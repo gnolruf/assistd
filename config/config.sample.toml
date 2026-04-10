@@ -1,0 +1,37 @@
+# assistd configuration
+# Copy to ~/.config/assistd/config.toml and edit to taste.
+# All fields are required unless noted otherwise.
+
+[model]
+# Filesystem path to the GGUF model file.
+path = "/usr/share/models/default.gguf"
+# VRAM budget in megabytes. Must be > 0.
+vram_budget_mb = 4096
+# Context window length in tokens. Must be > 0.
+context_length = 8192
+
+[voice]
+# Enable voice input via microphone.
+enabled = false
+# ALSA/PulseAudio device name (optional). Omit for system default.
+# mic_device = "hw:0,0"
+# Hotkey to activate voice input.
+hotkey = "Super+V"
+
+[compositor]
+# Tiling compositor to integrate with. One of: i3, sway, hyprland
+type = "sway"
+
+[sleep]
+# Idle timeout in seconds before the sleep action fires. Must be > 0.
+idle_timeout_secs = 300
+# Whether to suspend the machine (true) or just deactivate (false).
+suspend = false
+
+[remote]
+# Enable the remote access API.
+enabled = false
+# IP address to bind to.
+bind_address = "127.0.0.1"
+# TCP port to listen on. Must not be 0 when remote is enabled.
+port = 8384

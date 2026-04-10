@@ -1,3 +1,7 @@
+pub mod config;
+
+pub use config::Config;
+
 /// Returns the version string of the assistd-core crate.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
