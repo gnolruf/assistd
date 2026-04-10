@@ -1,0 +1,21 @@
+[package]
+name = "assistd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "assistd"
+path = "src/main.rs"
+
+[dependencies]
+assistd-core  = { workspace = true }
+assistd-llm   = { workspace = true }
+assistd-voice = { workspace = true }
+assistd-tools = { workspace = true }
+assistd-wm    = { workspace = true }
+assistd-tui   = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

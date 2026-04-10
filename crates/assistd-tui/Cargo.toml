@@ -1,0 +1,10 @@
+[package]
+name = "assistd-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+assistd-core = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
