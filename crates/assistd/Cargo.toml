@@ -16,6 +16,7 @@ assistd-tools = { workspace = true }
 assistd-wm    = { workspace = true }
 assistd-tui   = { workspace = true }
 anyhow = { workspace = true }
+clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
