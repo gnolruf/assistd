@@ -16,7 +16,7 @@ env:
 
 jobs:
   ci:
-    name: clippy + test + release build
+    name: fmt + clippy + test + release build
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -27,7 +27,7 @@ jobs:
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
@@ -35,21 +35,25 @@ jobs:
           shared-key: "ci"
           cache-on-failure: true
 
+      - name: Rustfmt (check)
+        run: cargo fmt --all -- --check
+
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Test
         run: cargo test --workspace --all-features --locked
 
-      - name: Release build
-        run: cargo build --release -p assistd --locked
+      - name: Release build (default features)
+        run: cargo build --release -p assistd-cli --locked
 
-      - name: Upload release binaries
+      - name: Release build (client-only)
+        run: cargo build --release -p assistd-cli --no-default-features --features client --locked
+
+      - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
           name: assistd-linux-x86_64
-          path: |
-            target/release/assistd
-            target/release/assistd-query
+          path: target/release/assistd
           if-no-files-found: error
           retention-days: 14

@@ -1,27 +1,43 @@
 [package]
-name = "assistd"
+name = "assistd-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version = "1.85"
 
 [[bin]]
 name = "assistd"
 path = "src/main.rs"
 
-[[bin]]
-name = "assistd-query"
-path = "src/bin/query.rs"
+[features]
+default = ["daemon", "client"]
+daemon = [
+    "dep:assistd-core",
+    "dep:assistd-llm",
+    "dep:assistd-voice",
+    "dep:assistd-tools",
+    "dep:assistd-wm",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+client = ["dep:uuid"]
 
 [dependencies]
-assistd-core  = { workspace = true }
-assistd-llm   = { workspace = true }
-assistd-voice = { workspace = true }
-assistd-tools = { workspace = true }
-assistd-wm    = { workspace = true }
-assistd-tui   = { workspace = true }
+# Always-on — shared CLI plumbing and wire protocol
+assistd-ipc = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+
+# Daemon-only
+assistd-core  = { workspace = true, optional = true }
+assistd-llm   = { workspace = true, optional = true }
+assistd-voice = { workspace = true, optional = true }
+assistd-tools = { workspace = true, optional = true }
+assistd-wm    = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+# Client-only
+uuid = { workspace = true, optional = true }

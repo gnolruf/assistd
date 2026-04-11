@@ -6,7 +6,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/assistd
+ExecStart=%h/.cargo/bin/assistd daemon
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGTERM
