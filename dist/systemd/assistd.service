@@ -1,0 +1,21 @@
+[Unit]
+Description=assistd — local model agent OS assistant daemon
+Documentation=https://github.com/gnolruf/assistd
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/assistd
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+# stdout/stderr are captured by journald automatically for user units;
+# set explicitly for clarity.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=assistd
+
+[Install]
+WantedBy=graphical-session.target
