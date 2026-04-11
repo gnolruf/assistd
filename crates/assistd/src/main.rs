@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use tokio::signal::unix::{SignalKind, signal};
 use tracing::info;
 
 use assistd_core::Config;
@@ -20,7 +21,8 @@ struct Cli {
     config: Option<std::path::PathBuf>,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -56,6 +58,21 @@ fn main() -> Result<()> {
     info!("  tui   v{}", assistd_tui::version());
     info!("loaded config from {}", config_path.display());
 
-    info!("all subsystems registered — exiting (no runtime loop yet)");
+    let shutdown = async {
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("failed to install SIGTERM handler: {e}");
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => info!("received SIGINT"),
+            _ = term.recv() => info!("received SIGTERM"),
+        }
+    };
+
+    assistd_core::socket::serve(shutdown).await?;
+    info!("assistd stopped");
     Ok(())
 }
