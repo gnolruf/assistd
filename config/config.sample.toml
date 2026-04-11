@@ -10,6 +10,17 @@ vram_budget_mb = 4096
 # Context window length in tokens. Must be > 0.
 context_length = 8192
 
+[llama_server]
+# Path to the llama-server binary. Absolute path or a name resolvable via $PATH.
+binary_path = "llama-server"
+# Host llama-server binds to. Should be a loopback address.
+host = "127.0.0.1"
+# TCP port llama-server binds to. Must differ from remote.port.
+port = 8385
+# Optional manual override for GPU layer count. If unset, assistd parses the
+# GGUF header and computes -ngl from model.vram_budget_mb.
+# gpu_layers = 35
+
 [voice]
 # Enable voice input via microphone.
 enabled = false

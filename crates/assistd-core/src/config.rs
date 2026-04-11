@@ -6,6 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub model: ModelConfig,
+    pub llama_server: LlamaServerConfig,
     pub voice: VoiceConfig,
     pub compositor: CompositorConfig,
     pub sleep: SleepConfig,
@@ -21,6 +22,21 @@ pub struct ModelConfig {
     pub vram_budget_mb: u64,
     /// Context window length in tokens.
     pub context_length: u32,
+}
+
+/// llama-server process lifecycle settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LlamaServerConfig {
+    /// Path to the llama-server binary. Absolute path or a name resolvable via `$PATH`.
+    pub binary_path: String,
+    /// Host the managed llama-server binds to. Should be a loopback address.
+    pub host: String,
+    /// TCP port the managed llama-server binds to.
+    pub port: u16,
+    /// Manual override for the `-ngl` GPU layer count. If `None`, the supervisor
+    /// parses the GGUF header and derives a value from `model.vram_budget_mb`.
+    #[serde(default)]
+    pub gpu_layers: Option<u32>,
 }
 
 /// Voice input settings.
@@ -83,6 +99,12 @@ impl Default for Config {
                 path: "/usr/share/models/default.gguf".to_string(),
                 vram_budget_mb: 4096,
                 context_length: 8192,
+            },
+            llama_server: LlamaServerConfig {
+                binary_path: "llama-server".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: 8385,
+                gpu_layers: None,
             },
             voice: VoiceConfig {
                 enabled: false,
@@ -178,6 +200,16 @@ impl Config {
         }
         if self.model.context_length == 0 {
             errors.push("model.context_length must be greater than 0".into());
+        }
+
+        if self.llama_server.binary_path.is_empty() {
+            errors.push("llama_server.binary_path must not be empty".into());
+        }
+        if self.llama_server.host.is_empty() {
+            errors.push("llama_server.host must not be empty".into());
+        }
+        if self.llama_server.port == 0 {
+            errors.push("llama_server.port must not be 0".into());
         }
 
         if self.voice.enabled && self.voice.hotkey.is_empty() {
@@ -323,6 +355,11 @@ path = "/some/model.gguf"
 vram_budget_mb = 4096
 context_length = 8192
 
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
 [voice]
 enabled = false
 hotkey = "Super+V"
@@ -343,5 +380,62 @@ port = 8384
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("unknown variant"));
+    }
+
+    #[test]
+    fn validation_catches_empty_binary_path() {
+        let mut config = Config::default();
+        config.llama_server.binary_path = String::new();
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("llama_server.binary_path")));
+    }
+
+    #[test]
+    fn validation_catches_zero_llama_server_port() {
+        let mut config = Config::default();
+        config.llama_server.port = 0;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("llama_server.port")));
+    }
+
+    #[test]
+    fn validation_catches_empty_llama_server_host() {
+        let mut config = Config::default();
+        config.llama_server.host = String::new();
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("llama_server.host")));
+    }
+
+    #[test]
+    fn llama_server_gpu_layers_override_is_optional() {
+        let toml_str = r#"
+[model]
+path = "/some/model.gguf"
+vram_budget_mb = 4096
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+idle_timeout_secs = 300
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse");
+        assert!(cfg.llama_server.gpu_layers.is_none());
     }
 }
