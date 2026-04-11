@@ -5,6 +5,10 @@
 //! [`LlmBackend`]. The daemon holds one as `Arc<dyn LlmBackend>` inside
 //! `AppState` and streams response events back to connected clients.
 
+pub mod llama_server;
+
+pub use llama_server::{LlamaServerError, LlamaService, ModelSpec, ReadyState, ServerSpec};
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

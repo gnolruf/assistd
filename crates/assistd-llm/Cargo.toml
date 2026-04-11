@@ -4,8 +4,27 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Compiles the fake_llama_server helper binary used by integration tests.
+test-support = []
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+libc = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "fake_llama_server"
+path = "src/bin/fake_llama_server.rs"
+required-features = ["test-support"]
