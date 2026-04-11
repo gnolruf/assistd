@@ -3,11 +3,11 @@ resolver = "2"
 members = [
     "crates/assistd",
     "crates/assistd-core",
+    "crates/assistd-ipc",
     "crates/assistd-llm",
     "crates/assistd-voice",
     "crates/assistd-tools",
     "crates/assistd-wm",
-    "crates/assistd-tui",
 ]
 
 [workspace.package]
@@ -18,11 +18,11 @@ license = "Apache-2.0"
 [workspace.dependencies]
 # Internal crates
 assistd-core  = { path = "crates/assistd-core" }
+assistd-ipc   = { path = "crates/assistd-ipc" }
 assistd-llm   = { path = "crates/assistd-llm" }
 assistd-voice = { path = "crates/assistd-voice" }
 assistd-tools = { path = "crates/assistd-tools" }
 assistd-wm    = { path = "crates/assistd-wm" }
-assistd-tui   = { path = "crates/assistd-tui" }
 
 # External crates
 serde = { version = "1", features = ["derive"] }
@@ -31,5 +31,8 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+thiserror = "1"
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"

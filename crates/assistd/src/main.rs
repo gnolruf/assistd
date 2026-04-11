@@ -1,9 +1,10 @@
 use anyhow::Result;
-use clap::Parser;
-use tokio::signal::unix::{SignalKind, signal};
-use tracing::info;
+use clap::{Parser, Subcommand};
 
-use assistd_core::Config;
+#[cfg(feature = "daemon")]
+mod daemon;
+#[cfg(feature = "client")]
+mod query;
 
 #[derive(Parser)]
 #[command(
@@ -12,67 +13,34 @@ use assistd_core::Config;
     about = "Local model agent OS assistant daemon"
 )]
 struct Cli {
-    /// Generate a default config file at ~/.config/assistd/config.toml
-    #[arg(long)]
-    init_config: bool,
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Path to config file [default: ~/.config/assistd/config.toml]
-    #[arg(long, short)]
-    config: Option<std::path::PathBuf>,
+#[derive(Subcommand)]
+enum Commands {
+    /// Run the assistd daemon
+    #[cfg(feature = "daemon")]
+    Daemon(daemon::DaemonArgs),
+
+    /// Write a default config file to ~/.config/assistd/config.toml
+    #[cfg(feature = "daemon")]
+    InitConfig,
+
+    /// Send a one-shot query to a running assistd daemon
+    #[cfg(feature = "client")]
+    Query(query::QueryArgs),
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
-    if cli.init_config {
-        let path = Config::default_path()?;
-        Config::write_default(&path)?;
-        info!("wrote default config to {}", path.display());
-        return Ok(());
+    match cli.command {
+        #[cfg(feature = "daemon")]
+        Commands::Daemon(args) => daemon::run(args).await,
+        #[cfg(feature = "daemon")]
+        Commands::InitConfig => daemon::init_config(),
+        #[cfg(feature = "client")]
+        Commands::Query(args) => query::run(args).await,
     }
-
-    let config_path = match cli.config {
-        Some(p) => p,
-        None => Config::default_path()?,
-    };
-    let config = Config::load_from_file(&config_path)?;
-    config.validate()?;
-
-    info!(
-        "assistd v{} — local model agent OS assistant daemon",
-        assistd_core::version()
-    );
-    info!("  core  v{}", assistd_core::version());
-    info!("  llm   v{}", assistd_llm::version());
-    info!("  voice v{}", assistd_voice::version());
-    info!("  tools v{}", assistd_tools::version());
-    info!("  wm    v{}", assistd_wm::version());
-    info!("  tui   v{}", assistd_tui::version());
-    info!("loaded config from {}", config_path.display());
-
-    let shutdown = async {
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("failed to install SIGTERM handler: {e}");
-                return;
-            }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => info!("received SIGINT"),
-            _ = term.recv() => info!("received SIGTERM"),
-        }
-    };
-
-    assistd_core::socket::serve(shutdown).await?;
-    info!("assistd stopped");
-    Ok(())
 }

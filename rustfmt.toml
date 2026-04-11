@@ -1,0 +1,2 @@
+# Locks formatting to rustfmt defaults. Override here if consensus shifts.
+edition = "2024"

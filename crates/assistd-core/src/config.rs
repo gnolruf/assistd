@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -106,26 +106,64 @@ impl Default for Config {
 }
 
 // ---------------------------------------------------------------------------
-// Validation
+// Errors
 // ---------------------------------------------------------------------------
 
-/// Collects all validation failures so the user can fix them in one pass.
-#[derive(Debug)]
-pub struct ConfigError {
-    pub errors: Vec<String>,
+/// Errors produced while loading, writing, or validating configuration.
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("HOME environment variable not set")]
+    HomeNotSet,
+
+    #[error("failed to read config file {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to parse config file {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+
+    #[error("failed to serialize default config: {0}")]
+    Serialize(#[from] toml::ser::Error),
+
+    #[error("failed to create directory {path}: {source}")]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to write config file {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("config file already exists at {0} (not overwriting)")]
+    AlreadyExists(PathBuf),
+
+    #[error("{}", format_validation_errors(.0))]
+    Validation(Vec<String>),
 }
 
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "configuration has {} error(s):", self.errors.len())?;
-        for (i, e) in self.errors.iter().enumerate() {
-            writeln!(f, "  {}: {}", i + 1, e)?;
-        }
-        Ok(())
+fn format_validation_errors(errors: &[String]) -> String {
+    let mut s = format!("configuration has {} error(s):", errors.len());
+    for (i, e) in errors.iter().enumerate() {
+        s.push_str(&format!("\n  {}: {}", i + 1, e));
     }
+    s
 }
 
-impl std::error::Error for ConfigError {}
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
 
 impl Config {
     /// Validates all config fields. Returns every problem found, not just the first.
@@ -164,7 +202,7 @@ impl Config {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(ConfigError { errors })
+            Err(ConfigError::Validation(errors))
         }
     }
 }
@@ -175,45 +213,47 @@ impl Config {
 
 impl Config {
     /// Default config file path: `$HOME/.config/assistd/config.toml`.
-    pub fn default_path() -> anyhow::Result<PathBuf> {
-        let home = std::env::var("HOME")
-            .map_err(|_| anyhow::anyhow!("HOME environment variable not set"))?;
+    pub fn default_path() -> Result<PathBuf, ConfigError> {
+        let home = std::env::var("HOME").map_err(|_| ConfigError::HomeNotSet)?;
         Ok(PathBuf::from(home).join(".config/assistd/config.toml"))
     }
 
     /// Loads and deserializes a config from the given TOML file.
-    pub fn load_from_file(path: &Path) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("failed to read {}: {}", path.display(), e))?;
-        let config: Config = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", path.display(), e))?;
-        Ok(config)
+    pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
+        let content = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        toml::from_str(&content).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 
     /// Writes the default config to `path`. Errors if the file already exists.
-    pub fn write_default(path: &Path) -> anyhow::Result<()> {
+    pub fn write_default(path: &Path) -> Result<(), ConfigError> {
         if path.exists() {
-            anyhow::bail!(
-                "config file already exists at {} (not overwriting)",
-                path.display()
-            );
+            return Err(ConfigError::AlreadyExists(path.to_path_buf()));
         }
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("failed to create {}: {}", parent.display(), e))?;
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
 
-        let toml_string = toml::to_string_pretty(&Config::default())
-            .map_err(|e| anyhow::anyhow!("failed to serialize default config: {}", e))?;
+        let toml_string = toml::to_string_pretty(&Config::default())?;
 
         let content = format!(
             "# assistd configuration file\n\
-             # Generated by `assistd --init-config`\n\n\
+             # Generated by `assistd init-config`\n\n\
              {toml_string}"
         );
 
-        std::fs::write(path, content)
-            .map_err(|e| anyhow::anyhow!("failed to write {}: {}", path.display(), e))?;
+        std::fs::write(path, content).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
         Ok(())
     }
 }
@@ -241,21 +281,28 @@ mod tests {
             .expect("default config should be valid");
     }
 
+    fn validation_errors(err: ConfigError) -> Vec<String> {
+        match err {
+            ConfigError::Validation(errs) => errs,
+            other => panic!("expected ConfigError::Validation, got {other:?}"),
+        }
+    }
+
     #[test]
     fn validation_catches_zero_port() {
         let mut config = Config::default();
         config.remote.enabled = true;
         config.remote.port = 0;
-        let err = config.validate().unwrap_err();
-        assert!(err.errors.iter().any(|e| e.contains("port")));
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("port")));
     }
 
     #[test]
     fn validation_catches_empty_model_path() {
         let mut config = Config::default();
         config.model.path = String::new();
-        let err = config.validate().unwrap_err();
-        assert!(err.errors.iter().any(|e| e.contains("model.path")));
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("model.path")));
     }
 
     #[test]
@@ -264,8 +311,8 @@ mod tests {
         config.model.path = String::new();
         config.model.vram_budget_mb = 0;
         config.sleep.idle_timeout_secs = 0;
-        let err = config.validate().unwrap_err();
-        assert_eq!(err.errors.len(), 3);
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert_eq!(errs.len(), 3);
     }
 
     #[test]

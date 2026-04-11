@@ -1,8 +1,10 @@
 pub mod config;
-pub mod ipc;
 pub mod socket;
+pub mod state;
 
+pub use assistd_ipc as ipc;
 pub use config::Config;
+pub use state::AppState;
 
 /// Returns the version string of the assistd-core crate.
 pub fn version() -> &'static str {
