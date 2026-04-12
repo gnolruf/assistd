@@ -181,7 +181,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assistd_llm::EchoBackend;
+    use assistd_llm::{EchoBackend, FailedBackend};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
@@ -273,5 +273,18 @@ mod tests {
             other => panic!("expected Delta, got {other:?}"),
         }
         assert!(matches!(second, ChatEvent::Llm(LlmEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn failed_backend_spawn_yields_llm_error() {
+        let (tx, mut rx) = mpsc::channel::<ChatEvent>(16);
+        let client: Arc<dyn LlmBackend> = Arc::new(FailedBackend::new("server down".into()));
+        let app = App::new(client, tx, "test-model".into());
+        app.spawn_generation("hello".into());
+        let ev = rx.recv().await.expect("error event");
+        match ev {
+            ChatEvent::LlmError(msg) => assert!(msg.contains("server down")),
+            other => panic!("expected LlmError, got {other:?}"),
+        }
     }
 }
