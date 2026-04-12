@@ -7,6 +7,7 @@ use thiserror::Error;
 pub struct Config {
     pub model: ModelConfig,
     pub llama_server: LlamaServerConfig,
+    pub chat: ChatConfig,
     pub voice: VoiceConfig,
     pub compositor: CompositorConfig,
     pub sleep: SleepConfig,
@@ -37,6 +38,32 @@ pub struct LlamaServerConfig {
     /// parses the GGUF header and derives a value from `model.vram_budget_mb`.
     #[serde(default)]
     pub gpu_layers: Option<u32>,
+}
+
+/// Chat backend behaviour: system prompt, history window, sampling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatConfig {
+    /// System prompt injected as the first message of every request.
+    /// An empty string disables system-prompt injection.
+    pub system_prompt: String,
+    /// Approximate token budget for the full request messages (system + history).
+    /// Must be strictly less than `model.context_length`. When exceeded, older
+    /// messages are summarized and replaced by a single summary message.
+    pub max_history_tokens: u32,
+    /// Approximate target length of a history summary, in tokens.
+    pub summary_target_tokens: u32,
+    /// Number of recent user/assistant exchanges to preserve verbatim when
+    /// summarizing. Must be at least 1.
+    pub preserve_recent_turns: u32,
+    /// Sampling temperature in the range `0.0..=2.0`.
+    pub temperature: f32,
+    /// Maximum tokens the model may emit in a single streamed response.
+    pub max_response_tokens: u32,
+    /// Maximum tokens for the summarization (non-streaming) call. Typically a
+    /// bit above `summary_target_tokens`.
+    pub max_summary_tokens: u32,
+    /// HTTP request timeout for a single chat call, in seconds.
+    pub request_timeout_secs: u64,
 }
 
 /// Voice input settings.
@@ -105,6 +132,19 @@ impl Default for Config {
                 host: "127.0.0.1".to_string(),
                 port: 8385,
                 gpu_layers: None,
+            },
+            chat: ChatConfig {
+                system_prompt:
+                    "You are assistd, a concise local desktop assistant running on a Linux \
+                     workstation. Answer precisely and in a conversational tone."
+                        .to_string(),
+                max_history_tokens: 6000,
+                summary_target_tokens: 1000,
+                preserve_recent_turns: 4,
+                temperature: 0.7,
+                max_response_tokens: 1024,
+                max_summary_tokens: 1200,
+                request_timeout_secs: 120,
             },
             voice: VoiceConfig {
                 enabled: false,
@@ -210,6 +250,54 @@ impl Config {
         }
         if self.llama_server.port == 0 {
             errors.push("llama_server.port must not be 0".into());
+        }
+
+        if self.chat.max_history_tokens == 0 {
+            errors.push("chat.max_history_tokens must be greater than 0".into());
+        }
+        if self.model.context_length > 0
+            && self.chat.max_history_tokens >= self.model.context_length
+        {
+            errors.push(
+                "chat.max_history_tokens must be strictly less than model.context_length".into(),
+            );
+        }
+        if self.chat.summary_target_tokens == 0 {
+            errors.push("chat.summary_target_tokens must be greater than 0".into());
+        }
+        if self.chat.summary_target_tokens >= self.chat.max_history_tokens
+            && self.chat.max_history_tokens > 0
+        {
+            errors.push(
+                "chat.summary_target_tokens must be strictly less than chat.max_history_tokens"
+                    .into(),
+            );
+        }
+        if self.chat.max_response_tokens == 0 {
+            errors.push("chat.max_response_tokens must be greater than 0".into());
+        }
+        if self.model.context_length > 0
+            && self.chat.max_response_tokens >= self.model.context_length
+        {
+            errors.push(
+                "chat.max_response_tokens must be strictly less than model.context_length".into(),
+            );
+        }
+        if self.chat.max_summary_tokens == 0 {
+            errors.push("chat.max_summary_tokens must be greater than 0".into());
+        }
+        if self.model.context_length > 0 && self.chat.max_summary_tokens > self.model.context_length
+        {
+            errors.push("chat.max_summary_tokens must not exceed model.context_length".into());
+        }
+        if self.chat.request_timeout_secs == 0 {
+            errors.push("chat.request_timeout_secs must be greater than 0".into());
+        }
+        if !(0.0..=2.0).contains(&self.chat.temperature) || self.chat.temperature.is_nan() {
+            errors.push("chat.temperature must be in the range 0.0..=2.0".into());
+        }
+        if self.chat.preserve_recent_turns == 0 {
+            errors.push("chat.preserve_recent_turns must be at least 1".into());
         }
 
         if self.voice.enabled && self.voice.hotkey.is_empty() {
@@ -360,6 +448,16 @@ binary_path = "llama-server"
 host = "127.0.0.1"
 port = 8385
 
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
 [voice]
 enabled = false
 hotkey = "Super+V"
@@ -419,6 +517,16 @@ binary_path = "llama-server"
 host = "127.0.0.1"
 port = 8385
 
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
 [voice]
 enabled = false
 hotkey = "Super+V"
@@ -437,5 +545,54 @@ port = 8384
 "#;
         let cfg: Config = toml::from_str(toml_str).expect("parse");
         assert!(cfg.llama_server.gpu_layers.is_none());
+    }
+
+    #[test]
+    fn validation_catches_temperature_out_of_range() {
+        let mut config = Config::default();
+        config.chat.temperature = 2.5;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("chat.temperature")));
+    }
+
+    #[test]
+    fn validation_catches_history_budget_exceeds_context() {
+        let mut config = Config::default();
+        config.chat.max_history_tokens = config.model.context_length;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(
+            errs.iter().any(
+                |e| e.contains("chat.max_history_tokens") && e.contains("model.context_length")
+            )
+        );
+    }
+
+    #[test]
+    fn validation_catches_summary_target_exceeds_history_budget() {
+        let mut config = Config::default();
+        config.chat.summary_target_tokens = config.chat.max_history_tokens;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(
+            errs.iter().any(|e| e.contains("chat.summary_target_tokens")
+                && e.contains("chat.max_history_tokens"))
+        );
+    }
+
+    #[test]
+    fn validation_catches_zero_preserve_recent_turns() {
+        let mut config = Config::default();
+        config.chat.preserve_recent_turns = 0;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("chat.preserve_recent_turns"))
+        );
+    }
+
+    #[test]
+    fn chat_config_empty_system_prompt_is_valid() {
+        let mut config = Config::default();
+        config.chat.system_prompt = String::new();
+        config.validate().expect("empty system prompt allowed");
     }
 }
