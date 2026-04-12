@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+#[cfg(feature = "chat")]
+mod chat;
 #[cfg(feature = "daemon")]
 mod daemon;
 #[cfg(feature = "client")]
@@ -30,6 +32,10 @@ enum Commands {
     /// Send a one-shot query to a running assistd daemon
     #[cfg(feature = "client")]
     Query(query::QueryArgs),
+
+    /// Open an interactive chat TUI
+    #[cfg(feature = "chat")]
+    Chat(chat::ChatArgs),
 }
 
 #[tokio::main]
@@ -42,5 +48,7 @@ async fn main() -> Result<()> {
         Commands::InitConfig => daemon::init_config(),
         #[cfg(feature = "client")]
         Commands::Query(args) => query::run(args).await,
+        #[cfg(feature = "chat")]
+        Commands::Chat(args) => chat::run(args).await,
     }
 }

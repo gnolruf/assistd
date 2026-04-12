@@ -38,3 +38,8 @@ uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 libc = "0.2"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures-util = "0.3"
+tracing-appender = "0.2"
+textwrap = "0.16"
