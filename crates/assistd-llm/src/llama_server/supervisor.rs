@@ -1,11 +1,9 @@
 use super::backoff::{MAX_CONSECUTIVE_FAILURES, backoff_delay};
 use super::config::{ModelSpec, ServerSpec};
 use super::error::LlamaServerError;
-use super::gguf::{self, LayerBudget};
 use super::health::HealthChecker;
 use super::process::ChildProcess;
 use super::service::ReadyState;
-use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,7 +36,6 @@ pub struct Supervisor {
     pub model: ModelSpec,
     pub shutdown_rx: watch::Receiver<bool>,
     pub ready_tx: watch::Sender<ReadyState>,
-    pub ngl: u32,
     pub pid: Arc<Mutex<Option<u32>>>,
 }
 
@@ -119,9 +116,10 @@ impl Supervisor {
     }
 
     async fn supervise_once(&mut self) -> Result<CycleResult, LlamaServerError> {
-        let mut child = ChildProcess::spawn(&self.cfg, &self.model, self.ngl)?;
+        let mut child = ChildProcess::spawn(&self.cfg, &self.model)?;
         *self.pid.lock().expect("pid mutex poisoned") = child.pid();
-        let health = HealthChecker::new(&self.cfg.host, self.cfg.port)?;
+        let ready_timeout = Duration::from_secs(self.cfg.ready_timeout_secs);
+        let health = HealthChecker::new(&self.cfg.host, self.cfg.port, ready_timeout)?;
 
         // Phase 1: wait for /health to return 200. Race against child exit.
         // `health.wait_ready` internally handles shutdown signals.
@@ -183,54 +181,4 @@ impl Supervisor {
         *self.pid.lock().expect("pid mutex poisoned") = None;
         result
     }
-}
-
-/// Resolve `-ngl` once at startup: manual override takes precedence, otherwise
-/// parse the GGUF header and derive from the VRAM budget. I/O errors on the
-/// GGUF file propagate (bad model path is a config issue worth failing on),
-/// but parse/metadata errors soft-fall-back to `ngl = 0` with a warning.
-pub async fn resolve_ngl(cfg: &ServerSpec, model: &ModelSpec) -> Result<u32, LlamaServerError> {
-    if let Some(n) = cfg.gpu_layers {
-        info!(
-            target: "assistd::llama_server",
-            "using manual gpu_layers override: {n}"
-        );
-        return Ok(n);
-    }
-
-    let path = PathBuf::from(&model.path);
-    let file_size_bytes = std::fs::metadata(&path)?.len();
-    let file_size_mb = file_size_bytes / (1024 * 1024);
-
-    let parse_path = path.clone();
-    let header_result = tokio::task::spawn_blocking(move || gguf::parse_header(&parse_path))
-        .await
-        .map_err(|_| LlamaServerError::SupervisorPanic)?;
-
-    let header = match header_result {
-        Ok(h) => h,
-        Err(e @ LlamaServerError::Io(_)) => return Err(e),
-        Err(other) => {
-            warn!(
-                target: "assistd::llama_server",
-                "GGUF parse failed ({other}); falling back to ngl=0"
-            );
-            return Ok(0);
-        }
-    };
-
-    let budget = LayerBudget {
-        file_size_mb,
-        block_count: header.block_count,
-    };
-    let ngl = gguf::compute_ngl(model.vram_budget_mb, model.context_length, &budget);
-    info!(
-        target: "assistd::llama_server",
-        arch = %header.architecture,
-        block_count = header.block_count,
-        file_size_mb,
-        vram_budget_mb = model.vram_budget_mb,
-        "computed ngl={ngl}"
-    );
-    Ok(ngl)
 }

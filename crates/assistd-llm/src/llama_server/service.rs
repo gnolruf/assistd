@@ -1,7 +1,7 @@
 use super::backoff::MAX_CONSECUTIVE_FAILURES;
 use super::config::{ModelSpec, ServerSpec};
 use super::error::LlamaServerError;
-use super::supervisor::{Supervisor, resolve_ngl};
+use super::supervisor::Supervisor;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -42,8 +42,6 @@ impl LlamaService {
         model: ModelSpec,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Result<Self, LlamaServerError> {
-        let ngl = resolve_ngl(&cfg, &model).await?;
-
         let (ready_tx, mut ready_rx) = watch::channel(ReadyState::Starting);
         let pid = Arc::new(Mutex::new(None));
 
@@ -52,7 +50,6 @@ impl LlamaService {
             model,
             shutdown_rx,
             ready_tx,
-            ngl,
             pid: pid.clone(),
         };
         let task = tokio::spawn(async move { supervisor.run().await });

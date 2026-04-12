@@ -71,12 +71,12 @@ fn parse_args() -> Args {
                 mode = parse_mode(&argv[i + 1]).expect("invalid --mode");
                 i += 2;
             }
-            // Ignore llama-server args we don't implement: --jinja, -m <path>,
+            // Ignore llama-server args we don't implement: --jinja, --hf-repo <id>,
             // -ngl <n>, -c <n>, etc.
             "--jinja" => {
                 i += 1;
             }
-            "-m" | "-ngl" | "-c" => {
+            "--hf-repo" | "-ngl" | "-c" => {
                 i += 2;
             }
             _ => {

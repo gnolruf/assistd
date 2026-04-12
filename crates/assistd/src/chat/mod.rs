@@ -12,15 +12,13 @@ mod throughput;
 mod ui;
 mod vram;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::Config;
-use assistd_llm::{
-    ChatSpec, FailedBackend, LlamaChatClient, LlamaService, LlmBackend, ModelSpec, ServerSpec,
-};
+use assistd_llm::{FailedBackend, LlamaChatClient, LlamaService, LlmBackend};
 use clap::Args;
 use crossterm::event::{self, Event, EventStream};
 use crossterm::{cursor, execute, terminal};
@@ -56,34 +54,13 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let (shutdown_tx, _) = watch::channel(false);
     install_signal_handler(shutdown_tx.clone());
 
-    println!("loading model from {} ...", config.model.path);
+    println!("loading model {} ...", config.model.name);
 
-    let chat_spec = ChatSpec {
-        host: config.llama_server.host.clone(),
-        port: config.llama_server.port,
-        system_prompt: config.chat.system_prompt.clone(),
-        max_history_tokens: config.chat.max_history_tokens,
-        summary_target_tokens: config.chat.summary_target_tokens,
-        preserve_recent_turns: config.chat.preserve_recent_turns,
-        temperature: config.chat.temperature,
-        max_response_tokens: config.chat.max_response_tokens,
-        max_summary_tokens: config.chat.max_summary_tokens,
-        request_timeout_secs: config.chat.request_timeout_secs,
-        model_context_length: config.model.context_length,
-    };
+    let chat_spec = config.to_chat_spec();
 
     let (llama, client, startup_error) = match LlamaService::start(
-        ServerSpec {
-            binary_path: config.llama_server.binary_path.clone(),
-            host: config.llama_server.host.clone(),
-            port: config.llama_server.port,
-            gpu_layers: config.llama_server.gpu_layers,
-        },
-        ModelSpec {
-            path: config.model.path.clone(),
-            vram_budget_mb: config.model.vram_budget_mb,
-            context_length: config.model.context_length,
-        },
+        config.to_server_spec(),
+        config.to_model_spec(),
         shutdown_tx.subscribe(),
     )
     .await
@@ -104,17 +81,19 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         }
     };
 
-    let mut vram_rx = vram::spawn_probe(shutdown_tx.subscribe());
+    let mut resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
-    let model_name = Path::new(&config.model.path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "?".to_string());
+    let model_name = config
+        .model
+        .name
+        .rsplit_once('/')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_else(|| config.model.name.clone());
 
     let run_result = run_tui(
         client,
         model_name,
-        &mut vram_rx,
+        &mut resource_rx,
         shutdown_tx.clone(),
         startup_error,
     )
@@ -133,7 +112,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 async fn run_tui(
     client: Arc<dyn LlmBackend>,
     model_name: String,
-    vram_rx: &mut watch::Receiver<vram::VramState>,
+    resource_rx: &mut watch::Receiver<vram::ResourceState>,
     shutdown_tx: watch::Sender<bool>,
     startup_error: Option<String>,
 ) -> Result<()> {
@@ -196,9 +175,9 @@ async fn run_tui(
             _ = tick.tick() => {
                 app.on_tick();
             }
-            Ok(_) = vram_rx.changed() => {
-                let v = vram_rx.borrow_and_update().clone();
-                app.on_vram(v);
+            Ok(_) = resource_rx.changed() => {
+                let v = resource_rx.borrow_and_update().clone();
+                app.on_resources(v);
             }
             _ = shutdown_rx.changed() => {
                 break;

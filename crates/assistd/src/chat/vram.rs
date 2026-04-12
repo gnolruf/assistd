@@ -1,9 +1,9 @@
-//! Background probe that reports live VRAM usage in the TUI status bar.
+//! Background probe that reports live VRAM and RAM usage in the TUI status
+//! bar.
 //!
-//! Shells out to `nvidia-smi` every [`POLL_INTERVAL`] and publishes the
-//! parsed used/total memory on a `tokio::sync::watch` channel. If
-//! `nvidia-smi` is not on the system `PATH`, the probe marks itself
-//! `Disabled` and exits — there is nothing to recover from.
+//! Shells out to `nvidia-smi` every [`POLL_INTERVAL`] for VRAM and reads
+//! `/proc/meminfo` for RAM. If `nvidia-smi` is not on the system `PATH`,
+//! VRAM is marked `Disabled` while RAM continues to be polled.
 
 use std::time::Duration;
 
@@ -19,6 +19,12 @@ pub struct VramInfo {
     pub total_mb: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RamInfo {
+    pub used_mb: u64,
+    pub total_mb: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum VramState {
     #[default]
@@ -28,24 +34,50 @@ pub enum VramState {
     Err(String),
 }
 
-pub fn spawn_probe(mut shutdown: watch::Receiver<bool>) -> watch::Receiver<VramState> {
-    let (tx, rx) = watch::channel(VramState::Unknown);
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RamState {
+    #[default]
+    Unknown,
+    Ok(RamInfo),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceState {
+    pub vram: VramState,
+    pub ram: RamState,
+}
+
+pub fn spawn_probe(mut shutdown: watch::Receiver<bool>) -> watch::Receiver<ResourceState> {
+    let (tx, rx) = watch::channel(ResourceState::default());
+    let mut vram_disabled = false;
 
     tokio::spawn(async move {
         loop {
-            match run_nvidia_smi().await {
-                Ok(info) => {
-                    let _ = tx.send(VramState::Ok(info));
+            let vram = if vram_disabled {
+                VramState::Disabled
+            } else {
+                match run_nvidia_smi().await {
+                    Ok(info) => VramState::Ok(info),
+                    Err(ProbeError::NotInstalled) => {
+                        vram_disabled = true;
+                        VramState::Disabled
+                    }
+                    Err(ProbeError::Transient(msg)) => {
+                        warn!(target: "assistd::chat::vram", "nvidia-smi probe failed: {msg}");
+                        VramState::Err(msg)
+                    }
                 }
-                Err(ProbeError::NotInstalled) => {
-                    let _ = tx.send(VramState::Disabled);
-                    return;
+            };
+
+            let ram = match read_meminfo() {
+                Ok(info) => RamState::Ok(info),
+                Err(e) => {
+                    warn!(target: "assistd::chat::vram", "meminfo read failed: {e}");
+                    RamState::Unknown
                 }
-                Err(ProbeError::Transient(msg)) => {
-                    warn!(target: "assistd::chat::vram", "nvidia-smi probe failed: {msg}");
-                    let _ = tx.send(VramState::Err(msg));
-                }
-            }
+            };
+
+            let _ = tx.send(ResourceState { vram, ram });
 
             tokio::select! {
                 _ = tokio::time::sleep(POLL_INTERVAL) => {}
@@ -86,6 +118,38 @@ async fn run_nvidia_smi() -> Result<VramInfo, ProbeError> {
     }
 
     parse_output(&out.stdout).map_err(ProbeError::Transient)
+}
+
+/// Read used/total RAM from `/proc/meminfo`. Used = Total - Available.
+fn read_meminfo() -> Result<RamInfo, String> {
+    let content =
+        std::fs::read_to_string("/proc/meminfo").map_err(|e| format!("read /proc/meminfo: {e}"))?;
+    parse_meminfo(&content)
+}
+
+fn parse_meminfo(content: &str) -> Result<RamInfo, String> {
+    let mut total_kb = None;
+    let mut available_kb = None;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            total_kb = parse_meminfo_kb(rest);
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            available_kb = parse_meminfo_kb(rest);
+        }
+        if total_kb.is_some() && available_kb.is_some() {
+            break;
+        }
+    }
+    let total = total_kb.ok_or("MemTotal not found in /proc/meminfo")?;
+    let available = available_kb.ok_or("MemAvailable not found in /proc/meminfo")?;
+    Ok(RamInfo {
+        used_mb: total.saturating_sub(available) / 1024,
+        total_mb: total / 1024,
+    })
+}
+
+fn parse_meminfo_kb(value: &str) -> Option<u64> {
+    value.trim().strip_suffix("kB")?.trim().parse().ok()
 }
 
 /// Parse `memory.used,memory.total` CSV from nvidia-smi. Multiple GPUs sum.
@@ -154,5 +218,24 @@ mod tests {
         let info = parse_output(b"  512 ,  8192  \n").unwrap();
         assert_eq!(info.used_mb, 512);
         assert_eq!(info.total_mb, 8192);
+    }
+
+    #[test]
+    fn meminfo_typical() {
+        let content = "\
+MemTotal:       65536000 kB
+MemFree:         2048000 kB
+MemAvailable:   32768000 kB
+Buffers:          512000 kB
+";
+        let info = parse_meminfo(content).unwrap();
+        assert_eq!(info.total_mb, 64000);
+        assert_eq!(info.used_mb, 32000);
+    }
+
+    #[test]
+    fn meminfo_missing_available_errors() {
+        let content = "MemTotal:       65536000 kB\n";
+        assert!(parse_meminfo(content).is_err());
     }
 }

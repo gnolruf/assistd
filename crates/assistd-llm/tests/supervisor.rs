@@ -7,7 +7,6 @@
 #![cfg(feature = "test-support")]
 
 use assistd_llm::{LlamaService, ModelSpec, ReadyState, ServerSpec};
-use std::io::Write;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -37,28 +36,19 @@ async fn grab_port() -> u16 {
     port
 }
 
-/// Writes 4 bytes "XXXX" to a temp file so the supervisor's `std::fs::metadata`
-/// call succeeds while GGUF parsing soft-falls-back to `ngl = 0`.
-fn fake_model_file() -> tempfile::NamedTempFile {
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(b"XXXX").unwrap();
-    f.flush().unwrap();
-    f
-}
-
 fn server_spec(port: u16) -> ServerSpec {
     ServerSpec {
         binary_path: FAKE_BIN.to_string(),
         host: "127.0.0.1".to_string(),
         port,
-        gpu_layers: Some(0),
+        gpu_layers: 0,
+        ready_timeout_secs: 60,
     }
 }
 
-fn model_spec(model_path: &std::path::Path) -> ModelSpec {
+fn model_spec() -> ModelSpec {
     ModelSpec {
-        path: model_path.to_string_lossy().into_owned(),
-        vram_budget_mb: 4096,
+        name: "test/fake-model-GGUF:Q4_K_M".to_string(),
         context_length: 2048,
     }
 }
@@ -90,28 +80,20 @@ fn set_mode(mode: &str) {
 use tokio::sync::Mutex;
 static MODE_LOCK: Mutex<()> = Mutex::const_new(());
 
-async fn start_service(
-    mode: &str,
-    port: u16,
-) -> (LlamaService, watch::Sender<bool>, tempfile::NamedTempFile) {
-    let model_file = fake_model_file();
+async fn start_service(mode: &str, port: u16) -> (LlamaService, watch::Sender<bool>) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     set_mode(mode);
-    let service = LlamaService::start(
-        server_spec(port),
-        model_spec(model_file.path()),
-        shutdown_rx,
-    )
-    .await
-    .expect("service should start");
-    (service, shutdown_tx, model_file)
+    let service = LlamaService::start(server_spec(port), model_spec(), shutdown_rx)
+        .await
+        .expect("service should start");
+    (service, shutdown_tx)
 }
 
 #[tokio::test]
 async fn brings_up_fake_server_and_reports_ready() {
     let _guard = MODE_LOCK.lock().await;
     let port = grab_port().await;
-    let (service, shutdown_tx, _model) = start_service("normal", port).await;
+    let (service, shutdown_tx) = start_service("normal", port).await;
 
     assert!(service.is_ready());
     assert!(service.pid().is_some());
@@ -124,7 +106,7 @@ async fn brings_up_fake_server_and_reports_ready() {
 async fn restarts_after_external_kill() {
     let _guard = MODE_LOCK.lock().await;
     let port = grab_port().await;
-    let (service, shutdown_tx, _model) = start_service("normal", port).await;
+    let (service, shutdown_tx) = start_service("normal", port).await;
 
     let first_pid = service.pid().expect("first pid");
     // SAFETY: libc::kill with a valid pid and signal.
@@ -156,17 +138,11 @@ async fn enters_degraded_after_five_failures() {
     init_tracing();
     let _guard = MODE_LOCK.lock().await;
     let port = grab_port().await;
-    let model_file = fake_model_file();
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     set_mode("bind-fail");
 
     let start_at = Instant::now();
-    let result = LlamaService::start(
-        server_spec(port),
-        model_spec(model_file.path()),
-        shutdown_rx,
-    )
-    .await;
+    let result = LlamaService::start(server_spec(port), model_spec(), shutdown_rx).await;
     let elapsed = start_at.elapsed();
 
     let err = result.err().expect("start should fail");
@@ -191,7 +167,6 @@ async fn enters_degraded_after_five_failures() {
 async fn respects_shutdown_during_backoff() {
     let _guard = MODE_LOCK.lock().await;
     let port = grab_port().await;
-    let model_file = fake_model_file();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     set_mode("bind-fail");
 
@@ -204,12 +179,7 @@ async fn respects_shutdown_during_backoff() {
     });
 
     let start_at = Instant::now();
-    let result = LlamaService::start(
-        server_spec(port),
-        model_spec(model_file.path()),
-        shutdown_rx,
-    )
-    .await;
+    let result = LlamaService::start(server_spec(port), model_spec(), shutdown_rx).await;
     let elapsed = start_at.elapsed();
 
     // start() should either error (ShutdownDuringHealth) or return quickly.
@@ -229,7 +199,7 @@ async fn respects_shutdown_during_backoff() {
 async fn shutdown_kills_running_child() {
     let _guard = MODE_LOCK.lock().await;
     let port = grab_port().await;
-    let (service, shutdown_tx, _model) = start_service("normal", port).await;
+    let (service, shutdown_tx) = start_service("normal", port).await;
 
     let pid = service.pid().expect("running child");
     assert!(
@@ -254,7 +224,7 @@ async fn shutdown_kills_running_child() {
 async fn reaches_ready_even_when_state_transitions() {
     let _guard = MODE_LOCK.lock().await;
     let port = grab_port().await;
-    let (service, shutdown_tx, _model) = start_service("normal", port).await;
+    let (service, shutdown_tx) = start_service("normal", port).await;
 
     assert_eq!(service.state(), ReadyState::Ready);
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use assistd_core::{AppState, Config};
-use assistd_llm::{ChatSpec, LlamaChatClient, LlamaService, ModelSpec, ServerSpec};
+use assistd_llm::{LlamaChatClient, LlamaService};
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,17 +61,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     // Bring up llama-server and block until /health returns 200.
     let llama = LlamaService::start(
-        ServerSpec {
-            binary_path: config.llama_server.binary_path.clone(),
-            host: config.llama_server.host.clone(),
-            port: config.llama_server.port,
-            gpu_layers: config.llama_server.gpu_layers,
-        },
-        ModelSpec {
-            path: config.model.path.clone(),
-            vram_budget_mb: config.model.vram_budget_mb,
-            context_length: config.model.context_length,
-        },
+        config.to_server_spec(),
+        config.to_model_spec(),
         shutdown_tx.subscribe(),
     )
     .await?;
@@ -80,20 +71,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         config.llama_server.host, config.llama_server.port
     );
 
-    let chat_spec = ChatSpec {
-        host: config.llama_server.host.clone(),
-        port: config.llama_server.port,
-        system_prompt: config.chat.system_prompt.clone(),
-        max_history_tokens: config.chat.max_history_tokens,
-        summary_target_tokens: config.chat.summary_target_tokens,
-        preserve_recent_turns: config.chat.preserve_recent_turns,
-        temperature: config.chat.temperature,
-        max_response_tokens: config.chat.max_response_tokens,
-        max_summary_tokens: config.chat.max_summary_tokens,
-        request_timeout_secs: config.chat.request_timeout_secs,
-        model_context_length: config.model.context_length,
-    };
-    let chat = LlamaChatClient::new(chat_spec)?;
+    let chat = LlamaChatClient::new(config.to_chat_spec())?;
     let state = Arc::new(AppState::new(config, Arc::new(chat)));
 
     let mut socket_shutdown_rx = shutdown_tx.subscribe();
