@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use super::app::App;
-use super::vram::VramState;
+use super::vram::{RamState, VramState};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -55,7 +55,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let snap = app.throughput.snapshot(Instant::now());
     let rate = snap.rate.map(|r| format!("{r:.0} tok/s"));
 
-    let vram = match &app.vram {
+    let vram = match &app.resources.vram {
         VramState::Unknown => "…".to_string(),
         VramState::Disabled => "N/A".to_string(),
         VramState::Ok(info) => format!(
@@ -66,10 +66,20 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         VramState::Err(_) => "err".to_string(),
     };
 
+    let ram = match &app.resources.ram {
+        RamState::Unknown => "…".to_string(),
+        RamState::Ok(info) => format!(
+            "{:.1}/{:.1} GiB",
+            info.used_mb as f64 / 1024.0,
+            info.total_mb as f64 / 1024.0,
+        ),
+    };
+
     let mut left_parts: Vec<String> = vec![format!("model: {}", app.model_name), state];
     if let Some(r) = rate {
         left_parts.push(r);
     }
+    left_parts.push(format!("RAM: {ram}"));
     left_parts.push(format!("VRAM: {vram}"));
     let left = left_parts.join(" │ ");
 

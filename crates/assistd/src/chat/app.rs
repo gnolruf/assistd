@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use super::input::{InputAction, InputLine};
 use super::output::OutputPane;
 use super::throughput::ThroughputMeter;
-use super::vram::VramState;
+use super::vram::ResourceState;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
@@ -29,7 +29,7 @@ pub struct App {
     pub output: OutputPane,
     pub input: InputLine,
     pub throughput: ThroughputMeter,
-    pub vram: VramState,
+    pub resources: ResourceState,
     pub model_name: String,
     pub generating: bool,
     pub quitting: bool,
@@ -50,7 +50,7 @@ impl App {
             output: OutputPane::new(),
             input: InputLine::new(),
             throughput: ThroughputMeter::new(),
-            vram: VramState::Unknown,
+            resources: ResourceState::default(),
             model_name,
             generating: false,
             quitting: false,
@@ -135,8 +135,8 @@ impl App {
         }
     }
 
-    pub fn on_vram(&mut self, v: VramState) {
-        self.vram = v;
+    pub fn on_resources(&mut self, v: ResourceState) {
+        self.resources = v;
     }
 
     fn set_notice(&mut self, text: &str) {

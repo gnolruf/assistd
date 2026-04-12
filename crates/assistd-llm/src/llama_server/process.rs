@@ -19,7 +19,7 @@ impl ChildProcess {
     pub fn spawn(cfg: &ServerSpec, model: &ModelSpec) -> Result<Self, LlamaServerError> {
         let mut cmd = Command::new(&cfg.binary_path);
         cmd.arg("--jinja")
-            .arg("--hf")
+            .arg("--hf-repo")
             .arg(&model.name)
             .arg("-ngl")
             .arg(cfg.gpu_layers.to_string())
@@ -55,7 +55,7 @@ impl ChildProcess {
         info!(
             target: "assistd::llama_server",
             pid = child.id(),
-            "spawned llama-server: {} --hf {} -ngl {} --host {} --port {}",
+            "spawned llama-server: {} --hf-repo {} -ngl {} --host {} --port {}",
             cfg.binary_path,
             model.name,
             cfg.gpu_layers,

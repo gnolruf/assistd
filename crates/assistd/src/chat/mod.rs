@@ -81,7 +81,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         }
     };
 
-    let mut vram_rx = vram::spawn_probe(shutdown_tx.subscribe());
+    let mut resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
     let model_name = config
         .model
@@ -93,7 +93,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let run_result = run_tui(
         client,
         model_name,
-        &mut vram_rx,
+        &mut resource_rx,
         shutdown_tx.clone(),
         startup_error,
     )
@@ -112,7 +112,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 async fn run_tui(
     client: Arc<dyn LlmBackend>,
     model_name: String,
-    vram_rx: &mut watch::Receiver<vram::VramState>,
+    resource_rx: &mut watch::Receiver<vram::ResourceState>,
     shutdown_tx: watch::Sender<bool>,
     startup_error: Option<String>,
 ) -> Result<()> {
@@ -175,9 +175,9 @@ async fn run_tui(
             _ = tick.tick() => {
                 app.on_tick();
             }
-            Ok(_) = vram_rx.changed() => {
-                let v = vram_rx.borrow_and_update().clone();
-                app.on_vram(v);
+            Ok(_) = resource_rx.changed() => {
+                let v = resource_rx.borrow_and_update().clone();
+                app.on_resources(v);
             }
             _ = shutdown_rx.changed() => {
                 break;
