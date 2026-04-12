@@ -36,9 +36,6 @@ pub trait LlmBackend: Send + Sync + 'static {
 }
 
 /// Trivial backend that echoes the prompt back as a single delta.
-///
-/// Used by milestone-1 scaffolding and by tests. Replaced with a real
-/// `llama.cpp` backend in the LLM-integration milestone.
 pub struct EchoBackend;
 
 #[async_trait]
@@ -47,6 +44,27 @@ impl LlmBackend for EchoBackend {
         let _ = tx.send(LlmEvent::Delta { text: prompt }).await;
         let _ = tx.send(LlmEvent::Done).await;
         Ok(())
+    }
+}
+
+/// Backend that always fails with a fixed reason.
+///
+/// Used when llama-server fails to start so the TUI can still launch
+/// and display the error rather than crashing before it appears.
+pub struct FailedBackend {
+    reason: String,
+}
+
+impl FailedBackend {
+    pub fn new(reason: String) -> Self {
+        Self { reason }
+    }
+}
+
+#[async_trait]
+impl LlmBackend for FailedBackend {
+    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> Result<()> {
+        anyhow::bail!("{}", self.reason)
     }
 }
 
@@ -73,6 +91,14 @@ mod tests {
         );
         assert_eq!(second, LlmEvent::Done);
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_backend_returns_error() {
+        let backend = FailedBackend::new("server exploded".into());
+        let (tx, _rx) = mpsc::channel(8);
+        let err = backend.generate("hello".into(), tx).await.unwrap_err();
+        assert!(err.to_string().contains("server exploded"));
     }
 
     #[test]

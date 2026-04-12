@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::Config;
-use assistd_llm::{ChatSpec, LlamaChatClient, LlamaService, LlmBackend, ModelSpec, ServerSpec};
+use assistd_llm::{
+    ChatSpec, FailedBackend, LlamaChatClient, LlamaService, LlmBackend, ModelSpec, ServerSpec,
+};
 use clap::Args;
 use crossterm::event::{self, Event, EventStream};
 use crossterm::{cursor, execute, terminal};
@@ -56,26 +58,6 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     println!("loading model from {} ...", config.model.path);
 
-    let llama = LlamaService::start(
-        ServerSpec {
-            binary_path: config.llama_server.binary_path.clone(),
-            host: config.llama_server.host.clone(),
-            port: config.llama_server.port,
-            gpu_layers: config.llama_server.gpu_layers,
-        },
-        ModelSpec {
-            path: config.model.path.clone(),
-            vram_budget_mb: config.model.vram_budget_mb,
-            context_length: config.model.context_length,
-        },
-        shutdown_tx.subscribe(),
-    )
-    .await?;
-    info!(
-        "llama-server ready on {}:{}",
-        config.llama_server.host, config.llama_server.port
-    );
-
     let chat_spec = ChatSpec {
         host: config.llama_server.host.clone(),
         port: config.llama_server.port,
@@ -89,7 +71,38 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         request_timeout_secs: config.chat.request_timeout_secs,
         model_context_length: config.model.context_length,
     };
-    let client: Arc<dyn LlmBackend> = Arc::new(LlamaChatClient::new(chat_spec)?);
+
+    let (llama, client, startup_error) = match LlamaService::start(
+        ServerSpec {
+            binary_path: config.llama_server.binary_path.clone(),
+            host: config.llama_server.host.clone(),
+            port: config.llama_server.port,
+            gpu_layers: config.llama_server.gpu_layers,
+        },
+        ModelSpec {
+            path: config.model.path.clone(),
+            vram_budget_mb: config.model.vram_budget_mb,
+            context_length: config.model.context_length,
+        },
+        shutdown_tx.subscribe(),
+    )
+    .await
+    {
+        Ok(llama) => {
+            info!(
+                "llama-server ready on {}:{}",
+                config.llama_server.host, config.llama_server.port
+            );
+            let client: Arc<dyn LlmBackend> = Arc::new(LlamaChatClient::new(chat_spec)?);
+            (Some(llama), client, None)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            tracing::error!("llama-server failed to start: {msg}");
+            let client: Arc<dyn LlmBackend> = Arc::new(FailedBackend::new(msg.clone()));
+            (None, client, Some(msg))
+        }
+    };
 
     let mut vram_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
@@ -98,11 +111,20 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "?".to_string());
 
-    let run_result = run_tui(client, model_name, &mut vram_rx, shutdown_tx.clone()).await;
+    let run_result = run_tui(
+        client,
+        model_name,
+        &mut vram_rx,
+        shutdown_tx.clone(),
+        startup_error,
+    )
+    .await;
 
     let _ = shutdown_tx.send(true);
-    if let Err(e) = llama.shutdown().await {
-        tracing::error!("llama-server shutdown error: {e}");
+    if let Some(llama) = llama {
+        if let Err(e) = llama.shutdown().await {
+            tracing::error!("llama-server shutdown error: {e}");
+        }
     }
     info!("assistd chat stopped");
     run_result
@@ -113,6 +135,7 @@ async fn run_tui(
     model_name: String,
     vram_rx: &mut watch::Receiver<vram::VramState>,
     shutdown_tx: watch::Sender<bool>,
+    startup_error: Option<String>,
 ) -> Result<()> {
     terminal::enable_raw_mode().context("enable_raw_mode")?;
     if let Err(e) = execute!(
@@ -136,6 +159,13 @@ async fn run_tui(
 
     let (chat_tx, mut chat_rx) = mpsc::channel::<ChatEvent>(64);
     let mut app = App::new(client, chat_tx, model_name);
+
+    if let Some(err) = startup_error {
+        app.output
+            .push_error(&format!("llama-server failed to start: {err}"));
+        app.output
+            .push_error("check config and model path, then restart");
+    }
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
