@@ -10,7 +10,7 @@ name = "assistd"
 path = "src/main.rs"
 
 [features]
-default = ["daemon", "client"]
+default = ["daemon", "client", "chat"]
 daemon = [
     "dep:assistd-core",
     "dep:assistd-llm",
@@ -21,6 +21,14 @@ daemon = [
     "dep:tracing-subscriber",
 ]
 client = ["dep:uuid"]
+chat = [
+    "daemon",
+    "dep:ratatui",
+    "dep:crossterm",
+    "dep:futures-util",
+    "dep:tracing-appender",
+    "dep:textwrap",
+]
 
 [dependencies]
 # Always-on — shared CLI plumbing and wire protocol
@@ -41,3 +49,10 @@ tracing-subscriber = { workspace = true, optional = true }
 
 # Client-only
 uuid = { workspace = true, optional = true }
+
+# Chat TUI
+ratatui          = { workspace = true, optional = true }
+crossterm        = { workspace = true, optional = true }
+futures-util     = { workspace = true, optional = true }
+tracing-appender = { workspace = true, optional = true }
+textwrap         = { workspace = true, optional = true }
