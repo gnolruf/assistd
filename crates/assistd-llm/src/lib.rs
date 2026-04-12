@@ -5,8 +5,10 @@
 //! [`LlmBackend`]. The daemon holds one as `Arc<dyn LlmBackend>` inside
 //! `AppState` and streams response events back to connected clients.
 
+pub mod chat;
 pub mod llama_server;
 
+pub use chat::{ChatClientError, ChatSpec, LlamaChatClient};
 pub use llama_server::{LlamaServerError, LlamaService, ModelSpec, ReadyState, ServerSpec};
 
 use anyhow::Result;

@@ -36,5 +36,5 @@ toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 libc = "0.2"

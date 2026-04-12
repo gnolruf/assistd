@@ -21,6 +21,28 @@ port = 8385
 # GGUF header and computes -ngl from model.vram_budget_mb.
 # gpu_layers = 35
 
+[chat]
+# System prompt injected as the first message of every request. Leave empty
+# (system_prompt = "") to skip system-prompt injection entirely.
+system_prompt = "You are assistd, a concise local desktop assistant running on a Linux workstation. Answer precisely and in a conversational tone."
+# Approximate token budget for the full request (system + history). Must be
+# strictly less than model.context_length. When exceeded, older messages are
+# summarized and replaced by a single summary message.
+max_history_tokens = 6000
+# Approximate target length of a conversation summary, in tokens.
+summary_target_tokens = 1000
+# Preserve the last N user/assistant exchanges verbatim when summarizing.
+preserve_recent_turns = 4
+# Sampling temperature, 0.0..=2.0.
+temperature = 0.7
+# Maximum tokens the model may emit in a single streamed response.
+max_response_tokens = 1024
+# Maximum tokens for the summarization (non-streaming) call. Typically a bit
+# above summary_target_tokens.
+max_summary_tokens = 1200
+# HTTP request timeout for a single /v1/chat/completions call.
+request_timeout_secs = 120
+
 [voice]
 # Enable voice input via microphone.
 enabled = false
