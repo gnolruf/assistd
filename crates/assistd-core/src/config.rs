@@ -1,3 +1,4 @@
+use assistd_llm::{ChatSpec, ModelSpec, ServerSpec};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -17,10 +18,9 @@ pub struct Config {
 /// Local model settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelConfig {
-    /// Filesystem path to the GGUF model file.
-    pub path: String,
-    /// VRAM budget in megabytes.
-    pub vram_budget_mb: u64,
+    /// Model identifier passed to llama-server's `--hf` flag.
+    /// Format: `owner/repo:quant` (e.g. `"bartowski/Qwen3-14B-GGUF:Q4_K_M"`).
+    pub name: String,
     /// Context window length in tokens.
     pub context_length: u32,
 }
@@ -34,10 +34,14 @@ pub struct LlamaServerConfig {
     pub host: String,
     /// TCP port the managed llama-server binds to.
     pub port: u16,
-    /// Manual override for the `-ngl` GPU layer count. If `None`, the supervisor
-    /// parses the GGUF header and derives a value from `model.vram_budget_mb`.
-    #[serde(default)]
-    pub gpu_layers: Option<u32>,
+    /// GPU layer count passed as `-ngl`. Default `9999` offloads all layers;
+    /// llama.cpp clamps to the model's actual layer count.
+    #[serde(default = "default_gpu_layers")]
+    pub gpu_layers: u32,
+    /// Timeout in seconds for the health check to succeed after spawning
+    /// llama-server. First-time HuggingFace downloads may need several minutes.
+    #[serde(default = "default_ready_timeout_secs")]
+    pub ready_timeout_secs: u64,
 }
 
 /// Chat backend behaviour: system prompt, history window, sampling.
@@ -115,6 +119,14 @@ pub struct RemoteConfig {
     pub port: u16,
 }
 
+fn default_gpu_layers() -> u32 {
+    9999
+}
+
+fn default_ready_timeout_secs() -> u64 {
+    300
+}
+
 // ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
@@ -123,15 +135,15 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             model: ModelConfig {
-                path: "/usr/share/models/default.gguf".to_string(),
-                vram_budget_mb: 4096,
+                name: "bartowski/Qwen3-14B-GGUF:Q4_K_M".to_string(),
                 context_length: 8192,
             },
             llama_server: LlamaServerConfig {
                 binary_path: "llama-server".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 8385,
-                gpu_layers: None,
+                gpu_layers: default_gpu_layers(),
+                ready_timeout_secs: default_ready_timeout_secs(),
             },
             chat: ChatConfig {
                 system_prompt:
@@ -232,11 +244,8 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
 
-        if self.model.path.is_empty() {
-            errors.push("model.path must not be empty".into());
-        }
-        if self.model.vram_budget_mb == 0 {
-            errors.push("model.vram_budget_mb must be greater than 0".into());
+        if self.model.name.is_empty() {
+            errors.push("model.name must not be empty".into());
         }
         if self.model.context_length == 0 {
             errors.push("model.context_length must be greater than 0".into());
@@ -332,10 +341,17 @@ impl Config {
 // ---------------------------------------------------------------------------
 
 impl Config {
-    /// Default config file path: `$HOME/.config/assistd/config.toml`.
+    /// Default config file path, respecting `$XDG_CONFIG_HOME`:
+    /// `$XDG_CONFIG_HOME/assistd/config.toml` or `$HOME/.config/assistd/config.toml`.
     pub fn default_path() -> Result<PathBuf, ConfigError> {
-        let home = std::env::var("HOME").map_err(|_| ConfigError::HomeNotSet)?;
-        Ok(PathBuf::from(home).join(".config/assistd/config.toml"))
+        let config_dir = match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                let home = std::env::var("HOME").map_err(|_| ConfigError::HomeNotSet)?;
+                PathBuf::from(home).join(".config")
+            }
+        };
+        Ok(config_dir.join("assistd/config.toml"))
     }
 
     /// Loads and deserializes a config from the given TOML file.
@@ -379,6 +395,45 @@ impl Config {
 }
 
 // ---------------------------------------------------------------------------
+// Spec conversions
+// ---------------------------------------------------------------------------
+
+impl Config {
+    pub fn to_server_spec(&self) -> ServerSpec {
+        ServerSpec {
+            binary_path: self.llama_server.binary_path.clone(),
+            host: self.llama_server.host.clone(),
+            port: self.llama_server.port,
+            gpu_layers: self.llama_server.gpu_layers,
+            ready_timeout_secs: self.llama_server.ready_timeout_secs,
+        }
+    }
+
+    pub fn to_model_spec(&self) -> ModelSpec {
+        ModelSpec {
+            name: self.model.name.clone(),
+            context_length: self.model.context_length,
+        }
+    }
+
+    pub fn to_chat_spec(&self) -> ChatSpec {
+        ChatSpec {
+            host: self.llama_server.host.clone(),
+            port: self.llama_server.port,
+            system_prompt: self.chat.system_prompt.clone(),
+            max_history_tokens: self.chat.max_history_tokens,
+            summary_target_tokens: self.chat.summary_target_tokens,
+            preserve_recent_turns: self.chat.preserve_recent_turns,
+            temperature: self.chat.temperature,
+            max_response_tokens: self.chat.max_response_tokens,
+            max_summary_tokens: self.chat.max_summary_tokens,
+            request_timeout_secs: self.chat.request_timeout_secs,
+            model_context_length: self.model.context_length,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -418,18 +473,18 @@ mod tests {
     }
 
     #[test]
-    fn validation_catches_empty_model_path() {
+    fn validation_catches_empty_model_name() {
         let mut config = Config::default();
-        config.model.path = String::new();
+        config.model.name = String::new();
         let errs = validation_errors(config.validate().unwrap_err());
-        assert!(errs.iter().any(|e| e.contains("model.path")));
+        assert!(errs.iter().any(|e| e.contains("model.name")));
     }
 
     #[test]
     fn validation_collects_multiple_errors() {
         let mut config = Config::default();
-        config.model.path = String::new();
-        config.model.vram_budget_mb = 0;
+        config.model.name = String::new();
+        config.model.context_length = 0;
         config.sleep.idle_timeout_secs = 0;
         let errs = validation_errors(config.validate().unwrap_err());
         assert_eq!(errs.len(), 3);
@@ -439,8 +494,7 @@ mod tests {
     fn unknown_compositor_type_rejected() {
         let toml_str = r#"
 [model]
-path = "/some/model.gguf"
-vram_budget_mb = 4096
+name = "test/model-GGUF:Q4_K_M"
 context_length = 8192
 
 [llama_server]
@@ -505,11 +559,10 @@ port = 8384
     }
 
     #[test]
-    fn llama_server_gpu_layers_override_is_optional() {
+    fn llama_server_gpu_layers_defaults_to_9999() {
         let toml_str = r#"
 [model]
-path = "/some/model.gguf"
-vram_budget_mb = 4096
+name = "test/model-GGUF:Q4_K_M"
 context_length = 8192
 
 [llama_server]
@@ -544,7 +597,8 @@ bind_address = "127.0.0.1"
 port = 8384
 "#;
         let cfg: Config = toml::from_str(toml_str).expect("parse");
-        assert!(cfg.llama_server.gpu_layers.is_none());
+        assert_eq!(cfg.llama_server.gpu_layers, 9999);
+        assert_eq!(cfg.llama_server.ready_timeout_secs, 300);
     }
 
     #[test]

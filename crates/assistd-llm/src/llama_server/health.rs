@@ -5,7 +5,6 @@ use tracing::debug;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
-const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct HealthChecker {
     client: reqwest::Client,
@@ -16,7 +15,7 @@ pub struct HealthChecker {
 }
 
 impl HealthChecker {
-    pub fn new(host: &str, port: u16) -> Result<Self, LlamaServerError> {
+    pub fn new(host: &str, port: u16, ready_timeout: Duration) -> Result<Self, LlamaServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(PROBE_TIMEOUT)
@@ -26,7 +25,7 @@ impl HealthChecker {
             url: format!("http://{host}:{port}/health"),
             poll_interval: POLL_INTERVAL,
             probe_timeout: PROBE_TIMEOUT,
-            ready_timeout: READY_TIMEOUT,
+            ready_timeout,
         })
     }
 

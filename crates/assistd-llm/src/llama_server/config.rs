@@ -11,14 +11,16 @@ pub struct ServerSpec {
     pub binary_path: String,
     pub host: String,
     pub port: u16,
-    /// If set, passed to `-ngl` verbatim, bypassing GGUF parsing.
-    pub gpu_layers: Option<u32>,
+    /// GPU layer count passed as `-ngl`.
+    pub gpu_layers: u32,
+    /// Timeout in seconds for the health check after spawning the child.
+    pub ready_timeout_secs: u64,
 }
 
-/// Fields needed to compute `-ngl` and pass the model path/context length on.
+/// Model identity and context length, passed to the llama-server child.
 #[derive(Debug, Clone)]
 pub struct ModelSpec {
-    pub path: String,
-    pub vram_budget_mb: u64,
+    /// Model identifier passed to `--hf` (e.g. `"bartowski/Qwen3-14B-GGUF:Q4_K_M"`).
+    pub name: String,
     pub context_length: u32,
 }

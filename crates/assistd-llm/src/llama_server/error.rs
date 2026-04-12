@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 use thiserror::Error;
@@ -23,15 +22,6 @@ pub enum LlamaServerError {
 
     #[error("health check aborted due to shutdown")]
     ShutdownDuringHealth,
-
-    #[error("invalid GGUF file {path}: {reason}")]
-    GgufInvalid { path: PathBuf, reason: String },
-
-    #[error("unsupported GGUF version {version} in {path}")]
-    GgufUnsupportedVersion { path: PathBuf, version: u32 },
-
-    #[error("GGUF metadata in {path} is missing required key: {key}")]
-    GgufMetadataMissing { path: PathBuf, key: &'static str },
 
     #[error("HTTP client error: {0}")]
     Http(#[from] reqwest::Error),

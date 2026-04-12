@@ -13,7 +13,6 @@
 pub mod backoff;
 pub mod config;
 pub mod error;
-pub mod gguf;
 pub mod health;
 pub mod process;
 pub mod service;

@@ -3,10 +3,9 @@
 # All fields are required unless noted otherwise.
 
 [model]
-# Filesystem path to the GGUF model file.
-path = "/usr/share/models/default.gguf"
-# VRAM budget in megabytes. Must be > 0.
-vram_budget_mb = 4096
+# Model identifier passed to llama-server's --hf flag.
+# Format: owner/repo:quant (e.g. "bartowski/Qwen3-14B-GGUF:Q4_K_M")
+name = "bartowski/Qwen3-14B-GGUF:Q4_K_M"
 # Context window length in tokens. Must be > 0.
 context_length = 8192
 
@@ -17,9 +16,12 @@ binary_path = "llama-server"
 host = "127.0.0.1"
 # TCP port llama-server binds to. Must differ from remote.port.
 port = 8385
-# Optional manual override for GPU layer count. If unset, assistd parses the
-# GGUF header and computes -ngl from model.vram_budget_mb.
-# gpu_layers = 35
+# GPU layer count passed as -ngl. Default 9999 offloads all layers; reduce if
+# running out of VRAM.
+# gpu_layers = 9999
+# Timeout in seconds for the health check. Increase for first-time HuggingFace
+# downloads on slow connections.
+# ready_timeout_secs = 300
 
 [chat]
 # System prompt injected as the first message of every request. Leave empty
