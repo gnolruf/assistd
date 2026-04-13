@@ -1,6 +1,6 @@
 use anyhow::Result;
-use assistd_core::{AppState, Config};
-use assistd_llm::{LlamaChatClient, LlamaService};
+use assistd_core::{AppState, Config, PresenceManager};
+use assistd_llm::LlamaChatClient;
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,20 +59,22 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         });
     }
 
-    // Bring up llama-server and block until /health returns 200.
-    let llama = LlamaService::start(
+    // Bring the daemon up in Active: PresenceManager cold-starts llama-server
+    // (supervisor spawns, /health = 200, /models/load completes) before it
+    // returns. Socket serving starts only after this succeeds.
+    let presence = PresenceManager::new_active(
         config.to_server_spec(),
         config.to_model_spec(),
         shutdown_tx.subscribe(),
     )
     .await?;
     info!(
-        "llama-server ready on {}:{}",
+        "presence: Active (llama-server ready on {}:{})",
         config.llama_server.host, config.llama_server.port
     );
 
     let chat = LlamaChatClient::new(config.to_chat_spec())?;
-    let state = Arc::new(AppState::new(config, Arc::new(chat)));
+    let state = Arc::new(AppState::new(config, Arc::new(chat), presence.clone()));
 
     let mut socket_shutdown_rx = shutdown_tx.subscribe();
     let socket_shutdown = async move {
@@ -81,8 +83,9 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     let serve_result = assistd_core::socket::serve(state, socket_shutdown).await;
 
-    if let Err(e) = llama.shutdown().await {
-        tracing::error!("llama-server shutdown error: {e}");
+    // Drop to Sleeping on shutdown: tears down the supervisor and the child.
+    if let Err(e) = presence.sleep().await {
+        tracing::error!("presence shutdown error: {e:#}");
     }
 
     serve_result?;

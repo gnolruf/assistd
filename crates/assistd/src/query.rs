@@ -60,6 +60,9 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             Event::ToolResult { name, .. } => {
                 writeln!(stdout, "[tool result: {name}]")?;
             }
+            Event::Presence { state, .. } => {
+                writeln!(stdout, "[presence: {state:?}]")?;
+            }
             Event::Done { .. } => {
                 if wrote_anything {
                     writeln!(stdout)?;

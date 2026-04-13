@@ -126,11 +126,14 @@ name = "assistd-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "assistd-core",
+ "assistd-ipc",
  "async-trait",
  "libc",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

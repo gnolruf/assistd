@@ -165,7 +165,7 @@ async fn write_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Config;
+    use crate::{Config, PresenceManager, PresenceState};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
     use tokio::sync::oneshot;
@@ -174,6 +174,7 @@ mod tests {
         Arc::new(AppState::new(
             Config::default(),
             Arc::new(assistd_llm::EchoBackend),
+            PresenceManager::stub(PresenceState::Active),
         ))
     }
 

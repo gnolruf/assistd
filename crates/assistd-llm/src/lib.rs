@@ -9,7 +9,9 @@ pub mod chat;
 pub mod llama_server;
 
 pub use chat::{ChatClientError, ChatSpec, LlamaChatClient};
-pub use llama_server::{LlamaServerError, LlamaService, ModelSpec, ReadyState, ServerSpec};
+pub use llama_server::{
+    LlamaServerControl, LlamaServerError, LlamaService, ModelSpec, ReadyState, ServerSpec,
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
