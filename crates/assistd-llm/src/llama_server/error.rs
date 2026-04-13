@@ -26,6 +26,13 @@ pub enum LlamaServerError {
     #[error("HTTP client error: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("llama-server {method} {path} returned status {status}")]
+    ControlHttp {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+    },
+
     #[error("llama-server startup failed after {attempts} attempts")]
     StartupFailed { attempts: u32 },
 

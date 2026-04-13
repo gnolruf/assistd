@@ -12,6 +12,7 @@
 
 pub mod backoff;
 pub mod config;
+pub mod control;
 pub mod error;
 pub mod health;
 pub mod process;
@@ -20,5 +21,6 @@ pub mod supervisor;
 
 pub use backoff::MAX_CONSECUTIVE_FAILURES;
 pub use config::{ModelSpec, ServerSpec};
+pub use control::LlamaServerControl;
 pub use error::LlamaServerError;
 pub use service::{LlamaService, ReadyState};

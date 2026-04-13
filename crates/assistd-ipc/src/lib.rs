@@ -17,10 +17,34 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Coarse daemon lifecycle state exposed on the wire so clients and the
+/// daemon can agree on resource usage. `Sleeping` means llama-server is
+/// fully stopped; `Drowsy` keeps the process alive but its model weights
+/// unloaded; `Active` is fully ready to answer queries.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceState {
+    Active,
+    Drowsy,
+    Sleeping,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    Query { id: String, text: String },
+    Query {
+        id: String,
+        text: String,
+    },
+    /// Drive the daemon to a specific presence state.
+    SetPresence {
+        id: String,
+        target: PresenceState,
+    },
+    /// Report the daemon's current presence state.
+    GetPresence {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +64,9 @@ pub enum Event {
         name: String,
         result: serde_json::Value,
     },
+    /// Daemon presence state, emitted in response to GetPresence or after a
+    /// successful SetPresence transition.
+    Presence { id: String, state: PresenceState },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -58,6 +85,7 @@ impl Event {
             Event::Delta { id, .. }
             | Event::ToolCall { id, .. }
             | Event::ToolResult { id, .. }
+            | Event::Presence { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }
@@ -151,6 +179,52 @@ mod tests {
             }
             .is_terminal()
         );
+    }
+
+    #[test]
+    fn set_presence_request_roundtrip() {
+        let req = Request::SetPresence {
+            id: "p-1".into(),
+            target: PresenceState::Drowsy,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"set_presence","id":"p-1","target":"drowsy"}"#
+        );
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn get_presence_request_roundtrip() {
+        let req = Request::GetPresence { id: "p-2".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"get_presence","id":"p-2"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn presence_event_roundtrip() {
+        let evt = Event::Presence {
+            id: "p-1".into(),
+            state: PresenceState::Sleeping,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(json, r#"{"type":"presence","id":"p-1","state":"sleeping"}"#);
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn presence_event_is_not_terminal() {
+        let evt = Event::Presence {
+            id: "p-1".into(),
+            state: PresenceState::Active,
+        };
+        assert!(!evt.is_terminal());
+        assert_eq!(evt.id(), "p-1");
     }
 
     #[test]

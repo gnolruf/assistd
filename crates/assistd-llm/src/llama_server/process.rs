@@ -17,10 +17,12 @@ pub struct ChildProcess {
 
 impl ChildProcess {
     pub fn spawn(cfg: &ServerSpec, model: &ModelSpec) -> Result<Self, LlamaServerError> {
+        // Router mode: start with no `--hf-repo`. The presence state machine
+        // calls `POST /models/load` with `model.name` to bring weights in on
+        // demand, and `POST /models/unload` to drop them while keeping the
+        // process alive. `-c` still controls the server-wide context window.
         let mut cmd = Command::new(&cfg.binary_path);
         cmd.arg("--jinja")
-            .arg("--hf-repo")
-            .arg(&model.name)
             .arg("-ngl")
             .arg(cfg.gpu_layers.to_string())
             .arg("--host")
@@ -55,12 +57,13 @@ impl ChildProcess {
         info!(
             target: "assistd::llama_server",
             pid = child.id(),
-            "spawned llama-server: {} --hf-repo {} -ngl {} --host {} --port {}",
+            "spawned llama-server (router mode): {} -ngl {} --host {} --port {} -c {} (model {} loaded on demand)",
             cfg.binary_path,
-            model.name,
             cfg.gpu_layers,
             cfg.host,
             cfg.port,
+            model.context_length,
+            model.name,
         );
 
         Ok(Self {

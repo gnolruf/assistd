@@ -1,9 +1,12 @@
 pub mod config;
+pub mod presence;
 pub mod socket;
 pub mod state;
 
 pub use assistd_ipc as ipc;
+pub use assistd_ipc::PresenceState;
 pub use config::Config;
+pub use presence::PresenceManager;
 pub use state::AppState;
 
 /// Returns the version string of the assistd-core crate.
