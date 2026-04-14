@@ -63,6 +63,29 @@ idle_timeout_secs = 300
 # Whether to suspend the machine (true) or just deactivate (false).
 suspend = false
 
+# ---- GPU contention monitor ----
+# Background NVML poller that transitions the daemon to Sleeping when another
+# process (e.g. a game) claims VRAM. Silently disables itself when no NVIDIA
+# GPU is available.
+#
+# Enable the monitor. Default true.
+# gpu_monitor_enabled = true
+# NVML poll interval in seconds. Must be > 0 when enabled.
+# gpu_poll_secs = 5
+# Per-process VRAM threshold in MiB. A non-assistd process holding at least
+# this much VRAM triggers sleep. 2048 = 2 GiB. Must be > 0 when enabled.
+# gpu_vram_threshold_mb = 2048
+# When true, the daemon auto-wakes once the contending process exits. Default
+# false so the daemon stays out of the way while you are still gaming.
+# gpu_auto_wake = false
+# Process basenames that never trigger sleep, even above the threshold.
+# Matched against /proc/<pid>/comm, which the kernel truncates at 16 bytes —
+# e.g. "chromium_main" fits but "systemd-userdbd" becomes "systemd-userdb".
+# gpu_allowlist = ["Xorg", "Xwayland", "gnome-shell", "kwin_x11",
+#                  "kwin_wayland", "firefox", "chromium", "chrome"]
+# Process basenames that always trigger sleep regardless of VRAM usage.
+# gpu_denylist = []
+
 [remote]
 # Enable the remote access API.
 enabled = false

@@ -6,6 +6,8 @@ mod chat;
 #[cfg(feature = "daemon")]
 mod daemon;
 #[cfg(feature = "daemon")]
+mod gpu_monitor;
+#[cfg(feature = "daemon")]
 mod hotkey;
 #[cfg(feature = "client")]
 mod presence;
