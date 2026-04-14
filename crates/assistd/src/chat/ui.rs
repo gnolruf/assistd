@@ -82,23 +82,41 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let reversed = Style::default().add_modifier(Modifier::REVERSED);
     let mut left_spans: Vec<Span> = Vec::new();
     left_spans.push(Span::styled(format!("model: {}", app.model_name), reversed));
-    if let Some((dot, label)) = presence_dot(app.presence_state) {
+    let wake_started = app.presence.as_ref().and_then(|p| p.wake_in_progress());
+    if let Some(started) = wake_started {
+        // Override the presence segment during an active wake: the
+        // regular dot + idle countdown are meaningless while the
+        // daemon is mid-transition to Active.
         left_spans.push(Span::raw(" "));
         left_spans.push(Span::styled(
-            "●",
-            Style::default().fg(dot).add_modifier(Modifier::BOLD),
+            format!(
+                "{} waking up ({}s)",
+                app.spinner_char(),
+                started.elapsed().as_secs()
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::REVERSED),
         ));
-        left_spans.push(Span::styled(format!(" {label}"), reversed));
-    }
-    if let Some(remaining) = app
-        .presence
-        .as_ref()
-        .and_then(|p| p.time_until_next_transition(&app.sleep_cfg))
-    {
-        left_spans.push(Span::styled(
-            format!(" ({})", format_countdown(remaining)),
-            reversed,
-        ));
+    } else {
+        if let Some((dot, label)) = presence_dot(app.presence_state) {
+            left_spans.push(Span::raw(" "));
+            left_spans.push(Span::styled(
+                "●",
+                Style::default().fg(dot).add_modifier(Modifier::BOLD),
+            ));
+            left_spans.push(Span::styled(format!(" {label}"), reversed));
+        }
+        if let Some(remaining) = app
+            .presence
+            .as_ref()
+            .and_then(|p| p.time_until_next_transition(&app.sleep_cfg))
+        {
+            left_spans.push(Span::styled(
+                format!(" ({})", format_countdown(remaining)),
+                reversed,
+            ));
+        }
     }
     left_spans.push(Span::styled(format!(" │ {state}"), reversed));
     if let Some(r) = rate {

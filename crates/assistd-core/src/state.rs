@@ -48,18 +48,25 @@ impl AppState {
         text: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
-        // Auto-wake: a query in any non-Active state blocks here until the
-        // daemon is ready to serve. Failures surface to the client as an
-        // Error event so the client doesn't hang.
-        if let Err(e) = self.presence.ensure_active().await {
-            let _ = tx
-                .send(Event::Error {
-                    id: id.clone(),
-                    message: format!("wake failed: {e:#}"),
-                })
-                .await;
-            return Err(e);
-        }
+        // Auto-wake and take an in-flight guard: a query in any
+        // non-Active state blocks here until the daemon is ready to
+        // serve. The returned guard keeps the daemon `Active` for the
+        // lifetime of the generation — a concurrent `sleep()` will
+        // wait until this guard (and the generator that follows) has
+        // finished. Failures surface to the client as an Error event
+        // so the client doesn't hang.
+        let _request_guard = match self.presence.acquire_request_guard().await {
+            Ok(g) => g,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id: id.clone(),
+                        message: format!("wake failed: {e:#}"),
+                    })
+                    .await;
+                return Err(e);
+            }
+        };
 
         let (llm_tx, mut llm_rx) = mpsc::channel::<LlmEvent>(32);
         let llm = self.llm.clone();
