@@ -193,19 +193,25 @@ impl App {
         let tx = self.chat_tx.clone();
         let presence = self.presence.clone();
         tokio::spawn(async move {
-            // Auto-wake before generating so a user hitting Enter from
-            // Drowsy/Sleeping sees the response stream once the model is
-            // ready, instead of hitting a raw HTTP error on a dead server.
-            if let Some(p) = presence.as_ref() {
-                if p.state() != PresenceState::Active {
-                    if let Err(e) = p.ensure_active().await {
+            // Auto-wake and take an in-flight guard so a user hitting
+            // Enter from Drowsy/Sleeping sees the response stream once
+            // the model is ready, and so a concurrent sleep waits for
+            // this generation to finish before tearing down
+            // llama-server. The guard is held until the end of this
+            // task.
+            let _request_guard = if let Some(p) = presence.as_ref() {
+                match p.acquire_request_guard().await {
+                    Ok(g) => Some(g),
+                    Err(e) => {
                         let _ = tx
                             .send(ChatEvent::LlmError(format!("wake failed: {e:#}")))
                             .await;
                         return;
                     }
                 }
-            }
+            } else {
+                None
+            };
             let (llm_tx, mut llm_rx) = mpsc::channel::<LlmEvent>(64);
             let tx_fwd = tx.clone();
             let forwarder = tokio::spawn(async move {

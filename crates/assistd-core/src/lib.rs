@@ -6,7 +6,7 @@ pub mod state;
 pub use assistd_ipc as ipc;
 pub use assistd_ipc::PresenceState;
 pub use config::{Config, PresenceConfig, SleepConfig};
-pub use presence::PresenceManager;
+pub use presence::{PresenceManager, RequestGuard};
 pub use state::AppState;
 
 /// Returns the version string of the assistd-core crate.

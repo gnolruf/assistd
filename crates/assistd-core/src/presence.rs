@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use assistd_ipc::PresenceState;
 use assistd_llm::{LlamaServerControl, LlamaService, ModelSpec, ServerSpec};
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, watch};
 use tracing::{debug, info, warn};
 
 /// Owner of the llama-server handle and the daemon-wide presence state.
@@ -68,6 +68,52 @@ pub struct PresenceManager {
     // (GPU, idle) deliberately do not update it so their own
     // transitions don't defer further idle progress.
     last_activity: StdMutex<Instant>,
+    // Shared lock over in-flight request tracking. Request handlers take
+    // an owned read guard (`RequestGuard`) for the duration of the
+    // generation; `sleep`/`drowse` take the write side to block until
+    // all outstanding requests drain. `tokio::sync::RwLock` is
+    // writer-preferring, so new requests queued after a pending
+    // transition wait for that transition plus the subsequent wake
+    // rather than starving the writer.
+    inflight: Arc<RwLock<()>>,
+    // `Some(started_at)` while a `wake` transition is executing — set
+    // after the transition mutex is taken and the short-circuit check
+    // passes, cleared by RAII when `wake` returns (success or error).
+    // The TUI polls this each render tick to drive the "waking up"
+    // indicator.
+    wake_started: Arc<StdMutex<Option<Instant>>>,
+}
+
+/// Held by request handlers for the duration of a query (or other
+/// in-flight work). While any guard is alive, [`PresenceManager::sleep`]
+/// and [`PresenceManager::drowse`] block — sleep cannot tear down the
+/// llama-server while a response is still streaming.
+///
+/// Created via [`PresenceManager::acquire_request_guard`]; released on
+/// drop.
+pub struct RequestGuard {
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+/// RAII marker for "a wake transition is in progress". Constructed at
+/// the top of [`PresenceManager::wake`] after the short-circuit check;
+/// cleared on drop so every return path — `?`-propagated error, panic,
+/// success — leaves `wake_started` back at `None`.
+struct WakeMarker {
+    slot: Arc<StdMutex<Option<Instant>>>,
+}
+
+impl WakeMarker {
+    fn new(slot: Arc<StdMutex<Option<Instant>>>) -> Self {
+        *slot.lock().expect("wake_started mutex poisoned") = Some(Instant::now());
+        Self { slot }
+    }
+}
+
+impl Drop for WakeMarker {
+    fn drop(&mut self) {
+        *self.slot.lock().expect("wake_started mutex poisoned") = None;
+    }
 }
 
 impl PresenceManager {
@@ -121,6 +167,8 @@ impl PresenceManager {
             state_tx,
             _daemon_shutdown: daemon_shutdown,
             last_activity: StdMutex::new(Instant::now()),
+            inflight: Arc::new(RwLock::new(())),
+            wake_started: Arc::new(StdMutex::new(None)),
         });
 
         manager
@@ -208,6 +256,47 @@ impl PresenceManager {
         self.wake().await
     }
 
+    /// Request a guard that keeps the daemon `Active` for as long as
+    /// the returned [`RequestGuard`] is alive. While any guard exists,
+    /// [`Self::sleep`] and [`Self::drowse`] block — this is the
+    /// mechanism that prevents a concurrent sleep from tearing down
+    /// llama-server mid-generation.
+    ///
+    /// The guard is acquired *before* the state check, so `state ==
+    /// Active` observed under the guard is a stable invariant for the
+    /// guard's lifetime (a sleep that wants to flip the state first
+    /// needs the write side of the same lock, which this guard blocks).
+    ///
+    /// If the state is not `Active` when the read guard is taken, the
+    /// guard is dropped and [`Self::ensure_active`] runs to wake the
+    /// daemon, then a new read guard is acquired and the state
+    /// re-checked. A bounded retry guards against pathological
+    /// sleep/wake churn.
+    pub async fn acquire_request_guard(self: &Arc<Self>) -> Result<RequestGuard> {
+        self.mark_activity();
+        const MAX_RETRIES: usize = 3;
+        for _ in 0..MAX_RETRIES {
+            let guard = self.inflight.clone().read_owned().await;
+            if self.state() == PresenceState::Active {
+                return Ok(RequestGuard { _guard: guard });
+            }
+            drop(guard);
+            self.ensure_active().await?;
+        }
+        bail!("failed to acquire active request guard after {MAX_RETRIES} retries")
+    }
+
+    /// `Some(started_at)` if a wake transition is currently running;
+    /// `None` otherwise. Used by the TUI to drive a "waking up"
+    /// indicator during cold-start wakes (which can take tens of
+    /// seconds to minutes).
+    pub fn wake_in_progress(&self) -> Option<Instant> {
+        *self
+            .wake_started
+            .lock()
+            .expect("wake_started mutex poisoned")
+    }
+
     /// Drive the manager to `target`. Convenience wrapper used by the IPC
     /// `SetPresence` handler.
     pub async fn set_presence(&self, target: PresenceState) -> Result<()> {
@@ -235,6 +324,9 @@ impl PresenceManager {
     }
 
     /// `Active|Drowsy → Sleeping`. Idempotent from `Sleeping`.
+    ///
+    /// Blocks until every outstanding [`RequestGuard`] has been dropped,
+    /// so an in-flight generation is never killed mid-stream.
     pub async fn sleep(&self) -> Result<()> {
         let _guard = self.transition.lock().await;
         let prior = self.state();
@@ -242,6 +334,11 @@ impl PresenceManager {
             debug!(target: "assistd::presence", "sleep: already Sleeping, no-op");
             return Ok(());
         }
+
+        // Wait for all in-flight requests to drop their read guards.
+        // Writer-preferring: new requests acquiring read guards after
+        // this point will block until the write guard is released.
+        let _inflight = self.inflight.write().await;
 
         let started = Instant::now();
         // Flip inner-shutdown to trigger supervisor teardown.
@@ -276,6 +373,10 @@ impl PresenceManager {
     }
 
     /// `Active → Drowsy`. Idempotent from `Drowsy`. Errors from `Sleeping`.
+    ///
+    /// Blocks until every outstanding [`RequestGuard`] has been dropped,
+    /// so an in-flight generation completes before the model weights
+    /// are unloaded.
     pub async fn drowse(&self) -> Result<()> {
         let _guard = self.transition.lock().await;
         let prior = self.state();
@@ -286,6 +387,10 @@ impl PresenceManager {
             }
             PresenceState::Active => {}
         }
+
+        // Wait for all in-flight requests to drop their read guards
+        // before unloading model weights.
+        let _inflight = self.inflight.write().await;
 
         let started = Instant::now();
         self.control
@@ -311,12 +416,22 @@ impl PresenceManager {
     }
 
     /// `Sleeping|Drowsy → Active`. Idempotent from `Active`.
+    ///
+    /// While this is running, [`Self::wake_in_progress`] returns
+    /// `Some(started_at)` so the TUI can display a "waking up"
+    /// indicator. The marker is installed via RAII after the
+    /// short-circuit check and cleared on every return path.
     pub async fn wake(&self) -> Result<()> {
         let _guard = self.transition.lock().await;
         let prior = self.state();
         if prior == PresenceState::Active {
             return Ok(());
         }
+
+        // Mark wake-in-progress for TUI. Placed *after* the short-circuit
+        // so idempotent wakes from Active don't briefly flicker the
+        // indicator.
+        let _wake_marker = WakeMarker::new(Arc::clone(&self.wake_started));
 
         let started = Instant::now();
         match prior {
@@ -414,6 +529,8 @@ impl PresenceManager {
             state_tx,
             _daemon_shutdown: rx,
             last_activity: StdMutex::new(Instant::now()),
+            inflight: Arc::new(RwLock::new(())),
+            wake_started: Arc::new(StdMutex::new(None)),
         })
     }
 
@@ -596,5 +713,137 @@ mod tests {
         let m = PresenceManager::stub(PresenceState::Drowsy);
         let d = m.time_until_next_transition(&sleep_cfg(30, 120)).unwrap();
         assert!(d <= Duration::from_secs(120 * 60));
+    }
+
+    #[tokio::test]
+    async fn acquire_request_guard_fast_path_when_active() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        let g = tokio::time::timeout(Duration::from_millis(100), m.acquire_request_guard())
+            .await
+            .expect("acquire did not complete in time")
+            .expect("acquire returned Err");
+        drop(g);
+        assert_eq!(m.state(), PresenceState::Active);
+    }
+
+    #[tokio::test]
+    async fn sleep_defers_for_inflight_request() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        let guard = m.acquire_request_guard().await.unwrap();
+
+        let m2 = Arc::clone(&m);
+        let sleep_task = tokio::spawn(async move { m2.sleep().await });
+
+        // Sleep must block while the request guard is alive.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !sleep_task.is_finished(),
+            "sleep completed while request guard held"
+        );
+
+        // Drop guard — sleep should now proceed.
+        drop(guard);
+        let res = tokio::time::timeout(Duration::from_secs(2), sleep_task)
+            .await
+            .expect("sleep did not complete after guard dropped")
+            .expect("sleep task panicked");
+        res.expect("sleep returned Err");
+        assert_eq!(m.state(), PresenceState::Sleeping);
+    }
+
+    #[tokio::test]
+    async fn drowse_defers_for_inflight_request() {
+        // Same mechanism as sleep: the inflight write lock blocks
+        // drowse until all read guards drop. We only verify the block
+        // behaviour; the drowse itself will error on the dummy control
+        // client once it gets past the inflight wait, which is fine.
+        let m = PresenceManager::stub(PresenceState::Active);
+        let guard = m.acquire_request_guard().await.unwrap();
+
+        let m2 = Arc::clone(&m);
+        let drowse_task = tokio::spawn(async move { m2.drowse().await });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !drowse_task.is_finished(),
+            "drowse must block while request guard is held"
+        );
+
+        drop(guard);
+        // After drop, drowse completes (with Err from the dummy
+        // control client, since load/unload hit an unreachable port).
+        let _ = tokio::time::timeout(Duration::from_secs(2), drowse_task)
+            .await
+            .expect("drowse did not unblock after guard dropped");
+    }
+
+    #[tokio::test]
+    async fn wake_marker_cleared_on_error_path() {
+        // Wake from Drowsy calls `control.load_model`, which hits an
+        // unreachable port in the stub and returns Err. The RAII
+        // marker must still clear on the error path.
+        let m = PresenceManager::stub(PresenceState::Drowsy);
+        assert!(m.wake_in_progress().is_none());
+        let err = m.wake().await;
+        assert!(err.is_err(), "wake must fail against dummy control");
+        assert!(
+            m.wake_in_progress().is_none(),
+            "wake_in_progress must be cleared after wake returns, even on error"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rapid_sleep_guard_loop_no_crash() {
+        // Stress the inflight RwLock + transition mutex interaction:
+        // many tasks take/release read guards while another loop calls
+        // sleep() and restores state via set_state_for_test. The stub
+        // can't cold-start wake, so the writer forces state back to
+        // Active after each sleep, which lets the retry loop in
+        // acquire_request_guard make progress. The point of the test
+        // is to confirm no deadlock or state corruption under churn —
+        // not to measure throughput. A generous wall-clock timeout
+        // wraps the whole workload.
+        let m = PresenceManager::stub(PresenceState::Active);
+
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let m = Arc::clone(&m);
+            readers.push(tokio::spawn(async move {
+                for _ in 0..20 {
+                    match m.acquire_request_guard().await {
+                        Ok(g) => {
+                            tokio::task::yield_now().await;
+                            drop(g);
+                        }
+                        // Reader may observe Sleeping between writer's
+                        // sleep() completing and set_state_for_test(Active)
+                        // running; ensure_active() then fails in the
+                        // stub. Retry exhaustion is fine — just keep
+                        // going.
+                        Err(_) => tokio::task::yield_now().await,
+                    }
+                }
+            }));
+        }
+
+        let m2 = Arc::clone(&m);
+        let writer = tokio::spawn(async move {
+            for _ in 0..10 {
+                m2.sleep().await.expect("sleep errored");
+                m2.set_state_for_test(PresenceState::Active);
+                tokio::task::yield_now().await;
+            }
+        });
+
+        // Overall workload cap: if anything deadlocks, this trips and
+        // the test fails with a clear message rather than hanging.
+        tokio::time::timeout(Duration::from_secs(30), async move {
+            writer.await.expect("writer panicked");
+            for r in readers {
+                r.await.expect("reader panicked");
+            }
+        })
+        .await
+        .expect("rapid toggle workload deadlocked");
     }
 }
