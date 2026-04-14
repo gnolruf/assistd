@@ -2,7 +2,7 @@
 //! output pane's wrap cache and the app's last-viewport-height sink, both
 //! of which must be updated during layout.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use assistd_core::PresenceState;
 use ratatui::Frame;
@@ -90,6 +90,16 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ));
         left_spans.push(Span::styled(format!(" {label}"), reversed));
     }
+    if let Some(remaining) = app
+        .presence
+        .as_ref()
+        .and_then(|p| p.time_until_next_transition(&app.sleep_cfg))
+    {
+        left_spans.push(Span::styled(
+            format!(" ({})", format_countdown(remaining)),
+            reversed,
+        ));
+    }
     left_spans.push(Span::styled(format!(" │ {state}"), reversed));
     if let Some(r) = rate {
         left_spans.push(Span::styled(format!(" │ {r}"), reversed));
@@ -136,6 +146,17 @@ fn presence_dot(s: Option<PresenceState>) -> Option<(Color, &'static str)> {
         PresenceState::Active => Some((Color::Green, "active")),
         PresenceState::Drowsy => Some((Color::Yellow, "drowsy")),
         PresenceState::Sleeping => Some((Color::Red, "sleeping")),
+    }
+}
+
+fn format_countdown(d: Duration) -> String {
+    let total = d.as_secs();
+    if total >= 3600 {
+        format!("{}h{:02}m", total / 3600, (total % 3600) / 60)
+    } else if total >= 60 {
+        format!("{}m", total / 60)
+    } else {
+        format!("{total}s")
     }
 }
 

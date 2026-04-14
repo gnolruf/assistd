@@ -104,8 +104,17 @@ pub struct CompositorConfig {
 /// Sleep/idle policy settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SleepConfig {
-    /// Idle timeout in seconds before the sleep action fires.
-    pub idle_timeout_secs: u64,
+    /// Minutes of no user interaction after which the daemon drops
+    /// `Active → Drowsy` (model weights unloaded, server stays alive).
+    /// `0` disables this transition. Independent of `idle_to_sleep_mins`.
+    #[serde(default = "default_idle_to_drowsy_mins")]
+    pub idle_to_drowsy_mins: u64,
+    /// Minutes of no user interaction after which the daemon drops to
+    /// `Sleeping` (llama-server stopped, all VRAM freed). Must be greater
+    /// than `idle_to_drowsy_mins` when both are non-zero. `0` disables
+    /// this transition.
+    #[serde(default = "default_idle_to_sleep_mins")]
+    pub idle_to_sleep_mins: u64,
     /// Whether to suspend the machine (true) or just deactivate (false).
     pub suspend: bool,
 
@@ -176,6 +185,14 @@ fn default_ready_timeout_secs() -> u64 {
     300
 }
 
+fn default_idle_to_drowsy_mins() -> u64 {
+    30
+}
+
+fn default_idle_to_sleep_mins() -> u64 {
+    120
+}
+
 fn default_gpu_monitor_enabled() -> bool {
     true
 }
@@ -241,7 +258,8 @@ impl Default for Config {
                 compositor_type: CompositorType::Sway,
             },
             sleep: SleepConfig {
-                idle_timeout_secs: 300,
+                idle_to_drowsy_mins: default_idle_to_drowsy_mins(),
+                idle_to_sleep_mins: default_idle_to_sleep_mins(),
                 suspend: false,
                 gpu_monitor_enabled: default_gpu_monitor_enabled(),
                 gpu_poll_secs: default_gpu_poll_secs(),
@@ -394,8 +412,15 @@ impl Config {
             errors.push("voice.hotkey must not be empty when voice is enabled".into());
         }
 
-        if self.sleep.idle_timeout_secs == 0 {
-            errors.push("sleep.idle_timeout_secs must be greater than 0".into());
+        if self.sleep.idle_to_drowsy_mins > 0
+            && self.sleep.idle_to_sleep_mins > 0
+            && self.sleep.idle_to_sleep_mins <= self.sleep.idle_to_drowsy_mins
+        {
+            errors.push(
+                "sleep.idle_to_sleep_mins must be greater than sleep.idle_to_drowsy_mins \
+                 (set either to 0 to disable that transition)"
+                    .into(),
+            );
         }
 
         if self.sleep.gpu_monitor_enabled {
@@ -580,7 +605,7 @@ mod tests {
         let mut config = Config::default();
         config.model.name = String::new();
         config.model.context_length = 0;
-        config.sleep.idle_timeout_secs = 0;
+        config.chat.max_response_tokens = 0;
         let errs = validation_errors(config.validate().unwrap_err());
         assert_eq!(errs.len(), 3);
     }
@@ -615,7 +640,6 @@ hotkey = "Super+V"
 type = "kde"
 
 [sleep]
-idle_timeout_secs = 300
 suspend = false
 
 [remote]
@@ -683,7 +707,6 @@ hotkey = "Super+V"
 type = "sway"
 
 [sleep]
-idle_timeout_secs = 300
 suspend = false
 
 [remote]
@@ -777,7 +800,6 @@ hotkey = "Super+V"
 type = "sway"
 
 [sleep]
-idle_timeout_secs = 300
 suspend = false
 
 [remote]
@@ -836,7 +858,6 @@ hotkey = "Super+V"
 type = "sway"
 
 [sleep]
-idle_timeout_secs = 300
 suspend = false
 
 [remote]
@@ -884,5 +905,94 @@ port = 8384
         config
             .validate()
             .expect("zero poll/threshold is allowed when monitor disabled");
+    }
+
+    #[test]
+    fn idle_timeouts_default_from_missing_keys() {
+        let toml_str = r#"
+[model]
+name = "test/model-GGUF:Q4_K_M"
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse without idle keys");
+        assert_eq!(cfg.sleep.idle_to_drowsy_mins, 30);
+        assert_eq!(cfg.sleep.idle_to_sleep_mins, 120);
+    }
+
+    #[test]
+    fn validation_catches_idle_sleep_lte_drowsy() {
+        let mut config = Config::default();
+        config.sleep.idle_to_drowsy_mins = 60;
+        config.sleep.idle_to_sleep_mins = 30;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("idle_to_sleep_mins") && e.contains("idle_to_drowsy_mins"))
+        );
+    }
+
+    #[test]
+    fn validation_catches_idle_sleep_eq_drowsy() {
+        let mut config = Config::default();
+        config.sleep.idle_to_drowsy_mins = 60;
+        config.sleep.idle_to_sleep_mins = 60;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("idle_to_sleep_mins")));
+    }
+
+    #[test]
+    fn idle_both_zero_is_valid() {
+        let mut config = Config::default();
+        config.sleep.idle_to_drowsy_mins = 0;
+        config.sleep.idle_to_sleep_mins = 0;
+        config
+            .validate()
+            .expect("both zero disables idle monitoring");
+    }
+
+    #[test]
+    fn idle_only_drowsy_set_is_valid() {
+        let mut config = Config::default();
+        config.sleep.idle_to_drowsy_mins = 30;
+        config.sleep.idle_to_sleep_mins = 0;
+        config.validate().expect("only drowsy configured is valid");
+    }
+
+    #[test]
+    fn idle_only_sleep_set_is_valid() {
+        let mut config = Config::default();
+        config.sleep.idle_to_drowsy_mins = 0;
+        config.sleep.idle_to_sleep_mins = 120;
+        config.validate().expect("only sleep configured is valid");
     }
 }

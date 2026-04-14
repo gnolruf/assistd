@@ -307,7 +307,8 @@ mod tests {
 
     fn cfg() -> SleepConfig {
         SleepConfig {
-            idle_timeout_secs: 300,
+            idle_to_drowsy_mins: 30,
+            idle_to_sleep_mins: 120,
             suspend: false,
             gpu_monitor_enabled: true,
             gpu_poll_secs: 5,

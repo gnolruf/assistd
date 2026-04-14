@@ -9,6 +9,8 @@ mod daemon;
 mod gpu_monitor;
 #[cfg(feature = "daemon")]
 mod hotkey;
+#[cfg(any(feature = "daemon", feature = "chat"))]
+mod idle_monitor;
 #[cfg(feature = "client")]
 mod presence;
 #[cfg(feature = "client")]

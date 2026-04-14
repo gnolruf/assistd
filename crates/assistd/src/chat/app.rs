@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assistd_core::{PresenceManager, PresenceState};
+use assistd_core::{PresenceManager, PresenceState, SleepConfig};
 use assistd_llm::{LlmBackend, LlmEvent};
 use crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
@@ -38,9 +38,10 @@ pub struct App {
     pub notice: Option<(String, Instant)>,
     pub last_output_height: u16,
     pub presence_state: Option<PresenceState>,
+    pub sleep_cfg: SleepConfig,
+    pub presence: Option<Arc<PresenceManager>>,
     client: Arc<dyn LlmBackend>,
     chat_tx: mpsc::Sender<ChatEvent>,
-    presence: Option<Arc<PresenceManager>>,
 }
 
 impl App {
@@ -48,6 +49,7 @@ impl App {
         client: Arc<dyn LlmBackend>,
         chat_tx: mpsc::Sender<ChatEvent>,
         model_name: String,
+        sleep_cfg: SleepConfig,
         presence: Option<Arc<PresenceManager>>,
     ) -> Self {
         let presence_state = presence.as_ref().map(|p| p.state());
@@ -63,9 +65,10 @@ impl App {
             notice: None,
             last_output_height: 10,
             presence_state,
+            sleep_cfg,
+            presence,
             client,
             chat_tx,
-            presence,
         }
     }
 
@@ -235,10 +238,17 @@ mod tests {
     use assistd_llm::{EchoBackend, FailedBackend};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    fn test_sleep_cfg() -> SleepConfig {
+        let mut cfg = assistd_core::Config::default().sleep;
+        cfg.idle_to_drowsy_mins = 0;
+        cfg.idle_to_sleep_mins = 0;
+        cfg
+    }
+
     fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
         let (tx, rx) = mpsc::channel::<ChatEvent>(16);
         let client: Arc<dyn LlmBackend> = Arc::new(EchoBackend);
-        let app = App::new(client, tx, "test-model".into(), None);
+        let app = App::new(client, tx, "test-model".into(), test_sleep_cfg(), None);
         (app, rx)
     }
 
@@ -350,7 +360,7 @@ mod tests {
     async fn failed_backend_spawn_yields_llm_error() {
         let (tx, mut rx) = mpsc::channel::<ChatEvent>(16);
         let client: Arc<dyn LlmBackend> = Arc::new(FailedBackend::new("server down".into()));
-        let app = App::new(client, tx, "test-model".into(), None);
+        let app = App::new(client, tx, "test-model".into(), test_sleep_cfg(), None);
         app.spawn_generation("hello".into());
         let ev = rx.recv().await.expect("error event");
         match ev {
