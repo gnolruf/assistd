@@ -16,13 +16,15 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-# Internal crates
-assistd-core  = { path = "crates/assistd-core" }
-assistd-ipc   = { path = "crates/assistd-ipc" }
-assistd-llm   = { path = "crates/assistd-llm" }
-assistd-voice = { path = "crates/assistd-voice" }
-assistd-tools = { path = "crates/assistd-tools" }
-assistd-wm    = { path = "crates/assistd-wm" }
+# Internal crates. `version` is declared alongside `path` so tooling that
+# inspects workspace manifests (e.g. cargo-deny) doesn't treat these as
+# wildcard deps. `path` still wins for local builds.
+assistd-core  = { version = "0.1", path = "crates/assistd-core" }
+assistd-ipc   = { version = "0.1", path = "crates/assistd-ipc" }
+assistd-llm   = { version = "0.1", path = "crates/assistd-llm" }
+assistd-voice = { version = "0.1", path = "crates/assistd-voice" }
+assistd-tools = { version = "0.1", path = "crates/assistd-tools" }
+assistd-wm    = { version = "0.1", path = "crates/assistd-wm" }
 
 # External crates
 serde = { version = "1", features = ["derive"] }
@@ -44,3 +46,10 @@ futures-util = "0.3"
 tracing-appender = "0.2"
 textwrap = "0.16"
 nvml-wrapper = "0.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = "line-tables-only"

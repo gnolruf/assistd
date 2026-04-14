@@ -3,10 +3,12 @@ use assistd_ipc::{Event, Request};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 const EVENT_CHANNEL_CAPACITY: usize = 32;
@@ -83,18 +85,21 @@ async fn accept_loop<F>(
 where
     F: Future<Output = ()>,
 {
+    let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
+    let mut connections: JoinSet<()> = JoinSet::new();
+
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             _ = &mut shutdown => {
                 info!("shutting down socket listener");
-                return Ok(());
+                break;
             }
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _addr)) => {
                         let conn_state = state.clone();
-                        tokio::spawn(async move {
+                        connections.spawn(async move {
                             if let Err(e) = handle_connection(stream, conn_state).await {
                                 error!("connection error: {e}");
                             }
@@ -105,8 +110,54 @@ where
                     }
                 }
             }
+            // Reap finished connections eagerly so the set doesn't grow
+            // unbounded. `join_next` yields `None` when the set is empty,
+            // which would busy-loop; gate on `len()` to avoid that.
+            Some(res) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(e) = res
+                    && e.is_panic()
+                {
+                    error!("connection task panicked: {e}");
+                }
+            }
         }
     }
+
+    // Stop accepting and drain in-flight handlers with bounded grace so
+    // streaming responses can emit their final `Done` event before the
+    // daemon exits.
+    drop(listener);
+
+    let in_flight = connections.len();
+    if in_flight == 0 {
+        return Ok(());
+    }
+    info!(
+        grace_secs = grace.as_secs(),
+        in_flight, "draining in-flight connections"
+    );
+
+    let drained = tokio::time::timeout(grace, async {
+        while let Some(res) = connections.join_next().await {
+            if let Err(e) = res
+                && e.is_panic()
+            {
+                error!("connection task panicked: {e}");
+            }
+        }
+    })
+    .await;
+
+    if drained.is_err() {
+        let remaining = connections.len();
+        warn!(
+            remaining,
+            "shutdown grace expired; aborting remaining connections"
+        );
+        connections.shutdown().await;
+    }
+
+    Ok(())
 }
 
 async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(), SocketError> {
@@ -135,17 +186,26 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
 
     let (tx, mut rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
     let dispatch_state = state.clone();
-    let dispatcher = tokio::spawn(async move { dispatch_state.dispatch(req, tx).await });
 
-    while let Some(event) = rx.recv().await {
-        write_event(&mut write_half, &event).await?;
-    }
+    // Dispatch and event-forwarding run concurrently on this task rather
+    // than on a spawned child. If the task is cancelled (e.g. the outer
+    // accept loop hits its shutdown grace and calls `JoinSet::shutdown`),
+    // both halves are torn down together — the dispatcher can't be
+    // orphaned.
+    let dispatch_fut = async move { dispatch_state.dispatch(req, tx).await };
+    let forward_fut = async {
+        while let Some(event) = rx.recv().await {
+            write_event(&mut write_half, &event).await?;
+        }
+        Ok::<(), SocketError>(())
+    };
 
-    match dispatcher.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => error!("dispatch error: {e:#}"),
-        Err(e) => error!("dispatch task panicked: {e}"),
+    let (dispatch_res, forward_res) = tokio::join!(dispatch_fut, forward_fut);
+
+    if let Err(e) = dispatch_res {
+        error!("dispatch error: {e:#}");
     }
+    forward_res?;
 
     write_half.shutdown().await?;
     Ok(())
@@ -346,5 +406,182 @@ mod tests {
 
         tx.send(()).unwrap();
         server.await.unwrap();
+    }
+
+    /// Backend that emits N deltas with a fixed pause between each, then
+    /// Done. Used to exercise graceful shutdown of in-flight streams.
+    struct SlowBackend {
+        deltas: usize,
+        pause: std::time::Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_llm::LlmBackend for SlowBackend {
+        async fn generate(
+            &self,
+            _prompt: String,
+            tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        ) -> anyhow::Result<()> {
+            for i in 0..self.deltas {
+                let _ = tx
+                    .send(assistd_llm::LlmEvent::Delta {
+                        text: format!("d{i}"),
+                    })
+                    .await;
+                tokio::time::sleep(self.pause).await;
+            }
+            let _ = tx.send(assistd_llm::LlmEvent::Done).await;
+            Ok(())
+        }
+    }
+
+    /// Backend that emits a single delta then blocks indefinitely on an
+    /// un-awoken channel. Used to exercise the shutdown grace timeout.
+    struct StuckBackend;
+
+    #[async_trait::async_trait]
+    impl assistd_llm::LlmBackend for StuckBackend {
+        async fn generate(
+            &self,
+            _prompt: String,
+            tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        ) -> anyhow::Result<()> {
+            let _ = tx
+                .send(assistd_llm::LlmEvent::Delta {
+                    text: "stuck".into(),
+                })
+                .await;
+            // Park forever; this future is cancelled when the parent
+            // task is aborted via JoinSet::shutdown.
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    }
+
+    fn state_with_backend_and_grace(
+        backend: Arc<dyn assistd_llm::LlmBackend>,
+        grace_secs: u64,
+    ) -> Arc<AppState> {
+        let mut config = Config::default();
+        config.daemon.shutdown_grace_secs = grace_secs;
+        Arc::new(AppState::new(
+            config,
+            backend,
+            PresenceManager::stub(PresenceState::Active),
+        ))
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_waits_for_in_flight_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistd.sock");
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_path = path.clone();
+        let state = state_with_backend_and_grace(
+            Arc::new(SlowBackend {
+                deltas: 3,
+                pause: std::time::Duration::from_millis(50),
+            }),
+            5,
+        );
+        let server = tokio::spawn(async move {
+            serve_at(&server_path, state, async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        });
+
+        wait_for_listener(&path).await;
+
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(br#"{"type":"query","id":"s1","text":"go"}"#)
+            .await
+            .unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.shutdown().await.unwrap();
+
+        let mut reader = BufReader::new(read);
+
+        // Wait for the first Delta, then trigger shutdown mid-stream.
+        let mut first = String::new();
+        let n = reader.read_line(&mut first).await.unwrap();
+        assert!(n > 0, "expected first Delta to arrive");
+        let ev: Event = serde_json::from_str(first.trim()).unwrap();
+        assert!(matches!(ev, Event::Delta { .. }));
+
+        tx.send(()).unwrap();
+
+        // All remaining Deltas and the terminal Done must still arrive
+        // before the stream closes, because grace (5s) comfortably
+        // exceeds the remaining ~100ms of backend work.
+        let mut seen_delta = 1;
+        let mut seen_done = false;
+        loop {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            let event: Event = serde_json::from_str(line.trim()).unwrap();
+            match event {
+                Event::Delta { .. } => seen_delta += 1,
+                Event::Done { .. } => {
+                    seen_done = true;
+                    break;
+                }
+                other => panic!("unexpected event during graceful shutdown: {other:?}"),
+            }
+        }
+        assert_eq!(seen_delta, 3, "expected all 3 deltas to arrive");
+        assert!(seen_done, "expected terminal Done before connection close");
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_aborts_after_grace_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistd.sock");
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_path = path.clone();
+        // Grace = 0 (no wait). Shutdown aborts the stuck connection
+        // immediately after the accept loop exits.
+        let state = state_with_backend_and_grace(Arc::new(StuckBackend), 0);
+        let server = tokio::spawn(async move {
+            serve_at(&server_path, state, async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        });
+
+        wait_for_listener(&path).await;
+
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(br#"{"type":"query","id":"s2","text":"hang"}"#)
+            .await
+            .unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.shutdown().await.unwrap();
+
+        let mut reader = BufReader::new(read);
+        let mut first = String::new();
+        let n = reader.read_line(&mut first).await.unwrap();
+        assert!(n > 0, "expected first Delta from StuckBackend");
+
+        tx.send(()).unwrap();
+
+        // Server task must exit promptly — the grace is 0, so the
+        // connection is aborted as soon as shutdown fires. Bound with
+        // a 2s timeout so a regression doesn't hang the test forever.
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("server did not exit within 2s of shutdown")
+            .unwrap();
     }
 }

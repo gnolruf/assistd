@@ -138,6 +138,15 @@ impl PresenceManager {
 
         // Forwarder: when daemon shutdown fires, flip whatever inner-shutdown
         // sender is currently active. Lives for the daemon's lifetime.
+        //
+        // The `JoinHandle` is intentionally discarded: the task is bounded
+        // by the daemon-shutdown watch channel. It exits via one of two
+        // paths — `wait_for` returns `Ok` once shutdown fires (the normal
+        // case), or `Err` if every `watch::Sender` clone for daemon
+        // shutdown is dropped (which implies the daemon is already tearing
+        // down). `PresenceManager` also holds `_daemon_shutdown:
+        // watch::Receiver` below to keep the subscription valid for the
+        // manager's lifetime.
         {
             let mut daemon_rx = daemon_shutdown.clone();
             let current = Arc::clone(&current_inner_shutdown);

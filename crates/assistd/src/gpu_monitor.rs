@@ -114,13 +114,23 @@ pub fn spawn_monitor(
         }
     };
 
-    let device_count = nvml.device_count().unwrap_or(0);
+    let device_count = match nvml.device_count() {
+        Ok(n) => n.to_string(),
+        Err(e) => {
+            warn!(
+                target: "assistd::gpu_monitor",
+                "nvml.device_count() failed: {e}. Monitor will still run, \
+                 but per-device enumeration may be unreliable."
+            );
+            "unknown".to_string()
+        }
+    };
     info!(
         target: "assistd::gpu_monitor",
         poll_secs = cfg.gpu_poll_secs,
         threshold_mb = cfg.gpu_vram_threshold_mb,
         auto_wake = cfg.gpu_auto_wake,
-        devices = device_count,
+        devices = %device_count,
         "GPU contention monitor enabled"
     );
 
