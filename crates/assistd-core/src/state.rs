@@ -178,3 +178,140 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+    use assistd_llm::{EchoBackend, FailedBackend};
+
+    fn test_state(backend: Arc<dyn LlmBackend>, initial_state: PresenceState) -> Arc<AppState> {
+        Arc::new(AppState::new(
+            Config::default(),
+            backend,
+            PresenceManager::stub(initial_state),
+        ))
+    }
+
+    async fn collect_events(mut rx: mpsc::Receiver<Event>) -> Vec<Event> {
+        let mut out = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_emits_delta_then_done() {
+        let state = test_state(Arc::new(EchoBackend), PresenceState::Active);
+        let (tx, rx) = mpsc::channel::<Event>(8);
+        let req = Request::Query {
+            id: "q1".into(),
+            text: "hello".into(),
+        };
+
+        state.dispatch(req, tx).await.unwrap();
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 2, "expected Delta+Done, got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::Delta { id, text } if id == "q1" && text == "hello"
+        ));
+        assert!(matches!(&events[1], Event::Done { id } if id == "q1"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_set_presence_emits_presence_and_done() {
+        // Active → Sleeping avoids hitting the stub's non-existent
+        // control-plane endpoint while still exercising the transition
+        // path end-to-end.
+        let state = test_state(Arc::new(EchoBackend), PresenceState::Active);
+        let (tx, rx) = mpsc::channel::<Event>(8);
+        let req = Request::SetPresence {
+            id: "p1".into(),
+            target: PresenceState::Sleeping,
+        };
+
+        state.clone().dispatch(req, tx).await.unwrap();
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 2, "expected Presence+Done, got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::Presence { id, state: PresenceState::Sleeping } if id == "p1"
+        ));
+        assert!(matches!(&events[1], Event::Done { id } if id == "p1"));
+        assert_eq!(state.presence.state(), PresenceState::Sleeping);
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_presence_reports_current_state_without_transition() {
+        let state = test_state(Arc::new(EchoBackend), PresenceState::Drowsy);
+        let (tx, rx) = mpsc::channel::<Event>(8);
+        let req = Request::GetPresence { id: "g1".into() };
+
+        state.clone().dispatch(req, tx).await.unwrap();
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 2, "expected Presence+Done, got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::Presence { id, state: PresenceState::Drowsy } if id == "g1"
+        ));
+        assert!(matches!(&events[1], Event::Done { id } if id == "g1"));
+        // State must be unchanged — GetPresence is a read-only snapshot.
+        assert_eq!(state.presence.state(), PresenceState::Drowsy);
+    }
+
+    #[tokio::test]
+    async fn dispatch_cycle_advances_to_next_state() {
+        // Drowsy → Sleeping: the Drowsy→Sleeping branch of `sleep()` is
+        // network-free when `llama` is None (as in the stub), so this
+        // exercises the full cycle path without a live server.
+        let state = test_state(Arc::new(EchoBackend), PresenceState::Drowsy);
+        let (tx, rx) = mpsc::channel::<Event>(8);
+        let req = Request::Cycle { id: "c1".into() };
+
+        state.clone().dispatch(req, tx).await.unwrap();
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 2, "expected Presence+Done, got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::Presence { id, state: PresenceState::Sleeping } if id == "c1"
+        ));
+        assert!(matches!(&events[1], Event::Done { id } if id == "c1"));
+        assert_eq!(state.presence.state(), PresenceState::Sleeping);
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_backend_error_emits_error_event() {
+        let backend = Arc::new(FailedBackend::new("backend broken".into()));
+        let state = test_state(backend, PresenceState::Active);
+        let (tx, rx) = mpsc::channel::<Event>(8);
+        let req = Request::Query {
+            id: "q-err".into(),
+            text: "boom".into(),
+        };
+
+        let err = state.dispatch(req, tx).await.unwrap_err();
+        assert!(err.to_string().contains("backend broken"));
+
+        let events = collect_events(rx).await;
+        let err_event = events
+            .iter()
+            .find(|e| matches!(e, Event::Error { .. }))
+            .expect("expected Error event in stream");
+        match err_event {
+            Event::Error { id, message } => {
+                assert_eq!(id, "q-err");
+                assert!(
+                    message.contains("backend broken"),
+                    "error message should propagate backend reason: {message}"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}

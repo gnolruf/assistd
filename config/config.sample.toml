@@ -110,3 +110,10 @@ port = 8384
 # compositor config instead, e.g. Sway:
 #   bindsym $mod+Escape exec assistd cycle
 hotkey = "Super+Escape"
+
+[daemon]
+# Seconds to wait for in-flight IPC connections (e.g. streaming LLM
+# responses) to finish before aborting them on daemon shutdown. 0 aborts
+# all in-flight work immediately; higher values let clients receive a
+# final Done event before the daemon exits.
+# shutdown_grace_secs = 5

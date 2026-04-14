@@ -44,6 +44,12 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features --locked
 
+      - name: cargo-deny (advisories, licenses, bans)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
       - name: Release build (default features)
         run: cargo build --release -p assistd-cli --locked
 

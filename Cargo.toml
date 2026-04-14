@@ -44,3 +44,10 @@ futures-util = "0.3"
 tracing-appender = "0.2"
 textwrap = "0.16"
 nvml-wrapper = "0.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = "line-tables-only"

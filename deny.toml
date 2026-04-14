@@ -1,0 +1,88 @@
+# cargo-deny configuration for assistd.
+#
+# Checks licenses, advisories, and dependency duplication. Run locally with
+#   cargo deny check
+# or see .github/workflows/ci.yml for the CI invocation.
+#
+# Documentation: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Only the host target matters for this daemon.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+]
+all-features = true
+
+# ---------------------------------------------------------------------------
+# Advisories — block known-vulnerable or yanked versions.
+# ---------------------------------------------------------------------------
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses — keep the dependency set Apache-2.0-compatible.
+# ---------------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+    "CC0-1.0",
+]
+
+# ---------------------------------------------------------------------------
+# Bans / multiple-version check.
+# ---------------------------------------------------------------------------
+#
+# We warn on duplicates rather than deny them: most are transitive via
+# mainstream crates (ratatui, nvml-wrapper, reqwest) that we don't control,
+# and an ecosystem-wide bump typically resolves them on its own. The
+# `skip` list below documents known, benign duplicates as of 2026-04 so
+# CI stays green without silently losing signal on *new* duplicates that
+# show up in future dependency updates.
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+skip = [
+    # Proc-macro helpers pulled in by different ecosystems (ratatui's
+    # `instability` vs. nvml-wrapper's `wrapcenum-derive`).
+    { name = "darling", version = "0.20" },
+    { name = "darling_core", version = "0.20" },
+    { name = "darling_macro", version = "0.20" },
+    # Transitive via crossterm (older) vs tempfile/x11rb (newer).
+    { name = "rustix", version = "0.38" },
+    { name = "linux-raw-sys", version = "0.4" },
+    # Transitive via ring/rustls (older) vs tempfile/uuid (newer).
+    { name = "getrandom", version = "0.2" },
+    # Transitive via ratatui (older) vs toml_edit/indexmap (newer).
+    { name = "hashbrown", version = "0.15" },
+    # Transitive via ratatui/unicode-truncate (older) vs newer consumers.
+    { name = "unicode-width", version = "0.1" },
+    # nvml-wrapper still pins thiserror 1; global-hotkey and
+    # tracing-appender pull thiserror 2.
+    { name = "thiserror", version = "1" },
+    { name = "thiserror-impl", version = "1" },
+]
+
+# ---------------------------------------------------------------------------
+# Sources — only crates.io is trusted.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
