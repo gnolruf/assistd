@@ -8,7 +8,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing::info;
 
-use crate::hotkey;
+use crate::{gpu_monitor, hotkey};
 
 #[derive(Args)]
 pub struct DaemonArgs {
@@ -27,6 +27,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
     hotkey::validate(&config.presence)?;
+    gpu_monitor::validate(&config.sleep)?;
 
     info!(
         "assistd v{} — local model agent OS assistant daemon",
@@ -79,6 +80,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let chat = LlamaChatClient::new(config.to_chat_spec())?;
     let hotkey_handle =
         hotkey::spawn_listener(&config.presence, presence.clone(), shutdown_tx.subscribe());
+    let gpu_monitor_handle =
+        gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
     let state = Arc::new(AppState::new(config, Arc::new(chat), presence.clone()));
 
     let mut socket_shutdown_rx = shutdown_tx.subscribe();
@@ -94,6 +97,9 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     }
 
     if let Some(h) = hotkey_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = gpu_monitor_handle {
         let _ = h.await;
     }
 

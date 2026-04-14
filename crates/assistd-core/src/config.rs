@@ -108,6 +108,32 @@ pub struct SleepConfig {
     pub idle_timeout_secs: u64,
     /// Whether to suspend the machine (true) or just deactivate (false).
     pub suspend: bool,
+
+    /// Enable the automatic GPU contention monitor. When true, a background
+    /// task polls NVML for other processes using VRAM and transitions the
+    /// daemon to Sleeping when a configurable threshold is exceeded.
+    #[serde(default = "default_gpu_monitor_enabled")]
+    pub gpu_monitor_enabled: bool,
+    /// NVML poll interval in seconds.
+    #[serde(default = "default_gpu_poll_secs")]
+    pub gpu_poll_secs: u64,
+    /// Per-process VRAM threshold in MiB. A non-assistd process holding at
+    /// least this much VRAM triggers a transition to Sleeping. 2048 = 2 GiB.
+    #[serde(default = "default_gpu_vram_threshold_mb")]
+    pub gpu_vram_threshold_mb: u64,
+    /// Automatically transition back to Active when the contending process
+    /// exits.
+    #[serde(default)]
+    pub gpu_auto_wake: bool,
+    /// Process basenames (matched against `/proc/<pid>/comm`, kernel-truncated
+    /// at 16 bytes) that never trigger contention sleep, even above the
+    /// threshold.
+    #[serde(default = "default_gpu_allowlist")]
+    pub gpu_allowlist: Vec<String>,
+    /// Process basenames that always trigger sleep when present, regardless
+    /// of their VRAM usage.
+    #[serde(default)]
+    pub gpu_denylist: Vec<String>,
 }
 
 /// Remote access API settings.
@@ -148,6 +174,31 @@ fn default_gpu_layers() -> u32 {
 
 fn default_ready_timeout_secs() -> u64 {
     300
+}
+
+fn default_gpu_monitor_enabled() -> bool {
+    true
+}
+
+fn default_gpu_poll_secs() -> u64 {
+    5
+}
+
+fn default_gpu_vram_threshold_mb() -> u64 {
+    2048
+}
+
+fn default_gpu_allowlist() -> Vec<String> {
+    vec![
+        "Xorg".into(),
+        "Xwayland".into(),
+        "gnome-shell".into(),
+        "kwin_x11".into(),
+        "kwin_wayland".into(),
+        "firefox".into(),
+        "chromium".into(),
+        "chrome".into(),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +243,12 @@ impl Default for Config {
             sleep: SleepConfig {
                 idle_timeout_secs: 300,
                 suspend: false,
+                gpu_monitor_enabled: default_gpu_monitor_enabled(),
+                gpu_poll_secs: default_gpu_poll_secs(),
+                gpu_vram_threshold_mb: default_gpu_vram_threshold_mb(),
+                gpu_auto_wake: false,
+                gpu_allowlist: default_gpu_allowlist(),
+                gpu_denylist: Vec::new(),
             },
             remote: RemoteConfig {
                 enabled: false,
@@ -339,6 +396,20 @@ impl Config {
 
         if self.sleep.idle_timeout_secs == 0 {
             errors.push("sleep.idle_timeout_secs must be greater than 0".into());
+        }
+
+        if self.sleep.gpu_monitor_enabled {
+            if self.sleep.gpu_poll_secs == 0 {
+                errors.push(
+                    "sleep.gpu_poll_secs must be greater than 0 when gpu_monitor_enabled".into(),
+                );
+            }
+            if self.sleep.gpu_vram_threshold_mb == 0 {
+                errors.push(
+                    "sleep.gpu_vram_threshold_mb must be greater than 0 when gpu_monitor_enabled"
+                        .into(),
+                );
+            }
         }
 
         if self.remote.enabled {
@@ -731,5 +802,87 @@ port = 8384
         config
             .validate()
             .expect("empty hotkey disables listener but is valid config");
+    }
+
+    #[test]
+    fn old_sleep_block_without_gpu_keys_applies_defaults() {
+        // An existing config.toml written before the GPU monitor feature
+        // landed must keep parsing and receive the new defaults.
+        let toml_str = r#"
+[model]
+name = "test/model-GGUF:Q4_K_M"
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+idle_timeout_secs = 300
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse without GPU keys");
+        assert!(cfg.sleep.gpu_monitor_enabled);
+        assert_eq!(cfg.sleep.gpu_poll_secs, 5);
+        assert_eq!(cfg.sleep.gpu_vram_threshold_mb, 2048);
+        assert!(!cfg.sleep.gpu_auto_wake);
+        assert!(cfg.sleep.gpu_allowlist.iter().any(|s| s == "Xorg"));
+        assert!(cfg.sleep.gpu_denylist.is_empty());
+        cfg.validate().expect("defaults validate");
+    }
+
+    #[test]
+    fn gpu_monitor_enabled_rejects_zero_poll_interval() {
+        let mut config = Config::default();
+        config.sleep.gpu_monitor_enabled = true;
+        config.sleep.gpu_poll_secs = 0;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("sleep.gpu_poll_secs")));
+    }
+
+    #[test]
+    fn gpu_monitor_enabled_rejects_zero_threshold() {
+        let mut config = Config::default();
+        config.sleep.gpu_monitor_enabled = true;
+        config.sleep.gpu_vram_threshold_mb = 0;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("sleep.gpu_vram_threshold_mb"))
+        );
+    }
+
+    #[test]
+    fn gpu_monitor_disabled_ignores_zero_threshold() {
+        let mut config = Config::default();
+        config.sleep.gpu_monitor_enabled = false;
+        config.sleep.gpu_poll_secs = 0;
+        config.sleep.gpu_vram_threshold_mb = 0;
+        config
+            .validate()
+            .expect("zero poll/threshold is allowed when monitor disabled");
     }
 }

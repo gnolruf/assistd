@@ -43,3 +43,4 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 futures-util = "0.3"
 tracing-appender = "0.2"
 textwrap = "0.16"
+nvml-wrapper = "0.12"
