@@ -4,6 +4,7 @@
 
 use std::time::Instant;
 
+use assistd_core::PresenceState;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -75,13 +76,28 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ),
     };
 
-    let mut left_parts: Vec<String> = vec![format!("model: {}", app.model_name), state];
-    if let Some(r) = rate {
-        left_parts.push(r);
+    // Reversed fg/bg for the whole bar (like before), applied per-span so we
+    // can drop the modifier for the presence dot — a REVERSED colored fg
+    // becomes a large colored background block, which reads as noise.
+    let reversed = Style::default().add_modifier(Modifier::REVERSED);
+    let mut left_spans: Vec<Span> = Vec::new();
+    left_spans.push(Span::styled(format!("model: {}", app.model_name), reversed));
+    if let Some((dot, label)) = presence_dot(app.presence_state) {
+        left_spans.push(Span::raw(" "));
+        left_spans.push(Span::styled(
+            "●",
+            Style::default().fg(dot).add_modifier(Modifier::BOLD),
+        ));
+        left_spans.push(Span::styled(format!(" {label}"), reversed));
     }
-    left_parts.push(format!("RAM: {ram}"));
-    left_parts.push(format!("VRAM: {vram}"));
-    let left = left_parts.join(" │ ");
+    left_spans.push(Span::styled(format!(" │ {state}"), reversed));
+    if let Some(r) = rate {
+        left_spans.push(Span::styled(format!(" │ {r}"), reversed));
+    }
+    left_spans.push(Span::styled(format!(" │ RAM: {ram}"), reversed));
+    left_spans.push(Span::styled(format!(" │ VRAM: {vram}"), reversed));
+
+    let left_len: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
 
     let right = if let Some(notice) = app.notice() {
         notice.to_string()
@@ -90,27 +106,37 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             "↑{} · PgDn to follow · Ctrl+C quit",
             app.output.scroll_offset()
         )
+    } else if app.presence_state.is_some() {
+        "Ctrl+C quit · F2 cycle presence · PgUp/Dn scroll".to_string()
     } else {
         "Ctrl+C quit · PgUp/Dn scroll · ↑/↓ history".to_string()
     };
 
     let width = area.width as usize;
-    let left_len = left.chars().count();
     let right_len = right.chars().count();
 
-    let line = if left_len + right_len < width {
+    let mut spans = left_spans;
+    if left_len + right_len < width {
         let gap = width - left_len - right_len;
-        Line::from(vec![
-            Span::raw(left),
-            Span::raw(" ".repeat(gap)),
-            Span::styled(right, Style::default().fg(Color::DarkGray)),
-        ])
-    } else {
-        Line::from(Span::raw(left))
-    };
+        spans.push(Span::styled(" ".repeat(gap), reversed));
+        spans.push(Span::styled(
+            right,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::REVERSED),
+        ));
+    }
 
-    let para = Paragraph::new(line).style(Style::default().add_modifier(Modifier::REVERSED));
+    let para = Paragraph::new(Line::from(spans));
     frame.render_widget(para, area);
+}
+
+fn presence_dot(s: Option<PresenceState>) -> Option<(Color, &'static str)> {
+    match s? {
+        PresenceState::Active => Some((Color::Green, "active")),
+        PresenceState::Drowsy => Some((Color::Yellow, "drowsy")),
+        PresenceState::Sleeping => Some((Color::Red, "sleeping")),
+    }
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {

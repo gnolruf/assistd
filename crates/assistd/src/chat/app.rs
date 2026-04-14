@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use assistd_core::{PresenceManager, PresenceState};
 use assistd_llm::{LlmBackend, LlmEvent};
 use crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
@@ -36,8 +37,10 @@ pub struct App {
     pub spinner: usize,
     pub notice: Option<(String, Instant)>,
     pub last_output_height: u16,
+    pub presence_state: Option<PresenceState>,
     client: Arc<dyn LlmBackend>,
     chat_tx: mpsc::Sender<ChatEvent>,
+    presence: Option<Arc<PresenceManager>>,
 }
 
 impl App {
@@ -45,7 +48,9 @@ impl App {
         client: Arc<dyn LlmBackend>,
         chat_tx: mpsc::Sender<ChatEvent>,
         model_name: String,
+        presence: Option<Arc<PresenceManager>>,
     ) -> Self {
+        let presence_state = presence.as_ref().map(|p| p.state());
         Self {
             output: OutputPane::new(),
             input: InputLine::new(),
@@ -57,8 +62,10 @@ impl App {
             spinner: 0,
             notice: None,
             last_output_height: 10,
+            presence_state,
             client,
             chat_tx,
+            presence,
         }
     }
 
@@ -88,6 +95,10 @@ impl App {
                 self.output.scroll_page_down(self.last_output_height);
                 return;
             }
+            KeyCode::F(2) => {
+                self.on_cycle_key();
+                return;
+            }
             _ => {}
         }
         match self.input.on_key(ev) {
@@ -103,6 +114,24 @@ impl App {
                 self.quitting = true;
             }
         }
+    }
+
+    pub fn on_presence(&mut self, s: PresenceState) {
+        self.presence_state = Some(s);
+    }
+
+    fn on_cycle_key(&mut self) {
+        let Some(p) = self.presence.clone() else {
+            self.set_notice("presence unavailable");
+            return;
+        };
+        let target = self.presence_state.unwrap_or_else(|| p.state()).next();
+        self.set_notice(&format!("cycling → {}", presence_label(target)));
+        tokio::spawn(async move {
+            if let Err(e) = p.cycle().await {
+                tracing::warn!("F2 cycle failed: {e:#}");
+            }
+        });
     }
 
     pub fn on_llm_event(&mut self, ev: ChatEvent) {
@@ -159,7 +188,21 @@ impl App {
     fn spawn_generation(&self, text: String) {
         let client = self.client.clone();
         let tx = self.chat_tx.clone();
+        let presence = self.presence.clone();
         tokio::spawn(async move {
+            // Auto-wake before generating so a user hitting Enter from
+            // Drowsy/Sleeping sees the response stream once the model is
+            // ready, instead of hitting a raw HTTP error on a dead server.
+            if let Some(p) = presence.as_ref() {
+                if p.state() != PresenceState::Active {
+                    if let Err(e) = p.ensure_active().await {
+                        let _ = tx
+                            .send(ChatEvent::LlmError(format!("wake failed: {e:#}")))
+                            .await;
+                        return;
+                    }
+                }
+            }
             let (llm_tx, mut llm_rx) = mpsc::channel::<LlmEvent>(64);
             let tx_fwd = tx.clone();
             let forwarder = tokio::spawn(async move {
@@ -178,6 +221,14 @@ impl App {
     }
 }
 
+fn presence_label(s: PresenceState) -> &'static str {
+    match s {
+        PresenceState::Active => "active",
+        PresenceState::Drowsy => "drowsy",
+        PresenceState::Sleeping => "sleeping",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,7 +238,7 @@ mod tests {
     fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
         let (tx, rx) = mpsc::channel::<ChatEvent>(16);
         let client: Arc<dyn LlmBackend> = Arc::new(EchoBackend);
-        let app = App::new(client, tx, "test-model".into());
+        let app = App::new(client, tx, "test-model".into(), None);
         (app, rx)
     }
 
@@ -262,6 +313,26 @@ mod tests {
         assert_ne!(c0, c1);
     }
 
+    #[test]
+    fn on_presence_updates_state() {
+        let (mut app, _rx) = test_app();
+        assert_eq!(app.presence_state, None);
+        app.on_presence(PresenceState::Drowsy);
+        assert_eq!(app.presence_state, Some(PresenceState::Drowsy));
+        app.on_presence(PresenceState::Active);
+        assert_eq!(app.presence_state, Some(PresenceState::Active));
+    }
+
+    #[test]
+    fn f2_without_presence_sets_notice_not_panic() {
+        let (mut app, _rx) = test_app();
+        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert_eq!(
+            app.notice().map(|s| s.to_string()),
+            Some("presence unavailable".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn echo_backend_spawn_yields_delta_then_done() {
         let (app, mut rx) = test_app();
@@ -279,7 +350,7 @@ mod tests {
     async fn failed_backend_spawn_yields_llm_error() {
         let (tx, mut rx) = mpsc::channel::<ChatEvent>(16);
         let client: Arc<dyn LlmBackend> = Arc::new(FailedBackend::new("server down".into()));
-        let app = App::new(client, tx, "test-model".into());
+        let app = App::new(client, tx, "test-model".into(), None);
         app.spawn_generation("hello".into());
         let ev = rx.recv().await.expect("error event");
         match ev {

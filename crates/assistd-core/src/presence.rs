@@ -55,6 +55,10 @@ pub struct PresenceManager {
     // Per-epoch watch that `sleep()` flips to tear down the current
     // supervisor without disturbing the daemon-wide shutdown watch.
     current_inner_shutdown: Arc<StdMutex<Option<watch::Sender<bool>>>>,
+    // Broadcast the current presence state to subscribers (TUI status bar,
+    // future clients). Updated after each successful transition, inside the
+    // transition lock so ordering is preserved.
+    state_tx: watch::Sender<PresenceState>,
     // Holds the daemon shutdown receiver alive so the forwarder task
     // keeps a valid subscription.
     _daemon_shutdown: watch::Receiver<bool>,
@@ -99,6 +103,7 @@ impl PresenceManager {
             });
         }
 
+        let (state_tx, _) = watch::channel(PresenceState::Sleeping);
         let manager = Arc::new(Self {
             state: StdMutex::new(PresenceState::Sleeping),
             transition: AsyncMutex::new(()),
@@ -107,6 +112,7 @@ impl PresenceManager {
             control,
             llama: AsyncMutex::new(None),
             current_inner_shutdown,
+            state_tx,
             _daemon_shutdown: daemon_shutdown,
         });
 
@@ -120,6 +126,12 @@ impl PresenceManager {
     /// Current presence state. Cheap, lock-protected snapshot.
     pub fn state(&self) -> PresenceState {
         *self.state.lock().expect("presence state mutex poisoned")
+    }
+
+    /// Subscribe to presence-state changes. The returned receiver starts at
+    /// the current state; each successful transition sends the new value.
+    pub fn subscribe(&self) -> watch::Receiver<PresenceState> {
+        self.state_tx.subscribe()
     }
 
     /// PID of the currently-managed llama-server child, or `None` if the
@@ -147,6 +159,20 @@ impl PresenceManager {
             PresenceState::Drowsy => self.drowse().await,
             PresenceState::Sleeping => self.sleep().await,
         }
+    }
+
+    /// Advance one step along `Active → Drowsy → Sleeping → Active`. Used by
+    /// the global hotkey listener and the `assistd cycle` CLI command.
+    ///
+    /// Not strictly atomic against concurrent callers: two racing `cycle`s
+    /// could both observe the same `current` and both attempt the same
+    /// target, in which case the loser is a no-op. That's acceptable — the
+    /// transition mutex still serialises the actual state change, so we
+    /// never skip or split a step.
+    pub async fn cycle(&self) -> Result<PresenceState> {
+        let target = self.state().next();
+        self.set_presence(target).await?;
+        Ok(target)
     }
 
     /// `Active|Drowsy → Sleeping`. Idempotent from `Sleeping`.
@@ -179,6 +205,7 @@ impl PresenceManager {
         }
 
         *self.state.lock().expect("presence state mutex poisoned") = PresenceState::Sleeping;
+        let _ = self.state_tx.send(PresenceState::Sleeping);
         info!(
             target: "assistd::presence",
             prior = ?prior,
@@ -213,6 +240,7 @@ impl PresenceManager {
             })?;
 
         *self.state.lock().expect("presence state mutex poisoned") = PresenceState::Drowsy;
+        let _ = self.state_tx.send(PresenceState::Drowsy);
         info!(
             target: "assistd::presence",
             prior = ?prior,
@@ -282,6 +310,7 @@ impl PresenceManager {
         }
 
         *self.state.lock().expect("presence state mutex poisoned") = PresenceState::Active;
+        let _ = self.state_tx.send(PresenceState::Active);
         info!(
             target: "assistd::presence",
             prior = ?prior,
@@ -302,6 +331,7 @@ impl PresenceManager {
     #[cfg(test)]
     pub(crate) fn stub(state: PresenceState) -> Arc<Self> {
         let (_tx, rx) = watch::channel(false);
+        let (state_tx, _) = watch::channel(state);
         let server_spec = ServerSpec {
             binary_path: "/does/not/exist".into(),
             host: "127.0.0.1".into(),
@@ -322,8 +352,18 @@ impl PresenceManager {
             control,
             llama: AsyncMutex::new(None),
             current_inner_shutdown: Arc::new(StdMutex::new(None)),
+            state_tx,
             _daemon_shutdown: rx,
         })
+    }
+
+    /// Test-only helper: force the observable state without running a
+    /// transition. Also broadcasts on `state_tx` so subscribers see the change.
+    /// Does not touch the transition mutex or the llama handle.
+    #[cfg(test)]
+    pub(crate) fn set_state_for_test(&self, s: PresenceState) {
+        *self.state.lock().expect("presence state mutex poisoned") = s;
+        let _ = self.state_tx.send(s);
     }
 }
 
@@ -369,5 +409,35 @@ mod tests {
         let m = PresenceManager::stub(PresenceState::Drowsy);
         assert!(m.drowse().await.is_ok());
         assert_eq!(m.state(), PresenceState::Drowsy);
+    }
+
+    #[tokio::test]
+    async fn sleep_from_active_broadcasts_sleeping() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        let mut rx = m.subscribe();
+        m.sleep().await.unwrap();
+        // `borrow()` returns the latest value even if the initial one was
+        // missed; the broadcast inside `sleep` must have overwritten it.
+        assert_eq!(*rx.borrow_and_update(), PresenceState::Sleeping);
+    }
+
+    #[tokio::test]
+    async fn subscribe_sees_test_set_state() {
+        let m = PresenceManager::stub(PresenceState::Sleeping);
+        let mut rx = m.subscribe();
+        m.set_state_for_test(PresenceState::Drowsy);
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow_and_update(), PresenceState::Drowsy);
+    }
+
+    #[tokio::test]
+    async fn cycle_from_sleeping_goes_to_active_logically() {
+        // `cycle` from Sleeping computes target=Active, then set_presence(Active)
+        // drives `wake`. With the stub, wake from Sleeping attempts a real
+        // cold-start and fails — we just assert the target selection by
+        // reading the next() helper directly here; full cycle paths are
+        // exercised by integration with a live daemon.
+        let start = PresenceState::Sleeping;
+        assert_eq!(start.next(), PresenceState::Active);
     }
 }

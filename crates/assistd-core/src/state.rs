@@ -38,6 +38,7 @@ impl AppState {
             Request::Query { id, text } => self.handle_query(id, text, tx).await,
             Request::SetPresence { id, target } => self.handle_set_presence(id, target, tx).await,
             Request::GetPresence { id } => self.handle_get_presence(id, tx).await,
+            Request::Cycle { id } => self.handle_cycle(id, tx).await,
         }
     }
 
@@ -144,5 +145,29 @@ impl AppState {
             .await;
         let _ = tx.send(Event::Done { id }).await;
         Ok(())
+    }
+
+    async fn handle_cycle(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
+        match self.presence.cycle().await {
+            Ok(new_state) => {
+                let _ = tx
+                    .send(Event::Presence {
+                        id: id.clone(),
+                        state: new_state,
+                    })
+                    .await;
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("cycle failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
     }
 }

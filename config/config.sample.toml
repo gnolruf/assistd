@@ -70,3 +70,13 @@ enabled = false
 bind_address = "127.0.0.1"
 # TCP port to listen on. Must not be 0 when remote is enabled.
 port = 8384
+
+[presence]
+# Global hotkey that cycles Active → Drowsy → Sleeping → Active.
+# Empty string disables the in-daemon global hotkey listener.
+#
+# The in-daemon listener only works on X11. On Wayland compositors
+# (Sway, Hyprland), leave this empty and bind `assistd cycle` in your
+# compositor config instead, e.g. Sway:
+#   bindsym $mod+Escape exec assistd cycle
+hotkey = "Super+Escape"

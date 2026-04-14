@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use assistd_core::Config;
-use assistd_llm::{FailedBackend, LlamaChatClient, LlamaService, LlmBackend};
+use assistd_core::{Config, PresenceManager};
+use assistd_llm::{FailedBackend, LlamaChatClient, LlmBackend};
 use clap::Args;
 use crossterm::event::{self, Event, EventStream};
 use crossterm::{cursor, execute, terminal};
@@ -58,20 +58,20 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     let chat_spec = config.to_chat_spec();
 
-    let (llama, client, startup_error) = match LlamaService::start(
+    let (presence, client, startup_error) = match PresenceManager::new_active(
         config.to_server_spec(),
         config.to_model_spec(),
         shutdown_tx.subscribe(),
     )
     .await
     {
-        Ok(llama) => {
+        Ok(presence) => {
             info!(
                 "llama-server ready on {}:{}",
                 config.llama_server.host, config.llama_server.port
             );
             let client: Arc<dyn LlmBackend> = Arc::new(LlamaChatClient::new(chat_spec)?);
-            (Some(llama), client, None)
+            (Some(presence), client, None)
         }
         Err(e) => {
             let msg = e.to_string();
@@ -93,6 +93,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let run_result = run_tui(
         client,
         model_name,
+        presence.clone(),
         &mut resource_rx,
         shutdown_tx.clone(),
         startup_error,
@@ -100,9 +101,9 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     .await;
 
     let _ = shutdown_tx.send(true);
-    if let Some(llama) = llama {
-        if let Err(e) = llama.shutdown().await {
-            tracing::error!("llama-server shutdown error: {e}");
+    if let Some(p) = presence {
+        if let Err(e) = p.sleep().await {
+            tracing::error!("presence shutdown error: {e:#}");
         }
     }
     info!("assistd chat stopped");
@@ -112,6 +113,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 async fn run_tui(
     client: Arc<dyn LlmBackend>,
     model_name: String,
+    presence: Option<Arc<PresenceManager>>,
     resource_rx: &mut watch::Receiver<vram::ResourceState>,
     shutdown_tx: watch::Sender<bool>,
     startup_error: Option<String>,
@@ -137,7 +139,7 @@ async fn run_tui(
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
     let (chat_tx, mut chat_rx) = mpsc::channel::<ChatEvent>(64);
-    let mut app = App::new(client, chat_tx, model_name);
+    let mut app = App::new(client, chat_tx, model_name, presence.clone());
 
     if let Some(err) = startup_error {
         app.output
@@ -149,6 +151,7 @@ async fn run_tui(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut shutdown_rx = shutdown_tx.subscribe();
+    let mut presence_rx = presence.as_ref().map(|p| p.subscribe());
 
     terminal.draw(|f| ui::render(f, &mut app))?;
 
@@ -178,6 +181,19 @@ async fn run_tui(
             Ok(_) = resource_rx.changed() => {
                 let v = resource_rx.borrow_and_update().clone();
                 app.on_resources(v);
+            }
+            presence_changed = async {
+                match presence_rx.as_mut() {
+                    Some(rx) => rx.changed().await.map(|_| true),
+                    None => std::future::pending().await,
+                }
+            } => {
+                if presence_changed.is_ok() {
+                    if let Some(rx) = presence_rx.as_mut() {
+                        let s = *rx.borrow_and_update();
+                        app.on_presence(s);
+                    }
+                }
             }
             _ = shutdown_rx.changed() => {
                 break;

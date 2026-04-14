@@ -29,6 +29,17 @@ pub enum PresenceState {
     Sleeping,
 }
 
+impl PresenceState {
+    /// Next state in the manual-cycle order: Active → Drowsy → Sleeping → Active.
+    pub fn next(self) -> Self {
+        match self {
+            PresenceState::Active => PresenceState::Drowsy,
+            PresenceState::Drowsy => PresenceState::Sleeping,
+            PresenceState::Sleeping => PresenceState::Active,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -43,6 +54,11 @@ pub enum Request {
     },
     /// Report the daemon's current presence state.
     GetPresence {
+        id: String,
+    },
+    /// Atomically advance the daemon one step along
+    /// `Active → Drowsy → Sleeping → Active`.
+    Cycle {
         id: String,
     },
 }
@@ -225,6 +241,22 @@ mod tests {
         };
         assert!(!evt.is_terminal());
         assert_eq!(evt.id(), "p-1");
+    }
+
+    #[test]
+    fn cycle_request_roundtrip() {
+        let req = Request::Cycle { id: "c-1".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"cycle","id":"c-1"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn presence_state_next_cycles() {
+        assert_eq!(PresenceState::Active.next(), PresenceState::Drowsy);
+        assert_eq!(PresenceState::Drowsy.next(), PresenceState::Sleeping);
+        assert_eq!(PresenceState::Sleeping.next(), PresenceState::Active);
     }
 
     #[test]

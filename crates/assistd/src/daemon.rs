@@ -8,6 +8,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing::info;
 
+use crate::hotkey;
+
 #[derive(Args)]
 pub struct DaemonArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
@@ -24,6 +26,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     };
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
+    hotkey::validate(&config.presence)?;
 
     info!(
         "assistd v{} — local model agent OS assistant daemon",
@@ -74,6 +77,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     );
 
     let chat = LlamaChatClient::new(config.to_chat_spec())?;
+    let hotkey_handle =
+        hotkey::spawn_listener(&config.presence, presence.clone(), shutdown_tx.subscribe());
     let state = Arc::new(AppState::new(config, Arc::new(chat), presence.clone()));
 
     let mut socket_shutdown_rx = shutdown_tx.subscribe();
@@ -86,6 +91,10 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     // Drop to Sleeping on shutdown: tears down the supervisor and the child.
     if let Err(e) = presence.sleep().await {
         tracing::error!("presence shutdown error: {e:#}");
+    }
+
+    if let Some(h) = hotkey_handle {
+        let _ = h.await;
     }
 
     serve_result?;

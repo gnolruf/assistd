@@ -5,7 +5,7 @@ pub mod state;
 
 pub use assistd_ipc as ipc;
 pub use assistd_ipc::PresenceState;
-pub use config::Config;
+pub use config::{Config, PresenceConfig};
 pub use presence::PresenceManager;
 pub use state::AppState;
 

@@ -13,6 +13,8 @@ pub struct Config {
     pub compositor: CompositorConfig,
     pub sleep: SleepConfig,
     pub remote: RemoteConfig,
+    #[serde(default)]
+    pub presence: PresenceConfig,
 }
 
 /// Local model settings.
@@ -119,6 +121,27 @@ pub struct RemoteConfig {
     pub port: u16,
 }
 
+/// Manual presence-control settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PresenceConfig {
+    /// Global hotkey that cycles `Active → Drowsy → Sleeping → Active`.
+    /// Empty string disables the in-daemon global hotkey listener.
+    #[serde(default = "default_presence_hotkey")]
+    pub hotkey: String,
+}
+
+impl Default for PresenceConfig {
+    fn default() -> Self {
+        Self {
+            hotkey: default_presence_hotkey(),
+        }
+    }
+}
+
+fn default_presence_hotkey() -> String {
+    "Super+Escape".to_string()
+}
+
 fn default_gpu_layers() -> u32 {
     9999
 }
@@ -175,6 +198,7 @@ impl Default for Config {
                 bind_address: "127.0.0.1".to_string(),
                 port: 8384,
             },
+            presence: PresenceConfig::default(),
         }
     }
 }
@@ -648,5 +672,64 @@ port = 8384
         let mut config = Config::default();
         config.chat.system_prompt = String::new();
         config.validate().expect("empty system prompt allowed");
+    }
+
+    #[test]
+    fn missing_presence_section_uses_defaults() {
+        // Existing config.toml files won't have a [presence] section — they
+        // must still parse and default to Super+Escape.
+        let toml_str = r#"
+[model]
+name = "test/model-GGUF:Q4_K_M"
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+idle_timeout_secs = 300
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse without [presence]");
+        assert_eq!(cfg.presence.hotkey, "Super+Escape");
+    }
+
+    #[test]
+    fn presence_config_defaults_hotkey() {
+        let cfg = PresenceConfig::default();
+        assert_eq!(cfg.hotkey, "Super+Escape");
+    }
+
+    #[test]
+    fn empty_presence_hotkey_is_valid() {
+        let mut config = Config::default();
+        config.presence.hotkey = String::new();
+        config
+            .validate()
+            .expect("empty hotkey disables listener but is valid config");
     }
 }
