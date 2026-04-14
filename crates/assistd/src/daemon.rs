@@ -8,7 +8,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing::info;
 
-use crate::{gpu_monitor, hotkey};
+use crate::{gpu_monitor, hotkey, idle_monitor};
 
 #[derive(Args)]
 pub struct DaemonArgs {
@@ -28,6 +28,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     config.validate()?;
     hotkey::validate(&config.presence)?;
     gpu_monitor::validate(&config.sleep)?;
+    idle_monitor::validate(&config.sleep)?;
 
     info!(
         "assistd v{} — local model agent OS assistant daemon",
@@ -82,6 +83,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         hotkey::spawn_listener(&config.presence, presence.clone(), shutdown_tx.subscribe());
     let gpu_monitor_handle =
         gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
+    let idle_monitor_handle =
+        idle_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
     let state = Arc::new(AppState::new(config, Arc::new(chat), presence.clone()));
 
     let mut socket_shutdown_rx = shutdown_tx.subscribe();
@@ -100,6 +103,9 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         let _ = h.await;
     }
     if let Some(h) = gpu_monitor_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = idle_monitor_handle {
         let _ = h.await;
     }
 

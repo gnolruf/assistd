@@ -17,8 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use assistd_core::{Config, PresenceManager};
+use assistd_core::{Config, PresenceManager, SleepConfig};
 use assistd_llm::{FailedBackend, LlamaChatClient, LlmBackend};
+
+use crate::idle_monitor;
 use clap::Args;
 use crossterm::event::{self, Event, EventStream};
 use crossterm::{cursor, execute, terminal};
@@ -45,6 +47,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     };
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
+    idle_monitor::validate(&config.sleep)?;
 
     let _log_guard = init_file_tracing()?;
 
@@ -83,6 +86,10 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     let mut resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
+    let idle_monitor_handle = presence.as_ref().and_then(|p| {
+        idle_monitor::spawn_monitor(&config.sleep, p.clone(), shutdown_tx.subscribe())
+    });
+
     let model_name = config
         .model
         .name
@@ -93,6 +100,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let run_result = run_tui(
         client,
         model_name,
+        config.sleep.clone(),
         presence.clone(),
         &mut resource_rx,
         shutdown_tx.clone(),
@@ -101,6 +109,9 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     .await;
 
     let _ = shutdown_tx.send(true);
+    if let Some(h) = idle_monitor_handle {
+        let _ = h.await;
+    }
     if let Some(p) = presence {
         if let Err(e) = p.sleep().await {
             tracing::error!("presence shutdown error: {e:#}");
@@ -113,6 +124,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 async fn run_tui(
     client: Arc<dyn LlmBackend>,
     model_name: String,
+    sleep_cfg: SleepConfig,
     presence: Option<Arc<PresenceManager>>,
     resource_rx: &mut watch::Receiver<vram::ResourceState>,
     shutdown_tx: watch::Sender<bool>,
@@ -139,7 +151,7 @@ async fn run_tui(
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
     let (chat_tx, mut chat_rx) = mpsc::channel::<ChatEvent>(64);
-    let mut app = App::new(client, chat_tx, model_name, presence.clone());
+    let mut app = App::new(client, chat_tx, model_name, sleep_cfg, presence.clone());
 
     if let Some(err) = startup_error {
         app.output

@@ -58,10 +58,17 @@ hotkey = "Super+V"
 type = "sway"
 
 [sleep]
-# Idle timeout in seconds before the sleep action fires. Must be > 0.
-idle_timeout_secs = 300
 # Whether to suspend the machine (true) or just deactivate (false).
 suspend = false
+
+# ---- Idle-based auto-sleep ----
+# Minutes of no user interaction after which the daemon drops Active → Drowsy
+# (model weights unloaded, server stays alive). 0 disables this transition.
+# idle_to_drowsy_mins = 30
+# Minutes of no user interaction after which the daemon drops to Sleeping
+# (llama-server stopped, all VRAM freed). Must be greater than
+# idle_to_drowsy_mins when both are non-zero. 0 disables this transition.
+# idle_to_sleep_mins = 120
 
 # ---- GPU contention monitor ----
 # Background NVML poller that transitions the daemon to Sleeping when another

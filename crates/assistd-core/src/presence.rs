@@ -28,7 +28,7 @@
 //! before dispatching work to the LLM backend.
 
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use assistd_ipc::PresenceState;
@@ -62,6 +62,12 @@ pub struct PresenceManager {
     // Holds the daemon shutdown receiver alive so the forwarder task
     // keeps a valid subscription.
     _daemon_shutdown: watch::Receiver<bool>,
+    // Monotonic timestamp of the last user-initiated interaction
+    // (query, manual presence command, hotkey, cycle). The idle monitor
+    // reads this to decide when to drowse or sleep; automatic monitors
+    // (GPU, idle) deliberately do not update it so their own
+    // transitions don't defer further idle progress.
+    last_activity: StdMutex<Instant>,
 }
 
 impl PresenceManager {
@@ -114,6 +120,7 @@ impl PresenceManager {
             current_inner_shutdown,
             state_tx,
             _daemon_shutdown: daemon_shutdown,
+            last_activity: StdMutex::new(Instant::now()),
         });
 
         manager
@@ -126,6 +133,55 @@ impl PresenceManager {
     /// Current presence state. Cheap, lock-protected snapshot.
     pub fn state(&self) -> PresenceState {
         *self.state.lock().expect("presence state mutex poisoned")
+    }
+
+    /// Record that the user just interacted with the daemon. Called at
+    /// the top of every user-facing wrapper (`ensure_active`,
+    /// `set_presence`, `cycle`). Deliberately NOT called by the
+    /// low-level transition methods (`wake`/`drowse`/`sleep`) so that
+    /// automatic monitors (GPU, idle) don't defer their own progress.
+    fn mark_activity(&self) {
+        *self
+            .last_activity
+            .lock()
+            .expect("last_activity mutex poisoned") = Instant::now();
+    }
+
+    /// Time since the last recorded user interaction. Read by the idle
+    /// monitor to decide when to drowse/sleep, and by the TUI status
+    /// bar for its countdown display.
+    pub fn idle_duration(&self) -> Duration {
+        self.last_activity
+            .lock()
+            .expect("last_activity mutex poisoned")
+            .elapsed()
+    }
+
+    /// Time until the next idle-based transition given the current
+    /// state and config. Returns `None` when idle monitoring is
+    /// disabled for the relevant transition or when the daemon is
+    /// already `Sleeping`.
+    pub fn time_until_next_transition(&self, cfg: &crate::SleepConfig) -> Option<Duration> {
+        let idle = self.idle_duration();
+        let threshold_mins = match self.state() {
+            PresenceState::Active => {
+                if cfg.idle_to_drowsy_mins > 0 {
+                    cfg.idle_to_drowsy_mins
+                } else if cfg.idle_to_sleep_mins > 0 {
+                    cfg.idle_to_sleep_mins
+                } else {
+                    return None;
+                }
+            }
+            PresenceState::Drowsy => {
+                if cfg.idle_to_sleep_mins == 0 {
+                    return None;
+                }
+                cfg.idle_to_sleep_mins
+            }
+            PresenceState::Sleeping => return None,
+        };
+        Some(Duration::from_secs(threshold_mins * 60).saturating_sub(idle))
     }
 
     /// Subscribe to presence-state changes. The returned receiver starts at
@@ -145,6 +201,7 @@ impl PresenceManager {
     /// concurrent queries — racing callers serialise on the transition
     /// lock and only one wake actually runs.
     pub async fn ensure_active(&self) -> Result<()> {
+        self.mark_activity();
         if self.state() == PresenceState::Active {
             return Ok(());
         }
@@ -154,6 +211,7 @@ impl PresenceManager {
     /// Drive the manager to `target`. Convenience wrapper used by the IPC
     /// `SetPresence` handler.
     pub async fn set_presence(&self, target: PresenceState) -> Result<()> {
+        self.mark_activity();
         match target {
             PresenceState::Active => self.wake().await,
             PresenceState::Drowsy => self.drowse().await,
@@ -170,6 +228,7 @@ impl PresenceManager {
     /// transition mutex still serialises the actual state change, so we
     /// never skip or split a step.
     pub async fn cycle(&self) -> Result<PresenceState> {
+        self.mark_activity();
         let target = self.state().next();
         self.set_presence(target).await?;
         Ok(target)
@@ -354,6 +413,7 @@ impl PresenceManager {
             current_inner_shutdown: Arc::new(StdMutex::new(None)),
             state_tx,
             _daemon_shutdown: rx,
+            last_activity: StdMutex::new(Instant::now()),
         })
     }
 
@@ -439,5 +499,102 @@ mod tests {
         // exercised by integration with a live daemon.
         let start = PresenceState::Sleeping;
         assert_eq!(start.next(), PresenceState::Active);
+    }
+
+    fn sleep_cfg(drowsy: u64, sleep: u64) -> crate::SleepConfig {
+        let mut cfg = crate::Config::default().sleep;
+        cfg.idle_to_drowsy_mins = drowsy;
+        cfg.idle_to_sleep_mins = sleep;
+        cfg
+    }
+
+    #[tokio::test]
+    async fn ensure_active_resets_activity_timer() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let before = m.idle_duration();
+        assert!(before >= Duration::from_millis(40));
+        m.ensure_active().await.unwrap();
+        let after = m.idle_duration();
+        assert!(after < before);
+        assert!(after < Duration::from_millis(20));
+    }
+
+    #[tokio::test]
+    async fn set_presence_resets_activity_timer() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(m.idle_duration() >= Duration::from_millis(40));
+        // set_presence(Active) from Active short-circuits in wake() but
+        // mark_activity still runs as the first line of set_presence.
+        m.set_presence(PresenceState::Active).await.unwrap();
+        assert!(m.idle_duration() < Duration::from_millis(20));
+    }
+
+    #[tokio::test]
+    async fn cycle_resets_activity_timer() {
+        // Stub starts in Drowsy; cycle() computes target=Sleeping and
+        // calls set_presence(Sleeping) → sleep(), which is a pure
+        // local-state transition with no network I/O in the stub.
+        let m = PresenceManager::stub(PresenceState::Drowsy);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(m.idle_duration() >= Duration::from_millis(40));
+        m.cycle().await.unwrap();
+        assert!(m.idle_duration() < Duration::from_millis(20));
+    }
+
+    #[tokio::test]
+    async fn wake_from_active_does_not_reset_activity_timer() {
+        // Low-level transition methods are called directly by automatic
+        // monitors (GPU, idle). They must NOT reset last_activity, or
+        // those automatic transitions would indefinitely defer their
+        // own forward progress.
+        let m = PresenceManager::stub(PresenceState::Active);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let before = m.idle_duration();
+        m.wake().await.unwrap();
+        let after = m.idle_duration();
+        assert!(after >= before);
+    }
+
+    #[test]
+    fn time_until_next_transition_active_counts_down_to_drowsy() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        let cfg = sleep_cfg(30, 120);
+        let d = m.time_until_next_transition(&cfg).unwrap();
+        assert!(d <= Duration::from_secs(30 * 60));
+        assert!(d >= Duration::from_secs(30 * 60).saturating_sub(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn time_until_next_transition_sleeping_returns_none() {
+        let m = PresenceManager::stub(PresenceState::Sleeping);
+        assert!(m.time_until_next_transition(&sleep_cfg(30, 120)).is_none());
+    }
+
+    #[test]
+    fn time_until_next_transition_active_with_drowsy_disabled_uses_sleep() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        let d = m.time_until_next_transition(&sleep_cfg(0, 120)).unwrap();
+        assert!(d <= Duration::from_secs(120 * 60));
+    }
+
+    #[test]
+    fn time_until_next_transition_active_with_both_disabled_returns_none() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        assert!(m.time_until_next_transition(&sleep_cfg(0, 0)).is_none());
+    }
+
+    #[test]
+    fn time_until_next_transition_drowsy_with_sleep_disabled_returns_none() {
+        let m = PresenceManager::stub(PresenceState::Drowsy);
+        assert!(m.time_until_next_transition(&sleep_cfg(30, 0)).is_none());
+    }
+
+    #[test]
+    fn time_until_next_transition_drowsy_counts_down_to_sleep() {
+        let m = PresenceManager::stub(PresenceState::Drowsy);
+        let d = m.time_until_next_transition(&sleep_cfg(30, 120)).unwrap();
+        assert!(d <= Duration::from_secs(120 * 60));
     }
 }
