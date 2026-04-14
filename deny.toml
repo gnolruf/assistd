@@ -20,7 +20,12 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste 1.0.15 is archived/unmaintained but has no safe upgrade path;
+    # it is pulled in transitively by ratatui 0.29. Revisit when ratatui
+    # switches to `pastey` or a similar replacement.
+    "RUSTSEC-2024-0436",
+]
 
 # ---------------------------------------------------------------------------
 # Licenses — keep the dependency set Apache-2.0-compatible.
@@ -31,16 +36,14 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "MIT",
-    "MIT-0",
-    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "0BSD",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
-    "MPL-2.0",
     "Zlib",
-    "CC0-1.0",
+    # webpki-roots 1.x ships Mozilla's root CA list under the Community
+    # Data License Agreement. It's a permissive data license and is fine
+    # for an Apache-2.0 downstream.
+    "CDLA-Permissive-2.0",
 ]
 
 # ---------------------------------------------------------------------------
@@ -56,6 +59,10 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace-internal crates use `path = ...` which cargo-deny would
+# otherwise flag as a wildcard. These are not published; they travel as
+# a unit with the workspace.
+allow-wildcard-paths = true
 highlight = "all"
 
 skip = [
