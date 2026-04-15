@@ -1,16 +1,19 @@
 //! The single LLM-facing tool: `run`. Parses a command-line string,
 //! routes each stage through a [`CommandRegistry`], and returns a
-//! structured JSON result with stdout (capped), stderr, and exit code.
+//! structured JSON result with stdout (capped), stderr, exit code, and
+//! any attachments (e.g. images produced by `see`) base64-encoded.
 
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
 use crate::Tool;
 use crate::chain::{execute, parse_chain};
-use crate::command::CommandRegistry;
+use crate::command::{Attachment, CommandRegistry};
 
 /// Cap on the stdout we surface to the LLM. A runaway command (e.g. a
 /// `bash "cat /dev/urandom"`) would otherwise bury the model's context
@@ -37,7 +40,7 @@ impl Tool for RunTool {
     fn description(&self) -> &str {
         "Execute a shell-style command in the daemon's working directory. \
          Supports pipelines (|), and/or (&&, ||), and sequencing (;). \
-         Built-in commands: cat, ls, grep, wc, echo, write, bash. \
+         Built-in commands: cat, ls, grep, wc, echo, write, see, web, bash. \
          Redirections (>, <), env expansion ($VAR), and backgrounding (&) \
          are NOT supported — use `bash \"…\"` for a real shell when needed."
     }
@@ -67,12 +70,27 @@ impl Tool for RunTool {
         let out = execute(&chain, &self.registry, Vec::new()).await?;
 
         let (stdout, truncated) = cap_utf8(&out.stdout, STDOUT_MAX);
-        Ok(json!({
+        let mut result = json!({
             "stdout": stdout,
             "stderr": String::from_utf8_lossy(&out.stderr),
             "exit_code": out.exit_code,
             "truncated": truncated,
-        }))
+        });
+        if !out.attachments.is_empty() {
+            let rendered: Vec<Value> = out.attachments.iter().map(render_attachment).collect();
+            result["attachments"] = Value::Array(rendered);
+        }
+        Ok(result)
+    }
+}
+
+fn render_attachment(a: &Attachment) -> Value {
+    match a {
+        Attachment::Image { mime, bytes } => json!({
+            "type": "image",
+            "mime": mime,
+            "data": B64.encode(bytes),
+        }),
     }
 }
 
@@ -97,7 +115,7 @@ fn cap_utf8(raw: &[u8], max: usize) -> (String, bool) {
 mod tests {
     use super::*;
     use crate::command::{Command, CommandInput, CommandOutput};
-    use crate::commands::{CatCommand, EchoCommand, GrepCommand, LsCommand, WcCommand};
+    use crate::commands::{CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand};
     use tempfile::tempdir;
 
     fn registry() -> Arc<CommandRegistry> {
@@ -107,6 +125,7 @@ mod tests {
         r.register(GrepCommand);
         r.register(LsCommand);
         r.register(WcCommand);
+        r.register(SeeCommand);
         Arc::new(r)
     }
 
@@ -114,6 +133,14 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(tool.invoke(json!({ "command": cmd }))).unwrap()
     }
+
+    const PNG_BYTES: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
 
     // --- acceptance criteria ----------------------------------------------
 
@@ -127,6 +154,66 @@ mod tests {
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 0);
         assert_eq!(result["stdout"], "hello notes\n");
+    }
+
+    #[test]
+    fn run_cat_rejects_binary_image() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("photo.png");
+        std::fs::write(&path, PNG_BYTES).unwrap();
+        let tool = RunTool::new(registry());
+        let cmd = format!("cat {}", path.to_string_lossy());
+        let result = invoke(&tool, &cmd);
+        assert_eq!(result["exit_code"], 1);
+        let stderr = result["stderr"].as_str().unwrap();
+        assert!(stderr.contains("binary image/png"), "{stderr}");
+    }
+
+    #[test]
+    fn run_see_returns_attachment_as_base64() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, PNG_BYTES).unwrap();
+        let tool = RunTool::new(registry());
+        let cmd = format!("see {}", path.to_string_lossy());
+        let result = invoke(&tool, &cmd);
+        assert_eq!(result["exit_code"], 0);
+        let attachments = result["attachments"].as_array().expect("attachments array");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0]["type"], "image");
+        assert_eq!(attachments[0]["mime"], "image/png");
+        let decoded = B64
+            .decode(attachments[0]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded.as_slice(), PNG_BYTES);
+    }
+
+    #[test]
+    fn run_attachments_flow_through_pipeline() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, PNG_BYTES).unwrap();
+        let tool = RunTool::new(registry());
+        // `see X | wc -l` — wc's stdout replaces see's text output, but
+        // the image attachment survives the pipe.
+        let cmd = format!("see {} | wc -l", path.to_string_lossy());
+        let result = invoke(&tool, &cmd);
+        assert_eq!(result["exit_code"], 0);
+        let attachments = result["attachments"].as_array().expect("attachments");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0]["mime"], "image/png");
+    }
+
+    #[test]
+    fn run_grep_ic_returns_count() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("log.txt");
+        std::fs::write(&path, b"ERROR a\ninfo\nError b\nwarn\n").unwrap();
+        let tool = RunTool::new(registry());
+        let cmd = format!("cat {} | grep -ic \"error\"", path.to_string_lossy());
+        let result = invoke(&tool, &cmd);
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["stdout"], "2\n");
     }
 
     #[test]
@@ -183,6 +270,7 @@ mod tests {
         assert!(stderr.contains("echo"), "{stderr}");
         assert!(stderr.contains("grep"), "{stderr}");
         assert!(stderr.contains("ls"), "{stderr}");
+        assert!(stderr.contains("see"), "{stderr}");
         assert!(stderr.contains("wc"), "{stderr}");
     }
 
@@ -206,6 +294,16 @@ mod tests {
             .block_on(tool.invoke(json!({ "command": "echo hi |" })))
             .unwrap_err();
         assert!(err.to_string().contains("parse error"), "{err}");
+    }
+
+    #[test]
+    fn run_omits_attachments_key_when_empty() {
+        let tool = RunTool::new(registry());
+        let result = invoke(&tool, "echo hi");
+        assert!(
+            result.get("attachments").is_none(),
+            "attachments key should be absent when empty"
+        );
     }
 
     /// Fake command that emits 200 KiB — should trigger `STDOUT_MAX`.

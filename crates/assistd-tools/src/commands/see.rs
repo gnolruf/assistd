@@ -1,0 +1,154 @@
+//! `see PATH` — read an image file and attach it as an
+//! [`crate::Attachment::Image`] on the command output. The chain
+//! executor threads the attachment through pipes, and `RunTool` surfaces
+//! it in the JSON tool result; the chat loop (separate ticket) is
+//! responsible for turning that into a vision input on the model's
+//! next turn.
+
+use anyhow::Result;
+use async_trait::async_trait;
+
+use crate::command::{Attachment, Command, CommandInput, CommandOutput};
+use crate::commands::cat::human_size;
+
+pub struct SeeCommand;
+
+#[async_trait]
+impl Command for SeeCommand {
+    fn name(&self) -> &str {
+        "see"
+    }
+
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+        if input.args.len() != 1 {
+            return Ok(CommandOutput::failed(
+                2,
+                b"see expects exactly one path argument\n".to_vec(),
+            ));
+        }
+        let path = &input.args[0];
+        let bytes = match tokio::fs::read(path).await {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(CommandOutput::failed(
+                    1,
+                    format!("{path}: {e}\n").into_bytes(),
+                ));
+            }
+        };
+        let Some(t) = infer::get(&bytes) else {
+            return Ok(CommandOutput::failed(
+                1,
+                format!("{path}: not an image file\n").into_bytes(),
+            ));
+        };
+        if !infer::is_image(&bytes) {
+            return Ok(CommandOutput::failed(
+                1,
+                format!("{path}: not an image file (detected {})\n", t.mime_type()).into_bytes(),
+            ));
+        }
+        let mime = t.mime_type().to_string();
+        let size = bytes.len();
+        let stdout = format!("attached {mime} ({}) from {path}\n", human_size(size));
+        Ok(CommandOutput {
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+            exit_code: 0,
+            attachments: vec![Attachment::Image { mime, bytes }],
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    const PNG_BYTES: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    #[tokio::test]
+    async fn attaches_png_image() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        tokio::fs::write(&path, PNG_BYTES).await.unwrap();
+        let out = SeeCommand
+            .run(CommandInput {
+                args: vec![path.to_string_lossy().into_owned()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("attached image/png"), "{stdout}");
+        assert_eq!(out.attachments.len(), 1);
+        match &out.attachments[0] {
+            Attachment::Image { mime, bytes } => {
+                assert_eq!(mime, "image/png");
+                assert_eq!(bytes.as_slice(), PNG_BYTES);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_non_image() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        tokio::fs::write(&path, b"not an image").await.unwrap();
+        let out = SeeCommand
+            .run(CommandInput {
+                args: vec![path.to_string_lossy().into_owned()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("not an image"), "{stderr}");
+        assert!(out.attachments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_file_exits_1() {
+        let out = SeeCommand
+            .run(CommandInput {
+                args: vec!["/nonexistent/image.png".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 1);
+        assert!(out.attachments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_args_errors() {
+        let out = SeeCommand
+            .run(CommandInput {
+                args: Vec::new(),
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+    }
+
+    #[tokio::test]
+    async fn too_many_args_errors() {
+        let out = SeeCommand
+            .run(CommandInput {
+                args: vec!["a.png".into(), "b.png".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+    }
+}

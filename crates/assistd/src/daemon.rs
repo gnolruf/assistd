@@ -4,7 +4,8 @@ use assistd_llm::LlamaChatClient;
 use assistd_tools::{
     CommandRegistry, RunTool, ToolRegistry,
     commands::{
-        BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, WcCommand, WriteCommand,
+        BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
+        WebCommand, WriteCommand,
     },
 };
 use clap::Args;
@@ -99,6 +100,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     commands.register(WcCommand);
     commands.register(EchoCommand);
     commands.register(WriteCommand);
+    commands.register(SeeCommand);
+    commands.register(WebCommand::new());
     commands.register(BashCommand::default());
     let commands = Arc::new(commands);
 

@@ -227,11 +227,11 @@ impl Summarizer for LlamaChatClient {
             messages: vec![
                 wire::ChatMessage {
                     role: "system",
-                    content: SUMMARY_SYSTEM_PROMPT,
+                    content: wire::ContentBody::Text(SUMMARY_SYSTEM_PROMPT),
                 },
                 wire::ChatMessage {
                     role: "user",
-                    content: &dialogue,
+                    content: wire::ContentBody::Text(&dialogue),
                 },
             ],
             stream: false,

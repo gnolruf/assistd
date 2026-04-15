@@ -19,6 +19,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 libc = { workspace = true }
+assistd-tools = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }
