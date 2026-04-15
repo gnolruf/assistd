@@ -21,6 +21,16 @@ pub struct CommandInput {
     pub stdin: Vec<u8>,
 }
 
+/// A side-channel payload a command can attach alongside its stdout. The
+/// chain executor threads attachments through pipes untouched so `see X |
+/// wc` still surfaces the image; `RunTool` base64-encodes them into the
+/// JSON result so a caller (eventually the chat loop) can inject them
+/// into the model's next turn as a vision input.
+#[derive(Debug, Clone)]
+pub enum Attachment {
+    Image { mime: String, bytes: Vec<u8> },
+}
+
 /// Output of a single chain stage.
 ///
 /// Returning `CommandOutput` inside `Result::Ok` (rather than surfacing
@@ -35,6 +45,7 @@ pub struct CommandOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: i32,
+    pub attachments: Vec<Attachment>,
 }
 
 impl CommandOutput {
@@ -43,6 +54,7 @@ impl CommandOutput {
             stdout,
             stderr: Vec::new(),
             exit_code: 0,
+            attachments: Vec::new(),
         }
     }
 
@@ -51,6 +63,7 @@ impl CommandOutput {
             stdout: Vec::new(),
             stderr: stderr.into(),
             exit_code,
+            attachments: Vec::new(),
         }
     }
 }

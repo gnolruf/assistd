@@ -48,6 +48,8 @@ textwrap = "0.16"
 nvml-wrapper = "0.12"
 regex = "1"
 tempfile = "3"
+base64 = "0.22"
+infer = "0.19"
 
 [profile.release]
 lto = "thin"

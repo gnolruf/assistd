@@ -6,7 +6,10 @@
 //! heuristic that intentionally over-counts multi-byte text so we summarize
 //! early rather than overflow the server's context window.
 
+use assistd_tools::Attachment;
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use tracing::{debug, warn};
 
 use super::config::ChatSpec;
@@ -15,6 +18,10 @@ use super::wire;
 
 const SUMMARY_PREFIX: &str = "[Conversation summary] ";
 const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
+/// Conservative per-image token weight for budget math. Real usage
+/// depends on the vision model, but 1000 tokens errs on the side of
+/// summarizing earlier rather than overflowing.
+const TOKENS_PER_IMAGE: u32 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -37,6 +44,11 @@ impl Role {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Image attachments carried by this turn. Empty for every classic
+    /// text-only message; populated by `push_user_with_attachments` when
+    /// a tool-call (typically `see`) produced an image the model should
+    /// see on its next turn.
+    pub attachments: Vec<Attachment>,
 }
 
 /// Summarizer trait so unit tests can inject a fake without spinning up
@@ -77,6 +89,19 @@ impl Conversation {
         self.messages.push(Message {
             role: Role::User,
             content,
+            attachments: Vec::new(),
+        });
+    }
+
+    /// Append a user turn that carries one or more attachments alongside
+    /// its text. When rendered to the wire, the message becomes a
+    /// multimodal `content` array with one `text` part followed by one
+    /// `image_url` part per attachment.
+    pub fn push_user_with_attachments(&mut self, content: String, attachments: Vec<Attachment>) {
+        self.messages.push(Message {
+            role: Role::User,
+            content,
+            attachments,
         });
     }
 
@@ -84,6 +109,7 @@ impl Conversation {
         self.messages.push(Message {
             role: Role::Assistant,
             content,
+            attachments: Vec::new(),
         });
     }
 
@@ -110,19 +136,32 @@ impl Conversation {
     }
 
     /// Render current state as wire messages. Drops the system prompt if
-    /// the user explicitly configured it empty.
+    /// the user explicitly configured it empty. Messages with attachments
+    /// are rendered as a multimodal `content` array (text part + one
+    /// `image_url` part per attachment); text-only messages stay as plain
+    /// strings for compatibility with non-vision models.
     pub fn as_wire_messages(&self) -> Vec<wire::ChatMessage<'_>> {
         let mut out = Vec::with_capacity(self.messages.len() + 1);
         if !self.system_prompt.is_empty() {
             out.push(wire::ChatMessage {
                 role: Role::System.as_wire(),
-                content: &self.system_prompt,
+                content: wire::ContentBody::Text(&self.system_prompt),
             });
         }
         for m in &self.messages {
+            let content = if m.attachments.is_empty() {
+                wire::ContentBody::Text(&m.content)
+            } else {
+                let mut parts = Vec::with_capacity(m.attachments.len() + 1);
+                parts.push(wire::ContentPart::Text { text: &m.content });
+                for att in &m.attachments {
+                    parts.push(attachment_to_part(att));
+                }
+                wire::ContentBody::Parts(parts)
+            };
             out.push(wire::ChatMessage {
                 role: m.role.as_wire(),
-                content: &m.content,
+                content,
             });
         }
         out
@@ -184,6 +223,7 @@ impl Conversation {
         let summary_msg = Message {
             role: Role::System,
             content: format!("{SUMMARY_PREFIX}{body}"),
+            attachments: Vec::new(),
         };
 
         let drop_end = preserve_from;
@@ -281,7 +321,20 @@ fn approx_tokens(text: &str) -> u32 {
 }
 
 fn approx_message_tokens(m: &Message) -> u32 {
-    TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(&m.content))
+    let image_cost = (m.attachments.len() as u32).saturating_mul(TOKENS_PER_IMAGE);
+    TOKENS_PER_MESSAGE_OVERHEAD
+        .saturating_add(approx_tokens(&m.content))
+        .saturating_add(image_cost)
+}
+
+fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
+    match att {
+        Attachment::Image { mime, bytes } => wire::ContentPart::ImageUrl {
+            image_url: wire::ImageUrl {
+                url: format!("data:{};base64,{}", mime, B64.encode(bytes)),
+            },
+        },
+    }
 }
 
 fn effective_budget(spec: &ChatSpec) -> u32 {
@@ -407,7 +460,7 @@ mod tests {
         let wire = c.as_wire_messages();
         assert_eq!(wire.len(), 2);
         assert_eq!(wire[0].role, "system");
-        assert_eq!(wire[0].content, "sys");
+        assert_eq!(wire[0].content, wire::ContentBody::Text("sys"));
         assert_eq!(wire[1].role, "user");
     }
 
@@ -426,6 +479,83 @@ mod tests {
         assert_eq!(approx_tokens("abcd"), 1);
         assert_eq!(approx_tokens("abcde"), 2);
         assert_eq!(approx_tokens("hello world"), 3);
+    }
+
+    #[test]
+    fn push_user_with_attachments_renders_multimodal_wire() {
+        let mut c = Conversation::new(String::new());
+        c.push_user_with_attachments(
+            "what is this?".into(),
+            vec![Attachment::Image {
+                mime: "image/png".into(),
+                bytes: vec![0xAB, 0xCD],
+            }],
+        );
+        let wire = c.as_wire_messages();
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].role, "user");
+        let parts = match &wire[0].content {
+            wire::ContentBody::Parts(p) => p,
+            other => panic!("expected Parts, got {other:?}"),
+        };
+        assert_eq!(parts.len(), 2);
+        match &parts[0] {
+            wire::ContentPart::Text { text } => assert_eq!(*text, "what is this?"),
+            other => panic!("first part must be text, got {other:?}"),
+        }
+        match &parts[1] {
+            wire::ContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, "data:image/png;base64,q80=");
+            }
+            other => panic!("second part must be image_url, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_text_user_still_renders_as_string_content() {
+        let mut c = Conversation::new(String::new());
+        c.push_user("hello".into());
+        let wire = c.as_wire_messages();
+        assert!(matches!(wire[0].content, wire::ContentBody::Text("hello")));
+    }
+
+    #[test]
+    fn attachments_contribute_to_token_budget() {
+        let mut c = Conversation::new(String::new());
+        c.push_user("q".into());
+        let baseline = c.approx_total_tokens();
+
+        let mut c = Conversation::new(String::new());
+        c.push_user_with_attachments(
+            "q".into(),
+            vec![Attachment::Image {
+                mime: "image/png".into(),
+                bytes: vec![0; 10],
+            }],
+        );
+        let with_image = c.approx_total_tokens();
+        assert_eq!(with_image, baseline + TOKENS_PER_IMAGE);
+    }
+
+    #[test]
+    fn multimodal_wire_serializes_to_openai_shape() {
+        let mut c = Conversation::new(String::new());
+        c.push_user_with_attachments(
+            "describe".into(),
+            vec![Attachment::Image {
+                mime: "image/jpeg".into(),
+                bytes: vec![0x12, 0x34, 0x56],
+            }],
+        );
+        let msgs = c.as_wire_messages();
+        let json = serde_json::to_value(&msgs).unwrap();
+        assert_eq!(json[0]["content"][0]["type"], "text");
+        assert_eq!(json[0]["content"][0]["text"], "describe");
+        assert_eq!(json[0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            json[0]["content"][1]["image_url"]["url"],
+            "data:image/jpeg;base64,EjRW"
+        );
     }
 
     #[tokio::test]

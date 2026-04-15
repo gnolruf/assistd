@@ -3,9 +3,16 @@ use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};
 
-/// `write PATH` — write stdin to PATH. Fails with a teaching message
-/// if extra argv is passed; enforces the "content comes from stdin"
-/// convention so pipelines like `grep ERROR log | write err.txt` work.
+/// `write PATH [CONTENT...]` — write to PATH.
+///
+/// Two shapes:
+/// - `echo "hi" | write /tmp/x` — stdin is the content (pipeline form).
+/// - `write /tmp/x hello world` — args beyond the path are joined with
+///   single spaces and written (convenience form for when the model
+///   already has the content inline).
+///
+/// If both args and stdin are provided, args win and stdin is silently
+/// discarded — callers who want stdin should avoid passing extra argv.
 pub struct WriteCommand;
 
 #[async_trait]
@@ -21,14 +28,13 @@ impl Command for WriteCommand {
                 b"missing path argument\n".to_vec(),
             ));
         }
-        if input.args.len() > 1 {
-            return Ok(CommandOutput::failed(
-                2,
-                b"content comes from stdin; use 'echo \"hello\" | write file.txt'\n".to_vec(),
-            ));
-        }
         let path = &input.args[0];
-        match tokio::fs::write(path, &input.stdin).await {
+        let content: Vec<u8> = if input.args.len() > 1 {
+            input.args[1..].join(" ").into_bytes()
+        } else {
+            input.stdin
+        };
+        match tokio::fs::write(path, &content).await {
             Ok(()) => Ok(CommandOutput::ok(Vec::new())),
             Err(e) => Ok(CommandOutput::failed(
                 1,
@@ -44,7 +50,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn write_persists_stdin_to_file() {
+    async fn persists_stdin_to_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("out.txt");
         let out = WriteCommand
@@ -60,21 +66,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_rejects_content_as_arg() {
+    async fn persists_args_content_to_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("out.txt");
         let out = WriteCommand
             .run(CommandInput {
-                args: vec!["/tmp/x".into(), "hi".into()],
+                args: vec![
+                    path.to_string_lossy().into_owned(),
+                    "hello".into(),
+                    "world".into(),
+                ],
                 stdin: Vec::new(),
             })
             .await
             .unwrap();
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("stdin"), "{stderr}");
+        assert_eq!(out.exit_code, 0);
+        let content = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(content, b"hello world");
     }
 
     #[tokio::test]
-    async fn write_no_args_errors() {
+    async fn args_content_wins_over_stdin() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("out.txt");
+        let out = WriteCommand
+            .run(CommandInput {
+                args: vec![path.to_string_lossy().into_owned(), "args".into()],
+                stdin: b"stdin".to_vec(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        let content = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(content, b"args");
+    }
+
+    #[tokio::test]
+    async fn no_args_errors() {
         let out = WriteCommand
             .run(CommandInput {
                 args: Vec::new(),
@@ -83,5 +111,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.exit_code, 2);
+    }
+
+    #[tokio::test]
+    async fn path_only_with_empty_stdin_creates_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("out.txt");
+        let out = WriteCommand
+            .run(CommandInput {
+                args: vec![path.to_string_lossy().into_owned()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        let content = tokio::fs::read(&path).await.unwrap();
+        assert!(content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unwritable_path_exits_1() {
+        let out = WriteCommand
+            .run(CommandInput {
+                args: vec!["/definitely/not/a/writable/path".into(), "hi".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 1);
     }
 }

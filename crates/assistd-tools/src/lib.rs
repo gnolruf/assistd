@@ -14,7 +14,7 @@ pub mod commands;
 pub mod run;
 
 pub use chain::{Chain, ParseError, execute, parse_chain};
-pub use command::{Command, CommandInput, CommandOutput, CommandRegistry};
+pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
 pub use run::RunTool;
 
 use anyhow::Result;

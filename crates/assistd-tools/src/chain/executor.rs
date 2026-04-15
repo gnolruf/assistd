@@ -46,23 +46,28 @@ pub fn execute<'a>(
                                 .into_bytes(),
                         ),
                         exit_code: 141,
+                        attachments: left.attachments,
                     });
                 }
+                let left_attachments = left.attachments;
                 let right = execute(r, registry, left.stdout).await?;
                 Ok(CommandOutput {
                     stdout: right.stdout,
                     stderr: merge(left.stderr, right.stderr),
                     exit_code: right.exit_code,
+                    attachments: concat_attachments(left_attachments, right.attachments),
                 })
             }
             Chain::And(l, r) => {
                 let left = execute(l, registry, stdin.clone()).await?;
                 if left.exit_code == 0 {
+                    let left_attachments = left.attachments;
                     let right = execute(r, registry, stdin).await?;
                     Ok(CommandOutput {
                         stdout: merge(left.stdout, right.stdout),
                         stderr: merge(left.stderr, right.stderr),
                         exit_code: right.exit_code,
+                        attachments: concat_attachments(left_attachments, right.attachments),
                     })
                 } else {
                     Ok(left)
@@ -71,11 +76,13 @@ pub fn execute<'a>(
             Chain::Or(l, r) => {
                 let left = execute(l, registry, stdin.clone()).await?;
                 if left.exit_code != 0 {
+                    let left_attachments = left.attachments;
                     let right = execute(r, registry, stdin).await?;
                     Ok(CommandOutput {
                         stdout: merge(left.stdout, right.stdout),
                         stderr: merge(left.stderr, right.stderr),
                         exit_code: right.exit_code,
+                        attachments: concat_attachments(left_attachments, right.attachments),
                     })
                 } else {
                     Ok(left)
@@ -83,11 +90,13 @@ pub fn execute<'a>(
             }
             Chain::Seq(l, r) => {
                 let left = execute(l, registry, stdin.clone()).await?;
+                let left_attachments = left.attachments;
                 let right = execute(r, registry, stdin).await?;
                 Ok(CommandOutput {
                     stdout: merge(left.stdout, right.stdout),
                     stderr: merge(left.stderr, right.stderr),
                     exit_code: right.exit_code,
+                    attachments: concat_attachments(left_attachments, right.attachments),
                 })
             }
         }
@@ -131,6 +140,7 @@ async fn run_command(
         stdout: out.stdout,
         stderr,
         exit_code: out.exit_code,
+        attachments: out.attachments,
     })
 }
 
@@ -157,6 +167,14 @@ fn prefix_stderr(name: &str, raw: &[u8]) -> Vec<u8> {
 
 fn merge(mut a: Vec<u8>, b: Vec<u8>) -> Vec<u8> {
     a.extend_from_slice(&b);
+    a
+}
+
+fn concat_attachments(
+    mut a: Vec<crate::command::Attachment>,
+    b: Vec<crate::command::Attachment>,
+) -> Vec<crate::command::Attachment> {
+    a.extend(b);
     a
 }
 
@@ -205,6 +223,7 @@ mod tests {
                 stdout: self.stdout.clone(),
                 stderr: Vec::new(),
                 exit_code: self.exit_code,
+                attachments: Vec::new(),
             })
         }
     }

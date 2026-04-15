@@ -1,5 +1,11 @@
 //! Serde types for the OpenAI-shaped `/v1/chat/completions` endpoint as
 //! served by llama.cpp. We only model the subset the client actually uses.
+//!
+//! `ChatMessage.content` is modeled as an untagged enum so text-only turns
+//! render as a plain string (matching classic OpenAI payloads) while
+//! multimodal turns render as an array of content parts. llama.cpp
+//! accepts both shapes; a vision-capable model + mmproj is required for
+//! the `image_url` parts to actually reach the projector.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +23,34 @@ pub struct ChatRequest<'a> {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage<'a> {
     pub role: &'a str,
-    pub content: &'a str,
+    pub content: ContentBody<'a>,
+}
+
+/// Wire shape of a message's `content` field.
+///
+/// Untagged serde keeps the two shapes indistinguishable on the outgoing
+/// wire — `Text(s)` serializes as the bare string `"..."`, `Parts(v)`
+/// serializes as a JSON array `[{"type": "text", "text": "..."}, ...]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum ContentBody<'a> {
+    Text(&'a str),
+    Parts(Vec<ContentPart<'a>>),
+}
+
+/// One slot in a multimodal `content` array.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart<'a> {
+    Text { text: &'a str },
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// `{"url": "data:image/png;base64,..."}`. Owned because we build the
+/// data URI on the fly when rendering wire messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImageUrl {
+    pub url: String,
 }
 
 /// Non-streaming response shape — used only for the summarization call.
@@ -75,11 +108,11 @@ mod tests {
             messages: vec![
                 ChatMessage {
                     role: "system",
-                    content: "you are helpful",
+                    content: ContentBody::Text("you are helpful"),
                 },
                 ChatMessage {
                     role: "user",
-                    content: "hi",
+                    content: ContentBody::Text("hi"),
                 },
             ],
             stream: true,
@@ -96,6 +129,36 @@ mod tests {
         assert_eq!(json["max_tokens"], 128);
         assert_eq!(json["messages"][0]["role"], "system");
         assert_eq!(json["messages"][1]["content"], "hi");
+    }
+
+    #[test]
+    fn serializes_multimodal_content_as_parts_array() {
+        let req = ChatRequest {
+            model: "local",
+            messages: vec![ChatMessage {
+                role: "user",
+                content: ContentBody::Parts(vec![
+                    ContentPart::Text {
+                        text: "what's in this image?",
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,AAAA".into(),
+                        },
+                    },
+                ]),
+            }],
+            stream: false,
+            temperature: 0.5,
+            max_tokens: 64,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        let content = &json["messages"][0]["content"];
+        assert!(content.is_array(), "{content}");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what's in this image?");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 
     #[test]

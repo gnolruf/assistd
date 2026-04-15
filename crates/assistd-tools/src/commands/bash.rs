@@ -102,6 +102,7 @@ impl Command for BashCommand {
             stdout: output.stdout,
             stderr: output.stderr,
             exit_code,
+            attachments: Vec::new(),
         })
     }
 }
