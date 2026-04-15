@@ -1,13 +1,25 @@
 //! Tool-use subsystem: the trait every invokable tool implements, plus
 //! the registry the LLM looks up tool calls in.
 //!
-//! Milestone 3 ("tool use") will register real tools here (shell, files,
-//! HTTP, etc.) and run them in a sandbox. Milestone 1 ships no tools —
-//! the registry exists so the call-site wiring is in place.
+//! The daemon exposes a single LLM-facing tool — `run` — whose argument is
+//! a Unix-shell-style command line. `run` parses the line into a
+//! [`chain::Chain`] AST and dispatches each stage through a
+//! [`CommandRegistry`] of internal Rust handlers. Two-tier split: `Tool`
+//! is what the LLM sees (JSON-in/JSON-out); `Command` is what executes
+//! bytes-in/bytes-out with a Unix exit code.
+
+pub mod chain;
+pub mod command;
+pub mod commands;
+pub mod run;
+
+pub use chain::{Chain, ParseError, execute, parse_chain};
+pub use command::{Command, CommandInput, CommandOutput, CommandRegistry};
+pub use run::RunTool;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// A single tool the LLM can invoke.
 #[async_trait]
@@ -18,6 +30,10 @@ pub trait Tool: Send + Sync + 'static {
     /// Human-readable description the LLM sees when deciding whether to
     /// call the tool.
     fn description(&self) -> &str;
+
+    /// JSON Schema describing the `arguments` object the LLM must pass to
+    /// [`Tool::invoke`]. Used to build the OpenAI-compatible `tools` array.
+    fn parameters_schema(&self) -> Value;
 
     /// Execute the tool with JSON-shaped arguments and return a
     /// JSON-shaped result.
@@ -57,6 +73,27 @@ impl ToolRegistry {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tools.iter().map(|t| t.name())
     }
+
+    /// Render the registry as an OpenAI chat-completions `tools` array.
+    /// Each entry is a `{"type": "function", "function": {...}}` object
+    /// with `strict: true` — guaranteeing the model's arguments conform
+    /// to `parameters_schema()`.
+    pub fn openai_schemas(&self) -> Vec<Value> {
+        self.tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name(),
+                        "description": t.description(),
+                        "parameters": t.parameters_schema(),
+                        "strict": true,
+                    }
+                })
+            })
+            .collect()
+    }
 }
 
 pub fn version() -> &'static str {
@@ -76,6 +113,9 @@ mod tests {
         }
         fn description(&self) -> &str {
             "does nothing"
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object", "properties": {}, "additionalProperties": false})
         }
         async fn invoke(&self, _args: Value) -> Result<Value> {
             Ok(Value::Null)
@@ -98,6 +138,19 @@ mod tests {
         let tool = reg.get("noop").expect("tool registered");
         let result = tool.invoke(Value::Null).await.unwrap();
         assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn openai_schemas_wraps_each_tool() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Noop);
+        let schemas = reg.openai_schemas();
+        assert_eq!(schemas.len(), 1);
+        let entry = &schemas[0];
+        assert_eq!(entry["type"], "function");
+        assert_eq!(entry["function"]["name"], "noop");
+        assert_eq!(entry["function"]["strict"], true);
+        assert_eq!(entry["function"]["parameters"]["type"], "object");
     }
 
     #[test]

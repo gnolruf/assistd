@@ -235,6 +235,7 @@ mod tests {
             Config::default(),
             Arc::new(assistd_llm::EchoBackend),
             PresenceManager::stub(PresenceState::Active),
+            Arc::new(assistd_tools::ToolRegistry::default()),
         ))
     }
 
@@ -468,6 +469,7 @@ mod tests {
             config,
             backend,
             PresenceManager::stub(PresenceState::Active),
+            Arc::new(assistd_tools::ToolRegistry::default()),
         ))
     }
 

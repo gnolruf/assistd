@@ -1,6 +1,12 @@
 use anyhow::Result;
 use assistd_core::{AppState, Config, PresenceManager};
 use assistd_llm::LlamaChatClient;
+use assistd_tools::{
+    CommandRegistry, RunTool, ToolRegistry,
+    commands::{
+        BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, WcCommand, WriteCommand,
+    },
+};
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -85,7 +91,32 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
-    let state = Arc::new(AppState::new(config, Arc::new(chat), presence.clone()));
+
+    let mut commands = CommandRegistry::new();
+    commands.register(CatCommand);
+    commands.register(LsCommand);
+    commands.register(GrepCommand);
+    commands.register(WcCommand);
+    commands.register(EchoCommand);
+    commands.register(WriteCommand);
+    commands.register(BashCommand::default());
+    let commands = Arc::new(commands);
+
+    let mut tools = ToolRegistry::new();
+    tools.register(RunTool::new(commands.clone()));
+    let tools = Arc::new(tools);
+    info!(
+        "tools: registered {} ({} commands)",
+        tools.len(),
+        commands.len()
+    );
+
+    let state = Arc::new(AppState::new(
+        config,
+        Arc::new(chat),
+        presence.clone(),
+        tools,
+    ));
 
     let mut socket_shutdown_rx = shutdown_tx.subscribe();
     let socket_shutdown = async move {

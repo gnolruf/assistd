@@ -2,28 +2,35 @@ use crate::{Config, PresenceManager};
 use anyhow::Result;
 use assistd_ipc::{Event, PresenceState, Request};
 use assistd_llm::{LlmBackend, LlmEvent};
+use assistd_tools::ToolRegistry;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Shared, long-lived daemon state handed to every request handler.
 ///
-/// Subsystem handles (tools, voice, window manager, memory) will be
-/// added here as their respective milestones land. They are expected to
-/// be `Arc`-held and cheaply cloneable (actor façades over background
+/// Subsystem handles (tools, voice, window manager, memory) are expected
+/// to be `Arc`-held and cheaply cloneable (actor façades over background
 /// tasks) so that multiple concurrent requests can all hold
 /// `Arc<AppState>` without contention.
 pub struct AppState {
     pub config: Config,
     pub llm: Arc<dyn LlmBackend>,
     pub presence: Arc<PresenceManager>,
+    pub tools: Arc<ToolRegistry>,
 }
 
 impl AppState {
-    pub fn new(config: Config, llm: Arc<dyn LlmBackend>, presence: Arc<PresenceManager>) -> Self {
+    pub fn new(
+        config: Config,
+        llm: Arc<dyn LlmBackend>,
+        presence: Arc<PresenceManager>,
+        tools: Arc<ToolRegistry>,
+    ) -> Self {
         Self {
             config,
             llm,
             presence,
+            tools,
         }
     }
 
@@ -190,6 +197,7 @@ mod tests {
             Config::default(),
             backend,
             PresenceManager::stub(initial_state),
+            Arc::new(ToolRegistry::default()),
         ))
     }
 
