@@ -21,12 +21,30 @@ impl Command for WriteCommand {
         "write"
     }
 
+    fn summary(&self) -> &'static str {
+        "write a file from stdin, or from inline args joined by spaces"
+    }
+
+    fn help(&self) -> String {
+        "usage: write PATH [CONTENT...]\n\
+         \n\
+         Write bytes to PATH. Two shapes:\n  \
+           `echo \"hi\" | write /tmp/x`   — stdin is the file content (pipeline form)\n  \
+           `write /tmp/x hello world`   — args beyond PATH are joined by spaces and written\n\
+         \n\
+         If both args and stdin are provided, args win and stdin is \
+         silently discarded. Exit 1 on write failure (permissions, no-such-dir, etc.).\n"
+            .to_string()
+    }
+
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         if input.args.is_empty() {
-            return Ok(CommandOutput::failed(
-                2,
-                b"missing path argument\n".to_vec(),
-            ));
+            return Ok(CommandOutput {
+                stdout: self.help().into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                attachments: Vec::new(),
+            });
         }
         let path = &input.args[0];
         let content: Vec<u8> = if input.args.len() > 1 {

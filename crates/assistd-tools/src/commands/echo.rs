@@ -12,6 +12,18 @@ impl Command for EchoCommand {
         "echo"
     }
 
+    fn summary(&self) -> &'static str {
+        "write arguments joined by spaces, followed by a newline"
+    }
+
+    fn help(&self) -> String {
+        "usage: echo [ARGS...]\n\
+         \n\
+         Write the argument list joined by single spaces, followed by a \
+         newline. With no arguments, emits a bare newline.\n"
+            .to_string()
+    }
+
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         let mut out = input.args.join(" ").into_bytes();
         out.push(b'\n');

@@ -28,16 +28,60 @@ pub struct RunTool {
     registry: Arc<CommandRegistry>,
     spec: PresentSpec,
     counter: Arc<AtomicU64>,
+    /// Level-0 description, built once in `new` from
+    /// `registry.sorted_summaries()`. Returned by reference from
+    /// [`Tool::description`] — owned here so the trait's `&str` signature
+    /// is honored without requiring a static string.
+    description: String,
 }
 
 impl RunTool {
     pub fn new(registry: Arc<CommandRegistry>, spec: PresentSpec) -> Self {
+        let description = build_description(&registry);
         Self {
             registry,
             spec,
             counter: Arc::new(AtomicU64::new(0)),
+            description,
         }
     }
+}
+
+/// Build the Level-0 description the LLM sees in its tool schema. The
+/// header/footer are static; the middle block is a bulleted list of
+/// `(name, summary)` pairs pulled from every registered command. The
+/// "run a command with no arguments" footer is the discovery hook: the
+/// LLM learns that calling a command bare returns Level-1 usage.
+fn build_description(registry: &CommandRegistry) -> String {
+    let mut s = String::with_capacity(1024);
+    s.push_str(
+        "Execute a shell-style command in the daemon's working directory. \
+         Supports pipelines (|), and/or (&&, ||), and sequencing (;). \
+         Redirections (>, <), env expansion ($VAR), and backgrounding (&) \
+         are NOT supported — use `bash \"…\"` for a real shell when needed. \
+         Large outputs are truncated; the truncation notice includes a \
+         `Full output: /tmp/assistd-output/cmd-N.txt` path that subsequent \
+         `run` calls can grep/cat to read the full content.\n\n\
+         Available commands:\n",
+    );
+    let pairs = registry.sorted_summaries();
+    let name_width = pairs.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    for (name, summary) in pairs {
+        s.push_str("  ");
+        s.push_str(name);
+        for _ in name.len()..name_width {
+            s.push(' ');
+        }
+        s.push_str(" — ");
+        s.push_str(summary);
+        s.push('\n');
+    }
+    s.push_str(
+        "\nCall a command with no (or insufficient) arguments to see its \
+         usage (exit code 2, stdout). Errors in real calls exit with a \
+         `[<name>]\\t` stderr prefix — distinct from help on stdout.",
+    );
+    s
 }
 
 #[async_trait]
@@ -47,14 +91,7 @@ impl Tool for RunTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell-style command in the daemon's working directory. \
-         Supports pipelines (|), and/or (&&, ||), and sequencing (;). \
-         Built-in commands: cat, ls, grep, wc, echo, write, see, web, bash. \
-         Redirections (>, <), env expansion ($VAR), and backgrounding (&) \
-         are NOT supported — use `bash \"…\"` for a real shell when needed. \
-         Large outputs are truncated; the truncation notice includes a \
-         `Full output: /tmp/assistd-output/cmd-N.txt` path that subsequent \
-         `run` calls can grep/cat to read the full content."
+        &self.description
     }
 
     fn parameters_schema(&self) -> Value {
@@ -117,8 +154,12 @@ fn render_attachment(a: &Attachment) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolRegistry;
     use crate::command::{Command, CommandInput, CommandOutput};
-    use crate::commands::{CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand};
+    use crate::commands::{
+        BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
+        WebCommand, WriteCommand,
+    };
     use async_trait::async_trait;
     use regex::Regex;
     use std::path::Path;
@@ -132,6 +173,23 @@ mod tests {
         r.register(LsCommand);
         r.register(WcCommand);
         r.register(SeeCommand);
+        Arc::new(r)
+    }
+
+    /// Full 9-command registry matching the daemon's production set.
+    /// Used by Level-0 description tests that need to verify every
+    /// command name flows into the LLM-facing schema.
+    fn full_registry() -> Arc<CommandRegistry> {
+        let mut r = CommandRegistry::new();
+        r.register(CatCommand);
+        r.register(LsCommand);
+        r.register(GrepCommand);
+        r.register(WcCommand);
+        r.register(EchoCommand);
+        r.register(WriteCommand);
+        r.register(SeeCommand);
+        r.register(WebCommand::new());
+        r.register(BashCommand::default());
         Arc::new(r)
     }
 
@@ -382,6 +440,12 @@ mod tests {
         fn name(&self) -> &str {
             "lines"
         }
+        fn summary(&self) -> &'static str {
+            "test: emit N lines"
+        }
+        fn help(&self) -> String {
+            "usage: lines".to_string()
+        }
         async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
             let mut v = Vec::with_capacity(self.0 * 8);
             for i in 1..=self.0 {
@@ -398,6 +462,12 @@ mod tests {
         fn name(&self) -> &str {
             "bytecount"
         }
+        fn summary(&self) -> &'static str {
+            "test: count bytes"
+        }
+        fn help(&self) -> String {
+            "usage: bytecount".to_string()
+        }
         async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(
                 format!("{}\n", input.stdin.len()).into_bytes(),
@@ -412,6 +482,12 @@ mod tests {
         fn name(&self) -> &str {
             "emitpng"
         }
+        fn summary(&self) -> &'static str {
+            "test: emit PNG"
+        }
+        fn help(&self) -> String {
+            "usage: emitpng".to_string()
+        }
         async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(PNG_BYTES.to_vec()))
         }
@@ -423,6 +499,12 @@ mod tests {
     impl Command for Noisy {
         fn name(&self) -> &str {
             "noisy"
+        }
+        fn summary(&self) -> &'static str {
+            "test: noisy output"
+        }
+        fn help(&self) -> String {
+            "usage: noisy".to_string()
         }
         async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
             Ok(CommandOutput {
@@ -578,6 +660,190 @@ mod tests {
         assert!(output.contains("line 3\n"));
         assert!(!output.contains("line 4\n"));
         assert!(output.contains("--- output truncated (10 lines,"));
+    }
+
+    // --- progressive help: Level 0 (tool description) --------------------
+
+    /// Acceptance #1: the `run` tool's description lists every registered
+    /// command with its one-line summary.
+    #[test]
+    fn run_tool_description_lists_all_commands() {
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), full_registry());
+        let desc = tool.description();
+        for name in [
+            "cat", "ls", "grep", "wc", "echo", "write", "see", "web", "bash",
+        ] {
+            assert!(desc.contains(name), "description missing `{name}`: {desc}");
+        }
+        // Summary text from a representative command should appear.
+        assert!(
+            desc.contains("filter lines matching a pattern"),
+            "description missing grep summary: {desc}"
+        );
+        // Level-1 discovery hint tells the LLM how to drill in.
+        assert!(
+            desc.to_lowercase()
+                .contains("no (or insufficient) arguments")
+                || desc.to_lowercase().contains("usage"),
+            "description missing drill-in hint: {desc}"
+        );
+    }
+
+    /// Acceptance #4: adding a new command to the registry automatically
+    /// includes it in the Level-0 summary without touching any tool-side
+    /// description string.
+    #[test]
+    fn run_tool_description_auto_updates_when_command_added() {
+        struct Frobnicate;
+        #[async_trait]
+        impl Command for Frobnicate {
+            fn name(&self) -> &str {
+                "frobnicate"
+            }
+            fn summary(&self) -> &'static str {
+                "frobnicate the widget"
+            }
+            fn help(&self) -> String {
+                "usage: frobnicate".to_string()
+            }
+            async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
+                Ok(CommandOutput::ok(Vec::new()))
+            }
+        }
+        let mut reg = CommandRegistry::new();
+        reg.register(CatCommand);
+        reg.register(Frobnicate);
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), Arc::new(reg));
+        let desc = tool.description();
+        assert!(desc.contains("frobnicate"), "missing name: {desc}");
+        assert!(
+            desc.contains("frobnicate the widget"),
+            "missing summary: {desc}"
+        );
+    }
+
+    /// Acceptance #1, wire-level: the OpenAI-compatible schema (what the
+    /// LLM actually consumes) exposes the dynamic description verbatim.
+    #[test]
+    fn openai_schemas_description_includes_all_commands() {
+        let dir = fresh_dir();
+        let mut tools = ToolRegistry::new();
+        tools.register(RunTool::new(
+            full_registry(),
+            PresentSpec {
+                max_lines: 200,
+                max_bytes: 50 * 1024,
+                overflow_dir: dir.path().to_path_buf(),
+            },
+        ));
+        let schemas = tools.openai_schemas();
+        assert_eq!(schemas.len(), 1);
+        let desc = schemas[0]["function"]["description"]
+            .as_str()
+            .expect("description is a string");
+        for name in [
+            "cat", "ls", "grep", "wc", "echo", "write", "see", "web", "bash",
+        ] {
+            assert!(desc.contains(name), "schema description missing `{name}`");
+        }
+    }
+
+    // --- progressive help: Level 1 (command-level help on missing args) --
+
+    /// Acceptance #2, #5: calling a command with no arguments returns its
+    /// help text on stdout with a non-zero exit code so the LLM can tell
+    /// help from successful execution.
+    #[test]
+    fn run_grep_no_args_returns_help_on_stdout_exit_2() {
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
+        let result = invoke(&tool, "grep");
+        assert_eq!(result["exit_code"], 2);
+        let stdout = result["stdout"].as_str().unwrap();
+        assert!(
+            stdout.starts_with("usage: grep"),
+            "stdout should start with `usage: grep`: {stdout:?}"
+        );
+        assert!(stdout.contains("PATTERN"), "help missing PATTERN: {stdout}");
+        // Help goes to stdout; stderr stays empty (no `[grep]\t` prefix).
+        assert_eq!(result["stderr"].as_str().unwrap(), "");
+        let output = result["output"].as_str().unwrap();
+        assert_footer(output, 2);
+    }
+
+    #[test]
+    fn run_see_no_args_returns_help_on_stdout_exit_2() {
+        let dir = fresh_dir();
+        let mut reg = CommandRegistry::new();
+        reg.register(SeeCommand);
+        let tool = tool_with(dir.path(), Arc::new(reg));
+        let result = invoke(&tool, "see");
+        assert_eq!(result["exit_code"], 2);
+        let stdout = result["stdout"].as_str().unwrap();
+        assert!(stdout.starts_with("usage: see"), "{stdout:?}");
+        assert_eq!(result["stderr"].as_str().unwrap(), "");
+    }
+
+    #[test]
+    fn run_write_no_args_returns_help_on_stdout_exit_2() {
+        let dir = fresh_dir();
+        let mut reg = CommandRegistry::new();
+        reg.register(WriteCommand);
+        let tool = tool_with(dir.path(), Arc::new(reg));
+        let result = invoke(&tool, "write");
+        assert_eq!(result["exit_code"], 2);
+        let stdout = result["stdout"].as_str().unwrap();
+        assert!(stdout.starts_with("usage: write"), "{stdout:?}");
+        assert_eq!(result["stderr"].as_str().unwrap(), "");
+    }
+
+    #[test]
+    fn run_web_no_args_returns_help_on_stdout_exit_2() {
+        let dir = fresh_dir();
+        let mut reg = CommandRegistry::new();
+        reg.register(WebCommand::new());
+        let tool = tool_with(dir.path(), Arc::new(reg));
+        let result = invoke(&tool, "web");
+        assert_eq!(result["exit_code"], 2);
+        let stdout = result["stdout"].as_str().unwrap();
+        assert!(stdout.starts_with("usage: web"), "{stdout:?}");
+        assert_eq!(result["stderr"].as_str().unwrap(), "");
+    }
+
+    #[test]
+    fn run_bash_no_args_returns_help_on_stdout_exit_2() {
+        let dir = fresh_dir();
+        let mut reg = CommandRegistry::new();
+        reg.register(BashCommand::default());
+        let tool = tool_with(dir.path(), Arc::new(reg));
+        let result = invoke(&tool, "bash");
+        assert_eq!(result["exit_code"], 2);
+        let stdout = result["stdout"].as_str().unwrap();
+        assert!(stdout.starts_with("usage: bash"), "{stdout:?}");
+        assert_eq!(result["stderr"].as_str().unwrap(), "");
+    }
+
+    /// Help output on stdout is visually distinct from a real usage error
+    /// on stderr. A real grep error (bad regex) still goes to stderr with
+    /// the `[grep]\t` executor prefix — exits 2 like help does, but the
+    /// transport is different. This test locks the distinction.
+    #[test]
+    fn run_grep_real_usage_error_still_on_stderr() {
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
+        // Unrecognized flag — triggers parse_flags error path, which
+        // remains on stderr (unlike the no-args path, which emits help).
+        let result = invoke(&tool, "grep -x foo");
+        assert_eq!(result["exit_code"], 2);
+        let stderr = result["stderr"].as_str().unwrap();
+        assert!(
+            stderr.contains("[grep]\t"),
+            "real errors keep executor prefix: {stderr}"
+        );
+        // Stdout stays empty — the usage error didn't go to stdout.
+        assert_eq!(result["stdout"].as_str().unwrap(), "");
     }
 
     // --- OpenAI schema ----------------------------------------------------

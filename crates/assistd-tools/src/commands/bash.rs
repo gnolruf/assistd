@@ -44,12 +44,31 @@ impl Command for BashCommand {
         "bash"
     }
 
+    fn summary(&self) -> &'static str {
+        "escape hatch: run a bash -c <script> subprocess (30s timeout)"
+    }
+
+    fn help(&self) -> String {
+        "usage: bash \"<script>\"\n\
+         \n\
+         Spawn a real `bash -c <script>` subprocess. The escape hatch for \
+         anything the in-process commands can't express: redirections, env \
+         expansion, backgrounding, pipes the chain parser doesn't support.\n\
+         \n\
+         Stdin is forwarded to the script's stdin. Stdout/stderr/exit-code \
+         are captured. Exit 124 on timeout (30s default), 127 if the spawn \
+         itself failed, 137 if killed by signal.\n"
+            .to_string()
+    }
+
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         if input.args.is_empty() {
-            return Ok(CommandOutput::failed(
-                2,
-                b"missing script argument; use: bash \"<script>\"\n".to_vec(),
-            ));
+            return Ok(CommandOutput {
+                stdout: self.help().into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                attachments: Vec::new(),
+            });
         }
         let script = input.args.join(" ");
 

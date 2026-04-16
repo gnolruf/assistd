@@ -15,6 +15,20 @@ impl Command for LsCommand {
         "ls"
     }
 
+    fn summary(&self) -> &'static str {
+        "list directory entries (type, size, name); defaults to cwd"
+    }
+
+    fn help(&self) -> String {
+        "usage: ls [PATH]\n\
+         \n\
+         List directory entries alphabetically, one per line, formatted as \
+         `<type>\\t<size>\\t<name>`. `<type>` is `dir`, `file`, or `symlink`; \
+         `<size>` is bytes from the entry's (symlink-preserving) metadata. \
+         Defaults to the daemon's CWD if PATH is omitted.\n"
+            .to_string()
+    }
+
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         let path = input.args.first().map(|s| s.as_str()).unwrap_or(".");
         let mut reader = match tokio::fs::read_dir(path).await {

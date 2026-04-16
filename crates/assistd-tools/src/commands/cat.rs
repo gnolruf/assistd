@@ -15,6 +15,23 @@ impl Command for CatCommand {
         "cat"
     }
 
+    fn summary(&self) -> &'static str {
+        "read text files or stdin; binary rejected (see `see`, `cat -b`)"
+    }
+
+    fn help(&self) -> String {
+        "usage: cat [-b] [FILE]...\n\
+         \n\
+         Concatenate files, or echo stdin if no files given. Binary files \
+         are rejected so their raw bytes don't pollute the model's context.\n\
+         \n\
+         Flags:\n  \
+           -b  print metadata (mime, size) instead of content — safe for binary files\n\
+         \n\
+         For image files, use `see PATH` to attach them as a vision input.\n"
+            .to_string()
+    }
+
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         let (metadata_only, files) = partition_flags(&input.args);
 
