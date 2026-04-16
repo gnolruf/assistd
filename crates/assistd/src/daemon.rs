@@ -2,7 +2,7 @@ use anyhow::Result;
 use assistd_core::{AppState, Config, PresenceManager};
 use assistd_llm::LlamaChatClient;
 use assistd_tools::{
-    CommandRegistry, RunTool, ToolRegistry,
+    CommandRegistry, PresentSpec, RunTool, ToolRegistry,
     commands::{
         BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
         WebCommand, WriteCommand,
@@ -36,6 +36,25 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     hotkey::validate(&config.presence)?;
     gpu_monitor::validate(&config.sleep)?;
     idle_monitor::validate(&config.sleep)?;
+
+    // Reset the Layer 2 overflow directory on every startup. Clearing it
+    // means the per-daemon monotonic counter always starts at 1 with no
+    // stale `cmd-<n>.txt` files left over from a previous run.
+    let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
+    if overflow_dir.exists() {
+        std::fs::remove_dir_all(&overflow_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to clear tools.output.overflow_dir {}: {e}",
+                overflow_dir.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(&overflow_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to create tools.output.overflow_dir {}: {e}",
+            overflow_dir.display()
+        )
+    })?;
 
     info!(
         "assistd v{} — local model agent OS assistant daemon",
@@ -105,13 +124,19 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     commands.register(BashCommand::default());
     let commands = Arc::new(commands);
 
+    let present_spec = PresentSpec {
+        max_lines: config.tools.output.max_lines as usize,
+        max_bytes: (config.tools.output.max_kb as usize) * 1024,
+        overflow_dir: overflow_dir.clone(),
+    };
     let mut tools = ToolRegistry::new();
-    tools.register(RunTool::new(commands.clone()));
+    tools.register(RunTool::new(commands.clone(), present_spec));
     let tools = Arc::new(tools);
     info!(
-        "tools: registered {} ({} commands)",
+        "tools: registered {} ({} commands, overflow dir {})",
         tools.len(),
-        commands.len()
+        commands.len(),
+        overflow_dir.display()
     );
 
     let state = Arc::new(AppState::new(

@@ -1,9 +1,17 @@
 //! The single LLM-facing tool: `run`. Parses a command-line string,
-//! routes each stage through a [`CommandRegistry`], and returns a
-//! structured JSON result with stdout (capped), stderr, exit code, and
-//! any attachments (e.g. images produced by `see`) base64-encoded.
+//! routes each stage through a [`CommandRegistry`] (Layer 1), then hands the
+//! final [`CommandOutput`] to the [`crate::presentation`] module (Layer 2) for
+//! binary guarding, overflow spill-to-file, stderr attachment, and the
+//! metadata footer.
+//!
+//! The split between the two layers matters: pipes operate on raw bytes
+//! (Layer 1), so `cat bigfile | grep foo | wc -l` feeds grep the full cat
+//! output without any LLM-presentation truncation. Only the final chain
+//! result is condensed into a model-friendly body.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -14,20 +22,21 @@ use serde_json::{Value, json};
 use crate::Tool;
 use crate::chain::{execute, parse_chain};
 use crate::command::{Attachment, CommandRegistry};
-
-/// Cap on the stdout we surface to the LLM. A runaway command (e.g. a
-/// `bash "cat /dev/urandom"`) would otherwise bury the model's context
-/// window. When hit, the returned JSON gains `truncated: true` and the
-/// stdout string ends with `"…<truncated>"`.
-pub const STDOUT_MAX: usize = 64 * 1024;
+use crate::presentation::{PresentSpec, present};
 
 pub struct RunTool {
     registry: Arc<CommandRegistry>,
+    spec: PresentSpec,
+    counter: Arc<AtomicU64>,
 }
 
 impl RunTool {
-    pub fn new(registry: Arc<CommandRegistry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Arc<CommandRegistry>, spec: PresentSpec) -> Self {
+        Self {
+            registry,
+            spec,
+            counter: Arc::new(AtomicU64::new(0)),
+        }
     }
 }
 
@@ -42,7 +51,10 @@ impl Tool for RunTool {
          Supports pipelines (|), and/or (&&, ||), and sequencing (;). \
          Built-in commands: cat, ls, grep, wc, echo, write, see, web, bash. \
          Redirections (>, <), env expansion ($VAR), and backgrounding (&) \
-         are NOT supported — use `bash \"…\"` for a real shell when needed."
+         are NOT supported — use `bash \"…\"` for a real shell when needed. \
+         Large outputs are truncated; the truncation notice includes a \
+         `Full output: /tmp/assistd-output/cmd-N.txt` path that subsequent \
+         `run` calls can grep/cat to read the full content."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -67,17 +79,25 @@ impl Tool for RunTool {
             .ok_or_else(|| anyhow!("`command` (string) is required"))?;
 
         let chain = parse_chain(command).map_err(|e| anyhow!("parse error: {e}"))?;
+        let start = Instant::now();
         let out = execute(&chain, &self.registry, Vec::new()).await?;
+        let duration = start.elapsed();
 
-        let (stdout, truncated) = cap_utf8(&out.stdout, STDOUT_MAX);
+        let r = present(out, &self.spec, &self.counter, duration);
+
         let mut result = json!({
-            "stdout": stdout,
-            "stderr": String::from_utf8_lossy(&out.stderr),
-            "exit_code": out.exit_code,
-            "truncated": truncated,
+            "output":      r.output,
+            "stdout":      r.stdout_raw,
+            "stderr":      r.stderr_raw,
+            "exit_code":   r.exit_code,
+            "truncated":   r.truncated,
+            "duration_ms": r.duration_ms,
         });
-        if !out.attachments.is_empty() {
-            let rendered: Vec<Value> = out.attachments.iter().map(render_attachment).collect();
+        if let Some(p) = &r.overflow_file {
+            result["overflow_file"] = json!(p.to_string_lossy());
+        }
+        if !r.attachments.is_empty() {
+            let rendered: Vec<Value> = r.attachments.iter().map(render_attachment).collect();
             result["attachments"] = Value::Array(rendered);
         }
         Ok(result)
@@ -94,29 +114,15 @@ fn render_attachment(a: &Attachment) -> Value {
     }
 }
 
-/// Truncate `raw` to at most `max` UTF-8 bytes, falling back to a
-/// replacement-character-preserving decode. Returns `(string, truncated)`.
-fn cap_utf8(raw: &[u8], max: usize) -> (String, bool) {
-    if raw.len() <= max {
-        return (String::from_utf8_lossy(raw).into_owned(), false);
-    }
-    // Find a char boundary at or before `max` so we don't split UTF-8.
-    let s = String::from_utf8_lossy(raw);
-    let mut cut = max.min(s.len());
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let mut truncated = s[..cut].to_string();
-    truncated.push_str("…<truncated>");
-    (truncated, true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::command::{Command, CommandInput, CommandOutput};
     use crate::commands::{CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand};
-    use tempfile::tempdir;
+    use async_trait::async_trait;
+    use regex::Regex;
+    use std::path::Path;
+    use tempfile::{TempDir, tempdir};
 
     fn registry() -> Arc<CommandRegistry> {
         let mut r = CommandRegistry::new();
@@ -129,9 +135,51 @@ mod tests {
         Arc::new(r)
     }
 
+    fn tool_with_dir(dir: &Path) -> RunTool {
+        RunTool::new(
+            registry(),
+            PresentSpec {
+                max_lines: 200,
+                max_bytes: 50 * 1024,
+                overflow_dir: dir.to_path_buf(),
+            },
+        )
+    }
+
+    fn tool_with(dir: &Path, reg: Arc<CommandRegistry>) -> RunTool {
+        RunTool::new(
+            reg,
+            PresentSpec {
+                max_lines: 200,
+                max_bytes: 50 * 1024,
+                overflow_dir: dir.to_path_buf(),
+            },
+        )
+    }
+
+    fn fresh_dir() -> TempDir {
+        tempdir().expect("tempdir")
+    }
+
     fn invoke(tool: &RunTool, cmd: &str) -> Value {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(tool.invoke(json!({ "command": cmd }))).unwrap()
+    }
+
+    fn footer_re() -> Regex {
+        Regex::new(r"\[exit:-?\d+ \| \d+ms\]$").unwrap()
+    }
+
+    fn assert_footer(output: &str, expected_exit: i32) {
+        assert!(
+            footer_re().is_match(output),
+            "expected footer at end of: {output:?}"
+        );
+        let prefix = format!("[exit:{expected_exit} | ");
+        assert!(
+            output.contains(&prefix),
+            "expected footer exit_code={expected_exit} in: {output:?}"
+        );
     }
 
     const PNG_BYTES: &[u8] = &[
@@ -146,35 +194,47 @@ mod tests {
 
     #[test]
     fn run_cat_returns_file_contents() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("notes.md");
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("notes.md");
         std::fs::write(&path, b"hello notes\n").unwrap();
-        let tool = RunTool::new(registry());
+        let tool = tool_with_dir(dir.path());
         let cmd = format!("cat {}", path.to_string_lossy());
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 0);
         assert_eq!(result["stdout"], "hello notes\n");
+        let output = result["output"].as_str().unwrap();
+        assert!(output.starts_with("hello notes\n"));
+        assert_footer(output, 0);
     }
 
     #[test]
     fn run_cat_rejects_binary_image() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("photo.png");
+        // `cat` rejects the binary file at Layer 1 — exit 1 with stderr.
+        // Layer 2 surfaces stderr inline via [stderr] marker.
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("photo.png");
         std::fs::write(&path, PNG_BYTES).unwrap();
-        let tool = RunTool::new(registry());
+        let tool = tool_with_dir(dir.path());
         let cmd = format!("cat {}", path.to_string_lossy());
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 1);
         let stderr = result["stderr"].as_str().unwrap();
         assert!(stderr.contains("binary image/png"), "{stderr}");
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("[stderr] "), "output={output}");
+        assert!(output.contains("binary image/png"), "output={output}");
+        assert_footer(output, 1);
     }
 
     #[test]
     fn run_see_returns_attachment_as_base64() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("shot.png");
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("shot.png");
         std::fs::write(&path, PNG_BYTES).unwrap();
-        let tool = RunTool::new(registry());
+        let tool = tool_with_dir(dir.path());
         let cmd = format!("see {}", path.to_string_lossy());
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 0);
@@ -190,12 +250,11 @@ mod tests {
 
     #[test]
     fn run_attachments_flow_through_pipeline() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("shot.png");
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("shot.png");
         std::fs::write(&path, PNG_BYTES).unwrap();
-        let tool = RunTool::new(registry());
-        // `see X | wc -l` — wc's stdout replaces see's text output, but
-        // the image attachment survives the pipe.
+        let tool = tool_with_dir(dir.path());
         let cmd = format!("see {} | wc -l", path.to_string_lossy());
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 0);
@@ -206,10 +265,11 @@ mod tests {
 
     #[test]
     fn run_grep_ic_returns_count() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("log.txt");
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("log.txt");
         std::fs::write(&path, b"ERROR a\ninfo\nError b\nwarn\n").unwrap();
-        let tool = RunTool::new(registry());
+        let tool = tool_with_dir(dir.path());
         let cmd = format!("cat {} | grep -ic \"error\"", path.to_string_lossy());
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 0);
@@ -218,10 +278,11 @@ mod tests {
 
     #[test]
     fn run_pipeline_cat_grep_wc() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("log.txt");
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("log.txt");
         std::fs::write(&path, b"INFO start\nERROR a\nWARN b\nERROR c\nINFO done\n").unwrap();
-        let tool = RunTool::new(registry());
+        let tool = tool_with_dir(dir.path());
         let cmd = format!("cat {} | grep ERROR | wc -l", path.to_string_lossy());
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 0);
@@ -230,7 +291,8 @@ mod tests {
 
     #[test]
     fn run_or_fallback_on_missing_file() {
-        let tool = RunTool::new(registry());
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
         let result = invoke(&tool, "cat /no/such/path || echo 'not found'");
         assert_eq!(result["exit_code"], 0);
         let stdout = result["stdout"].as_str().unwrap();
@@ -239,9 +301,10 @@ mod tests {
 
     #[test]
     fn run_and_chains_only_on_success() {
-        let dir = tempdir().unwrap();
-        let tool = RunTool::new(registry());
-        let cmd = format!("ls {} && echo done", dir.path().to_string_lossy());
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        let tool = tool_with_dir(dir.path());
+        let cmd = format!("ls {} && echo done", tmp.path().to_string_lossy());
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 0);
         let stdout = result["stdout"].as_str().unwrap();
@@ -250,7 +313,8 @@ mod tests {
 
     #[test]
     fn run_seq_runs_both() {
-        let tool = RunTool::new(registry());
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
         let result = invoke(&tool, "echo hello ; echo world");
         assert_eq!(result["exit_code"], 0);
         let stdout = result["stdout"].as_str().unwrap();
@@ -260,12 +324,12 @@ mod tests {
 
     #[test]
     fn run_unknown_command_lists_available() {
-        let tool = RunTool::new(registry());
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
         let result = invoke(&tool, "foo");
         assert_eq!(result["exit_code"], 127);
         let stderr = result["stderr"].as_str().unwrap();
         assert!(stderr.contains("[error] unknown command: foo"), "{stderr}");
-        // Registry order is preserved by `sorted_names` alphabetically.
         assert!(stderr.contains("cat"), "{stderr}");
         assert!(stderr.contains("echo"), "{stderr}");
         assert!(stderr.contains("grep"), "{stderr}");
@@ -278,7 +342,8 @@ mod tests {
 
     #[test]
     fn run_rejects_wrong_argument_key() {
-        let tool = RunTool::new(registry());
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt
             .block_on(tool.invoke(json!({ "cmd": "ls" })))
@@ -288,7 +353,8 @@ mod tests {
 
     #[test]
     fn run_parse_error_surfaces() {
-        let tool = RunTool::new(registry());
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt
             .block_on(tool.invoke(json!({ "command": "echo hi |" })))
@@ -298,7 +364,8 @@ mod tests {
 
     #[test]
     fn run_omits_attachments_key_when_empty() {
-        let tool = RunTool::new(registry());
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
         let result = invoke(&tool, "echo hi");
         assert!(
             result.get("attachments").is_none(),
@@ -306,35 +373,219 @@ mod tests {
         );
     }
 
-    /// Fake command that emits 200 KiB — should trigger `STDOUT_MAX`.
-    struct Mass;
+    // --- new: Layer 2 acceptance criteria --------------------------------
+
+    /// Fake command: emits a configurable number of lines.
+    struct Lines(usize);
     #[async_trait]
-    impl Command for Mass {
+    impl Command for Lines {
         fn name(&self) -> &str {
-            "mass"
+            "lines"
         }
         async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
-            Ok(CommandOutput::ok(vec![b'x'; 200 * 1024]))
+            let mut v = Vec::with_capacity(self.0 * 8);
+            for i in 1..=self.0 {
+                v.extend_from_slice(format!("line {i}\n").as_bytes());
+            }
+            Ok(CommandOutput::ok(v))
+        }
+    }
+
+    /// Fake command: counts how many bytes flow in on stdin.
+    struct ByteCount;
+    #[async_trait]
+    impl Command for ByteCount {
+        fn name(&self) -> &str {
+            "bytecount"
+        }
+        async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+            Ok(CommandOutput::ok(
+                format!("{}\n", input.stdin.len()).into_bytes(),
+            ))
+        }
+    }
+
+    /// Fake command: emits raw PNG bytes as stdout.
+    struct EmitPng;
+    #[async_trait]
+    impl Command for EmitPng {
+        fn name(&self) -> &str {
+            "emitpng"
+        }
+        async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
+            Ok(CommandOutput::ok(PNG_BYTES.to_vec()))
+        }
+    }
+
+    /// Fake command: produces stdout + stderr + non-zero exit in one shot.
+    struct Noisy;
+    #[async_trait]
+    impl Command for Noisy {
+        fn name(&self) -> &str {
+            "noisy"
+        }
+        async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
+            Ok(CommandOutput {
+                stdout: b"stdout content\n".to_vec(),
+                stderr: b"stderr content\n".to_vec(),
+                exit_code: 1,
+                attachments: Vec::new(),
+            })
         }
     }
 
     #[test]
-    fn run_caps_stdout_and_sets_truncated() {
+    fn run_pipe_integrity_full_bytes_reach_final_stage() {
+        // Layer 1 must NOT truncate the 5000-line stream between `lines` and
+        // `bytecount`. The final `bytecount` sees the full upstream bytes.
         let mut reg = CommandRegistry::new();
-        reg.register(Mass);
-        let tool = RunTool::new(Arc::new(reg));
-        let result = invoke(&tool, "mass");
+        reg.register(Lines(5000));
+        reg.register(ByteCount);
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), Arc::new(reg));
+        let result = invoke(&tool, "lines | bytecount");
+        let expected_bytes: usize = (1..=5000).map(|i| format!("line {i}\n").len()).sum();
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(
+            result["stdout"].as_str().unwrap(),
+            &format!("{expected_bytes}\n")
+        );
+        assert_eq!(result["truncated"], false);
+        assert!(result.get("overflow_file").is_none());
+    }
+
+    #[test]
+    fn run_overflow_end_to_end_writes_temp_file() {
+        let mut reg = CommandRegistry::new();
+        reg.register(Lines(5000));
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), Arc::new(reg));
+        let result = invoke(&tool, "lines");
         assert_eq!(result["truncated"], true);
-        let stdout = result["stdout"].as_str().unwrap();
-        assert!(stdout.ends_with("…<truncated>"), "length={}", stdout.len());
-        assert!(stdout.len() <= STDOUT_MAX + "…<truncated>".len());
+        let path = result["overflow_file"].as_str().expect("overflow_file");
+        assert_eq!(path, dir.path().join("cmd-1.txt").to_string_lossy());
+
+        let contents = std::fs::read_to_string(path).unwrap();
+        // The full 5000-line content is on disk.
+        assert_eq!(contents.lines().count(), 5000);
+        assert!(contents.starts_with("line 1\n"));
+        assert!(contents.ends_with("line 5000\n"));
+
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("line 1\n"));
+        assert!(output.contains("line 200\n"));
+        assert!(!output.contains("line 201\n"));
+        assert!(output.contains("--- output truncated (5000 lines,"));
+        assert!(output.contains(&format!("Full output: {path}")));
+        assert!(output.contains(&format!("Explore: cat {path} | grep")));
+        assert!(output.contains(&format!("cat {path} | tail 100")));
+        assert_footer(output, 0);
+    }
+
+    #[test]
+    fn run_overflow_file_readable_via_followup_grep() {
+        // Acceptance: after an overflow, the LLM can follow up with
+        // `cat <overflow-path> | grep <pat>` and get matches from the full
+        // output.
+        let mut reg = CommandRegistry::new();
+        reg.register(Lines(5000));
+        reg.register(CatCommand);
+        reg.register(GrepCommand);
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), Arc::new(reg));
+
+        let first = invoke(&tool, "lines");
+        let path = first["overflow_file"].as_str().expect("path").to_string();
+
+        // Follow-up: same RunTool instance, same overflow dir, reads the
+        // spilled file.
+        let followup = invoke(&tool, &format!("cat {path} | grep \"line 4242\""));
+        assert_eq!(followup["exit_code"], 0);
+        assert_eq!(followup["stdout"].as_str().unwrap(), "line 4242\n");
+    }
+
+    #[test]
+    fn run_binary_guard_end_to_end() {
+        let mut reg = CommandRegistry::new();
+        reg.register(EmitPng);
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), Arc::new(reg));
+        let result = invoke(&tool, "emitpng");
+        assert_eq!(result["exit_code"], 0);
+        let output = result["output"].as_str().unwrap();
+        assert!(output.starts_with("[error] binary output (image/png, "));
+        assert!(output.contains(". Use: cat -b <path>"));
+        assert_footer(output, 0);
+        // stdout_raw is suppressed when binary guard trips.
+        assert_eq!(result["stdout"].as_str().unwrap(), "");
+    }
+
+    #[test]
+    fn run_metadata_footer_on_unknown_command() {
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
+        let result = invoke(&tool, "nope");
+        assert_eq!(result["exit_code"], 127);
+        let output = result["output"].as_str().unwrap();
+        assert_footer(output, 127);
+        assert!(output.contains("[stderr] "));
+        assert!(output.contains("unknown command: nope"));
+    }
+
+    #[test]
+    fn run_stderr_attached_when_both_stdout_and_stderr_present() {
+        let mut reg = CommandRegistry::new();
+        reg.register(Noisy);
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), Arc::new(reg));
+        let result = invoke(&tool, "noisy");
+        assert_eq!(result["exit_code"], 1);
+        let output = result["output"].as_str().unwrap();
+        // Stdout content survives; stderr is not silently dropped; both appear.
+        assert!(output.contains("stdout content\n"));
+        assert!(output.contains("[stderr] [noisy]\tstderr content\n"));
+        assert_footer(output, 1);
+    }
+
+    #[test]
+    fn run_metadata_footer_present_on_success() {
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
+        let result = invoke(&tool, "echo hi");
+        let output = result["output"].as_str().unwrap();
+        assert_footer(output, 0);
+        assert!(output.starts_with("hi\n"));
+    }
+
+    #[test]
+    fn run_respects_config_overrides() {
+        // Tight spec: 3 lines / 10 KB. `lines 10` overflows via line cap.
+        let mut reg = CommandRegistry::new();
+        reg.register(Lines(10));
+        let dir = fresh_dir();
+        let tool = RunTool::new(
+            Arc::new(reg),
+            PresentSpec {
+                max_lines: 3,
+                max_bytes: 10 * 1024,
+                overflow_dir: dir.path().to_path_buf(),
+            },
+        );
+        let result = invoke(&tool, "lines");
+        assert_eq!(result["truncated"], true);
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("line 1\n"));
+        assert!(output.contains("line 3\n"));
+        assert!(!output.contains("line 4\n"));
+        assert!(output.contains("--- output truncated (10 lines,"));
     }
 
     // --- OpenAI schema ----------------------------------------------------
 
     #[test]
     fn parameters_schema_shape() {
-        let tool = RunTool::new(registry());
+        let dir = fresh_dir();
+        let tool = tool_with_dir(dir.path());
         let schema = tool.parameters_schema();
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
