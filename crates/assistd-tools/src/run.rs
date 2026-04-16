@@ -154,12 +154,12 @@ fn render_attachment(a: &Attachment) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolRegistry;
     use crate::command::{Command, CommandInput, CommandOutput};
     use crate::commands::{
         BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
         WebCommand, WriteCommand,
     };
-    use crate::ToolRegistry;
     use async_trait::async_trait;
     use regex::Regex;
     use std::path::Path;
@@ -671,7 +671,9 @@ mod tests {
         let dir = fresh_dir();
         let tool = tool_with(dir.path(), full_registry());
         let desc = tool.description();
-        for name in ["cat", "ls", "grep", "wc", "echo", "write", "see", "web", "bash"] {
+        for name in [
+            "cat", "ls", "grep", "wc", "echo", "write", "see", "web", "bash",
+        ] {
             assert!(desc.contains(name), "description missing `{name}`: {desc}");
         }
         // Summary text from a representative command should appear.
@@ -681,7 +683,8 @@ mod tests {
         );
         // Level-1 discovery hint tells the LLM how to drill in.
         assert!(
-            desc.to_lowercase().contains("no (or insufficient) arguments")
+            desc.to_lowercase()
+                .contains("no (or insufficient) arguments")
                 || desc.to_lowercase().contains("usage"),
             "description missing drill-in hint: {desc}"
         );
@@ -740,7 +743,9 @@ mod tests {
         let desc = schemas[0]["function"]["description"]
             .as_str()
             .expect("description is a string");
-        for name in ["cat", "ls", "grep", "wc", "echo", "write", "see", "web", "bash"] {
+        for name in [
+            "cat", "ls", "grep", "wc", "echo", "write", "see", "web", "bash",
+        ] {
             assert!(desc.contains(name), "schema description missing `{name}`");
         }
     }

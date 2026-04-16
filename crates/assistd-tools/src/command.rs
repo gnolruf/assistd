@@ -135,8 +135,11 @@ impl CommandRegistry {
     /// by `RunTool::new` to build the dynamic Level-0 description the
     /// LLM sees in its tool schema.
     pub fn sorted_summaries(&self) -> Vec<(&str, &'static str)> {
-        let mut v: Vec<(&str, &'static str)> =
-            self.commands.iter().map(|c| (c.name(), c.summary())).collect();
+        let mut v: Vec<(&str, &'static str)> = self
+            .commands
+            .iter()
+            .map(|c| (c.name(), c.summary()))
+            .collect();
         v.sort_unstable_by_key(|(n, _)| *n);
         v
     }
@@ -218,10 +221,7 @@ mod tests {
                 "{name} summary is {} chars (>80): {summary:?}",
                 summary.len()
             );
-            let help = reg
-                .get(name)
-                .expect("command registered")
-                .help();
+            let help = reg.get(name).expect("command registered").help();
             assert!(!help.is_empty(), "{name} has empty help");
             assert!(
                 help.contains("usage:"),
