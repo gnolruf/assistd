@@ -46,18 +46,41 @@ impl Command for WebCommand {
         "web"
     }
 
+    fn summary(&self) -> &'static str {
+        "HTTP GET a URL and return the body as stdout (http/https only)"
+    }
+
+    fn help(&self) -> String {
+        "usage: web URL\n\
+         \n\
+         HTTP GET the URL (http or https only) and return the response body \
+         as stdout. 30-second timeout; response body capped at 10 MiB.\n\
+         \n\
+         Non-2xx statuses exit 1 so `||` fallbacks fire; transport errors \
+         also exit 1. Exit 2 on usage errors (wrong arg count, non-http scheme).\n"
+            .to_string()
+    }
+
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+        if input.args.is_empty() {
+            return Ok(CommandOutput {
+                stdout: self.help().into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                attachments: Vec::new(),
+            });
+        }
         if input.args.len() != 1 {
             return Ok(CommandOutput::failed(
                 2,
-                b"web expects exactly one URL argument\n".to_vec(),
+                b"error: web expects exactly one URL argument\n".to_vec(),
             ));
         }
         let url = &input.args[0];
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok(CommandOutput::failed(
                 2,
-                format!("{url}: only http(s):// URLs are allowed\n").into_bytes(),
+                format!("error: {url}: only http(s):// URLs are allowed\n").into_bytes(),
             ));
         }
 

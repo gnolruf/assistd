@@ -217,6 +217,12 @@ mod tests {
         fn name(&self) -> &str {
             self.name
         }
+        fn summary(&self) -> &'static str {
+            "test stub"
+        }
+        fn help(&self) -> String {
+            "stub help".to_string()
+        }
         async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
             *self.invoked.lock().unwrap() = true;
             Ok(CommandOutput {
@@ -235,6 +241,12 @@ mod tests {
         fn name(&self) -> &str {
             "echo_stdin"
         }
+        fn summary(&self) -> &'static str {
+            "test: echo stdin"
+        }
+        fn help(&self) -> String {
+            "usage: echo_stdin".to_string()
+        }
         async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(input.stdin))
         }
@@ -246,6 +258,12 @@ mod tests {
     impl Command for LineCount {
         fn name(&self) -> &str {
             "lc"
+        }
+        fn summary(&self) -> &'static str {
+            "test: count lines"
+        }
+        fn help(&self) -> String {
+            "usage: lc".to_string()
         }
         async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
             let n = input.stdin.iter().filter(|b| **b == b'\n').count();
@@ -259,6 +277,12 @@ mod tests {
     impl Command for Flood {
         fn name(&self) -> &str {
             "flood"
+        }
+        fn summary(&self) -> &'static str {
+            "test: emit N bytes"
+        }
+        fn help(&self) -> String {
+            "usage: flood".to_string()
         }
         async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(vec![b'x'; self.0]))
@@ -463,6 +487,12 @@ mod tests {
         impl Command for Err1 {
             fn name(&self) -> &str {
                 "boom"
+            }
+            fn summary(&self) -> &'static str {
+                "test: always fails"
+            }
+            fn help(&self) -> String {
+                "usage: boom".to_string()
             }
             async fn run(&self, _: CommandInput) -> Result<CommandOutput> {
                 Ok(CommandOutput::failed(1, b"something went wrong\n".to_vec()))

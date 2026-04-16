@@ -58,15 +58,51 @@ impl Command for GrepCommand {
         "grep"
     }
 
+    fn summary(&self) -> &'static str {
+        "filter lines matching a pattern (supports -i, -v, -c)"
+    }
+
+    fn help(&self) -> String {
+        "usage: grep [-ivc] PATTERN [FILE]\n\
+         \n\
+         Print lines from FILE (or stdin) that match the regex PATTERN.\n\
+         \n\
+         Flags:\n  \
+           -i  case-insensitive\n  \
+           -v  invert match (print non-matching lines)\n  \
+           -c  print the count instead of the matching lines\n\
+         \n\
+         Flags can be combined (e.g. `-ivc`). Exit 0 if any line matched \
+         (or the count is non-zero under `-c`), 1 if no matches, 2 on \
+         usage/input errors.\n"
+            .to_string()
+    }
+
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+        if input.args.is_empty() {
+            return Ok(CommandOutput {
+                stdout: self.help().into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                attachments: Vec::new(),
+            });
+        }
         let (flags, positional) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => {
-                return Ok(CommandOutput::failed(2, format!("{msg}\n").into_bytes()));
+                return Ok(CommandOutput::failed(
+                    2,
+                    format!("error: {msg}\n").into_bytes(),
+                ));
             }
         };
         if positional.is_empty() {
-            return Ok(CommandOutput::failed(2, b"missing pattern\n".to_vec()));
+            return Ok(CommandOutput {
+                stdout: self.help().into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                attachments: Vec::new(),
+            });
         }
 
         let pattern = &positional[0];

@@ -19,11 +19,35 @@ impl Command for SeeCommand {
         "see"
     }
 
+    fn summary(&self) -> &'static str {
+        "attach an image file as a vision input for the next LLM turn"
+    }
+
+    fn help(&self) -> String {
+        "usage: see PATH\n\
+         \n\
+         Read the image file at PATH and attach it to the tool result as a \
+         vision input. The chat loop surfaces the attachment on the model's \
+         next turn. Attachments flow through pipes untouched (e.g. \
+         `see img.png | wc` still surfaces the image).\n\
+         \n\
+         Exit 1 if the file is missing or not a recognized image format.\n"
+            .to_string()
+    }
+
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+        if input.args.is_empty() {
+            return Ok(CommandOutput {
+                stdout: self.help().into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                attachments: Vec::new(),
+            });
+        }
         if input.args.len() != 1 {
             return Ok(CommandOutput::failed(
                 2,
-                b"see expects exactly one path argument\n".to_vec(),
+                b"error: see expects exactly one path argument\n".to_vec(),
             ));
         }
         let path = &input.args[0];

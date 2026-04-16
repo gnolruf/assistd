@@ -69,9 +69,26 @@ impl CommandOutput {
 }
 
 /// A single internal command (`cat`, `grep`, `bash`, …).
+///
+/// The `summary` / `help` split backs the progressive `--help` discovery
+/// system: `summary` is a ≤80-char one-liner that [`CommandRegistry`]
+/// aggregates for the `run` tool's Level-0 description (the list the LLM
+/// sees in its tool schema); `help` is the full usage block a command
+/// emits when invoked with insufficient arguments (Level-1). Commands
+/// with subcommands can return subcommand-specific help from within their
+/// own `run` body (Level-2).
 #[async_trait]
 pub trait Command: Send + Sync + 'static {
     fn name(&self) -> &str;
+    /// One-line advertisement (≤80 chars, no trailing newline). Used to
+    /// build the `run` tool's Level-0 description. Convention: terse verb
+    /// phrase, e.g. `"filter lines matching a pattern (supports -i, -v, -c)"`.
+    fn summary(&self) -> &'static str;
+    /// Full usage block. Emitted verbatim on stdout when the command is
+    /// called with insufficient arguments. Convention: first line begins
+    /// with `usage: <name> …` so the LLM can visually disambiguate help
+    /// output from a real `[<name>]\terror: …` failure.
+    fn help(&self) -> String;
     async fn run(&self, input: CommandInput) -> Result<CommandOutput>;
 }
 
@@ -113,6 +130,16 @@ impl CommandRegistry {
         v.sort_unstable();
         v
     }
+
+    /// `(name, summary)` pairs, sorted alphabetically by name. Consumed
+    /// by `RunTool::new` to build the dynamic Level-0 description the
+    /// LLM sees in its tool schema.
+    pub fn sorted_summaries(&self) -> Vec<(&str, &'static str)> {
+        let mut v: Vec<(&str, &'static str)> =
+            self.commands.iter().map(|c| (c.name(), c.summary())).collect();
+        v.sort_unstable_by_key(|(n, _)| *n);
+        v
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +153,12 @@ mod tests {
         fn name(&self) -> &str {
             self.0
         }
+        fn summary(&self) -> &'static str {
+            "stub command for tests"
+        }
+        fn help(&self) -> String {
+            "stub help".to_string()
+        }
         async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(Vec::new()))
         }
@@ -138,6 +171,63 @@ mod tests {
         reg.register(Stub("cat"));
         reg.register(Stub("ls"));
         assert_eq!(reg.sorted_names(), vec!["cat", "grep", "ls"]);
+    }
+
+    #[test]
+    fn sorted_summaries_is_alphabetical_and_paired() {
+        let mut reg = CommandRegistry::new();
+        reg.register(Stub("grep"));
+        reg.register(Stub("cat"));
+        reg.register(Stub("ls"));
+        let pairs = reg.sorted_summaries();
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0].0, "cat");
+        assert_eq!(pairs[1].0, "grep");
+        assert_eq!(pairs[2].0, "ls");
+        // Every pair carries a non-empty summary.
+        for (name, summary) in &pairs {
+            assert!(!summary.is_empty(), "{name} has empty summary");
+        }
+    }
+
+    /// Acceptance criterion #6: every registered production command has a
+    /// non-empty `help()` return value. Also asserts `summary()` is
+    /// non-empty and within the ≤80-char budget, since the Level-0
+    /// description is the contract the LLM actually consumes.
+    #[test]
+    fn every_registered_command_has_nonempty_help_and_summary() {
+        use crate::commands::{
+            BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
+            WebCommand, WriteCommand,
+        };
+        let mut reg = CommandRegistry::new();
+        reg.register(CatCommand);
+        reg.register(LsCommand);
+        reg.register(GrepCommand);
+        reg.register(WcCommand);
+        reg.register(EchoCommand);
+        reg.register(WriteCommand);
+        reg.register(SeeCommand);
+        reg.register(WebCommand::new());
+        reg.register(BashCommand::default());
+        assert_eq!(reg.len(), 9);
+        for (name, summary) in reg.sorted_summaries() {
+            assert!(!summary.is_empty(), "{name} has empty summary");
+            assert!(
+                summary.len() <= 80,
+                "{name} summary is {} chars (>80): {summary:?}",
+                summary.len()
+            );
+            let help = reg
+                .get(name)
+                .expect("command registered")
+                .help();
+            assert!(!help.is_empty(), "{name} has empty help");
+            assert!(
+                help.contains("usage:"),
+                "{name} help should contain `usage:` line — got {help:?}"
+            );
+        }
     }
 
     #[test]

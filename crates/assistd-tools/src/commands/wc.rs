@@ -13,6 +13,21 @@ impl Command for WcCommand {
         "wc"
     }
 
+    fn summary(&self) -> &'static str {
+        "count lines/words/bytes on stdin; -l for lines only"
+    }
+
+    fn help(&self) -> String {
+        "usage: wc [-l]\n\
+         \n\
+         Count newlines, whitespace-separated words, and bytes read from \
+         stdin. Output is `<lines> <words> <bytes>` on one line.\n\
+         \n\
+         Flags:\n  \
+           -l  print only the line count\n"
+            .to_string()
+    }
+
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         let mut lines_only = false;
         for a in &input.args {
