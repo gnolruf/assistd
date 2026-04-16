@@ -17,6 +17,8 @@ pub struct Config {
     pub presence: PresenceConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 /// Local model settings.
@@ -201,6 +203,53 @@ fn default_shutdown_grace_secs() -> u64 {
     5
 }
 
+/// Tools subsystem configuration. Nested container so future tool-related
+/// knobs (sandboxing, per-command timeouts, etc.) can slot in alongside the
+/// output-presentation limits.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub output: ToolsOutputConfig,
+}
+
+/// Layer-2 presentation limits applied to the final output of `run` before
+/// it is handed to the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolsOutputConfig {
+    /// Max lines of stdout surfaced to the LLM before overflow spill.
+    #[serde(default = "default_tools_max_lines")]
+    pub max_lines: u32,
+    /// Max bytes of the truncated head, in KB.
+    #[serde(default = "default_tools_max_kb")]
+    pub max_kb: u32,
+    /// Directory where overflow output is spilled as `cmd-<n>.txt`.
+    /// Cleared + recreated on daemon startup.
+    #[serde(default = "default_tools_overflow_dir")]
+    pub overflow_dir: String,
+}
+
+impl Default for ToolsOutputConfig {
+    fn default() -> Self {
+        Self {
+            max_lines: default_tools_max_lines(),
+            max_kb: default_tools_max_kb(),
+            overflow_dir: default_tools_overflow_dir(),
+        }
+    }
+}
+
+fn default_tools_max_lines() -> u32 {
+    200
+}
+
+fn default_tools_max_kb() -> u32 {
+    50
+}
+
+fn default_tools_overflow_dir() -> String {
+    "/tmp/assistd-output".to_string()
+}
+
 fn default_gpu_layers() -> u32 {
     9999
 }
@@ -299,6 +348,7 @@ impl Default for Config {
             },
             presence: PresenceConfig::default(),
             daemon: DaemonConfig::default(),
+            tools: ToolsConfig::default(),
         }
     }
 }
@@ -471,6 +521,16 @@ impl Config {
                     "remote.bind_address must not be empty when remote access is enabled".into(),
                 );
             }
+        }
+
+        if self.tools.output.max_lines == 0 {
+            errors.push("tools.output.max_lines must be greater than 0".into());
+        }
+        if self.tools.output.max_kb == 0 {
+            errors.push("tools.output.max_kb must be greater than 0".into());
+        }
+        if self.tools.output.overflow_dir.is_empty() {
+            errors.push("tools.output.overflow_dir must not be empty".into());
         }
 
         if errors.is_empty() {
@@ -1019,5 +1079,83 @@ port = 8384
         config.sleep.idle_to_drowsy_mins = 0;
         config.sleep.idle_to_sleep_mins = 120;
         config.validate().expect("only sleep configured is valid");
+    }
+
+    #[test]
+    fn tools_config_defaults_match_spec() {
+        let cfg = ToolsOutputConfig::default();
+        assert_eq!(cfg.max_lines, 200);
+        assert_eq!(cfg.max_kb, 50);
+        assert_eq!(cfg.overflow_dir, "/tmp/assistd-output");
+    }
+
+    #[test]
+    fn missing_tools_section_uses_defaults() {
+        // Existing config.toml files won't have a [tools] section — they
+        // must still parse and default correctly.
+        let toml_str = r#"
+[model]
+name = "test/model-GGUF:Q4_K_M"
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse without [tools]");
+        assert_eq!(cfg.tools.output.max_lines, 200);
+        assert_eq!(cfg.tools.output.max_kb, 50);
+        assert_eq!(cfg.tools.output.overflow_dir, "/tmp/assistd-output");
+        cfg.validate().expect("defaults validate");
+    }
+
+    #[test]
+    fn validation_catches_zero_tools_max_lines() {
+        let mut config = Config::default();
+        config.tools.output.max_lines = 0;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("tools.output.max_lines")));
+    }
+
+    #[test]
+    fn validation_catches_zero_tools_max_kb() {
+        let mut config = Config::default();
+        config.tools.output.max_kb = 0;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("tools.output.max_kb")));
+    }
+
+    #[test]
+    fn validation_catches_empty_tools_overflow_dir() {
+        let mut config = Config::default();
+        config.tools.output.overflow_dir = String::new();
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("tools.output.overflow_dir")));
     }
 }

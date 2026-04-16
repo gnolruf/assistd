@@ -11,10 +11,12 @@
 pub mod chain;
 pub mod command;
 pub mod commands;
+pub mod presentation;
 pub mod run;
 
 pub use chain::{Chain, ParseError, execute, parse_chain};
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
+pub use presentation::{PresentResult, PresentSpec, present};
 pub use run::RunTool;
 
 use anyhow::Result;
