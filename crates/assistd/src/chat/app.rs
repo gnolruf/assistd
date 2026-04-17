@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assistd_core::{PresenceManager, PresenceState, SleepConfig};
+use assistd_core::{PresenceManager, PresenceState, SleepConfig, ToolRegistry};
 use assistd_llm::{LlmBackend, LlmEvent};
 use crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
@@ -41,12 +41,16 @@ pub struct App {
     pub sleep_cfg: SleepConfig,
     pub presence: Option<Arc<PresenceManager>>,
     client: Arc<dyn LlmBackend>,
+    tools: Arc<ToolRegistry>,
+    max_iterations: u32,
     chat_tx: mpsc::Sender<ChatEvent>,
 }
 
 impl App {
     pub fn new(
         client: Arc<dyn LlmBackend>,
+        tools: Arc<ToolRegistry>,
+        max_iterations: u32,
         chat_tx: mpsc::Sender<ChatEvent>,
         model_name: String,
         sleep_cfg: SleepConfig,
@@ -68,6 +72,8 @@ impl App {
             sleep_cfg,
             presence,
             client,
+            tools,
+            max_iterations,
             chat_tx,
         }
     }
@@ -144,6 +150,28 @@ impl App {
                 self.throughput.on_delta(now);
                 self.output.append_assistant(&text);
             }
+            ChatEvent::Llm(LlmEvent::ToolCall { arguments, .. }) => {
+                let cmd = arguments
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<?>");
+                self.output.push_tool_call(cmd);
+            }
+            ChatEvent::Llm(LlmEvent::ToolResult { result, .. }) => {
+                let body = result
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let exit_code = result
+                    .get("exit_code")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0) as i32;
+                let truncated = result
+                    .get("truncated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                self.output.push_tool_result(body, exit_code, truncated);
+            }
             ChatEvent::Llm(LlmEvent::Done) => {
                 self.throughput.on_done(now);
                 self.output.finish_assistant();
@@ -190,6 +218,8 @@ impl App {
 
     fn spawn_generation(&self, text: String) {
         let client = self.client.clone();
+        let tools = self.tools.clone();
+        let max_iterations = self.max_iterations;
         let tx = self.chat_tx.clone();
         let presence = self.presence.clone();
         tokio::spawn(async move {
@@ -221,7 +251,8 @@ impl App {
                     }
                 }
             });
-            let result = client.generate(text, llm_tx).await;
+            let result =
+                assistd_core::run_agent_turn(client, tools, max_iterations, text, llm_tx).await;
             let _ = forwarder.await;
             if let Err(e) = result {
                 let _ = tx.send(ChatEvent::LlmError(e.to_string())).await;
@@ -253,8 +284,17 @@ mod tests {
 
     fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
         let (tx, rx) = mpsc::channel::<ChatEvent>(16);
-        let client: Arc<dyn LlmBackend> = Arc::new(EchoBackend);
-        let app = App::new(client, tx, "test-model".into(), test_sleep_cfg(), None);
+        let client: Arc<dyn LlmBackend> = Arc::new(EchoBackend::new());
+        let tools = Arc::new(ToolRegistry::default());
+        let app = App::new(
+            client,
+            tools,
+            20,
+            tx,
+            "test-model".into(),
+            test_sleep_cfg(),
+            None,
+        );
         (app, rx)
     }
 
@@ -366,7 +406,16 @@ mod tests {
     async fn failed_backend_spawn_yields_llm_error() {
         let (tx, mut rx) = mpsc::channel::<ChatEvent>(16);
         let client: Arc<dyn LlmBackend> = Arc::new(FailedBackend::new("server down".into()));
-        let app = App::new(client, tx, "test-model".into(), test_sleep_cfg(), None);
+        let tools = Arc::new(ToolRegistry::default());
+        let app = App::new(
+            client,
+            tools,
+            20,
+            tx,
+            "test-model".into(),
+            test_sleep_cfg(),
+            None,
+        );
         app.spawn_generation("hello".into());
         let ev = rx.recv().await.expect("error event");
         match ev {

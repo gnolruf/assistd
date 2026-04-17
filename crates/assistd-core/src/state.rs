@@ -1,10 +1,10 @@
-use crate::{Config, PresenceManager};
+use crate::{Config, PresenceManager, run_agent_turn};
 use anyhow::Result;
 use assistd_ipc::{Event, PresenceState, Request};
 use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_tools::ToolRegistry;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 
 /// Shared, long-lived daemon state handed to every request handler.
 ///
@@ -17,6 +17,12 @@ pub struct AppState {
     pub llm: Arc<dyn LlmBackend>,
     pub presence: Arc<PresenceManager>,
     pub tools: Arc<ToolRegistry>,
+    /// Serializes entire agent turns. Concurrent queries each grab this
+    /// lock before running `run_agent_turn`, so one query's tool-call /
+    /// tool-result cycle never interleaves with another's — which would
+    /// otherwise leave the backend's conversation state with dangling
+    /// `tool_calls` messages.
+    agent_turn_lock: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -31,6 +37,7 @@ impl AppState {
             llm,
             presence,
             tools,
+            agent_turn_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -75,15 +82,44 @@ impl AppState {
             }
         };
 
+        // Serialize agent turns. Concurrent queries each wait here so
+        // one turn's assistant/tool_calls/tool_result triplet lands in
+        // conversation state atomically — otherwise a second query
+        // could push its own user message between this turn's steps.
+        let _agent_guard = self.agent_turn_lock.clone().lock_owned().await;
+
         let (llm_tx, mut llm_rx) = mpsc::channel::<LlmEvent>(32);
         let llm = self.llm.clone();
-        let generator = tokio::spawn(async move { llm.generate(text, llm_tx).await });
+        let tools = self.tools.clone();
+        let max_iterations = self.config.agent.max_iterations;
+        let generator =
+            tokio::spawn(
+                async move { run_agent_turn(llm, tools, max_iterations, text, llm_tx).await },
+            );
 
         while let Some(llm_event) = llm_rx.recv().await {
             let wire_event = match llm_event {
                 LlmEvent::Delta { text } => Event::Delta {
                     id: id.clone(),
                     text,
+                },
+                LlmEvent::ToolCall {
+                    id: _call_id,
+                    name,
+                    arguments,
+                } => Event::ToolCall {
+                    id: id.clone(),
+                    name,
+                    args: arguments,
+                },
+                LlmEvent::ToolResult {
+                    id: _call_id,
+                    name,
+                    result,
+                } => Event::ToolResult {
+                    id: id.clone(),
+                    name,
+                    result,
                 },
                 LlmEvent::Done => Event::Done { id: id.clone() },
             };
@@ -190,7 +226,8 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::Config;
-    use assistd_llm::{EchoBackend, FailedBackend};
+    use assistd_llm::{EchoBackend, FailedBackend, StepOutcome, ToolCall, ToolResultPayload};
+    use assistd_tools::{CommandRegistry, PresentSpec, RunTool, commands::EchoCommand};
 
     fn test_state(backend: Arc<dyn LlmBackend>, initial_state: PresenceState) -> Arc<AppState> {
         Arc::new(AppState::new(
@@ -211,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_query_emits_delta_then_done() {
-        let state = test_state(Arc::new(EchoBackend), PresenceState::Active);
+        let state = test_state(Arc::new(EchoBackend::new()), PresenceState::Active);
         let (tx, rx) = mpsc::channel::<Event>(8);
         let req = Request::Query {
             id: "q1".into(),
@@ -234,7 +271,7 @@ mod tests {
         // Active → Sleeping avoids hitting the stub's non-existent
         // control-plane endpoint while still exercising the transition
         // path end-to-end.
-        let state = test_state(Arc::new(EchoBackend), PresenceState::Active);
+        let state = test_state(Arc::new(EchoBackend::new()), PresenceState::Active);
         let (tx, rx) = mpsc::channel::<Event>(8);
         let req = Request::SetPresence {
             id: "p1".into(),
@@ -255,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_get_presence_reports_current_state_without_transition() {
-        let state = test_state(Arc::new(EchoBackend), PresenceState::Drowsy);
+        let state = test_state(Arc::new(EchoBackend::new()), PresenceState::Drowsy);
         let (tx, rx) = mpsc::channel::<Event>(8);
         let req = Request::GetPresence { id: "g1".into() };
 
@@ -277,7 +314,7 @@ mod tests {
         // Drowsy → Sleeping: the Drowsy→Sleeping branch of `sleep()` is
         // network-free when `llama` is None (as in the stub), so this
         // exercises the full cycle path without a live server.
-        let state = test_state(Arc::new(EchoBackend), PresenceState::Drowsy);
+        let state = test_state(Arc::new(EchoBackend::new()), PresenceState::Drowsy);
         let (tx, rx) = mpsc::channel::<Event>(8);
         let req = Request::Cycle { id: "c1".into() };
 
@@ -321,5 +358,130 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// MockBackend that scripts StepOutcomes and records pushed tool
+    /// results. Same shape as the one in `agent::tests` but re-declared
+    /// here so we can wire it into AppState and exercise IPC mapping.
+    struct ScriptedBackend {
+        outcomes: std::sync::Mutex<Vec<StepOutcome>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for ScriptedBackend {
+        async fn generate(
+            &self,
+            _prompt: String,
+            _tx: mpsc::Sender<LlmEvent>,
+        ) -> anyhow::Result<()> {
+            unimplemented!("uses step path")
+        }
+        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            _tx: mpsc::Sender<LlmEvent>,
+        ) -> anyhow::Result<StepOutcome> {
+            let outcome = {
+                let mut q = self.outcomes.lock().unwrap();
+                if q.is_empty() {
+                    StepOutcome::Final
+                } else {
+                    q.remove(0)
+                }
+            };
+            Ok(outcome)
+        }
+    }
+
+    fn state_with_echo_tools(backend: Arc<dyn LlmBackend>) -> Arc<AppState> {
+        let mut commands = CommandRegistry::new();
+        commands.register(EchoCommand);
+        let mut tools = ToolRegistry::new();
+        tools.register(RunTool::new(
+            Arc::new(commands),
+            PresentSpec {
+                max_lines: 200,
+                max_bytes: 50 * 1024,
+                overflow_dir: std::env::temp_dir()
+                    .join(format!("assistd-state-test-{}", std::process::id())),
+            },
+        ));
+        Arc::new(AppState::new(
+            Config::default(),
+            backend,
+            PresenceManager::stub(PresenceState::Active),
+            Arc::new(tools),
+        ))
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_forwards_tool_call_and_result_events() {
+        // One tool call, then Final. We expect the forwarder to map
+        // LlmEvent::ToolCall → Event::ToolCall (with the request id),
+        // LlmEvent::ToolResult → Event::ToolResult, then Done.
+        let backend = Arc::new(ScriptedBackend {
+            outcomes: std::sync::Mutex::new(vec![
+                StepOutcome::ToolCalls(vec![ToolCall {
+                    id: "call-opaque".into(),
+                    name: "run".into(),
+                    arguments: serde_json::json!({"command": "echo hi"}),
+                }]),
+                StepOutcome::Final,
+            ]),
+        });
+        let state = state_with_echo_tools(backend);
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        let req = Request::Query {
+            id: "req-42".into(),
+            text: "go".into(),
+        };
+        state.dispatch(req, tx).await.unwrap();
+
+        let events = collect_events(rx).await;
+
+        let tool_call = events
+            .iter()
+            .find(|e| matches!(e, Event::ToolCall { .. }))
+            .expect("expected Event::ToolCall in stream");
+        match tool_call {
+            Event::ToolCall { id, name, args } => {
+                // IPC id is the *request* id, not the LLM's call id.
+                assert_eq!(id, "req-42");
+                assert_eq!(name, "run");
+                assert_eq!(args["command"], "echo hi");
+            }
+            _ => unreachable!(),
+        }
+
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, Event::ToolResult { .. }))
+            .expect("expected Event::ToolResult in stream");
+        match tool_result {
+            Event::ToolResult { id, name, result } => {
+                assert_eq!(id, "req-42");
+                assert_eq!(name, "run");
+                // RunTool's echo produces "hi\n" with a success footer.
+                assert!(
+                    result["output"]
+                        .as_str()
+                        .map(|s| s.contains("hi") && s.contains("[exit:0"))
+                        .unwrap_or(false),
+                    "expected echo output in result: {result}"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        assert!(
+            matches!(events.last(), Some(Event::Done { id }) if id == "req-42"),
+            "expected terminal Done: {events:?}"
+        );
     }
 }

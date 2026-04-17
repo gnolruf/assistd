@@ -19,6 +19,8 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
 /// Local model settings.
@@ -250,6 +252,32 @@ fn default_tools_overflow_dir() -> String {
     "/tmp/assistd-output".to_string()
 }
 
+/// Agent-loop configuration. The loop sends the LLM a single-tool
+/// (`run`) schema and iterates through tool calls until the model
+/// produces plain text or the cap is hit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentConfig {
+    /// Maximum number of LLM invocations per user turn. Caps runaway
+    /// loops where the model keeps calling tools without resolving the
+    /// user's query. Default 20 — higher than a multi-tool agent because
+    /// each `run` call is cheap and composable (pipes replace what
+    /// would be multiple tool calls in other systems).
+    #[serde(default = "default_agent_max_iterations")]
+    pub max_iterations: u32,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: default_agent_max_iterations(),
+        }
+    }
+}
+
+fn default_agent_max_iterations() -> u32 {
+    20
+}
+
 fn default_gpu_layers() -> u32 {
     9999
 }
@@ -312,7 +340,13 @@ impl Default for Config {
             chat: ChatConfig {
                 system_prompt:
                     "You are assistd, a concise local desktop assistant running on a Linux \
-                     workstation. Answer precisely and in a conversational tone."
+                     workstation. You have a `run` tool that executes shell-style commands \
+                     (bash, cat, ls, grep, wc, echo, write, see, web) — prefer calling `run` \
+                     over guessing when a question is about this machine or its files. Pipes \
+                     (|), and/or (&&, ||), and sequencing (;) are supported inside a single \
+                     `run` call, so a one-liner like `cat log.txt | grep ERROR | wc -l` is \
+                     usually better than three separate tool calls. Answer precisely and in \
+                     a conversational tone."
                         .to_string(),
                 max_history_tokens: 6000,
                 summary_target_tokens: 1000,
@@ -349,6 +383,7 @@ impl Default for Config {
             presence: PresenceConfig::default(),
             daemon: DaemonConfig::default(),
             tools: ToolsConfig::default(),
+            agent: AgentConfig::default(),
         }
     }
 }
@@ -531,6 +566,10 @@ impl Config {
         }
         if self.tools.output.overflow_dir.is_empty() {
             errors.push("tools.output.overflow_dir must not be empty".into());
+        }
+
+        if self.agent.max_iterations == 0 {
+            errors.push("agent.max_iterations must be greater than 0".into());
         }
 
         if errors.is_empty() {
@@ -1157,5 +1196,76 @@ port = 8384
         config.tools.output.overflow_dir = String::new();
         let errs = validation_errors(config.validate().unwrap_err());
         assert!(errs.iter().any(|e| e.contains("tools.output.overflow_dir")));
+    }
+
+    #[test]
+    fn agent_config_defaults_to_20_iterations() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.max_iterations, 20);
+    }
+
+    #[test]
+    fn validation_catches_zero_agent_max_iterations() {
+        let mut config = Config::default();
+        config.agent.max_iterations = 0;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("agent.max_iterations")));
+    }
+
+    #[test]
+    fn missing_agent_section_uses_defaults() {
+        // Old config.toml files written before the agent loop landed must
+        // still parse and receive the default iteration cap.
+        let toml_str = r#"
+[model]
+name = "test/model-GGUF:Q4_K_M"
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse without [agent]");
+        assert_eq!(cfg.agent.max_iterations, 20);
+        cfg.validate().expect("defaults validate");
+    }
+
+    #[test]
+    fn default_system_prompt_mentions_run_tool() {
+        // Without this hint, Qwen3-class models often answer from training
+        // data instead of invoking the tool. The default prompt must
+        // therefore explicitly mention `run` and prefer tool use.
+        let cfg = Config::default();
+        let prompt = &cfg.chat.system_prompt;
+        assert!(
+            prompt.contains("`run`") && prompt.contains("shell"),
+            "system prompt should mention the run tool: {prompt:?}"
+        );
     }
 }

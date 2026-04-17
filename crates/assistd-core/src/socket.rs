@@ -233,7 +233,7 @@ mod tests {
     fn test_state() -> Arc<AppState> {
         Arc::new(AppState::new(
             Config::default(),
-            Arc::new(assistd_llm::EchoBackend),
+            Arc::new(assistd_llm::EchoBackend::new()),
             PresenceManager::stub(PresenceState::Active),
             Arc::new(assistd_tools::ToolRegistry::default()),
         ))
@@ -434,6 +434,33 @@ mod tests {
             let _ = tx.send(assistd_llm::LlmEvent::Done).await;
             Ok(())
         }
+
+        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn push_tool_results(
+            &self,
+            _results: Vec<assistd_llm::ToolResultPayload>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        ) -> anyhow::Result<assistd_llm::StepOutcome> {
+            for i in 0..self.deltas {
+                let _ = tx
+                    .send(assistd_llm::LlmEvent::Delta {
+                        text: format!("d{i}"),
+                    })
+                    .await;
+                tokio::time::sleep(self.pause).await;
+            }
+            Ok(assistd_llm::StepOutcome::Final)
+        }
     }
 
     /// Backend that emits a single delta then blocks indefinitely on an
@@ -456,6 +483,31 @@ mod tests {
             // task is aborted via JoinSet::shutdown.
             std::future::pending::<()>().await;
             Ok(())
+        }
+
+        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn push_tool_results(
+            &self,
+            _results: Vec<assistd_llm::ToolResultPayload>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        ) -> anyhow::Result<assistd_llm::StepOutcome> {
+            let _ = tx
+                .send(assistd_llm::LlmEvent::Delta {
+                    text: "stuck".into(),
+                })
+                .await;
+            std::future::pending::<()>().await;
+            Ok(assistd_llm::StepOutcome::Final)
         }
     }
 
