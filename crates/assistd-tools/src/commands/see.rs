@@ -8,7 +8,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Attachment, Command, CommandInput, CommandOutput};
+use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line, io_error_nav};
 use crate::commands::cat::human_size;
 
 pub struct SeeCommand;
@@ -47,7 +47,13 @@ impl Command for SeeCommand {
         if input.args.len() != 1 {
             return Ok(CommandOutput::failed(
                 2,
-                b"error: see expects exactly one path argument\n".to_vec(),
+                error_line(
+                    "see",
+                    "expects exactly one path argument",
+                    "Use",
+                    "see <PATH>",
+                )
+                .into_bytes(),
             ));
         }
         let path = &input.args[0];
@@ -56,20 +62,32 @@ impl Command for SeeCommand {
             Err(e) => {
                 return Ok(CommandOutput::failed(
                     1,
-                    format!("{path}: {e}\n").into_bytes(),
+                    io_error_nav("see", path, &e).into_bytes(),
                 ));
             }
         };
         let Some(t) = infer::get(&bytes) else {
             return Ok(CommandOutput::failed(
                 1,
-                format!("{path}: not an image file\n").into_bytes(),
+                error_line(
+                    "see",
+                    format_args!("not an image file: {path}"),
+                    "Use",
+                    format_args!("cat {path}"),
+                )
+                .into_bytes(),
             ));
         };
         if !infer::is_image(&bytes) {
             return Ok(CommandOutput::failed(
                 1,
-                format!("{path}: not an image file (detected {})\n", t.mime_type()).into_bytes(),
+                error_line(
+                    "see",
+                    format_args!("not an image file: {path} (detected {})", t.mime_type()),
+                    "Use",
+                    format_args!("cat {path}"),
+                )
+                .into_bytes(),
             ));
         }
         let mime = t.mime_type().to_string();
@@ -135,7 +153,11 @@ mod tests {
             .unwrap();
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("not an image"), "{stderr}");
+        assert!(
+            stderr.contains("[error] see: not an image file:"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: cat "), "{stderr}");
         assert!(out.attachments.is_empty());
     }
 
@@ -149,6 +171,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[error] see: file not found: /nonexistent/image.png"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: ls to check the path"), "{stderr}");
         assert!(out.attachments.is_empty());
     }
 
@@ -174,5 +202,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.exit_code, 2);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[error] see: expects exactly one path argument"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: see <PATH>"), "{stderr}");
     }
 }

@@ -13,7 +13,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use super::Chain;
-use crate::command::{CommandInput, CommandOutput, CommandRegistry};
+use crate::command::{CommandInput, CommandOutput, CommandRegistry, error_line};
 
 /// Maximum bytes we buffer between pipe stages. Prevents one command
 /// from exhausting daemon memory. On overflow we return exit 141 (the
@@ -42,8 +42,13 @@ pub fn execute<'a>(
                         stdout: Vec::new(),
                         stderr: merge(
                             left.stderr,
-                            format!("[pipe]\tstage output exceeded {PIPE_BUF_MAX} bytes\n")
-                                .into_bytes(),
+                            error_line(
+                                "pipe",
+                                format_args!("stage output exceeded {PIPE_BUF_MAX} bytes"),
+                                "Try",
+                                "pipe through wc -l or head first to shrink the stream",
+                            )
+                            .into_bytes(),
                         ),
                         exit_code: 141,
                         attachments: left.attachments,
@@ -112,7 +117,13 @@ async fn run_command(
     if name.is_empty() {
         return Ok(CommandOutput::failed(
             2,
-            b"[error] empty command\n".to_vec(),
+            error_line(
+                "run",
+                "empty command",
+                "Use",
+                "run <cmd> (see tool description for available commands)",
+            )
+            .into_bytes(),
         ));
     }
 
@@ -451,8 +462,9 @@ mod tests {
         let out = execute(&chain, &r, Vec::new()).await.unwrap();
         assert_eq!(out.exit_code, 141);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[pipe]"), "{stderr}");
+        assert!(stderr.contains("[error] pipe: "), "{stderr}");
         assert!(stderr.contains("exceeded"), "{stderr}");
+        assert!(stderr.contains("Try: "), "{stderr}");
     }
 
     #[tokio::test]

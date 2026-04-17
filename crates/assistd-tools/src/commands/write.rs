@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput};
+use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
 
 /// `write PATH [CONTENT...]` — write to PATH.
 ///
@@ -56,7 +56,7 @@ impl Command for WriteCommand {
             Ok(()) => Ok(CommandOutput::ok(Vec::new())),
             Err(e) => Ok(CommandOutput::failed(
                 1,
-                format!("{path}: {e}\n").into_bytes(),
+                io_error_nav("write", path, &e).into_bytes(),
             )),
         }
     }
@@ -157,5 +157,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("[error] write: "), "{stderr}");
+        // Missing parent dir surfaces as NotFound on most platforms.
+        assert!(
+            stderr.contains("Use: ls to check the path")
+                || stderr.contains("Try: a different path"),
+            "{stderr}"
+        );
     }
 }

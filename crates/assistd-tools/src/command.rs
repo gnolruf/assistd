@@ -7,9 +7,73 @@
 //! A `Command` is distinct from a [`crate::Tool`]: the LLM only ever sees
 //! one `Tool` (`run`); the `CommandRegistry` is an internal lookup table
 //! that `run` consults as it walks each chain stage.
+//!
+//! # Error-message-as-navigation convention
+//!
+//! Every stderr line a command emits must carry both *what went wrong* and
+//! *what to do instead*, so the LLM recovers in one step instead of blind
+//! retries. The format is:
+//!
+//! ```text
+//! [error] <cmd>: <what-went-wrong>. <Hint>: <recovery>\n
+//! ```
+//!
+//! - `<cmd>` — the command name (`cat`, `see`, `bash`, …) or a pseudo-tag
+//!   for pre-dispatch failures (`parse`, `pipe`, `unknown command`).
+//! - `<Hint>` — one of `Use:`, `Try:`, `Check:`, `Available:` — the first
+//!   two phrase actionable alternatives; the latter two phrase diagnostics.
+//! - `<recovery>` — either a concrete `run`-executable command the LLM can
+//!   issue verbatim (e.g. `see photo.png`, `ls /dir`, `cat -b file.bin`)
+//!   or a short check instruction (`ls -l <path>`).
+//!
+//! Use [`error_line`] to build a line, or [`io_error_nav`] to classify a
+//! `std::io::Error` against the path that produced it. Never return a bare
+//! non-zero `exit_code` without context — if a subprocess or downstream
+//! library emitted stderr, forward it so the LLM can see *why*.
 
 use anyhow::Result;
 use async_trait::async_trait;
+
+/// Format a single stderr line conforming to the error-navigation
+/// convention. Emits exactly `[error] <cmd>: <what>. <hint>: <recovery>\n`.
+///
+/// `hint` is the label without the trailing colon (e.g. `"Use"`, `"Try"`,
+/// `"Check"`, `"Available"`) — the colon and space are added for you.
+pub fn error_line(
+    cmd: &str,
+    what: impl std::fmt::Display,
+    hint: &str,
+    recovery: impl std::fmt::Display,
+) -> String {
+    format!("[error] {cmd}: {what}. {hint}: {recovery}\n")
+}
+
+/// Classify a `std::io::Error` against the `path` that produced it and
+/// emit a convention-compliant stderr line. Used by every file-touching
+/// command so NotFound and PermissionDenied get uniform navigation hints.
+pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::NotFound => error_line(
+            cmd,
+            format_args!("file not found: {path}"),
+            "Use",
+            "ls to check the path",
+        ),
+        ErrorKind::PermissionDenied => error_line(
+            cmd,
+            format_args!("permission denied: {path}"),
+            "Check",
+            format_args!("ls -l {path}"),
+        ),
+        _ => error_line(
+            cmd,
+            format_args!("{path}: {e}"),
+            "Try",
+            "a different path or check with ls",
+        ),
+    }
+}
 
 /// Input to a single chain stage.
 pub struct CommandInput {
@@ -190,6 +254,113 @@ mod tests {
         // Every pair carries a non-empty summary.
         for (name, summary) in &pairs {
             assert!(!summary.is_empty(), "{name} has empty summary");
+        }
+    }
+
+    /// Acceptance for the error-message-as-navigation convention: every
+    /// registered command, when driven into a failure path, emits stderr
+    /// containing `[error] ` AND a hint word (`Use:` / `Try:` / `Check:` /
+    /// `Available:`). This is the gate that catches new commands added
+    /// without a convention-compliant error path.
+    ///
+    /// Drives one case per command with an input that's guaranteed to
+    /// fail. `echo` has no failure mode and is skipped. Permission-denied
+    /// assertions live in platform-gated per-command tests because
+    /// creating an unreadable file portably is brittle.
+    #[test]
+    fn every_registered_command_emits_convention_compliant_error() {
+        use crate::commands::{
+            BashCommand, CatCommand, GrepCommand, LsCommand, SeeCommand, WcCommand, WebCommand,
+            WriteCommand,
+        };
+
+        fn contains_hint(s: &str) -> bool {
+            s.contains("Use:")
+                || s.contains("Try:")
+                || s.contains("Check:")
+                || s.contains("Available:")
+        }
+
+        async fn run_cmd<C: Command>(cmd: C, args: Vec<String>) -> CommandOutput {
+            cmd.run(CommandInput {
+                args,
+                stdin: Vec::new(),
+            })
+            .await
+            .expect("run returns Ok on handled failures")
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let cases: Vec<(&str, CommandOutput)> = vec![
+            (
+                "cat",
+                rt.block_on(run_cmd(
+                    CatCommand,
+                    vec!["/nonexistent/assistd-convention-test".into()],
+                )),
+            ),
+            (
+                "ls",
+                rt.block_on(run_cmd(
+                    LsCommand,
+                    vec!["/nonexistent/assistd-convention-test".into()],
+                )),
+            ),
+            (
+                "see",
+                rt.block_on(run_cmd(
+                    SeeCommand,
+                    vec!["/nonexistent/assistd-convention-test.png".into()],
+                )),
+            ),
+            (
+                "grep",
+                rt.block_on(run_cmd(GrepCommand, vec!["-x".into(), "pat".into()])),
+            ),
+            (
+                "write",
+                rt.block_on(run_cmd(
+                    WriteCommand,
+                    vec!["/nonexistent/assistd-convention-test".into(), "x".into()],
+                )),
+            ),
+            ("wc", rt.block_on(run_cmd(WcCommand, vec!["-q".into()]))),
+            (
+                "web",
+                rt.block_on(run_cmd(
+                    WebCommand::new(),
+                    vec!["file:///etc/passwd".into()],
+                )),
+            ),
+            // bash timeout exercises assistd's own error wrapper (not a
+            // subprocess stderr forward). 50ms is plenty for a sleep.
+            (
+                "bash",
+                rt.block_on(run_cmd(
+                    BashCommand::new(std::time::Duration::from_millis(50)),
+                    vec!["sleep 5".into()],
+                )),
+            ),
+        ];
+
+        for (name, out) in cases {
+            assert_ne!(
+                out.exit_code, 0,
+                "{name}: failure input should exit non-zero"
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains("[error] "),
+                "{name}: stderr missing `[error] ` tag — got {stderr:?}"
+            );
+            assert!(
+                stderr.contains(&format!("[error] {name}: ")),
+                "{name}: stderr should say `[error] {name}: ` — got {stderr:?}"
+            );
+            assert!(
+                contains_hint(&stderr),
+                "{name}: stderr missing recovery hint (Use:/Try:/Check:/Available:) — got {stderr:?}"
+            );
         }
     }
 

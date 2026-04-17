@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput};
+use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
 
 /// `cat [FILE]...` — concatenate files, or echo stdin if no files given.
 /// Binary files are rejected so their raw bytes don't pollute the model's
@@ -50,7 +50,7 @@ impl Command for CatCommand {
                 Err(e) => {
                     return Ok(CommandOutput::failed(
                         1,
-                        format!("{path}: {e}\n").into_bytes(),
+                        io_error_nav("cat", path, &e).into_bytes(),
                     ));
                 }
             };
@@ -61,10 +61,22 @@ impl Command for CatCommand {
             }
 
             if let Some(mime) = sniff_binary(&bytes) {
-                let msg = format!(
-                    "[error] binary {mime} file ({}). Use: see {path}\n",
-                    human_size(bytes.len())
-                );
+                let size = human_size(bytes.len());
+                let msg = if mime.starts_with("image/") {
+                    error_line(
+                        "cat",
+                        format_args!("binary image file ({size}): {path}"),
+                        "Use",
+                        format_args!("see {path}"),
+                    )
+                } else {
+                    error_line(
+                        "cat",
+                        format_args!("binary {mime} file ({size}): {path}"),
+                        "Use",
+                        format_args!("cat -b {path}"),
+                    )
+                };
                 return Ok(CommandOutput::failed(1, msg.into_bytes()));
             }
             out.extend_from_slice(&bytes);
@@ -200,7 +212,11 @@ mod tests {
             .unwrap();
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("/nonexistent/path/xyz"), "{stderr}");
+        assert!(
+            stderr.contains("[error] cat: file not found: /nonexistent/path/xyz"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: ls to check the path"), "{stderr}");
     }
 
     #[tokio::test]
@@ -229,7 +245,10 @@ mod tests {
             .unwrap();
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[error] binary image/png file"), "{stderr}");
+        assert!(
+            stderr.contains("[error] cat: binary image file"),
+            "{stderr}"
+        );
         assert!(stderr.contains("Use: see "), "{stderr}");
         assert!(out.stdout.is_empty(), "must not leak bytes on rejection");
     }
@@ -251,9 +270,10 @@ mod tests {
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.contains("binary application/octet-stream"),
+            stderr.contains("[error] cat: binary application/octet-stream"),
             "{stderr}"
         );
+        assert!(stderr.contains("Use: cat -b "), "{stderr}");
     }
 
     #[tokio::test]
