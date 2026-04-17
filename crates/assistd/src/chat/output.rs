@@ -79,6 +79,56 @@ impl OutputPane {
         self.dirty = true;
     }
 
+    /// Append a command the model is about to execute via the `run` tool.
+    /// Rendered in a dim style with a `$ ` prefix so it visually reads as
+    /// a shell command separate from the chat transcript.
+    pub fn push_tool_call(&mut self, command: &str) {
+        self.close_open_assistant();
+        self.lines
+            .push(single_span_line(format!("$ {command}"), tool_call_style()));
+        self.dirty = true;
+    }
+
+    /// Append the result of a tool invocation. Shows up to the first
+    /// `TOOL_RESULT_MAX_LINES` of `output`, indented and dimmed. A
+    /// trailing marker indicates additional lines beyond the visible cap
+    /// or a server-side truncation flag.
+    pub fn push_tool_result(&mut self, output: &str, exit_code: i32, truncated: bool) {
+        self.close_open_assistant();
+        let mut emitted = 0usize;
+        let mut remainder = 0usize;
+        for (i, line) in output.lines().enumerate() {
+            if i < TOOL_RESULT_MAX_LINES {
+                self.lines
+                    .push(single_span_line(format!("  {line}"), tool_result_style()));
+                emitted += 1;
+            } else {
+                remainder += 1;
+            }
+        }
+        if remainder > 0 {
+            self.lines.push(single_span_line(
+                format!("  … ({remainder} more lines)"),
+                tool_result_style(),
+            ));
+        }
+        if truncated && remainder == 0 {
+            self.lines.push(single_span_line(
+                "  … (output truncated; full body in spill file)".to_string(),
+                tool_result_style(),
+            ));
+        }
+        // Short footer so the user can scan exit status without opening
+        // the output. Only shown when any content was emitted.
+        if emitted > 0 || remainder > 0 {
+            self.lines.push(single_span_line(
+                format!("  [exit:{exit_code}]"),
+                tool_result_style(),
+            ));
+        }
+        self.dirty = true;
+    }
+
     pub fn scroll_page_up(&mut self, viewport_height: u16) {
         let step = (viewport_height / 2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_add(step);
@@ -191,6 +241,19 @@ fn error_style() -> Style {
     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
 }
 
+fn tool_call_style() -> Style {
+    Style::default().fg(Color::Blue).add_modifier(Modifier::DIM)
+}
+
+fn tool_result_style() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+/// Cap on the number of raw `output` lines surfaced per tool result.
+/// The full body is still present in the LLM's conversation context —
+/// this is purely visual compression for the scrollback pane.
+const TOOL_RESULT_MAX_LINES: usize = 12;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +339,76 @@ mod tests {
         let mut p = OutputPane::new();
         p.push_error("boom");
         assert_eq!(line_text(&p.lines[0]), "!! boom");
+    }
+
+    #[test]
+    fn push_tool_call_prefixes_dollar_sign() {
+        let mut p = OutputPane::new();
+        p.push_tool_call("cat log.txt | grep ERROR");
+        assert_eq!(line_text(&p.lines[0]), "$ cat log.txt | grep ERROR");
+    }
+
+    #[test]
+    fn push_tool_call_closes_open_assistant_first() {
+        let mut p = OutputPane::new();
+        p.append_assistant("partial answer");
+        p.push_tool_call("ls");
+        // Expect: ["partial answer", "", "$ ls"]
+        assert_eq!(p.lines.len(), 3);
+        assert_eq!(line_text(&p.lines[0]), "partial answer");
+        assert_eq!(line_text(&p.lines[1]), "");
+        assert_eq!(line_text(&p.lines[2]), "$ ls");
+    }
+
+    #[test]
+    fn push_tool_result_indents_lines_and_emits_footer() {
+        let mut p = OutputPane::new();
+        p.push_tool_result("hello\nworld\n", 0, false);
+        // Two indented output lines + exit footer.
+        assert_eq!(line_text(&p.lines[0]), "  hello");
+        assert_eq!(line_text(&p.lines[1]), "  world");
+        assert_eq!(line_text(&p.lines[2]), "  [exit:0]");
+    }
+
+    #[test]
+    fn push_tool_result_caps_at_max_lines_with_marker() {
+        let mut p = OutputPane::new();
+        let body: String = (0..20).map(|i| format!("line {i}\n")).collect();
+        p.push_tool_result(&body, 0, false);
+        // First TOOL_RESULT_MAX_LINES lines + an overflow marker + footer.
+        assert_eq!(
+            p.lines.len(),
+            TOOL_RESULT_MAX_LINES + 2,
+            "{:?}",
+            p.lines.iter().map(line_text).collect::<Vec<_>>()
+        );
+        assert!(line_text(&p.lines[TOOL_RESULT_MAX_LINES]).contains("more lines"));
+    }
+
+    #[test]
+    fn push_tool_result_shows_truncated_marker_when_flag_set_and_under_cap() {
+        let mut p = OutputPane::new();
+        p.push_tool_result("small body\n", 0, true);
+        // body + truncation marker + footer.
+        assert_eq!(p.lines.len(), 3);
+        assert_eq!(line_text(&p.lines[0]), "  small body");
+        assert!(line_text(&p.lines[1]).contains("truncated"));
+        assert_eq!(line_text(&p.lines[2]), "  [exit:0]");
+    }
+
+    #[test]
+    fn push_tool_result_nonzero_exit_in_footer() {
+        let mut p = OutputPane::new();
+        p.push_tool_result("oops\n", 1, false);
+        assert_eq!(line_text(&p.lines[1]), "  [exit:1]");
+    }
+
+    #[test]
+    fn push_tool_result_empty_output_emits_nothing() {
+        // Empty body and no truncation → no indented output, no footer.
+        let mut p = OutputPane::new();
+        p.push_tool_result("", 0, false);
+        assert_eq!(p.lines.len(), 0);
     }
 
     #[test]

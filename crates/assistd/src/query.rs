@@ -6,6 +6,21 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use uuid::Uuid;
 
+/// Tool-call preview cap: long commands are truncated to keep the status
+/// line readable while still showing the shape of the call.
+const PREVIEW_MAX_CHARS: usize = 80;
+
+fn truncate_preview(s: &str) -> String {
+    let mut out = String::with_capacity(PREVIEW_MAX_CHARS + 1);
+    for ch in s.chars().take(PREVIEW_MAX_CHARS) {
+        out.push(ch);
+    }
+    if s.chars().count() > PREVIEW_MAX_CHARS {
+        out.push('…');
+    }
+    out
+}
+
 #[derive(Args)]
 pub struct QueryArgs {
     /// Text to send to the daemon
@@ -52,13 +67,28 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                 stdout.flush()?;
                 wrote_anything = wrote_anything || !text.is_empty();
             }
-            Event::ToolCall { name, .. } => {
-                // Tool use is reserved for a future milestone; surface to
-                // the user so the stream is readable when it lands.
-                writeln!(stdout, "\n[tool call: {name}]")?;
+            Event::ToolCall { name, args, .. } => {
+                // Prefix tool calls with a line separator so the stream
+                // remains readable when they land mid-response. Extract
+                // the command preview so the user sees what the model
+                // is running, not just the tool name.
+                let preview = args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(truncate_preview)
+                    .unwrap_or_default();
+                if preview.is_empty() {
+                    writeln!(stdout, "\n[tool call: {name}]")?;
+                } else {
+                    writeln!(stdout, "\n[tool call: {name} {preview}]")?;
+                }
             }
-            Event::ToolResult { name, .. } => {
-                writeln!(stdout, "[tool result: {name}]")?;
+            Event::ToolResult { name, result, .. } => {
+                let exit = result
+                    .get("exit_code")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                writeln!(stdout, "[tool result: {name} exit:{exit}]")?;
             }
             Event::Presence { state, .. } => {
                 writeln!(stdout, "[presence: {state:?}]")?;

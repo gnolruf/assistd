@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use assistd_core::{Config, PresenceManager, SleepConfig};
+use assistd_core::{Config, PresenceManager, SleepConfig, ToolRegistry};
 use assistd_llm::{FailedBackend, LlamaChatClient, LlmBackend};
 
 use crate::idle_monitor;
@@ -56,6 +56,17 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     let (shutdown_tx, _) = watch::channel(false);
     install_signal_handler(shutdown_tx.clone());
+
+    // Process-scoped overflow dir: the chat TUI and the daemon must not
+    // share a path, otherwise their startup resets race each other.
+    let tui_overflow_dir =
+        std::env::temp_dir().join(format!("assistd-chat-{}", std::process::id()));
+    let tools = assistd_core::build_tools(&config, tui_overflow_dir.clone())?;
+    info!(
+        "tools: registered {} (overflow dir {})",
+        tools.len(),
+        tui_overflow_dir.display()
+    );
 
     println!("loading model {} ...", config.model.name);
 
@@ -99,6 +110,8 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     let run_result = run_tui(
         client,
+        tools,
+        config.agent.max_iterations,
         model_name,
         config.sleep.clone(),
         presence.clone(),
@@ -121,8 +134,11 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     run_result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_tui(
     client: Arc<dyn LlmBackend>,
+    tools: Arc<ToolRegistry>,
+    max_iterations: u32,
     model_name: String,
     sleep_cfg: SleepConfig,
     presence: Option<Arc<PresenceManager>>,
@@ -151,7 +167,15 @@ async fn run_tui(
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
     let (chat_tx, mut chat_rx) = mpsc::channel::<ChatEvent>(64);
-    let mut app = App::new(client, chat_tx, model_name, sleep_cfg, presence.clone());
+    let mut app = App::new(
+        client,
+        tools,
+        max_iterations,
+        chat_tx,
+        model_name,
+        sleep_cfg,
+        presence.clone(),
+    );
 
     if let Some(err) = startup_error {
         app.output

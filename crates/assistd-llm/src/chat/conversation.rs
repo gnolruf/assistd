@@ -17,6 +17,11 @@ use super::error::ChatClientError;
 use super::wire;
 
 const SUMMARY_PREFIX: &str = "[Conversation summary] ";
+/// Tool-result user messages carry this prefix so (1) the model can
+/// distinguish tool output from genuine user speech when history is
+/// replayed, (2) the truncator can pair the result with its assistant
+/// `tool_calls` predecessor and drop both atomically.
+pub const TOOL_RESULT_PREFIX: &str = "[tool:";
 const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
 /// Conservative per-image token weight for budget math. Real usage
 /// depends on the vision model, but 1000 tokens errs on the side of
@@ -40,6 +45,18 @@ impl Role {
     }
 }
 
+/// One tool call recorded on an assistant turn. Mirrors the OpenAI shape
+/// `{id, type: "function", function: {name, arguments}}`. `arguments` is the
+/// JSON-encoded argument string the model emitted, stored verbatim so the
+/// replayed wire payload preserves whatever whitespace/formatting the model
+/// used — some servers compare it against their own re-serialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallRecord {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
@@ -49,6 +66,10 @@ pub struct Message {
     /// a tool-call (typically `see`) produced an image the model should
     /// see on its next turn.
     pub attachments: Vec<Attachment>,
+    /// Non-empty only on assistant messages that requested tool calls.
+    /// When present, the outgoing wire message is rendered with
+    /// `content: null` (or omitted) and a `tool_calls` array.
+    pub tool_calls: Vec<ToolCallRecord>,
 }
 
 /// Summarizer trait so unit tests can inject a fake without spinning up
@@ -90,6 +111,7 @@ impl Conversation {
             role: Role::User,
             content,
             attachments: Vec::new(),
+            tool_calls: Vec::new(),
         });
     }
 
@@ -102,6 +124,7 @@ impl Conversation {
             role: Role::User,
             content,
             attachments,
+            tool_calls: Vec::new(),
         });
     }
 
@@ -110,6 +133,29 @@ impl Conversation {
             role: Role::Assistant,
             content,
             attachments: Vec::new(),
+            tool_calls: Vec::new(),
+        });
+    }
+
+    /// Append an assistant turn that requested tool calls. `content` is the
+    /// assistant's narration (typically empty — models usually emit tool
+    /// calls without accompanying text when `finish_reason: "tool_calls"`).
+    /// `calls` must be non-empty; on the wire the message will render with
+    /// `content` omitted and `tool_calls: [...]` populated.
+    pub fn push_assistant_with_tool_calls(
+        &mut self,
+        content: Option<String>,
+        calls: Vec<ToolCallRecord>,
+    ) {
+        debug_assert!(
+            !calls.is_empty(),
+            "push_assistant_with_tool_calls requires at least one call"
+        );
+        self.messages.push(Message {
+            role: Role::Assistant,
+            content: content.unwrap_or_default(),
+            attachments: Vec::new(),
+            tool_calls: calls,
         });
     }
 
@@ -139,16 +185,45 @@ impl Conversation {
     /// the user explicitly configured it empty. Messages with attachments
     /// are rendered as a multimodal `content` array (text part + one
     /// `image_url` part per attachment); text-only messages stay as plain
-    /// strings for compatibility with non-vision models.
+    /// strings for compatibility with non-vision models. Assistant messages
+    /// carrying `tool_calls` render with `content: null` (omitted) and a
+    /// populated `tool_calls` array.
     pub fn as_wire_messages(&self) -> Vec<wire::ChatMessage<'_>> {
         let mut out = Vec::with_capacity(self.messages.len() + 1);
         if !self.system_prompt.is_empty() {
             out.push(wire::ChatMessage {
                 role: Role::System.as_wire(),
-                content: wire::ContentBody::Text(&self.system_prompt),
+                content: Some(wire::ContentBody::Text(&self.system_prompt)),
+                tool_calls: None,
+                tool_call_id: None,
             });
         }
         for m in &self.messages {
+            if !m.tool_calls.is_empty() {
+                // Assistant-with-tool_calls: omit content entirely (the
+                // OpenAI spec allows null/absent; some templates require
+                // absent). Any accompanying narration is dropped at
+                // commit time, so `m.content` is usually empty here.
+                let specs: Vec<wire::ToolCallSpec<'_>> = m
+                    .tool_calls
+                    .iter()
+                    .map(|c| wire::ToolCallSpec {
+                        id: &c.id,
+                        kind: "function",
+                        function: wire::FunctionCallSpec {
+                            name: &c.name,
+                            arguments: &c.arguments,
+                        },
+                    })
+                    .collect();
+                out.push(wire::ChatMessage {
+                    role: m.role.as_wire(),
+                    content: None,
+                    tool_calls: Some(specs),
+                    tool_call_id: None,
+                });
+                continue;
+            }
             let content = if m.attachments.is_empty() {
                 wire::ContentBody::Text(&m.content)
             } else {
@@ -161,7 +236,9 @@ impl Conversation {
             };
             out.push(wire::ChatMessage {
                 role: m.role.as_wire(),
-                content,
+                content: Some(content),
+                tool_calls: None,
+                tool_call_id: None,
             });
         }
         out
@@ -224,6 +301,7 @@ impl Conversation {
             role: Role::System,
             content: format!("{SUMMARY_PREFIX}{body}"),
             attachments: Vec::new(),
+            tool_calls: Vec::new(),
         };
 
         let drop_end = preserve_from;
@@ -242,7 +320,10 @@ impl Conversation {
 
     /// Infallible fallback: drop the oldest non-system, non-summary messages
     /// repeatedly until we fit in budget (or we've reduced history to just
-    /// the latest user message).
+    /// the latest user message). Tool-call/result pairs are dropped
+    /// atomically so the wire payload never carries an assistant
+    /// `tool_calls` without a matching result (or vice versa) — most
+    /// server-side chat templates reject that.
     pub fn truncate_to_budget(&mut self, spec: &ChatSpec) {
         let budget = effective_budget(spec);
         while self.approx_total_tokens() > budget {
@@ -253,6 +334,32 @@ impl Conversation {
                 );
                 break;
             };
+            self.drop_with_pair(idx);
+        }
+    }
+
+    /// Remove `idx` and, if it's half of a tool-call/result pair, the
+    /// matching sibling. Handles two shapes:
+    /// 1. Assistant-with-tool_calls at `idx` → also drop the immediately
+    ///    following tool-result user message (if present).
+    /// 2. Tool-result user message at `idx` → also drop the immediately
+    ///    preceding assistant-with-tool_calls (if present). This direction
+    ///    only fires if callers hit it directly; `first_droppable_index`
+    ///    always returns the assistant half first.
+    fn drop_with_pair(&mut self, idx: usize) {
+        if idx >= self.messages.len() {
+            return;
+        }
+        let drop_trailing_result = matches!(
+            self.messages.get(idx),
+            Some(m) if m.role == Role::Assistant && !m.tool_calls.is_empty()
+        );
+        self.messages.remove(idx);
+        if drop_trailing_result
+            && idx < self.messages.len()
+            && self.messages[idx].role == Role::User
+            && self.messages[idx].content.starts_with(TOOL_RESULT_PREFIX)
+        {
             self.messages.remove(idx);
         }
     }
@@ -295,6 +402,19 @@ impl Conversation {
                 }
             }
         }
+        // If the boundary landed on a tool-result user message, its
+        // preceding assistant-with-tool_calls would be orphaned on
+        // summarize. Walk back to include any matching assistant half,
+        // keeping the pair intact.
+        while idx > start
+            && self
+                .messages
+                .get(idx)
+                .map(|m| m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX))
+                .unwrap_or(false)
+        {
+            idx -= 1;
+        }
         idx.max(start)
     }
 
@@ -322,9 +442,23 @@ fn approx_tokens(text: &str) -> u32 {
 
 fn approx_message_tokens(m: &Message) -> u32 {
     let image_cost = (m.attachments.len() as u32).saturating_mul(TOKENS_PER_IMAGE);
+    // Each tool-call entry contributes its id + name + arguments verbatim
+    // plus a small per-entry structural overhead (braces, type, field
+    // names). `approx_tokens` over-counts slightly on purpose.
+    let tool_call_bytes: usize = m
+        .tool_calls
+        .iter()
+        .map(|c| c.id.len() + c.name.len() + c.arguments.len() + 32)
+        .sum();
+    let tool_call_cost = approx_tokens_bytes(tool_call_bytes);
     TOKENS_PER_MESSAGE_OVERHEAD
         .saturating_add(approx_tokens(&m.content))
         .saturating_add(image_cost)
+        .saturating_add(tool_call_cost)
+}
+
+fn approx_tokens_bytes(n: usize) -> u32 {
+    ((n as u32).saturating_add(3)) / 4
 }
 
 fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
@@ -460,7 +594,7 @@ mod tests {
         let wire = c.as_wire_messages();
         assert_eq!(wire.len(), 2);
         assert_eq!(wire[0].role, "system");
-        assert_eq!(wire[0].content, wire::ContentBody::Text("sys"));
+        assert_eq!(wire[0].content, Some(wire::ContentBody::Text("sys")));
         assert_eq!(wire[1].role, "user");
     }
 
@@ -495,8 +629,8 @@ mod tests {
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0].role, "user");
         let parts = match &wire[0].content {
-            wire::ContentBody::Parts(p) => p,
-            other => panic!("expected Parts, got {other:?}"),
+            Some(wire::ContentBody::Parts(p)) => p,
+            other => panic!("expected Some(Parts), got {other:?}"),
         };
         assert_eq!(parts.len(), 2);
         match &parts[0] {
@@ -516,7 +650,10 @@ mod tests {
         let mut c = Conversation::new(String::new());
         c.push_user("hello".into());
         let wire = c.as_wire_messages();
-        assert!(matches!(wire[0].content, wire::ContentBody::Text("hello")));
+        assert!(matches!(
+            wire[0].content,
+            Some(wire::ContentBody::Text("hello"))
+        ));
     }
 
     #[test]
@@ -662,5 +799,148 @@ mod tests {
         let truncated = truncate_utf8(s, 4);
         assert!(truncated.ends_with('…'));
         assert!(truncated.chars().filter(|c| *c != '…').all(|c| c == '世'));
+    }
+
+    // --- tool-call conversation support ----------------------------------
+
+    fn mk_call(id: &str, args: &str) -> ToolCallRecord {
+        ToolCallRecord {
+            id: id.into(),
+            name: "run".into(),
+            arguments: args.into(),
+        }
+    }
+
+    #[test]
+    fn push_assistant_with_tool_calls_records_calls() {
+        let mut c = Conversation::new(String::new());
+        c.push_user("do it".into());
+        c.push_assistant_with_tool_calls(None, vec![mk_call("call-1", r#"{"command":"ls"}"#)]);
+        let last = c.messages.last().unwrap();
+        assert_eq!(last.role, Role::Assistant);
+        assert_eq!(last.content, "");
+        assert_eq!(last.tool_calls.len(), 1);
+        assert_eq!(last.tool_calls[0].id, "call-1");
+        assert_eq!(last.tool_calls[0].name, "run");
+        assert_eq!(last.tool_calls[0].arguments, r#"{"command":"ls"}"#);
+    }
+
+    #[test]
+    fn as_wire_messages_renders_tool_calls_with_content_absent() {
+        let mut c = Conversation::new(String::new());
+        c.push_user("do it".into());
+        c.push_assistant_with_tool_calls(None, vec![mk_call("call-1", r#"{"command":"ls"}"#)]);
+        let wire = c.as_wire_messages();
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[1].role, "assistant");
+        assert!(wire[1].content.is_none(), "content must be absent");
+        let calls = wire[1].tool_calls.as_ref().expect("tool_calls present");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call-1");
+        assert_eq!(calls[0].kind, "function");
+        assert_eq!(calls[0].function.name, "run");
+        assert_eq!(calls[0].function.arguments, r#"{"command":"ls"}"#);
+
+        // Serialized JSON must omit `content` (null is not equivalent for
+        // strict Jinja templates).
+        let json = serde_json::to_value(&wire[1]).unwrap();
+        assert!(
+            json.get("content").is_none(),
+            "content key must be omitted: {json}"
+        );
+        assert_eq!(json["tool_calls"][0]["function"]["name"], "run");
+    }
+
+    #[test]
+    fn tool_calls_contribute_to_token_budget() {
+        let mut c = Conversation::new(String::new());
+        c.push_user("q".into());
+        let baseline = c.approx_total_tokens();
+
+        let mut c2 = Conversation::new(String::new());
+        c2.push_user("q".into());
+        c2.push_assistant_with_tool_calls(
+            None,
+            vec![mk_call(
+                "call-1",
+                r#"{"command":"a very long command string here to make the call nontrivial"}"#,
+            )],
+        );
+        let with_call = c2.approx_total_tokens();
+        assert!(
+            with_call > baseline,
+            "tool_calls should add to token count: {with_call} vs {baseline}"
+        );
+    }
+
+    #[test]
+    fn truncate_drops_tool_call_pair_atomically() {
+        let mut c = Conversation::new(String::new());
+        // Old messages we'll summarize/truncate:
+        c.push_user("old q".into());
+        c.push_assistant_with_tool_calls(None, vec![mk_call("c-1", r#"{"command":"ls"}"#)]);
+        c.push_user_with_attachments("[tool:run]\nsome output\n".into(), Vec::new());
+        c.push_assistant("old reply".into());
+        // The latest turn (kept by preserve):
+        c.push_user("latest".into());
+
+        c.truncate_to_budget(&spec(10, 1, 10_000));
+
+        // The remaining history must not carry a dangling tool_calls
+        // without a matching result (or vice versa).
+        for (i, m) in c.messages.iter().enumerate() {
+            if m.role == Role::Assistant && !m.tool_calls.is_empty() {
+                let next = c.messages.get(i + 1);
+                assert!(
+                    matches!(next, Some(n) if n.role == Role::User
+                             && n.content.starts_with(TOOL_RESULT_PREFIX)),
+                    "assistant tool_calls at index {i} has no matching result; \
+                     history: {:?}",
+                    c.messages
+                );
+            }
+            if m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX) {
+                let prev = i.checked_sub(1).and_then(|p| c.messages.get(p));
+                assert!(
+                    matches!(prev, Some(p) if p.role == Role::Assistant
+                             && !p.tool_calls.is_empty()),
+                    "tool result at index {i} has no matching assistant; \
+                     history: {:?}",
+                    c.messages
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_preserves_tool_call_pair_boundary() {
+        let mut c = Conversation::new("sys".into());
+        // Stuff enough history to force summarization.
+        for i in 0..5 {
+            c.push_user(format!("turn {i} question with some filler text here"));
+            c.push_assistant(format!(
+                "turn {i} answer with some filler text here to blow budget"
+            ));
+        }
+        // A tool-call pair in the recent tail.
+        c.push_assistant_with_tool_calls(None, vec![mk_call("c-99", r#"{"command":"ls"}"#)]);
+        c.push_user_with_attachments("[tool:run]\nfoo\nbar\n".into(), Vec::new());
+        c.push_user("latest".into());
+
+        let fake = FakeSummarizer::new("summary");
+        c.ensure_budget(&fake, &spec(60, 2, 10_000)).await.unwrap();
+
+        // Post-summarize, the preserved tail must not have a dangling
+        // tool_calls or tool-result.
+        for (i, m) in c.messages.iter().enumerate() {
+            if m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX) {
+                let prev = i.checked_sub(1).and_then(|p| c.messages.get(p));
+                assert!(
+                    matches!(prev, Some(p) if p.role == Role::Assistant
+                             && !p.tool_calls.is_empty()),
+                    "orphaned tool result at {i}"
+                );
+            }
+        }
     }
 }

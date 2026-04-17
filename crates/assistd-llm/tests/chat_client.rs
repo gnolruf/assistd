@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_llm::{ChatSpec, LlamaChatClient, LlmBackend, LlmEvent};
+use assistd_llm::{ChatSpec, LlamaChatClient, LlmBackend, LlmEvent, StepOutcome};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -610,6 +610,203 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
     assert!(
         captured.iter().any(|r| !r.stream),
         "summarize endpoint should have been attempted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Agent-loop step API
+// ---------------------------------------------------------------------------
+
+/// Frame the `tool_calls` path as a sequence of SSE payloads suitable for
+/// `StreamResponse::RawFrames`. Matches llama.cpp's typical shape: role
+/// first, then one or more tool_call deltas with accumulating `arguments`,
+/// terminated by a finish_reason chunk.
+fn tool_call_frames(call_id: &str, name: &str, arg_chunks: &[&str]) -> Vec<String> {
+    let mut frames = Vec::new();
+    frames.push("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n".to_string());
+    let head = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":{},\"type\":\"function\",\"function\":{{\"name\":{},\"arguments\":\"\"}}}}]}}}}]}}\n\n",
+        serde_json::to_string(call_id).unwrap(),
+        serde_json::to_string(name).unwrap()
+    );
+    frames.push(head);
+    for chunk in arg_chunks {
+        let encoded = serde_json::to_string(chunk).unwrap();
+        frames.push(format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":{}}}}}]}}}}]}}\n\n",
+            encoded
+        ));
+    }
+    frames.push(
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n".to_string(),
+    );
+    frames.push("data: [DONE]\n\n".to_string());
+    frames
+}
+
+#[tokio::test]
+async fn step_with_stop_finish_reason_returns_final() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::Deltas(vec!["answer".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    client.push_user("what is 2+2?".into()).await.unwrap();
+    let (tx, mut rx) = mpsc::channel(32);
+    let outcome = client.step(Vec::new(), tx).await.unwrap();
+    assert!(matches!(outcome, StepOutcome::Final));
+    let events = drain(&mut rx).await;
+    assert_eq!(
+        events,
+        vec![LlmEvent::Delta {
+            text: "answer".into()
+        }]
+    );
+    // No tools were passed — request should omit the `tools` key entirely.
+    let captured = script.captured().await;
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0].body.get("tools").is_none(),
+        "request should not carry tools when argument is empty"
+    );
+}
+
+#[tokio::test]
+async fn step_parses_tool_call_across_argument_chunks() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::RawFrames(tool_call_frames(
+            "call-42",
+            "run",
+            &[r#"{"com"#, r#"mand":"ls "#, r#"/tmp"}"#],
+        )))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    client.push_user("list /tmp".into()).await.unwrap();
+    let (tx, mut rx) = mpsc::channel(32);
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "run",
+            "description": "run a command",
+            "parameters": {"type":"object","properties":{"command":{"type":"string"}}},
+            "strict": true
+        }
+    })];
+    let outcome = client.step(tools, tx).await.unwrap();
+    let calls = match outcome {
+        StepOutcome::ToolCalls(c) => c,
+        other => panic!("expected ToolCalls, got {other:?}"),
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call-42");
+    assert_eq!(calls[0].name, "run");
+    assert_eq!(calls[0].arguments["command"], "ls /tmp");
+
+    // No visible text deltas for a tool-calls-only step — Qwen3-style
+    // <think> blocks would have been emitted via `content`, but none
+    // appeared in our scripted frames.
+    let events = drain(&mut rx).await;
+    assert!(
+        !events.iter().any(|e| matches!(e, LlmEvent::Delta { .. })),
+        "tool-call-only step should emit no text deltas, got {events:?}"
+    );
+
+    let captured = script.captured().await;
+    assert_eq!(captured[0].body["tool_choice"], "auto");
+    let tools_arr = captured[0].body["tools"].as_array().unwrap();
+    assert_eq!(tools_arr[0]["function"]["name"], "run");
+}
+
+#[tokio::test]
+async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
+    let script = Script::new();
+    // Turn 1: model asks for a tool call.
+    script
+        .push_stream(StreamResponse::RawFrames(tool_call_frames(
+            "call-7",
+            "run",
+            &[r#"{"command":"echo hi"}"#],
+        )))
+        .await;
+    // Turn 2 (after we push_tool_results): plain text answer.
+    script
+        .push_stream(StreamResponse::Deltas(vec!["done".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    client.push_user("please echo hi".into()).await.unwrap();
+
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {"name":"run","parameters":{"type":"object"},"strict":true}
+    })];
+    let (tx1, mut rx1) = mpsc::channel(32);
+    let outcome1 = client.step(tools.clone(), tx1).await.unwrap();
+    let calls = match outcome1 {
+        StepOutcome::ToolCalls(c) => c,
+        _ => panic!("expected ToolCalls"),
+    };
+    drain(&mut rx1).await;
+
+    // Simulate the agent-loop side of things: feed a result back.
+    let result = assistd_llm::ToolResultPayload {
+        call_id: calls[0].id.clone(),
+        name: "run".into(),
+        content: "hi\n[exit:0 | 2ms]".into(),
+        attachments: Vec::new(),
+    };
+    client.push_tool_results(vec![result]).await.unwrap();
+
+    let (tx2, mut rx2) = mpsc::channel(32);
+    let outcome2 = client.step(tools, tx2).await.unwrap();
+    assert!(matches!(outcome2, StepOutcome::Final));
+    drain(&mut rx2).await;
+
+    // Inspect the wire shape of the second request — it must carry the
+    // assistant tool_calls message AND the tool-result user message.
+    let captured = script.captured().await;
+    assert_eq!(captured.len(), 2);
+    let messages = captured[1].body["messages"].as_array().unwrap();
+
+    let assistant_with_calls = messages
+        .iter()
+        .find(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
+        .expect("assistant message with tool_calls");
+    assert!(
+        assistant_with_calls.get("content").is_none(),
+        "content key must be absent on tool-call assistant message"
+    );
+    let tool_calls = assistant_with_calls["tool_calls"].as_array().unwrap();
+    assert_eq!(tool_calls[0]["id"], "call-7");
+    assert_eq!(tool_calls[0]["function"]["name"], "run");
+
+    // The tool result should be routed as a user message with the
+    // [tool:run] prefix (per the design: user-role routing for tool
+    // results instead of the OpenAI tool role).
+    let tool_result_user = messages
+        .iter()
+        .rev()
+        .find(|m| {
+            m["role"] == "user"
+                && m["content"]
+                    .as_str()
+                    .map(|s| s.starts_with("[tool:run]"))
+                    .unwrap_or(false)
+        })
+        .expect("tool result user message");
+    assert!(
+        tool_result_user["content"]
+            .as_str()
+            .unwrap()
+            .contains("[exit:0 | 2ms]"),
+        "expected footer: {:?}",
+        tool_result_user["content"]
     );
 }
 

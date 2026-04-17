@@ -108,6 +108,7 @@ dependencies = [
  "assistd-llm",
  "assistd-tools",
  "async-trait",
+ "base64",
  "serde",
  "serde_json",
  "tempfile",

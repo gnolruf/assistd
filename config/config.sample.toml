@@ -26,7 +26,7 @@ port = 8385
 [chat]
 # System prompt injected as the first message of every request. Leave empty
 # (system_prompt = "") to skip system-prompt injection entirely.
-system_prompt = "You are assistd, a concise local desktop assistant running on a Linux workstation. Answer precisely and in a conversational tone."
+system_prompt = "You are assistd, a concise local desktop assistant running on a Linux workstation. You have a `run` tool that executes shell-style commands (bash, cat, ls, grep, wc, echo, write, see, web) — prefer calling `run` over guessing when a question is about this machine or its files. Pipes (|), and/or (&&, ||), and sequencing (;) are supported inside a single `run` call, so a one-liner like `cat log.txt | grep ERROR | wc -l` is usually better than three separate tool calls. Answer precisely and in a conversational tone."
 # Approximate token budget for the full request (system + history). Must be
 # strictly less than model.context_length. When exceeded, older messages are
 # summarized and replaced by a single summary message.
@@ -117,3 +117,11 @@ hotkey = "Super+Escape"
 # all in-flight work immediately; higher values let clients receive a
 # final Done event before the daemon exits.
 # shutdown_grace_secs = 5
+
+[agent]
+# Maximum number of LLM invocations per user turn. The agent loop sends
+# the `run` tool schema to the model, executes any requested commands,
+# and iterates until the model returns plain text — or until this cap
+# is hit. 20 is deliberately generous: each `run` call is cheap and
+# pipelines reduce the number of round-trips needed for most queries.
+# max_iterations = 20

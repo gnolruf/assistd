@@ -282,7 +282,7 @@ async fn query_during_sleeping_triggers_auto_wake() {
     // handle_query, not the llama chat path.
     let state = Arc::new(AppState::new(
         Config::default(),
-        Arc::new(EchoBackend),
+        Arc::new(EchoBackend::new()),
         m.clone(),
         Arc::new(ToolRegistry::default()),
     ));
@@ -357,6 +357,7 @@ async fn query_during_sleeping_triggers_auto_wake() {
 /// `sleep()` blocks through the gap rather than killing the generator.
 struct DelayBackend {
     delay: Duration,
+    last_user: tokio::sync::Mutex<String>,
 }
 
 #[async_trait]
@@ -366,6 +367,29 @@ impl LlmBackend for DelayBackend {
         tokio::time::sleep(self.delay).await;
         let _ = tx.send(LlmEvent::Done).await;
         Ok(())
+    }
+
+    async fn push_user(&self, text: String) -> anyhow::Result<()> {
+        *self.last_user.lock().await = text;
+        Ok(())
+    }
+
+    async fn push_tool_results(
+        &self,
+        _results: Vec<assistd_llm::ToolResultPayload>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn step(
+        &self,
+        _tools: Vec<serde_json::Value>,
+        tx: mpsc::Sender<LlmEvent>,
+    ) -> anyhow::Result<assistd_llm::StepOutcome> {
+        let text = self.last_user.lock().await.clone();
+        let _ = tx.send(LlmEvent::Delta { text }).await;
+        tokio::time::sleep(self.delay).await;
+        Ok(assistd_llm::StepOutcome::Final)
     }
 }
 
@@ -406,6 +430,7 @@ async fn sleep_defers_until_inflight_query_done() {
         Config::default(),
         Arc::new(DelayBackend {
             delay: Duration::from_millis(500),
+            last_user: tokio::sync::Mutex::new(String::new()),
         }),
         m.clone(),
         Arc::new(ToolRegistry::default()),
@@ -490,7 +515,7 @@ async fn multiple_queries_during_wake_complete_in_order() {
 
     let state = Arc::new(AppState::new(
         Config::default(),
-        Arc::new(EchoBackend),
+        Arc::new(EchoBackend::new()),
         m.clone(),
         Arc::new(ToolRegistry::default()),
     ));

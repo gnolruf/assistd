@@ -1,13 +1,6 @@
 use anyhow::Result;
 use assistd_core::{AppState, Config, PresenceManager};
 use assistd_llm::LlamaChatClient;
-use assistd_tools::{
-    CommandRegistry, PresentSpec, RunTool, ToolRegistry,
-    commands::{
-        BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
-        WebCommand, WriteCommand,
-    },
-};
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,24 +30,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     gpu_monitor::validate(&config.sleep)?;
     idle_monitor::validate(&config.sleep)?;
 
-    // Reset the Layer 2 overflow directory on every startup. Clearing it
-    // means the per-daemon monotonic counter always starts at 1 with no
-    // stale `cmd-<n>.txt` files left over from a previous run.
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
-    if overflow_dir.exists() {
-        std::fs::remove_dir_all(&overflow_dir).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to clear tools.output.overflow_dir {}: {e}",
-                overflow_dir.display()
-            )
-        })?;
-    }
-    std::fs::create_dir_all(&overflow_dir).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to create tools.output.overflow_dir {}: {e}",
-            overflow_dir.display()
-        )
-    })?;
 
     info!(
         "assistd v{} — local model agent OS assistant daemon",
@@ -112,30 +88,10 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
 
-    let mut commands = CommandRegistry::new();
-    commands.register(CatCommand);
-    commands.register(LsCommand);
-    commands.register(GrepCommand);
-    commands.register(WcCommand);
-    commands.register(EchoCommand);
-    commands.register(WriteCommand);
-    commands.register(SeeCommand);
-    commands.register(WebCommand::new());
-    commands.register(BashCommand::default());
-    let commands = Arc::new(commands);
-
-    let present_spec = PresentSpec {
-        max_lines: config.tools.output.max_lines as usize,
-        max_bytes: (config.tools.output.max_kb as usize) * 1024,
-        overflow_dir: overflow_dir.clone(),
-    };
-    let mut tools = ToolRegistry::new();
-    tools.register(RunTool::new(commands.clone(), present_spec));
-    let tools = Arc::new(tools);
+    let tools = assistd_core::build_tools(&config, overflow_dir.clone())?;
     info!(
-        "tools: registered {} ({} commands, overflow dir {})",
+        "tools: registered {} (overflow dir {})",
         tools.len(),
-        commands.len(),
         overflow_dir.display()
     );
 
