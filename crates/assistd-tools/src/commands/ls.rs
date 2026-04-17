@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput};
+use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
 
 /// `ls [PATH]` — list directory entries alphabetically, one per line,
 /// formatted as `<type>\t<size>\t<name>`. Type is `dir`, `file`, or
@@ -36,7 +36,7 @@ impl Command for LsCommand {
             Err(e) => {
                 return Ok(CommandOutput::failed(
                     1,
-                    format!("{path}: {e}\n").into_bytes(),
+                    io_error_nav("ls", path, &e).into_bytes(),
                 ));
             }
         };
@@ -66,7 +66,7 @@ impl Command for LsCommand {
                 Err(e) => {
                     return Ok(CommandOutput::failed(
                         1,
-                        format!("{path}: {e}\n").into_bytes(),
+                        io_error_nav("ls", path, &e).into_bytes(),
                     ));
                 }
             }
@@ -145,5 +145,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[error] ls: file not found: /definitely/not/here"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: ls to check the path"), "{stderr}");
     }
 }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use regex::RegexBuilder;
 
-use crate::command::{Command, CommandInput, CommandOutput};
+use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
 
 /// `grep [-i] [-v] [-c] PATTERN [FILE]` — print lines from FILE (or
 /// stdin) that match `PATTERN`.
@@ -92,7 +92,8 @@ impl Command for GrepCommand {
             Err(msg) => {
                 return Ok(CommandOutput::failed(
                     2,
-                    format!("error: {msg}\n").into_bytes(),
+                    error_line("grep", msg, "Use", "grep (no args) for supported flags")
+                        .into_bytes(),
                 ));
             }
         };
@@ -114,7 +115,13 @@ impl Command for GrepCommand {
             Err(e) => {
                 return Ok(CommandOutput::failed(
                     2,
-                    format!("bad pattern: {e}\n").into_bytes(),
+                    error_line(
+                        "grep",
+                        format_args!("bad regex pattern: {e}"),
+                        "Check",
+                        "escape regex metachars; run grep for usage",
+                    )
+                    .into_bytes(),
                 ));
             }
         };
@@ -126,7 +133,7 @@ impl Command for GrepCommand {
                 Err(e) => {
                     return Ok(CommandOutput::failed(
                         2,
-                        format!("{path}: {e}\n").into_bytes(),
+                        io_error_nav("grep", path, &e).into_bytes(),
                     ));
                 }
             }
@@ -139,7 +146,13 @@ impl Command for GrepCommand {
             Err(_) => {
                 return Ok(CommandOutput::failed(
                     2,
-                    b"input is not valid UTF-8\n".to_vec(),
+                    error_line(
+                        "grep",
+                        "input is not valid UTF-8",
+                        "Try",
+                        "grep on a text file or pipe from cat",
+                    )
+                    .into_bytes(),
                 ));
             }
         };
@@ -251,6 +264,13 @@ mod tests {
         let out = run_grep(&["-x", "foo"], b"").await;
         assert_eq!(out.exit_code, 2);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("'-x'"), "{stderr}");
+        assert!(
+            stderr.contains("[error] grep: unknown flag '-x'"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("Use: grep (no args) for supported flags"),
+            "{stderr}"
+        );
     }
 }

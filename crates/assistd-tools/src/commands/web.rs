@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput};
+use crate::command::{Command, CommandInput, CommandOutput, error_line};
 
 /// Hard cap on response bytes. Mirrors the chain executor's
 /// `PIPE_BUF_MAX` so a multi-megabyte page doesn't blow the next
@@ -73,14 +73,26 @@ impl Command for WebCommand {
         if input.args.len() != 1 {
             return Ok(CommandOutput::failed(
                 2,
-                b"error: web expects exactly one URL argument\n".to_vec(),
+                error_line(
+                    "web",
+                    "expects exactly one URL argument",
+                    "Use",
+                    "web <URL>",
+                )
+                .into_bytes(),
             ));
         }
         let url = &input.args[0];
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok(CommandOutput::failed(
                 2,
-                format!("error: {url}: only http(s):// URLs are allowed\n").into_bytes(),
+                error_line(
+                    "web",
+                    format_args!("only http(s):// URLs are allowed: {url}"),
+                    "Use",
+                    "web https://... or web http://...",
+                )
+                .into_bytes(),
             ));
         }
 
@@ -89,7 +101,13 @@ impl Command for WebCommand {
             Err(e) => {
                 return Ok(CommandOutput::failed(
                     1,
-                    format!("{url}: {e}\n").into_bytes(),
+                    error_line(
+                        "web",
+                        format_args!("transport error: {url}: {e}"),
+                        "Try",
+                        "a different URL or check the endpoint is reachable",
+                    )
+                    .into_bytes(),
                 ));
             }
         };
@@ -97,10 +115,15 @@ impl Command for WebCommand {
         if !status.is_success() {
             return Ok(CommandOutput::failed(
                 1,
-                format!(
-                    "HTTP {} {}\n",
-                    status.as_u16(),
-                    status.canonical_reason().unwrap_or("")
+                error_line(
+                    "web",
+                    format_args!(
+                        "HTTP {} {}: {url}",
+                        status.as_u16(),
+                        status.canonical_reason().unwrap_or("")
+                    ),
+                    "Try",
+                    "a different URL or check the endpoint is reachable",
                 )
                 .into_bytes(),
             ));
@@ -111,16 +134,27 @@ impl Command for WebCommand {
             Err(e) => {
                 return Ok(CommandOutput::failed(
                     1,
-                    format!("{url}: body read failed: {e}\n").into_bytes(),
+                    error_line(
+                        "web",
+                        format_args!("body read failed: {url}: {e}"),
+                        "Try",
+                        "re-running or a different URL",
+                    )
+                    .into_bytes(),
                 ));
             }
         };
         if body.len() > BODY_MAX {
             return Ok(CommandOutput::failed(
                 1,
-                format!(
-                    "{url}: response body exceeded {BODY_MAX} bytes (got {})\n",
-                    body.len()
+                error_line(
+                    "web",
+                    format_args!(
+                        "response body exceeded {BODY_MAX} bytes (got {}): {url}",
+                        body.len()
+                    ),
+                    "Try",
+                    "a URL path that returns less content",
                 )
                 .into_bytes(),
             ));
@@ -182,7 +216,8 @@ mod tests {
             .unwrap();
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("HTTP 404"), "{stderr}");
+        assert!(stderr.contains("[error] web: HTTP 404"), "{stderr}");
+        assert!(stderr.contains("Try: "), "{stderr}");
     }
 
     #[tokio::test]
@@ -196,7 +231,11 @@ mod tests {
             .unwrap();
         assert_eq!(out.exit_code, 2);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("http(s)"), "{stderr}");
+        assert!(
+            stderr.contains("[error] web: only http(s):// URLs are allowed"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: web http"), "{stderr}");
     }
 
     #[tokio::test]

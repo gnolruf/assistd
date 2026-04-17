@@ -20,9 +20,9 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
 use crate::Tool;
-use crate::chain::{execute, parse_chain};
-use crate::command::{Attachment, CommandRegistry};
-use crate::presentation::{PresentSpec, present};
+use crate::chain::{ParseError, execute, parse_chain};
+use crate::command::{Attachment, CommandOutput, CommandRegistry, error_line};
+use crate::presentation::{PresentResult, PresentSpec, present};
 
 pub struct RunTool {
     registry: Arc<CommandRegistry>,
@@ -79,7 +79,11 @@ fn build_description(registry: &CommandRegistry) -> String {
     s.push_str(
         "\nCall a command with no (or insufficient) arguments to see its \
          usage (exit code 2, stdout). Errors in real calls exit with a \
-         `[<name>]\\t` stderr prefix — distinct from help on stdout.",
+         `[<name>]\\t` stderr prefix — distinct from help on stdout. Each \
+         error line follows `[error] <cmd>: <what-went-wrong>. <Hint>: \
+         <recovery>` where `<Hint>` is one of `Use:` / `Try:` / `Check:` / \
+         `Available:` — the recovery clause is a concrete command or check \
+         you can run next.",
     );
     s
 }
@@ -115,30 +119,82 @@ impl Tool for RunTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("`command` (string) is required"))?;
 
-        let chain = parse_chain(command).map_err(|e| anyhow!("parse error: {e}"))?;
         let start = Instant::now();
+        let chain = match parse_chain(command) {
+            Ok(c) => c,
+            Err(e) => {
+                // Surface parse errors through `present()` like any other
+                // failure so the LLM gets the usual `[stderr] ... [exit:N | Xms]`
+                // shape instead of a raw anyhow at the tool boundary.
+                let stderr = parse_error_line(&e).into_bytes();
+                let failed = CommandOutput::failed(2, stderr);
+                let r = present(failed, &self.spec, &self.counter, start.elapsed());
+                return Ok(build_result(r));
+            }
+        };
         let out = execute(&chain, &self.registry, Vec::new()).await?;
         let duration = start.elapsed();
 
         let r = present(out, &self.spec, &self.counter, duration);
-
-        let mut result = json!({
-            "output":      r.output,
-            "stdout":      r.stdout_raw,
-            "stderr":      r.stderr_raw,
-            "exit_code":   r.exit_code,
-            "truncated":   r.truncated,
-            "duration_ms": r.duration_ms,
-        });
-        if let Some(p) = &r.overflow_file {
-            result["overflow_file"] = json!(p.to_string_lossy());
-        }
-        if !r.attachments.is_empty() {
-            let rendered: Vec<Value> = r.attachments.iter().map(render_attachment).collect();
-            result["attachments"] = Value::Array(rendered);
-        }
-        Ok(result)
+        Ok(build_result(r))
     }
+}
+
+/// Translate a [`ParseError`] into a convention-compliant stderr line.
+/// Each variant gets a targeted recovery hint.
+fn parse_error_line(e: &ParseError) -> String {
+    match e {
+        ParseError::Empty => error_line("parse", "empty command", "Use", "run <cmd>"),
+        ParseError::UnterminatedQuote => error_line(
+            "parse",
+            "unterminated quoted string",
+            "Check",
+            "match all \" pairs",
+        ),
+        ParseError::UnexpectedOperator(s) => error_line(
+            "parse",
+            format_args!("unexpected operator '{s}' at start of expression"),
+            "Try",
+            "put a command before the operator",
+        ),
+        ParseError::TrailingOperator(s) => error_line(
+            "parse",
+            format_args!("trailing operator '{s}'"),
+            "Try",
+            "add a command after the operator",
+        ),
+        ParseError::EmptyCommand => error_line(
+            "parse",
+            "empty command between operators",
+            "Try",
+            "add a command between operators",
+        ),
+        ParseError::Unsupported(m) => error_line(
+            "parse",
+            *m,
+            "Use",
+            "bash \"...\" for unsupported shell features",
+        ),
+    }
+}
+
+fn build_result(r: PresentResult) -> Value {
+    let mut result = json!({
+        "output":      r.output,
+        "stdout":      r.stdout_raw,
+        "stderr":      r.stderr_raw,
+        "exit_code":   r.exit_code,
+        "truncated":   r.truncated,
+        "duration_ms": r.duration_ms,
+    });
+    if let Some(p) = &r.overflow_file {
+        result["overflow_file"] = json!(p.to_string_lossy());
+    }
+    if !r.attachments.is_empty() {
+        let rendered: Vec<Value> = r.attachments.iter().map(render_attachment).collect();
+        result["attachments"] = Value::Array(rendered);
+    }
+    result
 }
 
 fn render_attachment(a: &Attachment) -> Value {
@@ -279,10 +335,14 @@ mod tests {
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 1);
         let stderr = result["stderr"].as_str().unwrap();
-        assert!(stderr.contains("binary image/png"), "{stderr}");
+        assert!(
+            stderr.contains("[error] cat: binary image file"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: see "), "{stderr}");
         let output = result["output"].as_str().unwrap();
         assert!(output.contains("[stderr] "), "output={output}");
-        assert!(output.contains("binary image/png"), "output={output}");
+        assert!(output.contains("binary image file"), "output={output}");
         assert_footer(output, 1);
     }
 
@@ -410,14 +470,19 @@ mod tests {
     }
 
     #[test]
-    fn run_parse_error_surfaces() {
+    fn run_parse_error_surfaces_as_present_result() {
+        // Parse errors flow through `present()` like any other failure: the
+        // LLM sees the usual `[stderr] ... [exit:N | Xms]` shape with a
+        // `[error] parse: ...` line, not a raw anyhow at the tool boundary.
         let dir = fresh_dir();
         let tool = tool_with_dir(dir.path());
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let err = rt
-            .block_on(tool.invoke(json!({ "command": "echo hi |" })))
-            .unwrap_err();
-        assert!(err.to_string().contains("parse error"), "{err}");
+        let result = invoke(&tool, "echo hi |");
+        assert_eq!(result["exit_code"], 2);
+        let stderr = result["stderr"].as_str().unwrap();
+        assert!(stderr.contains("[error] parse: "), "{stderr}");
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("[stderr] "), "{output}");
+        assert_footer(output, 2);
     }
 
     #[test]

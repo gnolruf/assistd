@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput};
+use crate::command::{Command, CommandInput, CommandOutput, error_line};
 
 /// `wc [-l]` — count lines (`-l`) or "lines words bytes" (default) from
 /// stdin. Only `-l` is accepted in v1; other flags return exit 2.
@@ -36,7 +36,13 @@ impl Command for WcCommand {
                 other => {
                     return Ok(CommandOutput::failed(
                         2,
-                        format!("flag '{other}' not supported in v1\n").into_bytes(),
+                        error_line(
+                            "wc",
+                            format_args!("flag '{other}' not supported in v1"),
+                            "Use",
+                            "wc or wc -l",
+                        )
+                        .into_bytes(),
                     ));
                 }
             }
@@ -94,5 +100,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.exit_code, 2);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[error] wc: flag '-w' not supported in v1"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: wc or wc -l"), "{stderr}");
     }
 }
