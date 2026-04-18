@@ -81,11 +81,9 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     println!("loading model {} ...", config.model.name);
 
-    let chat_spec = config.to_chat_spec();
-
     let (presence, client, startup_error) = match PresenceManager::new_active(
-        config.to_server_spec(),
-        config.to_model_spec(),
+        config.llama_server.clone(),
+        config.model.clone(),
         shutdown_tx.subscribe(),
     )
     .await
@@ -95,7 +93,11 @@ pub async fn run(args: ChatArgs) -> Result<()> {
                 "llama-server ready on {}:{}",
                 config.llama_server.host, config.llama_server.port
             );
-            let client: Arc<dyn LlmBackend> = Arc::new(LlamaChatClient::new(chat_spec)?);
+            let client: Arc<dyn LlmBackend> = Arc::new(LlamaChatClient::new(
+                &config.chat,
+                &config.llama_server,
+                &config.model,
+            )?);
             (Some(presence), client, None)
         }
         Err(e) => {

@@ -289,8 +289,9 @@ fn parse_attachment(v: &Value) -> Option<Attachment> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assistd_config::ToolsOutputConfig;
     use assistd_llm::{LlmBackend, LlmEvent, StepOutcome, ToolCall};
-    use assistd_tools::{CommandRegistry, PresentSpec, RunTool};
+    use assistd_tools::{CommandRegistry, RunTool};
     use async_trait::async_trait;
     use std::sync::Mutex as StdMutex;
 
@@ -370,12 +371,8 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(RunTool::new(
             Arc::new(reg),
-            PresentSpec {
-                max_lines: 200,
-                max_bytes: 50 * 1024,
-                overflow_dir: std::env::temp_dir()
-                    .join(format!("assistd-agent-test-{}", std::process::id())),
-            },
+            &ToolsOutputConfig::default(),
+            std::env::temp_dir().join(format!("assistd-agent-test-{}", std::process::id())),
         ));
         Arc::new(tools)
     }
@@ -460,12 +457,8 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(RunTool::new(
             Arc::new(reg),
-            PresentSpec {
-                max_lines: 200,
-                max_bytes: 50 * 1024,
-                overflow_dir: std::env::temp_dir()
-                    .join(format!("assistd-agent-test-pipe-{}", std::process::id())),
-            },
+            &ToolsOutputConfig::default(),
+            std::env::temp_dir().join(format!("assistd-agent-test-pipe-{}", std::process::id())),
         ));
         let tools = Arc::new(tools);
 

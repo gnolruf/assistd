@@ -8,10 +8,8 @@
 pub mod chat;
 pub mod llama_server;
 
-pub use chat::{ChatClientError, ChatSpec, LlamaChatClient};
-pub use llama_server::{
-    LlamaServerControl, LlamaServerError, LlamaService, ModelSpec, ReadyState, ServerSpec,
-};
+pub use chat::{ChatClientError, LlamaChatClient};
+pub use llama_server::{LlamaServerControl, LlamaServerError, LlamaService, ReadyState};
 
 use anyhow::Result;
 use assistd_tools::Attachment;

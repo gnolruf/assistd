@@ -21,7 +21,7 @@ pub use policy::{
     AlwaysAllowGate, ConfirmationGate, ConfirmationRequest, DenyAllGate, ResolvedSandboxMode,
     SandboxInfo, SandboxRequest, matches_denylist, matches_destructive, probe_sandbox,
 };
-pub use presentation::{PresentResult, PresentSpec, present};
+pub use presentation::{PresentResult, present};
 pub use run::RunTool;
 
 use anyhow::Result;

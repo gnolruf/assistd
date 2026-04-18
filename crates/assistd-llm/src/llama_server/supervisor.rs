@@ -1,9 +1,9 @@
 use super::backoff::{MAX_CONSECUTIVE_FAILURES, backoff_delay};
-use super::config::{ModelSpec, ServerSpec};
 use super::error::LlamaServerError;
 use super::health::HealthChecker;
 use super::process::ChildProcess;
 use super::service::ReadyState;
+use assistd_config::{LlamaServerConfig, ModelConfig};
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,8 +32,8 @@ enum CycleResult {
 }
 
 pub struct Supervisor {
-    pub cfg: ServerSpec,
-    pub model: ModelSpec,
+    pub cfg: LlamaServerConfig,
+    pub model: ModelConfig,
     pub shutdown_rx: watch::Receiver<bool>,
     pub ready_tx: watch::Sender<ReadyState>,
     pub pid: Arc<Mutex<Option<u32>>>,

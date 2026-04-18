@@ -6,13 +6,13 @@
 //! heuristic that intentionally over-counts multi-byte text so we summarize
 //! early rather than overflow the server's context window.
 
+use assistd_config::{ChatConfig, ModelConfig};
 use assistd_tools::Attachment;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use tracing::{debug, warn};
 
-use super::config::ChatSpec;
 use super::error::ChatClientError;
 use super::wire;
 
@@ -250,14 +250,15 @@ impl Conversation {
     pub async fn ensure_budget(
         &mut self,
         summarizer: &dyn Summarizer,
-        spec: &ChatSpec,
+        chat: &ChatConfig,
+        model: &ModelConfig,
     ) -> Result<(), ChatClientError> {
-        let budget = effective_budget(spec);
+        let budget = effective_budget(chat, model);
         if self.approx_total_tokens() <= budget {
             return Ok(());
         }
 
-        let preserve_pairs = spec.preserve_recent_turns.max(1) as usize;
+        let preserve_pairs = chat.preserve_recent_turns.max(1) as usize;
         let preserve_from = self.first_preserved_index(preserve_pairs);
 
         let tail_start = self.summary_insertion_index();
@@ -266,21 +267,21 @@ impl Conversation {
                 target: "assistd::chat",
                 "ensure_budget: nothing to summarize, falling through to truncation"
             );
-            self.truncate_to_budget(spec);
+            self.truncate_to_budget(chat, model);
             return Ok(());
         }
 
         let dialogue = serialize_tail(&self.messages[tail_start..preserve_from]);
         if dialogue.trim().is_empty() {
-            self.truncate_to_budget(spec);
+            self.truncate_to_budget(chat, model);
             return Ok(());
         }
 
         let summary = summarizer
             .summarize(
                 dialogue,
-                spec.summary_target_tokens,
-                spec.max_summary_tokens,
+                chat.summary_target_tokens,
+                chat.max_summary_tokens,
             )
             .await?;
         let trimmed = summary.trim();
@@ -290,7 +291,7 @@ impl Conversation {
             ));
         }
 
-        let max_summary_bytes = (spec.summary_target_tokens as usize).saturating_mul(4);
+        let max_summary_bytes = (chat.summary_target_tokens as usize).saturating_mul(4);
         let body = if trimmed.len() > max_summary_bytes {
             truncate_utf8(trimmed, max_summary_bytes)
         } else {
@@ -313,7 +314,7 @@ impl Conversation {
                 target: "assistd::chat",
                 "ensure_budget: still over budget after summarize, truncating"
             );
-            self.truncate_to_budget(spec);
+            self.truncate_to_budget(chat, model);
         }
         Ok(())
     }
@@ -324,8 +325,8 @@ impl Conversation {
     /// atomically so the wire payload never carries an assistant
     /// `tool_calls` without a matching result (or vice versa) — most
     /// server-side chat templates reject that.
-    pub fn truncate_to_budget(&mut self, spec: &ChatSpec) {
-        let budget = effective_budget(spec);
+    pub fn truncate_to_budget(&mut self, chat: &ChatConfig, model: &ModelConfig) {
+        let budget = effective_budget(chat, model);
         while self.approx_total_tokens() > budget {
             let Some(idx) = self.first_droppable_index() else {
                 warn!(
@@ -471,8 +472,9 @@ fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
     }
 }
 
-fn effective_budget(spec: &ChatSpec) -> u32 {
-    spec.max_history_tokens.min(spec.effective_context_budget())
+fn effective_budget(chat: &ChatConfig, model: &ModelConfig) -> u32 {
+    chat.max_history_tokens
+        .min(chat.effective_context_budget(model))
 }
 
 fn serialize_tail(messages: &[Message]) -> String {
@@ -553,10 +555,8 @@ mod tests {
         }
     }
 
-    fn spec(max_history: u32, preserve: u32, ctx: u32) -> ChatSpec {
-        ChatSpec {
-            host: "127.0.0.1".into(),
-            port: 8385,
+    fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) {
+        let chat = ChatConfig {
             system_prompt: "sys".into(),
             max_history_tokens: max_history,
             summary_target_tokens: max_history / 4,
@@ -565,8 +565,13 @@ mod tests {
             max_response_tokens: 512,
             max_summary_tokens: max_history / 2,
             request_timeout_secs: 60,
-            model_context_length: ctx,
-        }
+            summary_temperature: 0.3,
+        };
+        let model = ModelConfig {
+            name: "test-model".into(),
+            context_length: ctx,
+        };
+        (chat, model)
     }
 
     #[test]
@@ -700,9 +705,8 @@ mod tests {
         let mut c = Conversation::new("sys".into());
         c.push_user("hi".into());
         let fake = FakeSummarizer::new("summary");
-        c.ensure_budget(&fake, &spec(10_000, 4, 20_000))
-            .await
-            .unwrap();
+        let (chat, model) = spec(10_000, 4, 20_000);
+        c.ensure_budget(&fake, &chat, &model).await.unwrap();
         assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
     }
 
@@ -719,7 +723,8 @@ mod tests {
         let before_total = c.approx_total_tokens();
 
         let fake = FakeSummarizer::new("the conversation covered topics 0 through 9");
-        c.ensure_budget(&fake, &spec(60, 2, 10_000)).await.unwrap();
+        let (chat, model) = spec(60, 2, 10_000);
+        c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         assert!(c.approx_total_tokens() <= 60 || c.approx_total_tokens() < before_total);
@@ -743,7 +748,8 @@ mod tests {
         c.push_user("current question with enough length to count".into());
 
         let fake = FakeSummarizer::new("early chat covered topics 0 and 1");
-        c.ensure_budget(&fake, &spec(120, 2, 10_000)).await.unwrap();
+        let (chat, model) = spec(120, 2, 10_000);
+        c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
         let tail_contents: Vec<_> = c
             .messages
@@ -762,9 +768,8 @@ mod tests {
             c.push_user(format!("user turn {i}"));
             c.push_assistant(format!("assistant reply {i}"));
         }
-        let result = c
-            .ensure_budget(&FailingSummarizer, &spec(40, 2, 10_000))
-            .await;
+        let (chat, model) = spec(40, 2, 10_000);
+        let result = c.ensure_budget(&FailingSummarizer, &chat, &model).await;
         assert!(matches!(result, Err(ChatClientError::Summarize(_))));
     }
 
@@ -776,7 +781,8 @@ mod tests {
             c.push_assistant(format!("assistant reply {i} with padding"));
         }
         let before = c.messages.len();
-        c.truncate_to_budget(&spec(40, 2, 10_000));
+        let (chat, model) = spec(40, 2, 10_000);
+        c.truncate_to_budget(&chat, &model);
         assert!(c.messages.len() < before);
         assert_eq!(c.messages.last().unwrap().role, Role::Assistant);
     }
@@ -789,7 +795,8 @@ mod tests {
             c.push_assistant(format!("a{i} with filler"));
         }
         c.push_user("keepme with filler".into());
-        c.truncate_to_budget(&spec(20, 1, 10_000));
+        let (chat, model) = spec(20, 1, 10_000);
+        c.truncate_to_budget(&chat, &model);
         assert_eq!(c.messages.last().unwrap().content, "keepme with filler");
     }
 
@@ -884,7 +891,8 @@ mod tests {
         // The latest turn (kept by preserve):
         c.push_user("latest".into());
 
-        c.truncate_to_budget(&spec(10, 1, 10_000));
+        let (chat, model) = spec(10, 1, 10_000);
+        c.truncate_to_budget(&chat, &model);
 
         // The remaining history must not carry a dangling tool_calls
         // without a matching result (or vice versa).
@@ -928,7 +936,8 @@ mod tests {
         c.push_user("latest".into());
 
         let fake = FakeSummarizer::new("summary");
-        c.ensure_budget(&fake, &spec(60, 2, 10_000)).await.unwrap();
+        let (chat, model) = spec(60, 2, 10_000);
+        c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
         // Post-summarize, the preserved tail must not have a dangling
         // tool_calls or tool-result.

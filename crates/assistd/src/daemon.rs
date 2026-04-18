@@ -71,8 +71,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     // (supervisor spawns, /health = 200, /models/load completes) before it
     // returns. Socket serving starts only after this succeeds.
     let presence = PresenceManager::new_active(
-        config.to_server_spec(),
-        config.to_model_spec(),
+        config.llama_server.clone(),
+        config.model.clone(),
         shutdown_tx.subscribe(),
     )
     .await?;
@@ -81,7 +81,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         config.llama_server.host, config.llama_server.port
     );
 
-    let chat = LlamaChatClient::new(config.to_chat_spec())?;
+    let chat = LlamaChatClient::new(&config.chat, &config.llama_server, &config.model)?;
     let hotkey_handle =
         hotkey::spawn_listener(&config.presence, presence.clone(), shutdown_tx.subscribe());
     let gpu_monitor_handle =
