@@ -44,6 +44,10 @@ max_response_tokens = 1024
 max_summary_tokens = 1200
 # HTTP request timeout for a single /v1/chat/completions call.
 request_timeout_secs = 120
+# Sampling temperature for the non-streaming summarization call. Lower
+# than `temperature` by default because summaries should be deterministic.
+# Range: 0.0..=2.0.
+# summary_temperature = 0.3
 
 [voice]
 # Enable voice input via microphone.

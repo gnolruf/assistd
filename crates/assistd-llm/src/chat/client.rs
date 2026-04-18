@@ -17,12 +17,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::Result;
+use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig};
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
 
-use super::config::ChatSpec;
 use super::conversation::{Conversation, Summarizer, ToolCallRecord};
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
@@ -30,7 +30,6 @@ use super::wire;
 use crate::{LlmBackend, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 
 const ERROR_BODY_CAP: usize = 1024;
-const SUMMARY_TEMPERATURE: f32 = 0.3;
 const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce a concise \
     summary of the following dialogue that preserves all factual claims, user requests, and \
     assistant conclusions. Write in past tense. Do not add commentary.";
@@ -38,23 +37,33 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce 
 pub struct LlamaChatClient {
     client: reqwest::Client,
     base_url: String,
-    spec: ChatSpec,
+    chat: ChatConfig,
+    model: ModelConfig,
     conv: Mutex<Conversation>,
 }
 
 impl LlamaChatClient {
-    pub fn new(spec: ChatSpec) -> Result<Self, ChatClientError> {
+    /// `chat` carries the sampling + history-window knobs, `server` provides
+    /// the host:port the request is sent to, and `model` is the identifier
+    /// llama-server has loaded (plus its context length for budget math).
+    /// All three are cloned; the caller keeps ownership.
+    pub fn new(
+        chat: &ChatConfig,
+        server: &LlamaServerConfig,
+        model: &ModelConfig,
+    ) -> Result<Self, ChatClientError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(spec.request_timeout_secs))
+            .timeout(Duration::from_secs(chat.request_timeout_secs))
             .build()?;
-        let base_url = format!("http://{}:{}", spec.host, spec.port);
-        let conv = Conversation::new(spec.system_prompt.clone());
+        let base_url = format!("http://{}:{}", server.host, server.port);
+        let conv = Conversation::new(chat.system_prompt.clone());
         Ok(Self {
             client,
             base_url,
-            spec,
+            chat: chat.clone(),
+            model: model.clone(),
             conv: Mutex::new(conv),
         })
     }
@@ -181,21 +190,21 @@ impl LlmBackend for LlamaChatClient {
 
         conv.push_user(prompt);
 
-        if let Err(e) = conv.ensure_budget(self, &self.spec).await {
+        if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
             warn!(
                 target: "assistd::chat",
                 "ensure_budget failed ({e}); falling back to truncation"
             );
-            conv.truncate_to_budget(&self.spec);
+            conv.truncate_to_budget(&self.chat, &self.model);
         }
 
         let wire_messages = conv.as_wire_messages();
         let payload = wire::ChatRequest {
-            model: self.spec.model_name.as_str(),
+            model: self.model.name.as_str(),
             messages: wire_messages,
             stream: true,
-            temperature: self.spec.temperature,
-            max_tokens: self.spec.max_response_tokens,
+            temperature: self.chat.temperature,
+            max_tokens: self.chat.max_response_tokens,
             tools: None,
             tool_choice: None,
         };
@@ -249,22 +258,22 @@ impl LlmBackend for LlamaChatClient {
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> Result<StepOutcome> {
         let mut conv = self.conv.lock().await;
 
-        if let Err(e) = conv.ensure_budget(self, &self.spec).await {
+        if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
             warn!(
                 target: "assistd::chat",
                 "ensure_budget failed ({e}); falling back to truncation"
             );
-            conv.truncate_to_budget(&self.spec);
+            conv.truncate_to_budget(&self.chat, &self.model);
         }
 
         let wire_messages = conv.as_wire_messages();
         let has_tools = !tools.is_empty();
         let payload = wire::ChatRequest {
-            model: self.spec.model_name.as_str(),
+            model: self.model.name.as_str(),
             messages: wire_messages,
             stream: true,
-            temperature: self.spec.temperature,
-            max_tokens: self.spec.max_response_tokens,
+            temperature: self.chat.temperature,
+            max_tokens: self.chat.max_response_tokens,
             tools: if has_tools { Some(tools) } else { None },
             tool_choice: if has_tools { Some("auto") } else { None },
         };
@@ -309,7 +318,7 @@ impl Summarizer for LlamaChatClient {
     ) -> Result<String, ChatClientError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let payload = wire::ChatRequest {
-            model: self.spec.model_name.as_str(),
+            model: self.model.name.as_str(),
             messages: vec![
                 wire::ChatMessage {
                     role: "system",
@@ -325,7 +334,7 @@ impl Summarizer for LlamaChatClient {
                 },
             ],
             stream: false,
-            temperature: SUMMARY_TEMPERATURE,
+            temperature: self.chat.summary_temperature,
             max_tokens,
             tools: None,
             tool_choice: None,

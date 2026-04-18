@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+assistd-config = { workspace = true }
 assistd-ipc = { workspace = true }
 assistd-llm = { workspace = true }
 assistd-tools = { workspace = true }

@@ -23,6 +23,8 @@ use crate::Tool;
 use crate::chain::{ParseError, execute, parse_chain};
 use crate::command::{Attachment, CommandOutput, CommandRegistry, error_line};
 use crate::presentation::{PresentResult, PresentSpec, present};
+use assistd_config::ToolsOutputConfig;
+use std::path::PathBuf;
 
 pub struct RunTool {
     registry: Arc<CommandRegistry>,
@@ -36,7 +38,19 @@ pub struct RunTool {
 }
 
 impl RunTool {
-    pub fn new(registry: Arc<CommandRegistry>, spec: PresentSpec) -> Self {
+    /// `output` provides the line/byte truncation caps; `overflow_dir` is
+    /// the resolved on-disk location chosen by the caller (daemon and chat
+    /// TUI use different dirs so their startup resets don't race).
+    pub fn new(
+        registry: Arc<CommandRegistry>,
+        output: &ToolsOutputConfig,
+        overflow_dir: PathBuf,
+    ) -> Self {
+        let spec = PresentSpec {
+            max_lines: output.max_lines as usize,
+            max_bytes: output.max_bytes(),
+            overflow_dir,
+        };
         let description = build_description(&registry);
         Self {
             registry,
@@ -250,25 +264,11 @@ mod tests {
     }
 
     fn tool_with_dir(dir: &Path) -> RunTool {
-        RunTool::new(
-            registry(),
-            PresentSpec {
-                max_lines: 200,
-                max_bytes: 50 * 1024,
-                overflow_dir: dir.to_path_buf(),
-            },
-        )
+        RunTool::new(registry(), &ToolsOutputConfig::default(), dir.to_path_buf())
     }
 
     fn tool_with(dir: &Path, reg: Arc<CommandRegistry>) -> RunTool {
-        RunTool::new(
-            reg,
-            PresentSpec {
-                max_lines: 200,
-                max_bytes: 50 * 1024,
-                overflow_dir: dir.to_path_buf(),
-            },
-        )
+        RunTool::new(reg, &ToolsOutputConfig::default(), dir.to_path_buf())
     }
 
     fn fresh_dir() -> TempDir {
@@ -710,14 +710,12 @@ mod tests {
         let mut reg = CommandRegistry::new();
         reg.register(Lines(10));
         let dir = fresh_dir();
-        let tool = RunTool::new(
-            Arc::new(reg),
-            PresentSpec {
-                max_lines: 3,
-                max_bytes: 10 * 1024,
-                overflow_dir: dir.path().to_path_buf(),
-            },
-        );
+        let tight = ToolsOutputConfig {
+            max_lines: 3,
+            max_kb: 10,
+            overflow_dir: String::new(),
+        };
+        let tool = RunTool::new(Arc::new(reg), &tight, dir.path().to_path_buf());
         let result = invoke(&tool, "lines");
         assert_eq!(result["truncated"], true);
         let output = result["output"].as_str().unwrap();
@@ -797,11 +795,8 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(RunTool::new(
             full_registry(),
-            PresentSpec {
-                max_lines: 200,
-                max_bytes: 50 * 1024,
-                overflow_dir: dir.path().to_path_buf(),
-            },
+            &ToolsOutputConfig::default(),
+            dir.path().to_path_buf(),
         ));
         let schemas = tools.openai_schemas();
         assert_eq!(schemas.len(), 1);

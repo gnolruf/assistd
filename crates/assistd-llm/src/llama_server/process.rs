@@ -1,5 +1,5 @@
-use super::config::{ModelSpec, ServerSpec};
 use super::error::LlamaServerError;
+use assistd_config::{LlamaServerConfig, ModelConfig};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -16,7 +16,7 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
-    pub fn spawn(cfg: &ServerSpec, model: &ModelSpec) -> Result<Self, LlamaServerError> {
+    pub fn spawn(cfg: &LlamaServerConfig, model: &ModelConfig) -> Result<Self, LlamaServerError> {
         // Router mode: start with no `--hf-repo`. The presence state machine
         // calls `POST /models/load` with `model.name` to bring weights in on
         // demand, and `POST /models/unload` to drop them while keeping the

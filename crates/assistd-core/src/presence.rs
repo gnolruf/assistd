@@ -31,8 +31,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use assistd_config::{LlamaServerConfig, ModelConfig};
 use assistd_ipc::PresenceState;
-use assistd_llm::{LlamaServerControl, LlamaService, ModelSpec, ServerSpec};
+use assistd_llm::{LlamaServerControl, LlamaService};
 use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, watch};
 use tracing::{debug, info, warn};
 
@@ -47,8 +48,8 @@ pub struct PresenceManager {
     // Serialises all transitions. Held across awaits, so must be a
     // tokio mutex rather than std.
     transition: AsyncMutex<()>,
-    server_spec: ServerSpec,
-    model_spec: ModelSpec,
+    llama_server: LlamaServerConfig,
+    model: ModelConfig,
     control: LlamaServerControl,
     // `Some` iff state is `Active` or `Drowsy`.
     llama: AsyncMutex<Option<LlamaService>>,
@@ -126,11 +127,11 @@ impl PresenceManager {
     /// inner shutdown) so the daemon can exit promptly even if a wake is
     /// blocked on `/health`.
     pub async fn new_active(
-        server_spec: ServerSpec,
-        model_spec: ModelSpec,
+        llama_server: LlamaServerConfig,
+        model: ModelConfig,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>> {
-        let control = LlamaServerControl::new(&server_spec.host, server_spec.port)
+        let control = LlamaServerControl::new(&llama_server.host, llama_server.port)
             .context("failed to construct llama-server control client")?;
 
         let current_inner_shutdown: Arc<StdMutex<Option<watch::Sender<bool>>>> =
@@ -168,8 +169,8 @@ impl PresenceManager {
         let manager = Arc::new(Self {
             state: StdMutex::new(PresenceState::Sleeping),
             transition: AsyncMutex::new(()),
-            server_spec,
-            model_spec,
+            llama_server,
+            model,
             control,
             llama: AsyncMutex::new(None),
             current_inner_shutdown,
@@ -403,13 +404,10 @@ impl PresenceManager {
 
         let started = Instant::now();
         self.control
-            .unload_model(&self.model_spec.name)
+            .unload_model(&self.model.name)
             .await
             .with_context(|| {
-                format!(
-                    "llama-server /models/unload failed for {}",
-                    self.model_spec.name
-                )
+                format!("llama-server /models/unload failed for {}", self.model.name)
             })?;
 
         *self.state.lock().expect("presence state mutex poisoned") = PresenceState::Drowsy;
@@ -446,13 +444,10 @@ impl PresenceManager {
         match prior {
             PresenceState::Drowsy => {
                 self.control
-                    .load_model(&self.model_spec.name)
+                    .load_model(&self.model.name)
                     .await
                     .with_context(|| {
-                        format!(
-                            "llama-server /models/load failed for {}",
-                            self.model_spec.name
-                        )
+                        format!("llama-server /models/load failed for {}", self.model.name)
                     })?;
             }
             PresenceState::Sleeping => {
@@ -462,31 +457,25 @@ impl PresenceManager {
                     .lock()
                     .expect("inner-shutdown mutex poisoned") = Some(inner_tx);
 
-                let service = LlamaService::start(
-                    self.server_spec.clone(),
-                    self.model_spec.clone(),
-                    inner_rx,
-                )
-                .await
-                .map_err(|e| {
-                    warn!(
-                        target: "assistd::presence",
-                        "wake cold-start failed: {e}"
-                    );
-                    anyhow!(e)
-                })
-                .context("llama-server cold-start failed during wake")?;
+                let service =
+                    LlamaService::start(self.llama_server.clone(), self.model.clone(), inner_rx)
+                        .await
+                        .map_err(|e| {
+                            warn!(
+                                target: "assistd::presence",
+                                "wake cold-start failed: {e}"
+                            );
+                            anyhow!(e)
+                        })
+                        .context("llama-server cold-start failed during wake")?;
 
                 *self.llama.lock().await = Some(service);
 
                 self.control
-                    .load_model(&self.model_spec.name)
+                    .load_model(&self.model.name)
                     .await
                     .with_context(|| {
-                        format!(
-                            "llama-server /models/load failed for {}",
-                            self.model_spec.name
-                        )
+                        format!("llama-server /models/load failed for {}", self.model.name)
                     })?;
             }
             PresenceState::Active => unreachable!("short-circuited above"),
@@ -515,23 +504,23 @@ impl PresenceManager {
     pub(crate) fn stub(state: PresenceState) -> Arc<Self> {
         let (_tx, rx) = watch::channel(false);
         let (state_tx, _) = watch::channel(state);
-        let server_spec = ServerSpec {
+        let llama_server = LlamaServerConfig {
             binary_path: "/does/not/exist".into(),
             host: "127.0.0.1".into(),
             port: 0,
             gpu_layers: 1,
             ready_timeout_secs: 1,
         };
-        let model_spec = ModelSpec {
+        let model = ModelConfig {
             name: "stub/model".into(),
             context_length: 1024,
         };
-        let control = LlamaServerControl::new(&server_spec.host, 1).expect("dummy control");
+        let control = LlamaServerControl::new(&llama_server.host, 1).expect("dummy control");
         Arc::new(Self {
             state: StdMutex::new(state),
             transition: AsyncMutex::new(()),
-            server_spec,
-            model_spec,
+            llama_server,
+            model,
             control,
             llama: AsyncMutex::new(None),
             current_inner_shutdown: Arc::new(StdMutex::new(None)),

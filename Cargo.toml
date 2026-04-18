@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/assistd",
+    "crates/assistd-config",
     "crates/assistd-core",
     "crates/assistd-ipc",
     "crates/assistd-llm",
@@ -19,12 +20,13 @@ license = "Apache-2.0"
 # Internal crates. `version` is declared alongside `path` so tooling that
 # inspects workspace manifests (e.g. cargo-deny) doesn't treat these as
 # wildcard deps. `path` still wins for local builds.
-assistd-core  = { version = "0.1", path = "crates/assistd-core" }
-assistd-ipc   = { version = "0.1", path = "crates/assistd-ipc" }
-assistd-llm   = { version = "0.1", path = "crates/assistd-llm" }
-assistd-voice = { version = "0.1", path = "crates/assistd-voice" }
-assistd-tools = { version = "0.1", path = "crates/assistd-tools" }
-assistd-wm    = { version = "0.1", path = "crates/assistd-wm" }
+assistd-config = { version = "0.1", path = "crates/assistd-config" }
+assistd-core   = { version = "0.1", path = "crates/assistd-core" }
+assistd-ipc    = { version = "0.1", path = "crates/assistd-ipc" }
+assistd-llm    = { version = "0.1", path = "crates/assistd-llm" }
+assistd-voice  = { version = "0.1", path = "crates/assistd-voice" }
+assistd-tools  = { version = "0.1", path = "crates/assistd-tools" }
+assistd-wm     = { version = "0.1", path = "crates/assistd-wm" }
 
 # External crates
 serde = { version = "1", features = ["derive"] }

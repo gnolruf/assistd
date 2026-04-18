@@ -226,8 +226,9 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::Config;
+    use assistd_config::ToolsOutputConfig;
     use assistd_llm::{EchoBackend, FailedBackend, StepOutcome, ToolCall, ToolResultPayload};
-    use assistd_tools::{CommandRegistry, PresentSpec, RunTool, commands::EchoCommand};
+    use assistd_tools::{CommandRegistry, RunTool, commands::EchoCommand};
 
     fn test_state(backend: Arc<dyn LlmBackend>, initial_state: PresenceState) -> Arc<AppState> {
         Arc::new(AppState::new(
@@ -405,12 +406,8 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(RunTool::new(
             Arc::new(commands),
-            PresentSpec {
-                max_lines: 200,
-                max_bytes: 50 * 1024,
-                overflow_dir: std::env::temp_dir()
-                    .join(format!("assistd-state-test-{}", std::process::id())),
-            },
+            &ToolsOutputConfig::default(),
+            std::env::temp_dir().join(format!("assistd-state-test-{}", std::process::id())),
         ));
         Arc::new(AppState::new(
             Config::default(),

@@ -79,10 +79,16 @@ impl OutputPane {
     }
 
     pub fn append_assistant(&mut self, delta: &str) {
-        if self.open_assistant.is_none() {
-            self.begin_assistant();
-        }
-        let mut idx = self.open_assistant.expect("just set");
+        // Resolve the open-assistant index through `begin_assistant` once
+        // so the subsequent loop can assume a non-empty assistant line
+        // without an Option unwrap surviving into the hot path.
+        let mut idx = match self.open_assistant {
+            Some(i) => i,
+            None => {
+                self.begin_assistant();
+                self.items.len() - 1
+            }
+        };
         let mut fragments = delta.split('\n');
         if let Some(first) = fragments.next() {
             if let Some(line) = self.text_at_mut(idx) {
@@ -180,6 +186,8 @@ impl OutputPane {
     /// to render at the top of the viewport. The scroll offset is clamped
     /// in place so it never exceeds the wrapped total.
     pub fn render_view(&mut self, width: u16, height: u16) -> (&[Line<'static>], u16) {
+        // Force cache population + grab the length without holding the
+        // borrow, so the subsequent scroll-offset clamp is legal.
         let wrapped_len = self.wrapped(width).len();
         let max_offset = wrapped_len.saturating_sub(height as usize) as u16;
         if self.scroll_offset > max_offset {
@@ -188,7 +196,14 @@ impl OutputPane {
         let start = wrapped_len
             .saturating_sub(height as usize)
             .saturating_sub(self.scroll_offset as usize) as u16;
-        (&self.wrap_cache.as_ref().unwrap().1, start)
+        // wrap_cache is guaranteed Some — self.wrapped() above
+        // unconditionally populates it.
+        let lines = &self
+            .wrap_cache
+            .as_ref()
+            .expect("wrap_cache populated by self.wrapped() above")
+            .1;
+        (lines, start)
     }
 
     fn wrapped(&mut self, width: u16) -> &[Line<'static>] {
@@ -203,7 +218,16 @@ impl OutputPane {
             self.wrap_cache = Some((width, wrapped));
             self.dirty = false;
         }
-        &self.wrap_cache.as_ref().unwrap().1
+        // Invariant: wrap_cache is Some after the branch above; the only
+        // way to reach here is either needs_rewrap was true (so we just
+        // assigned Some) or needs_rewrap was false (which requires
+        // wrap_cache.as_ref().map(...) to have returned Some, proving it's
+        // Some here).
+        &self
+            .wrap_cache
+            .as_ref()
+            .expect("wrap_cache populated by branch above")
+            .1
     }
 
     fn rewrap(&self, width: u16) -> Vec<Line<'static>> {

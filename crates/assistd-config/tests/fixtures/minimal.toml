@@ -1,0 +1,33 @@
+[model]
+name = "test/model-GGUF:Q4_K_M"
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384

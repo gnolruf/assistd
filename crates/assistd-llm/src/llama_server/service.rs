@@ -1,7 +1,7 @@
 use super::backoff::MAX_CONSECUTIVE_FAILURES;
-use super::config::{ModelSpec, ServerSpec};
 use super::error::LlamaServerError;
 use super::supervisor::Supervisor;
+use assistd_config::{LlamaServerConfig, ModelConfig};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -38,8 +38,8 @@ impl LlamaService {
     /// exit; a call to `start` that sees shutdown before Ready returns
     /// `ShutdownDuringHealth`.
     pub async fn start(
-        cfg: ServerSpec,
-        model: ModelSpec,
+        cfg: LlamaServerConfig,
+        model: ModelConfig,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Result<Self, LlamaServerError> {
         let (ready_tx, mut ready_rx) = watch::channel(ReadyState::Starting);

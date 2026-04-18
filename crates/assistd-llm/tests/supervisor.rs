@@ -6,7 +6,8 @@
 
 #![cfg(feature = "test-support")]
 
-use assistd_llm::{LlamaService, ModelSpec, ReadyState, ServerSpec};
+use assistd_config::{LlamaServerConfig, ModelConfig};
+use assistd_llm::{LlamaService, ReadyState};
 use std::sync::Once;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -36,8 +37,8 @@ async fn grab_port() -> u16 {
     port
 }
 
-fn server_spec(port: u16) -> ServerSpec {
-    ServerSpec {
+fn server_spec(port: u16) -> LlamaServerConfig {
+    LlamaServerConfig {
         binary_path: FAKE_BIN.to_string(),
         host: "127.0.0.1".to_string(),
         port,
@@ -46,15 +47,15 @@ fn server_spec(port: u16) -> ServerSpec {
     }
 }
 
-fn model_spec() -> ModelSpec {
-    ModelSpec {
+fn model_spec() -> ModelConfig {
+    ModelConfig {
         name: "test/fake-model-GGUF:Q4_K_M".to_string(),
         context_length: 2048,
     }
 }
 
 /// Appends `--mode <mode>` by wrapping the fake binary via a shell invocation.
-/// We need this because ServerSpec doesn't expose extra args — but the fake
+/// We need this because LlamaServerConfig doesn't expose extra args — but the fake
 /// binary parses args itself. Instead we rely on the binary tolerating the
 /// llama-server arg shape and parsing its own mode flag out of env.
 ///
@@ -64,7 +65,7 @@ fn model_spec() -> ModelSpec {
 /// already parsed out of the command line. We put it at the end so the real
 /// llama-server-shaped args come first.
 ///
-/// Since ServerSpec just runs `binary_path` directly, we need a way to
+/// Since LlamaServerConfig just runs `binary_path` directly, we need a way to
 /// inject the mode. Two options: wrapper script, or env var.
 ///
 /// Environment variable is cleanest.

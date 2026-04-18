@@ -10,7 +10,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_llm::{ChatSpec, LlamaChatClient, LlmBackend, LlmEvent, StepOutcome};
+use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig};
+use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent, StepOutcome};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -301,21 +302,41 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn chat_spec(port: u16) -> ChatSpec {
-    ChatSpec {
-        host: "127.0.0.1".into(),
-        port,
-        system_prompt: "test system prompt".into(),
-        max_history_tokens: 10_000,
-        summary_target_tokens: 1000,
-        preserve_recent_turns: 2,
-        temperature: 0.5,
-        max_response_tokens: 256,
-        max_summary_tokens: 500,
-        request_timeout_secs: 5,
-        model_context_length: 12_000,
-        model_name: "test-model".into(),
+struct ClientCfg {
+    chat: ChatConfig,
+    server: LlamaServerConfig,
+    model: ModelConfig,
+}
+
+fn chat_spec(port: u16) -> ClientCfg {
+    ClientCfg {
+        chat: ChatConfig {
+            system_prompt: "test system prompt".into(),
+            max_history_tokens: 10_000,
+            summary_target_tokens: 1000,
+            preserve_recent_turns: 2,
+            temperature: 0.5,
+            max_response_tokens: 256,
+            max_summary_tokens: 500,
+            request_timeout_secs: 5,
+            summary_temperature: 0.3,
+        },
+        server: LlamaServerConfig {
+            binary_path: "llama-server".into(),
+            host: "127.0.0.1".into(),
+            port,
+            gpu_layers: 9999,
+            ready_timeout_secs: 60,
+        },
+        model: ModelConfig {
+            name: "test-model".into(),
+            context_length: 12_000,
+        },
     }
+}
+
+fn build_client(cfg: &ClientCfg) -> LlamaChatClient {
+    LlamaChatClient::new(&cfg.chat, &cfg.server, &cfg.model).unwrap()
 }
 
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
@@ -338,7 +359,7 @@ async fn single_turn_streams_deltas_and_finishes() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    let client = build_client(&chat_spec(port));
     let (tx, mut rx) = mpsc::channel(32);
     client.generate("hi".into(), tx).await.unwrap();
 
@@ -384,7 +405,7 @@ async fn multi_turn_request_includes_prior_exchange() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    let client = build_client(&chat_spec(port));
 
     let (tx1, mut rx1) = mpsc::channel(32);
     client.generate("question one".into(), tx1).await.unwrap();
@@ -415,8 +436,8 @@ async fn connection_refused_returns_typed_error_not_panic() {
     drop(listener);
 
     let mut spec = chat_spec(port);
-    spec.request_timeout_secs = 2;
-    let client = LlamaChatClient::new(spec).unwrap();
+    spec.chat.request_timeout_secs = 2;
+    let client = build_client(&spec);
     let (tx, mut rx) = mpsc::channel(32);
     let result = client.generate("hi".into(), tx).await;
     assert!(result.is_err(), "expected error for connection refused");
@@ -436,7 +457,7 @@ async fn http_500_returns_server_error() {
         .await;
     let (port, _server) = spawn_fake(script).await;
 
-    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    let client = build_client(&chat_spec(port));
     let (tx, mut rx) = mpsc::channel(32);
     let result = client.generate("hi".into(), tx).await;
     assert!(result.is_err());
@@ -459,7 +480,7 @@ async fn mid_stream_drop_after_deltas_emits_done() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    let client = build_client(&chat_spec(port));
 
     let (tx, mut rx) = mpsc::channel(32);
     client.generate("hi".into(), tx).await.unwrap();
@@ -497,7 +518,7 @@ async fn first_chunk_role_only_delta_is_ignored() {
         .await;
     let (port, _server) = spawn_fake(script).await;
 
-    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    let client = build_client(&chat_spec(port));
     let (tx, mut rx) = mpsc::channel(32);
     client.generate("hi".into(), tx).await.unwrap();
     let events = drain(&mut rx).await;
@@ -534,10 +555,10 @@ async fn summarization_triggered_when_over_budget() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let mut spec = chat_spec(port);
-    spec.max_history_tokens = 60;
-    spec.summary_target_tokens = 15;
-    spec.preserve_recent_turns = 1;
-    let client = LlamaChatClient::new(spec).unwrap();
+    spec.chat.max_history_tokens = 60;
+    spec.chat.summary_target_tokens = 15;
+    spec.chat.preserve_recent_turns = 1;
+    let client = build_client(&spec);
 
     for i in 0..3 {
         let (tx, mut rx) = mpsc::channel(32);
@@ -591,10 +612,10 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let mut spec = chat_spec(port);
-    spec.max_history_tokens = 50;
-    spec.summary_target_tokens = 10;
-    spec.preserve_recent_turns = 1;
-    let client = LlamaChatClient::new(spec).unwrap();
+    spec.chat.max_history_tokens = 50;
+    spec.chat.summary_target_tokens = 10;
+    spec.chat.preserve_recent_turns = 1;
+    let client = build_client(&spec);
 
     for i in 0..3 {
         let (tx, mut rx) = mpsc::channel(32);
@@ -653,7 +674,7 @@ async fn step_with_stop_finish_reason_returns_final() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    let client = build_client(&chat_spec(port));
     client.push_user("what is 2+2?".into()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
     let outcome = client.step(Vec::new(), tx).await.unwrap();
@@ -686,7 +707,7 @@ async fn step_parses_tool_call_across_argument_chunks() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    let client = build_client(&chat_spec(port));
     client.push_user("list /tmp".into()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
     let tools = vec![serde_json::json!({
@@ -740,7 +761,7 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let client = LlamaChatClient::new(chat_spec(port)).unwrap();
+    let client = build_client(&chat_spec(port));
     client.push_user("please echo hi".into()).await.unwrap();
 
     let tools = vec![serde_json::json!({
@@ -827,8 +848,8 @@ async fn request_timeout_surfaces_as_error() {
     });
 
     let mut spec = chat_spec(port);
-    spec.request_timeout_secs = 1;
-    let client = LlamaChatClient::new(spec).unwrap();
+    spec.chat.request_timeout_secs = 1;
+    let client = build_client(&spec);
     let (tx, _rx) = mpsc::channel(32);
     let result = client.generate("hi".into(), tx).await;
     assert!(result.is_err());

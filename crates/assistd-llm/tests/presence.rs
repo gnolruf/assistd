@@ -11,9 +11,10 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 
+use assistd_config::{LlamaServerConfig, ModelConfig};
 use assistd_core::{AppState, Config, PresenceManager, PresenceState, ToolRegistry};
 use assistd_ipc::{Event, Request};
-use assistd_llm::{EchoBackend, LlmBackend, LlmEvent, ModelSpec, ServerSpec};
+use assistd_llm::{EchoBackend, LlmBackend, LlmEvent};
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixStream};
@@ -51,8 +52,8 @@ async fn grab_port() -> u16 {
     port
 }
 
-fn server_spec(port: u16) -> ServerSpec {
-    ServerSpec {
+fn server_spec(port: u16) -> LlamaServerConfig {
+    LlamaServerConfig {
         binary_path: FAKE_BIN.to_string(),
         host: "127.0.0.1".to_string(),
         port,
@@ -61,8 +62,8 @@ fn server_spec(port: u16) -> ServerSpec {
     }
 }
 
-fn model_spec() -> ModelSpec {
-    ModelSpec {
+fn model_spec() -> ModelConfig {
+    ModelConfig {
         name: "test/fake-model-GGUF:Q4_K_M".to_string(),
         context_length: 2048,
     }

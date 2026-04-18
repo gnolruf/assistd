@@ -6,12 +6,10 @@
 //! `LlmEvent::Delta` events followed by a terminal `LlmEvent::Done`.
 
 pub mod client;
-pub mod config;
 pub mod conversation;
 pub mod error;
 pub mod sse;
 pub mod wire;
 
 pub use client::LlamaChatClient;
-pub use config::ChatSpec;
 pub use error::ChatClientError;

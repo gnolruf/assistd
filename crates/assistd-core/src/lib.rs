@@ -1,20 +1,24 @@
 pub mod agent;
-pub mod config;
 pub mod presence;
 pub mod socket;
 pub mod state;
 
 pub use agent::run_agent_turn;
+pub use assistd_config as config;
+pub use assistd_config::{
+    AgentConfig, BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config,
+    ConfigError, DaemonConfig, LlamaServerConfig, ModelConfig, PresenceConfig, RemoteConfig,
+    SleepConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsWriteConfig, VoiceConfig,
+};
 pub use assistd_ipc as ipc;
 pub use assistd_ipc::PresenceState;
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
-pub use config::{AgentConfig, Config, DaemonConfig, PresenceConfig, SleepConfig};
 pub use presence::{PresenceManager, RequestGuard};
 pub use state::AppState;
 
 use anyhow::{Context, Result};
 use assistd_tools::{
-    ConfirmationGate, PresentSpec, RunTool, SandboxRequest,
+    ConfirmationGate, RunTool, SandboxRequest,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand,
         WcCommand, WebCommand, WriteCommand, WritePolicyCfg,
@@ -62,9 +66,9 @@ pub fn build_tools(
     // degrades to unsandboxed with a warn; `Bwrap` bails startup if bwrap
     // is missing.
     let sandbox_request = match config.tools.bash.sandbox {
-        config::BashSandboxMode::Auto => SandboxRequest::Auto,
-        config::BashSandboxMode::Bwrap => SandboxRequest::Bwrap,
-        config::BashSandboxMode::None => SandboxRequest::None,
+        BashSandboxMode::Auto => SandboxRequest::Auto,
+        BashSandboxMode::Bwrap => SandboxRequest::Bwrap,
+        BashSandboxMode::None => SandboxRequest::None,
     };
     let sandbox = probe_sandbox(sandbox_request, config.tools.bash.bwrap_extra_args.clone())?;
 
@@ -121,13 +125,12 @@ pub fn build_tools(
     commands.register(WebCommand::new());
     commands.register(BashCommand::new(bash_cfg, sandbox, gate));
 
-    let present_spec = PresentSpec {
-        max_lines: config.tools.output.max_lines as usize,
-        max_bytes: (config.tools.output.max_kb as usize) * 1024,
-        overflow_dir,
-    };
     let mut tools = ToolRegistry::new();
-    tools.register(RunTool::new(Arc::new(commands), present_spec));
+    tools.register(RunTool::new(
+        Arc::new(commands),
+        &config.tools.output,
+        overflow_dir,
+    ));
     Ok(Arc::new(tools))
 }
 
