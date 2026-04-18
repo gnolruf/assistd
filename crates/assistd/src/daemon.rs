@@ -1,6 +1,7 @@
 use anyhow::Result;
 use assistd_core::{AppState, Config, PresenceManager};
 use assistd_llm::LlamaChatClient;
+use assistd_tools::DenyAllGate;
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,7 +89,11 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
 
-    let tools = assistd_core::build_tools(&config, overflow_dir.clone())?;
+    // IPC-connected clients (including `assistd query`) have no interactive
+    // channel, so destructive bash commands are denied by default. To
+    // approve such commands, run them from the chat TUI where the modal
+    // overlay can prompt the user.
+    let tools = assistd_core::build_tools(&config, overflow_dir.clone(), Arc::new(DenyAllGate))?;
     info!(
         "tools: registered {} (overflow dir {})",
         tools.len(),

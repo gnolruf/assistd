@@ -6,6 +6,7 @@
 //! tokens, readline-style input, and a VRAM/throughput status bar.
 
 mod app;
+mod gate;
 mod input;
 mod output;
 mod throughput;
@@ -32,6 +33,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::info;
 
 use self::app::{App, ChatEvent};
+use self::gate::{PendingConfirmation, TuiGate};
 
 #[derive(Args)]
 pub struct ChatArgs {
@@ -61,7 +63,16 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     // share a path, otherwise their startup resets race each other.
     let tui_overflow_dir =
         std::env::temp_dir().join(format!("assistd-chat-{}", std::process::id()));
-    let tools = assistd_core::build_tools(&config, tui_overflow_dir.clone())?;
+
+    // The TUI gate forwards destructive-command prompts to the modal
+    // overlay via this channel. Capacity 8 is generous — we process one
+    // at a time and the agent loop is blocked waiting for the response.
+    let (confirm_tx, confirm_rx) = mpsc::channel::<PendingConfirmation>(8);
+    let tools = assistd_core::build_tools(
+        &config,
+        tui_overflow_dir.clone(),
+        Arc::new(TuiGate::new(confirm_tx)),
+    )?;
     info!(
         "tools: registered {} (overflow dir {})",
         tools.len(),
@@ -118,6 +129,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         &mut resource_rx,
         shutdown_tx.clone(),
         startup_error,
+        confirm_rx,
     )
     .await;
 
@@ -145,6 +157,7 @@ async fn run_tui(
     resource_rx: &mut watch::Receiver<vram::ResourceState>,
     shutdown_tx: watch::Sender<bool>,
     startup_error: Option<String>,
+    mut confirmation_rx: mpsc::Receiver<PendingConfirmation>,
 ) -> Result<()> {
     terminal::enable_raw_mode().context("enable_raw_mode")?;
     if let Err(e) = execute!(
@@ -217,6 +230,9 @@ async fn run_tui(
             Ok(_) = resource_rx.changed() => {
                 let v = resource_rx.borrow_and_update().clone();
                 app.on_resources(v);
+            }
+            Some(pending) = confirmation_rx.recv() => {
+                app.open_confirmation_modal(pending);
             }
             presence_changed = async {
                 match presence_rx.as_mut() {

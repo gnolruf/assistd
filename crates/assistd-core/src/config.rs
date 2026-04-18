@@ -212,6 +212,10 @@ fn default_shutdown_grace_secs() -> u64 {
 pub struct ToolsConfig {
     #[serde(default)]
     pub output: ToolsOutputConfig,
+    #[serde(default)]
+    pub bash: ToolsBashConfig,
+    #[serde(default)]
+    pub write: ToolsWriteConfig,
 }
 
 /// Layer-2 presentation limits applied to the final output of `run` before
@@ -250,6 +254,125 @@ fn default_tools_max_kb() -> u32 {
 
 fn default_tools_overflow_dir() -> String {
     "/tmp/assistd-output".to_string()
+}
+
+/// Sandbox mode for bash subprocess execution.
+///
+/// * `Auto` — use bubblewrap if `bwrap` is found on `PATH` at daemon startup;
+///   log a warn and run unsandboxed if not.
+/// * `Bwrap` — require bubblewrap; fail daemon startup if `bwrap` is missing.
+/// * `None` — never wrap; run bash directly under the daemon's own user.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BashSandboxMode {
+    #[default]
+    Auto,
+    Bwrap,
+    None,
+}
+
+/// Bash-command policy: timeout ceiling, denylist of literal substrings that
+/// are rejected before spawn, destructive-pattern prefixes that require user
+/// confirmation, and sandbox mode.
+///
+/// Honest caveat: once bash is available, any syntactic pre-check can be
+/// defeated by a sufficiently clever caller (variable expansion, here-docs,
+/// command substitution). The denylist and destructive patterns are a
+/// backstop for the *obvious* cases; the sandbox is the real defense.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolsBashConfig {
+    /// Subprocess timeout in seconds. Must be > 0. Exceeding the timeout
+    /// kills the process group and returns exit 137.
+    #[serde(default = "default_bash_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Literal substrings that, if present in a bash script (case-insensitive),
+    /// cause immediate rejection before spawn. Use for patterns that should
+    /// never be executed under any circumstances.
+    #[serde(default = "default_bash_denylist")]
+    pub denylist: Vec<String>,
+    /// Shell-tokenized word prefixes that trigger interactive confirmation
+    /// before executing (when a confirmation gate is wired up) or reject by
+    /// default over IPC. Example: `"rm -rf"` matches `rm -rf foo` but not
+    /// `echo "rm -rf"`.
+    #[serde(default = "default_bash_destructive_patterns")]
+    pub destructive_patterns: Vec<String>,
+    /// Sandbox mode. See [`BashSandboxMode`].
+    #[serde(default)]
+    pub sandbox: BashSandboxMode,
+    /// Extra arguments appended to the bubblewrap invocation (before the
+    /// trailing `--`). Useful for widening binds (e.g.
+    /// `["--bind", "/srv", "/srv"]`) or tightening the sandbox (e.g.
+    /// `["--unshare-net"]`).
+    #[serde(default)]
+    pub bwrap_extra_args: Vec<String>,
+}
+
+impl Default for ToolsBashConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: default_bash_timeout_secs(),
+            denylist: default_bash_denylist(),
+            destructive_patterns: default_bash_destructive_patterns(),
+            sandbox: BashSandboxMode::default(),
+            bwrap_extra_args: Vec::new(),
+        }
+    }
+}
+
+fn default_bash_timeout_secs() -> u64 {
+    30
+}
+
+fn default_bash_denylist() -> Vec<String> {
+    vec![
+        "rm -rf /".into(),
+        "rm -rf /*".into(),
+        "rm -rf /home".into(),
+        "mkfs".into(),
+        "dd if=/dev/zero".into(),
+        ":(){ :|:& };:".into(),
+        "> /dev/sda".into(),
+        "> /dev/nvme".into(),
+    ]
+}
+
+fn default_bash_destructive_patterns() -> Vec<String> {
+    vec![
+        "rm -rf".into(),
+        "rm -fr".into(),
+        "git push --force".into(),
+        "git push -f".into(),
+        "git reset --hard".into(),
+        "dd of=".into(),
+        "shutdown".into(),
+        "reboot".into(),
+        "kill -9 -1".into(),
+    ]
+}
+
+/// Write-command policy: the allowlist of path prefixes under which the
+/// `write` command is permitted to create or overwrite files. Attempts
+/// outside every entry return exit 126.
+///
+/// Supports `~` / `~user` expansion. Relative paths are rejected outright
+/// because the daemon's cwd is not a meaningful anchor. Non-existent
+/// allowlist entries are dropped with a warning at daemon startup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolsWriteConfig {
+    #[serde(default = "default_writable_paths")]
+    pub writable_paths: Vec<String>,
+}
+
+impl Default for ToolsWriteConfig {
+    fn default() -> Self {
+        Self {
+            writable_paths: default_writable_paths(),
+        }
+    }
+}
+
+fn default_writable_paths() -> Vec<String> {
+    vec!["~".into(), "/tmp".into()]
 }
 
 /// Agent-loop configuration. The loop sends the LLM a single-tool
@@ -566,6 +689,16 @@ impl Config {
         }
         if self.tools.output.overflow_dir.is_empty() {
             errors.push("tools.output.overflow_dir must not be empty".into());
+        }
+
+        if self.tools.bash.timeout_secs == 0 {
+            errors.push("tools.bash.timeout_secs must be greater than 0".into());
+        }
+        if self.tools.write.writable_paths.is_empty() {
+            errors.push(
+                "tools.write.writable_paths must not be empty (the write command would be unusable)"
+                    .into(),
+            );
         }
 
         if self.agent.max_iterations == 0 {
@@ -1196,6 +1329,196 @@ port = 8384
         config.tools.output.overflow_dir = String::new();
         let errs = validation_errors(config.validate().unwrap_err());
         assert!(errs.iter().any(|e| e.contains("tools.output.overflow_dir")));
+    }
+
+    #[test]
+    fn tools_bash_defaults_match_spec() {
+        let cfg = ToolsBashConfig::default();
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.sandbox, BashSandboxMode::Auto);
+        assert!(cfg.bwrap_extra_args.is_empty());
+        // Catastrophic patterns that must be blocked out of the box.
+        assert!(cfg.denylist.iter().any(|p| p == "rm -rf /"));
+        assert!(cfg.denylist.iter().any(|p| p == "mkfs"));
+        // Destructive patterns that should prompt for confirmation.
+        assert!(cfg.destructive_patterns.iter().any(|p| p == "rm -rf"));
+        assert!(cfg.destructive_patterns.iter().any(|p| p == "shutdown"));
+    }
+
+    #[test]
+    fn tools_write_defaults_match_spec() {
+        let cfg = ToolsWriteConfig::default();
+        // Liberal default: user's home + /tmp. Tightened by users who want a
+        // smaller blast radius.
+        assert_eq!(
+            cfg.writable_paths,
+            vec!["~".to_string(), "/tmp".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_tools_bash_section_uses_defaults() {
+        // A config.toml written before the sandboxing feature landed must
+        // still parse and fall back to the safe defaults.
+        let toml_str = r#"
+[model]
+name = "test/model-GGUF:Q4_K_M"
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse without [tools.bash]");
+        assert_eq!(cfg.tools.bash.timeout_secs, 30);
+        assert_eq!(cfg.tools.bash.sandbox, BashSandboxMode::Auto);
+        assert!(!cfg.tools.bash.denylist.is_empty());
+        assert!(!cfg.tools.bash.destructive_patterns.is_empty());
+        cfg.validate().expect("defaults validate");
+    }
+
+    #[test]
+    fn missing_tools_write_section_uses_defaults() {
+        let toml_str = r#"
+[model]
+name = "test/model-GGUF:Q4_K_M"
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse without [tools.write]");
+        assert_eq!(
+            cfg.tools.write.writable_paths,
+            vec!["~".to_string(), "/tmp".to_string()]
+        );
+        cfg.validate().expect("defaults validate");
+    }
+
+    #[test]
+    fn tools_bash_sandbox_parses_all_variants() {
+        for variant in ["auto", "bwrap", "none"] {
+            let toml_str = format!(
+                r#"
+[model]
+name = "test/model-GGUF:Q4_K_M"
+context_length = 8192
+
+[llama_server]
+binary_path = "llama-server"
+host = "127.0.0.1"
+port = 8385
+
+[chat]
+system_prompt = "hi"
+max_history_tokens = 4000
+summary_target_tokens = 500
+preserve_recent_turns = 2
+temperature = 0.5
+max_response_tokens = 1024
+max_summary_tokens = 800
+request_timeout_secs = 60
+
+[voice]
+enabled = false
+hotkey = "Super+V"
+
+[compositor]
+type = "sway"
+
+[sleep]
+suspend = false
+
+[remote]
+enabled = false
+bind_address = "127.0.0.1"
+port = 8384
+
+[tools.bash]
+sandbox = "{variant}"
+"#
+            );
+            let cfg: Config = toml::from_str(&toml_str).expect("parse variant");
+            let expected = match variant {
+                "auto" => BashSandboxMode::Auto,
+                "bwrap" => BashSandboxMode::Bwrap,
+                "none" => BashSandboxMode::None,
+                _ => unreachable!(),
+            };
+            assert_eq!(cfg.tools.bash.sandbox, expected);
+        }
+    }
+
+    #[test]
+    fn validation_rejects_zero_bash_timeout() {
+        let mut config = Config::default();
+        config.tools.bash.timeout_secs = 0;
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(errs.iter().any(|e| e.contains("tools.bash.timeout_secs")));
+    }
+
+    #[test]
+    fn validation_rejects_empty_writable_paths() {
+        let mut config = Config::default();
+        config.tools.write.writable_paths = Vec::new();
+        let errs = validation_errors(config.validate().unwrap_err());
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("tools.write.writable_paths"))
+        );
     }
 
     #[test]

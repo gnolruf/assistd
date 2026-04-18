@@ -320,7 +320,7 @@ mod tests {
             (
                 "write",
                 rt.block_on(run_cmd(
-                    WriteCommand,
+                    WriteCommand::permissive_for_tests(),
                     vec!["/nonexistent/assistd-convention-test".into(), "x".into()],
                 )),
             ),
@@ -332,13 +332,27 @@ mod tests {
                     vec!["file:///etc/passwd".into()],
                 )),
             ),
-            // bash timeout exercises assistd's own error wrapper (not a
-            // subprocess stderr forward). 50ms is plenty for a sleep.
+            // bash denylist rejection exercises the policy error path,
+            // which is a convention-compliant `[error] bash: … Try: …`
+            // line. (The separate AC #2 timeout path deliberately emits a
+            // fixed, hint-free format and is not covered by this test.)
             (
                 "bash",
                 rt.block_on(run_cmd(
-                    BashCommand::new(std::time::Duration::from_millis(50)),
-                    vec!["sleep 5".into()],
+                    {
+                        use crate::commands::bash::BashPolicyCfg;
+                        use crate::policy::{AlwaysAllowGate, SandboxInfo};
+                        use std::sync::Arc;
+                        BashCommand::new(
+                            Arc::new(BashPolicyCfg {
+                                denylist: vec!["rm -rf /".into()],
+                                ..Default::default()
+                            }),
+                            SandboxInfo::none(),
+                            Arc::new(AlwaysAllowGate),
+                        )
+                    },
+                    vec!["rm -rf /".into()],
                 )),
             ),
         ];
@@ -380,7 +394,7 @@ mod tests {
         reg.register(GrepCommand);
         reg.register(WcCommand);
         reg.register(EchoCommand);
-        reg.register(WriteCommand);
+        reg.register(WriteCommand::permissive_for_tests());
         reg.register(SeeCommand);
         reg.register(WebCommand::new());
         reg.register(BashCommand::default());
