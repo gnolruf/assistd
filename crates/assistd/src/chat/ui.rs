@@ -9,9 +9,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use super::app::App;
+use super::app::{App, ConfirmationModal};
 use super::vram::{RamState, VramState};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -30,6 +30,65 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_output(frame, output_area, app);
     render_status(frame, status_area, app);
     render_input(frame, input_area, app);
+
+    // Modal overlay on top of the whole frame. Only drawn when a
+    // destructive-command prompt is pending.
+    if let Some(modal) = &app.modal {
+        render_confirmation_modal(frame, frame.area(), modal);
+    }
+}
+
+/// Centered Y/N prompt showing the pending destructive command. The agent
+/// loop is blocked on the gate's oneshot until the user decides, so the
+/// overlay is the only thing that matters.
+fn render_confirmation_modal(frame: &mut Frame, area: Rect, modal: &ConfirmationModal) {
+    let width = area.width.saturating_mul(3) / 5; // 60%
+    let width = width.clamp(40, 100);
+    let height = 10u16.min(area.height.saturating_sub(2));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let modal_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, modal_area);
+    let block = Block::default()
+        .title(Span::styled(
+            " Confirm destructive command ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let text = Text::from(vec![
+        Line::from(vec![
+            Span::styled("pattern: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                modal.request.matched_pattern.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "command:",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(modal.request.script.clone()),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[Y]es / [N]o   (Enter = yes · Esc = no)",
+            Style::default().fg(Color::Green),
+        )),
+    ]);
+    let para = Paragraph::new(text).wrap(Wrap { trim: false });
+    frame.render_widget(para, inner);
 }
 
 fn render_output(frame: &mut Frame, area: Rect, app: &mut App) {

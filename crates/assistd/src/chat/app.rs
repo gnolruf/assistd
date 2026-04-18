@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 
 use assistd_core::{PresenceManager, PresenceState, SleepConfig, ToolRegistry};
 use assistd_llm::{LlmBackend, LlmEvent};
+use assistd_tools::ConfirmationRequest;
 use crossterm::event::{KeyCode, KeyEvent};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
+use super::gate::PendingConfirmation;
 use super::input::{InputAction, InputLine};
 use super::output::OutputPane;
 use super::throughput::ThroughputMeter;
@@ -24,6 +26,14 @@ const NOTICE_HOLD: Duration = Duration::from_secs(3);
 pub enum ChatEvent {
     Llm(LlmEvent),
     LlmError(String),
+}
+
+/// Pending destructive-command prompt displayed as an overlay. Only one is
+/// ever active at a time — the agent loop is blocked on the gate's
+/// `oneshot` while we wait for the user's Y/N decision.
+pub struct ConfirmationModal {
+    pub request: ConfirmationRequest,
+    responder: oneshot::Sender<bool>,
 }
 
 pub struct App {
@@ -40,6 +50,7 @@ pub struct App {
     pub presence_state: Option<PresenceState>,
     pub sleep_cfg: SleepConfig,
     pub presence: Option<Arc<PresenceManager>>,
+    pub modal: Option<ConfirmationModal>,
     client: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
     max_iterations: u32,
@@ -71,11 +82,44 @@ impl App {
             presence_state,
             sleep_cfg,
             presence,
+            modal: None,
             client,
             tools,
             max_iterations,
             chat_tx,
         }
+    }
+
+    /// Called by the TUI event loop when a destructive-command request
+    /// arrives from the gate. Only one modal is supported at a time; if a
+    /// second request arrives while one is pending we reject the newer one
+    /// immediately (its oneshot is dropped, which the gate interprets as
+    /// a denial). This is a defensive guard — it should not happen because
+    /// the agent loop blocks on the first prompt before issuing a second
+    /// bash invocation.
+    pub fn open_confirmation_modal(&mut self, pending: PendingConfirmation) {
+        if self.modal.is_some() {
+            // Drop the new request's responder → gate returns false.
+            drop(pending);
+            return;
+        }
+        self.modal = Some(ConfirmationModal {
+            request: pending.request,
+            responder: pending.responder,
+        });
+    }
+
+    /// Consume the modal (if any) and send `decision` through the stored
+    /// oneshot. Used by both the Y/N key handlers and the quit path.
+    fn resolve_modal(&mut self, decision: bool) {
+        if let Some(modal) = self.modal.take() {
+            let _ = modal.responder.send(decision);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn has_modal(&self) -> bool {
+        self.modal.is_some()
     }
 
     pub fn should_quit(&self) -> bool {
@@ -95,6 +139,14 @@ impl App {
     }
 
     pub fn on_key(&mut self, ev: KeyEvent) {
+        // Modal takes precedence over every other keybinding: when the
+        // agent is blocked on a confirmation prompt, the only meaningful
+        // input is Y / N / Esc. Scrolling and input-line edits stay
+        // inert until the user decides.
+        if self.modal.is_some() {
+            self.handle_modal_key(ev);
+            return;
+        }
         match ev.code {
             KeyCode::PageUp => {
                 self.output.scroll_page_up(self.last_output_height);
@@ -120,7 +172,27 @@ impl App {
                 }
             }
             InputAction::Quit => {
+                // Closing during a pending modal isn't currently
+                // reachable — modal intercepts input — but guard anyway
+                // so the gate always gets a decision.
+                self.resolve_modal(false);
                 self.quitting = true;
+            }
+        }
+    }
+
+    fn handle_modal_key(&mut self, ev: KeyEvent) {
+        match ev.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                self.resolve_modal(true);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.resolve_modal(false);
+            }
+            _ => {
+                // Swallow every other key while the modal is open — the
+                // agent is blocked, so keystrokes meant for the input
+                // line would be confusing.
             }
         }
     }
@@ -387,6 +459,102 @@ mod tests {
             app.notice().map(|s| s.to_string()),
             Some("presence unavailable".to_string())
         );
+    }
+
+    fn pending_confirmation() -> (PendingConfirmation, oneshot::Receiver<bool>) {
+        let (tx, rx) = oneshot::channel();
+        let pending = PendingConfirmation {
+            request: ConfirmationRequest {
+                tool: "bash".into(),
+                script: "rm -rf /tmp/junk".into(),
+                matched_pattern: "rm -rf".into(),
+            },
+            responder: tx,
+        };
+        (pending, rx)
+    }
+
+    #[tokio::test]
+    async fn modal_approve_on_y() {
+        let (mut app, _rx) = test_app();
+        let (pending, responder_rx) = pending_confirmation();
+        app.open_confirmation_modal(pending);
+        assert!(app.has_modal());
+        app.on_key(typed('y'));
+        assert!(!app.has_modal(), "modal should close on approve");
+        let decision = responder_rx.await.expect("responder not dropped");
+        assert!(decision);
+    }
+
+    #[tokio::test]
+    async fn modal_approve_on_uppercase_y() {
+        let (mut app, _rx) = test_app();
+        let (pending, responder_rx) = pending_confirmation();
+        app.open_confirmation_modal(pending);
+        app.on_key(typed('Y'));
+        assert!(responder_rx.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn modal_approve_on_enter() {
+        let (mut app, _rx) = test_app();
+        let (pending, responder_rx) = pending_confirmation();
+        app.open_confirmation_modal(pending);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(responder_rx.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn modal_deny_on_n() {
+        let (mut app, _rx) = test_app();
+        let (pending, responder_rx) = pending_confirmation();
+        app.open_confirmation_modal(pending);
+        app.on_key(typed('n'));
+        assert!(!app.has_modal());
+        assert!(!responder_rx.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn modal_deny_on_esc() {
+        let (mut app, _rx) = test_app();
+        let (pending, responder_rx) = pending_confirmation();
+        app.open_confirmation_modal(pending);
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!responder_rx.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn modal_swallows_unrelated_keys() {
+        let (mut app, _rx) = test_app();
+        let (pending, _responder_rx) = pending_confirmation();
+        app.open_confirmation_modal(pending);
+        // Typing into the input line must NOT land in the buffer while
+        // the modal is open — it would be confusing.
+        app.on_key(typed('x'));
+        app.on_key(typed('z'));
+        assert!(app.has_modal());
+        assert!(app.input.buffer().is_empty());
+    }
+
+    #[tokio::test]
+    async fn modal_second_request_while_open_is_denied() {
+        let (mut app, _rx) = test_app();
+        let (first, first_rx) = pending_confirmation();
+        let (second, second_rx) = pending_confirmation();
+        app.open_confirmation_modal(first);
+        // Second request arrives while the first is pending — the gate
+        // must not hang; instead, the second request's responder is
+        // dropped, which the gate interprets as denial.
+        app.open_confirmation_modal(second);
+        // First is still the active modal.
+        assert!(app.has_modal());
+        assert!(
+            second_rx.await.is_err(),
+            "second responder should be dropped"
+        );
+        // Resolving the first still works.
+        app.on_key(typed('y'));
+        assert!(first_rx.await.unwrap());
     }
 
     #[tokio::test]

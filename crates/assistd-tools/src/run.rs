@@ -242,7 +242,7 @@ mod tests {
         r.register(GrepCommand);
         r.register(WcCommand);
         r.register(EchoCommand);
-        r.register(WriteCommand);
+        r.register(WriteCommand::permissive_for_tests());
         r.register(SeeCommand);
         r.register(WebCommand::new());
         r.register(BashCommand::default());
@@ -855,7 +855,7 @@ mod tests {
     fn run_write_no_args_returns_help_on_stdout_exit_2() {
         let dir = fresh_dir();
         let mut reg = CommandRegistry::new();
-        reg.register(WriteCommand);
+        reg.register(WriteCommand::permissive_for_tests());
         let tool = tool_with(dir.path(), Arc::new(reg));
         let result = invoke(&tool, "write");
         assert_eq!(result["exit_code"], 2);

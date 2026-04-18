@@ -125,3 +125,85 @@ hotkey = "Super+Escape"
 # is hit. 20 is deliberately generous: each `run` call is cheap and
 # pipelines reduce the number of round-trips needed for most queries.
 # max_iterations = 20
+
+# ---------------------------------------------------------------------------
+# Tool execution safety
+# ---------------------------------------------------------------------------
+# Honest note: the bash policy (denylist, destructive_patterns) is a
+# backstop for *obvious* dangerous invocations. A sufficiently clever LLM
+# can defeat any syntactic check (variable expansion, command
+# substitution, here-docs). The bubblewrap sandbox is the real
+# defense-in-depth; install bubblewrap (package: bubblewrap) and keep
+# tools.bash.sandbox = "auto" to benefit from it.
+
+[tools.bash]
+# Subprocess timeout in seconds. Must be > 0. Exceeding the timeout
+# kills the process group and returns exit 137 with the message
+#   [error] bash: timed out after 30s [exit:137 | 30.0s]
+# timeout_secs = 30
+
+# Denylist: literal substrings that, if present in a bash script
+# (case-insensitive), cause immediate rejection before spawn with exit
+# 126. Use for patterns that should never be executed under any
+# circumstances. The matched pattern is echoed back in the error line
+# so the LLM sees exactly what triggered the rejection.
+# denylist = [
+#     "rm -rf /",
+#     "rm -rf /*",
+#     "rm -rf /home",
+#     "mkfs",
+#     "dd if=/dev/zero",
+#     ":(){ :|:& };:",
+#     "> /dev/sda",
+#     "> /dev/nvme",
+# ]
+
+# Destructive patterns: shell-tokenized word prefixes that trigger an
+# interactive Y/N confirmation prompt in the chat TUI (or are denied by
+# default over IPC, where no confirmation channel exists). More permissive
+# than the denylist: these are "dangerous but sometimes needed" operations.
+# Example: `rm -rf foo` matches `["rm", "-rf"]` and prompts; `echo "rm -rf"`
+# is a quoted literal and does NOT match.
+# destructive_patterns = [
+#     "rm -rf",
+#     "rm -fr",
+#     "git push --force",
+#     "git push -f",
+#     "git reset --hard",
+#     "dd of=",
+#     "shutdown",
+#     "reboot",
+#     "kill -9 -1",
+# ]
+
+# Sandbox mode for bash subprocess execution. One of:
+#   auto  — use bubblewrap if found on PATH; log warn and run unsandboxed if not.
+#   bwrap — require bubblewrap; fail daemon startup if `bwrap` is missing.
+#   none  — never wrap; run bash directly under the daemon's user.
+# Default "auto" gives defense-in-depth on systems with bubblewrap without
+# breaking systems without it.
+# sandbox = "auto"
+
+# Extra arguments appended to the bubblewrap invocation (before the
+# trailing `--`). Useful for widening binds or tightening the sandbox.
+# The default profile is:
+#   --ro-bind / /            (root is read-only)
+#   --bind $HOME $HOME       ($HOME is writable)
+#   --bind /tmp /tmp         (/tmp is writable)
+#   --dev /dev --proc /proc  (standard)
+#   --tmpfs /run             (fresh, empty /run)
+#   --unshare-pid --unshare-ipc --unshare-uts
+#   --new-session --die-with-parent
+# Crucially NOT --unshare-net: network is available by default because the
+# assistant legitimately needs curl/pip/etc. Opt into network isolation via:
+#   bwrap_extra_args = ["--unshare-net"]
+# bwrap_extra_args = []
+
+[tools.write]
+# Writable-path allowlist for the `write` command. Paths outside every
+# entry are rejected with exit 126. Supports `~` and `~/` expansion.
+# Relative paths are always rejected (the daemon's cwd is not a meaningful
+# anchor). Non-existent allowlist entries are dropped with a warning at
+# startup, so missing `~/Documents` on a fresh install won't break the
+# command entirely.
+# writable_paths = ["~", "/tmp"]
