@@ -566,6 +566,7 @@ mod tests {
             max_summary_tokens: max_history / 2,
             request_timeout_secs: 60,
             model_context_length: ctx,
+            model_name: "test-model".into(),
         }
     }
 

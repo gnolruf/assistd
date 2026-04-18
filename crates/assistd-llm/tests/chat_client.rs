@@ -314,6 +314,7 @@ fn chat_spec(port: u16) -> ChatSpec {
         max_summary_tokens: 500,
         request_timeout_secs: 5,
         model_context_length: 12_000,
+        model_name: "test-model".into(),
     }
 }
 

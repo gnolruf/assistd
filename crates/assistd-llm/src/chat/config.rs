@@ -20,6 +20,11 @@ pub struct ChatSpec {
     /// Used to derive a safety-margin budget that the chat client never
     /// lets the request exceed, even if `max_history_tokens` is set high.
     pub model_context_length: u32,
+    /// Model identifier sent as the `"model"` field on every
+    /// `/v1/chat/completions` request. Must match the name llama-server
+    /// has registered for the loaded weights — in router mode that is
+    /// the string passed to `POST /models/load` (i.e. `config.model.name`).
+    pub model_name: String,
 }
 
 impl ChatSpec {
@@ -49,6 +54,7 @@ mod tests {
             max_summary_tokens: 800,
             request_timeout_secs: 60,
             model_context_length: ctx,
+            model_name: "test-model".into(),
         }
     }
 

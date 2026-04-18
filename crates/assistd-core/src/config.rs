@@ -806,6 +806,7 @@ impl Config {
             max_summary_tokens: self.chat.max_summary_tokens,
             request_timeout_secs: self.chat.request_timeout_secs,
             model_context_length: self.model.context_length,
+            model_name: self.model.name.clone(),
         }
     }
 }

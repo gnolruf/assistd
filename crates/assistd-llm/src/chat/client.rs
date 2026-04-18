@@ -29,7 +29,6 @@ use super::sse::{SseEvent, SseLineReader};
 use super::wire;
 use crate::{LlmBackend, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 
-const MODEL_NAME: &str = "local";
 const ERROR_BODY_CAP: usize = 1024;
 const SUMMARY_TEMPERATURE: f32 = 0.3;
 const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce a concise \
@@ -192,7 +191,7 @@ impl LlmBackend for LlamaChatClient {
 
         let wire_messages = conv.as_wire_messages();
         let payload = wire::ChatRequest {
-            model: MODEL_NAME,
+            model: self.spec.model_name.as_str(),
             messages: wire_messages,
             stream: true,
             temperature: self.spec.temperature,
@@ -261,7 +260,7 @@ impl LlmBackend for LlamaChatClient {
         let wire_messages = conv.as_wire_messages();
         let has_tools = !tools.is_empty();
         let payload = wire::ChatRequest {
-            model: MODEL_NAME,
+            model: self.spec.model_name.as_str(),
             messages: wire_messages,
             stream: true,
             temperature: self.spec.temperature,
@@ -310,7 +309,7 @@ impl Summarizer for LlamaChatClient {
     ) -> Result<String, ChatClientError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let payload = wire::ChatRequest {
-            model: MODEL_NAME,
+            model: self.spec.model_name.as_str(),
             messages: vec![
                 wire::ChatMessage {
                     role: "system",
