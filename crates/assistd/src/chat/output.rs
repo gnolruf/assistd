@@ -1,12 +1,41 @@
 //! Scrollable output pane with streaming-delta support and viewport-width
 //! aware line wrapping.
+//!
+//! Items are heterogeneous: prose lines (user / assistant / error) live as
+//! `OutputItem::Text(Line)`, while tool runs are first-class
+//! `OutputItem::Tool(ToolBlock)` items expanded into bar-prefixed,
+//! color-coded line groups at render time.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+/// A single tool invocation displayed as a cohesive block: command,
+/// captured output (already condensed by Layer 2 to ≤200 lines / ≤50 KB),
+/// exit status, and timing. Renders with a colored left-margin bar so the
+/// block is visually distinct from prose.
+///
+/// The Layer-2 truncation indicator is conveyed by the truncation banner
+/// already embedded in `output` — no separate flag is stored here.
+#[derive(Debug, Clone)]
+pub struct ToolBlock {
+    pub command: String,
+    /// Layer-2 `output` body verbatim: head + optional truncation banner +
+    /// optional `[stderr] ...` line + `[exit:N | Xms]` footer.
+    pub output: String,
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    pub expanded: bool,
+}
+
+#[derive(Debug)]
+enum OutputItem {
+    Text(Line<'static>),
+    Tool(ToolBlock),
+}
+
 #[derive(Debug)]
 pub struct OutputPane {
-    lines: Vec<Line<'static>>,
+    items: Vec<OutputItem>,
     open_assistant: Option<usize>,
     scroll_offset: u16,
     wrap_cache: Option<(u16, Vec<Line<'static>>)>,
@@ -22,7 +51,7 @@ impl Default for OutputPane {
 impl OutputPane {
     pub fn new() -> Self {
         Self {
-            lines: Vec::new(),
+            items: Vec::new(),
             open_assistant: None,
             scroll_offset: 0,
             wrap_cache: None,
@@ -32,16 +61,20 @@ impl OutputPane {
 
     pub fn push_user(&mut self, text: &str) {
         self.close_open_assistant();
-        self.lines
-            .push(single_span_line(format!("> {text}"), user_style()));
+        self.items.push(OutputItem::Text(single_span_line(
+            format!("> {text}"),
+            user_style(),
+        )));
         self.dirty = true;
     }
 
     pub fn begin_assistant(&mut self) {
         self.close_open_assistant();
-        self.lines
-            .push(single_span_line(String::new(), assistant_style()));
-        self.open_assistant = Some(self.lines.len() - 1);
+        self.items.push(OutputItem::Text(single_span_line(
+            String::new(),
+            assistant_style(),
+        )));
+        self.open_assistant = Some(self.items.len() - 1);
         self.dirty = true;
     }
 
@@ -52,12 +85,16 @@ impl OutputPane {
         let mut idx = self.open_assistant.expect("just set");
         let mut fragments = delta.split('\n');
         if let Some(first) = fragments.next() {
-            append_to_line(&mut self.lines[idx], first);
+            if let Some(line) = self.text_at_mut(idx) {
+                append_to_line(line, first);
+            }
         }
         for frag in fragments {
-            self.lines
-                .push(single_span_line(frag.to_string(), assistant_style()));
-            idx = self.lines.len() - 1;
+            self.items.push(OutputItem::Text(single_span_line(
+                frag.to_string(),
+                assistant_style(),
+            )));
+            idx = self.items.len() - 1;
         }
         self.open_assistant = Some(idx);
         self.dirty = true;
@@ -68,65 +105,57 @@ impl OutputPane {
             return;
         }
         self.open_assistant = None;
-        self.lines.push(Line::from(""));
+        self.items.push(OutputItem::Text(Line::from("")));
         self.dirty = true;
     }
 
     pub fn push_error(&mut self, msg: &str) {
         self.close_open_assistant();
-        self.lines
-            .push(single_span_line(format!("!! {msg}"), error_style()));
+        self.items.push(OutputItem::Text(single_span_line(
+            format!("!! {msg}"),
+            error_style(),
+        )));
         self.dirty = true;
     }
 
-    /// Append a command the model is about to execute via the `run` tool.
-    /// Rendered in a dim style with a `$ ` prefix so it visually reads as
-    /// a shell command separate from the chat transcript.
-    pub fn push_tool_call(&mut self, command: &str) {
+    /// Append a tool invocation as a single block. Called once per
+    /// `LlmEvent::ToolResult` after the corresponding `ToolCall` has been
+    /// observed; the call/result pair is collapsed into one item so users
+    /// see one cohesive entity instead of two loose line groups.
+    ///
+    /// New blocks start collapsed when their body exceeds
+    /// [`COLLAPSE_THRESHOLD`] lines (Tab toggles the most recent).
+    pub fn push_tool_block(
+        &mut self,
+        command: String,
+        output: String,
+        exit_code: i32,
+        duration_ms: u64,
+    ) {
         self.close_open_assistant();
-        self.lines
-            .push(single_span_line(format!("$ {command}"), tool_call_style()));
+        let expanded = body_line_count(&output) <= COLLAPSE_THRESHOLD;
+        self.items.push(OutputItem::Tool(ToolBlock {
+            command,
+            output,
+            exit_code,
+            duration_ms,
+            expanded,
+        }));
         self.dirty = true;
     }
 
-    /// Append the result of a tool invocation. Shows up to the first
-    /// `TOOL_RESULT_MAX_LINES` of `output`, indented and dimmed. A
-    /// trailing marker indicates additional lines beyond the visible cap
-    /// or a server-side truncation flag.
-    pub fn push_tool_result(&mut self, output: &str, exit_code: i32, truncated: bool) {
-        self.close_open_assistant();
-        let mut emitted = 0usize;
-        let mut remainder = 0usize;
-        for (i, line) in output.lines().enumerate() {
-            if i < TOOL_RESULT_MAX_LINES {
-                self.lines
-                    .push(single_span_line(format!("  {line}"), tool_result_style()));
-                emitted += 1;
-            } else {
-                remainder += 1;
+    /// Toggle the expand/collapse state of the most-recently-appended tool
+    /// block. Returns `true` if a toggle happened so the keybinding handler
+    /// can decide whether to show feedback.
+    pub fn toggle_last_tool_block(&mut self) -> bool {
+        for item in self.items.iter_mut().rev() {
+            if let OutputItem::Tool(b) = item {
+                b.expanded = !b.expanded;
+                self.dirty = true;
+                return true;
             }
         }
-        if remainder > 0 {
-            self.lines.push(single_span_line(
-                format!("  … ({remainder} more lines)"),
-                tool_result_style(),
-            ));
-        }
-        if truncated && remainder == 0 {
-            self.lines.push(single_span_line(
-                "  … (output truncated; full body in spill file)".to_string(),
-                tool_result_style(),
-            ));
-        }
-        // Short footer so the user can scan exit status without opening
-        // the output. Only shown when any content was emitted.
-        if emitted > 0 || remainder > 0 {
-            self.lines.push(single_span_line(
-                format!("  [exit:{exit_code}]"),
-                tool_result_style(),
-            ));
-        }
-        self.dirty = true;
+        false
     }
 
     pub fn scroll_page_up(&mut self, viewport_height: u16) {
@@ -179,23 +208,25 @@ impl OutputPane {
 
     fn rewrap(&self, width: u16) -> Vec<Line<'static>> {
         if width == 0 {
-            return self.lines.clone();
+            // Degraded path: render text items raw, tool blocks as a
+            // single unwrapped header line. Keeps the zero-width test
+            // green and avoids `textwrap` calls with width 0.
+            return self
+                .items
+                .iter()
+                .map(|it| match it {
+                    OutputItem::Text(l) => l.clone(),
+                    OutputItem::Tool(b) => {
+                        single_span_line(format!("$ {}", b.command), tool_call_style())
+                    }
+                })
+                .collect();
         }
-        let mut out = Vec::with_capacity(self.lines.len());
-        for line in &self.lines {
-            let style = line.spans.first().map(|s| s.style).unwrap_or_default();
-            let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            if content.is_empty() {
-                out.push(Line::from(""));
-                continue;
-            }
-            let wrapped = textwrap::wrap(&content, width as usize);
-            if wrapped.is_empty() {
-                out.push(Line::from(""));
-                continue;
-            }
-            for chunk in wrapped {
-                out.push(single_span_line(chunk.into_owned(), style));
+        let mut out = Vec::with_capacity(self.items.len() * 2);
+        for item in &self.items {
+            match item {
+                OutputItem::Text(line) => wrap_line_into(&mut out, line, width),
+                OutputItem::Tool(b) => render_tool_block(&mut out, b, width),
             }
         }
         out
@@ -203,9 +234,163 @@ impl OutputPane {
 
     fn close_open_assistant(&mut self) {
         if self.open_assistant.take().is_some() {
-            self.lines.push(Line::from(""));
+            self.items.push(OutputItem::Text(Line::from("")));
             self.dirty = true;
         }
+    }
+
+    fn text_at_mut(&mut self, idx: usize) -> Option<&mut Line<'static>> {
+        match self.items.get_mut(idx)? {
+            OutputItem::Text(line) => Some(line),
+            OutputItem::Tool(_) => None,
+        }
+    }
+}
+
+fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16) {
+    let style = line.spans.first().map(|s| s.style).unwrap_or_default();
+    let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    if content.is_empty() {
+        out.push(Line::from(""));
+        return;
+    }
+    let wrapped = textwrap::wrap(&content, width as usize);
+    if wrapped.is_empty() {
+        out.push(Line::from(""));
+        return;
+    }
+    for chunk in wrapped {
+        out.push(single_span_line(chunk.into_owned(), style));
+    }
+}
+
+fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16) {
+    let bar_color = if b.exit_code == 0 {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    let bar = Span::styled(
+        "▎ ",
+        Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
+    );
+    let inner_w = width.saturating_sub(2).max(1);
+
+    push_barred(
+        out,
+        &bar,
+        &format!("$ {}", b.command),
+        header_style(),
+        inner_w,
+    );
+
+    // Slice the Layer-2 body: drop the [exit:...] footer (we re-render it
+    // ourselves so we can right-align timing and color the exit code) and
+    // remember which lines start with [stderr] for pinning when collapsed.
+    let body_lines = split_body(&b.output);
+    let stderr_idxs: Vec<usize> = body_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("[stderr] "))
+        .map(|(i, _)| i)
+        .collect();
+
+    let collapsed = !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
+    let visible_idxs: Vec<usize> = if collapsed {
+        let mut idxs: Vec<usize> = (0..COLLAPSED_HEAD_LINES.min(body_lines.len())).collect();
+        for &si in &stderr_idxs {
+            if !idxs.contains(&si) {
+                idxs.push(si);
+            }
+        }
+        idxs.sort_unstable();
+        idxs
+    } else {
+        (0..body_lines.len()).collect()
+    };
+
+    for i in &visible_idxs {
+        let line = &body_lines[*i];
+        let style = if line.starts_with("[stderr] ") {
+            stderr_style()
+        } else {
+            tool_result_style()
+        };
+        push_barred(out, &bar, line, style, inner_w);
+    }
+    if collapsed {
+        let hidden = body_lines.len() - visible_idxs.len();
+        if hidden > 0 {
+            push_barred(
+                out,
+                &bar,
+                &format!("… ({hidden} more lines, Tab to expand)"),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+                inner_w,
+            );
+        }
+    }
+
+    // Footer: right-aligned [exit:N | Xms] in green/red bold.
+    let footer = format!("[exit:{} | {}ms]", b.exit_code, b.duration_ms);
+    let pad = (inner_w as usize).saturating_sub(footer.chars().count());
+    out.push(Line::from(vec![
+        bar.clone(),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(
+            footer,
+            Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Trailing blank so two adjacent blocks don't merge visually.
+    out.push(Line::from(""));
+}
+
+fn push_barred(
+    out: &mut Vec<Line<'static>>,
+    bar: &Span<'static>,
+    content: &str,
+    content_style: Style,
+    inner_w: u16,
+) {
+    let wrapped = textwrap::wrap(content, inner_w as usize);
+    if wrapped.is_empty() {
+        out.push(Line::from(vec![bar.clone(), Span::raw("")]));
+        return;
+    }
+    for chunk in wrapped {
+        out.push(Line::from(vec![
+            bar.clone(),
+            Span::styled(chunk.into_owned(), content_style),
+        ]));
+    }
+}
+
+/// Strip the `[exit:N | Xms]` footer (always the last line of a Layer-2
+/// `output`) and return the remaining body lines.
+fn split_body(output: &str) -> Vec<String> {
+    let mut lines: Vec<String> = output.lines().map(str::to_string).collect();
+    if lines
+        .last()
+        .map(|l| l.starts_with("[exit:"))
+        .unwrap_or(false)
+    {
+        lines.pop();
+    }
+    lines
+}
+
+/// Count body lines (everything except the Layer-2 footer) to decide
+/// whether a new block should start collapsed.
+fn body_line_count(output: &str) -> usize {
+    let n = output.lines().count();
+    if output.contains("[exit:") {
+        n.saturating_sub(1)
+    } else {
+        n
     }
 }
 
@@ -249,10 +434,22 @@ fn tool_result_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-/// Cap on the number of raw `output` lines surfaced per tool result.
-/// The full body is still present in the LLM's conversation context —
-/// this is purely visual compression for the scrollback pane.
-const TOOL_RESULT_MAX_LINES: usize = 12;
+fn header_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn stderr_style() -> Style {
+    Style::default().fg(Color::Red)
+}
+
+/// Body-line count above which a freshly-pushed tool block starts
+/// collapsed. Tab toggles the most recent block.
+const COLLAPSE_THRESHOLD: usize = 20;
+/// Number of leading body lines to keep visible while collapsed. Stderr
+/// lines past this index are still pinned visible — see `render_tool_block`.
+const COLLAPSED_HEAD_LINES: usize = 10;
 
 #[cfg(test)]
 mod tests {
@@ -262,11 +459,23 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
+    fn item_text(it: &OutputItem) -> String {
+        match it {
+            OutputItem::Text(l) => line_text(l),
+            OutputItem::Tool(b) => format!("[tool:{}]", b.command),
+        }
+    }
+
+    fn rendered_lines(p: &mut OutputPane, w: u16, h: u16) -> Vec<String> {
+        let (lines, _) = p.render_view(w, h);
+        lines.iter().map(line_text).collect()
+    }
+
     #[test]
     fn push_user_prefixes_caret() {
         let mut p = OutputPane::new();
         p.push_user("hi");
-        assert_eq!(line_text(&p.lines[0]), "> hi");
+        assert_eq!(item_text(&p.items[0]), "> hi");
     }
 
     #[test]
@@ -275,7 +484,7 @@ mod tests {
         p.begin_assistant();
         p.append_assistant("hello ");
         p.append_assistant("world");
-        assert_eq!(line_text(&p.lines[0]), "hello world");
+        assert_eq!(item_text(&p.items[0]), "hello world");
         assert_eq!(p.open_assistant, Some(0));
     }
 
@@ -283,18 +492,18 @@ mod tests {
     fn append_without_begin_auto_starts() {
         let mut p = OutputPane::new();
         p.append_assistant("hey");
-        assert_eq!(p.lines.len(), 1);
-        assert_eq!(line_text(&p.lines[0]), "hey");
+        assert_eq!(p.items.len(), 1);
+        assert_eq!(item_text(&p.items[0]), "hey");
     }
 
     #[test]
     fn append_splits_on_embedded_newlines() {
         let mut p = OutputPane::new();
         p.append_assistant("line1\nline2\nline3");
-        assert_eq!(p.lines.len(), 3);
-        assert_eq!(line_text(&p.lines[0]), "line1");
-        assert_eq!(line_text(&p.lines[1]), "line2");
-        assert_eq!(line_text(&p.lines[2]), "line3");
+        assert_eq!(p.items.len(), 3);
+        assert_eq!(item_text(&p.items[0]), "line1");
+        assert_eq!(item_text(&p.items[1]), "line2");
+        assert_eq!(item_text(&p.items[2]), "line3");
         assert_eq!(p.open_assistant, Some(2));
     }
 
@@ -302,13 +511,12 @@ mod tests {
     fn append_trailing_newline_opens_blank_tail() {
         let mut p = OutputPane::new();
         p.append_assistant("hello\n");
-        // ["hello", ""]
-        assert_eq!(p.lines.len(), 2);
-        assert_eq!(line_text(&p.lines[0]), "hello");
-        assert_eq!(line_text(&p.lines[1]), "");
+        assert_eq!(p.items.len(), 2);
+        assert_eq!(item_text(&p.items[0]), "hello");
+        assert_eq!(item_text(&p.items[1]), "");
         assert_eq!(p.open_assistant, Some(1));
         p.append_assistant("more");
-        assert_eq!(line_text(&p.lines[1]), "more");
+        assert_eq!(item_text(&p.items[1]), "more");
     }
 
     #[test]
@@ -318,9 +526,9 @@ mod tests {
         p.append_assistant("done");
         p.finish_assistant();
         assert_eq!(p.open_assistant, None);
-        assert_eq!(p.lines.len(), 2);
-        assert_eq!(line_text(&p.lines[0]), "done");
-        assert_eq!(line_text(&p.lines[1]), "");
+        assert_eq!(p.items.len(), 2);
+        assert_eq!(item_text(&p.items[0]), "done");
+        assert_eq!(item_text(&p.items[1]), "");
     }
 
     #[test]
@@ -329,87 +537,189 @@ mod tests {
         p.append_assistant("half");
         p.push_user("new question");
         assert_eq!(p.open_assistant, None);
-        // Expect: ["half", "", "> new question"]
-        assert_eq!(p.lines.len(), 3);
-        assert_eq!(line_text(&p.lines[2]), "> new question");
+        assert_eq!(p.items.len(), 3);
+        assert_eq!(item_text(&p.items[2]), "> new question");
     }
 
     #[test]
     fn push_error_adds_exclamation_prefix() {
         let mut p = OutputPane::new();
         p.push_error("boom");
-        assert_eq!(line_text(&p.lines[0]), "!! boom");
+        assert_eq!(item_text(&p.items[0]), "!! boom");
+    }
+
+    // --- tool blocks -----------------------------------------------------
+
+    fn small_block(p: &mut OutputPane, cmd: &str, body: &str, exit: i32, ms: u64) {
+        p.push_tool_block(cmd.into(), body.into(), exit, ms);
     }
 
     #[test]
-    fn push_tool_call_prefixes_dollar_sign() {
+    fn push_tool_block_creates_one_tool_item() {
         let mut p = OutputPane::new();
-        p.push_tool_call("cat log.txt | grep ERROR");
-        assert_eq!(line_text(&p.lines[0]), "$ cat log.txt | grep ERROR");
+        small_block(&mut p, "ls /tmp", "a\nb\n[exit:0 | 5ms]", 0, 5);
+        assert_eq!(p.items.len(), 1);
+        assert!(matches!(p.items[0], OutputItem::Tool(_)));
     }
 
     #[test]
-    fn push_tool_call_closes_open_assistant_first() {
+    fn tool_block_renders_header_body_footer_with_bar() {
         let mut p = OutputPane::new();
-        p.append_assistant("partial answer");
-        p.push_tool_call("ls");
-        // Expect: ["partial answer", "", "$ ls"]
-        assert_eq!(p.lines.len(), 3);
-        assert_eq!(line_text(&p.lines[0]), "partial answer");
-        assert_eq!(line_text(&p.lines[1]), "");
-        assert_eq!(line_text(&p.lines[2]), "$ ls");
+        small_block(&mut p, "ls /tmp", "a\nb\n[exit:0 | 5ms]", 0, 5);
+        let rendered = rendered_lines(&mut p, 40, 10);
+        assert!(rendered.iter().any(|l| l.contains("$ ls /tmp")));
+        assert!(rendered.iter().any(|l| l.ends_with('a')));
+        assert!(rendered.iter().any(|l| l.ends_with('b')));
+        assert!(rendered.iter().any(|l| l.contains("[exit:0 | 5ms]")));
+        for l in rendered.iter().filter(|l| !l.trim().is_empty()) {
+            assert!(l.starts_with('▎'), "missing bar on: {l:?}");
+        }
     }
 
     #[test]
-    fn push_tool_result_indents_lines_and_emits_footer() {
+    fn tool_block_collapsed_when_over_threshold() {
         let mut p = OutputPane::new();
-        p.push_tool_result("hello\nworld\n", 0, false);
-        // Two indented output lines + exit footer.
-        assert_eq!(line_text(&p.lines[0]), "  hello");
-        assert_eq!(line_text(&p.lines[1]), "  world");
-        assert_eq!(line_text(&p.lines[2]), "  [exit:0]");
-    }
-
-    #[test]
-    fn push_tool_result_caps_at_max_lines_with_marker() {
-        let mut p = OutputPane::new();
-        let body: String = (0..20).map(|i| format!("line {i}\n")).collect();
-        p.push_tool_result(&body, 0, false);
-        // First TOOL_RESULT_MAX_LINES lines + an overflow marker + footer.
-        assert_eq!(
-            p.lines.len(),
-            TOOL_RESULT_MAX_LINES + 2,
-            "{:?}",
-            p.lines.iter().map(line_text).collect::<Vec<_>>()
+        let body: String =
+            (0..30).map(|i| format!("line {i}\n")).collect::<String>() + "[exit:0 | 1ms]";
+        p.push_tool_block("seq 30".into(), body, 0, 1);
+        let rendered = rendered_lines(&mut p, 60, 80);
+        let head_visible = rendered.iter().filter(|l| l.contains("line ")).count();
+        assert_eq!(head_visible, COLLAPSED_HEAD_LINES);
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains("more lines, Tab to expand"))
         );
-        assert!(line_text(&p.lines[TOOL_RESULT_MAX_LINES]).contains("more lines"));
     }
 
     #[test]
-    fn push_tool_result_shows_truncated_marker_when_flag_set_and_under_cap() {
+    fn tool_block_expanded_after_toggle() {
         let mut p = OutputPane::new();
-        p.push_tool_result("small body\n", 0, true);
-        // body + truncation marker + footer.
-        assert_eq!(p.lines.len(), 3);
-        assert_eq!(line_text(&p.lines[0]), "  small body");
-        assert!(line_text(&p.lines[1]).contains("truncated"));
-        assert_eq!(line_text(&p.lines[2]), "  [exit:0]");
+        let body: String =
+            (0..30).map(|i| format!("line {i}\n")).collect::<String>() + "[exit:0 | 1ms]";
+        p.push_tool_block("seq 30".into(), body, 0, 1);
+        assert!(p.toggle_last_tool_block());
+        let rendered = rendered_lines(&mut p, 60, 80);
+        let head_visible = rendered.iter().filter(|l| l.contains("line ")).count();
+        assert_eq!(head_visible, 30);
+        assert!(!rendered.iter().any(|l| l.contains("more lines")));
     }
 
     #[test]
-    fn push_tool_result_nonzero_exit_in_footer() {
+    fn nonzero_exit_pins_stderr_visible_when_collapsed() {
+        let mut body = String::new();
+        for i in 0..25 {
+            body.push_str(&format!("stdout line {i}\n"));
+        }
+        body.push_str("[stderr] [grep]\tboom\n");
+        body.push_str("[exit:1 | 3ms]");
         let mut p = OutputPane::new();
-        p.push_tool_result("oops\n", 1, false);
-        assert_eq!(line_text(&p.lines[1]), "  [exit:1]");
+        p.push_tool_block("grep foo bar".into(), body, 1, 3);
+        let rendered = rendered_lines(&mut p, 80, 80);
+        assert!(rendered.iter().any(|l| l.contains("[stderr]")));
+        assert!(rendered.iter().any(|l| l.contains("boom")));
     }
 
     #[test]
-    fn push_tool_result_empty_output_emits_nothing() {
-        // Empty body and no truncation → no indented output, no footer.
+    fn nonzero_exit_uses_red_bar_color() {
         let mut p = OutputPane::new();
-        p.push_tool_result("", 0, false);
-        assert_eq!(p.lines.len(), 0);
+        small_block(&mut p, "false", "[exit:1 | 1ms]", 1, 1);
+        let (lines, _) = p.render_view(40, 5);
+        let header = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("$ false")))
+            .expect("header line present");
+        assert_eq!(header.spans[0].style.fg, Some(Color::Red));
     }
+
+    #[test]
+    fn zero_exit_uses_green_bar_color() {
+        let mut p = OutputPane::new();
+        small_block(&mut p, "true", "[exit:0 | 1ms]", 0, 1);
+        let (lines, _) = p.render_view(40, 5);
+        let header = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("$ true")))
+            .expect("header");
+        assert_eq!(header.spans[0].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn very_long_single_line_output_wraps_under_bar() {
+        let long = "x".repeat(500);
+        let body = format!("{long}\n[exit:0 | 1ms]");
+        let mut p = OutputPane::new();
+        p.push_tool_block("yes | head".into(), body, 0, 1);
+        let rendered = rendered_lines(&mut p, 40, 200);
+        assert!(rendered.iter().filter(|l| l.contains("xxxx")).count() > 5);
+        for l in rendered.iter().filter(|l| !l.trim().is_empty()) {
+            assert!(l.starts_with('▎'), "missing bar: {l:?}");
+        }
+    }
+
+    #[test]
+    fn empty_output_still_shows_header_and_footer() {
+        let mut p = OutputPane::new();
+        small_block(&mut p, "true", "[exit:0 | 0ms]", 0, 0);
+        let rendered = rendered_lines(&mut p, 40, 10);
+        assert!(rendered.iter().any(|l| l.contains("$ true")));
+        assert!(rendered.iter().any(|l| l.contains("[exit:0 | 0ms]")));
+    }
+
+    #[test]
+    fn nonzero_exit_with_no_stderr_renders_red_bar_and_footer() {
+        let mut p = OutputPane::new();
+        small_block(&mut p, "exit 7", "[exit:7 | 1ms]", 7, 1);
+        let rendered = rendered_lines(&mut p, 40, 10);
+        assert!(rendered.iter().any(|l| l.contains("[exit:7 | 1ms]")));
+        let (lines, _) = p.render_view(40, 10);
+        let header = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("$ exit 7")))
+            .unwrap();
+        assert_eq!(header.spans[0].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn truncation_banner_visible_in_block() {
+        let mut body = String::new();
+        body.push_str("a\nb\nc\n");
+        body.push_str("--- output truncated (5000 lines, 50.0K) ---\n");
+        body.push_str("Full output: /tmp/assistd-output/cmd-1.txt\n");
+        body.push_str("[exit:0 | 9ms]");
+        let mut p = OutputPane::new();
+        p.push_tool_block("cat huge".into(), body, 0, 9);
+        let rendered = rendered_lines(&mut p, 80, 80);
+        assert!(rendered.iter().any(|l| l.contains("output truncated")));
+        assert!(rendered.iter().any(|l| l.contains("Full output:")));
+    }
+
+    #[test]
+    fn toggle_last_tool_block_no_op_with_no_blocks() {
+        let mut p = OutputPane::new();
+        assert!(!p.toggle_last_tool_block());
+    }
+
+    #[test]
+    fn pipe_chain_renders_as_single_block() {
+        let mut p = OutputPane::new();
+        small_block(
+            &mut p,
+            "cat foo | grep bar | wc -l",
+            "2\n[exit:0 | 4ms]",
+            0,
+            4,
+        );
+        assert_eq!(p.items.len(), 1);
+        let rendered = rendered_lines(&mut p, 80, 10);
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains("$ cat foo | grep bar | wc -l"))
+        );
+    }
+
+    // --- scroll & wrap ---------------------------------------------------
 
     #[test]
     fn scroll_saturates_down_at_zero() {
@@ -451,7 +761,6 @@ mod tests {
         }
         p.scroll_offset = 99;
         let (_wrapped, _start) = p.render_view(80, 10);
-        // total wrapped < viewport_height → max_offset == 0
         assert_eq!(p.scroll_offset, 0);
     }
 

@@ -51,6 +51,11 @@ pub struct App {
     pub sleep_cfg: SleepConfig,
     pub presence: Option<Arc<PresenceManager>>,
     pub modal: Option<ConfirmationModal>,
+    /// Command of the in-flight tool call, captured on `LlmEvent::ToolCall`
+    /// and consumed on the matching `LlmEvent::ToolResult` so the
+    /// call+result pair becomes one `ToolBlock`. The agent loop is strictly
+    /// serial — only one tool runs at a time — so a single slot suffices.
+    pending_tool_call: Option<(String, String)>,
     client: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
     max_iterations: u32,
@@ -83,6 +88,7 @@ impl App {
             sleep_cfg,
             presence,
             modal: None,
+            pending_tool_call: None,
             client,
             tools,
             max_iterations,
@@ -160,6 +166,10 @@ impl App {
                 self.on_cycle_key();
                 return;
             }
+            KeyCode::Tab => {
+                self.output.toggle_last_tool_block();
+                return;
+            }
             _ => {}
         }
         match self.input.on_key(ev) {
@@ -222,27 +232,36 @@ impl App {
                 self.throughput.on_delta(now);
                 self.output.append_assistant(&text);
             }
-            ChatEvent::Llm(LlmEvent::ToolCall { arguments, .. }) => {
+            ChatEvent::Llm(LlmEvent::ToolCall { id, arguments, .. }) => {
                 let cmd = arguments
                     .get("command")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("<?>");
-                self.output.push_tool_call(cmd);
+                    .unwrap_or("<?>")
+                    .to_string();
+                self.pending_tool_call = Some((id, cmd));
             }
-            ChatEvent::Llm(LlmEvent::ToolResult { result, .. }) => {
+            ChatEvent::Llm(LlmEvent::ToolResult { id, result, .. }) => {
                 let body = result
                     .get("output")
                     .and_then(|v| v.as_str())
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .to_string();
                 let exit_code = result
                     .get("exit_code")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0) as i32;
-                let truncated = result
-                    .get("truncated")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                self.output.push_tool_result(body, exit_code, truncated);
+                let duration_ms = result
+                    .get("duration_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let command = self
+                    .pending_tool_call
+                    .take()
+                    .filter(|(pid, _)| pid == &id)
+                    .map(|(_, c)| c)
+                    .unwrap_or_else(|| "<?>".to_string());
+                self.output
+                    .push_tool_block(command, body, exit_code, duration_ms);
             }
             ChatEvent::Llm(LlmEvent::Done) => {
                 self.throughput.on_done(now);
@@ -590,5 +609,95 @@ mod tests {
             ChatEvent::LlmError(msg) => assert!(msg.contains("server down")),
             other => panic!("expected LlmError, got {other:?}"),
         }
+    }
+
+    fn rendered_text(app: &mut App) -> Vec<String> {
+        let (lines, _) = app.output.render_view(80, 50);
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn tool_call_then_result_creates_one_block_with_command() {
+        let (mut app, _rx) = test_app();
+        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolCall {
+            id: "c1".into(),
+            name: "run".into(),
+            arguments: serde_json::json!({"command": "ls /tmp"}),
+        }));
+        assert!(app.pending_tool_call.is_some());
+        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolResult {
+            id: "c1".into(),
+            name: "run".into(),
+            result: serde_json::json!({
+                "output": "a\nb\n[exit:0 | 5ms]",
+                "exit_code": 0,
+                "truncated": false,
+                "duration_ms": 5,
+            }),
+        }));
+        assert!(app.pending_tool_call.is_none());
+        let rendered = rendered_text(&mut app);
+        assert!(rendered.iter().any(|l| l.contains("$ ls /tmp")));
+        assert!(rendered.iter().any(|l| l.contains("[exit:0 | 5ms]")));
+    }
+
+    #[test]
+    fn tab_toggles_last_tool_block() {
+        let (mut app, _rx) = test_app();
+        let body: String =
+            (0..30).map(|i| format!("l{i}\n")).collect::<String>() + "[exit:0 | 1ms]";
+        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolCall {
+            id: "c1".into(),
+            name: "run".into(),
+            arguments: serde_json::json!({"command": "seq 30"}),
+        }));
+        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolResult {
+            id: "c1".into(),
+            name: "run".into(),
+            result: serde_json::json!({
+                "output": body,
+                "exit_code": 0,
+                "truncated": false,
+                "duration_ms": 1,
+            }),
+        }));
+        let collapsed_marker_count = |app: &mut App| {
+            rendered_text(app)
+                .iter()
+                .filter(|l| l.contains("more lines"))
+                .count()
+        };
+        assert_eq!(collapsed_marker_count(&mut app), 1);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(collapsed_marker_count(&mut app), 0);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(collapsed_marker_count(&mut app), 1);
+    }
+
+    #[test]
+    fn tool_result_without_matching_call_renders_with_placeholder() {
+        let (mut app, _rx) = test_app();
+        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolResult {
+            id: "lost".into(),
+            name: "run".into(),
+            result: serde_json::json!({
+                "output": "[exit:0 | 1ms]",
+                "exit_code": 0,
+                "truncated": false,
+                "duration_ms": 1,
+            }),
+        }));
+        let rendered = rendered_text(&mut app);
+        assert!(rendered.iter().any(|l| l.contains("$ <?>")));
+    }
+
+    #[test]
+    fn tab_with_no_blocks_is_safe_noop_and_not_typed() {
+        let (mut app, _rx) = test_app();
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(app.input.buffer().is_empty());
     }
 }
