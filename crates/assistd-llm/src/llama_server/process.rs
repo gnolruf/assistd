@@ -39,7 +39,8 @@ impl ChildProcess {
             cmd.arg("-ot").arg(ot);
         }
         if let Some(flash) = cfg.flash_attn {
-            cmd.arg("--flash-attn").arg(if flash { "on" } else { "off" });
+            cmd.arg("--flash-attn")
+                .arg(if flash { "on" } else { "off" });
         }
         if let Some(k) = &cfg.cache_type_k {
             cmd.arg("--cache-type-k").arg(k);

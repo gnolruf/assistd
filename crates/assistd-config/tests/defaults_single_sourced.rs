@@ -14,6 +14,18 @@ fn llama_server_defaults_match_constants() {
     assert_eq!(c.port, DEFAULT_LLAMA_PORT);
     assert_eq!(c.gpu_layers, DEFAULT_GPU_LAYERS);
     assert_eq!(c.ready_timeout_secs, DEFAULT_READY_TIMEOUT_SECS);
+    assert!(c.alias.is_none());
+    assert!(c.override_tensor.is_none());
+    assert!(c.flash_attn.is_none());
+    assert!(c.cache_type_k.is_none());
+    assert!(c.cache_type_v.is_none());
+    assert!(c.threads.is_none());
+    assert!(c.batch_size.is_none());
+    assert!(c.ubatch_size.is_none());
+    assert!(c.n_cpu_moe.is_none());
+    assert!(c.cache_ram_mib.is_none());
+    assert!(c.mlock.is_none());
+    assert!(c.mmproj_offload.is_none());
 }
 
 #[test]
@@ -35,6 +47,10 @@ fn chat_defaults_match_constants() {
     assert_eq!(c.max_summary_tokens, DEFAULT_CHAT_MAX_SUMMARY_TOKENS);
     assert_eq!(c.request_timeout_secs, DEFAULT_CHAT_REQUEST_TIMEOUT_SECS);
     assert_eq!(c.summary_temperature, DEFAULT_CHAT_SUMMARY_TEMPERATURE);
+    assert!(c.top_p.is_none());
+    assert!(c.top_k.is_none());
+    assert!(c.min_p.is_none());
+    assert!(c.presence_penalty.is_none());
 }
 
 #[test]
@@ -43,6 +59,19 @@ fn voice_defaults_match_constants() {
     assert!(!c.enabled);
     assert!(c.mic_device.is_none());
     assert_eq!(c.hotkey, DEFAULT_VOICE_HOTKEY);
+}
+
+#[test]
+fn transcription_defaults_match_constants() {
+    let c = TranscriptionConfig::default();
+    assert_eq!(c.model, DEFAULT_WHISPER_MODEL);
+    assert_eq!(c.vad_model, DEFAULT_WHISPER_VAD_MODEL);
+    assert_eq!(c.prefer_gpu, DEFAULT_WHISPER_PREFER_GPU);
+    assert!(c.threads.is_none());
+    assert_eq!(c.beams, DEFAULT_WHISPER_BEAMS);
+    assert_eq!(c.vad_enabled, DEFAULT_WHISPER_VAD_ENABLED);
+    assert_eq!(c.vad_silence_secs, DEFAULT_WHISPER_VAD_SILENCE_SECS);
+    assert!(c.model_cache_dir.is_none());
 }
 
 #[test]

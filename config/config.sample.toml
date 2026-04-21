@@ -101,6 +101,33 @@ enabled = false
 # Hotkey to activate voice input.
 hotkey = "Super+V"
 
+[voice.transcription]
+# HuggingFace identifier for the Whisper GGML model, formatted as
+# "<owner>/<repo>:<file>". Downloaded on first use and cached under
+# $XDG_CACHE_HOME/assistd/whisper/ (or ~/.cache/assistd/whisper/).
+# model = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin"
+# Prefer GPU inference. Falls back to CPU with a warning log when no
+# CUDA device is detected, or when assistd-voice was built without
+# the `cuda` cargo feature. On GPUs shared with llama-server, leave
+# an eye on total VRAM: large-v3-turbo Q5 uses ~1 GiB.
+# prefer_gpu = true
+# CPU thread count. Omit to let whisper.cpp auto-detect.
+# threads = 8
+# Decode beams. 1 = greedy (lowest latency). Higher values improve
+# accuracy at roughly linear cost.
+# beams = 1
+# Silero VAD trims leading/trailing silence before decoding. Disabling
+# VAD is useful only for debugging — whisper.cpp hallucinates on
+# prolonged silence.
+# vad_enabled = true
+# VAD GGML model (HF identifier).
+# vad_model = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin"
+# Approximate minimum silence length (seconds) required to split or
+# trim a speech segment. Maps to whisper.cpp's min_silence_duration_ms.
+# vad_silence_secs = 0.5
+# Override the on-disk model cache directory. Omit for the XDG default.
+# model_cache_dir = "/var/cache/assistd/whisper"
+
 [compositor]
 # Tiling compositor to integrate with. One of: i3, sway, hyprland
 type = "sway"
