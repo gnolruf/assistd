@@ -38,11 +38,20 @@ jobs:
       - name: Rustfmt (check)
         run: cargo fmt --all -- --check
 
+      # --all-features can't be used here: assistd-voice exposes a `cuda`
+      # feature that links against cuBLAS/cudart, which aren't installed
+      # on ubuntu-latest. Enable the test-support features explicitly so
+      # integration test code is still linted/exercised.
       - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets --locked \
+            --features assistd-llm/test-support,assistd-voice/test-support \
+            -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --all-features --locked
+        run: |
+          cargo test --workspace --locked \
+            --features assistd-llm/test-support
 
       - name: cargo-deny (advisories, licenses, bans)
         uses: EmbarkStudios/cargo-deny-action@v2
