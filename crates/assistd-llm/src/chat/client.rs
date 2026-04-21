@@ -205,6 +205,10 @@ impl LlmBackend for LlamaChatClient {
             stream: true,
             temperature: self.chat.temperature,
             max_tokens: self.chat.max_response_tokens,
+            top_p: self.chat.top_p,
+            top_k: self.chat.top_k,
+            min_p: self.chat.min_p,
+            presence_penalty: self.chat.presence_penalty,
             tools: None,
             tool_choice: None,
         };
@@ -274,6 +278,10 @@ impl LlmBackend for LlamaChatClient {
             stream: true,
             temperature: self.chat.temperature,
             max_tokens: self.chat.max_response_tokens,
+            top_p: self.chat.top_p,
+            top_k: self.chat.top_k,
+            min_p: self.chat.min_p,
+            presence_penalty: self.chat.presence_penalty,
             tools: if has_tools { Some(tools) } else { None },
             tool_choice: if has_tools { Some("auto") } else { None },
         };
@@ -336,6 +344,10 @@ impl Summarizer for LlamaChatClient {
             stream: false,
             temperature: self.chat.summary_temperature,
             max_tokens,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            presence_penalty: None,
             tools: None,
             tool_choice: None,
         };

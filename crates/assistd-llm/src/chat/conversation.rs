@@ -566,6 +566,10 @@ mod tests {
             max_summary_tokens: max_history / 2,
             request_timeout_secs: 60,
             summary_temperature: 0.3,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            presence_penalty: None,
         };
         let model = ModelConfig {
             name: "test-model".into(),

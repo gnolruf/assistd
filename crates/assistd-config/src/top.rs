@@ -109,6 +109,26 @@ impl Config {
         if self.chat.preserve_recent_turns == 0 {
             errors.push("chat.preserve_recent_turns must be at least 1".into());
         }
+        if let Some(tp) = self.chat.top_p
+            && (!(0.0..=1.0).contains(&tp) || tp.is_nan())
+        {
+            errors.push("chat.top_p must be in the range 0.0..=1.0".into());
+        }
+        if let Some(tk) = self.chat.top_k
+            && tk == 0
+        {
+            errors.push("chat.top_k must be greater than 0".into());
+        }
+        if let Some(mp) = self.chat.min_p
+            && (!(0.0..=1.0).contains(&mp) || mp.is_nan())
+        {
+            errors.push("chat.min_p must be in the range 0.0..=1.0".into());
+        }
+        if let Some(pp) = self.chat.presence_penalty
+            && (!(-2.0..=2.0).contains(&pp) || pp.is_nan())
+        {
+            errors.push("chat.presence_penalty must be in the range -2.0..=2.0".into());
+        }
 
         if self.voice.enabled && self.voice.hotkey.is_empty() {
             errors.push("voice.hotkey must not be empty when voice is enabled".into());

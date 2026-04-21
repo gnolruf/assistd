@@ -11,6 +11,11 @@ Restart=on-failure
 RestartSec=5s
 KillSignal=SIGTERM
 TimeoutStopSec=15s
+# Allow llama-server --mlock to pin the CPU-side model weights. Without
+# this, the kernel's default RLIMIT_MEMLOCK (8 MiB on most distros) means
+# mlock silently fails and expert weights can be paged out under memory
+# pressure. systemd user units do NOT inherit /etc/security/limits.conf.
+LimitMEMLOCK=infinity
 # stdout/stderr are captured by journald automatically for user units;
 # set explicitly for clarity.
 StandardOutput=journal

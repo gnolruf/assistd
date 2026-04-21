@@ -30,8 +30,50 @@ impl ChildProcess {
             .arg("--port")
             .arg(cfg.port.to_string())
             .arg("-c")
-            .arg(model.context_length.to_string())
-            .stdin(Stdio::null())
+            .arg(model.context_length.to_string());
+
+        if let Some(alias) = &cfg.alias {
+            cmd.arg("--alias").arg(alias);
+        }
+        if let Some(ot) = &cfg.override_tensor {
+            cmd.arg("-ot").arg(ot);
+        }
+        if let Some(flash) = cfg.flash_attn {
+            cmd.arg("--flash-attn").arg(if flash { "on" } else { "off" });
+        }
+        if let Some(k) = &cfg.cache_type_k {
+            cmd.arg("--cache-type-k").arg(k);
+        }
+        if let Some(v) = &cfg.cache_type_v {
+            cmd.arg("--cache-type-v").arg(v);
+        }
+        if let Some(t) = cfg.threads {
+            cmd.arg("--threads").arg(t.to_string());
+        }
+        if let Some(b) = cfg.batch_size {
+            cmd.arg("--batch-size").arg(b.to_string());
+        }
+        if let Some(ub) = cfg.ubatch_size {
+            cmd.arg("--ubatch-size").arg(ub.to_string());
+        }
+        if let Some(n) = cfg.n_cpu_moe {
+            cmd.arg("--n-cpu-moe").arg(n.to_string());
+        }
+        if let Some(c) = cfg.cache_ram_mib {
+            cmd.arg("--cache-ram").arg(c.to_string());
+        }
+        if cfg.mlock == Some(true) {
+            cmd.arg("--mlock");
+        }
+        if let Some(offload) = cfg.mmproj_offload {
+            cmd.arg(if offload {
+                "--mmproj-offload"
+            } else {
+                "--no-mmproj-offload"
+            });
+        }
+
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);

@@ -510,6 +510,18 @@ impl PresenceManager {
             port: 0,
             gpu_layers: 1,
             ready_timeout_secs: 1,
+            alias: None,
+            override_tensor: None,
+            flash_attn: None,
+            cache_type_k: None,
+            cache_type_v: None,
+            threads: None,
+            batch_size: None,
+            ubatch_size: None,
+            n_cpu_moe: None,
+            cache_ram_mib: None,
+            mlock: None,
+            mmproj_offload: None,
         };
         let model = ModelConfig {
             name: "stub/model".into(),

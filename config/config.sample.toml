@@ -22,6 +22,41 @@ port = 8385
 # Timeout in seconds for the health check. Increase for first-time HuggingFace
 # downloads on slow connections.
 # ready_timeout_secs = 300
+# Optional alias passed as --alias. Cosmetic: it's the name llama-server
+# reports for the loaded model in /v1/models.
+# alias = "qwen3.6-35b-a3b"
+# Tensor-override regex passed as -ot. For MoE models, offloading expert
+# tensors to CPU frees VRAM for the rest of the model:
+# override_tensor = "\\.ffn_(up|down|gate)_exps\\.=CPU"
+# Enable flash-attention (--flash-attn on). Big speed + memory win on
+# GPUs that support it.
+# flash_attn = true
+# KV-cache quantization. "q8_0" roughly halves KV memory for a negligible
+# quality loss — essential for long contexts on consumer GPUs.
+# cache_type_k = "q8_0"
+# cache_type_v = "q8_0"
+# CPU thread count (--threads). Omit to let llama.cpp auto-detect.
+# threads = 8
+# --batch-size / --ubatch-size. Raising the ubatch speeds prefill on
+# MoE models; 1024–2048 is a good range if you have VRAM headroom.
+# batch_size = 2048
+# ubatch_size = 2048
+# --n-cpu-moe N: keep only the first N MoE layers' experts on CPU; the
+# remainder go to GPU. Preferred over override_tensor because it's
+# layer-granular — tune N down until VRAM is nearly full.
+# n_cpu_moe = 30
+# --cache-ram MiB: prompt-checkpoint cache size. Default is 8192. Raising
+# this speeds up re-prefill when a conversation grows, at the cost of RAM.
+# cache_ram_mib = 32768
+# --mlock: pin model pages in RAM so the OS can't page them out. Useful
+# when running memory-hungry workloads alongside the daemon. NOTE: your
+# system's RLIMIT_MEMLOCK must allow enough pinning — see
+# /etc/security/limits.conf or LimitMEMLOCK= in a systemd unit.
+# mlock = true
+# --no-mmproj-offload: keep the vision encoder on CPU. Set false when
+# VRAM is fully consumed by the LLM — image preprocessing becomes
+# slightly slower but avoids CUDA OOM on image requests.
+# mmproj_offload = false
 
 [chat]
 # System prompt injected as the first message of every request. Leave empty
@@ -37,6 +72,15 @@ summary_target_tokens = 1000
 preserve_recent_turns = 4
 # Sampling temperature, 0.0..=2.0.
 temperature = 0.7
+# Nucleus sampling cutoff, 0.0..=1.0. Omit to let llama-server pick its default.
+# top_p = 0.95
+# Top-k sampling limit.
+# top_k = 20
+# Min-p sampling cutoff, 0.0..=1.0.
+# min_p = 0.0
+# Presence penalty in -2.0..=2.0. Qwen3 reasoning variants recommend a small
+# positive value to reduce looping.
+# presence_penalty = 1.5
 # Maximum tokens the model may emit in a single streamed response.
 max_response_tokens = 1024
 # Maximum tokens for the summarization (non-streaming) call. Typically a bit

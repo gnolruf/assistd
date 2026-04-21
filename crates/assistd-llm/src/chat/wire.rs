@@ -24,6 +24,14 @@ pub struct ChatRequest<'a> {
     pub stream: bool,
     pub temperature: f32,
     pub max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
     /// OpenAI-compatible tool schemas: `[{"type": "function", "function": {...}}]`.
     /// Only emitted when non-None so requests without tool use remain
     /// byte-identical to the pre-agent-loop format.
@@ -197,6 +205,10 @@ mod tests {
             stream: true,
             temperature: 0.5,
             max_tokens: 128,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            presence_penalty: None,
             tools: None,
             tool_choice: None,
         };
@@ -240,6 +252,10 @@ mod tests {
             stream: false,
             temperature: 0.5,
             max_tokens: 64,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            presence_penalty: None,
             tools: None,
             tool_choice: None,
         };
@@ -269,6 +285,10 @@ mod tests {
             stream: true,
             temperature: 0.5,
             max_tokens: 64,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            presence_penalty: None,
             tools: Some(tools),
             tool_choice: Some("auto"),
         };

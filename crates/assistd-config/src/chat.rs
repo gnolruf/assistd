@@ -36,6 +36,20 @@ pub struct ChatConfig {
     /// deterministic. Range: `0.0..=2.0`.
     #[serde(default = "default_summary_temperature")]
     pub summary_temperature: f32,
+    /// Nucleus sampling cutoff in `0.0..=1.0`. `None` omits the field from the
+    /// request, letting llama-server apply its own default.
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    /// Top-k sampling limit. `None` omits the field.
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    /// Min-p sampling cutoff in `0.0..=1.0`. `None` omits the field.
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    /// Presence penalty in `-2.0..=2.0`. `None` omits the field. Qwen3 reasoning
+    /// variants recommend a small positive value (e.g. 1.5) to reduce repetition.
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
 }
 
 impl Default for ChatConfig {
@@ -50,6 +64,10 @@ impl Default for ChatConfig {
             max_summary_tokens: DEFAULT_CHAT_MAX_SUMMARY_TOKENS,
             request_timeout_secs: DEFAULT_CHAT_REQUEST_TIMEOUT_SECS,
             summary_temperature: DEFAULT_CHAT_SUMMARY_TEMPERATURE,
+            top_p: None,
+            top_k: None,
+            min_p: None,
+            presence_penalty: None,
         }
     }
 }
