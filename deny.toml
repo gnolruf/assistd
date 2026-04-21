@@ -44,6 +44,10 @@ allow = [
     # Data License Agreement. It's a permissive data license and is fine
     # for an Apache-2.0 downstream.
     "CDLA-Permissive-2.0",
+    # whisper-rs / whisper-rs-sys ship under the Unlicense (public-domain
+    # dedication). OSI-approved and FSF Free/Libre — compatible with our
+    # Apache-2.0 downstream.
+    "Unlicense",
 ]
 
 # ---------------------------------------------------------------------------

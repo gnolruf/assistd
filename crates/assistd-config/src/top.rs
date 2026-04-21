@@ -130,8 +130,47 @@ impl Config {
             errors.push("chat.presence_penalty must be in the range -2.0..=2.0".into());
         }
 
-        if self.voice.enabled && self.voice.hotkey.is_empty() {
-            errors.push("voice.hotkey must not be empty when voice is enabled".into());
+        if self.voice.enabled {
+            if self.voice.hotkey.is_empty() {
+                errors.push("voice.hotkey must not be empty when voice is enabled".into());
+            }
+            let t = &self.voice.transcription;
+            if t.model.trim().is_empty() {
+                errors.push("voice.transcription.model must not be empty".into());
+            } else if !is_valid_hf_id(&t.model) {
+                errors.push(
+                    "voice.transcription.model must be of the form \
+                     '<owner>/<repo>:<file>'"
+                        .into(),
+                );
+            }
+            if t.vad_enabled {
+                if t.vad_model.trim().is_empty() {
+                    errors.push(
+                        "voice.transcription.vad_model must not be empty when vad_enabled".into(),
+                    );
+                } else if !is_valid_hf_id(&t.vad_model) {
+                    errors.push(
+                        "voice.transcription.vad_model must be of the form \
+                         '<owner>/<repo>:<file>'"
+                            .into(),
+                    );
+                }
+            }
+            if t.beams == 0 {
+                errors.push("voice.transcription.beams must be at least 1".into());
+            }
+            if !t.vad_silence_secs.is_finite() || t.vad_silence_secs < 0.0 {
+                errors.push(
+                    "voice.transcription.vad_silence_secs must be a non-negative, finite number"
+                        .into(),
+                );
+            }
+            if let Some(th) = t.threads
+                && th == 0
+            {
+                errors.push("voice.transcription.threads must be greater than 0 when set".into());
+            }
         }
 
         if self.sleep.idle_to_drowsy_mins > 0
@@ -254,4 +293,17 @@ impl Config {
         })?;
         Ok(())
     }
+}
+
+fn is_valid_hf_id(s: &str) -> bool {
+    let Some((repo, file)) = s.split_once(':') else {
+        return false;
+    };
+    if file.is_empty() || file.contains(':') {
+        return false;
+    }
+    let Some((owner, name)) = repo.split_once('/') else {
+        return false;
+    };
+    !owner.is_empty() && !name.is_empty()
 }

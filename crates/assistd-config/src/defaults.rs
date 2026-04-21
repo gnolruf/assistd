@@ -33,6 +33,13 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local deskto
 
 pub const DEFAULT_VOICE_HOTKEY: &str = "Super+V";
 
+pub const DEFAULT_WHISPER_MODEL: &str = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin";
+pub const DEFAULT_WHISPER_VAD_MODEL: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
+pub const DEFAULT_WHISPER_PREFER_GPU: bool = true;
+pub const DEFAULT_WHISPER_BEAMS: u32 = 1;
+pub const DEFAULT_WHISPER_VAD_ENABLED: bool = true;
+pub const DEFAULT_WHISPER_VAD_SILENCE_SECS: f32 = 0.5;
+
 pub const DEFAULT_REMOTE_BIND_ADDRESS: &str = "127.0.0.1";
 pub const DEFAULT_REMOTE_PORT: u16 = 8384;
 
