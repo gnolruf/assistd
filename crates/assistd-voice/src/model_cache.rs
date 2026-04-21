@@ -27,11 +27,11 @@ pub fn parse_hf_id(id: &str) -> Result<(String, String), TranscriptionError> {
     Ok((repo.to_string(), file.to_string()))
 }
 
-/// `$XDG_CACHE_HOME/assistd/whisper/` or `~/.cache/assistd/whisper/`.
+/// `$XDG_CACHE_HOME/assistd/whisper/` or `$HOME/.cache/assistd/whisper/`.
 pub fn default_cache_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".cache")))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     base.join("assistd").join("whisper")
 }

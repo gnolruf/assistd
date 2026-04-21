@@ -9,7 +9,6 @@ default = ["whisper"]
 whisper = [
     "dep:whisper-rs",
     "dep:reqwest",
-    "dep:dirs",
     "dep:thiserror",
     "dep:tracing",
     "dep:tokio",
@@ -26,7 +25,6 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 whisper-rs = { version = "0.16", optional = true, default-features = false }
 reqwest = { workspace = true, optional = true, features = ["stream"] }
-dirs = { version = "5", optional = true }
 hound = { version = "3.5", optional = true }
 thiserror = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
