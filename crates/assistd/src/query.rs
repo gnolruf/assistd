@@ -93,6 +93,14 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             Event::Presence { state, .. } => {
                 writeln!(stdout, "[presence: {state:?}]")?;
             }
+            Event::VoiceState { state, .. } => {
+                writeln!(stdout, "[voice: {state:?}]")?;
+            }
+            Event::Transcription { text, .. } => {
+                if !text.is_empty() {
+                    writeln!(stdout, "[transcription: {text}]")?;
+                }
+            }
             Event::Done { .. } => {
                 if wrote_anything {
                     writeln!(stdout)?;

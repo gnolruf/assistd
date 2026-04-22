@@ -40,6 +40,18 @@ impl PresenceState {
     }
 }
 
+/// Push-to-talk capture state exposed on the wire so the TUI can render a
+/// three-state indicator (idle / recording / transcribing). `Transcribing`
+/// is distinct from `Recording` because whisper inference takes 1–3 s on a
+/// few seconds of audio and users otherwise keep talking into dead air.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceCaptureState {
+    Idle,
+    Recording,
+    Transcribing,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -59,6 +71,19 @@ pub enum Request {
     /// Atomically advance the daemon one step along
     /// `Active → Drowsy → Sleeping → Active`.
     Cycle {
+        id: String,
+    },
+    /// Begin a push-to-talk recording. Returns immediately with `Done`
+    /// once cpal has opened the device; audio is buffered in the daemon
+    /// until a matching `PttStop` arrives.
+    PttStart {
+        id: String,
+    },
+    /// End the push-to-talk recording and transcribe what was captured.
+    /// Emits `VoiceState::Transcribing`, then `Transcription { text }`,
+    /// then the text is dispatched internally as a `Query` whose
+    /// streaming `Delta`s flow back on the same connection before `Done`.
+    PttStop {
         id: String,
     },
 }
@@ -83,6 +108,17 @@ pub enum Event {
     /// Daemon presence state, emitted in response to GetPresence or after a
     /// successful SetPresence transition.
     Presence { id: String, state: PresenceState },
+    /// Push-to-talk capture state transition. Emitted when the daemon's
+    /// mic pipeline moves between Idle / Recording / Transcribing.
+    VoiceState {
+        id: String,
+        state: VoiceCaptureState,
+    },
+    /// Final whisper transcription emitted once on `PttStop`, before the
+    /// text is dispatched internally as a `Query`. Empty string means VAD
+    /// trimmed the audio down to silence — no `Query` follows in that
+    /// case, only a terminal `Done`.
+    Transcription { id: String, text: String },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -102,6 +138,8 @@ impl Event {
             | Event::ToolCall { id, .. }
             | Event::ToolResult { id, .. }
             | Event::Presence { id, .. }
+            | Event::VoiceState { id, .. }
+            | Event::Transcription { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }
@@ -257,6 +295,70 @@ mod tests {
         assert_eq!(PresenceState::Active.next(), PresenceState::Drowsy);
         assert_eq!(PresenceState::Drowsy.next(), PresenceState::Sleeping);
         assert_eq!(PresenceState::Sleeping.next(), PresenceState::Active);
+    }
+
+    #[test]
+    fn ptt_start_request_roundtrip() {
+        let req = Request::PttStart { id: "v-1".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"ptt_start","id":"v-1"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn ptt_stop_request_roundtrip() {
+        let req = Request::PttStop { id: "v-2".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"ptt_stop","id":"v-2"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn voice_state_event_roundtrip() {
+        let evt = Event::VoiceState {
+            id: "v-1".into(),
+            state: VoiceCaptureState::Recording,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"voice_state","id":"v-1","state":"recording"}"#
+        );
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn transcription_event_roundtrip() {
+        let evt = Event::Transcription {
+            id: "v-1".into(),
+            text: "hello world".into(),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"transcription","id":"v-1","text":"hello world"}"#
+        );
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn voice_state_and_transcription_are_not_terminal() {
+        let rec = Event::VoiceState {
+            id: "x".into(),
+            state: VoiceCaptureState::Recording,
+        };
+        assert!(!rec.is_terminal());
+        assert_eq!(rec.id(), "x");
+        let txt = Event::Transcription {
+            id: "y".into(),
+            text: "z".into(),
+        };
+        assert!(!txt.is_terminal());
+        assert_eq!(txt.id(), "y");
     }
 
     #[test]

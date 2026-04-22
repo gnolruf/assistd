@@ -9,6 +9,10 @@ assistd-config = { workspace = true }
 assistd-ipc = { workspace = true }
 assistd-llm = { workspace = true }
 assistd-tools = { workspace = true }
+# The default features (whisper + mic) bring in cpal; callers that
+# don't want mic support (e.g. a headless-minimal daemon build) can
+# override this elsewhere in their feature set.
+assistd-voice = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }

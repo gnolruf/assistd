@@ -29,6 +29,15 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # cpal links to libasound2 on Linux (ALSA backend) and pkg-config
+      # is invoked by alsa-sys at build time. ubuntu-latest ships
+      # pkg-config but not the alsa headers, so we install them
+      # explicitly here.
+      - name: Install audio system deps (libasound2)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
+
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:

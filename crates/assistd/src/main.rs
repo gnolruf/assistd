@@ -7,12 +7,14 @@ mod chat;
 mod daemon;
 #[cfg(feature = "daemon")]
 mod gpu_monitor;
-#[cfg(feature = "daemon")]
+#[cfg(any(feature = "daemon", feature = "chat"))]
 mod hotkey;
 #[cfg(any(feature = "daemon", feature = "chat"))]
 mod idle_monitor;
 #[cfg(feature = "client")]
 mod presence;
+#[cfg(feature = "client")]
+mod ptt;
 #[cfg(feature = "client")]
 mod query;
 
@@ -57,6 +59,16 @@ enum Commands {
     #[cfg(feature = "client")]
     Cycle,
 
+    /// Begin a push-to-talk recording on the running daemon (for i3
+    /// `bindsym` — release handled by `ptt-stop` on the matching
+    /// `bindsym --release` line).
+    #[cfg(feature = "client")]
+    PttStart,
+
+    /// End the push-to-talk recording, transcribe, and dispatch as a query
+    #[cfg(feature = "client")]
+    PttStop,
+
     /// Open an interactive chat TUI
     #[cfg(feature = "chat")]
     Chat(chat::ChatArgs),
@@ -80,6 +92,10 @@ async fn main() -> Result<()> {
         Commands::Wake => presence::run(presence::PresenceAction::Wake).await,
         #[cfg(feature = "client")]
         Commands::Cycle => presence::run(presence::PresenceAction::Cycle).await,
+        #[cfg(feature = "client")]
+        Commands::PttStart => ptt::run(ptt::PttAction::Start).await,
+        #[cfg(feature = "client")]
+        Commands::PttStop => ptt::run(ptt::PttAction::Stop).await,
         #[cfg(feature = "chat")]
         Commands::Chat(args) => chat::run(args).await,
     }

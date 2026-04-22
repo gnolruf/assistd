@@ -1,8 +1,9 @@
 use crate::{Config, PresenceManager, run_agent_turn};
 use anyhow::Result;
-use assistd_ipc::{Event, PresenceState, Request};
+use assistd_ipc::{Event, PresenceState, Request, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_tools::ToolRegistry;
+use assistd_voice::VoiceInput;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -17,6 +18,7 @@ pub struct AppState {
     pub llm: Arc<dyn LlmBackend>,
     pub presence: Arc<PresenceManager>,
     pub tools: Arc<ToolRegistry>,
+    pub voice: Arc<dyn VoiceInput>,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `run_agent_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
@@ -31,12 +33,14 @@ impl AppState {
         llm: Arc<dyn LlmBackend>,
         presence: Arc<PresenceManager>,
         tools: Arc<ToolRegistry>,
+        voice: Arc<dyn VoiceInput>,
     ) -> Self {
         Self {
             config,
             llm,
             presence,
             tools,
+            voice,
             agent_turn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -53,6 +57,8 @@ impl AppState {
             Request::SetPresence { id, target } => self.handle_set_presence(id, target, tx).await,
             Request::GetPresence { id } => self.handle_get_presence(id, tx).await,
             Request::Cycle { id } => self.handle_cycle(id, tx).await,
+            Request::PttStart { id } => self.handle_ptt_start(id, tx).await,
+            Request::PttStop { id } => self.handle_ptt_stop(id, tx).await,
         }
     }
 
@@ -220,6 +226,91 @@ impl AppState {
             }
         }
     }
+
+    /// Begin a push-to-talk recording. Returns immediately on success
+    /// so the CLI client exits cleanly — the daemon holds the capture
+    /// session open until a matching `PttStop` arrives on a separate
+    /// connection.
+    async fn handle_ptt_start(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
+        match self.voice.start_recording().await {
+            Ok(()) => {
+                let _ = tx
+                    .send(Event::VoiceState {
+                        id: id.clone(),
+                        state: VoiceCaptureState::Recording,
+                    })
+                    .await;
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("ptt_start failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// End the push-to-talk recording, transcribe, and — if the
+    /// transcription has content — dispatch it internally as a Query
+    /// so the streaming LLM response flows back on the same
+    /// connection before the terminal `Done`.
+    async fn handle_ptt_stop(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
+        let _ = tx
+            .send(Event::VoiceState {
+                id: id.clone(),
+                state: VoiceCaptureState::Transcribing,
+            })
+            .await;
+
+        let text = match self.voice.stop_and_transcribe().await {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::VoiceState {
+                        id: id.clone(),
+                        state: VoiceCaptureState::Idle,
+                    })
+                    .await;
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("ptt_stop failed: {e:#}"),
+                    })
+                    .await;
+                return Err(e);
+            }
+        };
+
+        let _ = tx
+            .send(Event::VoiceState {
+                id: id.clone(),
+                state: VoiceCaptureState::Idle,
+            })
+            .await;
+        let _ = tx
+            .send(Event::Transcription {
+                id: id.clone(),
+                text: text.clone(),
+            })
+            .await;
+
+        if text.trim().is_empty() {
+            // VAD trimmed to silence — end the stream here rather
+            // than dispatching an empty user message to the LLM.
+            let _ = tx.send(Event::Done { id }).await;
+            return Ok(());
+        }
+
+        // Auto-feed the agent loop, reusing the Query handler so
+        // streaming deltas, tool calls, and Done all land on the
+        // same connection and correlate to this request's id.
+        self.handle_query(id, text, tx).await
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +327,20 @@ mod tests {
             backend,
             PresenceManager::stub(initial_state),
             Arc::new(ToolRegistry::default()),
+            Arc::new(assistd_voice::NoVoiceInput::new()),
+        ))
+    }
+
+    fn state_with_voice(
+        backend: Arc<dyn LlmBackend>,
+        voice: Arc<dyn assistd_voice::VoiceInput>,
+    ) -> Arc<AppState> {
+        Arc::new(AppState::new(
+            Config::default(),
+            backend,
+            PresenceManager::stub(PresenceState::Active),
+            Arc::new(ToolRegistry::default()),
+            voice,
         ))
     }
 
@@ -414,6 +519,7 @@ mod tests {
             backend,
             PresenceManager::stub(PresenceState::Active),
             Arc::new(tools),
+            Arc::new(assistd_voice::NoVoiceInput::new()),
         ))
     }
 
@@ -480,5 +586,200 @@ mod tests {
             matches!(events.last(), Some(Event::Done { id }) if id == "req-42"),
             "expected terminal Done: {events:?}"
         );
+    }
+
+    /// Mock VoiceInput driven by a script of canned start/stop
+    /// outcomes, used to exercise the PttStart / PttStop handlers
+    /// without touching cpal or whisper.
+    struct MockVoice {
+        start_result: std::sync::Mutex<Option<anyhow::Result<()>>>,
+        stop_result: std::sync::Mutex<Option<anyhow::Result<String>>>,
+        state_tx: tokio::sync::watch::Sender<assistd_voice::VoiceCaptureState>,
+    }
+
+    impl MockVoice {
+        fn new(start: anyhow::Result<()>, stop: anyhow::Result<String>) -> Self {
+            let (state_tx, _) = tokio::sync::watch::channel(assistd_voice::VoiceCaptureState::Idle);
+            Self {
+                start_result: std::sync::Mutex::new(Some(start)),
+                stop_result: std::sync::Mutex::new(Some(stop)),
+                state_tx,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_voice::VoiceInput for MockVoice {
+        async fn start_recording(&self) -> anyhow::Result<()> {
+            self.start_result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| Ok(()))
+        }
+        async fn stop_and_transcribe(&self) -> anyhow::Result<String> {
+            self.stop_result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| Ok(String::new()))
+        }
+        fn state(&self) -> assistd_voice::VoiceCaptureState {
+            *self.state_tx.borrow()
+        }
+        fn subscribe(&self) -> tokio::sync::watch::Receiver<assistd_voice::VoiceCaptureState> {
+            self.state_tx.subscribe()
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_ptt_start_emits_recording_then_done() {
+        let voice = Arc::new(MockVoice::new(Ok(()), Ok(String::new())));
+        let state = state_with_voice(Arc::new(EchoBackend::new()), voice);
+        let (tx, rx) = mpsc::channel::<Event>(8);
+
+        state
+            .dispatch(Request::PttStart { id: "p1".into() }, tx)
+            .await
+            .unwrap();
+        let events = collect_events(rx).await;
+
+        assert_eq!(events.len(), 2, "expected VoiceState+Done, got {events:?}");
+        assert!(matches!(
+            &events[0],
+            Event::VoiceState { id, state: VoiceCaptureState::Recording } if id == "p1"
+        ));
+        assert!(matches!(&events[1], Event::Done { id } if id == "p1"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_ptt_start_error_emits_error_event() {
+        let voice = Arc::new(MockVoice::new(
+            Err(anyhow::anyhow!("no mic")),
+            Ok(String::new()),
+        ));
+        let state = state_with_voice(Arc::new(EchoBackend::new()), voice);
+        let (tx, rx) = mpsc::channel::<Event>(8);
+
+        let err = state
+            .dispatch(Request::PttStart { id: "p2".into() }, tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no mic"));
+
+        let events = collect_events(rx).await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Error { id, message } => {
+                assert_eq!(id, "p2");
+                assert!(message.contains("no mic"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_ptt_stop_with_text_runs_query() {
+        // Non-empty transcription should: emit Transcribing → Idle →
+        // Transcription(text), then dispatch as a Query (EchoBackend
+        // echoes the text), then terminal Done.
+        let voice = Arc::new(MockVoice::new(Ok(()), Ok("hello world".into())));
+        let state = state_with_voice(Arc::new(EchoBackend::new()), voice);
+        let (tx, rx) = mpsc::channel::<Event>(16);
+
+        state
+            .dispatch(Request::PttStop { id: "p3".into() }, tx)
+            .await
+            .unwrap();
+        let events = collect_events(rx).await;
+
+        // Order: Transcribing, Idle, Transcription, Delta(echo), Done.
+        assert!(matches!(
+            &events[0],
+            Event::VoiceState {
+                state: VoiceCaptureState::Transcribing,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &events[1],
+            Event::VoiceState {
+                state: VoiceCaptureState::Idle,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &events[2],
+            Event::Transcription { text, .. } if text == "hello world"
+        ));
+        assert!(matches!(
+            &events[3],
+            Event::Delta { text, .. } if text == "hello world"
+        ));
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn dispatch_ptt_stop_empty_transcription_skips_query() {
+        // Empty (VAD trimmed) transcription should NOT dispatch a Query.
+        let voice = Arc::new(MockVoice::new(Ok(()), Ok(String::new())));
+        let state = state_with_voice(Arc::new(EchoBackend::new()), voice);
+        let (tx, rx) = mpsc::channel::<Event>(8);
+
+        state
+            .dispatch(Request::PttStop { id: "p4".into() }, tx)
+            .await
+            .unwrap();
+        let events = collect_events(rx).await;
+
+        // No Delta event should appear — the query is skipped.
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Delta { .. })),
+            "expected no Delta on empty transcription: {events:?}"
+        );
+        assert!(matches!(
+            events.iter().find(|e| matches!(e, Event::Transcription { .. })),
+            Some(Event::Transcription { text, .. }) if text.is_empty()
+        ));
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn dispatch_ptt_stop_error_emits_error_event() {
+        let voice = Arc::new(MockVoice::new(
+            Ok(()),
+            Err(anyhow::anyhow!("device disappeared")),
+        ));
+        let state = state_with_voice(Arc::new(EchoBackend::new()), voice);
+        let (tx, rx) = mpsc::channel::<Event>(8);
+
+        let err = state
+            .dispatch(Request::PttStop { id: "p5".into() }, tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("device disappeared"));
+
+        let events = collect_events(rx).await;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::VoiceState {
+                state: VoiceCaptureState::Transcribing,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::VoiceState {
+                state: VoiceCaptureState::Idle,
+                ..
+            }
+        )));
+        match events.last() {
+            Some(Event::Error { id, message }) => {
+                assert_eq!(id, "p5");
+                assert!(message.contains("device disappeared"));
+            }
+            other => panic!("expected terminal Error, got {other:?}"),
+        }
     }
 }

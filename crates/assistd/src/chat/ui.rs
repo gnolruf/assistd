@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use assistd_core::PresenceState;
+use assistd_core::{PresenceState, VoiceCaptureState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -177,6 +177,18 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             ));
         }
     }
+    // Voice PTT indicator: a pulsing dot + short label between the
+    // presence segment and the generation state. Idle is invisible;
+    // Recording renders red, Transcribing yellow, both with the
+    // shared status-bar spinner so users see the state isn't stuck.
+    if let Some((color, label)) = voice_indicator(app.listening) {
+        left_spans.push(Span::raw(" "));
+        left_spans.push(Span::styled(
+            app.spinner_char().to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+        left_spans.push(Span::styled(format!(" {label}"), reversed));
+    }
     left_spans.push(Span::styled(format!(" │ {state}"), reversed));
     if let Some(r) = rate {
         left_spans.push(Span::styled(format!(" │ {r}"), reversed));
@@ -223,6 +235,14 @@ fn presence_dot(s: Option<PresenceState>) -> Option<(Color, &'static str)> {
         PresenceState::Active => Some((Color::Green, "active")),
         PresenceState::Drowsy => Some((Color::Yellow, "drowsy")),
         PresenceState::Sleeping => Some((Color::Red, "sleeping")),
+    }
+}
+
+fn voice_indicator(s: VoiceCaptureState) -> Option<(Color, &'static str)> {
+    match s {
+        VoiceCaptureState::Idle => None,
+        VoiceCaptureState::Recording => Some((Color::Red, "Listening…")),
+        VoiceCaptureState::Transcribing => Some((Color::Yellow, "transcribing…")),
     }
 }
 

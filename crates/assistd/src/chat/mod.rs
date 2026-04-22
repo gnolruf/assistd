@@ -11,6 +11,7 @@ mod input;
 mod output;
 mod throughput;
 mod ui;
+mod voice;
 mod vram;
 
 use std::path::PathBuf;
@@ -114,6 +115,18 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         idle_monitor::spawn_monitor(&config.sleep, p.clone(), shutdown_tx.subscribe())
     });
 
+    // Voice pipeline: builds a `MicVoiceInput`, spawns the hotkey
+    // listener (press/release), and gives us a channel of
+    // VoiceEvents to plumb into the event loop. Always returns a
+    // handle — even when voice is disabled, which just gives a
+    // `NoVoiceInput` + no hotkey bound.
+    let (voice_tx, voice_rx) = mpsc::channel::<voice::VoiceEvent>(32);
+    // Keep the pipeline's handles alive for the lifetime of the TUI
+    // so the hotkey listener and state forwarder don't drop their
+    // `Arc<dyn VoiceInput>` reference. Dropped at the end of
+    // `run()` after the shutdown signal fires.
+    let _voice_pipeline = voice::spawn(&config, voice_tx, shutdown_tx.subscribe()).await;
+
     let model_name = config
         .model
         .name
@@ -132,6 +145,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         shutdown_tx.clone(),
         startup_error,
         confirm_rx,
+        voice_rx,
     )
     .await;
 
@@ -160,6 +174,7 @@ async fn run_tui(
     shutdown_tx: watch::Sender<bool>,
     startup_error: Option<String>,
     mut confirmation_rx: mpsc::Receiver<PendingConfirmation>,
+    mut voice_rx: mpsc::Receiver<voice::VoiceEvent>,
 ) -> Result<()> {
     terminal::enable_raw_mode().context("enable_raw_mode")?;
     if let Err(e) = execute!(
@@ -235,6 +250,13 @@ async fn run_tui(
             }
             Some(pending) = confirmation_rx.recv() => {
                 app.open_confirmation_modal(pending);
+            }
+            Some(v) = voice_rx.recv() => {
+                match v {
+                    voice::VoiceEvent::State(s) => app.on_voice_state(s),
+                    voice::VoiceEvent::Transcription(text) => app.on_transcription(text),
+                    voice::VoiceEvent::Error(msg) => app.on_voice_error(msg),
+                }
             }
             presence_changed = async {
                 match presence_rx.as_mut() {

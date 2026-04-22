@@ -98,8 +98,17 @@ request_timeout_secs = 120
 enabled = false
 # ALSA/PulseAudio device name (optional). Omit for system default.
 # mic_device = "hw:0,0"
-# Hotkey to activate voice input.
-hotkey = "Super+V"
+# Hotkey to hold for push-to-talk. Release to transcribe and auto-submit.
+# Empty string disables the in-process hotkey listener; the IPC commands
+# (`assistd ptt-start` / `ptt-stop`) always work regardless, for i3/sway
+# `bindsym` users:
+#   bindsym           $mod+space exec --no-startup-id assistd ptt-start
+#   bindsym --release $mod+space exec --no-startup-id assistd ptt-stop
+hotkey = "Super+Space"
+# Upper bound on a single PTT recording in seconds. The ring buffer
+# drops newer samples past this length; transcription still runs on
+# what was captured. Also determines pre-allocated buffer size.
+# max_recording_secs = 60
 
 [voice.transcription]
 # HuggingFace identifier for the Whisper GGML model, formatted as

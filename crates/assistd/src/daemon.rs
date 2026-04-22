@@ -1,7 +1,8 @@
 use anyhow::Result;
-use assistd_core::{AppState, Config, PresenceManager};
+use assistd_core::{AppState, Config, NoVoiceInput, PresenceManager, VoiceInput};
 use assistd_llm::LlamaChatClient;
 use assistd_tools::DenyAllGate;
+use assistd_voice::MicVoiceInput;
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     };
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
-    hotkey::validate(&config.presence)?;
+    hotkey::validate(&config.presence, &config.voice)?;
     gpu_monitor::validate(&config.sleep)?;
     idle_monitor::validate(&config.sleep)?;
 
@@ -82,8 +83,36 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     );
 
     let chat = LlamaChatClient::new(&config.chat, &config.llama_server, &config.model)?;
-    let hotkey_handle =
-        hotkey::spawn_listener(&config.presence, presence.clone(), shutdown_tx.subscribe());
+
+    // Voice input: build the mic-backed implementation when the user
+    // has enabled it. `MicVoiceInput::from_config` eagerly downloads
+    // the whisper/VAD models on first use (it does not open the
+    // device), so failures surface at startup rather than on the
+    // first PTT press.
+    let voice: Arc<dyn VoiceInput> = if config.voice.enabled {
+        info!(
+            "voice: building mic input ({})",
+            config.voice.transcription.model
+        );
+        match MicVoiceInput::from_config(&config.voice).await {
+            Ok(v) => Arc::new(v),
+            Err(e) => {
+                tracing::warn!("voice input failed to initialize: {e:#}; PTT commands will error");
+                Arc::new(NoVoiceInput::new())
+            }
+        }
+    } else {
+        info!("voice: disabled in config (voice.enabled = false)");
+        Arc::new(NoVoiceInput::new())
+    };
+
+    let hotkey_handle = hotkey::spawn_listener(
+        &config.presence,
+        &config.voice,
+        Some(presence.clone()),
+        voice.clone(),
+        shutdown_tx.subscribe(),
+    );
     let gpu_monitor_handle =
         gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
     let idle_monitor_handle =
@@ -105,6 +134,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         Arc::new(chat),
         presence.clone(),
         tools,
+        voice,
     ));
 
     let mut socket_shutdown_rx = shutdown_tx.subscribe();

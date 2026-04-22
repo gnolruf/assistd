@@ -31,7 +31,12 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local deskto
      usually better than three separate tool calls. Answer precisely and in \
      a conversational tone.";
 
-pub const DEFAULT_VOICE_HOTKEY: &str = "Super+V";
+pub const DEFAULT_VOICE_HOTKEY: &str = "Super+Space";
+/// Upper bound on push-to-talk recording length, in seconds. A held
+/// hotkey past this is truncated to the first N seconds (the ring buffer
+/// drops newer samples once full). Also determines the buffer size
+/// pre-allocated when recording starts.
+pub const DEFAULT_VOICE_MAX_RECORDING_SECS: u32 = 60;
 
 pub const DEFAULT_WHISPER_MODEL: &str = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin";
 pub const DEFAULT_WHISPER_VAD_MODEL: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";

@@ -12,7 +12,7 @@ use std::sync::Once;
 use std::time::Duration;
 
 use assistd_config::{LlamaServerConfig, ModelConfig};
-use assistd_core::{AppState, Config, PresenceManager, PresenceState, ToolRegistry};
+use assistd_core::{AppState, Config, NoVoiceInput, PresenceManager, PresenceState, ToolRegistry};
 use assistd_ipc::{Event, Request};
 use assistd_llm::{EchoBackend, LlmBackend, LlmEvent};
 use async_trait::async_trait;
@@ -298,6 +298,7 @@ async fn query_during_sleeping_triggers_auto_wake() {
         Arc::new(EchoBackend::new()),
         m.clone(),
         Arc::new(ToolRegistry::default()),
+        Arc::new(NoVoiceInput::new()),
     ));
 
     let dir = tempfile::tempdir().unwrap();
@@ -447,6 +448,7 @@ async fn sleep_defers_until_inflight_query_done() {
         }),
         m.clone(),
         Arc::new(ToolRegistry::default()),
+        Arc::new(NoVoiceInput::new()),
     ));
 
     let dir = tempfile::tempdir().unwrap();
@@ -531,6 +533,7 @@ async fn multiple_queries_during_wake_complete_in_order() {
         Arc::new(EchoBackend::new()),
         m.clone(),
         Arc::new(ToolRegistry::default()),
+        Arc::new(NoVoiceInput::new()),
     ));
 
     let dir = tempfile::tempdir().unwrap();
