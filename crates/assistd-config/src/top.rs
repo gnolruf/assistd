@@ -131,8 +131,12 @@ impl Config {
         }
 
         if self.voice.enabled {
-            if self.voice.hotkey.is_empty() {
-                errors.push("voice.hotkey must not be empty when voice is enabled".into());
+            // hotkey may be empty — the user might prefer the IPC-only
+            // PTT pathway (i3 bindsym → `assistd ptt-start/stop`).
+            if self.voice.max_recording_secs == 0 {
+                errors.push(
+                    "voice.max_recording_secs must be greater than 0 when voice is enabled".into(),
+                );
             }
             let t = &self.voice.transcription;
             if t.model.trim().is_empty() {

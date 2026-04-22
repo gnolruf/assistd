@@ -236,6 +236,7 @@ mod tests {
             Arc::new(assistd_llm::EchoBackend::new()),
             PresenceManager::stub(PresenceState::Active),
             Arc::new(assistd_tools::ToolRegistry::default()),
+            Arc::new(assistd_voice::NoVoiceInput::new()),
         ))
     }
 
@@ -522,6 +523,7 @@ mod tests {
             backend,
             PresenceManager::stub(PresenceState::Active),
             Arc::new(assistd_tools::ToolRegistry::default()),
+            Arc::new(assistd_voice::NoVoiceInput::new()),
         ))
     }
 

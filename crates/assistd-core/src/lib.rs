@@ -11,8 +11,9 @@ pub use assistd_config::{
     SleepConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsWriteConfig, VoiceConfig,
 };
 pub use assistd_ipc as ipc;
-pub use assistd_ipc::PresenceState;
+pub use assistd_ipc::{PresenceState, VoiceCaptureState};
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
+pub use assistd_voice::{NoVoiceInput, VoiceInput};
 pub use presence::{PresenceManager, RequestGuard};
 pub use state::AppState;
 

@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use crate::defaults::{
-    DEFAULT_VOICE_HOTKEY, DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
-    DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL, DEFAULT_WHISPER_VAD_SILENCE_SECS,
+    DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS, DEFAULT_WHISPER_BEAMS,
+    DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED,
+    DEFAULT_WHISPER_VAD_MODEL, DEFAULT_WHISPER_VAD_SILENCE_SECS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +15,15 @@ pub struct VoiceConfig {
     /// ALSA/PulseAudio device name. `None` = system default.
     #[serde(default)]
     pub mic_device: Option<String>,
-    /// Hotkey to activate voice input (e.g. "Super+V").
+    /// Hotkey to hold for push-to-talk recording (e.g. "Super+Space").
+    /// Empty disables the in-daemon/TUI global hotkey listener — the PTT
+    /// IPC commands (`assistd ptt-start` / `ptt-stop`) still work.
     pub hotkey: String,
+    /// Upper bound on a single PTT recording, in seconds. The ring
+    /// buffer drops newer samples past this length; transcription still
+    /// runs on whatever was captured.
+    #[serde(default = "default_voice_max_recording_secs")]
+    pub max_recording_secs: u32,
     /// Speech-to-text transcription settings.
     #[serde(default)]
     pub transcription: TranscriptionConfig,
@@ -27,9 +35,14 @@ impl Default for VoiceConfig {
             enabled: false,
             mic_device: None,
             hotkey: DEFAULT_VOICE_HOTKEY.to_string(),
+            max_recording_secs: DEFAULT_VOICE_MAX_RECORDING_SECS,
             transcription: TranscriptionConfig::default(),
         }
     }
+}
+
+fn default_voice_max_recording_secs() -> u32 {
+    DEFAULT_VOICE_MAX_RECORDING_SECS
 }
 
 /// Whisper transcription settings. Every field has a default; the full

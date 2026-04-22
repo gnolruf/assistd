@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assistd_core::{PresenceManager, PresenceState, SleepConfig, ToolRegistry};
+use assistd_core::{PresenceManager, PresenceState, SleepConfig, ToolRegistry, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_tools::ConfirmationRequest;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -51,6 +51,10 @@ pub struct App {
     pub sleep_cfg: SleepConfig,
     pub presence: Option<Arc<PresenceManager>>,
     pub modal: Option<ConfirmationModal>,
+    /// Push-to-talk capture state, driven by the mic-voice listener
+    /// spawned alongside the event loop. Rendered as an indicator in
+    /// `render_status` (recording = red, transcribing = yellow).
+    pub listening: VoiceCaptureState,
     /// Command of the in-flight tool call, captured on `LlmEvent::ToolCall`
     /// and consumed on the matching `LlmEvent::ToolResult` so the
     /// call+result pair becomes one `ToolBlock`. The agent loop is strictly
@@ -88,6 +92,7 @@ impl App {
             sleep_cfg,
             presence,
             modal: None,
+            listening: VoiceCaptureState::Idle,
             pending_tool_call: None,
             client,
             tools,
@@ -209,6 +214,37 @@ impl App {
 
     pub fn on_presence(&mut self, s: PresenceState) {
         self.presence_state = Some(s);
+    }
+
+    /// Reducer for `VoiceCaptureState` transitions from the mic
+    /// listener. Called on every watch-channel change; sets the
+    /// rendered indicator.
+    pub fn on_voice_state(&mut self, s: VoiceCaptureState) {
+        self.listening = s;
+    }
+
+    /// Handle a completed transcription from the PTT pipeline. Empty
+    /// strings (VAD trimmed everything) surface as a brief notice.
+    /// Non-empty text is auto-submitted to the LLM via the same path
+    /// as typing into the input line.
+    pub fn on_transcription(&mut self, text: String) {
+        if text.trim().is_empty() {
+            self.set_notice("no speech detected");
+            return;
+        }
+        if self.generating {
+            self.set_notice("still generating — transcription dropped");
+            return;
+        }
+        self.submit(text);
+    }
+
+    /// Surface a non-fatal voice pipeline error as a TUI notice. The
+    /// listening indicator is reset so stale "recording…" doesn't
+    /// linger on the status bar.
+    pub fn on_voice_error(&mut self, msg: String) {
+        self.listening = VoiceCaptureState::Idle;
+        self.set_notice(&format!("voice: {msg}"));
     }
 
     fn on_cycle_key(&mut self) {
