@@ -44,6 +44,13 @@ pub struct ChatArgs {
 }
 
 pub async fn run(args: ChatArgs) -> Result<()> {
+    // Redirect process-level stderr to a sibling log file BEFORE any
+    // subsystem initialization runs. C libraries (ALSA's JACK/OSS
+    // fallback probing, whisper.cpp when hooks aren't yet installed,
+    // future TTS backends) write diagnostics straight to fd 2; without
+    // this they leak into the ratatui draw surface and glitch the TUI.
+    let _stderr_redirect = redirect_stderr_to_log()?;
+
     let config_path = match args.config {
         Some(p) => p,
         None => Config::default_path()?,
@@ -300,18 +307,20 @@ fn install_signal_handler(shutdown_tx: watch::Sender<bool>) {
     });
 }
 
-fn init_file_tracing() -> Result<tracing_appender::non_blocking::WorkerGuard> {
-    use tracing_subscriber::{EnvFilter, fmt};
-
-    let log_dir = std::env::var_os("XDG_STATE_HOME")
+fn log_dir() -> Result<PathBuf> {
+    let dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .map(|p| p.join("assistd"))
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state/assistd")))
         .unwrap_or_else(std::env::temp_dir);
-    std::fs::create_dir_all(&log_dir)
-        .with_context(|| format!("creating log dir {}", log_dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
+    Ok(dir)
+}
 
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "chat.log");
+fn init_file_tracing() -> Result<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let file_appender = tracing_appender::rolling::daily(log_dir()?, "chat.log");
     let (writer, guard) = tracing_appender::non_blocking(file_appender);
 
     fmt()
@@ -323,6 +332,32 @@ fn init_file_tracing() -> Result<tracing_appender::non_blocking::WorkerGuard> {
         .init();
 
     Ok(guard)
+}
+
+/// Redirect the process's stderr (fd 2) to a dedicated log file next to
+/// `chat.log`. Returns the owning `File` — keep it alive for the TUI
+/// lifetime; dropping it doesn't close fd 2 because `dup2` has already
+/// linked the kernel descriptor. Panics and C-library stderr writes all
+/// land in `chat-stderr.log` instead of the ratatui draw surface.
+fn redirect_stderr_to_log() -> Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
+
+    let path = log_dir()?.join("chat-stderr.log");
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening stderr log {}", path.display()))?;
+    // SAFETY: dup2 on fd 2 is a standard POSIX operation; the target fd
+    // is a valid, owned descriptor from `OpenOptions::open`. On failure
+    // we surface the errno and leave stderr untouched.
+    let rc = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("dup2 stderr → {}", path.display()));
+    }
+    Ok(file)
 }
 
 struct TerminalGuard;

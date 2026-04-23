@@ -5,7 +5,6 @@ use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_tools::ToolRegistry;
 use assistd_voice::{ContinuousListener, VoiceInput};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, mpsc};
 
 /// Shared, long-lived daemon state handed to every request handler.
@@ -21,10 +20,6 @@ pub struct AppState {
     pub tools: Arc<ToolRegistry>,
     pub voice: Arc<dyn VoiceInput>,
     pub listener: Arc<dyn ContinuousListener>,
-    /// Mutual-exclusion flag between the continuous listener and PTT.
-    /// Both check this before opening the mic — only one can own the
-    /// device at a time (cpal can't share a stream on ALSA).
-    pub continuous_active: Arc<AtomicBool>,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `run_agent_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
@@ -49,7 +44,6 @@ impl AppState {
             tools,
             voice,
             listener,
-            continuous_active: Arc::new(AtomicBool::new(false)),
             agent_turn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -251,7 +245,7 @@ impl AppState {
     /// connection. Rejects when continuous listening currently owns
     /// the mic; the two modes can't share one cpal stream.
     async fn handle_ptt_start(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
-        if self.listener.is_active() || self.continuous_active.load(Ordering::SeqCst) {
+        if self.listener.is_active() {
             let _ = tx
                 .send(Event::Error {
                     id,

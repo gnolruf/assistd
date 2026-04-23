@@ -1,10 +1,12 @@
 //! Voice subsystem: input (speech-to-text) and output (text-to-speech) traits.
 //!
-//! Milestone 4 provides [`WhisperTranscriber`] (whisper-rs) and
-//! [`MicVoiceInput`] (cpal + ring buffer) behind the `whisper` and `mic`
-//! cargo features respectively. Milestone 5 will provide a `Piper`
-//! implementation of [`VoiceOutput`]. The traits live here so the daemon
-//! can hold them as `Arc<dyn …>` from the moment the feature lands,
+//! Milestone 5 ships voice input: [`WhisperTranscriber`] (whisper-rs) and
+//! [`MicVoiceInput`] (cpal + ring buffer + rubato) for push-to-talk, plus
+//! [`MicContinuousListener`] (webrtc-vad) for hands-free capture. These
+//! sit behind the `whisper`, `mic`, and `listen` cargo features
+//! respectively. Milestone 6 will add a `Piper` implementation of
+//! [`VoiceOutput`]; the trait lives here already so the daemon can hold
+//! it as `Arc<dyn VoiceOutput>` from the moment the feature lands,
 //! without touching the protocol or handler shape.
 
 use anyhow::Result;
@@ -118,7 +120,7 @@ impl VoiceInput for NoVoiceInput {
 }
 
 /// Placeholder [`VoiceOutput`] that drops speech requests silently — used
-/// until the milestone-5 implementation lands.
+/// until the milestone-6 implementation lands.
 pub struct NoVoiceOutput;
 
 #[async_trait]

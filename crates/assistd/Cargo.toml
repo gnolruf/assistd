@@ -31,6 +31,7 @@ chat = [
     "dep:tracing-appender",
     "dep:textwrap",
     "dep:async-trait",
+    "dep:libc",
 ]
 
 [dependencies]
@@ -62,3 +63,4 @@ futures-util     = { workspace = true, optional = true }
 tracing-appender = { workspace = true, optional = true }
 textwrap         = { workspace = true, optional = true }
 async-trait      = { workspace = true, optional = true }
+libc             = { workspace = true, optional = true }

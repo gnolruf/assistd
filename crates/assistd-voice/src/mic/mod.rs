@@ -232,6 +232,21 @@ impl VoiceInput for MicVoiceInput {
             return Ok(String::new());
         }
 
+        let duration_secs = pcm.len() as f32 / 16_000.0;
+        let peak = pcm.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+        let peak_dbfs = if peak == 0 {
+            f32::NEG_INFINITY
+        } else {
+            20.0 * (peak as f32 / i16::MAX as f32).log10()
+        };
+        info!(
+            target: "assistd::voice::mic",
+            pcm_samples = pcm.len(),
+            duration_secs,
+            peak_dbfs,
+            "captured pcm; invoking transcriber"
+        );
+
         let result = self.transcriber.transcribe(&pcm).await;
 
         // Regardless of result: retire the forwarder and publish Idle.
@@ -246,6 +261,7 @@ impl VoiceInput for MicVoiceInput {
             target: "assistd::voice::mic",
             pcm_samples = pcm.len(),
             text_chars = text.chars().count(),
+            text = %text,
             "transcription complete"
         );
         Ok(text)
