@@ -198,9 +198,7 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
         .and_then(|d| d.name().ok())
         .unwrap_or_else(|| "<none>".to_string());
     if let Ok(devices) = host.input_devices() {
-        let names: Vec<String> = devices
-            .filter_map(|d| d.name().ok())
-            .collect();
+        let names: Vec<String> = devices.filter_map(|d| d.name().ok()).collect();
         tracing::info!(
             target: "assistd::voice::mic",
             default = %default_name,

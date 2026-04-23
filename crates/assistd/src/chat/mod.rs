@@ -313,8 +313,7 @@ fn log_dir() -> Result<PathBuf> {
         .map(|p| p.join("assistd"))
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state/assistd")))
         .unwrap_or_else(std::env::temp_dir);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating log dir {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
     Ok(dir)
 }
 
