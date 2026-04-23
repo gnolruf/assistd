@@ -95,8 +95,8 @@ fn run_inference(
         params.set_n_threads(threads as i32);
     }
     if let Some(vad) = &cfg.vad {
-        params.enable_vad(true);
         params.set_vad_model_path(Some(vad.model_path.as_str()));
+        params.enable_vad(true);
         let mut vp = WhisperVadParams::default();
         let ms = (vad.silence_secs * 1000.0)
             .round()
@@ -200,6 +200,11 @@ impl WhisperTranscriberBuilder {
     }
 
     pub async fn build(self) -> Result<WhisperTranscriber, TranscriptionError> {
+        // Route whisper.cpp / ggml C-level logs through `tracing` instead
+        // of raw stderr, which would otherwise corrupt TUI draws.
+        // Idempotent: safe to call on every build.
+        whisper_rs::install_logging_hooks();
+
         let model = self.model.ok_or_else(|| TranscriptionError::ModelParse {
             id: String::new(),
             reason: "model identifier is required".into(),
@@ -254,6 +259,8 @@ pub async fn build_cpu_fallback(
     cfg: &assistd_config::TranscriptionConfig,
     cache_dir_override: Option<PathBuf>,
 ) -> Result<WhisperTranscriber, TranscriptionError> {
+    whisper_rs::install_logging_hooks();
+
     let cache_dir = cache_dir_override
         .or_else(|| cfg.model_cache_dir.clone())
         .unwrap_or_else(default_cache_dir);

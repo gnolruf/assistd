@@ -16,7 +16,7 @@ use ringbuf::HeapRb;
 use ringbuf::traits::{Producer, Split};
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use super::consumer;
 
@@ -99,7 +99,7 @@ pub fn open_producer_stream(
         .play()
         .map_err(|e| AudioCaptureError::PlayStream(e.to_string()))?;
 
-    debug!(
+    tracing::info!(
         target: "assistd::voice::mic",
         device = %device_name,
         sample_rate,
@@ -188,11 +188,31 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     if !cfg.enabled {
         return Ok(());
     }
+
+    // Always enumerate input devices at startup so the log captures
+    // which cpal-visible devices exist — indispensable for diagnosing
+    // "wrong mic picked" problems on systems with many PipeWire sinks.
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_else(|| "<none>".to_string());
+    if let Ok(devices) = host.input_devices() {
+        let names: Vec<String> = devices
+            .filter_map(|d| d.name().ok())
+            .collect();
+        tracing::info!(
+            target: "assistd::voice::mic",
+            default = %default_name,
+            available = ?names,
+            "cpal input devices"
+        );
+    }
+
     let Some(requested) = cfg.mic_device.as_deref() else {
         return Ok(());
     };
 
-    let host = cpal::default_host();
     let devices = match host.input_devices() {
         Ok(d) => d,
         Err(e) => {

@@ -33,7 +33,7 @@ thiserror = { workspace = true }
 assistd-ipc = { workspace = true }
 
 # Whisper backend
-whisper-rs = { version = "0.16", optional = true, default-features = false }
+whisper-rs = { version = "0.16", optional = true, default-features = false, features = ["tracing_backend"] }
 reqwest = { workspace = true, optional = true, features = ["stream"] }
 nvml-wrapper = { workspace = true, optional = true }
 assistd-config = { workspace = true, optional = true }
