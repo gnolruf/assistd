@@ -175,6 +175,31 @@ impl Config {
             {
                 errors.push("voice.transcription.threads must be greater than 0 when set".into());
             }
+
+            let c = &self.voice.continuous;
+            if c.enabled {
+                if c.silence_ms == 0 {
+                    errors.push(
+                        "voice.continuous.silence_ms must be greater than 0 when enabled".into(),
+                    );
+                }
+                if c.max_utterance_secs == 0 {
+                    errors.push(
+                        "voice.continuous.max_utterance_secs must be greater than 0 when enabled"
+                            .into(),
+                    );
+                }
+                if c.min_utterance_ms >= c.max_utterance_secs.saturating_mul(1000) {
+                    errors.push(
+                        "voice.continuous.min_utterance_ms must be less than max_utterance_secs * 1000"
+                            .into(),
+                    );
+                }
+                if c.aggressiveness > 3 {
+                    errors
+                        .push("voice.continuous.aggressiveness must be in the range 0..=3".into());
+                }
+            }
         }
 
         if self.sleep.idle_to_drowsy_mins > 0

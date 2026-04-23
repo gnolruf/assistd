@@ -86,6 +86,28 @@ pub enum Request {
     PttStop {
         id: String,
     },
+    /// Enable hands-free continuous listening. The daemon keeps the mic
+    /// open and auto-dispatches each VAD-segmented utterance as a
+    /// `Query`. Emits `ListenState { active: true }` + `Done`.
+    /// Rejects with `Error` when a PTT recording is already in flight.
+    ListenStart {
+        id: String,
+    },
+    /// Disable continuous listening. Emits `ListenState { active: false }`
+    /// + `Done`. Idempotent when already stopped.
+    ListenStop {
+        id: String,
+    },
+    /// Flip continuous listening on/off in a single call. Emits the
+    /// post-toggle `ListenState` + `Done`.
+    ListenToggle {
+        id: String,
+    },
+    /// Report whether continuous listening is currently active. Emits
+    /// `ListenState` + `Done` with no state change.
+    GetListenState {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,6 +141,9 @@ pub enum Event {
     /// trimmed the audio down to silence — no `Query` follows in that
     /// case, only a terminal `Done`.
     Transcription { id: String, text: String },
+    /// Current state of continuous listening. Emitted in response to
+    /// `ListenStart` / `ListenStop` / `ListenToggle` / `GetListenState`.
+    ListenState { id: String, active: bool },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -140,6 +165,7 @@ impl Event {
             | Event::Presence { id, .. }
             | Event::VoiceState { id, .. }
             | Event::Transcription { id, .. }
+            | Event::ListenState { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }
@@ -359,6 +385,64 @@ mod tests {
         };
         assert!(!txt.is_terminal());
         assert_eq!(txt.id(), "y");
+    }
+
+    #[test]
+    fn listen_start_request_roundtrip() {
+        let req = Request::ListenStart { id: "l-1".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"listen_start","id":"l-1"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn listen_stop_request_roundtrip() {
+        let req = Request::ListenStop { id: "l-2".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"listen_stop","id":"l-2"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn listen_toggle_request_roundtrip() {
+        let req = Request::ListenToggle { id: "l-3".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"listen_toggle","id":"l-3"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn get_listen_state_request_roundtrip() {
+        let req = Request::GetListenState { id: "l-4".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"get_listen_state","id":"l-4"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn listen_state_event_roundtrip() {
+        let evt = Event::ListenState {
+            id: "l-1".into(),
+            active: true,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(json, r#"{"type":"listen_state","id":"l-1","active":true}"#);
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn listen_state_is_not_terminal() {
+        let evt = Event::ListenState {
+            id: "l-1".into(),
+            active: false,
+        };
+        assert!(!evt.is_terminal());
+        assert_eq!(evt.id(), "l-1");
     }
 
     #[test]

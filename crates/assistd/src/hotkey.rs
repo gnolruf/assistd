@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use assistd_core::{PresenceConfig, PresenceManager, VoiceConfig, VoiceInput};
+use assistd_core::{ContinuousListener, PresenceConfig, PresenceManager, VoiceConfig, VoiceInput};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -33,6 +33,16 @@ pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
             .map(|_| ())
             .with_context(|| format!("invalid voice.hotkey {:?}", voice.hotkey))?;
     }
+    if voice.enabled && voice.continuous.enabled && !voice.continuous.hotkey.is_empty() {
+        HotKey::from_str(&voice.continuous.hotkey)
+            .map(|_| ())
+            .with_context(|| {
+                format!(
+                    "invalid voice.continuous.hotkey {:?}",
+                    voice.continuous.hotkey
+                )
+            })?;
+    }
     Ok(())
 }
 
@@ -49,6 +59,7 @@ pub fn spawn_listener(
     voice_cfg: &VoiceConfig,
     presence: Option<Arc<PresenceManager>>,
     voice: Arc<dyn VoiceInput>,
+    listener: Option<Arc<dyn ContinuousListener>>,
     shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     // Only bind the presence hotkey when the caller actually passed
@@ -64,8 +75,19 @@ pub fn spawn_listener(
     } else {
         None
     };
+    // Continuous-listen hotkey needs the listener arc as well — chat
+    // TUI mode may not supply one.
+    let listen_hotkey = if voice_cfg.enabled
+        && voice_cfg.continuous.enabled
+        && !voice_cfg.continuous.hotkey.is_empty()
+        && listener.is_some()
+    {
+        Some(voice_cfg.continuous.hotkey.clone())
+    } else {
+        None
+    };
 
-    if presence_hotkey.is_none() && voice_hotkey.is_none() {
+    if presence_hotkey.is_none() && voice_hotkey.is_none() && listen_hotkey.is_none() {
         info!(
             target: "assistd::hotkey",
             "no global hotkeys configured; hotkey listener disabled"
@@ -125,7 +147,24 @@ pub fn spawn_listener(
         }
     });
 
-    if presence_hk.is_none() && voice_hk.is_none() {
+    let listen_hk = listen_hotkey.and_then(|s| match HotKey::from_str(&s) {
+        Ok(h) => match manager.register(h) {
+            Ok(()) => {
+                info!(target: "assistd::hotkey", "continuous-listen hotkey {s:?} registered (press to toggle)");
+                Some(h)
+            }
+            Err(e) => {
+                warn!(target: "assistd::hotkey", "failed to register voice.continuous.hotkey {s:?}: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            warn!(target: "assistd::hotkey", "failed to parse voice.continuous.hotkey {s:?}: {e}");
+            None
+        }
+    });
+
+    if presence_hk.is_none() && voice_hk.is_none() && listen_hk.is_none() {
         return None;
     }
 
@@ -133,23 +172,29 @@ pub fn spawn_listener(
         manager,
         presence_hk,
         voice_hk,
+        listen_hk,
         presence,
         voice,
+        listener,
         shutdown,
     ));
     Some(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_listener(
     manager: GlobalHotKeyManager,
     presence_hk: Option<HotKey>,
     voice_hk: Option<HotKey>,
+    listen_hk: Option<HotKey>,
     presence: Option<Arc<PresenceManager>>,
     voice: Arc<dyn VoiceInput>,
+    listener: Option<Arc<dyn ContinuousListener>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let presence_id = presence_hk.map(|h| h.id());
     let voice_id = voice_hk.map(|h| h.id());
+    let listen_id = listen_hk.map(|h| h.id());
     let receiver = GlobalHotKeyEvent::receiver();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -212,6 +257,29 @@ async fn run_listener(
                                 });
                             }
                         }
+                    } else if Some(event.id) == listen_id
+                        && event.state == HotKeyState::Pressed
+                        && let Some(ref listener_arc) = listener
+                    {
+                        let l = listener_arc.clone();
+                        tokio::spawn(async move {
+                            let result = if l.is_active() {
+                                l.stop().await.map(|()| false)
+                            } else {
+                                l.start().await.map(|()| true)
+                            };
+                            match result {
+                                Ok(active) => info!(
+                                    target: "assistd::hotkey",
+                                    active,
+                                    "hotkey toggled continuous listening"
+                                ),
+                                Err(e) => warn!(
+                                    target: "assistd::hotkey",
+                                    "continuous-listen toggle failed: {e:#}"
+                                ),
+                            }
+                        });
                     }
                 }
             }
@@ -231,6 +299,11 @@ async fn run_listener(
     if let Some(h) = voice_hk {
         if let Err(e) = manager.unregister(h) {
             warn!(target: "assistd::hotkey", "failed to unregister voice hotkey on shutdown: {e}");
+        }
+    }
+    if let Some(h) = listen_hk {
+        if let Err(e) = manager.unregister(h) {
+            warn!(target: "assistd::hotkey", "failed to unregister continuous-listen hotkey on shutdown: {e}");
         }
     }
 }
@@ -295,6 +368,73 @@ mod tests {
             &v,
         )
         .expect("Super+Space must parse");
+    }
+
+    #[test]
+    fn validate_continuous_hotkey_when_enabled() {
+        use assistd_core::ContinuousListenConfig;
+        let v = VoiceConfig {
+            enabled: true,
+            hotkey: String::new(),
+            continuous: ContinuousListenConfig {
+                enabled: true,
+                hotkey: "Super+Shift+L".into(),
+                ..ContinuousListenConfig::default()
+            },
+            ..VoiceConfig::default()
+        };
+        validate(
+            &PresenceConfig {
+                hotkey: String::new(),
+            },
+            &v,
+        )
+        .expect("Super+Shift+L must parse");
+    }
+
+    #[test]
+    fn validate_garbage_continuous_hotkey_errors() {
+        use assistd_core::ContinuousListenConfig;
+        let v = VoiceConfig {
+            enabled: true,
+            hotkey: String::new(),
+            continuous: ContinuousListenConfig {
+                enabled: true,
+                hotkey: "### bogus ###".into(),
+                ..ContinuousListenConfig::default()
+            },
+            ..VoiceConfig::default()
+        };
+        let err = validate(
+            &PresenceConfig {
+                hotkey: String::new(),
+            },
+            &v,
+        )
+        .expect_err("garbage must fail");
+        assert!(err.to_string().contains("voice.continuous.hotkey"));
+    }
+
+    #[test]
+    fn validate_continuous_hotkey_ignored_when_disabled() {
+        use assistd_core::ContinuousListenConfig;
+        let v = VoiceConfig {
+            enabled: true,
+            hotkey: String::new(),
+            continuous: ContinuousListenConfig {
+                enabled: false,
+                hotkey: "### bogus ###".into(),
+                ..ContinuousListenConfig::default()
+            },
+            ..VoiceConfig::default()
+        };
+        validate(
+            &PresenceConfig {
+                hotkey: String::new(),
+            },
+            &v,
+        )
+        .expect("garbage ignored when continuous is disabled");
     }
 
     #[test]

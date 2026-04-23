@@ -96,6 +96,7 @@ pub async fn run(action: PttAction) -> Result<()> {
                 eprintln!("[tool result: {name} exit:{exit}]");
             }
             Event::Presence { .. } => {}
+            Event::ListenState { .. } => {}
             Event::Done { .. } => {
                 if wrote_delta {
                     writeln!(stdout)?;

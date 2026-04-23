@@ -40,7 +40,7 @@ pub enum AudioCaptureError {
 
 /// Target sample rate for whisper. The consumer resamples from native
 /// device rate to this before conversion to i16.
-pub(super) const TARGET_SAMPLE_RATE: u32 = 16_000;
+pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
 /// Handles to a running capture session. The cpal stream is owned by
 /// the consumer task — callers only see the atomics and the join
@@ -49,6 +49,71 @@ pub struct CaptureSession {
     pub stop_flag: Arc<AtomicBool>,
     pub overrun: Arc<AtomicU64>,
     pub handle: JoinHandle<Result<Vec<i16>, AudioCaptureError>>,
+}
+
+/// Pieces returned by [`open_producer_stream`] to a blocking worker.
+/// The `Stream` must stay alive on the thread that built it (cpal's
+/// `Stream` is `!Send` on ALSA); the caller drops it last.
+pub struct ProducerStream {
+    pub consumer: ringbuf::HeapCons<f32>,
+    pub native_rate: u32,
+    pub stream: Stream,
+}
+
+/// Open the cpal input device and start a running stream that pushes
+/// mono f32 samples at the native device rate into a ring buffer.
+///
+/// Runs synchronously on the caller's thread because cpal's `Stream`
+/// is `!Send` on ALSA — both PTT and continuous-listen callers invoke
+/// this from inside a `tokio::task::spawn_blocking` worker.
+///
+/// `ring_capacity_samples` sizes the SPSC ring (in mono samples at
+/// native rate). PTT sizes this to cover `max_recording_secs`;
+/// continuous-listen can use a few seconds of headroom since its
+/// consumer drains continuously.
+///
+/// `overrun` is the counter the cpal callback bumps when the ring is
+/// full and samples are dropped. The caller keeps a clone to read it.
+pub fn open_producer_stream(
+    device_hint: Option<&str>,
+    ring_capacity_samples: usize,
+    overrun: Arc<AtomicU64>,
+) -> Result<ProducerStream, AudioCaptureError> {
+    let host = cpal::default_host();
+    let device = select_device(&host, device_hint)?;
+    let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+
+    let supported = device
+        .default_input_config()
+        .map_err(|e| AudioCaptureError::DefaultConfig(e.to_string()))?;
+    let sample_rate = supported.sample_rate().0;
+    let channels = supported.channels() as usize;
+    let sample_format = supported.sample_format();
+    let config: StreamConfig = supported.into();
+
+    let rb = HeapRb::<f32>::new(ring_capacity_samples.max(sample_rate as usize));
+    let (prod, cons) = rb.split();
+
+    let stream = build_stream(&device, &config, sample_format, channels, prod, overrun)?;
+    stream
+        .play()
+        .map_err(|e| AudioCaptureError::PlayStream(e.to_string()))?;
+
+    debug!(
+        target: "assistd::voice::mic",
+        device = %device_name,
+        sample_rate,
+        channels,
+        format = ?sample_format,
+        ring_capacity = ring_capacity_samples,
+        "audio stream started"
+    );
+
+    Ok(ProducerStream {
+        consumer: cons,
+        native_rate: sample_rate,
+        stream,
+    })
 }
 
 /// Spawn a blocking worker that opens cpal, records, and returns the
@@ -83,51 +148,22 @@ fn capture_worker(
     stop_flag: Arc<AtomicBool>,
     overrun: Arc<AtomicU64>,
 ) -> Result<Vec<i16>, AudioCaptureError> {
-    let host = cpal::default_host();
-    let device = select_device(&host, device_hint)?;
-    let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
-
-    let supported = device
-        .default_input_config()
-        .map_err(|e| AudioCaptureError::DefaultConfig(e.to_string()))?;
-    let sample_rate = supported.sample_rate().0;
-    let channels = supported.channels() as usize;
-    let sample_format = supported.sample_format();
-    let config: StreamConfig = supported.into();
-
-    // Ring capacity: 1 s per second of recording + 1 s headroom, all at
-    // native rate. The callback downmixes stereo → mono in place so the
-    // ring only ever sees mono samples.
-    let ring_cap = (sample_rate as usize)
+    // Ring capacity: 1 s per second of recording + 1 s headroom. Sized
+    // in mono samples at native rate; we over-provision slightly using
+    // a conservative 48 kHz assumption — `open_producer_stream`
+    // enforces a per-open floor regardless.
+    let conservative_rate = 48_000usize;
+    let ring_cap = conservative_rate
         .saturating_mul((max_recording_secs as usize).saturating_add(1))
-        .max(sample_rate as usize * 2);
-    let rb = HeapRb::<f32>::new(ring_cap);
-    let (prod, cons) = rb.split();
-
-    let stream = build_stream(
-        &device,
-        &config,
-        sample_format,
-        channels,
-        prod,
-        Arc::clone(&overrun),
-    )?;
-    stream
-        .play()
-        .map_err(|e| AudioCaptureError::PlayStream(e.to_string()))?;
-
-    debug!(
-        target: "assistd::voice::mic",
-        device = %device_name,
-        sample_rate,
-        channels,
-        format = ?sample_format,
-        ring_capacity = ring_cap,
-        "audio stream started"
-    );
+        .max(conservative_rate * 2);
+    let ProducerStream {
+        consumer: cons,
+        native_rate,
+        stream,
+    } = open_producer_stream(device_hint, ring_cap, overrun)?;
 
     let max_pcm_samples = (TARGET_SAMPLE_RATE as usize).saturating_mul(max_recording_secs as usize);
-    let pcm = consumer::drain_loop(cons, sample_rate, max_pcm_samples, stop_flag)?;
+    let pcm = consumer::drain_loop(cons, native_rate, max_pcm_samples, stop_flag)?;
 
     // Drop cpal stream on this same thread. On ALSA this joins the
     // worker thread; doing it here avoids any `!Send` drop problem.
@@ -135,7 +171,7 @@ fn capture_worker(
     Ok(pcm)
 }
 
-fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, AudioCaptureError> {
+pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, AudioCaptureError> {
     match hint {
         None => host
             .default_input_device()

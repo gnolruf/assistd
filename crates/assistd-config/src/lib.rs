@@ -39,4 +39,4 @@ pub use tools::{
     BashSandboxMode, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsWriteConfig,
 };
 pub use top::Config;
-pub use voice::{TranscriptionConfig, VoiceConfig};
+pub use voice::{ContinuousListenConfig, TranscriptionConfig, VoiceConfig};

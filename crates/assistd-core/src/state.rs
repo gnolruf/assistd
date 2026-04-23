@@ -3,8 +3,9 @@ use anyhow::Result;
 use assistd_ipc::{Event, PresenceState, Request, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_tools::ToolRegistry;
-use assistd_voice::VoiceInput;
+use assistd_voice::{ContinuousListener, VoiceInput};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, mpsc};
 
 /// Shared, long-lived daemon state handed to every request handler.
@@ -19,6 +20,11 @@ pub struct AppState {
     pub presence: Arc<PresenceManager>,
     pub tools: Arc<ToolRegistry>,
     pub voice: Arc<dyn VoiceInput>,
+    pub listener: Arc<dyn ContinuousListener>,
+    /// Mutual-exclusion flag between the continuous listener and PTT.
+    /// Both check this before opening the mic — only one can own the
+    /// device at a time (cpal can't share a stream on ALSA).
+    pub continuous_active: Arc<AtomicBool>,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `run_agent_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
@@ -34,6 +40,7 @@ impl AppState {
         presence: Arc<PresenceManager>,
         tools: Arc<ToolRegistry>,
         voice: Arc<dyn VoiceInput>,
+        listener: Arc<dyn ContinuousListener>,
     ) -> Self {
         Self {
             config,
@@ -41,6 +48,8 @@ impl AppState {
             presence,
             tools,
             voice,
+            listener,
+            continuous_active: Arc::new(AtomicBool::new(false)),
             agent_turn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -59,10 +68,14 @@ impl AppState {
             Request::Cycle { id } => self.handle_cycle(id, tx).await,
             Request::PttStart { id } => self.handle_ptt_start(id, tx).await,
             Request::PttStop { id } => self.handle_ptt_stop(id, tx).await,
+            Request::ListenStart { id } => self.handle_listen_start(id, tx).await,
+            Request::ListenStop { id } => self.handle_listen_stop(id, tx).await,
+            Request::ListenToggle { id } => self.handle_listen_toggle(id, tx).await,
+            Request::GetListenState { id } => self.handle_get_listen_state(id, tx).await,
         }
     }
 
-    async fn handle_query(
+    pub async fn handle_query(
         self: Arc<Self>,
         id: String,
         text: String,
@@ -230,8 +243,18 @@ impl AppState {
     /// Begin a push-to-talk recording. Returns immediately on success
     /// so the CLI client exits cleanly — the daemon holds the capture
     /// session open until a matching `PttStop` arrives on a separate
-    /// connection.
+    /// connection. Rejects when continuous listening currently owns
+    /// the mic; the two modes can't share one cpal stream.
     async fn handle_ptt_start(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
+        if self.listener.is_active() || self.continuous_active.load(Ordering::SeqCst) {
+            let _ = tx
+                .send(Event::Error {
+                    id,
+                    message: "continuous listening is active; disable it before using PTT".into(),
+                })
+                .await;
+            return Ok(());
+        }
         match self.voice.start_recording().await {
             Ok(()) => {
                 let _ = tx
@@ -253,6 +276,106 @@ impl AppState {
                 Err(e)
             }
         }
+    }
+
+    /// Enable continuous listening. Rejects if PTT currently holds the
+    /// mic — the two modes are mutually exclusive because cpal cannot
+    /// share one input stream.
+    async fn handle_listen_start(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        if self.voice.state() != VoiceCaptureState::Idle {
+            let _ = tx
+                .send(Event::Error {
+                    id,
+                    message: "cannot start continuous listening while PTT is recording".into(),
+                })
+                .await;
+            return Ok(());
+        }
+        match self.listener.start().await {
+            Ok(()) => {
+                let _ = tx
+                    .send(Event::ListenState {
+                        id: id.clone(),
+                        active: true,
+                    })
+                    .await;
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("listen_start failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Disable continuous listening. Idempotent.
+    async fn handle_listen_stop(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        match self.listener.stop().await {
+            Ok(()) => {
+                let _ = tx
+                    .send(Event::ListenState {
+                        id: id.clone(),
+                        active: false,
+                    })
+                    .await;
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("listen_stop failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Flip continuous listening state. Routes to start or stop
+    /// depending on the current value of `listener.is_active()`.
+    async fn handle_listen_toggle(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        if self.listener.is_active() {
+            self.handle_listen_stop(id, tx).await
+        } else {
+            self.handle_listen_start(id, tx).await
+        }
+    }
+
+    /// Report whether continuous listening is currently active.
+    async fn handle_get_listen_state(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        let active = self.listener.is_active();
+        let _ = tx
+            .send(Event::ListenState {
+                id: id.clone(),
+                active,
+            })
+            .await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
     }
 
     /// End the push-to-talk recording, transcribe, and — if the
@@ -328,6 +451,7 @@ mod tests {
             PresenceManager::stub(initial_state),
             Arc::new(ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
+            Arc::new(assistd_voice::NoContinuousListener::new()),
         ))
     }
 
@@ -341,6 +465,21 @@ mod tests {
             PresenceManager::stub(PresenceState::Active),
             Arc::new(ToolRegistry::default()),
             voice,
+            Arc::new(assistd_voice::NoContinuousListener::new()),
+        ))
+    }
+
+    fn state_with_listener(
+        backend: Arc<dyn LlmBackend>,
+        listener: Arc<dyn assistd_voice::ContinuousListener>,
+    ) -> Arc<AppState> {
+        Arc::new(AppState::new(
+            Config::default(),
+            backend,
+            PresenceManager::stub(PresenceState::Active),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(assistd_voice::NoVoiceInput::new()),
+            listener,
         ))
     }
 
@@ -520,6 +659,7 @@ mod tests {
             PresenceManager::stub(PresenceState::Active),
             Arc::new(tools),
             Arc::new(assistd_voice::NoVoiceInput::new()),
+            Arc::new(assistd_voice::NoContinuousListener::new()),
         ))
     }
 
@@ -742,6 +882,183 @@ mod tests {
             Some(Event::Transcription { text, .. }) if text.is_empty()
         ));
         assert!(matches!(events.last(), Some(Event::Done { .. })));
+    }
+
+    /// Scripted `ContinuousListener` used by the listen-handler tests.
+    /// Tracks start/stop call counts and exposes a toggleable "should
+    /// fail" mode so we can exercise the error paths.
+    struct MockListener {
+        active: std::sync::atomic::AtomicBool,
+        start_fails: std::sync::atomic::AtomicBool,
+        state_tx: tokio::sync::watch::Sender<bool>,
+        utterances: tokio::sync::broadcast::Sender<String>,
+    }
+
+    impl MockListener {
+        fn new() -> Self {
+            let (state_tx, _) = tokio::sync::watch::channel(false);
+            let (utterances, _) = tokio::sync::broadcast::channel(4);
+            Self {
+                active: std::sync::atomic::AtomicBool::new(false),
+                start_fails: std::sync::atomic::AtomicBool::new(false),
+                state_tx,
+                utterances,
+            }
+        }
+        fn with_start_fails(self) -> Self {
+            self.start_fails
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_voice::ContinuousListener for MockListener {
+        async fn start(&self) -> anyhow::Result<()> {
+            if self.start_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("mock listener start failed");
+            }
+            self.active.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.state_tx.send(true);
+            Ok(())
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            self.active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.state_tx.send(false);
+            Ok(())
+        }
+        fn is_active(&self) -> bool {
+            self.active.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn subscribe_utterances(&self) -> tokio::sync::broadcast::Receiver<String> {
+            self.utterances.subscribe()
+        }
+        fn subscribe_state(&self) -> tokio::sync::watch::Receiver<bool> {
+            self.state_tx.subscribe()
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_listen_start_emits_listen_state_true() {
+        let listener = Arc::new(MockListener::new());
+        let state = state_with_listener(Arc::new(EchoBackend::new()), listener.clone());
+        let (tx, rx) = mpsc::channel::<Event>(4);
+        state
+            .dispatch(Request::ListenStart { id: "l1".into() }, tx)
+            .await
+            .unwrap();
+        let events = collect_events(rx).await;
+        assert!(matches!(
+            &events[0],
+            Event::ListenState { id, active: true } if id == "l1"
+        ));
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
+        assert!(listener.is_active());
+    }
+
+    #[tokio::test]
+    async fn dispatch_listen_stop_emits_listen_state_false() {
+        let listener = Arc::new(MockListener::new());
+        listener
+            .active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let state = state_with_listener(Arc::new(EchoBackend::new()), listener.clone());
+        let (tx, rx) = mpsc::channel::<Event>(4);
+        state
+            .dispatch(Request::ListenStop { id: "l2".into() }, tx)
+            .await
+            .unwrap();
+        let events = collect_events(rx).await;
+        assert!(matches!(
+            &events[0],
+            Event::ListenState { id, active: false } if id == "l2"
+        ));
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
+        assert!(!listener.is_active());
+    }
+
+    #[tokio::test]
+    async fn dispatch_listen_toggle_flips_state() {
+        let listener = Arc::new(MockListener::new());
+        let state = state_with_listener(Arc::new(EchoBackend::new()), listener.clone());
+        // Off → on.
+        let (tx, rx) = mpsc::channel::<Event>(4);
+        state
+            .clone()
+            .dispatch(Request::ListenToggle { id: "t1".into() }, tx)
+            .await
+            .unwrap();
+        let events = collect_events(rx).await;
+        assert!(matches!(
+            &events[0],
+            Event::ListenState { active: true, .. }
+        ));
+        // On → off.
+        let (tx, rx) = mpsc::channel::<Event>(4);
+        state
+            .clone()
+            .dispatch(Request::ListenToggle { id: "t2".into() }, tx)
+            .await
+            .unwrap();
+        let events = collect_events(rx).await;
+        assert!(matches!(
+            &events[0],
+            Event::ListenState { active: false, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_listen_state_returns_current_value() {
+        let listener = Arc::new(MockListener::new());
+        listener
+            .active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let state = state_with_listener(Arc::new(EchoBackend::new()), listener);
+        let (tx, rx) = mpsc::channel::<Event>(4);
+        state
+            .dispatch(Request::GetListenState { id: "g1".into() }, tx)
+            .await
+            .unwrap();
+        let events = collect_events(rx).await;
+        assert!(matches!(
+            &events[0],
+            Event::ListenState { id, active: true } if id == "g1"
+        ));
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn dispatch_listen_start_error_propagates() {
+        let listener = Arc::new(MockListener::new().with_start_fails());
+        let state = state_with_listener(Arc::new(EchoBackend::new()), listener);
+        let (tx, rx) = mpsc::channel::<Event>(4);
+        state
+            .dispatch(Request::ListenStart { id: "l3".into() }, tx)
+            .await
+            .unwrap_err();
+        let events = collect_events(rx).await;
+        assert!(
+            matches!(events.last(), Some(Event::Error { message, .. }) if message.contains("mock listener start failed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn ptt_start_rejected_while_listening_active() {
+        let listener = Arc::new(MockListener::new());
+        listener
+            .active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let state = state_with_listener(Arc::new(EchoBackend::new()), listener);
+        let (tx, rx) = mpsc::channel::<Event>(4);
+        state
+            .dispatch(Request::PttStart { id: "p-ex".into() }, tx)
+            .await
+            .unwrap();
+        let events = collect_events(rx).await;
+        assert!(
+            matches!(&events[0], Event::Error { message, .. } if message.contains("continuous listening"))
+        );
     }
 
     #[tokio::test]

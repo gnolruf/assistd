@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["whisper", "mic"]
+default = ["whisper", "mic", "listen"]
 whisper = [
     "dep:whisper-rs",
     "dep:reqwest",
@@ -16,9 +16,13 @@ whisper = [
 # Enables `MicVoiceInput` — cpal capture, SPSC ring buffer, resampler.
 # Requires `whisper` because MicVoiceInput wraps WhisperTranscriber.
 mic = ["whisper", "dep:cpal", "dep:ringbuf", "dep:rubato"]
+# Enables `MicContinuousListener` — VAD-driven hands-free utterance
+# segmentation that feeds completed utterances to whisper. Sits on top
+# of the `mic` + `whisper` stack.
+listen = ["mic", "dep:webrtc-vad"]
 cuda = ["whisper-rs/cuda"]
 # Gates the integration test that downloads a small model from HuggingFace.
-test-support = ["whisper", "mic", "dep:hound"]
+test-support = ["whisper", "mic", "listen", "dep:hound"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -39,6 +43,9 @@ futures-util = { workspace = true, optional = true }
 cpal = { version = "0.15", optional = true }
 ringbuf = { version = "0.4", optional = true }
 rubato = { version = "0.15", optional = true }
+
+# Continuous listening — streaming voice-activity detection
+webrtc-vad = { version = "0.4", optional = true }
 
 # Test support
 hound = { version = "3.5", optional = true }

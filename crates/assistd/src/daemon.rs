@@ -1,8 +1,11 @@
 use anyhow::Result;
-use assistd_core::{AppState, Config, NoVoiceInput, PresenceManager, VoiceInput};
+use assistd_core::{
+    AppState, Config, ContinuousListener, NoContinuousListener, NoVoiceInput, PresenceManager,
+    VoiceInput,
+};
 use assistd_llm::LlamaChatClient;
 use assistd_tools::DenyAllGate;
-use assistd_voice::MicVoiceInput;
+use assistd_voice::{MicContinuousListener, MicVoiceInput, WhisperTranscriberBuilder};
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +13,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing::info;
 
-use crate::{gpu_monitor, hotkey, idle_monitor};
+use crate::{gpu_monitor, hotkey, idle_monitor, listen_dispatcher};
 
 #[derive(Args)]
 pub struct DaemonArgs {
@@ -85,25 +88,57 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let chat = LlamaChatClient::new(&config.chat, &config.llama_server, &config.model)?;
 
     // Voice input: build the mic-backed implementation when the user
-    // has enabled it. `MicVoiceInput::from_config` eagerly downloads
-    // the whisper/VAD models on first use (it does not open the
-    // device), so failures surface at startup rather than on the
-    // first PTT press.
-    let voice: Arc<dyn VoiceInput> = if config.voice.enabled {
+    // has enabled it. The whisper transcriber is built once and shared
+    // between the PTT `MicVoiceInput` and the continuous
+    // `MicContinuousListener` so only one whisper/VAD model is loaded.
+    // Eager download + GPU probe happens here; failures surface at
+    // startup rather than on the first mic press.
+    let (voice, listener): (Arc<dyn VoiceInput>, Arc<dyn ContinuousListener>) = if config
+        .voice
+        .enabled
+    {
         info!(
             "voice: building mic input ({})",
             config.voice.transcription.model
         );
-        match MicVoiceInput::from_config(&config.voice).await {
-            Ok(v) => Arc::new(v),
+        match WhisperTranscriberBuilder::from_config(&config.voice.transcription)
+            .build()
+            .await
+        {
+            Ok(transcriber) => {
+                let transcriber = Arc::new(transcriber);
+                let mic = MicVoiceInput::new(
+                    transcriber.clone(),
+                    config.voice.mic_device.clone(),
+                    config.voice.max_recording_secs.max(1),
+                );
+                let listener_impl: Arc<dyn ContinuousListener> = if config.voice.continuous.enabled
+                {
+                    info!(
+                        "voice.continuous: enabled (hotkey={:?}, start_on_launch={})",
+                        config.voice.continuous.hotkey, config.voice.continuous.start_on_launch
+                    );
+                    Arc::new(MicContinuousListener::new(transcriber, &config.voice))
+                } else {
+                    info!("voice.continuous: disabled in config");
+                    Arc::new(NoContinuousListener::new())
+                };
+                (Arc::new(mic), listener_impl)
+            }
             Err(e) => {
                 tracing::warn!("voice input failed to initialize: {e:#}; PTT commands will error");
-                Arc::new(NoVoiceInput::new())
+                (
+                    Arc::new(NoVoiceInput::new()),
+                    Arc::new(NoContinuousListener::new()),
+                )
             }
         }
     } else {
         info!("voice: disabled in config (voice.enabled = false)");
-        Arc::new(NoVoiceInput::new())
+        (
+            Arc::new(NoVoiceInput::new()),
+            Arc::new(NoContinuousListener::new()),
+        )
     };
 
     let hotkey_handle = hotkey::spawn_listener(
@@ -111,6 +146,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         &config.voice,
         Some(presence.clone()),
         voice.clone(),
+        Some(listener.clone()),
         shutdown_tx.subscribe(),
     );
     let gpu_monitor_handle =
@@ -129,13 +165,32 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         overflow_dir.display()
     );
 
+    // Snapshot the continuous listen config before `config` is moved
+    // into `AppState`. Controls start_on_launch and pause semantics.
+    let continuous_enabled = config.voice.enabled && config.voice.continuous.enabled;
+    let continuous_start_on_launch = config.voice.continuous.start_on_launch;
+
     let state = Arc::new(AppState::new(
         config,
         Arc::new(chat),
         presence.clone(),
         tools,
-        voice,
+        voice.clone(),
+        listener.clone(),
     ));
+
+    let listen_handles = if continuous_enabled {
+        Some(listen_dispatcher::spawn(
+            state.clone(),
+            listener.clone(),
+            presence.clone(),
+            continuous_start_on_launch,
+            /* pause_when_sleeping = */ true,
+            shutdown_tx.subscribe(),
+        ))
+    } else {
+        None
+    };
 
     let mut socket_shutdown_rx = shutdown_tx.subscribe();
     let socket_shutdown = async move {
@@ -157,6 +212,10 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     }
     if let Some(h) = idle_monitor_handle {
         let _ = h.await;
+    }
+    if let Some(handles) = listen_handles {
+        let _ = handles.forwarder.await;
+        let _ = handles.presence_gate.await;
     }
 
     serve_result?;

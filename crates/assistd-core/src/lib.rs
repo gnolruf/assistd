@@ -7,13 +7,14 @@ pub use agent::run_agent_turn;
 pub use assistd_config as config;
 pub use assistd_config::{
     AgentConfig, BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config,
-    ConfigError, DaemonConfig, LlamaServerConfig, ModelConfig, PresenceConfig, RemoteConfig,
-    SleepConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsWriteConfig, VoiceConfig,
+    ConfigError, ContinuousListenConfig, DaemonConfig, LlamaServerConfig, ModelConfig,
+    PresenceConfig, RemoteConfig, SleepConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
+    ToolsWriteConfig, VoiceConfig,
 };
 pub use assistd_ipc as ipc;
 pub use assistd_ipc::{PresenceState, VoiceCaptureState};
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
-pub use assistd_voice::{NoVoiceInput, VoiceInput};
+pub use assistd_voice::{ContinuousListener, NoContinuousListener, NoVoiceInput, VoiceInput};
 pub use presence::{PresenceManager, RequestGuard};
 pub use state::AppState;
 
