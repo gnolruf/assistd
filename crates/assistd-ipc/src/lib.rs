@@ -41,13 +41,20 @@ impl PresenceState {
 }
 
 /// Push-to-talk capture state exposed on the wire so the TUI can render a
-/// three-state indicator (idle / recording / transcribing). `Transcribing`
-/// is distinct from `Recording` because whisper inference takes 1–3 s on a
-/// few seconds of audio and users otherwise keep talking into dead air.
+/// four-state indicator. `Transcribing` is distinct from `Recording` because
+/// whisper inference takes 1–3 s on a few seconds of audio and users
+/// otherwise keep talking into dead air. `Queued` sits between them when the
+/// GPU is busy with an LLM stream — the transcriber is briefly waiting for
+/// the GPU before starting inference (or deciding to fall back to CPU).
+///
+/// `Idle` is pinned to discriminant 0; a unit test in
+/// `assistd-voice::mic` guards the invariant so reordering the variants
+/// without updating TUI defaults triggers a build failure.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceCaptureState {
     Idle,
+    Queued,
     Recording,
     Transcribing,
 }
@@ -131,7 +138,7 @@ pub enum Event {
     /// successful SetPresence transition.
     Presence { id: String, state: PresenceState },
     /// Push-to-talk capture state transition. Emitted when the daemon's
-    /// mic pipeline moves between Idle / Recording / Transcribing.
+    /// mic pipeline moves between Idle / Queued / Recording / Transcribing.
     VoiceState {
         id: String,
         state: VoiceCaptureState,
@@ -351,6 +358,21 @@ mod tests {
         assert_eq!(
             json,
             r#"{"type":"voice_state","id":"v-1","state":"recording"}"#
+        );
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn voice_state_queued_roundtrip() {
+        let evt = Event::VoiceState {
+            id: "v-2".into(),
+            state: VoiceCaptureState::Queued,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"voice_state","id":"v-2","state":"queued"}"#
         );
         let parsed: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, evt);

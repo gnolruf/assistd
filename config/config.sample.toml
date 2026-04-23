@@ -136,6 +136,17 @@ hotkey = "Super+Space"
 # vad_silence_secs = 0.5
 # Override the on-disk model cache directory. Omit for the XDG default.
 # model_cache_dir = "/var/cache/assistd/whisper"
+# When the primary Whisper context is GPU-backed and the daemon is
+# currently streaming an LLM response on the same GPU, Whisper briefly
+# waits for the stream to drain before running inference. After this
+# many milliseconds, it falls back to a lazily-built CPU context for
+# that utterance. Set to 0 to always prefer CPU when any LLM stream is
+# in flight; cap is 10000 (10 s).
+# gpu_busy_timeout_ms = 300
+# Build a CPU fallback context on demand when the GPU is busy. Disable
+# to force strict GPU-only transcription (users wait for the LLM stream
+# to finish before their utterance is transcribed).
+# cpu_fallback_enabled = true
 
 [voice.continuous]
 # Hands-free continuous listening. When enabled, the daemon keeps the

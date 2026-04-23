@@ -31,11 +31,14 @@ pub mod listen;
 #[cfg(feature = "listen")]
 pub use listen::{ContinuousListener, MicContinuousListener, NoContinuousListener};
 #[cfg(feature = "mic")]
-pub use mic::{MicVoiceInput, VoiceInputError};
+pub use mic::{MicVoiceInput, VoiceInputError, capture::validate as mic_validate};
 #[cfg(feature = "whisper")]
-pub use transcribe::{Transcriber, TranscriptionError};
+pub use transcribe::{
+    BusyProbe, CpuFallbackFactory, NullBusyProbe, QueueConfig, QueuedTranscriber, Transcriber,
+    TranscriptionError,
+};
 #[cfg(feature = "whisper")]
-pub use whisper::{WhisperTranscriber, WhisperTranscriberBuilder};
+pub use whisper::{WhisperTranscriber, WhisperTranscriberBuilder, build_cpu_fallback};
 
 /// Push-to-talk voice capture. Implementors buffer mic audio between
 /// [`start_recording`](VoiceInput::start_recording) and

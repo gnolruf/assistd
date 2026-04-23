@@ -117,6 +117,7 @@ pub async fn run(action: PttAction) -> Result<()> {
 fn voice_state_label(s: VoiceCaptureState) -> &'static str {
     match s {
         VoiceCaptureState::Idle => "idle",
+        VoiceCaptureState::Queued => "queued",
         VoiceCaptureState::Recording => "recording",
         VoiceCaptureState::Transcribing => "transcribing",
     }

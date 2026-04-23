@@ -242,6 +242,7 @@ fn voice_indicator(s: VoiceCaptureState) -> Option<(Color, &'static str)> {
     match s {
         VoiceCaptureState::Idle => None,
         VoiceCaptureState::Recording => Some((Color::Red, "Listening…")),
+        VoiceCaptureState::Queued => Some((Color::Blue, "Processing…")),
         VoiceCaptureState::Transcribing => Some((Color::Yellow, "transcribing…")),
     }
 }

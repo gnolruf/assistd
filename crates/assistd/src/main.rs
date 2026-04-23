@@ -21,6 +21,8 @@ mod presence;
 mod ptt;
 #[cfg(feature = "client")]
 mod query;
+#[cfg(feature = "daemon")]
+mod voice_probe;
 
 #[derive(Parser)]
 #[command(

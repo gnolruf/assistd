@@ -100,6 +100,11 @@ impl AppState {
                 return Err(e);
             }
         };
+        // Separately mark the LLM as streaming so voice transcription
+        // can detect GPU contention and queue/fall back to CPU. This is
+        // a no-block counter — sleep/drowse still block on
+        // `_request_guard` via the inflight RwLock.
+        let _stream_guard = self.presence.acquire_stream_guard();
 
         // Serialize agent turns. Concurrent queries each wait here so
         // one turn's assistant/tool_calls/tool_result triplet lands in
