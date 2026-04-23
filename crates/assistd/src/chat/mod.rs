@@ -51,6 +51,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
     idle_monitor::validate(&config.sleep)?;
+    assistd_voice::mic_validate(&config.voice)?;
 
     let _log_guard = init_file_tracing()?;
 

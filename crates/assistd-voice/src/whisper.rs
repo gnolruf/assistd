@@ -33,11 +33,20 @@ struct VadRuntime {
 pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
     cfg: InferenceConfig,
+    is_gpu: bool,
 }
 
 impl WhisperTranscriber {
     pub fn builder() -> WhisperTranscriberBuilder {
         WhisperTranscriberBuilder::default()
+    }
+
+    /// Reports whether this transcriber was built against a GPU-backed
+    /// whisper context. Voice orchestration uses this to decide whether
+    /// the queue-and-fallback flow is even needed — a CPU-only primary
+    /// never contends with the LLM on the same device.
+    pub fn is_gpu(&self) -> bool {
+        self.is_gpu
     }
 }
 
@@ -231,8 +240,53 @@ impl WhisperTranscriberBuilder {
                 beams: self.beams.max(1),
                 vad: vad_runtime,
             },
+            is_gpu: use_gpu,
         })
     }
+}
+
+/// Build a CPU-backed [`WhisperTranscriber`] sharing the same model (and
+/// VAD, if enabled) as the primary. Used by
+/// [`crate::transcribe::QueuedTranscriber`] as its lazily-initialized
+/// fallback when the GPU is contended. Reuses
+/// [`model_cache::ensure_model`] so the weights aren't re-downloaded.
+pub async fn build_cpu_fallback(
+    cfg: &assistd_config::TranscriptionConfig,
+    cache_dir_override: Option<PathBuf>,
+) -> Result<WhisperTranscriber, TranscriptionError> {
+    let cache_dir = cache_dir_override
+        .or_else(|| cfg.model_cache_dir.clone())
+        .unwrap_or_else(default_cache_dir);
+    let model_path = model_cache::ensure_model(&cfg.model, &cache_dir).await?;
+
+    let vad_runtime = if cfg.vad_enabled {
+        let vad_path = model_cache::ensure_model(&cfg.vad_model, &cache_dir).await?;
+        Some(VadRuntime {
+            model_path: vad_path.to_string_lossy().into_owned(),
+            silence_secs: cfg.vad_silence_secs.max(0.0),
+        })
+    } else {
+        None
+    };
+
+    let model_path_str = model_path.to_string_lossy().into_owned();
+    let ctx = tokio::task::spawn_blocking(move || {
+        let mut params = WhisperContextParameters::new();
+        params.use_gpu(false);
+        WhisperContext::new_with_params(&model_path_str, params)
+    })
+    .await?
+    .map_err(|err| TranscriptionError::WhisperInit(err.to_string()))?;
+
+    Ok(WhisperTranscriber {
+        ctx: Arc::new(ctx),
+        cfg: InferenceConfig {
+            threads: cfg.threads,
+            beams: cfg.beams.max(1),
+            vad: vad_runtime,
+        },
+        is_gpu: false,
+    })
 }
 
 fn decide_use_gpu(prefer: bool) -> bool {

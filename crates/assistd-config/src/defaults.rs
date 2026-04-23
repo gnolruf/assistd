@@ -44,6 +44,8 @@ pub const DEFAULT_WHISPER_PREFER_GPU: bool = true;
 pub const DEFAULT_WHISPER_BEAMS: u32 = 1;
 pub const DEFAULT_WHISPER_VAD_ENABLED: bool = true;
 pub const DEFAULT_WHISPER_VAD_SILENCE_SECS: f32 = 0.5;
+pub const DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS: u32 = 300;
+pub const DEFAULT_WHISPER_CPU_FALLBACK_ENABLED: bool = true;
 
 pub const DEFAULT_LISTEN_ENABLED: bool = false;
 pub const DEFAULT_LISTEN_START_ON_LAUNCH: bool = false;

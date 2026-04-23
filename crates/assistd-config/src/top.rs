@@ -175,6 +175,11 @@ impl Config {
             {
                 errors.push("voice.transcription.threads must be greater than 0 when set".into());
             }
+            if t.gpu_busy_timeout_ms > 10_000 {
+                errors.push(
+                    "voice.transcription.gpu_busy_timeout_ms must not exceed 10000 (10 s)".into(),
+                );
+            }
 
             let c = &self.voice.continuous;
             if c.enabled {

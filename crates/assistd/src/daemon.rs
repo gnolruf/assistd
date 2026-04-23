@@ -5,7 +5,10 @@ use assistd_core::{
 };
 use assistd_llm::LlamaChatClient;
 use assistd_tools::DenyAllGate;
-use assistd_voice::{MicContinuousListener, MicVoiceInput, WhisperTranscriberBuilder};
+use assistd_voice::{
+    MicContinuousListener, MicVoiceInput, QueueConfig, QueuedTranscriber, Transcriber,
+    WhisperTranscriberBuilder, build_cpu_fallback,
+};
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +16,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing::info;
 
+use crate::voice_probe::PresenceGpuProbe;
 use crate::{gpu_monitor, hotkey, idle_monitor, listen_dispatcher};
 
 #[derive(Args)]
@@ -34,6 +38,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     hotkey::validate(&config.presence, &config.voice)?;
     gpu_monitor::validate(&config.sleep)?;
     idle_monitor::validate(&config.sleep)?;
+    assistd_voice::mic_validate(&config.voice)?;
 
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
 
@@ -105,8 +110,53 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             .build()
             .await
         {
-            Ok(transcriber) => {
-                let transcriber = Arc::new(transcriber);
+            Ok(primary) => {
+                let is_gpu = primary.is_gpu();
+                let primary: Arc<dyn Transcriber> = Arc::new(primary);
+
+                // When the primary context runs on the GPU and CPU
+                // fallback is enabled, wrap it in a QueuedTranscriber
+                // that consults PresenceManager + NVML before each
+                // transcription. In the CPU-only case we hand the
+                // primary directly to the PTT and listen pipelines
+                // (no contention window, no Queued state flash).
+                let transcriber: Arc<dyn Transcriber> = if is_gpu
+                    && config.voice.transcription.cpu_fallback_enabled
+                {
+                    let probe = Arc::new(PresenceGpuProbe::new(presence.clone()));
+                    let queue_cfg = QueueConfig {
+                        gpu_busy_timeout_ms: config.voice.transcription.gpu_busy_timeout_ms,
+                        cpu_fallback_enabled: config.voice.transcription.cpu_fallback_enabled,
+                    };
+                    let cpu_cfg = config.voice.transcription.clone();
+                    let cpu_factory: assistd_voice::CpuFallbackFactory = Arc::new(move || {
+                        let cfg = cpu_cfg.clone();
+                        Box::pin(async move {
+                            let t = build_cpu_fallback(&cfg, None).await?;
+                            Ok(Arc::new(t) as Arc<dyn Transcriber>)
+                        })
+                    });
+                    info!(
+                        "voice: GPU transcription active; CPU fallback armed \
+                         (gpu_busy_timeout_ms={})",
+                        queue_cfg.gpu_busy_timeout_ms
+                    );
+                    Arc::new(QueuedTranscriber::new(
+                        primary.clone(),
+                        true,
+                        cpu_factory,
+                        probe,
+                        queue_cfg,
+                    ))
+                } else {
+                    if is_gpu {
+                        info!("voice: GPU transcription active; CPU fallback disabled by config");
+                    } else {
+                        info!("voice: CPU transcription active");
+                    }
+                    primary.clone()
+                };
+
                 let mic = MicVoiceInput::new(
                     transcriber.clone(),
                     config.voice.mic_device.clone(),

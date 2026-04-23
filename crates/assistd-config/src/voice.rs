@@ -5,7 +5,8 @@ use crate::defaults::{
     DEFAULT_LISTEN_MAX_UTTERANCE_SECS, DEFAULT_LISTEN_MIN_UTTERANCE_MS,
     DEFAULT_LISTEN_ONSET_CONFIRM_MS, DEFAULT_LISTEN_PREROLL_MS, DEFAULT_LISTEN_SILENCE_MS,
     DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS,
-    DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
+    DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_CPU_FALLBACK_ENABLED,
+    DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
     DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL, DEFAULT_WHISPER_VAD_SILENCE_SECS,
 };
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,18 @@ pub struct TranscriptionConfig {
     /// `$XDG_CACHE_HOME/assistd/whisper/` (or `~/.cache/assistd/whisper/`).
     #[serde(default)]
     pub model_cache_dir: Option<PathBuf>,
+    /// How long Whisper will wait for an in-flight LLM stream to finish
+    /// before falling back to a lazily-built CPU context. Only consulted
+    /// when the primary Whisper context is GPU-backed and
+    /// [`Self::cpu_fallback_enabled`] is true. `0` means "use CPU
+    /// immediately whenever any LLM stream is inflight".
+    #[serde(default = "default_whisper_gpu_busy_timeout_ms")]
+    pub gpu_busy_timeout_ms: u32,
+    /// Build a CPU fallback context on demand when the GPU is busy.
+    /// Disable to force strict GPU-only transcription (users wait for
+    /// the LLM stream to finish before their utterance is transcribed).
+    #[serde(default = "default_whisper_cpu_fallback_enabled")]
+    pub cpu_fallback_enabled: bool,
 }
 
 impl Default for TranscriptionConfig {
@@ -105,6 +118,8 @@ impl Default for TranscriptionConfig {
             vad_model: DEFAULT_WHISPER_VAD_MODEL.to_string(),
             vad_silence_secs: DEFAULT_WHISPER_VAD_SILENCE_SECS,
             model_cache_dir: None,
+            gpu_busy_timeout_ms: DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS,
+            cpu_fallback_enabled: DEFAULT_WHISPER_CPU_FALLBACK_ENABLED,
         }
     }
 }
@@ -131,6 +146,14 @@ fn default_whisper_vad_enabled() -> bool {
 
 fn default_whisper_vad_silence_secs() -> f32 {
     DEFAULT_WHISPER_VAD_SILENCE_SECS
+}
+
+fn default_whisper_gpu_busy_timeout_ms() -> u32 {
+    DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS
+}
+
+fn default_whisper_cpu_fallback_enabled() -> bool {
+    DEFAULT_WHISPER_CPU_FALLBACK_ENABLED
 }
 
 /// Continuous (hands-free) listening settings. Runs only when

@@ -21,7 +21,6 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::transcribe::Transcriber;
-use crate::whisper::WhisperTranscriber;
 
 use super::ContinuousListener;
 use super::capture::{self, ListenCaptureSession};
@@ -40,7 +39,7 @@ const FRAME_CHANNEL_DEPTH: usize = 128;
 
 /// Cpal + VAD + whisper implementation of [`ContinuousListener`].
 pub struct MicContinuousListener {
-    transcriber: Arc<WhisperTranscriber>,
+    transcriber: Arc<dyn Transcriber>,
     mic_device: Option<String>,
     tuning: VadTuning,
     active: Arc<AtomicBool>,
@@ -60,10 +59,11 @@ struct ActiveSession {
 }
 
 impl MicContinuousListener {
-    /// Build from config, sharing a whisper transcriber with the
-    /// PTT pipeline. Does not open the audio device — that happens
-    /// on [`Self::start`].
-    pub fn new(transcriber: Arc<WhisperTranscriber>, cfg: &VoiceConfig) -> Self {
+    /// Build from config, sharing a transcriber with the PTT pipeline
+    /// (typically the same [`crate::QueuedTranscriber`] so continuous
+    /// listening benefits from the same queue-and-fallback policy).
+    /// Does not open the audio device — that happens on [`Self::start`].
+    pub fn new(transcriber: Arc<dyn Transcriber>, cfg: &VoiceConfig) -> Self {
         let tuning = tuning_from_config(&cfg.continuous);
         let (state_tx, _) = watch::channel(false);
         let (utterances, _) = broadcast::channel(UTTERANCE_CHANNEL_DEPTH);
@@ -183,7 +183,7 @@ impl ContinuousListener for MicContinuousListener {
 /// are spawned onto the async runtime via the captured handle.
 fn run_vad_blocking(
     tuning: VadTuning,
-    transcriber: Arc<WhisperTranscriber>,
+    transcriber: Arc<dyn Transcriber>,
     utterances: broadcast::Sender<String>,
     mut frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
     rt: tokio::runtime::Handle,

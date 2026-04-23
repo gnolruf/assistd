@@ -83,6 +83,15 @@ pub struct PresenceManager {
     // The TUI polls this each render tick to drive the "waking up"
     // indicator.
     wake_started: Arc<StdMutex<Option<Instant>>>,
+    // Count of LLM streams currently in flight, maintained by
+    // [`LlmStreamGuard`] via RAII. Voice transcription subscribes via
+    // [`Self::wait_until_llm_idle`] and diverts to a CPU fallback when
+    // the count doesn't reach zero within the configured timeout. A
+    // separate signal from `inflight` because a few request paths take a
+    // request guard without actually streaming on the GPU (presence
+    // queries, cycles) and we don't want those to force Whisper off the
+    // GPU.
+    stream_count_tx: watch::Sender<usize>,
 }
 
 /// Held by request handlers for the duration of a query (or other
@@ -94,6 +103,22 @@ pub struct PresenceManager {
 /// drop.
 pub struct RequestGuard {
     _guard: OwnedRwLockReadGuard<()>,
+}
+
+/// RAII counter for "an LLM stream is currently running". Bumps the
+/// shared count on construction and decrements on drop. Held by LLM
+/// query handlers for the duration of their streaming lifetime so the
+/// voice transcriber can decide whether to queue briefly or fall back
+/// to CPU. Does not block sleep/drowse — unlike [`RequestGuard`], which
+/// is how the two signals differ.
+pub struct LlmStreamGuard {
+    tx: watch::Sender<usize>,
+}
+
+impl Drop for LlmStreamGuard {
+    fn drop(&mut self) {
+        self.tx.send_modify(|n| *n = n.saturating_sub(1));
+    }
 }
 
 /// RAII marker for "a wake transition is in progress". Constructed at
@@ -166,6 +191,7 @@ impl PresenceManager {
         }
 
         let (state_tx, _) = watch::channel(PresenceState::Sleeping);
+        let (stream_count_tx, _) = watch::channel(0usize);
         let manager = Arc::new(Self {
             state: StdMutex::new(PresenceState::Sleeping),
             transition: AsyncMutex::new(()),
@@ -179,6 +205,7 @@ impl PresenceManager {
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: Arc::new(StdMutex::new(None)),
+            stream_count_tx,
         });
 
         manager
@@ -254,6 +281,18 @@ impl PresenceManager {
         self.llama.lock().await.as_ref().and_then(|s| s.pid())
     }
 
+    /// Non-blocking llama-server PID lookup for fast-path callers that
+    /// can't await (e.g. the voice crate's GPU-contention probe running
+    /// inside a sync context). Returns `None` when the llama mutex is
+    /// currently held by a transition — acceptable for a periodic probe
+    /// since it will retry on the next call.
+    pub fn llama_pid_blocking(&self) -> Option<u32> {
+        self.llama
+            .try_lock()
+            .ok()
+            .and_then(|svc| svc.as_ref().and_then(|s| s.pid()))
+    }
+
     /// Fast path for query handlers: if already `Active`, returns
     /// immediately; otherwise calls [`Self::wake`]. Safe to call under
     /// concurrent queries — racing callers serialise on the transition
@@ -305,6 +344,44 @@ impl PresenceManager {
             .wake_started
             .lock()
             .expect("wake_started mutex poisoned")
+    }
+
+    /// Register an in-flight LLM stream. The returned guard decrements
+    /// the shared count on drop. Held by query handlers for the full
+    /// streaming lifetime of a response so the voice transcriber can
+    /// avoid contending with the LLM on the same GPU. Unlike
+    /// [`Self::acquire_request_guard`], this guard does not block
+    /// sleep/drowse; the existing request guard still carries that
+    /// invariant.
+    pub fn acquire_stream_guard(&self) -> LlmStreamGuard {
+        self.stream_count_tx.send_modify(|n| *n += 1);
+        LlmStreamGuard {
+            tx: self.stream_count_tx.clone(),
+        }
+    }
+
+    /// Waits until the LLM-stream count drops to zero, up to `timeout`.
+    /// Returns `true` if the count reached zero within the budget
+    /// (including the common case where no stream is running at call
+    /// time) and `false` on timeout. Cancel-safe: the internal
+    /// `wait_for` releases cleanly if the caller drops the future.
+    pub async fn wait_until_llm_idle(&self, timeout: Duration) -> bool {
+        if *self.stream_count_tx.borrow() == 0 {
+            return true;
+        }
+        let mut rx = self.stream_count_tx.subscribe();
+        tokio::time::timeout(timeout, async {
+            let _ = rx.wait_for(|n| *n == 0).await;
+        })
+        .await
+        .is_ok()
+    }
+
+    /// Subscribe to changes in the active LLM-stream count. Mostly
+    /// useful for diagnostics; the voice transcriber uses
+    /// [`Self::wait_until_llm_idle`] directly.
+    pub fn subscribe_llm_streams(&self) -> watch::Receiver<usize> {
+        self.stream_count_tx.subscribe()
     }
 
     /// Drive the manager to `target`. Convenience wrapper used by the IPC
@@ -528,6 +605,7 @@ impl PresenceManager {
             context_length: 1024,
         };
         let control = LlamaServerControl::new(&llama_server.host, 1).expect("dummy control");
+        let (stream_count_tx, _) = watch::channel(0usize);
         Arc::new(Self {
             state: StdMutex::new(state),
             transition: AsyncMutex::new(()),
@@ -541,6 +619,7 @@ impl PresenceManager {
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: Arc::new(StdMutex::new(None)),
+            stream_count_tx,
         })
     }
 
@@ -785,6 +864,74 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), drowse_task)
             .await
             .expect("drowse did not unblock after guard dropped");
+    }
+
+    #[tokio::test]
+    async fn stream_guard_increments_and_decrements_count() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        let mut rx = m.subscribe_llm_streams();
+        assert_eq!(*rx.borrow_and_update(), 0);
+        let g1 = m.acquire_stream_guard();
+        assert_eq!(*m.subscribe_llm_streams().borrow(), 1);
+        let g2 = m.acquire_stream_guard();
+        assert_eq!(*m.subscribe_llm_streams().borrow(), 2);
+        drop(g1);
+        assert_eq!(*m.subscribe_llm_streams().borrow(), 1);
+        drop(g2);
+        assert_eq!(*m.subscribe_llm_streams().borrow(), 0);
+    }
+
+    #[tokio::test]
+    async fn wait_until_llm_idle_returns_true_immediately_when_zero() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        let ok = tokio::time::timeout(
+            Duration::from_millis(20),
+            m.wait_until_llm_idle(Duration::from_secs(5)),
+        )
+        .await
+        .expect("wait did not complete fast");
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn wait_until_llm_idle_times_out_when_busy() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        let _g = m.acquire_stream_guard();
+        let ok = m.wait_until_llm_idle(Duration::from_millis(30)).await;
+        assert!(!ok, "wait should have timed out while a guard is held");
+    }
+
+    #[tokio::test]
+    async fn wait_until_llm_idle_returns_true_after_guard_dropped() {
+        let m = PresenceManager::stub(PresenceState::Active);
+        let g = m.acquire_stream_guard();
+        let m2 = Arc::clone(&m);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(g);
+            // Keep the Arc alive for the spawn so the guard drop observes the watch.
+            let _ = m2;
+        });
+        let ok = m.wait_until_llm_idle(Duration::from_millis(500)).await;
+        assert!(ok, "wait should have resolved once the guard dropped");
+    }
+
+    #[tokio::test]
+    async fn stream_guard_does_not_block_sleep() {
+        // Stream guards are a separate signal from the inflight RwLock;
+        // holding one must not prevent a concurrent sleep() from
+        // proceeding. sleep() will still block on a real RequestGuard
+        // via inflight, but that's a different path verified elsewhere.
+        let m = PresenceManager::stub(PresenceState::Active);
+        let _stream = m.acquire_stream_guard();
+        let m2 = Arc::clone(&m);
+        let sleep_task = tokio::spawn(async move { m2.sleep().await });
+        let res = tokio::time::timeout(Duration::from_secs(1), sleep_task)
+            .await
+            .expect("sleep was blocked by an LLM stream guard");
+        res.expect("sleep task panicked")
+            .expect("sleep returned Err");
+        assert_eq!(m.state(), PresenceState::Sleeping);
     }
 
     #[tokio::test]

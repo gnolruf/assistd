@@ -171,6 +171,65 @@ fn capture_worker(
     Ok(pcm)
 }
 
+/// Pre-flight check called from daemon startup, mirroring
+/// [`crate::gpu`]'s graceful-degradation idiom. When
+/// [`assistd_config::VoiceConfig::enabled`] is false, succeeds
+/// unconditionally. When `mic_device` is `None`, the system default
+/// will be selected at PTT start — missing-default is intentionally a
+/// soft failure (we don't want a headless CI without ALSA to fail
+/// daemon startup). Only the `Some(name)` case where the configured
+/// name cannot be found is hard-rejected.
+///
+/// The error message includes the configured name, every available
+/// input device name enumerated via cpal, and a hint about
+/// `mic_device = null`. If cpal itself refuses to enumerate devices,
+/// that is wrapped verbatim.
+pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
+    if !cfg.enabled {
+        return Ok(());
+    }
+    let Some(requested) = cfg.mic_device.as_deref() else {
+        return Ok(());
+    };
+
+    let host = cpal::default_host();
+    let devices = match host.input_devices() {
+        Ok(d) => d,
+        Err(e) => {
+            anyhow::bail!(
+                "failed to enumerate cpal input devices while validating voice.mic_device \
+                 = {requested:?}: {e}"
+            );
+        }
+    };
+    let mut names: Vec<String> = Vec::new();
+    let mut matched = false;
+    for d in devices {
+        let name = d.name().unwrap_or_else(|_| "<unknown>".to_string());
+        if name == requested {
+            matched = true;
+        }
+        names.push(name);
+    }
+    if matched {
+        return Ok(());
+    }
+
+    let listing = if names.is_empty() {
+        "<no input devices reported by cpal>".to_string()
+    } else {
+        names
+            .iter()
+            .map(|n| format!("{n:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    anyhow::bail!(
+        "voice.mic_device = {requested:?} not found. Available input devices: [{listing}]. \
+         Set voice.mic_device = null to use the system default."
+    );
+}
+
 pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, AudioCaptureError> {
     match hint {
         None => host
@@ -325,5 +384,54 @@ impl CallbackState {
         if dropped > 0 {
             self.overrun.fetch_add(dropped as u64, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assistd_config::VoiceConfig;
+
+    #[test]
+    fn validate_ok_when_voice_disabled() {
+        let cfg = VoiceConfig {
+            enabled: false,
+            mic_device: Some("never-checked".to_string()),
+            ..VoiceConfig::default()
+        };
+        validate(&cfg).expect("disabled voice should skip mic validation");
+    }
+
+    #[test]
+    fn validate_ok_when_no_device_name() {
+        let cfg = VoiceConfig {
+            enabled: true,
+            mic_device: None,
+            ..VoiceConfig::default()
+        };
+        validate(&cfg).expect("missing mic_device should accept the system default");
+    }
+
+    #[test]
+    fn validate_errors_with_listing_for_unknown_device() {
+        let cfg = VoiceConfig {
+            enabled: true,
+            mic_device: Some("assistd-test-definitely-missing-device".to_string()),
+            ..VoiceConfig::default()
+        };
+        let err = validate(&cfg).expect_err("unknown device must not pass validation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("assistd-test-definitely-missing-device"),
+            "error should echo the configured name: {msg}"
+        );
+        assert!(
+            msg.contains("mic_device"),
+            "error should mention mic_device: {msg}"
+        );
+        assert!(
+            msg.contains("Set voice.mic_device = null"),
+            "error should hint at the null default: {msg}"
+        );
     }
 }

@@ -62,10 +62,10 @@ enum Action {
 
 /// VRAM usage for a single foreign PID, aggregated across all GPUs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProcSample {
-    pid: u32,
-    used_mb: u64,
-    name: String,
+pub(crate) struct ProcSample {
+    pub(crate) pid: u32,
+    pub(crate) used_mb: u64,
+    pub(crate) name: String,
 }
 
 /// Pre-flight check called from daemon startup, mirroring
@@ -263,7 +263,7 @@ fn decide(
     }
 }
 
-fn collect_foreign_usage(
+pub(crate) fn collect_foreign_usage(
     nvml: &Nvml,
     self_pid: u32,
     llama_pid: Option<u32>,
