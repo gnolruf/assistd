@@ -94,6 +94,7 @@ pub async fn spawn(
         &config.voice,
         None, // chat TUI doesn't own a PresenceManager for hotkey use
         tui_voice,
+        None, // chat TUI doesn't run the continuous listener
         shutdown_rx,
     );
 

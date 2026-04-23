@@ -62,6 +62,20 @@ fn voice_defaults_match_constants() {
 }
 
 #[test]
+fn continuous_listen_defaults_match_constants() {
+    let c = ContinuousListenConfig::default();
+    assert_eq!(c.enabled, DEFAULT_LISTEN_ENABLED);
+    assert_eq!(c.start_on_launch, DEFAULT_LISTEN_START_ON_LAUNCH);
+    assert_eq!(c.hotkey, DEFAULT_LISTEN_HOTKEY);
+    assert_eq!(c.silence_ms, DEFAULT_LISTEN_SILENCE_MS);
+    assert_eq!(c.min_utterance_ms, DEFAULT_LISTEN_MIN_UTTERANCE_MS);
+    assert_eq!(c.max_utterance_secs, DEFAULT_LISTEN_MAX_UTTERANCE_SECS);
+    assert_eq!(c.preroll_ms, DEFAULT_LISTEN_PREROLL_MS);
+    assert_eq!(c.onset_confirm_ms, DEFAULT_LISTEN_ONSET_CONFIRM_MS);
+    assert_eq!(c.aggressiveness, DEFAULT_LISTEN_AGGRESSIVENESS);
+}
+
+#[test]
 fn transcription_defaults_match_constants() {
     let c = TranscriptionConfig::default();
     assert_eq!(c.model, DEFAULT_WHISPER_MODEL);

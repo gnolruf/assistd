@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
 use crate::defaults::{
-    DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS, DEFAULT_WHISPER_BEAMS,
-    DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED,
-    DEFAULT_WHISPER_VAD_MODEL, DEFAULT_WHISPER_VAD_SILENCE_SECS,
+    DEFAULT_LISTEN_AGGRESSIVENESS, DEFAULT_LISTEN_ENABLED, DEFAULT_LISTEN_HOTKEY,
+    DEFAULT_LISTEN_MAX_UTTERANCE_SECS, DEFAULT_LISTEN_MIN_UTTERANCE_MS,
+    DEFAULT_LISTEN_ONSET_CONFIRM_MS, DEFAULT_LISTEN_PREROLL_MS, DEFAULT_LISTEN_SILENCE_MS,
+    DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS,
+    DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
+    DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL, DEFAULT_WHISPER_VAD_SILENCE_SECS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +30,12 @@ pub struct VoiceConfig {
     /// Speech-to-text transcription settings.
     #[serde(default)]
     pub transcription: TranscriptionConfig,
+    /// Hands-free continuous listening (VAD-gated). Disabled by default;
+    /// when `enabled = true` the daemon keeps the mic open, segments
+    /// utterances with `webrtc-vad`, and auto-dispatches each transcript
+    /// to the agent loop.
+    #[serde(default)]
+    pub continuous: ContinuousListenConfig,
 }
 
 impl Default for VoiceConfig {
@@ -37,6 +46,7 @@ impl Default for VoiceConfig {
             hotkey: DEFAULT_VOICE_HOTKEY.to_string(),
             max_recording_secs: DEFAULT_VOICE_MAX_RECORDING_SECS,
             transcription: TranscriptionConfig::default(),
+            continuous: ContinuousListenConfig::default(),
         }
     }
 }
@@ -121,4 +131,95 @@ fn default_whisper_vad_enabled() -> bool {
 
 fn default_whisper_vad_silence_secs() -> f32 {
     DEFAULT_WHISPER_VAD_SILENCE_SECS
+}
+
+/// Continuous (hands-free) listening settings. Runs only when
+/// [`VoiceConfig::enabled`] and [`Self::enabled`] are both true.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContinuousListenConfig {
+    /// Master switch for the feature. When false, no listener task is
+    /// built even if `voice.enabled` is true — the PTT pipeline is
+    /// unaffected.
+    #[serde(default = "default_listen_enabled")]
+    pub enabled: bool,
+    /// Start listening automatically on daemon launch. When false the
+    /// listener is built but idle; flip it on via the hotkey or the
+    /// `assistd listen-start` IPC command.
+    #[serde(default = "default_listen_start_on_launch")]
+    pub start_on_launch: bool,
+    /// Optional global hotkey that toggles listening on/off. Empty
+    /// disables the hotkey binding; the IPC commands still work.
+    #[serde(default = "default_listen_hotkey")]
+    pub hotkey: String,
+    /// Trailing silence required to mark the end of an utterance, in
+    /// milliseconds. Shorter values respond faster; longer values
+    /// tolerate mid-sentence pauses.
+    #[serde(default = "default_listen_silence_ms")]
+    pub silence_ms: u32,
+    /// Utterances shorter than this are dropped without transcription —
+    /// filters clicks and single-phoneme bursts.
+    #[serde(default = "default_listen_min_utterance_ms")]
+    pub min_utterance_ms: u32,
+    /// Force-flush a utterance to whisper after this many seconds even
+    /// if the user keeps speaking. Bounds memory use.
+    #[serde(default = "default_listen_max_utterance_secs")]
+    pub max_utterance_secs: u32,
+    /// Audio kept in a rolling pre-roll ring and prepended to a new
+    /// utterance so the first syllable isn't clipped between VAD onset
+    /// confirmation and buffer start.
+    #[serde(default = "default_listen_preroll_ms")]
+    pub preroll_ms: u32,
+    /// Consecutive voiced-frame duration needed to confirm speech
+    /// onset. Guards against single-frame noise spikes (keyboard
+    /// clicks, fan pops).
+    #[serde(default = "default_listen_onset_confirm_ms")]
+    pub onset_confirm_ms: u32,
+    /// webrtc-vad aggressiveness level `0..=3`. Higher is more
+    /// aggressive at rejecting non-speech.
+    #[serde(default = "default_listen_aggressiveness")]
+    pub aggressiveness: u8,
+}
+
+impl Default for ContinuousListenConfig {
+    fn default() -> Self {
+        Self {
+            enabled: DEFAULT_LISTEN_ENABLED,
+            start_on_launch: DEFAULT_LISTEN_START_ON_LAUNCH,
+            hotkey: DEFAULT_LISTEN_HOTKEY.to_string(),
+            silence_ms: DEFAULT_LISTEN_SILENCE_MS,
+            min_utterance_ms: DEFAULT_LISTEN_MIN_UTTERANCE_MS,
+            max_utterance_secs: DEFAULT_LISTEN_MAX_UTTERANCE_SECS,
+            preroll_ms: DEFAULT_LISTEN_PREROLL_MS,
+            onset_confirm_ms: DEFAULT_LISTEN_ONSET_CONFIRM_MS,
+            aggressiveness: DEFAULT_LISTEN_AGGRESSIVENESS,
+        }
+    }
+}
+
+fn default_listen_enabled() -> bool {
+    DEFAULT_LISTEN_ENABLED
+}
+fn default_listen_start_on_launch() -> bool {
+    DEFAULT_LISTEN_START_ON_LAUNCH
+}
+fn default_listen_hotkey() -> String {
+    DEFAULT_LISTEN_HOTKEY.to_string()
+}
+fn default_listen_silence_ms() -> u32 {
+    DEFAULT_LISTEN_SILENCE_MS
+}
+fn default_listen_min_utterance_ms() -> u32 {
+    DEFAULT_LISTEN_MIN_UTTERANCE_MS
+}
+fn default_listen_max_utterance_secs() -> u32 {
+    DEFAULT_LISTEN_MAX_UTTERANCE_SECS
+}
+fn default_listen_preroll_ms() -> u32 {
+    DEFAULT_LISTEN_PREROLL_MS
+}
+fn default_listen_onset_confirm_ms() -> u32 {
+    DEFAULT_LISTEN_ONSET_CONFIRM_MS
+}
+fn default_listen_aggressiveness() -> u8 {
+    DEFAULT_LISTEN_AGGRESSIVENESS
 }

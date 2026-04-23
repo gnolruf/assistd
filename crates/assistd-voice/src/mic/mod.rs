@@ -25,8 +25,8 @@ use crate::VoiceInput;
 use crate::transcribe::{Transcriber, TranscriptionError};
 use crate::whisper::{WhisperTranscriber, WhisperTranscriberBuilder};
 
-mod capture;
-mod consumer;
+pub mod capture;
+pub mod consumer;
 
 pub use capture::AudioCaptureError;
 

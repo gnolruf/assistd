@@ -12,6 +12,10 @@ mod hotkey;
 #[cfg(any(feature = "daemon", feature = "chat"))]
 mod idle_monitor;
 #[cfg(feature = "client")]
+mod listen;
+#[cfg(feature = "daemon")]
+mod listen_dispatcher;
+#[cfg(feature = "client")]
 mod presence;
 #[cfg(feature = "client")]
 mod ptt;
@@ -69,6 +73,22 @@ enum Commands {
     #[cfg(feature = "client")]
     PttStop,
 
+    /// Enable hands-free continuous listening on the daemon
+    #[cfg(feature = "client")]
+    ListenStart,
+
+    /// Disable hands-free continuous listening
+    #[cfg(feature = "client")]
+    ListenStop,
+
+    /// Toggle hands-free continuous listening on/off
+    #[cfg(feature = "client")]
+    ListenToggle,
+
+    /// Report whether continuous listening is currently active
+    #[cfg(feature = "client")]
+    ListenState,
+
     /// Open an interactive chat TUI
     #[cfg(feature = "chat")]
     Chat(chat::ChatArgs),
@@ -96,6 +116,14 @@ async fn main() -> Result<()> {
         Commands::PttStart => ptt::run(ptt::PttAction::Start).await,
         #[cfg(feature = "client")]
         Commands::PttStop => ptt::run(ptt::PttAction::Stop).await,
+        #[cfg(feature = "client")]
+        Commands::ListenStart => listen::run(listen::ListenAction::Start).await,
+        #[cfg(feature = "client")]
+        Commands::ListenStop => listen::run(listen::ListenAction::Stop).await,
+        #[cfg(feature = "client")]
+        Commands::ListenToggle => listen::run(listen::ListenAction::Toggle).await,
+        #[cfg(feature = "client")]
+        Commands::ListenState => listen::run(listen::ListenAction::State).await,
         #[cfg(feature = "chat")]
         Commands::Chat(args) => chat::run(args).await,
     }

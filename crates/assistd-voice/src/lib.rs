@@ -25,6 +25,11 @@ pub mod whisper;
 #[cfg(feature = "mic")]
 pub mod mic;
 
+#[cfg(feature = "listen")]
+pub mod listen;
+
+#[cfg(feature = "listen")]
+pub use listen::{ContinuousListener, MicContinuousListener, NoContinuousListener};
 #[cfg(feature = "mic")]
 pub use mic::{MicVoiceInput, VoiceInputError};
 #[cfg(feature = "whisper")]

@@ -162,7 +162,7 @@ fn resample_and_append(
 }
 
 #[inline]
-fn f32_to_i16(s: f32) -> i16 {
+pub(crate) fn f32_to_i16(s: f32) -> i16 {
     // Clamp to avoid wrap on occasional out-of-range float noise.
     let clamped = s.clamp(-1.0, 1.0);
     (clamped * i16::MAX as f32) as i16

@@ -237,6 +237,7 @@ mod tests {
             PresenceManager::stub(PresenceState::Active),
             Arc::new(assistd_tools::ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
+            Arc::new(assistd_voice::NoContinuousListener::new()),
         ))
     }
 
@@ -376,6 +377,66 @@ mod tests {
             Event::Error { .. } => {}
             other => panic!("expected Error event, got {other:?}"),
         }
+
+        tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_listen_state_reports_inactive_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistd.sock");
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_path = path.clone();
+        let state = test_state();
+        let server = tokio::spawn(async move {
+            serve_at(&server_path, state, async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        });
+        wait_for_listener(&path).await;
+
+        let events =
+            send_request_collect_events(&path, r#"{"type":"get_listen_state","id":"ls-1"}"#).await;
+        assert!(matches!(
+            events.first(),
+            Some(Event::ListenState { id, active: false }) if id == "ls-1"
+        ));
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
+
+        tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listen_start_errors_with_no_continuous_listener_stub() {
+        // The default `test_state` builds with a `NoContinuousListener`
+        // whose `start()` is a hard error — this asserts the error
+        // propagation path. A real MicContinuousListener has different
+        // semantics (it actually starts) but needs cpal + whisper to
+        // exercise end-to-end.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistd.sock");
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_path = path.clone();
+        let state = test_state();
+        let server = tokio::spawn(async move {
+            serve_at(&server_path, state, async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        });
+        wait_for_listener(&path).await;
+
+        let events =
+            send_request_collect_events(&path, r#"{"type":"listen_start","id":"ls-start"}"#).await;
+        assert!(
+            matches!(events.last(), Some(Event::Error { message, .. }) if message.contains("not enabled")),
+            "expected Error with 'not enabled' message; got {events:?}"
+        );
 
         tx.send(()).unwrap();
         server.await.unwrap();
@@ -524,6 +585,7 @@ mod tests {
             PresenceManager::stub(PresenceState::Active),
             Arc::new(assistd_tools::ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
+            Arc::new(assistd_voice::NoContinuousListener::new()),
         ))
     }
 

@@ -137,6 +137,35 @@ hotkey = "Super+Space"
 # Override the on-disk model cache directory. Omit for the XDG default.
 # model_cache_dir = "/var/cache/assistd/whisper"
 
+[voice.continuous]
+# Hands-free continuous listening. When enabled, the daemon keeps the
+# mic open and uses webrtc-vad to detect speech onset/offset, transcribing
+# each completed utterance and auto-dispatching the text to the agent loop.
+# The mic is released while presence is Sleeping so stray room speech
+# doesn't repeatedly warm up llama-server.
+enabled = false
+# Start listening automatically at daemon launch. When false, the listener
+# is built but idle; toggle it with the hotkey or `assistd listen-toggle`.
+# start_on_launch = false
+# Hotkey that toggles listening on/off. Empty disables the binding.
+# hotkey = "Super+Shift+L"
+# Trailing silence (ms) that ends an utterance. Larger values tolerate
+# longer mid-sentence pauses.
+# silence_ms = 800
+# Utterances shorter than this are dropped without transcription.
+# min_utterance_ms = 400
+# Force-flush cap, in seconds, to bound per-utterance memory use.
+# max_utterance_secs = 30
+# Rolling pre-roll appended to a new utterance so onset confirmation
+# doesn't clip the first syllable.
+# preroll_ms = 300
+# Voiced frames required to confirm onset (guards against keystroke
+# clicks and fan pops).
+# onset_confirm_ms = 60
+# webrtc-vad aggressiveness, 0..=3. Higher is more aggressive at
+# rejecting non-speech.
+# aggressiveness = 3
+
 [compositor]
 # Tiling compositor to integrate with. One of: i3, sway, hyprland
 type = "sway"

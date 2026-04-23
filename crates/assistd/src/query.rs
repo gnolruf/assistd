@@ -101,6 +101,9 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                     writeln!(stdout, "[transcription: {text}]")?;
                 }
             }
+            Event::ListenState { active, .. } => {
+                writeln!(stdout, "[listen: {}]", if active { "on" } else { "off" })?;
+            }
             Event::Done { .. } => {
                 if wrote_anything {
                     writeln!(stdout)?;
