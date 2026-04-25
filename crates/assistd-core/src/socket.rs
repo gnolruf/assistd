@@ -238,6 +238,7 @@ mod tests {
             Arc::new(assistd_tools::ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             Arc::new(assistd_voice::NoContinuousListener::new()),
+            Arc::new(assistd_voice::NoVoiceOutput),
         ))
     }
 
@@ -586,6 +587,7 @@ mod tests {
             Arc::new(assistd_tools::ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             Arc::new(assistd_voice::NoContinuousListener::new()),
+            Arc::new(assistd_voice::NoVoiceOutput),
         ))
     }
 

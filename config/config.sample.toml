@@ -177,6 +177,44 @@ enabled = false
 # rejecting non-speech.
 # aggressiveness = 3
 
+[voice.synthesis]
+# Speak LLM responses aloud through a local Piper TTS subprocess. When
+# enabled, the daemon spawns piper per utterance, writes one sentence to
+# stdin, reads raw PCM from stdout, and plays it through the default
+# audio device via rodio. Falls back silently with a warning log if the
+# piper binary is missing, the voice model fails to download, or no
+# audio device is available — the daemon stays up either way.
+enabled = false
+# Path to (or name of) the piper binary. A bare command name is looked
+# up via $PATH.
+# binary_path = "piper"
+# HuggingFace identifier for the Piper voice ONNX, formatted as
+# "<owner>/<repo>:<file>" where <file> is the path of the .onnx inside
+# the repo. The matching .onnx.json is downloaded alongside it. Cached
+# under $XDG_CACHE_HOME/assistd/piper/ (or ~/.cache/assistd/piper/).
+# voice = "rhasspy/piper-voices:en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+# Override the on-disk voice cache directory. Omit for the XDG default.
+# model_cache_dir = "/var/cache/assistd/piper"
+# Speaking-rate scale. 1.0 is the voice's natural rate; lower = faster.
+# length_scale = 1.0
+# Sampling noise scale (--noise-scale). Higher = more pitch variation.
+# noise_scale = 0.667
+# Phoneme noise scale (--noise-w). Higher = more cadence variation.
+# noise_w = 0.8
+# Trailing silence (seconds) Piper inserts after each utterance.
+# sentence_silence_secs = 0.2
+# Optional override for Piper's espeak-ng data directory. Only set when
+# piper logs "Failed to load espeak-ng" — most distro packages handle
+# this themselves.
+# espeak_data_dir = "/usr/share/espeak-ng-data"
+# Per-utterance synthesis deadline in seconds. Piper is killed if it
+# hasn't returned PCM by this point.
+# deadline_secs = 30
+# Maximum sentence length fed to Piper. The sentence buffer flushes at
+# the last whitespace before this cap when no terminator appears within
+# the limit.
+# max_sentence_chars = 400
+
 [compositor]
 # Tiling compositor to integrate with. One of: i3, sway, hyprland
 type = "sway"

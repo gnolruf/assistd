@@ -47,6 +47,17 @@ pub const DEFAULT_WHISPER_VAD_SILENCE_SECS: f32 = 0.5;
 pub const DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS: u32 = 300;
 pub const DEFAULT_WHISPER_CPU_FALLBACK_ENABLED: bool = true;
 
+pub const DEFAULT_PIPER_ENABLED: bool = false;
+pub const DEFAULT_PIPER_BINARY: &str = "piper";
+pub const DEFAULT_PIPER_VOICE: &str =
+    "rhasspy/piper-voices:en/en_US/lessac/medium/en_US-lessac-medium.onnx";
+pub const DEFAULT_PIPER_LENGTH_SCALE: f32 = 1.0;
+pub const DEFAULT_PIPER_NOISE_SCALE: f32 = 0.667;
+pub const DEFAULT_PIPER_NOISE_W: f32 = 0.8;
+pub const DEFAULT_PIPER_SENTENCE_SILENCE_SECS: f32 = 0.2;
+pub const DEFAULT_PIPER_DEADLINE_SECS: u32 = 30;
+pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: u32 = 400;
+
 pub const DEFAULT_LISTEN_ENABLED: bool = false;
 pub const DEFAULT_LISTEN_START_ON_LAUNCH: bool = false;
 pub const DEFAULT_LISTEN_HOTKEY: &str = "";

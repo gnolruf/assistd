@@ -4,7 +4,10 @@ use crate::defaults::{
     DEFAULT_LISTEN_AGGRESSIVENESS, DEFAULT_LISTEN_ENABLED, DEFAULT_LISTEN_HOTKEY,
     DEFAULT_LISTEN_MAX_UTTERANCE_SECS, DEFAULT_LISTEN_MIN_UTTERANCE_MS,
     DEFAULT_LISTEN_ONSET_CONFIRM_MS, DEFAULT_LISTEN_PREROLL_MS, DEFAULT_LISTEN_SILENCE_MS,
-    DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS,
+    DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_PIPER_BINARY, DEFAULT_PIPER_DEADLINE_SECS,
+    DEFAULT_PIPER_ENABLED, DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS,
+    DEFAULT_PIPER_NOISE_SCALE, DEFAULT_PIPER_NOISE_W, DEFAULT_PIPER_SENTENCE_SILENCE_SECS,
+    DEFAULT_PIPER_VOICE, DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS,
     DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_CPU_FALLBACK_ENABLED,
     DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
     DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL, DEFAULT_WHISPER_VAD_SILENCE_SECS,
@@ -37,6 +40,11 @@ pub struct VoiceConfig {
     /// to the agent loop.
     #[serde(default)]
     pub continuous: ContinuousListenConfig,
+    /// Text-to-speech synthesis (Piper). Disabled by default; when
+    /// `enabled = true` the daemon spawns piper per utterance and plays
+    /// LLM responses aloud through the default audio output.
+    #[serde(default)]
+    pub synthesis: SynthesisConfig,
 }
 
 impl Default for VoiceConfig {
@@ -48,6 +56,7 @@ impl Default for VoiceConfig {
             max_recording_secs: DEFAULT_VOICE_MAX_RECORDING_SECS,
             transcription: TranscriptionConfig::default(),
             continuous: ContinuousListenConfig::default(),
+            synthesis: SynthesisConfig::default(),
         }
     }
 }
@@ -245,4 +254,107 @@ fn default_listen_onset_confirm_ms() -> u32 {
 }
 fn default_listen_aggressiveness() -> u8 {
     DEFAULT_LISTEN_AGGRESSIVENESS
+}
+
+/// Piper text-to-speech settings. The full section can be omitted from
+/// the TOML; everything has a default. `enabled = false` means the
+/// daemon won't spawn piper, won't download voice models, and any LLM
+/// response stays silent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SynthesisConfig {
+    /// Master switch. When false, the daemon substitutes a silent
+    /// `NoVoiceOutput` placeholder and skips Piper startup entirely.
+    #[serde(default = "default_piper_enabled")]
+    pub enabled: bool,
+    /// Path to (or name of) the piper binary. Looked up via `$PATH`
+    /// when the value is a bare command name.
+    #[serde(default = "default_piper_binary")]
+    pub binary_path: String,
+    /// HuggingFace identifier for the Piper voice ONNX, formatted as
+    /// `<owner>/<repo>:<file>` where `<file>` is the path of the
+    /// `.onnx` file inside the repo. The matching `.onnx.json` is
+    /// downloaded alongside it. Cached under `model_cache_dir` (or
+    /// `$XDG_CACHE_HOME/assistd/piper/`).
+    #[serde(default = "default_piper_voice")]
+    pub voice: String,
+    /// Override for the on-disk voice cache directory. `None` uses
+    /// `$XDG_CACHE_HOME/assistd/piper/` (or `~/.cache/assistd/piper/`).
+    #[serde(default)]
+    pub model_cache_dir: Option<PathBuf>,
+    /// Speaking-rate scale. `1.0` is the voice's natural rate; lower
+    /// values speak faster, higher values speak slower.
+    #[serde(default = "default_piper_length_scale")]
+    pub length_scale: f32,
+    /// Sampling noise scale (Piper `--noise-scale`). Higher = more
+    /// variation in pitch/intonation.
+    #[serde(default = "default_piper_noise_scale")]
+    pub noise_scale: f32,
+    /// Phoneme noise scale (Piper `--noise-w`). Higher = more variation
+    /// in cadence/stress.
+    #[serde(default = "default_piper_noise_w")]
+    pub noise_w: f32,
+    /// Trailing silence (seconds) Piper inserts after each utterance.
+    /// Maps to `--sentence-silence`.
+    #[serde(default = "default_piper_sentence_silence_secs")]
+    pub sentence_silence_secs: f32,
+    /// Optional override for Piper's espeak-ng data directory. Most
+    /// distro packages set this themselves; only set when piper logs
+    /// "Failed to load espeak-ng".
+    #[serde(default)]
+    pub espeak_data_dir: Option<PathBuf>,
+    /// Per-utterance synthesis deadline in seconds. The piper child is
+    /// killed if it hasn't returned PCM by this point.
+    #[serde(default = "default_piper_deadline_secs")]
+    pub deadline_secs: u32,
+    /// Maximum sentence length fed to Piper. The sentence buffer flushes
+    /// at the last whitespace before this cap when no terminator appears
+    /// within the limit.
+    #[serde(default = "default_piper_max_sentence_chars")]
+    pub max_sentence_chars: u32,
+}
+
+impl Default for SynthesisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: DEFAULT_PIPER_ENABLED,
+            binary_path: DEFAULT_PIPER_BINARY.to_string(),
+            voice: DEFAULT_PIPER_VOICE.to_string(),
+            model_cache_dir: None,
+            length_scale: DEFAULT_PIPER_LENGTH_SCALE,
+            noise_scale: DEFAULT_PIPER_NOISE_SCALE,
+            noise_w: DEFAULT_PIPER_NOISE_W,
+            sentence_silence_secs: DEFAULT_PIPER_SENTENCE_SILENCE_SECS,
+            espeak_data_dir: None,
+            deadline_secs: DEFAULT_PIPER_DEADLINE_SECS,
+            max_sentence_chars: DEFAULT_PIPER_MAX_SENTENCE_CHARS,
+        }
+    }
+}
+
+fn default_piper_enabled() -> bool {
+    DEFAULT_PIPER_ENABLED
+}
+fn default_piper_binary() -> String {
+    DEFAULT_PIPER_BINARY.to_string()
+}
+fn default_piper_voice() -> String {
+    DEFAULT_PIPER_VOICE.to_string()
+}
+fn default_piper_length_scale() -> f32 {
+    DEFAULT_PIPER_LENGTH_SCALE
+}
+fn default_piper_noise_scale() -> f32 {
+    DEFAULT_PIPER_NOISE_SCALE
+}
+fn default_piper_noise_w() -> f32 {
+    DEFAULT_PIPER_NOISE_W
+}
+fn default_piper_sentence_silence_secs() -> f32 {
+    DEFAULT_PIPER_SENTENCE_SILENCE_SECS
+}
+fn default_piper_deadline_secs() -> u32 {
+    DEFAULT_PIPER_DEADLINE_SECS
+}
+fn default_piper_max_sentence_chars() -> u32 {
+    DEFAULT_PIPER_MAX_SENTENCE_CHARS
 }

@@ -53,6 +53,8 @@ tempfile = "3"
 base64 = "0.22"
 infer = "0.19"
 shlex = "1"
+which = "7"
+rodio = { version = "0.22", default-features = false, features = ["playback"] }
 
 [profile.release]
 lto = "thin"

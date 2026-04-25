@@ -30,10 +30,18 @@ pub mod mic;
 #[cfg(feature = "listen")]
 pub mod listen;
 
+#[cfg(feature = "tts")]
+pub mod piper;
+
+pub mod sentence;
+
 #[cfg(feature = "listen")]
 pub use listen::{ContinuousListener, MicContinuousListener, NoContinuousListener};
 #[cfg(feature = "mic")]
 pub use mic::{MicVoiceInput, VoiceInputError, capture::validate as mic_validate};
+#[cfg(feature = "tts")]
+pub use piper::{PiperError, PiperVoiceOutput};
+pub use sentence::SentenceBuffer;
 #[cfg(feature = "whisper")]
 pub use transcribe::{
     BusyProbe, CpuFallbackFactory, NullBusyProbe, QueueConfig, QueuedTranscriber, Transcriber,
