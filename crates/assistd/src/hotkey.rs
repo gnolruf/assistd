@@ -13,7 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use assistd_core::{ContinuousListener, PresenceConfig, PresenceManager, VoiceConfig, VoiceInput};
+use assistd_core::{
+    ContinuousListener, PresenceConfig, PresenceManager, VoiceConfig, VoiceInput,
+    VoiceOutputController,
+};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -43,6 +46,26 @@ pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
                 )
             })?;
     }
+    if voice.enabled && voice.synthesis.enabled && !voice.synthesis.toggle_hotkey.is_empty() {
+        HotKey::from_str(&voice.synthesis.toggle_hotkey)
+            .map(|_| ())
+            .with_context(|| {
+                format!(
+                    "invalid voice.synthesis.toggle_hotkey {:?}",
+                    voice.synthesis.toggle_hotkey
+                )
+            })?;
+    }
+    if voice.enabled && voice.synthesis.enabled && !voice.synthesis.skip_hotkey.is_empty() {
+        HotKey::from_str(&voice.synthesis.skip_hotkey)
+            .map(|_| ())
+            .with_context(|| {
+                format!(
+                    "invalid voice.synthesis.skip_hotkey {:?}",
+                    voice.synthesis.skip_hotkey
+                )
+            })?;
+    }
     Ok(())
 }
 
@@ -60,6 +83,7 @@ pub fn spawn_listener(
     presence: Option<Arc<PresenceManager>>,
     voice: Arc<dyn VoiceInput>,
     listener: Option<Arc<dyn ContinuousListener>>,
+    voice_output: Option<Arc<VoiceOutputController>>,
     shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     // Only bind the presence hotkey when the caller actually passed
@@ -86,8 +110,34 @@ pub fn spawn_listener(
     } else {
         None
     };
+    // TTS toggle/skip hotkeys are only registered when the daemon
+    // actually owns a VoiceOutputController (chat-TUI mode passes
+    // None — those clients control TTS via IPC instead).
+    let toggle_hotkey = if voice_cfg.enabled
+        && voice_cfg.synthesis.enabled
+        && !voice_cfg.synthesis.toggle_hotkey.is_empty()
+        && voice_output.is_some()
+    {
+        Some(voice_cfg.synthesis.toggle_hotkey.clone())
+    } else {
+        None
+    };
+    let skip_hotkey = if voice_cfg.enabled
+        && voice_cfg.synthesis.enabled
+        && !voice_cfg.synthesis.skip_hotkey.is_empty()
+        && voice_output.is_some()
+    {
+        Some(voice_cfg.synthesis.skip_hotkey.clone())
+    } else {
+        None
+    };
 
-    if presence_hotkey.is_none() && voice_hotkey.is_none() && listen_hotkey.is_none() {
+    if presence_hotkey.is_none()
+        && voice_hotkey.is_none()
+        && listen_hotkey.is_none()
+        && toggle_hotkey.is_none()
+        && skip_hotkey.is_none()
+    {
         info!(
             target: "assistd::hotkey",
             "no global hotkeys configured; hotkey listener disabled"
@@ -164,7 +214,46 @@ pub fn spawn_listener(
         }
     });
 
-    if presence_hk.is_none() && voice_hk.is_none() && listen_hk.is_none() {
+    let toggle_hk = toggle_hotkey.and_then(|s| match HotKey::from_str(&s) {
+        Ok(h) => match manager.register(h) {
+            Ok(()) => {
+                info!(target: "assistd::hotkey", "voice-output toggle hotkey {s:?} registered (press to mute/unmute)");
+                Some(h)
+            }
+            Err(e) => {
+                warn!(target: "assistd::hotkey", "failed to register voice.synthesis.toggle_hotkey {s:?}: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            warn!(target: "assistd::hotkey", "failed to parse voice.synthesis.toggle_hotkey {s:?}: {e}");
+            None
+        }
+    });
+
+    let skip_hk = skip_hotkey.and_then(|s| match HotKey::from_str(&s) {
+        Ok(h) => match manager.register(h) {
+            Ok(()) => {
+                info!(target: "assistd::hotkey", "voice-output skip hotkey {s:?} registered (press to abort current response)");
+                Some(h)
+            }
+            Err(e) => {
+                warn!(target: "assistd::hotkey", "failed to register voice.synthesis.skip_hotkey {s:?}: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            warn!(target: "assistd::hotkey", "failed to parse voice.synthesis.skip_hotkey {s:?}: {e}");
+            None
+        }
+    });
+
+    if presence_hk.is_none()
+        && voice_hk.is_none()
+        && listen_hk.is_none()
+        && toggle_hk.is_none()
+        && skip_hk.is_none()
+    {
         return None;
     }
 
@@ -173,9 +262,12 @@ pub fn spawn_listener(
         presence_hk,
         voice_hk,
         listen_hk,
+        toggle_hk,
+        skip_hk,
         presence,
         voice,
         listener,
+        voice_output,
         shutdown,
     ));
     Some(handle)
@@ -187,14 +279,19 @@ async fn run_listener(
     presence_hk: Option<HotKey>,
     voice_hk: Option<HotKey>,
     listen_hk: Option<HotKey>,
+    toggle_hk: Option<HotKey>,
+    skip_hk: Option<HotKey>,
     presence: Option<Arc<PresenceManager>>,
     voice: Arc<dyn VoiceInput>,
     listener: Option<Arc<dyn ContinuousListener>>,
+    voice_output: Option<Arc<VoiceOutputController>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let presence_id = presence_hk.map(|h| h.id());
     let voice_id = voice_hk.map(|h| h.id());
     let listen_id = listen_hk.map(|h| h.id());
+    let toggle_id = toggle_hk.map(|h| h.id());
+    let skip_id = skip_hk.map(|h| h.id());
     let receiver = GlobalHotKeyEvent::receiver();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -224,7 +321,13 @@ async fn run_listener(
                         let v = voice.clone();
                         match event.state {
                             HotKeyState::Pressed => {
+                                // PTT barge-in: stop any in-flight TTS
+                                // playback before opening the mic.
+                                let vo = voice_output.clone();
                                 tokio::spawn(async move {
+                                    if let Some(ctrl) = vo {
+                                        ctrl.interrupt().await;
+                                    }
                                     if let Err(e) = v.start_recording().await {
                                         warn!(
                                             target: "assistd::hotkey",
@@ -280,6 +383,32 @@ async fn run_listener(
                                 ),
                             }
                         });
+                    } else if Some(event.id) == toggle_id
+                        && event.state == HotKeyState::Pressed
+                        && let Some(ref ctrl_arc) = voice_output
+                    {
+                        let ctrl = ctrl_arc.clone();
+                        tokio::spawn(async move {
+                            let new_state = !ctrl.enabled();
+                            ctrl.set_enabled(new_state).await;
+                            info!(
+                                target: "assistd::hotkey",
+                                enabled = new_state,
+                                "hotkey toggled voice output"
+                            );
+                        });
+                    } else if Some(event.id) == skip_id
+                        && event.state == HotKeyState::Pressed
+                        && let Some(ref ctrl_arc) = voice_output
+                    {
+                        let ctrl = ctrl_arc.clone();
+                        tokio::spawn(async move {
+                            ctrl.skip().await;
+                            info!(
+                                target: "assistd::hotkey",
+                                "hotkey skipped current voice-output response"
+                            );
+                        });
                     }
                 }
             }
@@ -304,6 +433,16 @@ async fn run_listener(
     if let Some(h) = listen_hk {
         if let Err(e) = manager.unregister(h) {
             warn!(target: "assistd::hotkey", "failed to unregister continuous-listen hotkey on shutdown: {e}");
+        }
+    }
+    if let Some(h) = toggle_hk {
+        if let Err(e) = manager.unregister(h) {
+            warn!(target: "assistd::hotkey", "failed to unregister voice-output toggle hotkey on shutdown: {e}");
+        }
+    }
+    if let Some(h) = skip_hk {
+        if let Err(e) = manager.unregister(h) {
+            warn!(target: "assistd::hotkey", "failed to unregister voice-output skip hotkey on shutdown: {e}");
         }
     }
 }
@@ -451,5 +590,117 @@ mod tests {
             &v,
         )
         .expect("garbage voice hotkey ignored when voice is disabled");
+    }
+
+    #[test]
+    fn validate_toggle_hotkey_when_synthesis_enabled() {
+        use assistd_core::SynthesisConfig;
+        let v = VoiceConfig {
+            enabled: true,
+            hotkey: String::new(),
+            synthesis: SynthesisConfig {
+                enabled: true,
+                toggle_hotkey: "Super+Shift+M".into(),
+                ..SynthesisConfig::default()
+            },
+            ..VoiceConfig::default()
+        };
+        validate(
+            &PresenceConfig {
+                hotkey: String::new(),
+            },
+            &v,
+        )
+        .expect("Super+Shift+M must parse");
+    }
+
+    #[test]
+    fn validate_garbage_toggle_hotkey_errors() {
+        use assistd_core::SynthesisConfig;
+        let v = VoiceConfig {
+            enabled: true,
+            hotkey: String::new(),
+            synthesis: SynthesisConfig {
+                enabled: true,
+                toggle_hotkey: "### bogus ###".into(),
+                ..SynthesisConfig::default()
+            },
+            ..VoiceConfig::default()
+        };
+        let err = validate(
+            &PresenceConfig {
+                hotkey: String::new(),
+            },
+            &v,
+        )
+        .expect_err("garbage must fail");
+        assert!(err.to_string().contains("voice.synthesis.toggle_hotkey"));
+    }
+
+    #[test]
+    fn validate_toggle_hotkey_ignored_when_synthesis_disabled() {
+        use assistd_core::SynthesisConfig;
+        let v = VoiceConfig {
+            enabled: true,
+            hotkey: String::new(),
+            synthesis: SynthesisConfig {
+                enabled: false,
+                toggle_hotkey: "### bogus ###".into(),
+                ..SynthesisConfig::default()
+            },
+            ..VoiceConfig::default()
+        };
+        validate(
+            &PresenceConfig {
+                hotkey: String::new(),
+            },
+            &v,
+        )
+        .expect("garbage ignored when synthesis is disabled");
+    }
+
+    #[test]
+    fn validate_skip_hotkey_when_synthesis_enabled() {
+        use assistd_core::SynthesisConfig;
+        let v = VoiceConfig {
+            enabled: true,
+            hotkey: String::new(),
+            synthesis: SynthesisConfig {
+                enabled: true,
+                skip_hotkey: "Super+Shift+S".into(),
+                ..SynthesisConfig::default()
+            },
+            ..VoiceConfig::default()
+        };
+        validate(
+            &PresenceConfig {
+                hotkey: String::new(),
+            },
+            &v,
+        )
+        .expect("Super+Shift+S must parse");
+    }
+
+    #[test]
+    fn validate_garbage_skip_hotkey_errors() {
+        use assistd_core::SynthesisConfig;
+        let v = VoiceConfig {
+            enabled: true,
+            hotkey: String::new(),
+            synthesis: SynthesisConfig {
+                enabled: true,
+                skip_hotkey: "### bogus ###".into(),
+                ..SynthesisConfig::default()
+            },
+            ..VoiceConfig::default()
+        };
+        let err = validate(
+            &PresenceConfig {
+                hotkey: String::new(),
+            },
+            &v,
+        )
+        .expect_err("garbage must fail");
+        assert!(err.to_string().contains("voice.synthesis.skip_hotkey"));
     }
 }

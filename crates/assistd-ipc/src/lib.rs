@@ -115,6 +115,24 @@ pub enum Request {
     GetListenState {
         id: String,
     },
+    /// Flip TTS on/off at runtime. Off cancels in-flight playback and
+    /// drains any subsequent sentences for the active query without
+    /// speaking them; on resumes for the next sentence delivered. Emits
+    /// the post-toggle `VoiceOutputState` + `Done`.
+    VoiceToggle {
+        id: String,
+    },
+    /// Abort the current TTS response: drop the rest of the audio queue
+    /// and any pending sentences for the active query. Does not change
+    /// the enabled flag. Emits `VoiceOutputState` + `Done`.
+    VoiceSkip {
+        id: String,
+    },
+    /// Report whether TTS is currently enabled. Emits `VoiceOutputState`
+    /// + `Done` with no state change.
+    GetVoiceState {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -151,6 +169,10 @@ pub enum Event {
     /// Current state of continuous listening. Emitted in response to
     /// `ListenStart` / `ListenStop` / `ListenToggle` / `GetListenState`.
     ListenState { id: String, active: bool },
+    /// Current TTS enabled state. Emitted in response to `VoiceToggle`
+    /// / `VoiceSkip` / `GetVoiceState`. Skip leaves the flag unchanged
+    /// (true if synthesis was on before the skip).
+    VoiceOutputState { id: String, enabled: bool },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -173,6 +195,7 @@ impl Event {
             | Event::VoiceState { id, .. }
             | Event::Transcription { id, .. }
             | Event::ListenState { id, .. }
+            | Event::VoiceOutputState { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }
@@ -465,6 +488,58 @@ mod tests {
         };
         assert!(!evt.is_terminal());
         assert_eq!(evt.id(), "l-1");
+    }
+
+    #[test]
+    fn voice_toggle_request_roundtrip() {
+        let req = Request::VoiceToggle { id: "vt-1".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"voice_toggle","id":"vt-1"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn voice_skip_request_roundtrip() {
+        let req = Request::VoiceSkip { id: "vs-1".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"voice_skip","id":"vs-1"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn get_voice_state_request_roundtrip() {
+        let req = Request::GetVoiceState { id: "vg-1".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"get_voice_state","id":"vg-1"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn voice_output_state_event_roundtrip() {
+        let evt = Event::VoiceOutputState {
+            id: "vt-1".into(),
+            enabled: true,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"voice_output_state","id":"vt-1","enabled":true}"#
+        );
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn voice_output_state_is_not_terminal() {
+        let evt = Event::VoiceOutputState {
+            id: "vt-1".into(),
+            enabled: false,
+        };
+        assert!(!evt.is_terminal());
+        assert_eq!(evt.id(), "vt-1");
     }
 
     #[test]

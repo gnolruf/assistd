@@ -214,6 +214,16 @@ enabled = false
 # the last whitespace before this cap when no terminator appears within
 # the limit.
 # max_sentence_chars = 400
+# Global hotkey that toggles TTS on/off at runtime. Empty = no
+# binding (use `assistd voice-toggle` from the CLI instead). Off
+# silences current playback; on resumes for the next sentence.
+# Examples: "Super+Shift+M", "Ctrl+Alt+M".
+# toggle_hotkey = ""
+# Global hotkey that aborts the current response: drops the rest of
+# the audio queue and any pending sentences for the in-flight query
+# without starting recording. Empty = no binding (use
+# `assistd voice-skip` instead).
+# skip_hotkey = ""
 
 [compositor]
 # Tiling compositor to integrate with. One of: i3, sway, hyprland

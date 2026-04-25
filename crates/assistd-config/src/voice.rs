@@ -7,8 +7,9 @@ use crate::defaults::{
     DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_PIPER_BINARY, DEFAULT_PIPER_DEADLINE_SECS,
     DEFAULT_PIPER_ENABLED, DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS,
     DEFAULT_PIPER_NOISE_SCALE, DEFAULT_PIPER_NOISE_W, DEFAULT_PIPER_PARTIAL_FLUSH_MS,
-    DEFAULT_PIPER_SENTENCE_SILENCE_SECS, DEFAULT_PIPER_VOICE, DEFAULT_VOICE_HOTKEY,
-    DEFAULT_VOICE_MAX_RECORDING_SECS, DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_CPU_FALLBACK_ENABLED,
+    DEFAULT_PIPER_SENTENCE_SILENCE_SECS, DEFAULT_PIPER_SKIP_HOTKEY, DEFAULT_PIPER_TOGGLE_HOTKEY,
+    DEFAULT_PIPER_VOICE, DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS,
+    DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_CPU_FALLBACK_ENABLED,
     DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
     DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL, DEFAULT_WHISPER_VAD_SILENCE_SECS,
 };
@@ -320,6 +321,18 @@ pub struct SynthesisConfig {
     /// How fenced code blocks in the LLM response are spoken aloud.
     #[serde(default)]
     pub code_block_mode: CodeBlockMode,
+    /// Global hotkey (e.g. `"Super+Shift+M"`) that flips TTS on/off
+    /// mid-session. Empty disables the binding. Turning off cancels
+    /// in-flight playback; turning back on resumes for the next
+    /// sentence delivered by the LLM (sentences arriving while off are
+    /// silently dropped).
+    #[serde(default = "default_piper_toggle_hotkey")]
+    pub toggle_hotkey: String,
+    /// Global hotkey (e.g. `"Super+Shift+S"`) that aborts the current
+    /// response: stops playback, drops any queued sentences for the
+    /// in-flight query, but does not start recording. Empty disables.
+    #[serde(default = "default_piper_skip_hotkey")]
+    pub skip_hotkey: String,
 }
 
 /// How the sentence buffer treats fenced code blocks in the LLM response.
@@ -356,6 +369,8 @@ impl Default for SynthesisConfig {
             max_sentence_chars: DEFAULT_PIPER_MAX_SENTENCE_CHARS,
             partial_flush_ms: DEFAULT_PIPER_PARTIAL_FLUSH_MS,
             code_block_mode: CodeBlockMode::Skip,
+            toggle_hotkey: DEFAULT_PIPER_TOGGLE_HOTKEY.to_string(),
+            skip_hotkey: DEFAULT_PIPER_SKIP_HOTKEY.to_string(),
         }
     }
 }
@@ -389,4 +404,10 @@ fn default_piper_max_sentence_chars() -> u32 {
 }
 fn default_piper_partial_flush_ms() -> u32 {
     DEFAULT_PIPER_PARTIAL_FLUSH_MS
+}
+fn default_piper_toggle_hotkey() -> String {
+    DEFAULT_PIPER_TOGGLE_HOTKEY.to_string()
+}
+fn default_piper_skip_hotkey() -> String {
+    DEFAULT_PIPER_SKIP_HOTKEY.to_string()
 }

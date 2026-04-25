@@ -62,6 +62,15 @@ pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: u32 = 400;
 /// only the terminal `Done`-based flush is used. Inhibited while a tool
 /// call is in flight (the LLM is waiting on a tool, not stalled).
 pub const DEFAULT_PIPER_PARTIAL_FLUSH_MS: u32 = 750;
+/// Empty by default — opt-in like `DEFAULT_LISTEN_HOTKEY`. When non-empty
+/// and synthesis is enabled, pressing the hotkey flips TTS on/off at
+/// runtime (also silences current playback when turning off).
+pub const DEFAULT_PIPER_TOGGLE_HOTKEY: &str = "";
+/// Empty by default. When non-empty, pressing the hotkey aborts the
+/// current response: drops queued audio and any pending sentences for
+/// the in-flight query without starting recording. TTS stays armed for
+/// the next response.
+pub const DEFAULT_PIPER_SKIP_HOTKEY: &str = "";
 
 pub const DEFAULT_LISTEN_ENABLED: bool = false;
 pub const DEFAULT_LISTEN_START_ON_LAUNCH: bool = false;

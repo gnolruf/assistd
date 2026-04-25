@@ -14,7 +14,7 @@ use std::time::Duration;
 use assistd_config::{LlamaServerConfig, ModelConfig};
 use assistd_core::{
     AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceManager,
-    PresenceState, ToolRegistry,
+    PresenceState, ToolRegistry, VoiceOutputController,
 };
 use assistd_ipc::{Event, Request};
 use assistd_llm::{EchoBackend, LlmBackend, LlmEvent};
@@ -303,7 +303,7 @@ async fn query_during_sleeping_triggers_auto_wake() {
         Arc::new(ToolRegistry::default()),
         Arc::new(NoVoiceInput::new()),
         Arc::new(NoContinuousListener::new()),
-        Arc::new(NoVoiceOutput),
+        VoiceOutputController::new(Arc::new(NoVoiceOutput), true),
     ));
 
     let dir = tempfile::tempdir().unwrap();
@@ -455,7 +455,7 @@ async fn sleep_defers_until_inflight_query_done() {
         Arc::new(ToolRegistry::default()),
         Arc::new(NoVoiceInput::new()),
         Arc::new(NoContinuousListener::new()),
-        Arc::new(NoVoiceOutput),
+        VoiceOutputController::new(Arc::new(NoVoiceOutput), true),
     ));
 
     let dir = tempfile::tempdir().unwrap();
@@ -542,7 +542,7 @@ async fn multiple_queries_during_wake_complete_in_order() {
         Arc::new(ToolRegistry::default()),
         Arc::new(NoVoiceInput::new()),
         Arc::new(NoContinuousListener::new()),
-        Arc::new(NoVoiceOutput),
+        VoiceOutputController::new(Arc::new(NoVoiceOutput), true),
     ));
 
     let dir = tempfile::tempdir().unwrap();

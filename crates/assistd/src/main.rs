@@ -21,6 +21,8 @@ mod presence;
 mod ptt;
 #[cfg(feature = "client")]
 mod query;
+#[cfg(feature = "client")]
+mod voice_ctl;
 #[cfg(feature = "daemon")]
 mod voice_probe;
 
@@ -91,6 +93,21 @@ enum Commands {
     #[cfg(feature = "client")]
     ListenState,
 
+    /// Toggle TTS playback on/off mid-session (off cancels current
+    /// utterance; on resumes for the next sentence delivered).
+    #[cfg(feature = "client")]
+    VoiceToggle,
+
+    /// Abort the current TTS response: stops playback, drops any
+    /// pending sentences for the active query. Does not start
+    /// recording.
+    #[cfg(feature = "client")]
+    VoiceSkip,
+
+    /// Report whether TTS is currently enabled at runtime.
+    #[cfg(feature = "client")]
+    VoiceState,
+
     /// Open an interactive chat TUI
     #[cfg(feature = "chat")]
     Chat(chat::ChatArgs),
@@ -126,6 +143,12 @@ async fn main() -> Result<()> {
         Commands::ListenToggle => listen::run(listen::ListenAction::Toggle).await,
         #[cfg(feature = "client")]
         Commands::ListenState => listen::run(listen::ListenAction::State).await,
+        #[cfg(feature = "client")]
+        Commands::VoiceToggle => voice_ctl::run(voice_ctl::VoiceCtlAction::Toggle).await,
+        #[cfg(feature = "client")]
+        Commands::VoiceSkip => voice_ctl::run(voice_ctl::VoiceCtlAction::Skip).await,
+        #[cfg(feature = "client")]
+        Commands::VoiceState => voice_ctl::run(voice_ctl::VoiceCtlAction::State).await,
         #[cfg(feature = "chat")]
         Commands::Chat(args) => chat::run(args).await,
     }

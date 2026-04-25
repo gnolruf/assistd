@@ -3,7 +3,9 @@ use anyhow::Result;
 use assistd_ipc::{Event, PresenceState, Request, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_tools::ToolRegistry;
-use assistd_voice::{ContinuousListener, SentenceBuffer, VoiceInput, VoiceOutput};
+use assistd_voice::{
+    ContinuousListener, SentenceBuffer, SpeakDecision, VoiceInput, VoiceOutputController,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
@@ -21,10 +23,11 @@ pub struct AppState {
     pub tools: Arc<ToolRegistry>,
     pub voice: Arc<dyn VoiceInput>,
     pub listener: Arc<dyn ContinuousListener>,
-    /// Speaks LLM responses aloud, sentence by sentence. When TTS is
-    /// disabled in config or the build, this is `NoVoiceOutput` which
-    /// silently accepts every speak() call.
-    pub voice_output: Arc<dyn VoiceOutput>,
+    /// Speaks LLM responses aloud, sentence by sentence, through a
+    /// runtime controller that owns the toggle/skip/interrupt policy.
+    /// When TTS is disabled in config or the build, the inner backend
+    /// is `NoVoiceOutput` which silently accepts every speak() call.
+    pub voice_output: Arc<VoiceOutputController>,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `run_agent_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
@@ -41,7 +44,7 @@ impl AppState {
         tools: Arc<ToolRegistry>,
         voice: Arc<dyn VoiceInput>,
         listener: Arc<dyn ContinuousListener>,
-        voice_output: Arc<dyn VoiceOutput>,
+        voice_output: Arc<VoiceOutputController>,
     ) -> Self {
         Self {
             config,
@@ -73,6 +76,9 @@ impl AppState {
             Request::ListenStop { id } => self.handle_listen_stop(id, tx).await,
             Request::ListenToggle { id } => self.handle_listen_toggle(id, tx).await,
             Request::GetListenState { id } => self.handle_get_listen_state(id, tx).await,
+            Request::VoiceToggle { id } => self.handle_voice_toggle(id, tx).await,
+            Request::VoiceSkip { id } => self.handle_voice_skip(id, tx).await,
+            Request::GetVoiceState { id } => self.handle_get_voice_state(id, tx).await,
         }
     }
 
@@ -137,21 +143,35 @@ impl AppState {
         let mut sentence_buf = SentenceBuffer::new_with_mode(max_sentence_chars, code_block_mode);
 
         let (speech_tx, mut speech_rx) = mpsc::channel::<String>(32);
-        let voice = self.voice_output.clone();
+        let ctrl = self.voice_output.clone();
+        // Capture the current skip-epoch once. Any later `skip()` (or
+        // `interrupt()`) advances the global epoch and the worker drops
+        // every remaining sentence for THIS query without affecting
+        // future queries spawned with the new epoch.
+        let start_epoch = ctrl.current_epoch();
         let speech_handle = tokio::spawn(async move {
             while let Some(sentence) = speech_rx.recv().await {
-                if let Err(e) = voice.speak(sentence).await {
-                    tracing::debug!(
-                        target: "assistd::voice",
-                        error = %e,
-                        "voice_output.speak failed (non-fatal)"
-                    );
+                match ctrl.should_speak(start_epoch) {
+                    SpeakDecision::Speak => {
+                        if let Err(e) = ctrl.inner().speak(sentence).await {
+                            tracing::debug!(
+                                target: "assistd::voice",
+                                error = %e,
+                                "voice_output.speak failed (non-fatal)"
+                            );
+                        }
+                    }
+                    SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {
+                        // TTS toggled off, or skipped — drain the channel
+                        // without speaking. We still loop so the LLM can
+                        // keep streaming through the bounded mpsc.
+                    }
                 }
             }
             // Channel closed: drain anything still in the audio queue
             // before the worker returns. Any failure here is logged
             // inside wait_idle and downgraded to Ok.
-            if let Err(e) = voice.wait_idle().await {
+            if let Err(e) = ctrl.inner().wait_idle().await {
                 tracing::debug!(
                     target: "assistd::voice",
                     error = %e,
@@ -390,6 +410,10 @@ impl AppState {
     /// connection. Rejects when continuous listening currently owns
     /// the mic; the two modes can't share one cpal stream.
     async fn handle_ptt_start(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
+        // Barge-in: stop any in-flight TTS playback before opening the
+        // mic. Fire unconditionally — even if recording is rejected
+        // below, the user signaled "shut up", which we should honor.
+        self.voice_output.interrupt().await;
         if self.listener.is_active() {
             let _ = tx
                 .send(Event::Error {
@@ -522,6 +546,59 @@ impl AppState {
         Ok(())
     }
 
+    /// Flip TTS on/off at runtime. Off cancels currently-queued audio;
+    /// on is a pure flag flip. Subsequent sentences from the in-flight
+    /// query speak again as soon as the toggle returns. Emits the
+    /// post-toggle `VoiceOutputState` + `Done`.
+    async fn handle_voice_toggle(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        let new_state = !self.voice_output.enabled();
+        self.voice_output.set_enabled(new_state).await;
+        let _ = tx
+            .send(Event::VoiceOutputState {
+                id: id.clone(),
+                enabled: new_state,
+            })
+            .await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
+    /// Abort the current TTS response: drops queued audio and any
+    /// pending sentences for active speech workers. Does not start
+    /// recording. Emits `VoiceOutputState` + `Done`; the enabled flag
+    /// is unchanged.
+    async fn handle_voice_skip(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
+        self.voice_output.skip().await;
+        let _ = tx
+            .send(Event::VoiceOutputState {
+                id: id.clone(),
+                enabled: self.voice_output.enabled(),
+            })
+            .await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
+    /// Report whether TTS is currently enabled.
+    async fn handle_get_voice_state(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        let _ = tx
+            .send(Event::VoiceOutputState {
+                id: id.clone(),
+                enabled: self.voice_output.enabled(),
+            })
+            .await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
     /// End the push-to-talk recording, transcribe, and — if the
     /// transcription has content — dispatch it internally as a Query
     /// so the streaming LLM response flows back on the same
@@ -598,7 +675,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             Arc::new(assistd_voice::NoContinuousListener::new()),
-            Arc::new(assistd_voice::NoVoiceOutput),
+            VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
         ))
     }
 
@@ -613,7 +690,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             voice,
             Arc::new(assistd_voice::NoContinuousListener::new()),
-            Arc::new(assistd_voice::NoVoiceOutput),
+            VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
         ))
     }
 
@@ -628,7 +705,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             listener,
-            Arc::new(assistd_voice::NoVoiceOutput),
+            VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
         ))
     }
 
@@ -809,7 +886,7 @@ mod tests {
             Arc::new(tools),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             Arc::new(assistd_voice::NoContinuousListener::new()),
-            Arc::new(assistd_voice::NoVoiceOutput),
+            VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
         ))
     }
 
@@ -1277,7 +1354,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl VoiceOutput for MockSpeechRecorder {
+    impl assistd_voice::VoiceOutput for MockSpeechRecorder {
         async fn speak(&self, text: String) -> anyhow::Result<()> {
             self.calls.lock().unwrap().push(text);
             Ok(())
@@ -1293,6 +1370,16 @@ mod tests {
         recorder: Arc<MockSpeechRecorder>,
         config: Config,
     ) -> Arc<AppState> {
+        state_with_speech_recorder_and_enabled(backend, recorder, config, true)
+    }
+
+    fn state_with_speech_recorder_and_enabled(
+        backend: Arc<dyn LlmBackend>,
+        recorder: Arc<MockSpeechRecorder>,
+        config: Config,
+        initially_enabled: bool,
+    ) -> Arc<AppState> {
+        let ctrl = VoiceOutputController::new(recorder, initially_enabled);
         Arc::new(AppState::new(
             config,
             backend,
@@ -1300,7 +1387,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             Arc::new(assistd_voice::NoContinuousListener::new()),
-            recorder,
+            ctrl,
         ))
     }
 
@@ -1612,7 +1699,7 @@ mod tests {
             Arc::new(tools),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             Arc::new(assistd_voice::NoContinuousListener::new()),
-            recorder.clone(),
+            VoiceOutputController::new(recorder.clone(), true),
         ));
         let (tx, rx) = mpsc::channel::<Event>(16);
         state
