@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["whisper", "mic", "listen"]
+default = ["whisper", "mic", "listen", "tts"]
 whisper = [
     "dep:whisper-rs",
     "dep:reqwest",
@@ -20,9 +20,21 @@ mic = ["whisper", "dep:cpal", "dep:ringbuf", "dep:rubato"]
 # segmentation that feeds completed utterances to whisper. Sits on top
 # of the `mic` + `whisper` stack.
 listen = ["mic", "dep:webrtc-vad"]
+# Enables `PiperVoiceOutput` — managed per-utterance piper subprocess
+# with rodio playback. Pulls in rodio (which itself uses cpal) and
+# reqwest (shared with whisper) for HuggingFace voice downloads.
+tts = [
+    "dep:rodio",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:reqwest",
+    "dep:futures-util",
+    "dep:assistd-config",
+    "dep:which",
+]
 cuda = ["whisper-rs/cuda"]
 # Gates the integration test that downloads a small model from HuggingFace.
-test-support = ["whisper", "mic", "listen", "dep:hound"]
+test-support = ["whisper", "mic", "listen", "tts", "dep:hound"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -46,6 +58,12 @@ rubato = { version = "0.15", optional = true }
 
 # Continuous listening — streaming voice-activity detection
 webrtc-vad = { version = "0.4", optional = true }
+
+# Piper TTS
+rodio = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+which = { workspace = true, optional = true }
 
 # Test support
 hound = { version = "3.5", optional = true }

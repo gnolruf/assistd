@@ -14,7 +14,9 @@ pub use assistd_config::{
 pub use assistd_ipc as ipc;
 pub use assistd_ipc::{PresenceState, VoiceCaptureState};
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
-pub use assistd_voice::{ContinuousListener, NoContinuousListener, NoVoiceInput, VoiceInput};
+pub use assistd_voice::{
+    ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput, VoiceInput, VoiceOutput,
+};
 pub use presence::{PresenceManager, RequestGuard};
 pub use state::AppState;
 

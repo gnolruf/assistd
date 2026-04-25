@@ -1,7 +1,7 @@
 use anyhow::Result;
 use assistd_core::{
-    AppState, Config, ContinuousListener, NoContinuousListener, NoVoiceInput, PresenceManager,
-    VoiceInput,
+    AppState, Config, ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput,
+    PresenceManager, VoiceInput, VoiceOutput,
 };
 use assistd_llm::LlamaChatClient;
 use assistd_tools::DenyAllGate;
@@ -191,6 +191,33 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         )
     };
 
+    // Voice output (Piper TTS): try-warn-fallback, identical pattern
+    // to voice input above. On any error — missing binary, voice
+    // download fails, audio device unavailable, health-check synth
+    // fails — log a warning and substitute `NoVoiceOutput` so LLM
+    // streaming continues silently.
+    let voice_output: Arc<dyn VoiceOutput> = if config.voice.synthesis.enabled {
+        info!(
+            "voice.synthesis: starting Piper ({})",
+            config.voice.synthesis.voice
+        );
+        match assistd_voice::PiperVoiceOutput::start(config.voice.synthesis.clone()).await {
+            Ok(p) => {
+                info!("voice.synthesis: Piper ready");
+                Arc::new(p)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "voice.synthesis failed to initialize: {e:#}; speech output disabled"
+                );
+                Arc::new(NoVoiceOutput)
+            }
+        }
+    } else {
+        info!("voice.synthesis: disabled in config (voice.synthesis.enabled = false)");
+        Arc::new(NoVoiceOutput)
+    };
+
     let hotkey_handle = hotkey::spawn_listener(
         &config.presence,
         &config.voice,
@@ -227,6 +254,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         tools,
         voice.clone(),
         listener.clone(),
+        voice_output,
     ));
 
     let listen_handles = if continuous_enabled {

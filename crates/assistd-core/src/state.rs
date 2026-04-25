@@ -3,7 +3,7 @@ use anyhow::Result;
 use assistd_ipc::{Event, PresenceState, Request, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_tools::ToolRegistry;
-use assistd_voice::{ContinuousListener, VoiceInput};
+use assistd_voice::{ContinuousListener, SentenceBuffer, VoiceInput, VoiceOutput};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -20,6 +20,10 @@ pub struct AppState {
     pub tools: Arc<ToolRegistry>,
     pub voice: Arc<dyn VoiceInput>,
     pub listener: Arc<dyn ContinuousListener>,
+    /// Speaks LLM responses aloud, sentence by sentence. When TTS is
+    /// disabled in config or the build, this is `NoVoiceOutput` which
+    /// silently accepts every speak() call.
+    pub voice_output: Arc<dyn VoiceOutput>,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `run_agent_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
@@ -36,6 +40,7 @@ impl AppState {
         tools: Arc<ToolRegistry>,
         voice: Arc<dyn VoiceInput>,
         listener: Arc<dyn ContinuousListener>,
+        voice_output: Arc<dyn VoiceOutput>,
     ) -> Self {
         Self {
             config,
@@ -44,6 +49,7 @@ impl AppState {
             tools,
             voice,
             listener,
+            voice_output,
             agent_turn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -115,12 +121,34 @@ impl AppState {
                 async move { run_agent_turn(llm, tools, max_iterations, text, llm_tx).await },
             );
 
+        // Sentence buffer feeds completed sentences to TTS as the LLM
+        // streams. Tool call/result events do not feed it — speaking
+        // tool JSON is annoying. Each completed sentence is fire-and-
+        // forget tokio::spawn so audio playback doesn't block the wire
+        // forward to the client.
+        let max_sentence_chars = self.config.voice.synthesis.max_sentence_chars as usize;
+        let mut sentence_buf = SentenceBuffer::new(max_sentence_chars);
+
         while let Some(llm_event) = llm_rx.recv().await {
             let wire_event = match llm_event {
-                LlmEvent::Delta { text } => Event::Delta {
-                    id: id.clone(),
-                    text,
-                },
+                LlmEvent::Delta { text } => {
+                    for sentence in sentence_buf.push(&text) {
+                        let v = self.voice_output.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = v.speak(sentence).await {
+                                tracing::debug!(
+                                    target: "assistd::voice",
+                                    error = %e,
+                                    "voice_output.speak failed (non-fatal)"
+                                );
+                            }
+                        });
+                    }
+                    Event::Delta {
+                        id: id.clone(),
+                        text,
+                    }
+                }
                 LlmEvent::ToolCall {
                     id: _call_id,
                     name,
@@ -139,7 +167,21 @@ impl AppState {
                     name,
                     result,
                 },
-                LlmEvent::Done => Event::Done { id: id.clone() },
+                LlmEvent::Done => {
+                    if let Some(tail) = sentence_buf.finish() {
+                        let v = self.voice_output.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = v.speak(tail).await {
+                                tracing::debug!(
+                                    target: "assistd::voice",
+                                    error = %e,
+                                    "voice_output.speak (final) failed (non-fatal)"
+                                );
+                            }
+                        });
+                    }
+                    Event::Done { id: id.clone() }
+                }
             };
             if tx.send(wire_event).await.is_err() {
                 // Client has disconnected; stop forwarding events.
@@ -451,6 +493,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             Arc::new(assistd_voice::NoContinuousListener::new()),
+            Arc::new(assistd_voice::NoVoiceOutput),
         ))
     }
 
@@ -465,6 +508,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             voice,
             Arc::new(assistd_voice::NoContinuousListener::new()),
+            Arc::new(assistd_voice::NoVoiceOutput),
         ))
     }
 
@@ -479,6 +523,7 @@ mod tests {
             Arc::new(ToolRegistry::default()),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             listener,
+            Arc::new(assistd_voice::NoVoiceOutput),
         ))
     }
 
@@ -659,6 +704,7 @@ mod tests {
             Arc::new(tools),
             Arc::new(assistd_voice::NoVoiceInput::new()),
             Arc::new(assistd_voice::NoContinuousListener::new()),
+            Arc::new(assistd_voice::NoVoiceOutput),
         ))
     }
 

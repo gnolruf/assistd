@@ -207,6 +207,48 @@ impl Config {
             }
         }
 
+        // Synthesis (Piper TTS) is gated independently of voice.enabled —
+        // a user might want LLM responses spoken aloud even with no
+        // microphone available.
+        if self.voice.synthesis.enabled {
+            let s = &self.voice.synthesis;
+            if s.binary_path.trim().is_empty() {
+                errors.push(
+                    "voice.synthesis.binary_path must not be empty when synthesis is enabled"
+                        .into(),
+                );
+            }
+            if s.voice.trim().is_empty() {
+                errors.push("voice.synthesis.voice must not be empty".into());
+            } else if !is_valid_hf_id(&s.voice) {
+                errors.push(
+                    "voice.synthesis.voice must be of the form '<owner>/<repo>:<file>'".into(),
+                );
+            }
+            if !s.length_scale.is_finite() || s.length_scale <= 0.0 {
+                errors
+                    .push("voice.synthesis.length_scale must be a positive, finite number".into());
+            }
+            if !s.noise_scale.is_finite() || !(0.0..=5.0).contains(&s.noise_scale) {
+                errors.push("voice.synthesis.noise_scale must be in the range 0.0..=5.0".into());
+            }
+            if !s.noise_w.is_finite() || !(0.0..=5.0).contains(&s.noise_w) {
+                errors.push("voice.synthesis.noise_w must be in the range 0.0..=5.0".into());
+            }
+            if !s.sentence_silence_secs.is_finite() || s.sentence_silence_secs < 0.0 {
+                errors.push(
+                    "voice.synthesis.sentence_silence_secs must be a non-negative, finite number"
+                        .into(),
+                );
+            }
+            if s.deadline_secs == 0 {
+                errors.push("voice.synthesis.deadline_secs must be greater than 0".into());
+            }
+            if s.max_sentence_chars < 50 {
+                errors.push("voice.synthesis.max_sentence_chars must be at least 50".into());
+            }
+        }
+
         if self.sleep.idle_to_drowsy_mins > 0
             && self.sleep.idle_to_sleep_mins > 0
             && self.sleep.idle_to_sleep_mins <= self.sleep.idle_to_drowsy_mins
