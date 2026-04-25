@@ -144,6 +144,24 @@ fn agent_defaults_match_constants() {
 }
 
 #[test]
+fn synthesis_defaults_match_constants() {
+    let c = SynthesisConfig::default();
+    assert_eq!(c.enabled, DEFAULT_PIPER_ENABLED);
+    assert_eq!(c.binary_path, DEFAULT_PIPER_BINARY);
+    assert_eq!(c.voice, DEFAULT_PIPER_VOICE);
+    assert!(c.model_cache_dir.is_none());
+    assert_eq!(c.length_scale, DEFAULT_PIPER_LENGTH_SCALE);
+    assert_eq!(c.noise_scale, DEFAULT_PIPER_NOISE_SCALE);
+    assert_eq!(c.noise_w, DEFAULT_PIPER_NOISE_W);
+    assert_eq!(c.sentence_silence_secs, DEFAULT_PIPER_SENTENCE_SILENCE_SECS);
+    assert!(c.espeak_data_dir.is_none());
+    assert_eq!(c.deadline_secs, DEFAULT_PIPER_DEADLINE_SECS);
+    assert_eq!(c.max_sentence_chars, DEFAULT_PIPER_MAX_SENTENCE_CHARS);
+    assert_eq!(c.partial_flush_ms, DEFAULT_PIPER_PARTIAL_FLUSH_MS);
+    assert_eq!(c.code_block_mode, CodeBlockMode::Skip);
+}
+
+#[test]
 fn minimal_fixture_parses_and_validates() {
     let cfg = fixtures::minimal();
     cfg.validate().expect("minimal fixture must validate");

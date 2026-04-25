@@ -1,7 +1,8 @@
 //! Streaming sentence segmenter that sits between the LLM token stream
-//! and Piper. Strips markdown, drops fenced code blocks entirely, and
-//! flushes whole sentences to TTS so utterances align with natural
-//! prosody boundaries instead of arbitrary token boundaries.
+//! and Piper. Strips markdown, handles fenced code blocks per the
+//! configured [`CodeBlockMode`], and flushes whole sentences to TTS so
+//! utterances align with natural prosody boundaries instead of arbitrary
+//! token boundaries.
 //!
 //! Boundary priority (highest first):
 //!   1. Paragraph break `\n\n`
@@ -10,8 +11,20 @@
 //!      decimal-number guard (3.14)
 //!   3. Bullet list marker `\n- ` or `\n* `
 //!   4. Length safety net at `max_len` chars (last whitespace before)
+//!
+//! Two flush modes are exposed alongside the streaming `push`:
+//!   - [`SentenceBuffer::finish`] — terminal flush on `LlmEvent::Done`.
+//!   - [`SentenceBuffer::flush_idle`] — mid-stream "the LLM has paused"
+//!     flush, called on an idle timeout. Preserves fence/lang state so
+//!     the stream can resume cleanly.
 
 use std::collections::VecDeque;
+
+pub use assistd_config::CodeBlockMode;
+
+/// Cap on captured fence-opener language tags. Defends against
+/// pathological input — a real lang is at most a few chars.
+const MAX_LANG_LEN: usize = 32;
 
 const ABBREVIATIONS: &[&str] = &[
     "Mr", "Mrs", "Ms", "Dr", "St", "Sr", "Jr", "Inc", "Ltd", "Co", "etc", "vs", "e.g", "i.e",
@@ -29,15 +42,35 @@ pub struct SentenceBuffer {
     /// small — only enough lookahead to spot a fence opener / closer.
     pending: String,
     max_len: usize,
+    /// How fence content is treated.
+    mode: CodeBlockMode,
+    /// True from the moment a fence opens until we see whitespace —
+    /// the chars in this window are the language tag (e.g. `rust`,
+    /// `python`) on the opener line.
+    capturing_lang: bool,
+    /// Captured fence-opener language tag. Used in `Summarize` mode to
+    /// produce phrases like "Code block in rust." on close.
+    lang_buf: String,
 }
 
 impl SentenceBuffer {
+    /// Construct with the default [`CodeBlockMode::Skip`] — drop fenced
+    /// content silently. Equivalent to
+    /// `new_with_mode(max_len, CodeBlockMode::Skip)`.
     pub fn new(max_len: usize) -> Self {
+        Self::new_with_mode(max_len, CodeBlockMode::Skip)
+    }
+
+    /// Construct with a specific code-block handling mode.
+    pub fn new_with_mode(max_len: usize, mode: CodeBlockMode) -> Self {
         Self {
             buf: String::new(),
             in_code_fence: false,
             pending: String::new(),
             max_len: max_len.max(50),
+            mode,
+            capturing_lang: false,
+            lang_buf: String::new(),
         }
     }
 
@@ -65,8 +98,44 @@ impl SentenceBuffer {
         }
         self.in_code_fence = false;
         self.pending.clear();
+        self.capturing_lang = false;
+        self.lang_buf.clear();
         let raw = std::mem::take(&mut self.buf);
         let speech = postprocess_for_speech(&raw);
+        if speech.is_empty() {
+            None
+        } else {
+            Some(speech)
+        }
+    }
+
+    /// Mid-stream flush triggered by an idle timeout (the LLM has
+    /// paused without emitting a terminator). Returns the buffered
+    /// content up to the last whitespace boundary, leaving any
+    /// trailing partial word in the buffer so it isn't double-spoken
+    /// when the stream resumes. Preserves `pending`, `in_code_fence`,
+    /// `capturing_lang`, and `lang_buf` — call this freely without
+    /// disturbing in-flight fence detection.
+    ///
+    /// Returns `None` when:
+    ///   - we're inside a code fence (stay quiet, the fence is the
+    ///     authoritative boundary),
+    ///   - the buffer has no whitespace to cut on (i.e. it's a single
+    ///     partial word — wait for more input),
+    ///   - the cut prefix postprocesses to an empty string.
+    pub fn flush_idle(&mut self) -> Option<String> {
+        if self.in_code_fence {
+            return None;
+        }
+        let cut = self.buf.rfind(char::is_whitespace)?;
+        // Take everything up to and including the whitespace; leave any
+        // trailing partial word in `buf` for the next push to complete.
+        let mut end = cut + self.buf[cut..].chars().next()?.len_utf8();
+        while !self.buf.is_char_boundary(end) && end < self.buf.len() {
+            end += 1;
+        }
+        let prefix: String = self.buf.drain(..end).collect();
+        let speech = postprocess_for_speech(&prefix);
         if speech.is_empty() {
             None
         } else {
@@ -80,18 +149,53 @@ impl SentenceBuffer {
         if ch == '`' {
             self.pending.push('`');
             if self.pending.ends_with("```") {
+                let opening = !self.in_code_fence;
                 self.in_code_fence = !self.in_code_fence;
                 self.pending.truncate(self.pending.len() - 3);
-                if !self.in_code_fence {
+                if opening {
+                    // Treat the fence opener as a paragraph break so
+                    // anything in `buf` is flushed first — preserves
+                    // ordering between the prelude and any synthetic
+                    // "Code block ..." phrase emitted on close.
+                    self.flush_buf_to_out(out);
+                    self.capturing_lang = matches!(self.mode, CodeBlockMode::Summarize);
+                    self.lang_buf.clear();
+                } else {
                     // Closing fence: the pending pre-fence prefix is
                     // discarded along with the fenced content.
                     self.pending.clear();
+                    if matches!(self.mode, CodeBlockMode::Summarize) {
+                        let phrase = if self.lang_buf.is_empty() {
+                            "Code block.".to_string()
+                        } else {
+                            format!("Code block in {}.", self.lang_buf)
+                        };
+                        out.push(phrase);
+                    }
+                    self.capturing_lang = false;
+                    self.lang_buf.clear();
                 }
             }
             return;
         }
 
         if self.in_code_fence {
+            if self.capturing_lang {
+                // Whitespace ends the lang tag; non-whitespace ASCII
+                // chars (within cap) form it. Anything else stops
+                // capture without recording.
+                if ch.is_whitespace() {
+                    self.capturing_lang = false;
+                } else if self.lang_buf.len() < MAX_LANG_LEN
+                    && (ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '_')
+                {
+                    self.lang_buf.push(ch);
+                } else {
+                    // Reject this char (e.g. punctuation or oversize) —
+                    // stop capturing but keep what we have.
+                    self.capturing_lang = false;
+                }
+            }
             // Drop fenced content.
             self.pending.clear();
             return;
@@ -113,6 +217,21 @@ impl SentenceBuffer {
         // Scan opportunistically as content arrives. Cheap because we
         // only inspect the suffix.
         self.scan_boundaries(out);
+    }
+
+    /// Drain whatever's in `buf` as a single sentence (postprocessed).
+    /// Used at fence-open so any prelude is spoken in order, before the
+    /// synthetic "Code block..." phrase that may follow on close.
+    fn flush_buf_to_out(&mut self, out: &mut Vec<String>) {
+        if self.buf.trim().is_empty() {
+            self.buf.clear();
+            return;
+        }
+        let raw = std::mem::take(&mut self.buf);
+        let speech = postprocess_for_speech(&raw);
+        if !speech.is_empty() {
+            out.push(speech);
+        }
     }
 
     fn scan_boundaries(&mut self, out: &mut Vec<String>) {
@@ -646,5 +765,140 @@ mod tests {
         // `\n` after `.` should let it split even without uppercase.
         // Each "Item one." ends with period+newline.
         assert!(!s.is_empty());
+    }
+
+    // ---- flush_idle ----
+
+    #[test]
+    fn flush_idle_emits_at_last_whitespace() {
+        let mut b = SentenceBuffer::new(400);
+        let _ = b.push("I am writ");
+        // Trailing partial word "writ" stays buffered; "I am " flushes.
+        let out = b.flush_idle();
+        assert_eq!(out.as_deref(), Some("I am"));
+        // Resume: pushing the rest completes the sentence cleanly.
+        let s = b.push("ing now. Done.");
+        assert_eq!(s, vec!["writing now."]);
+        assert_eq!(b.finish().as_deref(), Some("Done."));
+    }
+
+    #[test]
+    fn flush_idle_returns_none_on_pure_whitespace() {
+        let mut b = SentenceBuffer::new(400);
+        let _ = b.push("   \t  ");
+        assert!(b.flush_idle().is_none());
+    }
+
+    #[test]
+    fn flush_idle_returns_none_in_code_fence() {
+        let mut b = SentenceBuffer::new(400);
+        let _ = b.push("```rust\nfn main");
+        // Inside a fence — stay quiet, don't flush partial code.
+        assert!(b.flush_idle().is_none());
+    }
+
+    #[test]
+    fn flush_idle_returns_none_on_single_partial_word() {
+        let mut b = SentenceBuffer::new(400);
+        let _ = b.push("writ");
+        // No whitespace boundary → wait for more input.
+        assert!(b.flush_idle().is_none());
+    }
+
+    #[test]
+    fn flush_idle_can_be_called_repeatedly_without_loss() {
+        let mut b = SentenceBuffer::new(400);
+        let _ = b.push("Hello world ");
+        // First idle flush takes "Hello world".
+        let first = b.flush_idle();
+        assert_eq!(first.as_deref(), Some("Hello world"));
+        // Buffer empty now — nothing more to flush.
+        assert!(b.flush_idle().is_none());
+        // Stream resumes; subsequent push completes a sentence.
+        let s = b.push("again. End.");
+        assert_eq!(s, vec!["again.".to_string()]);
+        assert_eq!(b.finish().as_deref(), Some("End."));
+    }
+
+    // ---- code-block mode ----
+
+    #[test]
+    fn code_block_skip_drops_content_default() {
+        let mut b = SentenceBuffer::new(400);
+        let s = push_all(
+            &mut b,
+            &["Prelude. ", "```rust\nfn main() {}\n```", " Tail end."],
+        );
+        let joined = s.join(" | ");
+        let tail = b.finish().unwrap_or_default();
+        let all = format!("{joined} {tail}");
+        assert!(!all.contains("fn main"), "code leaked: {all:?}");
+        assert!(!all.contains("Code block"), "summary leaked: {all:?}");
+    }
+
+    #[test]
+    fn code_block_summarize_emits_phrase_with_lang() {
+        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
+        let s = push_all(
+            &mut b,
+            &["Prelude. ", "```rust\nfn main() {}\n```", " Tail end."],
+        );
+        let joined = s.join(" | ");
+        let tail = b.finish().unwrap_or_default();
+        let all = format!("{joined} {tail}");
+        assert!(!all.contains("fn main"), "code leaked: {all:?}");
+        assert!(
+            all.contains("Code block in rust"),
+            "expected lang-tagged summary: {all:?}"
+        );
+        // Order: prelude before summary before tail.
+        let prelude_pos = all.find("Prelude").expect("prelude present");
+        let summary_pos = all.find("Code block").expect("summary present");
+        let tail_pos = all.find("Tail end").expect("tail present");
+        assert!(prelude_pos < summary_pos, "got: {all:?}");
+        assert!(summary_pos < tail_pos, "got: {all:?}");
+    }
+
+    #[test]
+    fn code_block_summarize_no_lang_tag() {
+        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
+        let s = push_all(&mut b, &["```\nopaque content\n```", " After."]);
+        // No language tag → "Code block." with no suffix.
+        assert!(
+            s.iter().any(|x| x == "Code block."),
+            "expected exactly \"Code block.\": {s:?}"
+        );
+        assert!(
+            !s.iter().any(|x| x.contains("Code block in")),
+            "should not have a lang suffix: {s:?}"
+        );
+    }
+
+    #[test]
+    fn code_block_summarize_lang_tag_capped_no_panic() {
+        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
+        let long_lang: String = "a".repeat(100);
+        let _ = b.push(&format!("```{long_lang}\nfoo\n```"));
+        let _ = b.finish();
+        // Just asserting no panic on oversize lang tag.
+    }
+
+    #[test]
+    fn code_block_summarize_emits_only_after_close() {
+        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
+        // Open fence + content but no close → no summary on finish.
+        let _ = b.push("```python\nprint('hi')\n");
+        // No close fence yet: nothing emitted.
+        let s = b.push("");
+        assert!(
+            s.iter().all(|x| !x.contains("Code block")),
+            "summary emitted prematurely: {s:?}"
+        );
+        // Closing fence yields the summary.
+        let s2 = b.push("```");
+        assert!(
+            s2.iter().any(|x| x.contains("Code block in python")),
+            "expected summary on close: {s2:?}"
+        );
     }
 }

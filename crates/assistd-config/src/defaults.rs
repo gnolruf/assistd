@@ -57,6 +57,11 @@ pub const DEFAULT_PIPER_NOISE_W: f32 = 0.8;
 pub const DEFAULT_PIPER_SENTENCE_SILENCE_SECS: f32 = 0.2;
 pub const DEFAULT_PIPER_DEADLINE_SECS: u32 = 30;
 pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: u32 = 400;
+/// Idle gap (ms) between LLM deltas after which the sentence buffer is
+/// flushed even without a terminator. `0` disables the timeout flush —
+/// only the terminal `Done`-based flush is used. Inhibited while a tool
+/// call is in flight (the LLM is waiting on a tool, not stalled).
+pub const DEFAULT_PIPER_PARTIAL_FLUSH_MS: u32 = 750;
 
 pub const DEFAULT_LISTEN_ENABLED: bool = false;
 pub const DEFAULT_LISTEN_START_ON_LAUNCH: bool = false;
