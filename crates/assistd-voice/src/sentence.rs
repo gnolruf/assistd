@@ -548,12 +548,24 @@ mod tests {
     #[test]
     fn length_cap_flushes_at_whitespace() {
         let mut b = SentenceBuffer::new(50);
-        // 60 chars no terminator
-        let _ = b.push("aaaaaaaaa bbbbbbbbb ccccccccc ddddddddd eeeeeeeee fffffffff");
-        let tail = b.finish();
-        // Something must have flushed before the cap.
-        // The buffer can't hold all 60 chars without a flush.
-        assert!(tail.is_some() || true);
+        // 59 chars, no terminator: at 50 chars the safety net fires
+        // and flushes at the last whitespace before the cap.
+        let s = b.push("aaaaaaaaa bbbbbbbbb ccccccccc ddddddddd eeeeeeeee fffffffff");
+        assert!(
+            !s.is_empty(),
+            "length cap should have produced at least one flush"
+        );
+        // First flushed sentence must end at a whitespace boundary,
+        // not mid-word.
+        assert!(
+            !s[0].ends_with(['a', 'b', 'c']),
+            "should not split mid-word: {:?}",
+            s[0]
+        );
+        // Whatever's left lands in finish().
+        let tail = b.finish().unwrap_or_default();
+        let total: usize = s.iter().map(|x| x.len()).sum::<usize>() + tail.len();
+        assert!(total > 0, "should have spoken something total");
     }
 
     #[test]

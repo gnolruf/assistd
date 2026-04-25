@@ -10,9 +10,11 @@ use assistd_voice::PiperVoiceOutput;
 
 #[tokio::test]
 async fn start_returns_err_when_binary_is_missing() {
-    let mut cfg = SynthesisConfig::default();
-    cfg.enabled = true;
-    cfg.binary_path = "/definitely/not/a/real/piper/binary/path".into();
+    let cfg = SynthesisConfig {
+        enabled: true,
+        binary_path: "/definitely/not/a/real/piper/binary/path".into(),
+        ..SynthesisConfig::default()
+    };
 
     let err = match PiperVoiceOutput::start(cfg).await {
         Ok(_) => panic!("expected PiperError::BinaryMissing"),
@@ -30,12 +32,14 @@ async fn start_returns_err_when_voice_id_is_invalid() {
     // A valid-on-PATH binary doesn't exist in CI sandboxes either, so
     // we skip the voice-parse path and just confirm a malformed HF id
     // is rejected without ever spawning a process.
-    let mut cfg = SynthesisConfig::default();
-    cfg.enabled = true;
-    // Point at a fake binary so the binary check fails first; we
-    // really just care that bad config errors out predictably.
-    cfg.binary_path = "/no/such/binary".into();
-    cfg.voice = "not-a-valid-hf-id".into();
+    let cfg = SynthesisConfig {
+        enabled: true,
+        // Point at a fake binary so the binary check fails first; we
+        // really just care that bad config errors out predictably.
+        binary_path: "/no/such/binary".into(),
+        voice: "not-a-valid-hf-id".into(),
+        ..SynthesisConfig::default()
+    };
 
     let err = match PiperVoiceOutput::start(cfg).await {
         Ok(_) => panic!("expected an error from start()"),
