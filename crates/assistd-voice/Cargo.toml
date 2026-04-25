@@ -10,7 +10,6 @@ whisper = [
     "dep:whisper-rs",
     "dep:reqwest",
     "dep:nvml-wrapper",
-    "dep:assistd-config",
     "dep:futures-util",
 ]
 # Enables `MicVoiceInput` — cpal capture, SPSC ring buffer, resampler.
@@ -29,7 +28,6 @@ tts = [
     "dep:serde_json",
     "dep:reqwest",
     "dep:futures-util",
-    "dep:assistd-config",
     "dep:which",
 ]
 cuda = ["whisper-rs/cuda"]
@@ -43,12 +41,14 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 assistd-ipc = { workspace = true }
+# `assistd-config` is required unconditionally because `sentence` (built
+# in every feature combination) consumes the `CodeBlockMode` enum.
+assistd-config = { workspace = true }
 
 # Whisper backend
 whisper-rs = { version = "0.16", optional = true, default-features = false, features = ["tracing_backend"] }
 reqwest = { workspace = true, optional = true, features = ["stream"] }
 nvml-wrapper = { workspace = true, optional = true }
-assistd-config = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
 # Mic backend

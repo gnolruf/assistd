@@ -118,10 +118,8 @@ impl RodioPlaybackWorker {
         rx.await.map_err(|_| PiperError::PlaybackClosed)
     }
 
-    /// Drop pending audio — used to interrupt mid-utterance. Not
-    /// wired into `speak()` for v1 but exposed so a future "shut up"
-    /// IPC command can land without re-architecting.
-    #[allow(dead_code)]
+    /// Drop pending audio — used to interrupt mid-utterance via
+    /// `VoiceOutput::cancel`.
     pub fn clear(&self) {
         self.player.clear();
     }

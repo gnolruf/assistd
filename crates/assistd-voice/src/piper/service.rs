@@ -1,7 +1,13 @@
 //! `PiperVoiceOutput` — the assembled façade implementing
 //! [`crate::VoiceOutput`]. Owns one [`OneShotSynth`] and one
 //! [`RodioPlaybackWorker`] for the daemon's lifetime; speak() runs the
-//! per-utterance subprocess and queues PCM on the playback worker.
+//! per-utterance subprocess and appends PCM to the playback queue.
+//!
+//! `speak()` returns once PCM has been enqueued — *not* once playback
+//! finishes. Sequential calls produce back-to-back audio because
+//! `rodio::Player`'s queue is FIFO and drained continuously by the
+//! audio thread. Callers that need to await drain (e.g. on shutdown)
+//! call [`crate::VoiceOutput::wait_idle`].
 //!
 //! Circuit breaker: synthesis failures are timestamped in a small
 //! ringbuffer. After 3 failures within 60 seconds the service flips
@@ -202,20 +208,42 @@ impl VoiceOutput for PiperVoiceOutput {
             return Ok(());
         }
 
-        // Honor the trait contract: speak() returns when playback
-        // finishes. Without this, multiple concurrent speak() calls
-        // would interleave audio.
+        // Don't drain here — that would force every utterance to wait
+        // for the previous one to finish playing before its synth
+        // could start, opening a ~50–250 ms audible gap between
+        // sentences. Sequential `speak` calls append to the same FIFO
+        // and play back-to-back. Callers await drain via `wait_idle()`.
+        self.record_success();
+        Ok(())
+    }
+
+    async fn wait_idle(&self) -> Result<()> {
+        // Skip the drain entirely when degraded — there's nothing to
+        // wait for and `playback.drain()` would still happily block
+        // for any in-flight non-piper PCM, but in practice a degraded
+        // service has no inflight work, so this is safe.
+        {
+            let s = self.state.lock().expect("piper state mutex poisoned");
+            if matches!(s.ready, ReadyState::Degraded { .. }) {
+                return Ok(());
+            }
+        }
         if let Err(e) = self.playback.drain().await {
             tracing::warn!(
                 target: "assistd::voice::piper",
                 error = %e,
                 "piper playback drain failed"
             );
-            self.record_failure(&e);
+            // Don't trip the breaker on a drain failure — drain is
+            // an end-of-stream best-effort, not synth.
             return Ok(());
         }
-
-        self.record_success();
         Ok(())
+    }
+
+    async fn cancel(&self) {
+        // Drop everything currently queued. Used for "shut up" /
+        // barge-in — the next speak() starts fresh.
+        self.playback.clear();
     }
 }

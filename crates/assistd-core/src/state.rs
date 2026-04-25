@@ -5,6 +5,7 @@ use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_tools::ToolRegistry;
 use assistd_voice::{ContinuousListener, SentenceBuffer, VoiceInput, VoiceOutput};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
 /// Shared, long-lived daemon state handed to every request handler.
@@ -121,75 +122,177 @@ impl AppState {
                 async move { run_agent_turn(llm, tools, max_iterations, text, llm_tx).await },
             );
 
-        // Sentence buffer feeds completed sentences to TTS as the LLM
-        // streams. Tool call/result events do not feed it — speaking
-        // tool JSON is annoying. Each completed sentence is fire-and-
-        // forget tokio::spawn so audio playback doesn't block the wire
-        // forward to the client.
-        let max_sentence_chars = self.config.voice.synthesis.max_sentence_chars as usize;
-        let mut sentence_buf = SentenceBuffer::new(max_sentence_chars);
+        // Sentence buffer + speech worker. Each completed sentence is
+        // sent to a per-query worker task that calls voice_output.speak
+        // serially. Speak returns post-enqueue (not post-playback), so
+        // the worker keeps Piper's stdout pipeline ahead of the audio
+        // queue and there's no audible gap between utterances.
+        //
+        // Buffer = 32 ≈ 2 minutes of queued speech — absorbs Piper
+        // hiccups without backpressuring the IPC client wire forward.
+        let synthesis = &self.config.voice.synthesis;
+        let max_sentence_chars = synthesis.max_sentence_chars as usize;
+        let code_block_mode = synthesis.code_block_mode;
+        let partial_flush_ms = synthesis.partial_flush_ms;
+        let mut sentence_buf = SentenceBuffer::new_with_mode(max_sentence_chars, code_block_mode);
 
-        while let Some(llm_event) = llm_rx.recv().await {
-            let wire_event = match llm_event {
+        let (speech_tx, mut speech_rx) = mpsc::channel::<String>(32);
+        let voice = self.voice_output.clone();
+        let speech_handle = tokio::spawn(async move {
+            while let Some(sentence) = speech_rx.recv().await {
+                if let Err(e) = voice.speak(sentence).await {
+                    tracing::debug!(
+                        target: "assistd::voice",
+                        error = %e,
+                        "voice_output.speak failed (non-fatal)"
+                    );
+                }
+            }
+            // Channel closed: drain anything still in the audio queue
+            // before the worker returns. Any failure here is logged
+            // inside wait_idle and downgraded to Ok.
+            if let Err(e) = voice.wait_idle().await {
+                tracing::debug!(
+                    target: "assistd::voice",
+                    error = %e,
+                    "voice_output.wait_idle failed (non-fatal)"
+                );
+            }
+        });
+
+        // Tool calls inhibit the idle-flush — the LLM is *waiting on a
+        // tool*, not stalled mid-prose. Without this, a long-running
+        // bash command would trigger spurious mid-sentence flushes.
+        let mut awaiting_tool_result = false;
+        let partial_flush = if partial_flush_ms > 0 {
+            Some(Duration::from_millis(partial_flush_ms as u64))
+        } else {
+            None
+        };
+
+        let mut client_alive = true;
+
+        loop {
+            let llm_event = match (partial_flush, awaiting_tool_result) {
+                (Some(d), false) => match tokio::time::timeout(d, llm_rx.recv()).await {
+                    Ok(Some(ev)) => ev,
+                    Ok(None) => break,
+                    Err(_) => {
+                        // Idle timeout: flush partial sentence (if any)
+                        // without disturbing fence state.
+                        if let Some(partial) = sentence_buf.flush_idle()
+                            && speech_tx.send(partial).await.is_err()
+                        {
+                            tracing::debug!(
+                                target: "assistd::voice",
+                                "speech worker channel closed; dropping idle flush"
+                            );
+                        }
+                        continue;
+                    }
+                },
+                _ => match llm_rx.recv().await {
+                    Some(ev) => ev,
+                    None => break,
+                },
+            };
+
+            // Build the wire event. Sentence-buffer pushes happen
+            // here too — but the wire event is sent BEFORE any
+            // speech_tx.send below, so client display latency stays
+            // independent of TTS backpressure.
+            let (wire_event, sentences_to_speak): (Event, Vec<String>) = match llm_event {
                 LlmEvent::Delta { text } => {
-                    for sentence in sentence_buf.push(&text) {
-                        let v = self.voice_output.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = v.speak(sentence).await {
-                                tracing::debug!(
-                                    target: "assistd::voice",
-                                    error = %e,
-                                    "voice_output.speak failed (non-fatal)"
-                                );
-                            }
-                        });
-                    }
-                    Event::Delta {
-                        id: id.clone(),
-                        text,
-                    }
+                    let sentences = sentence_buf.push(&text);
+                    (
+                        Event::Delta {
+                            id: id.clone(),
+                            text,
+                        },
+                        sentences,
+                    )
                 }
                 LlmEvent::ToolCall {
                     id: _call_id,
                     name,
                     arguments,
-                } => Event::ToolCall {
-                    id: id.clone(),
-                    name,
-                    args: arguments,
-                },
+                } => {
+                    awaiting_tool_result = true;
+                    (
+                        Event::ToolCall {
+                            id: id.clone(),
+                            name,
+                            args: arguments,
+                        },
+                        Vec::new(),
+                    )
+                }
                 LlmEvent::ToolResult {
                     id: _call_id,
                     name,
                     result,
-                } => Event::ToolResult {
-                    id: id.clone(),
-                    name,
-                    result,
-                },
+                } => {
+                    awaiting_tool_result = false;
+                    (
+                        Event::ToolResult {
+                            id: id.clone(),
+                            name,
+                            result,
+                        },
+                        Vec::new(),
+                    )
+                }
                 LlmEvent::Done => {
-                    if let Some(tail) = sentence_buf.finish() {
-                        let v = self.voice_output.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = v.speak(tail).await {
-                                tracing::debug!(
-                                    target: "assistd::voice",
-                                    error = %e,
-                                    "voice_output.speak (final) failed (non-fatal)"
-                                );
-                            }
-                        });
-                    }
-                    Event::Done { id: id.clone() }
+                    let tail = sentence_buf.finish();
+                    let sentences = tail.into_iter().collect();
+                    (Event::Done { id: id.clone() }, sentences)
                 }
             };
-            if tx.send(wire_event).await.is_err() {
-                // Client has disconnected; stop forwarding events.
+
+            // Forward wire event first.
+            if client_alive && tx.send(wire_event).await.is_err() {
+                client_alive = false;
+            }
+
+            // Then enqueue speech (in arrival order). Channel send
+            // failure means the worker died — log and continue; we
+            // still want to forward remaining wire events.
+            for s in sentences_to_speak {
+                if speech_tx.send(s).await.is_err() {
+                    tracing::debug!(
+                        target: "assistd::voice",
+                        "speech worker channel closed; dropping sentence"
+                    );
+                    break;
+                }
+            }
+
+            if !client_alive {
+                // Client gone: stop pulling from llm_rx so the agent
+                // loop's tx.is_closed() check fires at its next
+                // iteration boundary. The worker keeps draining
+                // queued audio.
                 break;
             }
         }
 
-        match generator.await {
+        // Stop the speech pipeline. Dropping speech_tx tells the worker
+        // to consume the remainder of its channel and then run
+        // wait_idle() — playback finishes naturally.
+        drop(speech_tx);
+
+        // Wait for the agent turn to finish so we know whether to
+        // surface a backend error. The agent_turn_lock can be released
+        // as soon as the turn ends — concurrent queries shouldn't wait
+        // for audio to finish playing.
+        let gen_result = generator.await;
+        drop(_agent_guard);
+
+        // Now await the speech worker. _request_guard is still held so
+        // presence stays Active through playback.
+        let _ = speech_handle.await;
+
+        match gen_result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => {
                 let _ = tx
@@ -484,6 +587,8 @@ mod tests {
     use assistd_config::ToolsOutputConfig;
     use assistd_llm::{EchoBackend, FailedBackend, StepOutcome, ToolCall, ToolResultPayload};
     use assistd_tools::{CommandRegistry, RunTool, commands::EchoCommand};
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_state(backend: Arc<dyn LlmBackend>, initial_state: PresenceState) -> Arc<AppState> {
         Arc::new(AppState::new(
@@ -1143,5 +1248,420 @@ mod tests {
             }
             other => panic!("expected terminal Error, got {other:?}"),
         }
+    }
+
+    // ---- TTS streaming tests ----
+
+    /// Records every speak() in arrival order. Tests assert order and
+    /// content. wait_idle() is counted so cleanup behavior is testable.
+    struct MockSpeechRecorder {
+        calls: StdMutex<Vec<String>>,
+        wait_idle_calls: AtomicUsize,
+    }
+
+    impl MockSpeechRecorder {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: StdMutex::new(Vec::new()),
+                wait_idle_calls: AtomicUsize::new(0),
+            })
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn wait_idle_count(&self) -> usize {
+            self.wait_idle_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl VoiceOutput for MockSpeechRecorder {
+        async fn speak(&self, text: String) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(text);
+            Ok(())
+        }
+        async fn wait_idle(&self) -> anyhow::Result<()> {
+            self.wait_idle_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn state_with_speech_recorder(
+        backend: Arc<dyn LlmBackend>,
+        recorder: Arc<MockSpeechRecorder>,
+        config: Config,
+    ) -> Arc<AppState> {
+        Arc::new(AppState::new(
+            config,
+            backend,
+            PresenceManager::stub(PresenceState::Active),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(assistd_voice::NoVoiceInput::new()),
+            Arc::new(assistd_voice::NoContinuousListener::new()),
+            recorder,
+        ))
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_speaks_sentences_in_order() {
+        // EchoBackend emits the input as a single Delta. SentenceBuffer
+        // pushes that into 4 sentences (3 from push, 1 from finish).
+        // The new per-query speech worker MUST consume them in arrival
+        // order — the previous fire-and-forget tokio::spawn pattern
+        // could scramble them based on synthesis time.
+        let recorder = MockSpeechRecorder::new();
+        let state = state_with_speech_recorder(
+            Arc::new(EchoBackend::new()),
+            recorder.clone(),
+            Config::default(),
+        );
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .dispatch(
+                Request::Query {
+                    id: "ord".into(),
+                    text: "First. Second. Third. End.".into(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let _ = collect_events(rx).await;
+
+        let calls = recorder.calls();
+        assert_eq!(
+            calls,
+            vec![
+                "First.".to_string(),
+                "Second.".to_string(),
+                "Third.".to_string(),
+                "End.".to_string(),
+            ],
+            "sentences must be spoken in arrival order"
+        );
+        // Worker drained before handle_query returned.
+        assert_eq!(recorder.wait_idle_count(), 1);
+    }
+
+    /// Backend whose `step` emits a scripted sequence of deltas (with
+    /// optional sleeps between them) on the first call, then `Final`
+    /// on subsequent calls.
+    struct StreamingDeltaBackend {
+        script: StdMutex<Option<Vec<DeltaScript>>>,
+    }
+
+    enum DeltaScript {
+        Text(&'static str),
+        Sleep(Duration),
+    }
+
+    impl StreamingDeltaBackend {
+        fn new(script: Vec<DeltaScript>) -> Arc<Self> {
+            Arc::new(Self {
+                script: StdMutex::new(Some(script)),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for StreamingDeltaBackend {
+        async fn generate(
+            &self,
+            _prompt: String,
+            _tx: mpsc::Sender<LlmEvent>,
+        ) -> anyhow::Result<()> {
+            unimplemented!("uses step path")
+        }
+        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            tx: mpsc::Sender<LlmEvent>,
+        ) -> anyhow::Result<StepOutcome> {
+            let script = self.script.lock().unwrap().take();
+            if let Some(actions) = script {
+                for action in actions {
+                    match action {
+                        DeltaScript::Text(s) => {
+                            tx.send(LlmEvent::Delta { text: s.into() }).await.ok();
+                        }
+                        DeltaScript::Sleep(d) => tokio::time::sleep(d).await,
+                    }
+                }
+            }
+            Ok(StepOutcome::Final)
+        }
+    }
+
+    fn config_with_partial_flush(ms: u32) -> Config {
+        let mut cfg = Config::default();
+        cfg.voice.synthesis.partial_flush_ms = ms;
+        cfg
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_partial_flush_after_idle() {
+        // Backend emits a partial sentence ("Half a sente"), then
+        // *stalls* for >partial_flush_ms, then completes ("nce. End.").
+        // With the idle flush enabled the partial cuts at the last
+        // whitespace ("Half a") and is spoken during the stall;
+        // "sentence." then completes naturally on resume; "End." on
+        // finish.
+        let recorder = MockSpeechRecorder::new();
+        let backend = StreamingDeltaBackend::new(vec![
+            DeltaScript::Text("Half a sente"),
+            DeltaScript::Sleep(Duration::from_millis(150)),
+            DeltaScript::Text("nce. End."),
+        ]);
+        let cfg = config_with_partial_flush(50);
+        let state = state_with_speech_recorder(backend, recorder.clone(), cfg);
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .dispatch(
+                Request::Query {
+                    id: "pf".into(),
+                    text: "go".into(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let _ = collect_events(rx).await;
+
+        let calls = recorder.calls();
+        assert_eq!(
+            calls,
+            vec![
+                "Half a".to_string(),
+                "sentence.".to_string(),
+                "End.".to_string(),
+            ],
+            "expected idle-flush followed by completed sentence"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_partial_flush_zero_disables() {
+        // Same backend, same stall — but partial_flush_ms = 0 means no
+        // idle flush. Only the completed sentence and the final tail
+        // are spoken.
+        let recorder = MockSpeechRecorder::new();
+        let backend = StreamingDeltaBackend::new(vec![
+            DeltaScript::Text("Half a sente"),
+            DeltaScript::Sleep(Duration::from_millis(150)),
+            DeltaScript::Text("nce. End."),
+        ]);
+        let cfg = config_with_partial_flush(0);
+        let state = state_with_speech_recorder(backend, recorder.clone(), cfg);
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .dispatch(
+                Request::Query {
+                    id: "pf0".into(),
+                    text: "go".into(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let _ = collect_events(rx).await;
+
+        let calls = recorder.calls();
+        assert_eq!(
+            calls,
+            vec!["Half a sentence.".to_string(), "End.".to_string()],
+            "partial_flush_ms=0 should hold the partial in-buffer until \
+             the LLM resumes, completing the sentence whole; got {calls:?}"
+        );
+    }
+
+    /// Tool-emitting scripted backend: step #1 emits one Delta then
+    /// returns ToolCalls; step #N+ emits the queued post-tool deltas
+    /// then returns Final.
+    struct ToolCallBackend {
+        pre_delta: &'static str,
+        post_delta: &'static str,
+        outcomes: StdMutex<Vec<StepOutcome>>,
+    }
+
+    impl ToolCallBackend {
+        fn new(pre: &'static str, post: &'static str, outcomes: Vec<StepOutcome>) -> Arc<Self> {
+            Arc::new(Self {
+                pre_delta: pre,
+                post_delta: post,
+                outcomes: StdMutex::new(outcomes),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for ToolCallBackend {
+        async fn generate(
+            &self,
+            _prompt: String,
+            _tx: mpsc::Sender<LlmEvent>,
+        ) -> anyhow::Result<()> {
+            unimplemented!("uses step path")
+        }
+        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            tx: mpsc::Sender<LlmEvent>,
+        ) -> anyhow::Result<StepOutcome> {
+            let outcome = {
+                let mut q = self.outcomes.lock().unwrap();
+                if q.is_empty() {
+                    StepOutcome::Final
+                } else {
+                    q.remove(0)
+                }
+            };
+            // Emit pre-delta on the FIRST step (when ToolCalls is queued)
+            // and post-delta on Final.
+            match &outcome {
+                StepOutcome::ToolCalls(_) => {
+                    tx.send(LlmEvent::Delta {
+                        text: self.pre_delta.into(),
+                    })
+                    .await
+                    .ok();
+                }
+                StepOutcome::Final => {
+                    tx.send(LlmEvent::Delta {
+                        text: self.post_delta.into(),
+                    })
+                    .await
+                    .ok();
+                }
+            }
+            Ok(outcome)
+        }
+    }
+
+    /// A tool that sleeps before returning. Used to span the
+    /// partial_flush_ms window so we can verify the flush is
+    /// inhibited while a tool call is in flight.
+    struct SleepTool {
+        ms: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_tools::Tool for SleepTool {
+        fn name(&self) -> &str {
+            "sleep"
+        }
+        fn description(&self) -> &str {
+            "sleep for testing"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn invoke(&self, _args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+            tokio::time::sleep(Duration::from_millis(self.ms)).await;
+            Ok(serde_json::json!({
+                "output": "slept",
+                "exit_code": 0,
+                "duration_ms": self.ms,
+                "truncated": false,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_tool_call_inhibits_idle_flush() {
+        // Stream: Delta("Half a ") → ToolCall(sleep 300ms) →
+        //          ToolResult → Delta("done.") → Done.
+        // partial_flush_ms = 50 — would fire 6+ times during the
+        // 300ms tool dispatch if not inhibited. With proper
+        // `awaiting_tool_result` tracking, only the final tail is
+        // spoken: "Half a done."
+        let recorder = MockSpeechRecorder::new();
+        let backend = ToolCallBackend::new(
+            "Half a ",
+            "done.",
+            vec![
+                StepOutcome::ToolCalls(vec![ToolCall {
+                    id: "c1".into(),
+                    name: "sleep".into(),
+                    arguments: serde_json::json!({}),
+                }]),
+                StepOutcome::Final,
+            ],
+        );
+        let mut tools = ToolRegistry::new();
+        tools.register(SleepTool { ms: 300 });
+        let mut cfg = config_with_partial_flush(50);
+        cfg.voice.synthesis.max_sentence_chars = 400;
+        let state = Arc::new(AppState::new(
+            cfg,
+            backend,
+            PresenceManager::stub(PresenceState::Active),
+            Arc::new(tools),
+            Arc::new(assistd_voice::NoVoiceInput::new()),
+            Arc::new(assistd_voice::NoContinuousListener::new()),
+            recorder.clone(),
+        ));
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .dispatch(
+                Request::Query {
+                    id: "tc".into(),
+                    text: "go".into(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let _ = collect_events(rx).await;
+
+        let calls = recorder.calls();
+        assert!(
+            !calls.iter().any(|c| c == "Half a"),
+            "idle flush fired during tool dispatch — inhibition broken: {calls:?}"
+        );
+        assert_eq!(
+            calls,
+            vec!["Half a done.".to_string()],
+            "expected single combined utterance after tool resolves; got {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_query_speech_worker_drains_before_return() {
+        // The worker's wait_idle() must be awaited before handle_query
+        // returns — otherwise daemon shutdown could cut off audio.
+        let recorder = MockSpeechRecorder::new();
+        let state = state_with_speech_recorder(
+            Arc::new(EchoBackend::new()),
+            recorder.clone(),
+            Config::default(),
+        );
+        let (tx, rx) = mpsc::channel::<Event>(8);
+        state
+            .dispatch(
+                Request::Query {
+                    id: "drain".into(),
+                    text: "Hello world.".into(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let _ = collect_events(rx).await;
+        // wait_idle invoked exactly once after the channel closes.
+        assert_eq!(recorder.wait_idle_count(), 1);
     }
 }

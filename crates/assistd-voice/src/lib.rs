@@ -82,10 +82,31 @@ pub trait VoiceInput: Send + Sync + 'static {
 }
 
 /// Speak the given text aloud.
+///
+/// Designed for streaming pipelines where the daemon hands utterances to
+/// TTS one sentence at a time. The implementation is expected to keep an
+/// internal playback queue so sequential `speak` calls produce
+/// back-to-back audio with no audible gap.
 #[async_trait]
 pub trait VoiceOutput: Send + Sync + 'static {
-    /// Synthesize and play `text`, returning when playback finishes.
+    /// Synthesize `text` and append the resulting audio to the playback
+    /// queue. Returns once the audio is enqueued — **not** once playback
+    /// finishes. Sequential calls produce back-to-back audio because the
+    /// playback queue is FIFO. Use [`wait_idle`](Self::wait_idle) to await
+    /// queue drain.
     async fn speak(&self, text: String) -> Result<()>;
+
+    /// Block until the playback queue drains. Used at end-of-query so
+    /// the worker isn't torn down before the last utterance plays.
+    /// Default impl is a no-op for output backends that have no queue.
+    async fn wait_idle(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Drop pending audio (mid-utterance interrupt). Idempotent and
+    /// infallible — used by future "shut up" / barge-in handling.
+    /// Default impl is a no-op.
+    async fn cancel(&self) {}
 }
 
 /// Placeholder [`VoiceInput`] used when voice is disabled in config or
@@ -127,8 +148,9 @@ impl VoiceInput for NoVoiceInput {
     }
 }
 
-/// Placeholder [`VoiceOutput`] that drops speech requests silently — used
-/// until the milestone-6 implementation lands.
+/// Placeholder [`VoiceOutput`] used when TTS is disabled in config or
+/// built without the `tts` feature. Drops every request silently and
+/// inherits the trait's no-op `wait_idle` / `cancel` defaults.
 pub struct NoVoiceOutput;
 
 #[async_trait]
@@ -164,6 +186,16 @@ mod tests {
     #[tokio::test]
     async fn no_voice_output_is_silent_success() {
         NoVoiceOutput.speak("hi".into()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_voice_output_wait_idle_returns_ok() {
+        NoVoiceOutput.wait_idle().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_voice_output_cancel_does_not_panic() {
+        NoVoiceOutput.cancel().await;
     }
 
     #[test]

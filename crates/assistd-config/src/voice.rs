@@ -6,9 +6,9 @@ use crate::defaults::{
     DEFAULT_LISTEN_ONSET_CONFIRM_MS, DEFAULT_LISTEN_PREROLL_MS, DEFAULT_LISTEN_SILENCE_MS,
     DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_PIPER_BINARY, DEFAULT_PIPER_DEADLINE_SECS,
     DEFAULT_PIPER_ENABLED, DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS,
-    DEFAULT_PIPER_NOISE_SCALE, DEFAULT_PIPER_NOISE_W, DEFAULT_PIPER_SENTENCE_SILENCE_SECS,
-    DEFAULT_PIPER_VOICE, DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS,
-    DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_CPU_FALLBACK_ENABLED,
+    DEFAULT_PIPER_NOISE_SCALE, DEFAULT_PIPER_NOISE_W, DEFAULT_PIPER_PARTIAL_FLUSH_MS,
+    DEFAULT_PIPER_SENTENCE_SILENCE_SECS, DEFAULT_PIPER_VOICE, DEFAULT_VOICE_HOTKEY,
+    DEFAULT_VOICE_MAX_RECORDING_SECS, DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_CPU_FALLBACK_ENABLED,
     DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
     DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL, DEFAULT_WHISPER_VAD_SILENCE_SECS,
 };
@@ -311,6 +311,33 @@ pub struct SynthesisConfig {
     /// within the limit.
     #[serde(default = "default_piper_max_sentence_chars")]
     pub max_sentence_chars: u32,
+    /// Idle gap (ms) between LLM deltas after which the sentence buffer
+    /// is flushed even without a terminator. `0` disables the timeout
+    /// flush — only the terminal `Done`-based flush is used. Inhibited
+    /// while a tool call is in flight.
+    #[serde(default = "default_piper_partial_flush_ms")]
+    pub partial_flush_ms: u32,
+    /// How fenced code blocks in the LLM response are spoken aloud.
+    #[serde(default)]
+    pub code_block_mode: CodeBlockMode,
+}
+
+/// How the sentence buffer treats fenced code blocks in the LLM response.
+///
+/// Triple-backtick fences are detected per-character as the stream comes
+/// in. The selected mode decides what (if anything) is spoken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeBlockMode {
+    /// Drop fenced content silently. The default — code in a chat
+    /// response is rarely useful as speech.
+    #[default]
+    Skip,
+    /// Drop fenced content but emit one short phrase per fence so the
+    /// listener knows code was elided. Captures the fence's language tag
+    /// (e.g. ```` ```rust ````) and speaks "Code block in rust." when
+    /// the fence closes; falls back to "Code block." with no tag.
+    Summarize,
 }
 
 impl Default for SynthesisConfig {
@@ -327,6 +354,8 @@ impl Default for SynthesisConfig {
             espeak_data_dir: None,
             deadline_secs: DEFAULT_PIPER_DEADLINE_SECS,
             max_sentence_chars: DEFAULT_PIPER_MAX_SENTENCE_CHARS,
+            partial_flush_ms: DEFAULT_PIPER_PARTIAL_FLUSH_MS,
+            code_block_mode: CodeBlockMode::Skip,
         }
     }
 }
@@ -357,4 +386,7 @@ fn default_piper_deadline_secs() -> u32 {
 }
 fn default_piper_max_sentence_chars() -> u32 {
     DEFAULT_PIPER_MAX_SENTENCE_CHARS
+}
+fn default_piper_partial_flush_ms() -> u32 {
+    DEFAULT_PIPER_PARTIAL_FLUSH_MS
 }
