@@ -33,8 +33,10 @@ pub mod listen;
 #[cfg(feature = "tts")]
 pub mod piper;
 
+pub mod controller;
 pub mod sentence;
 
+pub use controller::{SpeakDecision, VoiceOutputController};
 #[cfg(feature = "listen")]
 pub use listen::{ContinuousListener, MicContinuousListener, NoContinuousListener};
 #[cfg(feature = "mic")]

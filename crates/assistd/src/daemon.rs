@@ -196,7 +196,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     // download fails, audio device unavailable, health-check synth
     // fails — log a warning and substitute `NoVoiceOutput` so LLM
     // streaming continues silently.
-    let voice_output: Arc<dyn VoiceOutput> = if config.voice.synthesis.enabled {
+    let voice_output_inner: Arc<dyn VoiceOutput> = if config.voice.synthesis.enabled {
         info!(
             "voice.synthesis: starting Piper ({})",
             config.voice.synthesis.voice
@@ -217,6 +217,13 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         info!("voice.synthesis: disabled in config (voice.synthesis.enabled = false)");
         Arc::new(NoVoiceOutput)
     };
+    // Wrap in a runtime controller so the toggle/skip/PTT-interrupt
+    // controls all flow through one shared object. Initial enabled
+    // state mirrors config; runtime changes do not persist.
+    let voice_output = assistd_voice::VoiceOutputController::new(
+        voice_output_inner,
+        config.voice.synthesis.enabled,
+    );
 
     let hotkey_handle = hotkey::spawn_listener(
         &config.presence,
@@ -224,6 +231,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         Some(presence.clone()),
         voice.clone(),
         Some(listener.clone()),
+        Some(voice_output.clone()),
         shutdown_tx.subscribe(),
     );
     let gpu_monitor_handle =

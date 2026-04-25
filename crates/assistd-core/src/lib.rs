@@ -8,14 +8,15 @@ pub use assistd_config as config;
 pub use assistd_config::{
     AgentConfig, BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config,
     ConfigError, ContinuousListenConfig, DaemonConfig, LlamaServerConfig, ModelConfig,
-    PresenceConfig, RemoteConfig, SleepConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
-    ToolsWriteConfig, VoiceConfig,
+    PresenceConfig, RemoteConfig, SleepConfig, SynthesisConfig, ToolsBashConfig, ToolsConfig,
+    ToolsOutputConfig, ToolsWriteConfig, VoiceConfig,
 };
 pub use assistd_ipc as ipc;
 pub use assistd_ipc::{PresenceState, VoiceCaptureState};
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
 pub use assistd_voice::{
-    ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput, VoiceInput, VoiceOutput,
+    ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput, SpeakDecision,
+    VoiceInput, VoiceOutput, VoiceOutputController,
 };
 pub use presence::{PresenceManager, RequestGuard};
 pub use state::AppState;

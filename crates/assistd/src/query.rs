@@ -104,6 +104,13 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             Event::ListenState { active, .. } => {
                 writeln!(stdout, "[listen: {}]", if active { "on" } else { "off" })?;
             }
+            Event::VoiceOutputState { enabled, .. } => {
+                writeln!(
+                    stdout,
+                    "[voice-output: {}]",
+                    if enabled { "on" } else { "off" }
+                )?;
+            }
             Event::Done { .. } => {
                 if wrote_anything {
                     writeln!(stdout)?;
