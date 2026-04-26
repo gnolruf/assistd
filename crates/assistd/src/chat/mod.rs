@@ -208,10 +208,11 @@ async fn run_tui(
     // graphics" so `/attach` falls back to filename-only display on
     // non-graphics terminals — chunky ASCII thumbnails are gimmicky.
     let picker = match Picker::from_query_stdio() {
-        Ok(p) if matches!(
-            p.protocol_type(),
-            ProtocolType::Kitty | ProtocolType::Sixel | ProtocolType::Iterm2
-        ) =>
+        Ok(p)
+            if matches!(
+                p.protocol_type(),
+                ProtocolType::Kitty | ProtocolType::Sixel | ProtocolType::Iterm2
+            ) =>
         {
             tracing::info!(
                 "terminal graphics: {:?} (font_size {:?})",

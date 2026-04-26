@@ -17,7 +17,10 @@ const SUPPORTED_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 #[derive(Debug)]
 pub enum LoadImageError {
     /// File missing, unreadable, or other I/O failure.
-    Io { path: String, source: std::io::Error },
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
     /// `infer` couldn't identify the file type from its magic bytes.
     Unrecognized { path: String },
     /// `infer` identified a non-image type.
@@ -55,13 +58,13 @@ impl LoadImageError {
 /// On success returns the [`Attachment`] (ready to hand to the LLM
 /// conversation layer) plus the file size in bytes (so the caller can
 /// render a "12 KB" annotation without re-stat-ing).
-pub async fn load_image_attachment(
-    path: &Path,
-) -> Result<(Attachment, usize), LoadImageError> {
-    let bytes = tokio::fs::read(path).await.map_err(|e| LoadImageError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
+pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), LoadImageError> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| LoadImageError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
     let Some(t) = infer::get(&bytes) else {
         return Err(LoadImageError::Unrecognized {
             path: path.display().to_string(),

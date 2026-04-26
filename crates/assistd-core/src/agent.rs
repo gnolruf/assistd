@@ -399,9 +399,16 @@ mod tests {
         let backend = MockBackend::with(vec![StepOutcome::Final]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), tools, 10, "what is 2+2?".into(), Vec::new(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "what is 2+2?".into(),
+            Vec::new(),
+            tx,
+        )
+        .await
+        .unwrap();
         let events = collect(&mut rx).await;
         assert!(matches!(events.last(), Some(LlmEvent::Done)));
         assert_eq!(backend.pushed_users.lock().unwrap().len(), 1);
@@ -417,9 +424,16 @@ mod tests {
         ]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), tools, 10, "say hello".into(), Vec::new(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "say hello".into(),
+            Vec::new(),
+            tx,
+        )
+        .await
+        .unwrap();
         let events = collect(&mut rx).await;
 
         // Expected event sequence (intermixed with deltas):
@@ -472,9 +486,16 @@ mod tests {
         let tools = Arc::new(tools);
 
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), tools, 10, "how many?".into(), Vec::new(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "how many?".into(),
+            Vec::new(),
+            tx,
+        )
+        .await
+        .unwrap();
         let events = collect(&mut rx).await;
         // Exactly one ToolCall/ToolResult pair.
         let calls = events

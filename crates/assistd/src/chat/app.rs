@@ -91,7 +91,10 @@ pub enum ChatEvent {
         protocol: Option<StatefulProtocol>,
     },
     /// `/attach <path>` failed (missing file, unsupported format, etc.).
-    AttachFailed { path: String, message: String },
+    AttachFailed {
+        path: String,
+        message: String,
+    },
 }
 
 // Manual Debug because `StatefulProtocol` (inside `AttachLoaded.protocol`)
@@ -428,8 +431,7 @@ impl App {
                 protocol,
                 ..
             } => {
-                let label =
-                    format!("📎 attached: {name} ({mime}, {})", human_size_short(size));
+                let label = format!("📎 attached: {name} ({mime}, {})", human_size_short(size));
                 self.output.push_info(&label);
                 self.set_notice(&format!("📎 {name} attached"));
                 self.pending_attachments.push(PendingAttachment {
@@ -506,7 +508,8 @@ impl App {
         if attachment_names.is_empty() {
             self.output.push_user(text);
         } else {
-            self.output.push_user_with_attachments(text, attachment_names);
+            self.output
+                .push_user_with_attachments(text, attachment_names);
         }
         self.output.reset_scroll();
         self.output.begin_assistant();
@@ -550,15 +553,13 @@ impl App {
                     // 16-bit PNGs the `image` crate doesn't enable by
                     // default) — fall back to filename-only display in
                     // that case rather than failing the whole attach.
-                    let protocol = picker.and_then(|p| {
-                        match image::load_from_memory(&bytes) {
-                            Ok(img) => Some(p.new_resize_protocol(img)),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "/attach: thumbnail decode failed for {path_for_load}: {e}"
-                                );
-                                None
-                            }
+                    let protocol = picker.and_then(|p| match image::load_from_memory(&bytes) {
+                        Ok(img) => Some(p.new_resize_protocol(img)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "/attach: thumbnail decode failed for {path_for_load}: {e}"
+                            );
+                            None
                         }
                     });
                     let _ = tx
@@ -1088,7 +1089,9 @@ mod tests {
         assert!(app.pending_attachments.is_empty());
         let rendered = rendered_text(&mut app);
         assert!(
-            rendered.iter().any(|l| l.contains("not a recognized image")),
+            rendered
+                .iter()
+                .any(|l| l.contains("not a recognized image")),
             "expected unrecognized-image error: {rendered:?}"
         );
     }
@@ -1186,9 +1189,7 @@ mod tests {
         assert!(app.pending_attachments.is_empty());
         let rendered = rendered_text(&mut app);
         assert!(
-            rendered
-                .iter()
-                .any(|l| l.contains("> /attach foo.png")),
+            rendered.iter().any(|l| l.contains("> /attach foo.png")),
             "voice transcription starting with /attach must render as plain user text: {rendered:?}"
         );
     }
