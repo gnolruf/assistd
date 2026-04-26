@@ -270,8 +270,8 @@ mod tests {
     #[test]
     fn every_registered_command_emits_convention_compliant_error() {
         use crate::commands::{
-            BashCommand, CatCommand, GrepCommand, LsCommand, SeeCommand, WcCommand, WebCommand,
-            WriteCommand,
+            BashCommand, CatCommand, GrepCommand, LsCommand, ScreenshotCommand, SeeCommand,
+            WcCommand, WebCommand, WriteCommand,
         };
 
         fn contains_hint(s: &str) -> bool {
@@ -311,6 +311,13 @@ mod tests {
                 rt.block_on(run_cmd(
                     SeeCommand,
                     vec!["/nonexistent/assistd-convention-test.png".into()],
+                )),
+            ),
+            (
+                "screenshot",
+                rt.block_on(run_cmd(
+                    ScreenshotCommand::default(),
+                    vec!["--bogus-flag".into()],
                 )),
             ),
             (
@@ -385,8 +392,8 @@ mod tests {
     #[test]
     fn every_registered_command_has_nonempty_help_and_summary() {
         use crate::commands::{
-            BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
-            WebCommand, WriteCommand,
+            BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, ScreenshotCommand,
+            SeeCommand, WcCommand, WebCommand, WriteCommand,
         };
         let mut reg = CommandRegistry::new();
         reg.register(CatCommand);
@@ -396,9 +403,10 @@ mod tests {
         reg.register(EchoCommand);
         reg.register(WriteCommand::permissive_for_tests());
         reg.register(SeeCommand);
+        reg.register(ScreenshotCommand::default());
         reg.register(WebCommand::new());
         reg.register(BashCommand::default());
-        assert_eq!(reg.len(), 9);
+        assert_eq!(reg.len(), 10);
         for (name, summary) in reg.sorted_summaries() {
             assert!(!summary.is_empty(), "{name} has empty summary");
             assert!(

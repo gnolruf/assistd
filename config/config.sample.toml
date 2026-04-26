@@ -379,3 +379,22 @@ hotkey = "Super+Escape"
 # startup, so missing `~/Documents` on a fresh install won't break the
 # command entirely.
 # writable_paths = ["~", "/tmp"]
+
+[tools.screenshot]
+# Capture the user's screen as a PNG on demand and attach it as a vision
+# input for the next LLM turn. The agent invokes this via `run` with
+# `screenshot` (full screen) or `screenshot --focused` (focused window).
+# Bytes are kept in memory; nothing is written to disk by default.
+#
+# Privacy: the captured pixels reach the LLM as part of its next turn.
+# The default backend (`auto`) picks maim on X11 and grim on Wayland.
+#
+# Backend selector. One of:
+#   auto    — XDG_SESSION_TYPE / WAYLAND_DISPLAY / DISPLAY decide.
+#   x11     — always use maim (requires xdotool for --focused).
+#   wayland — always use grim (--focused requires sway or Hyprland).
+# backend = "auto"
+
+# Capture subprocess timeout in seconds. Must be > 0. A wedged compositor
+# is killed at the deadline and the command returns exit 137.
+# timeout_secs = 5

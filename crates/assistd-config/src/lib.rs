@@ -36,7 +36,8 @@ pub use presence::PresenceConfig;
 pub use remote::RemoteConfig;
 pub use sleep::SleepConfig;
 pub use tools::{
-    BashSandboxMode, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsWriteConfig,
+    BashSandboxMode, ScreenshotBackend, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
+    ToolsScreenshotConfig, ToolsWriteConfig,
 };
 pub use top::Config;
 pub use voice::{

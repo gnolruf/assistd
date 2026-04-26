@@ -304,6 +304,9 @@ impl Config {
                     .into(),
             );
         }
+        if self.tools.screenshot.timeout_secs == 0 {
+            errors.push("tools.screenshot.timeout_secs must be greater than 0".into());
+        }
 
         if self.agent.max_iterations == 0 {
             errors.push("agent.max_iterations must be greater than 0".into());
