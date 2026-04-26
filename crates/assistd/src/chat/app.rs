@@ -151,6 +151,11 @@ pub struct App {
     pub presence_state: Option<PresenceState>,
     pub sleep_cfg: SleepConfig,
     pub presence: Option<Arc<PresenceManager>>,
+    /// Set at chat startup from a `/props` probe of the running
+    /// llama-server. `false` means the loaded model has no mmproj —
+    /// `/attach` rejects with the AC `vision not available` error and
+    /// the status bar renders `vision: off`.
+    pub vision_enabled: bool,
     pub modal: Option<ConfirmationModal>,
     /// Push-to-talk capture state, driven by the mic-voice listener
     /// spawned alongside the event loop. Rendered as an indicator in
@@ -187,6 +192,7 @@ impl App {
         model_name: String,
         sleep_cfg: SleepConfig,
         presence: Option<Arc<PresenceManager>>,
+        vision_enabled: bool,
         picker: Option<Picker>,
     ) -> Self {
         let presence_state = presence.as_ref().map(|p| p.state());
@@ -204,6 +210,7 @@ impl App {
             presence_state,
             sleep_cfg,
             presence,
+            vision_enabled,
             modal: None,
             listening: VoiceCaptureState::Idle,
             pending_tool_call: None,
@@ -469,6 +476,18 @@ impl App {
 
     fn submit_with_origin(&mut self, text: String, origin: SubmitOrigin) {
         if origin == SubmitOrigin::Typed {
+            // Both `/attach <path>` and bare `/attach` are vision-only;
+            // when no mmproj is loaded, the AC requires the same
+            // navigation-compliant error wording as `see` / `screenshot`.
+            let is_attach = text.starts_with("/attach ") || text.trim() == "/attach";
+            if is_attach && !self.vision_enabled {
+                self.output.push_error(
+                    "[error] attach_image: vision not available: model does not support \
+                     images. Use: a model with mmproj loaded",
+                );
+                self.set_notice("vision not available");
+                return;
+            }
             if let Some(rest) = text.strip_prefix("/attach ") {
                 self.handle_attach(rest.trim());
                 return;
@@ -677,6 +696,10 @@ mod tests {
     }
 
     fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
+        test_app_with(true)
+    }
+
+    fn test_app_with(vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
         let (tx, rx) = mpsc::channel::<ChatEvent>(16);
         let client: Arc<dyn LlmBackend> = Arc::new(EchoBackend::new());
         let tools = Arc::new(ToolRegistry::default());
@@ -688,6 +711,7 @@ mod tests {
             "test-model".into(),
             test_sleep_cfg(),
             None,
+            vision_enabled,
             None,
         );
         (app, rx)
@@ -906,6 +930,7 @@ mod tests {
             "test-model".into(),
             test_sleep_cfg(),
             None,
+            true,
             None,
         );
         app.spawn_generation("hello".into(), Vec::new());
@@ -1206,6 +1231,56 @@ mod tests {
         assert!(
             rendered.iter().any(|l| l.contains("expected a path")),
             "missing usage error: {rendered:?}"
+        );
+    }
+
+    /// AC #3 (TUI side): when the loaded model has no mmproj, typing
+    /// `/attach <path>` must reject before the file is read and emit
+    /// the same "vision not available" wording as `see` / `screenshot`.
+    /// We drive keys synchronously and skip `attach_and_drain` because
+    /// the vision-disabled path returns *before* spawning the loader,
+    /// so no `AttachLoaded`/`AttachFailed` event ever lands on `rx`.
+    #[test]
+    fn attach_when_vision_disabled_pushes_error_and_stages_nothing() {
+        let (mut app, _rx) = test_app_with(false);
+        for c in "/attach /tmp/some-image.png".chars() {
+            app.on_key(typed(c));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.pending_attachments.is_empty(),
+            "vision disabled must not stage an attachment"
+        );
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered.iter().any(|l| l.contains(
+                "[error] attach_image: vision not available: model does not support images"
+            )),
+            "missing exact AC error wording: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains("Use: a model with mmproj loaded")),
+            "missing recovery hint: {rendered:?}"
+        );
+    }
+
+    /// Bare `/attach` (no path) with vision disabled also takes the
+    /// vision-disabled path — the user should see the capability
+    /// problem, not the "missing path" usage error.
+    #[test]
+    fn bare_attach_when_vision_disabled_reports_vision_error() {
+        let (mut app, _rx) = test_app_with(false);
+        for c in "/attach".chars() {
+            app.on_key(typed(c));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.pending_attachments.is_empty());
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered.iter().any(|l| l.contains("vision not available")),
+            "expected vision error, got {rendered:?}"
         );
     }
 }

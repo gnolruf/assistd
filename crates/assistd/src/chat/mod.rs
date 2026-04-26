@@ -78,16 +78,6 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     // overlay via this channel. Capacity 8 is generous — we process one
     // at a time and the agent loop is blocked waiting for the response.
     let (confirm_tx, confirm_rx) = mpsc::channel::<PendingConfirmation>(8);
-    let tools = assistd_core::build_tools(
-        &config,
-        tui_overflow_dir.clone(),
-        Arc::new(TuiGate::new(confirm_tx)),
-    )?;
-    info!(
-        "tools: registered {} (overflow dir {})",
-        tools.len(),
-        tui_overflow_dir.display()
-    );
 
     println!("loading model {} ...", config.model.name);
 
@@ -117,6 +107,36 @@ pub async fn run(args: ChatArgs) -> Result<()> {
             (None, client, Some(msg))
         }
     };
+
+    // One-shot capability probe — only meaningful when llama-server
+    // actually came up. The FailedBackend path already surfaces the
+    // startup error to the TUI, so skip the misleading mmproj warning
+    // in that case.
+    let vision_enabled = if presence.is_some() {
+        let v =
+            assistd_llm::detect_vision_support(&config.llama_server.host, config.llama_server.port)
+                .await;
+        if v {
+            info!("vision: enabled (model has mmproj)");
+        } else {
+            tracing::warn!("Vision not available: mmproj not loaded.");
+        }
+        v
+    } else {
+        false
+    };
+
+    let tools = assistd_core::build_tools(
+        &config,
+        tui_overflow_dir.clone(),
+        Arc::new(TuiGate::new(confirm_tx)),
+        vision_enabled,
+    )?;
+    info!(
+        "tools: registered {} (overflow dir {})",
+        tools.len(),
+        tui_overflow_dir.display()
+    );
 
     let mut resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
@@ -150,6 +170,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         model_name,
         config.sleep.clone(),
         presence.clone(),
+        vision_enabled,
         &mut resource_rx,
         shutdown_tx.clone(),
         startup_error,
@@ -179,6 +200,7 @@ async fn run_tui(
     model_name: String,
     sleep_cfg: SleepConfig,
     presence: Option<Arc<PresenceManager>>,
+    vision_enabled: bool,
     resource_rx: &mut watch::Receiver<vram::ResourceState>,
     shutdown_tx: watch::Sender<bool>,
     startup_error: Option<String>,
@@ -248,6 +270,7 @@ async fn run_tui(
         model_name,
         sleep_cfg,
         presence.clone(),
+        vision_enabled,
         picker,
     );
 

@@ -95,10 +95,18 @@ use tracing::warn;
 /// `DenyAllGate` (headless path: no interactive confirmation available);
 /// the chat TUI passes a `TuiGate` that forwards prompts to the user via
 /// a modal overlay.
+///
+/// `vision_enabled` reflects a one-shot `/props` probe of the running
+/// llama-server (see [`assistd_llm::detect_vision_support`]). When `false`,
+/// the image-producing commands (`see`, `screenshot`) are still
+/// registered but their `run()` short-circuits to the convention
+/// `[error] …: vision not available …` line, and their `summary()` flips
+/// so the LLM sees the unavailability in its tool schema.
 pub fn build_tools(
     config: &Config,
     overflow_dir: PathBuf,
     gate: Arc<dyn ConfirmationGate>,
+    vision_enabled: bool,
 ) -> Result<Arc<ToolRegistry>> {
     if overflow_dir.exists() {
         std::fs::remove_dir_all(&overflow_dir).with_context(|| {
@@ -183,8 +191,8 @@ pub fn build_tools(
     commands.register(WcCommand);
     commands.register(EchoCommand);
     commands.register(WriteCommand::new(write_cfg));
-    commands.register(SeeCommand);
-    commands.register(ScreenshotCommand::new(screenshot_cfg));
+    commands.register(SeeCommand::new(vision_enabled));
+    commands.register(ScreenshotCommand::new(screenshot_cfg, vision_enabled));
     commands.register(WebCommand::new());
     commands.register(BashCommand::new(bash_cfg, sandbox, gate));
 

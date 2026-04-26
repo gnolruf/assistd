@@ -90,6 +90,18 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         config.llama_server.host, config.llama_server.port
     );
 
+    // One-shot capability probe: ask the now-ready llama-server whether
+    // it loaded a vision encoder. Returns false on any error; gates
+    // see/screenshot/attach_image downstream.
+    let vision_enabled =
+        assistd_llm::detect_vision_support(&config.llama_server.host, config.llama_server.port)
+            .await;
+    if vision_enabled {
+        info!("vision: enabled (model has mmproj)");
+    } else {
+        tracing::warn!("Vision not available: mmproj not loaded.");
+    }
+
     let chat = LlamaChatClient::new(&config.chat, &config.llama_server, &config.model)?;
 
     // Voice input: build the mic-backed implementation when the user
@@ -243,7 +255,12 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     // channel, so destructive bash commands are denied by default. To
     // approve such commands, run them from the chat TUI where the modal
     // overlay can prompt the user.
-    let tools = assistd_core::build_tools(&config, overflow_dir.clone(), Arc::new(DenyAllGate))?;
+    let tools = assistd_core::build_tools(
+        &config,
+        overflow_dir.clone(),
+        Arc::new(DenyAllGate),
+        vision_enabled,
+    )?;
     info!(
         "tools: registered {} (overflow dir {})",
         tools.len(),

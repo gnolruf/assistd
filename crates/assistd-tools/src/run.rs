@@ -242,7 +242,7 @@ mod tests {
         r.register(GrepCommand);
         r.register(LsCommand);
         r.register(WcCommand);
-        r.register(SeeCommand);
+        r.register(SeeCommand::default());
         Arc::new(r)
     }
 
@@ -257,7 +257,7 @@ mod tests {
         r.register(WcCommand);
         r.register(EchoCommand);
         r.register(WriteCommand::permissive_for_tests());
-        r.register(SeeCommand);
+        r.register(SeeCommand::default());
         r.register(ScreenshotCommand::default());
         r.register(WebCommand::new());
         r.register(BashCommand::default());
@@ -856,7 +856,7 @@ mod tests {
     fn run_see_no_args_returns_help_on_stdout_exit_2() {
         let dir = fresh_dir();
         let mut reg = CommandRegistry::new();
-        reg.register(SeeCommand);
+        reg.register(SeeCommand::default());
         let tool = tool_with(dir.path(), Arc::new(reg));
         let result = invoke(&tool, "see");
         assert_eq!(result["exit_code"], 2);

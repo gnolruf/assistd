@@ -241,6 +241,21 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ));
         left_spans.push(Span::styled(format!(" {label}"), reversed));
     }
+    // Vision capability indicator. Detected once at startup from the
+    // running llama-server's `/props` and never changes thereafter, so
+    // we render it unconditionally — the user can see at a glance
+    // whether the model can accept the next `screenshot` / `/attach`.
+    let (vision_label, vision_color) = if app.vision_enabled {
+        ("vision: on", Color::Green)
+    } else {
+        ("vision: off", Color::DarkGray)
+    };
+    left_spans.push(Span::styled(
+        format!(" │ {vision_label}"),
+        Style::default()
+            .fg(vision_color)
+            .add_modifier(Modifier::REVERSED),
+    ));
     // Persistent staged-attachment indicator. The 3-second `notice`
     // pop is too ephemeral for state that gates the next submission —
     // this stays visible until `submit` drains `pending_attachments`.

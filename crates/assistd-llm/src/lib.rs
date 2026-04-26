@@ -9,7 +9,9 @@ pub mod chat;
 pub mod llama_server;
 
 pub use chat::{ChatClientError, LlamaChatClient};
-pub use llama_server::{LlamaServerControl, LlamaServerError, LlamaService, ReadyState};
+pub use llama_server::{
+    LlamaServerControl, LlamaServerError, LlamaService, ReadyState, detect_vision_support,
+};
 
 use anyhow::Result;
 use assistd_tools::Attachment;

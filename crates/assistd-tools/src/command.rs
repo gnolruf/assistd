@@ -309,7 +309,7 @@ mod tests {
             (
                 "see",
                 rt.block_on(run_cmd(
-                    SeeCommand,
+                    SeeCommand::default(),
                     vec!["/nonexistent/assistd-convention-test.png".into()],
                 )),
             ),
@@ -402,7 +402,7 @@ mod tests {
         reg.register(WcCommand);
         reg.register(EchoCommand);
         reg.register(WriteCommand::permissive_for_tests());
-        reg.register(SeeCommand);
+        reg.register(SeeCommand::default());
         reg.register(ScreenshotCommand::default());
         reg.register(WebCommand::new());
         reg.register(BashCommand::default());
