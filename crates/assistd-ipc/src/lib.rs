@@ -135,6 +135,47 @@ pub enum Request {
     },
 }
 
+impl Request {
+    /// Returns the request id every variant carries.
+    pub fn id(&self) -> &str {
+        match self {
+            Request::Query { id, .. }
+            | Request::SetPresence { id, .. }
+            | Request::GetPresence { id }
+            | Request::Cycle { id }
+            | Request::PttStart { id }
+            | Request::PttStop { id }
+            | Request::ListenStart { id }
+            | Request::ListenStop { id }
+            | Request::ListenToggle { id }
+            | Request::GetListenState { id }
+            | Request::VoiceToggle { id }
+            | Request::VoiceSkip { id }
+            | Request::GetVoiceState { id } => id,
+        }
+    }
+
+    /// Short, stable name for the variant — used as a span field so
+    /// concurrent requests can be filtered by kind in trace output.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Request::Query { .. } => "query",
+            Request::SetPresence { .. } => "set_presence",
+            Request::GetPresence { .. } => "get_presence",
+            Request::Cycle { .. } => "cycle",
+            Request::PttStart { .. } => "ptt_start",
+            Request::PttStop { .. } => "ptt_stop",
+            Request::ListenStart { .. } => "listen_start",
+            Request::ListenStop { .. } => "listen_stop",
+            Request::ListenToggle { .. } => "listen_toggle",
+            Request::GetListenState { .. } => "get_listen_state",
+            Request::VoiceToggle { .. } => "voice_toggle",
+            Request::VoiceSkip { .. } => "voice_skip",
+            Request::GetVoiceState { .. } => "get_voice_state",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {

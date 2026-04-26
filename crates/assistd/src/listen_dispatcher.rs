@@ -20,12 +20,13 @@
 //! listener (that's the daemon's `presence.sleep()` teardown).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use assistd_core::{AppState, ContinuousListener, PresenceManager, PresenceState};
 use assistd_ipc::Event;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tokio::task::{JoinHandle, JoinSet};
+use tracing::{Instrument, error, info, warn};
 
 /// Spawn both background tasks. Returns a `JoinHandle` for each so
 /// the daemon can await them at shutdown.
@@ -65,7 +66,12 @@ async fn run_utterance_forwarder(
     listener: Arc<dyn ContinuousListener>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
     let mut utterances = listener.subscribe_utterances();
+    // Track in-flight listen-triggered queries so a hanging handle_query
+    // (e.g. wedged MCP call in a future milestone) can't outlive daemon
+    // shutdown. Mirrors the socket accept loop's JoinSet pattern.
+    let mut handlers: JoinSet<()> = JoinSet::new();
     loop {
         tokio::select! {
             res = utterances.recv() => {
@@ -78,25 +84,41 @@ async fn run_utterance_forwarder(
                         let id = format!("listen-{}", short_id());
                         let state = state.clone();
                         let text = trimmed.to_string();
-                        tokio::spawn(async move {
-                            // `handle_query` wants a per-request event
-                            // channel. There is no IPC client here, so
-                            // drain the receiver into /dev/null. Send
-                            // failures are already treated as "client
-                            // disconnected" by `handle_query`, but the
-                            // drain is cheaper than relying on that
-                            // fallback.
-                            let (tx, mut rx) = mpsc::channel::<Event>(32);
-                            tokio::spawn(async move {
-                                while rx.recv().await.is_some() {}
-                            });
-                            if let Err(e) = state.clone().handle_query(id, text, tx).await {
-                                warn!(
-                                    target: "assistd::listen",
-                                    "listen-triggered query failed: {e:#}"
-                                );
+                        // Root span for listen-triggered queries so
+                        // their log lines correlate the same way
+                        // socket-side `ipc{id,req}` spans do.
+                        let span = tracing::info_span!(
+                            "listen",
+                            id = %id,
+                            req = "query",
+                        );
+                        handlers.spawn(
+                            async move {
+                                // `handle_query` wants a per-request event
+                                // channel. There is no IPC client here, so
+                                // drain the receiver into /dev/null inline
+                                // via `tokio::join!`. Doing the drain on
+                                // the same task means we don't have to
+                                // track a second spawn; when handle_query
+                                // returns, `tx` drops and the drain ends.
+                                let (tx, mut rx) = mpsc::channel::<Event>(32);
+                                let drain = async {
+                                    while rx.recv().await.is_some() {}
+                                };
+                                let query = async {
+                                    if let Err(e) =
+                                        state.clone().handle_query(id, text, tx).await
+                                    {
+                                        warn!(
+                                            target: "assistd::listen",
+                                            "listen-triggered query failed: {e:#}"
+                                        );
+                                    }
+                                };
+                                tokio::join!(drain, query);
                             }
-                        });
+                            .instrument(span),
+                        );
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(
@@ -110,16 +132,64 @@ async fn run_utterance_forwarder(
                             target: "assistd::listen",
                             "utterance broadcast closed; forwarder exiting"
                         );
-                        return;
+                        break;
                     }
+                }
+            }
+            // Reap completed handlers eagerly so the set doesn't grow
+            // unbounded during long-running listen sessions.
+            Some(res) = handlers.join_next(), if !handlers.is_empty() => {
+                if let Err(e) = res
+                    && e.is_panic()
+                {
+                    error!(
+                        target: "assistd::listen",
+                        "listen-triggered query task panicked: {e}"
+                    );
                 }
             }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
-                    return;
+                    break;
                 }
             }
         }
+    }
+
+    // Drain in-flight handlers with bounded grace, mirroring the socket
+    // accept loop. Past the grace window, abort whatever's left so the
+    // daemon doesn't block its own shutdown on a wedged query.
+    let in_flight = handlers.len();
+    if in_flight == 0 {
+        return;
+    }
+    info!(
+        target: "assistd::listen",
+        grace_secs = grace.as_secs(),
+        in_flight,
+        "draining in-flight listen-triggered queries"
+    );
+    let drained = tokio::time::timeout(grace, async {
+        while let Some(res) = handlers.join_next().await {
+            if let Err(e) = res
+                && e.is_panic()
+            {
+                error!(
+                    target: "assistd::listen",
+                    "listen-triggered query task panicked: {e}"
+                );
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        let remaining = handlers.len();
+        warn!(
+            target: "assistd::listen",
+            remaining,
+            "shutdown grace expired; aborting remaining listen handlers"
+        );
+        handlers.shutdown().await;
     }
 }
 

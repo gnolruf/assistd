@@ -9,6 +9,7 @@ use assistd_voice::{
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
+use tracing::Instrument;
 
 /// Shared, long-lived daemon state handed to every request handler.
 ///
@@ -123,10 +124,10 @@ impl AppState {
         let llm = self.llm.clone();
         let tools = self.tools.clone();
         let max_iterations = self.config.agent.max_iterations;
-        let generator =
-            tokio::spawn(
-                async move { run_agent_turn(llm, tools, max_iterations, text, llm_tx).await },
-            );
+        let generator = tokio::spawn(
+            async move { run_agent_turn(llm, tools, max_iterations, text, llm_tx).await }
+                .in_current_span(),
+        );
 
         // Sentence buffer + speech worker. Each completed sentence is
         // sent to a per-query worker task that calls voice_output.speak
@@ -149,36 +150,39 @@ impl AppState {
         // every remaining sentence for THIS query without affecting
         // future queries spawned with the new epoch.
         let start_epoch = ctrl.current_epoch();
-        let speech_handle = tokio::spawn(async move {
-            while let Some(sentence) = speech_rx.recv().await {
-                match ctrl.should_speak(start_epoch) {
-                    SpeakDecision::Speak => {
-                        if let Err(e) = ctrl.inner().speak(sentence).await {
-                            tracing::debug!(
-                                target: "assistd::voice",
-                                error = %e,
-                                "voice_output.speak failed (non-fatal)"
-                            );
+        let speech_handle = tokio::spawn(
+            async move {
+                while let Some(sentence) = speech_rx.recv().await {
+                    match ctrl.should_speak(start_epoch) {
+                        SpeakDecision::Speak => {
+                            if let Err(e) = ctrl.inner().speak(sentence).await {
+                                tracing::debug!(
+                                    target: "assistd::voice",
+                                    error = %e,
+                                    "voice_output.speak failed (non-fatal)"
+                                );
+                            }
+                        }
+                        SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {
+                            // TTS toggled off, or skipped — drain the channel
+                            // without speaking. We still loop so the LLM can
+                            // keep streaming through the bounded mpsc.
                         }
                     }
-                    SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {
-                        // TTS toggled off, or skipped — drain the channel
-                        // without speaking. We still loop so the LLM can
-                        // keep streaming through the bounded mpsc.
-                    }
+                }
+                // Channel closed: drain anything still in the audio queue
+                // before the worker returns. Any failure here is logged
+                // inside wait_idle and downgraded to Ok.
+                if let Err(e) = ctrl.inner().wait_idle().await {
+                    tracing::debug!(
+                        target: "assistd::voice",
+                        error = %e,
+                        "voice_output.wait_idle failed (non-fatal)"
+                    );
                 }
             }
-            // Channel closed: drain anything still in the audio queue
-            // before the worker returns. Any failure here is logged
-            // inside wait_idle and downgraded to Ok.
-            if let Err(e) = ctrl.inner().wait_idle().await {
-                tracing::debug!(
-                    target: "assistd::voice",
-                    error = %e,
-                    "voice_output.wait_idle failed (non-fatal)"
-                );
-            }
-        });
+            .in_current_span(),
+        );
 
         // Tool calls inhibit the idle-flush — the LLM is *waiting on a
         // tool*, not stalled mid-prose. Without this, a long-running

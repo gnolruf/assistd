@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tracing::{debug, error, info, warn};
+use tracing::{Instrument, debug, error, info, warn};
 
 const EVENT_CHANNEL_CAPACITY: usize = 32;
 
@@ -187,6 +187,12 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
     let (tx, mut rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
     let dispatch_state = state.clone();
 
+    // Span carries the request id and kind so all child events emitted
+    // by `dispatch` (LLM stream, tool calls, TTS sentences) and by the
+    // forward loop are correlatable in `RUST_LOG=assistd=debug` output
+    // when several requests are in flight on different connections.
+    let span = tracing::info_span!("ipc", id = %req.id(), req = req.kind());
+
     // Dispatch and event-forwarding run concurrently on this task rather
     // than on a spawned child. If the task is cancelled (e.g. the outer
     // accept loop hits its shutdown grace and calls `JoinSet::shutdown`),
@@ -200,7 +206,9 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
         Ok::<(), SocketError>(())
     };
 
-    let (dispatch_res, forward_res) = tokio::join!(dispatch_fut, forward_fut);
+    let (dispatch_res, forward_res) = async { tokio::join!(dispatch_fut, forward_fut) }
+        .instrument(span)
+        .await;
 
     if let Err(e) = dispatch_res {
         error!("dispatch error: {e:#}");
@@ -703,5 +711,245 @@ mod tests {
             .await
             .expect("server did not exit within 2s of shutdown")
             .unwrap();
+    }
+
+    // ---------------------------------------------------------------
+    // Wire-protocol contract tests: one happy (or expected-failure)
+    // path per `assistd_ipc::Request` variant. Each variant must
+    // produce a sensible event sequence terminated by `Done` or
+    // `Error`. Adding/renaming a variant should fail at least one of
+    // these tests, so a protocol regression is caught at CI time
+    // rather than at runtime in a TUI session.
+    // ---------------------------------------------------------------
+
+    /// Spin up `serve_at` against the given state, hand the socket
+    /// path to the body, then trigger shutdown and join the server.
+    /// Removes the boilerplate from per-variant tests below.
+    async fn with_server<F, Fut, R>(state: Arc<AppState>, body: F) -> R
+    where
+        F: FnOnce(PathBuf) -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistd.sock");
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_path = path.clone();
+        let server = tokio::spawn(async move {
+            serve_at(&server_path, state, async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        });
+        wait_for_listener(&path).await;
+        let out = body(path).await;
+        tx.send(()).unwrap();
+        server.await.unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn set_presence_to_sleeping_returns_presence_then_done() {
+        // Active → Sleeping is the stub-friendly path: it drops the
+        // (None) llama service and flips the state field. drowse()
+        // and Drowsy-bound wake() require a live HTTP server.
+        with_server(test_state(), |path| async move {
+            let events = send_request_collect_events(
+                &path,
+                r#"{"type":"set_presence","id":"sp-1","target":"sleeping"}"#,
+            )
+            .await;
+            assert!(matches!(
+                events.first(),
+                Some(Event::Presence { id, state }) if id == "sp-1" && *state == PresenceState::Sleeping
+            ), "got {events:?}");
+            assert!(matches!(events.last(), Some(Event::Done { id }) if id == "sp-1"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_presence_to_active_when_active_is_idempotent() {
+        with_server(test_state(), |path| async move {
+            let events = send_request_collect_events(
+                &path,
+                r#"{"type":"set_presence","id":"sp-2","target":"active"}"#,
+            )
+            .await;
+            assert!(matches!(
+                events.first(),
+                Some(Event::Presence { id, state }) if id == "sp-2" && *state == PresenceState::Active
+            ), "got {events:?}");
+            assert!(matches!(events.last(), Some(Event::Done { .. })));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_presence_returns_active_for_active_stub() {
+        with_server(test_state(), |path| async move {
+            let events = send_request_collect_events(
+                &path,
+                r#"{"type":"get_presence","id":"gp-1"}"#,
+            )
+            .await;
+            assert!(matches!(
+                events.first(),
+                Some(Event::Presence { id, state }) if id == "gp-1" && *state == PresenceState::Active
+            ), "got {events:?}");
+            assert!(matches!(events.last(), Some(Event::Done { .. })));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cycle_from_active_attempts_drowse_and_errors_on_stub() {
+        // Cycle Active → Drowsy invokes `drowse()`, which calls
+        // `control.unload_model()` against the stub's bogus
+        // 127.0.0.1:1 endpoint. We don't care about the exact error
+        // text, only that the IPC layer surfaces it as an `Error`
+        // event with the matching id.
+        with_server(test_state(), |path| async move {
+            let events =
+                send_request_collect_events(&path, r#"{"type":"cycle","id":"cy-1"}"#).await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Event::Error { id, .. }) if id == "cy-1"
+                ),
+                "got {events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ptt_start_errors_with_no_voice_input_stub() {
+        with_server(test_state(), |path| async move {
+            let events =
+                send_request_collect_events(&path, r#"{"type":"ptt_start","id":"ptt-1"}"#).await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Event::Error { id, message })
+                        if id == "ptt-1" && message.contains("not enabled")
+                ),
+                "got {events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ptt_stop_errors_with_no_voice_input_stub() {
+        with_server(test_state(), |path| async move {
+            let events =
+                send_request_collect_events(&path, r#"{"type":"ptt_stop","id":"ptt-2"}"#).await;
+            // ptt_stop emits VoiceState::Transcribing first, then
+            // surfaces the NoVoiceInput error.
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Event::Error { id, .. }) if id == "ptt-2"
+                ),
+                "got {events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn listen_stop_when_inactive_returns_listenstate_then_done() {
+        // NoContinuousListener::stop is idempotent — the daemon
+        // emits ListenState{active:false} + Done even when nothing
+        // was running.
+        with_server(test_state(), |path| async move {
+            let events =
+                send_request_collect_events(&path, r#"{"type":"listen_stop","id":"ls-stop"}"#)
+                    .await;
+            assert!(
+                matches!(
+                    events.first(),
+                    Some(Event::ListenState { id, active: false }) if id == "ls-stop"
+                ),
+                "got {events:?}"
+            );
+            assert!(matches!(events.last(), Some(Event::Done { id }) if id == "ls-stop"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn listen_toggle_from_inactive_attempts_start_and_errors_on_stub() {
+        // Toggle delegates to start/stop based on `is_active()`. With
+        // NoContinuousListener inactive, toggle routes to start,
+        // which then errors with "not enabled".
+        with_server(test_state(), |path| async move {
+            let events =
+                send_request_collect_events(&path, r#"{"type":"listen_toggle","id":"lt-1"}"#).await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Event::Error { id, message })
+                        if id == "lt-1" && message.contains("not enabled")
+                ),
+                "got {events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn voice_toggle_flips_enabled_and_returns_voiceoutputstate_then_done() {
+        // Default test_state builds the controller with enabled=true.
+        with_server(test_state(), |path| async move {
+            let events =
+                send_request_collect_events(&path, r#"{"type":"voice_toggle","id":"vt-1"}"#).await;
+            assert!(
+                matches!(
+                    events.first(),
+                    Some(Event::VoiceOutputState { id, enabled: false }) if id == "vt-1"
+                ),
+                "got {events:?}"
+            );
+            assert!(matches!(events.last(), Some(Event::Done { id }) if id == "vt-1"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn voice_skip_returns_voiceoutputstate_with_enabled_unchanged_then_done() {
+        with_server(test_state(), |path| async move {
+            let events =
+                send_request_collect_events(&path, r#"{"type":"voice_skip","id":"vs-1"}"#).await;
+            // Skip drops queued audio but leaves the enabled flag.
+            assert!(
+                matches!(
+                    events.first(),
+                    Some(Event::VoiceOutputState { id, enabled: true }) if id == "vs-1"
+                ),
+                "got {events:?}"
+            );
+            assert!(matches!(events.last(), Some(Event::Done { .. })));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_voice_state_reports_default_enabled_true() {
+        with_server(test_state(), |path| async move {
+            let events =
+                send_request_collect_events(&path, r#"{"type":"get_voice_state","id":"gvs-1"}"#)
+                    .await;
+            assert!(
+                matches!(
+                    events.first(),
+                    Some(Event::VoiceOutputState { id, enabled: true }) if id == "gvs-1"
+                ),
+                "got {events:?}"
+            );
+            assert!(matches!(events.last(), Some(Event::Done { .. })));
+        })
+        .await;
     }
 }

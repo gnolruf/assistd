@@ -19,7 +19,7 @@ use assistd_llm::{LlmBackend, LlmEvent, StepOutcome, ToolCall, ToolResultPayload
 use assistd_tools::{Attachment, ToolRegistry};
 use serde_json::Value;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// Run one agent turn end-to-end.
 ///
@@ -38,6 +38,7 @@ use tracing::{debug, info, warn};
 /// Cancellation: if `tx` is closed (client disconnected) between
 /// iterations, the loop returns `Ok(())` without running further tool
 /// calls or LLM round trips.
+#[instrument(skip_all, name = "agent_turn")]
 pub async fn run_agent_turn(
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,

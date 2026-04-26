@@ -1,9 +1,40 @@
+//! Daemon orchestration crate — the glue that wires every subsystem
+//! into a running `assistd` process.
+//!
+//! # Not a stable public library
+//!
+//! `assistd-core` is the aggregate facade consumed by the `assistd`
+//! binary (and a small amount of test code). It is **not** a versioned
+//! public API and external code should not depend on it. The re-exports
+//! below exist so the binary can `use assistd_core::*` instead of
+//! reaching into every subsystem crate.
+//!
+//! When adding a new subsystem crate (e.g. `assistd-memory`,
+//! `assistd-mcp`), define its typed API in that crate and re-export
+//! only the daemon-facing surface here, in its own `pub use` block
+//! grouped with a comment naming the upstream crate. Anything exported
+//! here that is not used outside `assistd-core` itself should be
+//! demoted to `pub(crate)`.
+//!
+//! # Modules
+//!
+//! - [`agent`] — per-turn LLM/tool loop driver.
+//! - [`presence`] — Active/Drowsy/Sleeping state machine and
+//!   `LlamaService` lifecycle.
+//! - [`socket`] — Unix-socket IPC server (line-delimited JSON).
+//! - [`state`] — `AppState` request dispatcher; one handler per
+//!   `assistd_ipc::Request` variant.
+
 pub mod agent;
 pub mod presence;
 pub mod socket;
 pub mod state;
 
 pub use agent::run_agent_turn;
+
+// Re-exports from `assistd-config`. Config types are the boundary
+// between user-supplied TOML and subsystem constructors; the daemon
+// passes them through unchanged.
 pub use assistd_config as config;
 pub use assistd_config::{
     AgentConfig, BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config,
@@ -11,13 +42,29 @@ pub use assistd_config::{
     PresenceConfig, RemoteConfig, SleepConfig, SynthesisConfig, ToolsBashConfig, ToolsConfig,
     ToolsOutputConfig, ToolsWriteConfig, VoiceConfig,
 };
+
+// Re-exports from `assistd-ipc`. Wire-protocol types crossing the
+// socket boundary. The daemon binary uses these to drive request
+// handlers and emit events.
 pub use assistd_ipc as ipc;
 pub use assistd_ipc::{PresenceState, VoiceCaptureState};
+
+// Re-exports from `assistd-tools`. The tool/command subsystem lives
+// in its own crate; these are the types the daemon constructs and
+// hands to `AppState`.
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
+
+// Re-exports from `assistd-voice`. Voice input/output traits plus
+// the `No*` placeholders used when the corresponding feature is
+// disabled at build time or in config.
 pub use assistd_voice::{
     ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput, SpeakDecision,
     VoiceInput, VoiceOutput, VoiceOutputController,
 };
+
+// In-crate exports. `AppState` is the daemon's shared state container;
+// `PresenceManager` owns the presence machine and llama-server lifecycle;
+// `RequestGuard` is the RAII handle held for the duration of a request.
 pub use presence::{PresenceManager, RequestGuard};
 pub use state::AppState;
 
