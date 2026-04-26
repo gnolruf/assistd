@@ -32,6 +32,9 @@ chat = [
     "dep:textwrap",
     "dep:async-trait",
     "dep:libc",
+    "dep:shlex",
+    "dep:ratatui-image",
+    "dep:image",
 ]
 
 [dependencies]
@@ -64,3 +67,9 @@ tracing-appender = { workspace = true, optional = true }
 textwrap         = { workspace = true, optional = true }
 async-trait      = { workspace = true, optional = true }
 libc             = { workspace = true, optional = true }
+shlex            = { workspace = true, optional = true }
+ratatui-image    = { workspace = true, optional = true }
+image            = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

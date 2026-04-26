@@ -8,6 +8,12 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui_image::protocol::StatefulProtocol;
+
+/// Reserved-row footprint for an inline `OutputItem::Thumbnail`. Picked
+/// to roughly match the height of an avatar-sized thumbnail without
+/// dominating the viewport.
+pub const THUMBNAIL_ROWS: u16 = 8;
 
 /// A single tool invocation displayed as a cohesive block: command,
 /// captured output (already condensed by Layer 2 to ≤200 lines / ≤50 KB),
@@ -27,13 +33,22 @@ pub struct ToolBlock {
     pub expanded: bool,
 }
 
-#[derive(Debug)]
+/// Inline thumbnail rendered via `ratatui-image`. The protocol is the
+/// pre-built per-image graphics state — its lifetime is the OutputPane.
+pub struct ThumbnailItem {
+    /// Filename shown in the placeholder line if the thumbnail's row
+    /// range is scrolled out of the viewport. Also used as the
+    /// `title` line above the image when rendered.
+    pub name: String,
+    pub protocol: StatefulProtocol,
+}
+
 enum OutputItem {
     Text(Line<'static>),
     Tool(ToolBlock),
+    Thumbnail(ThumbnailItem),
 }
 
-#[derive(Debug)]
 pub struct OutputPane {
     items: Vec<OutputItem>,
     open_assistant: Option<usize>,
@@ -64,6 +79,37 @@ impl OutputPane {
         self.items.push(OutputItem::Text(single_span_line(
             format!("> {text}"),
             user_style(),
+        )));
+        self.dirty = true;
+    }
+
+    /// Push the user's prompt line with a trailing 📎 tag listing every
+    /// attachment that rode along with the turn — so scrollback shows
+    /// which turn carried the image even after `pending_attachments` is
+    /// drained.
+    pub fn push_user_with_attachments(&mut self, text: &str, names: &[String]) {
+        self.close_open_assistant();
+        let tag = if names.len() == 1 {
+            format!("  📎 {}", names[0])
+        } else {
+            format!("  📎 {} ({} files)", names.join(", "), names.len())
+        };
+        self.items.push(OutputItem::Text(single_span_line(
+            format!("> {text}{tag}"),
+            user_style(),
+        )));
+        self.dirty = true;
+    }
+
+    /// Push a styled informational line — used by `/attach` to confirm
+    /// "📎 attached: name.png (image/png, 12 KB)" without polluting the
+    /// error stream. Distinct from `push_user` (no `> ` prefix) and
+    /// `push_error` (no `!! ` prefix or red color).
+    pub fn push_info(&mut self, text: &str) {
+        self.close_open_assistant();
+        self.items.push(OutputItem::Text(single_span_line(
+            text.to_string(),
+            info_style(),
         )));
         self.dirty = true;
     }
@@ -233,8 +279,9 @@ impl OutputPane {
     fn rewrap(&self, width: u16) -> Vec<Line<'static>> {
         if width == 0 {
             // Degraded path: render text items raw, tool blocks as a
-            // single unwrapped header line. Keeps the zero-width test
-            // green and avoids `textwrap` calls with width 0.
+            // single unwrapped header line, thumbnails as a one-line
+            // placeholder. Keeps the zero-width test green and avoids
+            // `textwrap` calls with width 0.
             return self
                 .items
                 .iter()
@@ -242,6 +289,9 @@ impl OutputPane {
                     OutputItem::Text(l) => l.clone(),
                     OutputItem::Tool(b) => {
                         single_span_line(format!("$ {}", b.command), tool_call_style())
+                    }
+                    OutputItem::Thumbnail(t) => {
+                        single_span_line(format!("📎 {}", t.name), info_style())
                     }
                 })
                 .collect();
@@ -251,6 +301,7 @@ impl OutputPane {
             match item {
                 OutputItem::Text(line) => wrap_line_into(&mut out, line, width),
                 OutputItem::Tool(b) => render_tool_block(&mut out, b, width),
+                OutputItem::Thumbnail(t) => render_thumbnail_placeholder(&mut out, t),
             }
         }
         out
@@ -266,9 +317,143 @@ impl OutputPane {
     fn text_at_mut(&mut self, idx: usize) -> Option<&mut Line<'static>> {
         match self.items.get_mut(idx)? {
             OutputItem::Text(line) => Some(line),
-            OutputItem::Tool(_) => None,
+            OutputItem::Tool(_) | OutputItem::Thumbnail(_) => None,
         }
     }
+
+    /// Append an inline image thumbnail. Reserves [`THUMBNAIL_ROWS`]
+    /// blank wrapped rows so layout math stays correct; the image
+    /// itself is drawn over those rows by the renderer.
+    pub fn push_thumbnail(&mut self, name: String, protocol: StatefulProtocol) {
+        self.close_open_assistant();
+        self.items
+            .push(OutputItem::Thumbnail(ThumbnailItem { name, protocol }));
+        self.dirty = true;
+    }
+
+    /// Walk the wrapped output once and collect, for each
+    /// `OutputItem::Thumbnail`, a `(start_row, item_idx)` pair. The
+    /// renderer uses this layout map to overlay
+    /// `ratatui_image::StatefulImage` widgets on the reserved rows.
+    pub fn thumbnail_layout(&mut self, width: u16) -> Vec<ThumbnailSlot> {
+        // Force the wrapped cache so `wrap_cache` reflects the current
+        // items; we walk items in their original order and accumulate
+        // the same per-item row counts that `rewrap` produced, so the
+        // returned `start_row` lines up with the wrapped output.
+        let _ = self.wrapped(width);
+        let mut slots = Vec::new();
+        let mut row: usize = 0;
+        for (idx, item) in self.items.iter().enumerate() {
+            let height = match item {
+                OutputItem::Text(line) => wrapped_text_rows(line, width),
+                OutputItem::Tool(b) => wrapped_tool_rows(b, width),
+                OutputItem::Thumbnail(_) => THUMBNAIL_ROWS as usize,
+            };
+            if matches!(item, OutputItem::Thumbnail(_)) {
+                slots.push(ThumbnailSlot {
+                    item_idx: idx,
+                    start_row: row,
+                    height,
+                });
+            }
+            row += height;
+        }
+        slots
+    }
+
+    /// Mutable access to a thumbnail's `StatefulProtocol`, indexed by
+    /// `OutputItem` position. The renderer needs `&mut StatefulProtocol`
+    /// to call `frame.render_stateful_widget`. Returns `None` if the
+    /// item at `idx` isn't a thumbnail.
+    pub fn thumbnail_protocol_mut(&mut self, idx: usize) -> Option<&mut StatefulProtocol> {
+        match self.items.get_mut(idx)? {
+            OutputItem::Thumbnail(t) => Some(&mut t.protocol),
+            _ => None,
+        }
+    }
+}
+
+/// Layout entry for one thumbnail in the wrapped output, returned by
+/// [`OutputPane::thumbnail_layout`] for the renderer to overlay images.
+#[derive(Debug, Clone, Copy)]
+pub struct ThumbnailSlot {
+    pub item_idx: usize,
+    /// Row index (0-based) in the full wrapped output where this
+    /// thumbnail's reserved area begins.
+    pub start_row: usize,
+    /// Number of wrapped rows the thumbnail reserves. Today this is
+    /// always [`THUMBNAIL_ROWS`] but kept as a field so future per-item
+    /// sizing doesn't change the API.
+    pub height: usize,
+}
+
+/// Reserve [`THUMBNAIL_ROWS`] blank lines so layout math stays correct.
+/// The first row carries a "📎 name" caption so non-graphics terminals
+/// (and the placeholder rows that show through if rendering is skipped)
+/// still tell the user what they're looking at.
+fn render_thumbnail_placeholder(out: &mut Vec<Line<'static>>, t: &ThumbnailItem) {
+    out.push(single_span_line(format!("📎 {}", t.name), info_style()));
+    for _ in 1..THUMBNAIL_ROWS {
+        out.push(Line::from(""));
+    }
+}
+
+fn wrapped_text_rows(line: &Line<'static>, width: u16) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    if content.is_empty() {
+        return 1;
+    }
+    let n = textwrap::wrap(&content, width as usize).len();
+    n.max(1)
+}
+
+fn wrapped_tool_rows(b: &ToolBlock, width: u16) -> usize {
+    // Mirrors `render_tool_block` row accounting: header + body + footer
+    // + trailing blank, all wrapped to `inner_w = width - 2` (bar prefix).
+    if width == 0 {
+        return 1;
+    }
+    let inner_w = width.saturating_sub(2).max(1) as usize;
+    let mut rows: usize = 0;
+    rows += textwrap::wrap(&format!("$ {}", b.command), inner_w)
+        .len()
+        .max(1);
+    let body_lines = split_body(&b.output);
+    let collapsed = !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
+    let stderr_idxs: Vec<usize> = body_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("[stderr] "))
+        .map(|(i, _)| i)
+        .collect();
+    let visible_idxs: Vec<usize> = if collapsed {
+        let mut idxs: Vec<usize> = (0..COLLAPSED_HEAD_LINES.min(body_lines.len())).collect();
+        for &si in &stderr_idxs {
+            if !idxs.contains(&si) {
+                idxs.push(si);
+            }
+        }
+        idxs.sort_unstable();
+        idxs
+    } else {
+        (0..body_lines.len()).collect()
+    };
+    for i in &visible_idxs {
+        let n = textwrap::wrap(&body_lines[*i], inner_w).len().max(1);
+        rows += n;
+    }
+    if collapsed {
+        let hidden = body_lines.len() - visible_idxs.len();
+        if hidden > 0 {
+            // The collapsed-tail line is short; treat it as one row.
+            rows += 1;
+        }
+    }
+    // Footer + trailing blank.
+    rows + 2
 }
 
 fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16) {
@@ -450,6 +635,10 @@ fn error_style() -> Style {
     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
 }
 
+fn info_style() -> Style {
+    Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
+}
+
 fn tool_call_style() -> Style {
     Style::default().fg(Color::Blue).add_modifier(Modifier::DIM)
 }
@@ -487,6 +676,7 @@ mod tests {
         match it {
             OutputItem::Text(l) => line_text(l),
             OutputItem::Tool(b) => format!("[tool:{}]", b.command),
+            OutputItem::Thumbnail(t) => format!("[thumb:{}]", t.name),
         }
     }
 

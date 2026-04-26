@@ -4,13 +4,16 @@
 //! and a handle to an `LlmBackend` for spawning generation tasks. The
 //! `on_*` methods are pure reducers; I/O is confined to `spawn_generation`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_core::{PresenceManager, PresenceState, SleepConfig, ToolRegistry, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
-use assistd_tools::ConfirmationRequest;
+use assistd_tools::{Attachment, ConfirmationRequest, load_image_attachment};
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::{mpsc, oneshot};
 
 use super::gate::PendingConfirmation;
@@ -22,10 +25,108 @@ use super::vram::ResourceState;
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
 
-#[derive(Debug)]
+/// One image staged by `/attach`, waiting to ride along with the user's
+/// next text submission.
+pub struct PendingAttachment {
+    /// Display name (file basename) shown in the `📎×N` indicator and
+    /// the user-prompt tag.
+    pub name: String,
+    pub mime: String,
+    /// Reserved for future use (token-budget hints) — held alongside the
+    /// bytes so we don't have to rescan on display.
+    #[allow(dead_code)]
+    pub size: usize,
+    pub bytes: Vec<u8>,
+    /// Pre-built terminal-graphics protocol for inline thumbnail
+    /// rendering. `None` on terminals without graphics support — the
+    /// `📎 attached: ...` info line still appears either way.
+    pub protocol: Option<StatefulProtocol>,
+}
+
+impl PendingAttachment {
+    fn into_parts(self) -> (Attachment, Option<StatefulProtocol>, String) {
+        (
+            Attachment::Image {
+                mime: self.mime,
+                bytes: self.bytes,
+            },
+            self.protocol,
+            self.name,
+        )
+    }
+}
+
+/// Where a `submit` was triggered from. Slash-command parsing only fires
+/// for `Typed` submissions so a voice transcription that happens to
+/// contain "/attach foo" goes to the model as plain text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitOrigin {
+    Typed,
+    Voice,
+}
+
+// `AttachLoaded`'s `bytes: Vec<u8>` and `protocol` push its size well
+// past the other variants — but it's a one-shot transient event flowing
+// through a bounded mpsc, so the size asymmetry is fine. Boxing the
+// payload would just trade one heap alloc per attach for two.
+#[allow(clippy::large_enum_variant)]
 pub enum ChatEvent {
     Llm(LlmEvent),
     LlmError(String),
+    /// `/attach <path>` finished reading + validating the file. Carries
+    /// everything the App needs to update the UI.
+    AttachLoaded {
+        /// Original path the user typed — kept for diagnostics; the
+        /// reducer only uses `name` for the visible label.
+        #[allow(dead_code)]
+        path: String,
+        name: String,
+        mime: String,
+        size: usize,
+        bytes: Vec<u8>,
+        /// Pre-built graphics-protocol state for the inline thumbnail.
+        /// `None` when the terminal doesn't support a graphics protocol
+        /// or image decoding failed (the bytes still get sent to the
+        /// LLM — only the local rendering fallback differs).
+        protocol: Option<StatefulProtocol>,
+    },
+    /// `/attach <path>` failed (missing file, unsupported format, etc.).
+    AttachFailed {
+        path: String,
+        message: String,
+    },
+}
+
+// Manual Debug because `StatefulProtocol` (inside `AttachLoaded.protocol`)
+// does not implement Debug. Hides the protocol blob behind a placeholder
+// so the rest of the variant fields stay debuggable.
+impl std::fmt::Debug for ChatEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChatEvent::Llm(ev) => f.debug_tuple("Llm").field(ev).finish(),
+            ChatEvent::LlmError(msg) => f.debug_tuple("LlmError").field(msg).finish(),
+            ChatEvent::AttachLoaded {
+                path,
+                name,
+                mime,
+                size,
+                protocol,
+                ..
+            } => f
+                .debug_struct("AttachLoaded")
+                .field("path", path)
+                .field("name", name)
+                .field("mime", mime)
+                .field("size", size)
+                .field("has_thumbnail", &protocol.is_some())
+                .finish(),
+            ChatEvent::AttachFailed { path, message } => f
+                .debug_struct("AttachFailed")
+                .field("path", path)
+                .field("message", message)
+                .finish(),
+        }
+    }
 }
 
 /// Pending destructive-command prompt displayed as an overlay. Only one is
@@ -60,6 +161,16 @@ pub struct App {
     /// call+result pair becomes one `ToolBlock`. The agent loop is strictly
     /// serial — only one tool runs at a time — so a single slot suffices.
     pending_tool_call: Option<(String, String)>,
+    /// Images staged by `/attach`, drained into the user's next
+    /// submission. Persists across multiple `/attach` invocations so a
+    /// user can attach several images before sending a query.
+    pub pending_attachments: Vec<PendingAttachment>,
+    /// Terminal graphics-protocol picker, probed once at TUI startup.
+    /// `None` on terminals without Kitty / Sixel / iTerm2 support — in
+    /// that case `/attach` falls back to filename-only display.
+    /// Cloned into the spawned attach-load task so the worker can build
+    /// `StatefulProtocol`s without holding a lock back to the UI loop.
+    picker: Option<Picker>,
     client: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
     max_iterations: u32,
@@ -67,6 +178,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Arc<dyn LlmBackend>,
         tools: Arc<ToolRegistry>,
@@ -75,6 +187,7 @@ impl App {
         model_name: String,
         sleep_cfg: SleepConfig,
         presence: Option<Arc<PresenceManager>>,
+        picker: Option<Picker>,
     ) -> Self {
         let presence_state = presence.as_ref().map(|p| p.state());
         Self {
@@ -94,6 +207,8 @@ impl App {
             modal: None,
             listening: VoiceCaptureState::Idle,
             pending_tool_call: None,
+            pending_attachments: Vec::new(),
+            picker,
             client,
             tools,
             max_iterations,
@@ -180,11 +295,7 @@ impl App {
         match self.input.on_key(ev) {
             InputAction::None => {}
             InputAction::Submit(text) => {
-                if self.generating {
-                    self.set_notice("still generating — please wait");
-                } else {
-                    self.submit(text);
-                }
+                self.submit_with_origin(text, SubmitOrigin::Typed);
             }
             InputAction::Quit => {
                 // Closing during a pending modal isn't currently
@@ -226,7 +337,9 @@ impl App {
     /// Handle a completed transcription from the PTT pipeline. Empty
     /// strings (VAD trimmed everything) surface as a brief notice.
     /// Non-empty text is auto-submitted to the LLM via the same path
-    /// as typing into the input line.
+    /// as typing into the input line, but with `Voice` origin so a
+    /// transcription containing "/attach" is treated as plain text
+    /// rather than parsed as a slash command.
     pub fn on_transcription(&mut self, text: String) {
         if text.trim().is_empty() {
             self.set_notice("no speech detected");
@@ -236,7 +349,7 @@ impl App {
             self.set_notice("still generating — transcription dropped");
             return;
         }
-        self.submit(text);
+        self.submit_with_origin(text, SubmitOrigin::Voice);
     }
 
     /// Surface a non-fatal voice pipeline error as a TUI notice. The
@@ -310,6 +423,30 @@ impl App {
                 self.output.push_error(&msg);
                 self.generating = false;
             }
+            ChatEvent::AttachLoaded {
+                name,
+                mime,
+                size,
+                bytes,
+                protocol,
+                ..
+            } => {
+                let label = format!("📎 attached: {name} ({mime}, {})", human_size_short(size));
+                self.output.push_info(&label);
+                self.set_notice(&format!("📎 {name} attached"));
+                self.pending_attachments.push(PendingAttachment {
+                    name,
+                    mime,
+                    size,
+                    bytes,
+                    protocol,
+                });
+            }
+            ChatEvent::AttachFailed { path, message } => {
+                self.output
+                    .push_error(&format!("/attach {path}: {message}"));
+                self.set_notice(&format!("📎 {path}: {message}"));
+            }
         }
     }
 
@@ -330,20 +467,125 @@ impl App {
         self.notice = Some((text.to_string(), Instant::now()));
     }
 
-    fn submit(&mut self, text: String) {
-        self.begin_submit(&text);
-        self.spawn_generation(text);
+    fn submit_with_origin(&mut self, text: String, origin: SubmitOrigin) {
+        if origin == SubmitOrigin::Typed {
+            if let Some(rest) = text.strip_prefix("/attach ") {
+                self.handle_attach(rest.trim());
+                return;
+            }
+            // Reject a bare `/attach` (no path) early so we don't ship the
+            // literal string to the LLM and waste a turn.
+            if text.trim() == "/attach" {
+                self.output
+                    .push_error("/attach: expected a path. Usage: /attach <path>");
+                self.set_notice("/attach: missing path");
+                return;
+            }
+        }
+        if self.generating {
+            self.set_notice("still generating — please wait");
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_attachments);
+        let attachment_names: Vec<String> = pending.iter().map(|a| a.name.clone()).collect();
+        let mut attachments: Vec<Attachment> = Vec::with_capacity(pending.len());
+        let mut thumbnails: Vec<(String, StatefulProtocol)> = Vec::new();
+        for p in pending {
+            let (att, proto, name) = p.into_parts();
+            attachments.push(att);
+            if let Some(pr) = proto {
+                thumbnails.push((name, pr));
+            }
+        }
+        self.begin_submit(&text, &attachment_names);
+        for (name, protocol) in thumbnails {
+            self.output.push_thumbnail(name, protocol);
+        }
+        self.spawn_generation(text, attachments);
     }
 
-    fn begin_submit(&mut self, text: &str) {
-        self.output.push_user(text);
+    fn begin_submit(&mut self, text: &str, attachment_names: &[String]) {
+        if attachment_names.is_empty() {
+            self.output.push_user(text);
+        } else {
+            self.output
+                .push_user_with_attachments(text, attachment_names);
+        }
         self.output.reset_scroll();
         self.output.begin_assistant();
         self.throughput.reset();
         self.generating = true;
     }
 
-    fn spawn_generation(&self, text: String) {
+    fn handle_attach(&mut self, raw: &str) {
+        let args = match shlex::split(raw) {
+            Some(v) => v,
+            None => {
+                self.output
+                    .push_error("/attach: unterminated quote in path");
+                self.set_notice("/attach: bad quoting");
+                return;
+            }
+        };
+        if args.len() != 1 {
+            self.output.push_error(&format!(
+                "/attach: expected exactly one path, got {}",
+                args.len()
+            ));
+            self.set_notice("/attach: need one path");
+            return;
+        }
+        let path = args.into_iter().next().expect("len == 1 checked above");
+        let name = PathBuf::from(&path)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        self.set_notice(&format!("📎 reading {name}…"));
+        let tx = self.chat_tx.clone();
+        let picker = self.picker.clone();
+        let path_for_load = path.clone();
+        tokio::spawn(async move {
+            match load_image_attachment(std::path::Path::new(&path_for_load)).await {
+                Ok((Attachment::Image { mime, bytes }, size)) => {
+                    // Build the graphics-protocol thumbnail when the
+                    // terminal supports it. `image::load_from_memory`
+                    // can fail on rare valid-but-unusual encodings (e.g.
+                    // 16-bit PNGs the `image` crate doesn't enable by
+                    // default) — fall back to filename-only display in
+                    // that case rather than failing the whole attach.
+                    let protocol = picker.and_then(|p| match image::load_from_memory(&bytes) {
+                        Ok(img) => Some(p.new_resize_protocol(img)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "/attach: thumbnail decode failed for {path_for_load}: {e}"
+                            );
+                            None
+                        }
+                    });
+                    let _ = tx
+                        .send(ChatEvent::AttachLoaded {
+                            path: path_for_load,
+                            name,
+                            mime,
+                            size,
+                            bytes,
+                            protocol,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(ChatEvent::AttachFailed {
+                            path: path_for_load,
+                            message: e.user_message(),
+                        })
+                        .await;
+                }
+            }
+        });
+    }
+
+    fn spawn_generation(&self, text: String, attachments: Vec<Attachment>) {
         let client = self.client.clone();
         let tools = self.tools.clone();
         let max_iterations = self.max_iterations;
@@ -378,8 +620,15 @@ impl App {
                     }
                 }
             });
-            let result =
-                assistd_core::run_agent_turn(client, tools, max_iterations, text, llm_tx).await;
+            let result = assistd_core::run_agent_turn(
+                client,
+                tools,
+                max_iterations,
+                text,
+                attachments,
+                llm_tx,
+            )
+            .await;
             let _ = forwarder.await;
             if let Err(e) = result {
                 let _ = tx.send(ChatEvent::LlmError(e.to_string())).await;
@@ -393,6 +642,24 @@ fn presence_label(s: PresenceState) -> &'static str {
         PresenceState::Active => "active",
         PresenceState::Drowsy => "drowsy",
         PresenceState::Sleeping => "sleeping",
+    }
+}
+
+/// Compact bytes-to-human formatter for the `📎 attached: ...` line.
+/// Mirrors `assistd_tools::commands::cat::human_size` but is duplicated
+/// here so the chat TUI doesn't depend on a `pub(crate)` helper.
+fn human_size_short(n: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = KB * 1024;
+    const GB: usize = MB * 1024;
+    if n >= GB {
+        format!("{:.1}GB", n as f64 / GB as f64)
+    } else if n >= MB {
+        format!("{:.1}MB", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{}KB", n / KB)
+    } else {
+        format!("{n}B")
     }
 }
 
@@ -420,6 +687,7 @@ mod tests {
             tx,
             "test-model".into(),
             test_sleep_cfg(),
+            None,
             None,
         );
         (app, rx)
@@ -615,7 +883,7 @@ mod tests {
     #[tokio::test]
     async fn echo_backend_spawn_yields_delta_then_done() {
         let (app, mut rx) = test_app();
-        app.spawn_generation("hello".into());
+        app.spawn_generation("hello".into(), Vec::new());
         let first = rx.recv().await.expect("delta");
         let second = rx.recv().await.expect("done");
         match first {
@@ -638,8 +906,9 @@ mod tests {
             "test-model".into(),
             test_sleep_cfg(),
             None,
+            None,
         );
-        app.spawn_generation("hello".into());
+        app.spawn_generation("hello".into(), Vec::new());
         let ev = rx.recv().await.expect("error event");
         match ev {
             ChatEvent::LlmError(msg) => assert!(msg.contains("server down")),
@@ -735,5 +1004,208 @@ mod tests {
         let (mut app, _rx) = test_app();
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(app.input.buffer().is_empty());
+    }
+
+    // --- /attach slash command -------------------------------------------
+
+    /// Minimal valid 1×1 PNG that `infer` recognizes as `image/png`.
+    /// Same bytes used by `assistd-tools::commands::see` tests so we
+    /// know the loader accepts them.
+    const PNG_BYTES: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    /// Drive an Enter on `text` then drain pending `AttachLoaded` /
+    /// `AttachFailed` events so the App applies them. Mirrors what the
+    /// real event loop does between `events.next()` and `chat_rx.recv`.
+    async fn attach_and_drain(app: &mut App, rx: &mut mpsc::Receiver<ChatEvent>, text: &str) {
+        for c in text.chars() {
+            app.on_key(typed(c));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // First event: either AttachLoaded or AttachFailed.
+        if let Some(ev) = rx.recv().await {
+            app.on_llm_event(ev);
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_png_stages_attachment_and_renders_info_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        tokio::fs::write(&path, PNG_BYTES).await.unwrap();
+
+        let (mut app, mut rx) = test_app();
+        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", path.display())).await;
+
+        assert_eq!(
+            app.pending_attachments.len(),
+            1,
+            "one image staged after /attach"
+        );
+        let staged = &app.pending_attachments[0];
+        assert_eq!(staged.name, "shot.png");
+        assert_eq!(staged.mime, "image/png");
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains("📎 attached: shot.png") && l.contains("image/png")),
+            "info line missing in: {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_missing_path_pushes_error_and_stages_nothing() {
+        let (mut app, mut rx) = test_app();
+        attach_and_drain(&mut app, &mut rx, "/attach /nonexistent/missing.png").await;
+
+        assert!(
+            app.pending_attachments.is_empty(),
+            "no attachment staged on error"
+        );
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains("/attach") && l.contains("file not found")),
+            "expected error line, got: {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_text_file_is_rejected_as_unrecognized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        tokio::fs::write(&path, b"not an image").await.unwrap();
+
+        let (mut app, mut rx) = test_app();
+        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", path.display())).await;
+
+        assert!(app.pending_attachments.is_empty());
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains("not a recognized image")),
+            "expected unrecognized-image error: {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_gif_is_rejected_by_format_allowlist() {
+        // GIF89a header — `infer` flags as image/gif; allowlist rejects.
+        const GIF_BYTES: &[u8] = &[
+            0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xFF,
+            0xFF, 0xFF, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00,
+            0x3B,
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("anim.gif");
+        tokio::fs::write(&path, GIF_BYTES).await.unwrap();
+
+        let (mut app, mut rx) = test_app();
+        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", path.display())).await;
+
+        assert!(app.pending_attachments.is_empty());
+        // Long error messages may wrap across multiple visual lines —
+        // join before searching so the test isn't sensitive to width.
+        let joined = rendered_text(&mut app).join(" ");
+        assert!(
+            joined.contains("unsupported image format") && joined.contains("image/gif"),
+            "expected unsupported-format error: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_then_submit_drains_pending_and_passes_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        tokio::fs::write(&path, PNG_BYTES).await.unwrap();
+
+        let (mut app, mut rx) = test_app();
+        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", path.display())).await;
+        assert_eq!(app.pending_attachments.len(), 1);
+
+        // Submitting plain text now should drain the attachment.
+        for c in "hi".chars() {
+            app.on_key(typed(c));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.pending_attachments.is_empty(),
+            "submit must drain pending_attachments"
+        );
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains("> hi") && l.contains("📎 a.png")),
+            "user prompt should include 📎 tag: {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_twice_stages_both_then_drains_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = dir.path().join("first.png");
+        let p2 = dir.path().join("second.png");
+        tokio::fs::write(&p1, PNG_BYTES).await.unwrap();
+        tokio::fs::write(&p2, PNG_BYTES).await.unwrap();
+
+        let (mut app, mut rx) = test_app();
+        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", p1.display())).await;
+        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", p2.display())).await;
+        assert_eq!(app.pending_attachments.len(), 2);
+
+        for c in "go".chars() {
+            app.on_key(typed(c));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.pending_attachments.is_empty());
+        let rendered = rendered_text(&mut app);
+        // Multi-attachment tag mentions both filenames + count.
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains("first.png") && l.contains("second.png")),
+            "multi-attachment user tag missing names: {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_transcription_with_slash_attach_is_treated_as_text() {
+        // A transcription that happens to start with "/attach" must
+        // NOT trigger file I/O — it's just spoken text. After
+        // submission we expect a regular user output line and no
+        // staged attachment.
+        let (mut app, _rx) = test_app();
+        app.on_transcription("/attach foo.png".into());
+        assert!(app.pending_attachments.is_empty());
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered.iter().any(|l| l.contains("> /attach foo.png")),
+            "voice transcription starting with /attach must render as plain user text: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn attach_with_no_path_pushes_error() {
+        let (mut app, _rx) = test_app();
+        for c in "/attach".chars() {
+            app.on_key(typed(c));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.pending_attachments.is_empty());
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered.iter().any(|l| l.contains("expected a path")),
+            "missing usage error: {rendered:?}"
+        );
     }
 }

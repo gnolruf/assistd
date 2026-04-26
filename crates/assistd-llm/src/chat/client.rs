@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig};
+use assistd_tools::Attachment;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
@@ -235,9 +236,13 @@ impl LlmBackend for LlamaChatClient {
         }
     }
 
-    async fn push_user(&self, text: String) -> Result<()> {
+    async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> Result<()> {
         let mut conv = self.conv.lock().await;
-        conv.push_user(text);
+        if attachments.is_empty() {
+            conv.push_user(text);
+        } else {
+            conv.push_user_with_attachments(text, attachments);
+        }
         Ok(())
     }
 

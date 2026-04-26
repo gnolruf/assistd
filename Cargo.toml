@@ -55,6 +55,8 @@ infer = "0.19"
 shlex = "1"
 which = "7"
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
+ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
 [profile.release]
 lto = "thin"

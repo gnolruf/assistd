@@ -44,9 +44,10 @@ pub async fn run_agent_turn(
     tools: Arc<ToolRegistry>,
     max_iterations: u32,
     user_text: String,
+    user_attachments: Vec<Attachment>,
     tx: mpsc::Sender<LlmEvent>,
 ) -> Result<()> {
-    backend.push_user(user_text).await?;
+    backend.push_user(user_text, user_attachments).await?;
     let schemas = tools.openai_schemas();
 
     for iteration in 0..max_iterations {
@@ -302,6 +303,7 @@ mod tests {
     struct MockBackend {
         outcomes: StdMutex<Vec<StepOutcome>>,
         pushed_users: StdMutex<Vec<String>>,
+        pushed_attachments: StdMutex<Vec<Vec<Attachment>>>,
         pushed_results: StdMutex<Vec<Vec<ToolResultPayload>>>,
     }
 
@@ -310,6 +312,7 @@ mod tests {
             Arc::new(Self {
                 outcomes: StdMutex::new(outcomes),
                 pushed_users: StdMutex::new(Vec::new()),
+                pushed_attachments: StdMutex::new(Vec::new()),
                 pushed_results: StdMutex::new(Vec::new()),
             })
         }
@@ -325,8 +328,13 @@ mod tests {
             unimplemented!("mock uses step path only")
         }
 
-        async fn push_user(&self, text: String) -> anyhow::Result<()> {
+        async fn push_user(
+            &self,
+            text: String,
+            attachments: Vec<Attachment>,
+        ) -> anyhow::Result<()> {
             self.pushed_users.lock().unwrap().push(text);
+            self.pushed_attachments.lock().unwrap().push(attachments);
             Ok(())
         }
 
@@ -391,9 +399,16 @@ mod tests {
         let backend = MockBackend::with(vec![StepOutcome::Final]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), tools, 10, "what is 2+2?".into(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "what is 2+2?".into(),
+            Vec::new(),
+            tx,
+        )
+        .await
+        .unwrap();
         let events = collect(&mut rx).await;
         assert!(matches!(events.last(), Some(LlmEvent::Done)));
         assert_eq!(backend.pushed_users.lock().unwrap().len(), 1);
@@ -409,9 +424,16 @@ mod tests {
         ]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), tools, 10, "say hello".into(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "say hello".into(),
+            Vec::new(),
+            tx,
+        )
+        .await
+        .unwrap();
         let events = collect(&mut rx).await;
 
         // Expected event sequence (intermixed with deltas):
@@ -464,9 +486,16 @@ mod tests {
         let tools = Arc::new(tools);
 
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), tools, 10, "how many?".into(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "how many?".into(),
+            Vec::new(),
+            tx,
+        )
+        .await
+        .unwrap();
         let events = collect(&mut rx).await;
         // Exactly one ToolCall/ToolResult pair.
         let calls = events
@@ -499,7 +528,7 @@ mod tests {
         let backend = MockBackend::with(outcomes);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(64);
-        run_agent_turn(backend, tools, 3, "loop it".into(), tx)
+        run_agent_turn(backend, tools, 3, "loop it".into(), Vec::new(), tx)
             .await
             .unwrap();
         let events = collect(&mut rx).await;
@@ -532,7 +561,7 @@ mod tests {
         ]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), tools, 10, "go".into(), tx)
+        run_agent_turn(backend.clone(), tools, 10, "go".into(), Vec::new(), tx)
             .await
             .unwrap();
         drop(collect(&mut rx).await);
@@ -577,7 +606,7 @@ mod tests {
             StepOutcome::Final,
         ]);
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), reg, 10, "go".into(), tx)
+        run_agent_turn(backend.clone(), reg, 10, "go".into(), Vec::new(), tx)
             .await
             .unwrap();
         drop(collect(&mut rx).await);
@@ -604,7 +633,7 @@ mod tests {
         drop(rx);
         // Channel is closed from the start, so the very first is_closed
         // check bails the loop before any step runs.
-        run_agent_turn(backend.clone(), tools, 10, "go".into(), tx)
+        run_agent_turn(backend.clone(), tools, 10, "go".into(), Vec::new(), tx)
             .await
             .unwrap();
         // With the receiver already dropped, no step was called.

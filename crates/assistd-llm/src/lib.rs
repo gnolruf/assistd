@@ -99,7 +99,12 @@ pub trait LlmBackend: Send + Sync + 'static {
 
     /// Append a user message to the conversation. Does not invoke the
     /// model. Used by the agent loop at the start of each turn.
-    async fn push_user(&self, text: String) -> Result<()>;
+    ///
+    /// `attachments` carries any images the user wants the model to see
+    /// on its next turn. Pass an empty `Vec` for plain-text turns.
+    /// Backends without vision support are expected to ignore the
+    /// attachments rather than error.
+    async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> Result<()>;
 
     /// Append the results of the most recent `tool_calls` request. The
     /// backend should commit these as messages the model will see on its
@@ -145,7 +150,7 @@ impl LlmBackend for EchoBackend {
         Ok(())
     }
 
-    async fn push_user(&self, text: String) -> Result<()> {
+    async fn push_user(&self, text: String, _attachments: Vec<Attachment>) -> Result<()> {
         *self.last_user.lock().await = text;
         Ok(())
     }
@@ -183,7 +188,7 @@ impl LlmBackend for FailedBackend {
         anyhow::bail!("{}", self.reason)
     }
 
-    async fn push_user(&self, _text: String) -> Result<()> {
+    async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> Result<()> {
         anyhow::bail!("{}", self.reason)
     }
 
@@ -224,7 +229,10 @@ mod tests {
     #[tokio::test]
     async fn echo_backend_step_echoes_last_pushed_user() {
         let backend = EchoBackend::new();
-        backend.push_user("what is 2+2?".into()).await.unwrap();
+        backend
+            .push_user("what is 2+2?".into(), Vec::new())
+            .await
+            .unwrap();
         let (tx, mut rx) = mpsc::channel(8);
         let outcome = backend.step(Vec::new(), tx).await.unwrap();
         assert!(matches!(outcome, StepOutcome::Final));

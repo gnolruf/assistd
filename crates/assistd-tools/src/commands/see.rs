@@ -5,9 +5,12 @@
 //! responsible for turning that into a vision input on the model's
 //! next turn.
 
+use std::path::Path;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::attachment::{LoadImageError, load_image_attachment};
 use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line, io_error_nav};
 use crate::commands::cat::human_size;
 
@@ -57,17 +60,24 @@ impl Command for SeeCommand {
             ));
         }
         let path = &input.args[0];
-        let bytes = match tokio::fs::read(path).await {
-            Ok(b) => b,
-            Err(e) => {
-                return Ok(CommandOutput::failed(
-                    1,
-                    io_error_nav("see", path, &e).into_bytes(),
-                ));
+        match load_image_attachment(Path::new(path)).await {
+            Ok((attachment, size)) => {
+                let mime = match &attachment {
+                    Attachment::Image { mime, .. } => mime.clone(),
+                };
+                let stdout = format!("attached {mime} ({}) from {path}\n", human_size(size));
+                Ok(CommandOutput {
+                    stdout: stdout.into_bytes(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                    attachments: vec![attachment],
+                })
             }
-        };
-        let Some(t) = infer::get(&bytes) else {
-            return Ok(CommandOutput::failed(
+            Err(LoadImageError::Io { source, .. }) => Ok(CommandOutput::failed(
+                1,
+                io_error_nav("see", path, &source).into_bytes(),
+            )),
+            Err(LoadImageError::Unrecognized { .. }) => Ok(CommandOutput::failed(
                 1,
                 error_line(
                     "see",
@@ -76,29 +86,28 @@ impl Command for SeeCommand {
                     format_args!("cat {path}"),
                 )
                 .into_bytes(),
-            ));
-        };
-        if !infer::is_image(&bytes) {
-            return Ok(CommandOutput::failed(
+            )),
+            Err(LoadImageError::NotAnImage { detected, .. }) => Ok(CommandOutput::failed(
                 1,
                 error_line(
                     "see",
-                    format_args!("not an image file: {path} (detected {})", t.mime_type()),
+                    format_args!("not an image file: {path} (detected {detected})"),
                     "Use",
                     format_args!("cat {path}"),
                 )
                 .into_bytes(),
-            ));
+            )),
+            Err(LoadImageError::UnsupportedFormat { mime, .. }) => Ok(CommandOutput::failed(
+                1,
+                error_line(
+                    "see",
+                    format_args!("unsupported image format: {path} ({mime})"),
+                    "Use",
+                    "PNG, JPEG, or WebP",
+                )
+                .into_bytes(),
+            )),
         }
-        let mime = t.mime_type().to_string();
-        let size = bytes.len();
-        let stdout = format!("attached {mime} ({}) from {path}\n", human_size(size));
-        Ok(CommandOutput {
-            stdout: stdout.into_bytes(),
-            stderr: Vec::new(),
-            exit_code: 0,
-            attachments: vec![Attachment::Image { mime, bytes }],
-        })
     }
 }
 

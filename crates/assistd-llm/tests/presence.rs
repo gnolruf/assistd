@@ -388,7 +388,11 @@ impl LlmBackend for DelayBackend {
         Ok(())
     }
 
-    async fn push_user(&self, text: String) -> anyhow::Result<()> {
+    async fn push_user(
+        &self,
+        text: String,
+        _attachments: Vec<assistd_tools::Attachment>,
+    ) -> anyhow::Result<()> {
         *self.last_user.lock().await = text;
         Ok(())
     }

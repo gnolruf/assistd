@@ -506,7 +506,11 @@ mod tests {
             Ok(())
         }
 
-        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+        async fn push_user(
+            &self,
+            _text: String,
+            _attachments: Vec<assistd_tools::Attachment>,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
 
@@ -556,7 +560,11 @@ mod tests {
             Ok(())
         }
 
-        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+        async fn push_user(
+            &self,
+            _text: String,
+            _attachments: Vec<assistd_tools::Attachment>,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
 
