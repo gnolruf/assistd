@@ -77,21 +77,28 @@ enum WaylandCompositor {
 
 pub struct ScreenshotCommand {
     cfg: Arc<ScreenshotPolicyCfg>,
+    /// Set at startup from a `/props` probe of the running llama-server.
+    /// When `false`, `run()` short-circuits to the vision-not-available
+    /// error without spawning the capture backend.
+    vision_enabled: bool,
 }
 
 impl ScreenshotCommand {
-    pub fn new(cfg: Arc<ScreenshotPolicyCfg>) -> Self {
-        Self { cfg }
+    pub fn new(cfg: Arc<ScreenshotPolicyCfg>, vision_enabled: bool) -> Self {
+        Self {
+            cfg,
+            vision_enabled,
+        }
     }
 }
 
 #[cfg(test)]
 impl Default for ScreenshotCommand {
-    /// Test-only default: auto-detect backend, 5-second timeout. Lets the
-    /// convention-compliance harness in `command.rs` construct an instance
-    /// without config plumbing.
+    /// Test-only default: auto-detect backend, 5-second timeout, vision
+    /// enabled. Lets the convention-compliance harness in `command.rs`
+    /// construct an instance without config plumbing.
     fn default() -> Self {
-        Self::new(Arc::new(ScreenshotPolicyCfg::default()))
+        Self::new(Arc::new(ScreenshotPolicyCfg::default()), true)
     }
 }
 
@@ -102,7 +109,11 @@ impl Command for ScreenshotCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "capture the screen as a PNG and attach it for the next LLM turn"
+        if self.vision_enabled {
+            "capture the screen as a PNG and attach it for the next LLM turn"
+        } else {
+            "(unavailable: model has no vision encoder)"
+        }
     }
 
     fn help(&self) -> String {
@@ -134,6 +145,18 @@ impl Command for ScreenshotCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+        if !self.vision_enabled {
+            return Ok(CommandOutput::failed(
+                1,
+                error_line(
+                    "screenshot",
+                    "vision not available: model does not support images",
+                    "Use",
+                    "a model with mmproj loaded",
+                )
+                .into_bytes(),
+            ));
+        }
         let target = match parse_args(&input.args) {
             Ok(t) => t,
             Err(msg) => {
@@ -869,6 +892,43 @@ mod tests {
     fn summary_under_80_chars() {
         let s = ScreenshotCommand::default().summary();
         assert!(s.len() <= 80, "summary is {} chars: {s:?}", s.len());
+    }
+
+    /// AC #3: when vision is disabled, `screenshot` short-circuits with
+    /// the exact wording "vision not available: model does not support
+    /// images" without spawning maim/grim.
+    #[tokio::test]
+    async fn vision_disabled_returns_exact_error() {
+        let cmd = ScreenshotCommand::new(Arc::new(ScreenshotPolicyCfg::default()), false);
+        let out = cmd
+            .run(CommandInput {
+                args: vec!["--full".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(
+                "[error] screenshot: vision not available: model does not support images"
+            ),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("Use: a model with mmproj loaded"),
+            "{stderr}"
+        );
+        assert!(out.attachments.is_empty());
+    }
+
+    #[test]
+    fn summary_changes_when_vision_disabled() {
+        let enabled = ScreenshotCommand::new(Arc::new(ScreenshotPolicyCfg::default()), true);
+        let disabled = ScreenshotCommand::new(Arc::new(ScreenshotPolicyCfg::default()), false);
+        assert!(enabled.summary().contains("capture the screen"));
+        assert!(disabled.summary().contains("unavailable"));
     }
 
     #[test]

@@ -14,7 +14,29 @@ use crate::attachment::{LoadImageError, load_image_attachment};
 use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line, io_error_nav};
 use crate::commands::cat::human_size;
 
-pub struct SeeCommand;
+pub struct SeeCommand {
+    /// Set at startup from a `/props` probe of the running llama-server.
+    /// When `false`, `run()` short-circuits to the vision-not-available
+    /// error without touching the filesystem.
+    vision_enabled: bool,
+}
+
+impl SeeCommand {
+    pub fn new(vision_enabled: bool) -> Self {
+        Self { vision_enabled }
+    }
+}
+
+#[cfg(test)]
+impl Default for SeeCommand {
+    /// Test-only default: vision enabled. Lets the
+    /// convention-compliance harness in `command.rs` and the
+    /// per-command tests construct an instance without rethreading the
+    /// flag through every call site.
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
 
 #[async_trait]
 impl Command for SeeCommand {
@@ -23,7 +45,11 @@ impl Command for SeeCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "attach an image file as a vision input for the next LLM turn"
+        if self.vision_enabled {
+            "attach an image file as a vision input for the next LLM turn"
+        } else {
+            "(unavailable: model has no vision encoder)"
+        }
     }
 
     fn help(&self) -> String {
@@ -39,6 +65,18 @@ impl Command for SeeCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+        if !self.vision_enabled {
+            return Ok(CommandOutput::failed(
+                1,
+                error_line(
+                    "see",
+                    "vision not available: model does not support images",
+                    "Use",
+                    "a model with mmproj loaded",
+                )
+                .into_bytes(),
+            ));
+        }
         if input.args.is_empty() {
             return Ok(CommandOutput {
                 stdout: self.help().into_bytes(),
@@ -129,7 +167,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("shot.png");
         tokio::fs::write(&path, PNG_BYTES).await.unwrap();
-        let out = SeeCommand
+        let out = SeeCommand::default()
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
                 stdin: Vec::new(),
@@ -153,7 +191,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("notes.txt");
         tokio::fs::write(&path, b"not an image").await.unwrap();
-        let out = SeeCommand
+        let out = SeeCommand::default()
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
                 stdin: Vec::new(),
@@ -172,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_exits_1() {
-        let out = SeeCommand
+        let out = SeeCommand::default()
             .run(CommandInput {
                 args: vec!["/nonexistent/image.png".into()],
                 stdin: Vec::new(),
@@ -191,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_args_errors() {
-        let out = SeeCommand
+        let out = SeeCommand::default()
             .run(CommandInput {
                 args: Vec::new(),
                 stdin: Vec::new(),
@@ -203,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn too_many_args_errors() {
-        let out = SeeCommand
+        let out = SeeCommand::default()
             .run(CommandInput {
                 args: vec!["a.png".into(), "b.png".into()],
                 stdin: Vec::new(),
@@ -217,5 +255,39 @@ mod tests {
             "{stderr}"
         );
         assert!(stderr.contains("Use: see <PATH>"), "{stderr}");
+    }
+
+    /// AC #3: when vision is disabled, `see` short-circuits with the
+    /// exact wording "vision not available: model does not support
+    /// images" and never touches the filesystem (so a real path
+    /// argument is irrelevant; we still pass one to mirror normal
+    /// usage).
+    #[tokio::test]
+    async fn vision_disabled_returns_exact_error() {
+        let out = SeeCommand::new(false)
+            .run(CommandInput {
+                args: vec!["/tmp/some-image.png".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[error] see: vision not available: model does not support images"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("Use: a model with mmproj loaded"),
+            "{stderr}"
+        );
+        assert!(out.attachments.is_empty());
+    }
+
+    #[test]
+    fn summary_changes_when_vision_disabled() {
+        assert!(SeeCommand::new(true).summary().contains("attach an image"));
+        assert!(SeeCommand::new(false).summary().contains("unavailable"));
     }
 }
