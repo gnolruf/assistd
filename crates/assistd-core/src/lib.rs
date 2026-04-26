@@ -39,8 +39,8 @@ pub use assistd_config as config;
 pub use assistd_config::{
     AgentConfig, BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config,
     ConfigError, ContinuousListenConfig, DaemonConfig, LlamaServerConfig, ModelConfig,
-    PresenceConfig, RemoteConfig, SleepConfig, SynthesisConfig, ToolsBashConfig, ToolsConfig,
-    ToolsOutputConfig, ToolsWriteConfig, VoiceConfig,
+    PresenceConfig, RemoteConfig, ScreenshotBackend, SleepConfig, SynthesisConfig, ToolsBashConfig,
+    ToolsConfig, ToolsOutputConfig, ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig,
 };
 
 // Re-exports from `assistd-ipc`. Wire-protocol types crossing the
@@ -72,8 +72,9 @@ use anyhow::{Context, Result};
 use assistd_tools::{
     ConfirmationGate, RunTool, SandboxRequest,
     commands::{
-        BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand,
-        WcCommand, WebCommand, WriteCommand, WritePolicyCfg,
+        BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, LsCommand,
+        ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WcCommand,
+        WebCommand, WriteCommand, WritePolicyCfg,
     },
     probe_sandbox,
 };
@@ -166,6 +167,15 @@ pub fn build_tools(
     }
     let write_cfg = Arc::new(WritePolicyCfg::new(writable_paths));
 
+    let screenshot_cfg = Arc::new(ScreenshotPolicyCfg {
+        backend: match config.tools.screenshot.backend {
+            ScreenshotBackend::Auto => None,
+            ScreenshotBackend::X11 => Some(ScreenshotBackendKind::X11),
+            ScreenshotBackend::Wayland => Some(ScreenshotBackendKind::Wayland),
+        },
+        timeout: Duration::from_secs(config.tools.screenshot.timeout_secs),
+    });
+
     let mut commands = CommandRegistry::new();
     commands.register(CatCommand);
     commands.register(LsCommand);
@@ -174,6 +184,7 @@ pub fn build_tools(
     commands.register(EchoCommand);
     commands.register(WriteCommand::new(write_cfg));
     commands.register(SeeCommand);
+    commands.register(ScreenshotCommand::new(screenshot_cfg));
     commands.register(WebCommand::new());
     commands.register(BashCommand::new(bash_cfg, sandbox, gate));
 

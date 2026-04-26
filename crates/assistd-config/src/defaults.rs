@@ -99,6 +99,7 @@ pub const DEFAULT_TOOLS_MAX_LINES: u32 = 200;
 pub const DEFAULT_TOOLS_MAX_KB: u32 = 50;
 pub const DEFAULT_TOOLS_OVERFLOW_DIR: &str = "/tmp/assistd-output";
 pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_SCREENSHOT_TIMEOUT_SECS: u64 = 5;
 
 pub const DEFAULT_AGENT_MAX_ITERATIONS: u32 = 20;
 

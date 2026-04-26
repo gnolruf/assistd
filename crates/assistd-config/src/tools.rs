@@ -1,7 +1,7 @@
 use crate::defaults::{
-    DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
-    DEFAULT_TOOLS_OVERFLOW_DIR, default_bash_denylist, default_bash_destructive_patterns,
-    default_writable_paths,
+    DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_SCREENSHOT_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB,
+    DEFAULT_TOOLS_MAX_LINES, DEFAULT_TOOLS_OVERFLOW_DIR, default_bash_denylist,
+    default_bash_destructive_patterns, default_writable_paths,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,8 @@ pub struct ToolsConfig {
     pub bash: ToolsBashConfig,
     #[serde(default)]
     pub write: ToolsWriteConfig,
+    #[serde(default)]
+    pub screenshot: ToolsScreenshotConfig,
 }
 
 /// Layer-2 presentation limits applied to the final output of `run` before
@@ -161,4 +163,42 @@ impl Default for ToolsWriteConfig {
 
 fn default_writable_paths_fn() -> Vec<String> {
     default_writable_paths()
+}
+
+/// Screenshot capture backend selector. `Auto` picks Wayland when
+/// `XDG_SESSION_TYPE`/`WAYLAND_DISPLAY` is set, X11 otherwise. Override
+/// only when the auto-detect picks the wrong tool on a hybrid session.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScreenshotBackend {
+    #[default]
+    Auto,
+    X11,
+    Wayland,
+}
+
+/// Screenshot-command policy: which capture backend to use and how long
+/// to wait before giving up. Bytes are kept in memory and never written
+/// to disk by this command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolsScreenshotConfig {
+    #[serde(default)]
+    pub backend: ScreenshotBackend,
+    /// Capture subprocess timeout in seconds. Must be > 0. Exceeding the
+    /// timeout kills the process group and returns exit 137.
+    #[serde(default = "default_screenshot_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for ToolsScreenshotConfig {
+    fn default() -> Self {
+        Self {
+            backend: ScreenshotBackend::default(),
+            timeout_secs: DEFAULT_SCREENSHOT_TIMEOUT_SECS,
+        }
+    }
+}
+
+fn default_screenshot_timeout_secs() -> u64 {
+    DEFAULT_SCREENSHOT_TIMEOUT_SECS
 }

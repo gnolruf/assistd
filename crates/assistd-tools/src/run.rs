@@ -227,8 +227,8 @@ mod tests {
     use crate::ToolRegistry;
     use crate::command::{Command, CommandInput, CommandOutput};
     use crate::commands::{
-        BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
-        WebCommand, WriteCommand,
+        BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, ScreenshotCommand,
+        SeeCommand, WcCommand, WebCommand, WriteCommand,
     };
     use async_trait::async_trait;
     use regex::Regex;
@@ -258,6 +258,7 @@ mod tests {
         r.register(EchoCommand);
         r.register(WriteCommand::permissive_for_tests());
         r.register(SeeCommand);
+        r.register(ScreenshotCommand::default());
         r.register(WebCommand::new());
         r.register(BashCommand::default());
         Arc::new(r)
@@ -735,7 +736,16 @@ mod tests {
         let tool = tool_with(dir.path(), full_registry());
         let desc = tool.description();
         for name in [
-            "cat", "ls", "grep", "wc", "echo", "write", "see", "web", "bash",
+            "cat",
+            "ls",
+            "grep",
+            "wc",
+            "echo",
+            "write",
+            "see",
+            "screenshot",
+            "web",
+            "bash",
         ] {
             assert!(desc.contains(name), "description missing `{name}`: {desc}");
         }
@@ -804,7 +814,16 @@ mod tests {
             .as_str()
             .expect("description is a string");
         for name in [
-            "cat", "ls", "grep", "wc", "echo", "write", "see", "web", "bash",
+            "cat",
+            "ls",
+            "grep",
+            "wc",
+            "echo",
+            "write",
+            "see",
+            "screenshot",
+            "web",
+            "bash",
         ] {
             assert!(desc.contains(name), "schema description missing `{name}`");
         }
