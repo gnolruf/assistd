@@ -125,8 +125,10 @@ impl AppState {
         let tools = self.tools.clone();
         let max_iterations = self.config.agent.max_iterations;
         let generator = tokio::spawn(
-            async move { run_agent_turn(llm, tools, max_iterations, text, llm_tx).await }
-                .in_current_span(),
+            async move {
+                run_agent_turn(llm, tools, max_iterations, text, Vec::new(), llm_tx).await
+            }
+            .in_current_span(),
         );
 
         // Sentence buffer + speech worker. Each completed sentence is
@@ -851,7 +853,7 @@ mod tests {
         ) -> anyhow::Result<()> {
             unimplemented!("uses step path")
         }
-        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+        async fn push_user(&self, _text: String, _attachments: Vec<assistd_tools::Attachment>) -> anyhow::Result<()> {
             Ok(())
         }
         async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
@@ -1465,7 +1467,7 @@ mod tests {
         ) -> anyhow::Result<()> {
             unimplemented!("uses step path")
         }
-        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+        async fn push_user(&self, _text: String, _attachments: Vec<assistd_tools::Attachment>) -> anyhow::Result<()> {
             Ok(())
         }
         async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
@@ -1601,7 +1603,7 @@ mod tests {
         ) -> anyhow::Result<()> {
             unimplemented!("uses step path")
         }
-        async fn push_user(&self, _text: String) -> anyhow::Result<()> {
+        async fn push_user(&self, _text: String, _attachments: Vec<assistd_tools::Attachment>) -> anyhow::Result<()> {
             Ok(())
         }
         async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {

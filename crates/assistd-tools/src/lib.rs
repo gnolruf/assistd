@@ -8,6 +8,7 @@
 //! is what the LLM sees (JSON-in/JSON-out); `Command` is what executes
 //! bytes-in/bytes-out with a Unix exit code.
 
+pub mod attachment;
 pub mod chain;
 pub mod command;
 pub mod commands;
@@ -15,6 +16,7 @@ pub mod policy;
 pub mod presentation;
 pub mod run;
 
+pub use attachment::{LoadImageError, load_image_attachment};
 pub use chain::{Chain, ParseError, execute, parse_chain};
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
 pub use policy::{

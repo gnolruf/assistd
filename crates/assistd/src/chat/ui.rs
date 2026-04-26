@@ -10,8 +10,10 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui_image::StatefulImage;
 
 use super::app::{App, ConfirmationModal};
+use super::output::THUMBNAIL_ROWS;
 use super::vram::{RamState, VramState};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -95,10 +97,60 @@ fn render_output(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // Snapshot the wrapped layout (thumbnails reserve THUMBNAIL_ROWS
+    // blank lines under their captions). Computed once so the same
+    // start/scroll values feed both the text Paragraph and the
+    // thumbnail overlay below.
+    let slots = app.output.thumbnail_layout(area.width);
     let (lines, start) = app.output.render_view(area.width, area.height);
     let text = Text::from(lines.to_vec());
     let para = Paragraph::new(text).scroll((start, 0));
     frame.render_widget(para, area);
+
+    // Overlay one `StatefulImage` per fully-visible thumbnail slot.
+    // Skip thumbnails whose reserved rows are partially or fully
+    // scrolled out — the underlying placeholder line keeps the
+    // filename visible in those cases.
+    let viewport_top = start as usize;
+    let viewport_bottom = viewport_top.saturating_add(area.height as usize);
+    // The placeholder caption ("📎 name") sits on the first reserved
+    // row. Push the image down by one row so the caption stays legible
+    // and we don't overdraw it.
+    const CAPTION_ROWS: u16 = 1;
+    let image_height = THUMBNAIL_ROWS.saturating_sub(CAPTION_ROWS);
+    if image_height == 0 {
+        return;
+    }
+    for slot in slots {
+        let image_start = slot.start_row + CAPTION_ROWS as usize;
+        let image_end = slot.start_row + slot.height;
+        if image_start < viewport_top || image_end > viewport_bottom {
+            continue;
+        }
+        let local_row = (image_start - viewport_top) as u16;
+        if local_row >= area.height {
+            continue;
+        }
+        let avail = area.height - local_row;
+        let h = image_height.min(avail);
+        if h == 0 {
+            continue;
+        }
+        // Cap thumbnail width so a wide terminal doesn't render a
+        // billboard-sized image. 32 cells × image_height is roughly
+        // square-ish on typical font aspect ratios.
+        let w = area.width.min(32);
+        let rect = Rect {
+            x: area.x,
+            y: area.y + local_row,
+            width: w,
+            height: h,
+        };
+        let widget = StatefulImage::default();
+        if let Some(state) = app.output.thumbnail_protocol_mut(slot.item_idx) {
+            frame.render_stateful_widget(widget, rect, state);
+        }
+    }
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -188,6 +240,25 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
         left_spans.push(Span::styled(format!(" {label}"), reversed));
+    }
+    // Persistent staged-attachment indicator. The 3-second `notice`
+    // pop is too ephemeral for state that gates the next submission —
+    // this stays visible until `submit` drains `pending_attachments`.
+    let pending_count = app.pending_attachments.len();
+    if pending_count > 0 {
+        left_spans.push(Span::raw(" "));
+        let label = if pending_count == 1 {
+            "📎×1".to_string()
+        } else {
+            format!("📎×{pending_count}")
+        };
+        left_spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::REVERSED),
+        ));
     }
     left_spans.push(Span::styled(format!(" │ {state}"), reversed));
     if let Some(r) = rate {

@@ -691,7 +691,7 @@ async fn step_with_stop_finish_reason_returns_final() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let client = build_client(&chat_spec(port));
-    client.push_user("what is 2+2?".into()).await.unwrap();
+    client.push_user("what is 2+2?".into(), Vec::new()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
     let outcome = client.step(Vec::new(), tx).await.unwrap();
     assert!(matches!(outcome, StepOutcome::Final));
@@ -724,7 +724,7 @@ async fn step_parses_tool_call_across_argument_chunks() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let client = build_client(&chat_spec(port));
-    client.push_user("list /tmp".into()).await.unwrap();
+    client.push_user("list /tmp".into(), Vec::new()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
     let tools = vec![serde_json::json!({
         "type": "function",
@@ -778,7 +778,7 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let client = build_client(&chat_spec(port));
-    client.push_user("please echo hi".into()).await.unwrap();
+    client.push_user("please echo hi".into(), Vec::new()).await.unwrap();
 
     let tools = vec![serde_json::json!({
         "type": "function",

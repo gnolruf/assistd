@@ -29,6 +29,7 @@ use crossterm::{cursor, execute, terminal};
 use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui_image::picker::{Picker, ProtocolType};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 use tracing::info;
@@ -201,6 +202,39 @@ async fn run_tui(
     }));
     let _guard = TerminalGuard;
 
+    // Probe terminal graphics support immediately after entering the
+    // alternate screen and before reading any events (per
+    // `Picker::from_query_stdio` docs). Halfblocks is treated as "no
+    // graphics" so `/attach` falls back to filename-only display on
+    // non-graphics terminals — chunky ASCII thumbnails are gimmicky.
+    let picker = match Picker::from_query_stdio() {
+        Ok(p) if matches!(
+            p.protocol_type(),
+            ProtocolType::Kitty | ProtocolType::Sixel | ProtocolType::Iterm2
+        ) =>
+        {
+            tracing::info!(
+                "terminal graphics: {:?} (font_size {:?})",
+                p.protocol_type(),
+                p.font_size()
+            );
+            Some(p)
+        }
+        Ok(p) => {
+            tracing::info!(
+                "terminal graphics: {:?} → /attach will display filenames only",
+                p.protocol_type()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::info!(
+                "terminal graphics probe failed ({e}); /attach will display filenames only"
+            );
+            None
+        }
+    };
+
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
@@ -213,6 +247,7 @@ async fn run_tui(
         model_name,
         sleep_cfg,
         presence.clone(),
+        picker,
     );
 
     if let Some(err) = startup_error {
