@@ -98,10 +98,10 @@ fn parse_vision_supported(body: &Value) -> bool {
             return true;
         }
     }
-    if let Some(settings) = body.get("default_generation_settings") {
-        if settings.get("multimodal").and_then(Value::as_bool) == Some(true) {
-            return true;
-        }
+    if let Some(settings) = body.get("default_generation_settings")
+        && settings.get("multimodal").and_then(Value::as_bool) == Some(true)
+    {
+        return true;
     }
     false
 }
