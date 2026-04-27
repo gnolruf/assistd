@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+
 use super::error::LlamaServerError;
 use assistd_config::{LlamaServerConfig, ModelConfig};
 use std::process::{ExitStatus, Stdio};

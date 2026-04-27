@@ -37,6 +37,7 @@ impl LlamaService {
     /// that watch externally causes the supervisor to tear down the child and
     /// exit; a call to `start` that sees shutdown before Ready returns
     /// `ShutdownDuringHealth`.
+    #[tracing::instrument(skip(cfg, model, shutdown_rx), fields(host = %cfg.host, port = cfg.port))]
     pub async fn start(
         cfg: LlamaServerConfig,
         model: ModelConfig,
@@ -99,7 +100,7 @@ impl LlamaService {
     /// PID of the currently-running child, or `None` if no child is alive.
     /// The value changes as the supervisor restarts the child.
     pub fn pid(&self) -> Option<u32> {
-        *self.pid.lock().expect("pid mutex poisoned")
+        *self.pid.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Awaits the supervisor task. The caller is expected to have already

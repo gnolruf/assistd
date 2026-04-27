@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
-use assistd_ipc::{Event, Request, socket_path};
+use assistd_ipc::{Event, ImageAttachment, Request, socket_path};
+use assistd_tools::attachment::{LoadImageError, MAX_IMAGE_BYTES};
 use clap::Args;
 use std::io::Write;
+use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use uuid::Uuid;
@@ -25,9 +27,34 @@ fn truncate_preview(s: &str) -> String {
 pub struct QueryArgs {
     /// Text to send to the daemon
     pub text: String,
+    /// Attach one or more images as vision inputs for this turn. Repeat
+    /// the flag to attach multiple. Each path must point to a PNG, JPEG,
+    /// or WebP file under 32 MiB.
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<PathBuf>,
 }
 
 pub async fn run(args: QueryArgs) -> Result<()> {
+    let mut wire_attachments = Vec::with_capacity(args.images.len());
+    for path in &args.images {
+        // Reject the bad path before opening the daemon socket so the
+        // user sees the error in their shell, not as a daemon Event.
+        match assistd_tools::load_image_attachment(path).await {
+            Ok((assistd_tools::Attachment::Image { mime, bytes }, _)) => {
+                wire_attachments.push(ImageAttachment::from_bytes(mime, &bytes));
+            }
+            Err(e) => {
+                let kind = match &e {
+                    LoadImageError::TooLarge { .. } => {
+                        format!("(max {} MiB)", MAX_IMAGE_BYTES / (1024 * 1024))
+                    }
+                    _ => String::new(),
+                };
+                anyhow::bail!("--image {}: {} {kind}", path.display(), e.user_message());
+            }
+        }
+    }
+
     let path = socket_path();
 
     let stream = UnixStream::connect(&path).await.with_context(|| {
@@ -38,9 +65,10 @@ pub async fn run(args: QueryArgs) -> Result<()> {
     })?;
 
     let (read_half, mut write_half) = stream.into_split();
-    let req = Request::Query {
-        id: Uuid::new_v4().to_string(),
-        text: args.text,
+    let req = if wire_attachments.is_empty() {
+        Request::query(Uuid::new_v4().to_string(), args.text)
+    } else {
+        Request::query_with_attachments(Uuid::new_v4().to_string(), args.text, wire_attachments)
     };
     let mut body = serde_json::to_string(&req)?;
     body.push('\n');

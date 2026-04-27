@@ -14,6 +14,12 @@ use crate::command::Attachment;
 /// we filter explicitly.
 const SUPPORTED_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 
+/// Hard upper bound on image size we'll accept from disk or a screenshot.
+/// 32 MiB is generous for a 4K PNG screenshot (~16 MiB uncompressed) but
+/// catches accidental video-or-RAW attaches before they reach the LLM
+/// pipeline and OOM the daemon.
+pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+
 #[derive(Debug)]
 pub enum LoadImageError {
     /// File missing, unreadable, or other I/O failure.
@@ -21,6 +27,8 @@ pub enum LoadImageError {
         path: String,
         source: std::io::Error,
     },
+    /// File exceeds [`MAX_IMAGE_BYTES`].
+    TooLarge { path: String, size: u64, max: u64 },
     /// `infer` couldn't identify the file type from its magic bytes.
     Unrecognized { path: String },
     /// `infer` identified a non-image type.
@@ -39,6 +47,11 @@ impl LoadImageError {
                 std::io::ErrorKind::PermissionDenied => format!("permission denied: {path}"),
                 _ => format!("{path}: {source}"),
             },
+            LoadImageError::TooLarge { path, size, max } => format!(
+                "image too large: {path} ({} > {} max)",
+                human_mib(*size),
+                human_mib(*max),
+            ),
             LoadImageError::Unrecognized { path } => {
                 format!("not a recognized image file: {path}")
             }
@@ -59,6 +72,23 @@ impl LoadImageError {
 /// conversation layer) plus the file size in bytes (so the caller can
 /// render a "12 KB" annotation without re-stat-ing).
 pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), LoadImageError> {
+    // Stat first so a multi-gigabyte file is rejected before we allocate
+    // a buffer for it. `metadata` resolves symlinks, matching what `read`
+    // would do — no surprise where the size check disagrees with what we
+    // end up reading.
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| LoadImageError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+    if meta.len() > MAX_IMAGE_BYTES {
+        return Err(LoadImageError::TooLarge {
+            path: path.display().to_string(),
+            size: meta.len(),
+            max: MAX_IMAGE_BYTES,
+        });
+    }
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| LoadImageError::Io {
@@ -91,6 +121,15 @@ pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), L
         },
         size,
     ))
+}
+
+fn human_mib(n: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if n >= MIB {
+        format!("{:.1} MiB", n as f64 / MIB as f64)
+    } else {
+        format!("{} B", n)
+    }
 }
 
 #[cfg(test)]
@@ -158,5 +197,27 @@ mod tests {
             LoadImageError::UnsupportedFormat { mime, .. } => assert_eq!(mime, "image/gif"),
             other => panic!("expected UnsupportedFormat, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn oversize_file_is_rejected_before_read() {
+        // Use a sparse file so the test doesn't actually allocate
+        // MAX_IMAGE_BYTES + 1 of disk. set_len + drop is enough — metadata()
+        // reports the logical size and load_image_attachment rejects on
+        // that, never reaching the read path.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("huge.png");
+        let f = tokio::fs::File::create(&path).await.unwrap();
+        f.set_len(MAX_IMAGE_BYTES + 1).await.unwrap();
+        drop(f);
+        let err = load_image_attachment(&path).await.unwrap_err();
+        match err {
+            LoadImageError::TooLarge { size, max, .. } => {
+                assert_eq!(size, MAX_IMAGE_BYTES + 1);
+                assert_eq!(max, MAX_IMAGE_BYTES);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+        assert!(err.user_message().starts_with("image too large:"));
     }
 }

@@ -139,6 +139,7 @@ dependencies = [
  "tempfile",
  "textwrap",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -162,6 +163,7 @@ dependencies = [
  "assistd-config",
  "assistd-ipc",
  "assistd-llm",
+ "assistd-memory",
  "assistd-tools",
  "assistd-voice",
  "async-trait",
@@ -172,6 +174,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
 ]
@@ -180,6 +183,7 @@ dependencies = [
 name = "assistd-ipc"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
 ]
@@ -204,6 +208,30 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "assistd-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assistd-tools",
+ "async-trait",
+ "base64",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "assistd-memory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2873,6 +2901,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

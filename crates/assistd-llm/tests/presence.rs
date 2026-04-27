@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+
 //! End-to-end tests for the presence state machine.
 //!
 //! These exercise `PresenceManager` against a real `fake_llama_server` child
@@ -329,6 +331,8 @@ async fn query_during_sleeping_triggers_auto_wake() {
     let req = Request::Query {
         id: "q1".into(),
         text: "hello".into(),
+        attachments: Vec::new(),
+        version: None,
     };
     let stream = UnixStream::connect(&sock_path).await.unwrap();
     let (read, mut write) = stream.into_split();
@@ -486,6 +490,8 @@ async fn sleep_defers_until_inflight_query_done() {
     let req = Request::Query {
         id: "q1".into(),
         text: "hello".into(),
+        attachments: Vec::new(),
+        version: None,
     };
     let sock_for_client = sock_path.clone();
     let client_task = tokio::spawn(async move { connect_and_send(&sock_for_client, &req).await });
@@ -583,6 +589,8 @@ async fn multiple_queries_during_wake_complete_in_order() {
         let req = Request::Query {
             id: id.clone(),
             text: text.clone(),
+            attachments: Vec::new(),
+            version: None,
         };
         handles.push((
             id,

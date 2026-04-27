@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+
 //! On-disk cache for Piper voices. Each voice is two files: a `.onnx`
 //! ONNX model and a matching `.onnx.json` config that carries the
 //! sample rate among other things. Both must sit side-by-side in the

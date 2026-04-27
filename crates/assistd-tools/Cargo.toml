@@ -11,7 +11,7 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "fs", "process"] }
 tracing = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
@@ -21,3 +21,6 @@ shlex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

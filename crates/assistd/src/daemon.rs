@@ -90,17 +90,25 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         config.llama_server.host, config.llama_server.port
     );
 
-    // One-shot capability probe: ask the now-ready llama-server whether
-    // it loaded a vision encoder. Returns false on any error; gates
-    // see/screenshot/attach_image downstream.
-    let vision_enabled =
-        assistd_llm::detect_vision_support(&config.llama_server.host, config.llama_server.port)
-            .await;
-    if vision_enabled {
+    // Capability probe: ask the now-ready llama-server for the loaded
+    // model id and whether it has a vision encoder. The shared
+    // VisionGate drives see/screenshot/attach_image; the
+    // VisionRevalidator re-probes at the top of each query so a model
+    // swap on the running llama-server flips the gate transparently.
+    let initial_vision_state =
+        assistd_llm::probe_capabilities(&config.llama_server.host, config.llama_server.port).await;
+    if initial_vision_state.vision_supported {
         info!("vision: enabled (model has mmproj)");
     } else {
         tracing::warn!("Vision not available: mmproj not loaded.");
     }
+    let vision_gate = assistd_tools::VisionGate::new(initial_vision_state.vision_supported);
+    let vision_revalidator = assistd_core::VisionRevalidator::new(
+        vision_gate.clone(),
+        initial_vision_state.model_id,
+        config.llama_server.host.clone(),
+        config.llama_server.port,
+    );
 
     let chat = LlamaChatClient::new(&config.chat, &config.llama_server, &config.model)?;
 
@@ -259,7 +267,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         &config,
         overflow_dir.clone(),
         Arc::new(DenyAllGate),
-        vision_enabled,
+        vision_gate.clone(),
     )?;
     info!(
         "tools: registered {} (overflow dir {})",
@@ -272,15 +280,18 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let continuous_enabled = config.voice.enabled && config.voice.continuous.enabled;
     let continuous_start_on_launch = config.voice.continuous.start_on_launch;
 
-    let state = Arc::new(AppState::new(
-        config,
-        Arc::new(chat),
-        presence.clone(),
-        tools,
-        voice.clone(),
-        listener.clone(),
-        voice_output,
-    ));
+    let state = Arc::new(
+        AppState::new(
+            config,
+            Arc::new(chat),
+            presence.clone(),
+            tools,
+            voice.clone(),
+            listener.clone(),
+            voice_output,
+        )
+        .with_vision_revalidator(vision_revalidator),
+    );
 
     let listen_handles = if continuous_enabled {
         Some(listen_dispatcher::spawn(

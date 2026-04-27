@@ -20,7 +20,7 @@ pub mod service;
 pub mod supervisor;
 
 pub use backoff::MAX_CONSECUTIVE_FAILURES;
-pub use capabilities::detect_vision_support;
+pub use capabilities::{VisionState, detect_vision_support, probe_capabilities};
 pub use control::LlamaServerControl;
 pub use error::LlamaServerError;
 pub use service::{LlamaService, ReadyState};

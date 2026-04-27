@@ -107,7 +107,7 @@ async fn run_utterance_forwarder(
                                 };
                                 let query = async {
                                     if let Err(e) =
-                                        state.clone().handle_query(id, text, tx).await
+                                        state.clone().handle_query(id, text, Vec::new(), tx).await
                                     {
                                         warn!(
                                             target: "assistd::listen",

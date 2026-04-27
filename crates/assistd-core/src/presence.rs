@@ -131,14 +131,14 @@ struct WakeMarker {
 
 impl WakeMarker {
     fn new(slot: Arc<StdMutex<Option<Instant>>>) -> Self {
-        *slot.lock().expect("wake_started mutex poisoned") = Some(Instant::now());
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         Self { slot }
     }
 }
 
 impl Drop for WakeMarker {
     fn drop(&mut self) {
-        *self.slot.lock().expect("wake_started mutex poisoned") = None;
+        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -180,10 +180,7 @@ impl PresenceManager {
                 if daemon_rx.wait_for(|v| *v).await.is_err() {
                     return;
                 }
-                let tx = current
-                    .lock()
-                    .expect("inner-shutdown mutex poisoned")
-                    .clone();
+                let tx = current.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 if let Some(tx) = tx {
                     let _ = tx.send(true);
                 }
@@ -217,7 +214,7 @@ impl PresenceManager {
 
     /// Current presence state. Cheap, lock-protected snapshot.
     pub fn state(&self) -> PresenceState {
-        *self.state.lock().expect("presence state mutex poisoned")
+        *self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Record that the user just interacted with the daemon. Called at
@@ -226,10 +223,7 @@ impl PresenceManager {
     /// low-level transition methods (`wake`/`drowse`/`sleep`) so that
     /// automatic monitors (GPU, idle) don't defer their own progress.
     fn mark_activity(&self) {
-        *self
-            .last_activity
-            .lock()
-            .expect("last_activity mutex poisoned") = Instant::now();
+        *self.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
 
     /// Time since the last recorded user interaction. Read by the idle
@@ -238,7 +232,7 @@ impl PresenceManager {
     pub fn idle_duration(&self) -> Duration {
         self.last_activity
             .lock()
-            .expect("last_activity mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .elapsed()
     }
 
@@ -297,6 +291,7 @@ impl PresenceManager {
     /// immediately; otherwise calls [`Self::wake`]. Safe to call under
     /// concurrent queries — racing callers serialise on the transition
     /// lock and only one wake actually runs.
+    #[tracing::instrument(skip(self), fields(from = ?self.state()))]
     pub async fn ensure_active(&self) -> Result<()> {
         self.mark_activity();
         if self.state() == PresenceState::Active {
@@ -340,10 +335,7 @@ impl PresenceManager {
     /// indicator during cold-start wakes (which can take tens of
     /// seconds to minutes).
     pub fn wake_in_progress(&self) -> Option<Instant> {
-        *self
-            .wake_started
-            .lock()
-            .expect("wake_started mutex poisoned")
+        *self.wake_started.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Register an in-flight LLM stream. The returned guard decrements
@@ -386,6 +378,7 @@ impl PresenceManager {
 
     /// Drive the manager to `target`. Convenience wrapper used by the IPC
     /// `SetPresence` handler.
+    #[tracing::instrument(skip(self), fields(from = ?self.state()))]
     pub async fn set_presence(&self, target: PresenceState) -> Result<()> {
         self.mark_activity();
         match target {
@@ -432,7 +425,7 @@ impl PresenceManager {
         let tx = self
             .current_inner_shutdown
             .lock()
-            .expect("inner-shutdown mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some(tx) = tx {
             let _ = tx.send(true);
@@ -447,7 +440,7 @@ impl PresenceManager {
                 .context("llama-server shutdown during sleep")?;
         }
 
-        *self.state.lock().expect("presence state mutex poisoned") = PresenceState::Sleeping;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = PresenceState::Sleeping;
         let _ = self.state_tx.send(PresenceState::Sleeping);
         info!(
             target: "assistd::presence",
@@ -487,7 +480,7 @@ impl PresenceManager {
                 format!("llama-server /models/unload failed for {}", self.model.name)
             })?;
 
-        *self.state.lock().expect("presence state mutex poisoned") = PresenceState::Drowsy;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = PresenceState::Drowsy;
         let _ = self.state_tx.send(PresenceState::Drowsy);
         info!(
             target: "assistd::presence",
@@ -532,7 +525,7 @@ impl PresenceManager {
                 *self
                     .current_inner_shutdown
                     .lock()
-                    .expect("inner-shutdown mutex poisoned") = Some(inner_tx);
+                    .unwrap_or_else(|e| e.into_inner()) = Some(inner_tx);
 
                 let service =
                     LlamaService::start(self.llama_server.clone(), self.model.clone(), inner_rx)
@@ -558,7 +551,7 @@ impl PresenceManager {
             PresenceState::Active => unreachable!("short-circuited above"),
         }
 
-        *self.state.lock().expect("presence state mutex poisoned") = PresenceState::Active;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = PresenceState::Active;
         let _ = self.state_tx.send(PresenceState::Active);
         info!(
             target: "assistd::presence",
@@ -628,7 +621,7 @@ impl PresenceManager {
     /// Does not touch the transition mutex or the llama handle.
     #[cfg(test)]
     pub(crate) fn set_state_for_test(&self, s: PresenceState) {
-        *self.state.lock().expect("presence state mutex poisoned") = s;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = s;
         let _ = self.state_tx.send(s);
     }
 }

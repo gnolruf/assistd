@@ -345,7 +345,7 @@ impl CallbackState {
     }
 
     fn push_f32(&self, data: &[f32]) {
-        let mut scratch = self.scratch.lock().expect("scratch mutex poisoned");
+        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         scratch.clear();
         if self.channels <= 1 {
             scratch.extend_from_slice(data);
@@ -360,7 +360,7 @@ impl CallbackState {
     }
 
     fn push_i16(&self, data: &[i16]) {
-        let mut scratch = self.scratch.lock().expect("scratch mutex poisoned");
+        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         scratch.clear();
         let scale = i16::MAX as f32;
         if self.channels <= 1 {
@@ -378,7 +378,7 @@ impl CallbackState {
     }
 
     fn push_u16(&self, data: &[u16]) {
-        let mut scratch = self.scratch.lock().expect("scratch mutex poisoned");
+        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         scratch.clear();
         // u16 is offset-binary — 32768 = silence.
         if self.channels <= 1 {
@@ -396,7 +396,7 @@ impl CallbackState {
     }
 
     fn push_mono(&self, mono: &[f32]) {
-        let mut prod = self.producer.lock().expect("producer mutex poisoned");
+        let mut prod = self.producer.lock().unwrap_or_else(|e| e.into_inner());
         let pushed = prod.push_slice(mono);
         let dropped = mono.len().saturating_sub(pushed);
         if dropped > 0 {

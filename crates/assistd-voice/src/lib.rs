@@ -1,3 +1,13 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::print_stdout,
+        clippy::print_stderr
+    )
+)]
+
 //! Voice subsystem: input (speech-to-text) and output (text-to-speech) traits.
 //!
 //! Milestone 5 ships voice input: [`WhisperTranscriber`] (whisper-rs) and

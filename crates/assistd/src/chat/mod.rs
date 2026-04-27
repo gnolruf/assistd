@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+
 //! Interactive ratatui-based chat TUI.
 //!
 //! `assistd chat` loads the existing config, starts its own llama-server
@@ -108,29 +110,32 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         }
     };
 
-    // One-shot capability probe — only meaningful when llama-server
-    // actually came up. The FailedBackend path already surfaces the
-    // startup error to the TUI, so skip the misleading mmproj warning
-    // in that case.
-    let vision_enabled = if presence.is_some() {
-        let v =
-            assistd_llm::detect_vision_support(&config.llama_server.host, config.llama_server.port)
+    // Capability probe — only meaningful when llama-server actually
+    // came up. The FailedBackend path already surfaces the startup
+    // error to the TUI, so skip the misleading mmproj warning in that
+    // case. Held in a VisionGate so a daemon-side revalidation flips
+    // see/screenshot/attach_image without a registry rebuild.
+    let initial_vision_state = if presence.is_some() {
+        let s =
+            assistd_llm::probe_capabilities(&config.llama_server.host, config.llama_server.port)
                 .await;
-        if v {
+        if s.vision_supported {
             info!("vision: enabled (model has mmproj)");
         } else {
             tracing::warn!("Vision not available: mmproj not loaded.");
         }
-        v
+        s
     } else {
-        false
+        assistd_llm::VisionState::default()
     };
+    let vision_enabled = initial_vision_state.vision_supported;
+    let vision_gate = assistd_tools::VisionGate::new(vision_enabled);
 
     let tools = assistd_core::build_tools(
         &config,
         tui_overflow_dir.clone(),
         Arc::new(TuiGate::new(confirm_tx)),
-        vision_enabled,
+        vision_gate.clone(),
     )?;
     info!(
         "tools: registered {} (overflow dir {})",

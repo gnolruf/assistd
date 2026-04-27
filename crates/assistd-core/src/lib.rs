@@ -1,3 +1,13 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::print_stdout,
+        clippy::print_stderr
+    )
+)]
+
 //! Daemon orchestration crate — the glue that wires every subsystem
 //! into a running `assistd` process.
 //!
@@ -96,17 +106,21 @@ use tracing::warn;
 /// the chat TUI passes a `TuiGate` that forwards prompts to the user via
 /// a modal overlay.
 ///
-/// `vision_enabled` reflects a one-shot `/props` probe of the running
-/// llama-server (see [`assistd_llm::detect_vision_support`]). When `false`,
-/// the image-producing commands (`see`, `screenshot`) are still
-/// registered but their `run()` short-circuits to the convention
-/// `[error] …: vision not available …` line, and their `summary()` flips
-/// so the LLM sees the unavailability in its tool schema.
+/// `vision_gate` is a shared, runtime-mutable flag (see
+/// [`assistd_tools::VisionGate`]) initialised from a `/props` probe of
+/// the running llama-server. When the gate reports `supported = false`,
+/// the image-producing commands (`see`, `screenshot`) still register
+/// but their `run()` short-circuits with the
+/// `[error] …: vision not available …` line and their `summary()` flips
+/// so the LLM sees the unavailability in its tool schema. The gate is
+/// re-evaluated on every command invocation, so a daemon-side
+/// revalidation that flips it after a model swap takes effect without
+/// rebuilding the registry.
 pub fn build_tools(
     config: &Config,
     overflow_dir: PathBuf,
     gate: Arc<dyn ConfirmationGate>,
-    vision_enabled: bool,
+    vision_gate: Arc<assistd_tools::VisionGate>,
 ) -> Result<Arc<ToolRegistry>> {
     if overflow_dir.exists() {
         std::fs::remove_dir_all(&overflow_dir).with_context(|| {
@@ -191,8 +205,8 @@ pub fn build_tools(
     commands.register(WcCommand);
     commands.register(EchoCommand);
     commands.register(WriteCommand::new(write_cfg));
-    commands.register(SeeCommand::new(vision_enabled));
-    commands.register(ScreenshotCommand::new(screenshot_cfg, vision_enabled));
+    commands.register(SeeCommand::new(vision_gate.clone()));
+    commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
     commands.register(WebCommand::new());
     commands.register(BashCommand::new(bash_cfg, sandbox, gate));
 
@@ -203,6 +217,156 @@ pub fn build_tools(
         overflow_dir,
     ));
     Ok(Arc::new(tools))
+}
+
+/// Cache the running llama-server's model id alongside the
+/// [`VisionGate`] state, so a re-probe can detect a model swap and
+/// flip vision availability without rebuilding the tool registry.
+///
+/// The daemon constructs one [`VisionRevalidator`] at startup, hands it
+/// to [`AppState`], and the per-query handler calls [`revalidate`] at
+/// the top of every turn. The probe is cheap (one local HTTP `GET
+/// /props` with a 2-second timeout), and we only mutate the gate when
+/// the cached model id actually changes — so a steady-state daemon
+/// pays a single round-trip per turn and never thrashes the gate.
+///
+/// [`revalidate`]: VisionRevalidator::revalidate
+pub struct VisionRevalidator {
+    gate: Arc<assistd_tools::VisionGate>,
+    cached_model: tokio::sync::Mutex<Option<String>>,
+    host: String,
+    port: u16,
+}
+
+impl VisionRevalidator {
+    pub fn new(
+        gate: Arc<assistd_tools::VisionGate>,
+        initial_model_id: Option<String>,
+        host: String,
+        port: u16,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            gate,
+            cached_model: tokio::sync::Mutex::new(initial_model_id),
+            host,
+            port,
+        })
+    }
+
+    /// Re-probe `/props` and, if the model id changed, update the
+    /// gate. Tolerates probe failures silently — a transient HTTP
+    /// blip should not flip vision off mid-session.
+    pub async fn revalidate(&self) {
+        let probe = assistd_llm::probe_capabilities(&self.host, self.port).await;
+        self.apply_probe(probe).await;
+    }
+
+    /// Apply a probe result to the cache and gate. Split out from
+    /// [`Self::revalidate`] so unit tests can drive the swap logic
+    /// without standing up an HTTP server.
+    pub async fn apply_probe(&self, probe: assistd_llm::VisionState) {
+        // No model id means the probe failed. Don't mutate the gate
+        // on a transient error; keep the last known good state.
+        if probe.model_id.is_none() {
+            return;
+        }
+        let mut cache = self.cached_model.lock().await;
+        if *cache != probe.model_id {
+            tracing::info!(
+                old = ?*cache,
+                new = ?probe.model_id,
+                vision_supported = probe.vision_supported,
+                "llama-server model changed; updating vision gate"
+            );
+            *cache = probe.model_id;
+            self.gate.set(probe.vision_supported);
+        }
+    }
+
+    pub fn gate(&self) -> &Arc<assistd_tools::VisionGate> {
+        &self.gate
+    }
+}
+
+#[cfg(test)]
+mod vision_revalidator_tests {
+    use super::*;
+    use assistd_llm::VisionState;
+
+    fn make_revalidator(gate_initial: bool, cached_model: Option<&str>) -> Arc<VisionRevalidator> {
+        VisionRevalidator::new(
+            assistd_tools::VisionGate::new(gate_initial),
+            cached_model.map(str::to_string),
+            "127.0.0.1".to_string(),
+            // Port is unused in the apply_probe path — set to 0 to
+            // make a real revalidate() obviously fail loudly if anyone
+            // accidentally points the test at it.
+            0,
+        )
+    }
+
+    #[tokio::test]
+    async fn no_model_id_keeps_gate_unchanged() {
+        // Simulates a transient probe failure: probe_capabilities
+        // returns the default (None model id, false vision). The gate
+        // must stay where it was; flipping it on a network blip would
+        // disable vision mid-session.
+        let rev = make_revalidator(true, Some("model-A"));
+        rev.apply_probe(VisionState::default()).await;
+        assert!(
+            rev.gate().supported(),
+            "gate must not flip on probe failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_model_id_keeps_gate_unchanged() {
+        let rev = make_revalidator(true, Some("model-A"));
+        rev.apply_probe(VisionState {
+            model_id: Some("model-A".into()),
+            // Even if the new probe says false, no model swap means we
+            // don't disturb the gate — same model can't lose vision.
+            vision_supported: false,
+        })
+        .await;
+        assert!(rev.gate().supported());
+    }
+
+    #[tokio::test]
+    async fn model_swap_flips_gate_off() {
+        let rev = make_revalidator(true, Some("vision-model"));
+        rev.apply_probe(VisionState {
+            model_id: Some("text-only-model".into()),
+            vision_supported: false,
+        })
+        .await;
+        assert!(!rev.gate().supported(), "gate must flip when model changes");
+    }
+
+    #[tokio::test]
+    async fn model_swap_flips_gate_on() {
+        let rev = make_revalidator(false, Some("text-only-model"));
+        rev.apply_probe(VisionState {
+            model_id: Some("vision-model".into()),
+            vision_supported: true,
+        })
+        .await;
+        assert!(rev.gate().supported());
+    }
+
+    #[tokio::test]
+    async fn fresh_revalidator_with_no_cached_model_still_picks_up_first_probe() {
+        // Daemon starts before the probe completes — the initial cache
+        // is None. When the first probe lands, we accept it as the
+        // baseline (None != Some) and update the gate to match.
+        let rev = make_revalidator(false, None);
+        rev.apply_probe(VisionState {
+            model_id: Some("vision-model".into()),
+            vision_supported: true,
+        })
+        .await;
+        assert!(rev.gate().supported());
+    }
 }
 
 /// Expand a leading `~` / `~/` in a config-supplied path string using

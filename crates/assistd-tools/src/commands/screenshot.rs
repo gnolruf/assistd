@@ -62,10 +62,14 @@ pub enum Backend {
     Wayland,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Target {
     Full,
     Focused,
+    /// Capture only the named monitor/output. On X11 the name is
+    /// resolved through `xrandr` to a geometry passed to maim; on
+    /// Wayland it's passed verbatim to grim's `-o` flag.
+    Monitor(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,18 +81,15 @@ enum WaylandCompositor {
 
 pub struct ScreenshotCommand {
     cfg: Arc<ScreenshotPolicyCfg>,
-    /// Set at startup from a `/props` probe of the running llama-server.
-    /// When `false`, `run()` short-circuits to the vision-not-available
-    /// error without spawning the capture backend.
-    vision_enabled: bool,
+    /// Shared, runtime-mutable vision flag. See [`crate::VisionGate`].
+    /// Read on every `run()` so a model swap (revalidated by the daemon)
+    /// can flip the gate without rebuilding the registry.
+    gate: Arc<crate::VisionGate>,
 }
 
 impl ScreenshotCommand {
-    pub fn new(cfg: Arc<ScreenshotPolicyCfg>, vision_enabled: bool) -> Self {
-        Self {
-            cfg,
-            vision_enabled,
-        }
+    pub fn new(cfg: Arc<ScreenshotPolicyCfg>, gate: Arc<crate::VisionGate>) -> Self {
+        Self { cfg, gate }
     }
 }
 
@@ -98,7 +99,10 @@ impl Default for ScreenshotCommand {
     /// enabled. Lets the convention-compliance harness in `command.rs`
     /// construct an instance without config plumbing.
     fn default() -> Self {
-        Self::new(Arc::new(ScreenshotPolicyCfg::default()), true)
+        Self::new(
+            Arc::new(ScreenshotPolicyCfg::default()),
+            crate::VisionGate::new(true),
+        )
     }
 }
 
@@ -109,7 +113,7 @@ impl Command for ScreenshotCommand {
     }
 
     fn summary(&self) -> &'static str {
-        if self.vision_enabled {
+        if self.gate.supported() {
             "capture the screen as a PNG and attach it for the next LLM turn"
         } else {
             "(unavailable: model has no vision encoder)"
@@ -117,12 +121,14 @@ impl Command for ScreenshotCommand {
     }
 
     fn help(&self) -> String {
-        "usage: screenshot [--full|--focused]\n\
+        "usage: screenshot [--full|--focused|--monitor=<name>]\n\
          \n\
          Capture the screen and attach it as a vision input for the next \
          LLM turn (kept in memory; never written to disk by default).\n\
          \n\
-         Without arguments, captures the full screen. Pass --focused to \
+         Without arguments, captures the full screen (which on multi-head \
+         setups means the bounding box across all monitors — pass \
+         --monitor=<name> to capture a single output). Pass --focused to \
          capture only the currently focused window.\n\
          \n\
          The display server is auto-detected: maim is used on X11, grim \
@@ -130,6 +136,12 @@ impl Command for ScreenshotCommand {
            X11: xdotool to find the active window\n  \
            Wayland (sway): swaymsg to read the focused node geometry\n  \
            Wayland (Hyprland): hyprctl to read the active-window geometry\n\
+         \n\
+         --monitor=<name> requires:\n  \
+           X11: xrandr to resolve the connector name to a geometry\n  \
+           Wayland: grim's -o flag (no extra binary)\n\
+         List monitors with `xrandr --listmonitors` (X11) or \
+         `swaymsg -t get_outputs` / `hyprctl monitors` (Wayland).\n\
          \n\
          Exit codes:\n  \
            0   success — image attached\n  \
@@ -145,7 +157,7 @@ impl Command for ScreenshotCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        if !self.vision_enabled {
+        if !self.gate.supported() {
             return Ok(CommandOutput::failed(
                 1,
                 error_line(
@@ -192,12 +204,28 @@ impl Command for ScreenshotCommand {
             },
         };
 
-        match capture(backend, target, self.cfg.timeout).await {
+        match capture(backend, &target, self.cfg.timeout).await {
             Ok(png) => {
+                if png.len() as u64 > crate::attachment::MAX_IMAGE_BYTES {
+                    return Ok(CommandOutput::failed(
+                        1,
+                        error_line(
+                            "screenshot",
+                            format_args!(
+                                "captured PNG too large ({} > {} max)",
+                                human_size(png.len()),
+                                human_size(crate::attachment::MAX_IMAGE_BYTES as usize),
+                            ),
+                            "Try",
+                            "--focused, or capture a single monitor",
+                        )
+                        .into_bytes(),
+                    ));
+                }
                 let stdout = format!(
                     "captured PNG ({}, {}, backend={}) — attached to next turn\n",
                     human_size(png.len()),
-                    target_label(target),
+                    target_label(&target),
                     backend_label(backend),
                 );
                 Ok(CommandOutput {
@@ -221,16 +249,35 @@ fn parse_args(args: &[String]) -> Result<Target, String> {
         1 => match args[0].as_str() {
             "--full" => Ok(Target::Full),
             "--focused" => Ok(Target::Focused),
+            s if s.starts_with("--monitor=") => {
+                let name = &s["--monitor=".len()..];
+                if name.is_empty() {
+                    Err("--monitor requires a name (try `xrandr --listmonitors` or `swaymsg -t get_outputs`)".into())
+                } else {
+                    Ok(Target::Monitor(name.to_string()))
+                }
+            }
+            "--monitor" => {
+                Err("--monitor requires a value: --monitor=<name> (e.g. --monitor=DP-1)".into())
+            }
             other => Err(format!("unknown flag: {other}")),
         },
-        _ => Err("expects at most one flag (--full or --focused)".into()),
+        2 if args[0] == "--monitor" => {
+            if args[1].is_empty() {
+                Err("--monitor requires a non-empty name".into())
+            } else {
+                Ok(Target::Monitor(args[1].clone()))
+            }
+        }
+        _ => Err("expects at most one flag (--full, --focused, or --monitor=<name>)".into()),
     }
 }
 
-fn target_label(t: Target) -> &'static str {
+fn target_label(t: &Target) -> &'static str {
     match t {
         Target::Full => "full-screen",
         Target::Focused => "focused-window",
+        Target::Monitor(_) => "monitor",
     }
 }
 
@@ -330,15 +377,95 @@ enum CaptureError {
 
 async fn capture(
     backend: Backend,
-    target: Target,
+    target: &Target,
     deadline: Duration,
 ) -> Result<Vec<u8>, CaptureError> {
     match (backend, target) {
         (Backend::X11, Target::Full) => spawn_subprocess("maim", &[], deadline).await,
         (Backend::X11, Target::Focused) => capture_x11_focused(deadline).await,
+        (Backend::X11, Target::Monitor(name)) => capture_x11_monitor(name, deadline).await,
         (Backend::Wayland, Target::Full) => spawn_subprocess("grim", &["-"], deadline).await,
         (Backend::Wayland, Target::Focused) => capture_wayland_focused(deadline).await,
+        (Backend::Wayland, Target::Monitor(name)) => {
+            spawn_subprocess("grim", &["-o", name, "-"], deadline).await
+        }
     }
+}
+
+/// Parse `xrandr --listmonitors` output. Each non-header line looks
+/// like:
+///   ` 0: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1`
+/// or:
+///   ` 1: +DP-2 2560/600x1440/340+1920+0  DP-2`
+/// We extract the `WIDTH/...xHEIGHT/...+X+Y` triple, drop the
+/// physical-size denominators, and return `WxH+X+Y` formatted for
+/// maim's `-g` flag. Match by trailing connector name (last whitespace
+/// token on the line) since the asterisks/pluses on the leading
+/// connector field vary.
+fn parse_xrandr_monitor_geom(listing: &str, monitor: &str) -> Option<String> {
+    for line in listing.lines() {
+        // Skip the `Monitors: N` header.
+        if !line.starts_with(|c: char| c.is_whitespace() || c.is_ascii_digit()) {
+            continue;
+        }
+        let trimmed = line.trim();
+        // Last whitespace-separated token is the connector name.
+        let name = trimmed.split_whitespace().next_back()?;
+        if name != monitor {
+            continue;
+        }
+        // The geometry token is the one matching `<num>/<num>x<num>/<num>+<num>+<num>`.
+        for tok in trimmed.split_whitespace() {
+            if let Some(geom) = strip_xrandr_geom_token(tok) {
+                return Some(geom);
+            }
+        }
+    }
+    None
+}
+
+/// Strip a single xrandr geometry token like `1920/598x1200/336+0+0`
+/// down to maim's `1920x1200+0+0` form. Returns `None` if the token
+/// doesn't match the expected shape.
+fn strip_xrandr_geom_token(tok: &str) -> Option<String> {
+    // Required structure: `<w>/<wmm>x<h>/<hmm>+<x>+<y>` (the second
+    // `+` may be `-` for monitors positioned off-zero, but we accept
+    // any sign).
+    let (lhs, after_x) = tok.split_once('x')?;
+    let (w_with_mm, _) = lhs.split_once('/')?;
+    let w: u32 = w_with_mm.parse().ok()?;
+    // After 'x' we have `<h>/<hmm>+<x>+<y>`. Take the first '+' or
+    // '-' as the start of the offset block (after the height/mm).
+    let h_end = after_x.find(['+', '-']).filter(|i| *i > 0)?;
+    let height_with_mm = &after_x[..h_end];
+    let offsets = &after_x[h_end..];
+    let (h_with_mm, _) = height_with_mm.split_once('/')?;
+    let h: u32 = h_with_mm.parse().ok()?;
+    // `offsets` begins with the sign of x. Must contain exactly one
+    // more sign-prefixed number for y.
+    let mut chars = offsets.char_indices().peekable();
+    chars.next()?; // consume leading sign
+    let next_sign_idx = chars.find(|(_, c)| *c == '+' || *c == '-')?.0;
+    let x_part = &offsets[..next_sign_idx];
+    let y_part = &offsets[next_sign_idx..];
+    // Validate both parts parse as signed integers.
+    x_part.parse::<i32>().ok()?;
+    y_part.parse::<i32>().ok()?;
+    Some(format!("{w}x{h}{x_part}{y_part}"))
+}
+
+/// Look up `monitor`'s geometry via `xrandr --listmonitors` and feed
+/// it to maim as `-g WxH+X+Y`. xrandr emits one line per active
+/// monitor in the form:
+///   `1: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1`
+/// We need the `1920x1200+0+0` triple for maim.
+async fn capture_x11_monitor(monitor: &str, deadline: Duration) -> Result<Vec<u8>, CaptureError> {
+    let raw = spawn_subprocess("xrandr", &["--listmonitors"], deadline).await?;
+    let listing = String::from_utf8_lossy(&raw);
+    let geom = parse_xrandr_monitor_geom(&listing, monitor).ok_or_else(|| CaptureError::Parse {
+        what: format!("monitor `{monitor}` not found in xrandr output"),
+    })?;
+    spawn_subprocess("maim", &["-g", &geom], deadline).await
 }
 
 /// Spawn `binary` with `args`, drain stdout to `Vec<u8>`, drain stderr to
@@ -627,6 +754,34 @@ mod tests {
         assert!(err.contains("at most one"), "{err}");
     }
 
+    #[test]
+    fn parse_monitor_equals_form() {
+        assert_eq!(
+            parse_args(&["--monitor=DP-1".into()]),
+            Ok(Target::Monitor("DP-1".into()))
+        );
+    }
+
+    #[test]
+    fn parse_monitor_two_arg_form() {
+        assert_eq!(
+            parse_args(&["--monitor".into(), "HDMI-1".into()]),
+            Ok(Target::Monitor("HDMI-1".into()))
+        );
+    }
+
+    #[test]
+    fn parse_monitor_without_value_errors() {
+        let err = parse_args(&["--monitor".into()]).unwrap_err();
+        assert!(err.contains("--monitor=<name>"), "{err}");
+    }
+
+    #[test]
+    fn parse_monitor_empty_equals_value_errors() {
+        let err = parse_args(&["--monitor=".into()]).unwrap_err();
+        assert!(err.contains("--monitor"), "{err}");
+    }
+
     /// The convention-compliance test in `command.rs` drives this exact path
     /// (bogus flag) to verify our error format. Re-asserting here keeps the
     /// failure message in this file when the format changes.
@@ -765,6 +920,26 @@ mod tests {
         assert!(parse_hyprland_geom(&v).is_none());
     }
 
+    #[test]
+    fn hyprland_geom_string_coords_returns_none() {
+        // Defensive: a future hyprctl version that emits coords as
+        // strings must not silently parse to garbage geometry.
+        let v = serde_json::json!({
+            "at": ["100", "200"],
+            "size": ["800", "600"],
+        });
+        assert!(parse_hyprland_geom(&v).is_none());
+    }
+
+    #[test]
+    fn hyprland_geom_short_array_returns_none() {
+        let v = serde_json::json!({
+            "at": [100],
+            "size": [800, 600],
+        });
+        assert!(parse_hyprland_geom(&v).is_none());
+    }
+
     // ---- Sway tree walking -----------------------------------------------
 
     #[test]
@@ -807,6 +982,103 @@ mod tests {
     fn sway_no_focused_node_returns_none() {
         let v = serde_json::json!({"focused": false, "nodes": []});
         assert!(find_focused_sway_rect(&v).is_none());
+    }
+
+    #[test]
+    fn sway_walks_three_levels_deep() {
+        // Real swaymsg output nests workspaces > containers > windows.
+        // The walker must recurse past at least 3 levels to find a
+        // focused leaf.
+        let v = serde_json::json!({
+            "focused": false,
+            "nodes": [
+                {"focused": false, "nodes": [
+                    {"focused": false, "nodes": [
+                        {
+                            "focused": true,
+                            "rect": {"x": 100, "y": 200, "width": 1280, "height": 720}
+                        }
+                    ]}
+                ]}
+            ]
+        });
+        assert_eq!(
+            find_focused_sway_rect(&v),
+            Some("100,200 1280x720".to_string())
+        );
+    }
+
+    #[test]
+    fn sway_focused_node_missing_rect_returns_none() {
+        // A malformed tree (focused=true but no rect) should not
+        // panic — find_focused_sway_rect uses `?` to propagate None.
+        let v = serde_json::json!({"focused": true});
+        assert!(find_focused_sway_rect(&v).is_none());
+    }
+
+    // ---- xrandr monitor geometry ----------------------------------------
+
+    /// Real `xrandr --listmonitors` output from a single-head HDMI
+    /// session. The geometry token carries physical-mm denominators
+    /// we need to strip.
+    const XRANDR_SINGLE: &str = "Monitors: 1\n \
+        0: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1\n";
+
+    /// Two-head laptop+external. Note the second monitor positions
+    /// past 1920 on x, and one connector has the `+*` (primary)
+    /// prefix while the other has just `+`.
+    const XRANDR_DUAL: &str = "Monitors: 2\n \
+        0: +*eDP-1 1920/300x1080/180+0+0  eDP-1\n \
+        1: +DP-2 2560/600x1440/340+1920+0  DP-2\n";
+
+    #[test]
+    fn parse_xrandr_single_monitor() {
+        assert_eq!(
+            parse_xrandr_monitor_geom(XRANDR_SINGLE, "HDMI-1").as_deref(),
+            Some("1920x1200+0+0")
+        );
+    }
+
+    #[test]
+    fn parse_xrandr_dual_monitor_picks_correct_geometry() {
+        assert_eq!(
+            parse_xrandr_monitor_geom(XRANDR_DUAL, "eDP-1").as_deref(),
+            Some("1920x1080+0+0")
+        );
+        assert_eq!(
+            parse_xrandr_monitor_geom(XRANDR_DUAL, "DP-2").as_deref(),
+            Some("2560x1440+1920+0")
+        );
+    }
+
+    #[test]
+    fn parse_xrandr_unknown_monitor_returns_none() {
+        assert!(parse_xrandr_monitor_geom(XRANDR_DUAL, "VGA-1").is_none());
+    }
+
+    #[test]
+    fn strip_xrandr_geom_token_drops_mm_denominators() {
+        assert_eq!(
+            strip_xrandr_geom_token("1920/598x1200/336+0+0").as_deref(),
+            Some("1920x1200+0+0")
+        );
+    }
+
+    #[test]
+    fn strip_xrandr_geom_token_handles_negative_offsets() {
+        // A monitor positioned to the left of (0,0).
+        assert_eq!(
+            strip_xrandr_geom_token("1920/598x1080/336-1920+0").as_deref(),
+            Some("1920x1080-1920+0")
+        );
+    }
+
+    #[test]
+    fn strip_xrandr_geom_token_rejects_unrelated_tokens() {
+        // The connector-name field must NOT be treated as geometry.
+        assert!(strip_xrandr_geom_token("HDMI-1").is_none());
+        // Missing offsets → None.
+        assert!(strip_xrandr_geom_token("1920/598x1200/336").is_none());
     }
 
     // ---- missing-binary path ---------------------------------------------
@@ -899,7 +1171,10 @@ mod tests {
     /// images" without spawning maim/grim.
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
-        let cmd = ScreenshotCommand::new(Arc::new(ScreenshotPolicyCfg::default()), false);
+        let cmd = ScreenshotCommand::new(
+            Arc::new(ScreenshotPolicyCfg::default()),
+            crate::VisionGate::new(false),
+        );
         let out = cmd
             .run(CommandInput {
                 args: vec!["--full".into()],
@@ -925,8 +1200,14 @@ mod tests {
 
     #[test]
     fn summary_changes_when_vision_disabled() {
-        let enabled = ScreenshotCommand::new(Arc::new(ScreenshotPolicyCfg::default()), true);
-        let disabled = ScreenshotCommand::new(Arc::new(ScreenshotPolicyCfg::default()), false);
+        let enabled = ScreenshotCommand::new(
+            Arc::new(ScreenshotPolicyCfg::default()),
+            crate::VisionGate::new(true),
+        );
+        let disabled = ScreenshotCommand::new(
+            Arc::new(ScreenshotPolicyCfg::default()),
+            crate::VisionGate::new(false),
+        );
         assert!(enabled.summary().contains("capture the screen"));
         assert!(disabled.summary().contains("unavailable"));
     }

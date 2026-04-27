@@ -118,13 +118,13 @@ impl PiperVoiceOutput {
     pub fn ready_state(&self) -> ReadyState {
         self.state
             .lock()
-            .expect("piper state mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .ready
             .clone()
     }
 
     fn record_success(&self) {
-        let mut s = self.state.lock().expect("piper state mutex poisoned");
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.recent_failures.clear();
         // Re-arming after a transient flap is intentional: a transient
         // stutter shouldn't permanently disable speech.
@@ -136,7 +136,7 @@ impl PiperVoiceOutput {
     }
 
     fn record_failure(&self, err: &PiperError) {
-        let mut s = self.state.lock().expect("piper state mutex poisoned");
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         // Drop entries older than the window.
         while let Some(&front) = s.recent_failures.front() {
@@ -168,7 +168,7 @@ impl VoiceOutput for PiperVoiceOutput {
         // Short-circuit when degraded — log once, then silent until a
         // future health check (manual restart for now) clears it.
         {
-            let s = self.state.lock().expect("piper state mutex poisoned");
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if let ReadyState::Degraded { ref reason } = s.ready {
                 if !s.logged_degraded {
                     tracing::warn!(
@@ -223,7 +223,7 @@ impl VoiceOutput for PiperVoiceOutput {
         // for any in-flight non-piper PCM, but in practice a degraded
         // service has no inflight work, so this is safe.
         {
-            let s = self.state.lock().expect("piper state mutex poisoned");
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(s.ready, ReadyState::Degraded { .. }) {
                 return Ok(());
             }

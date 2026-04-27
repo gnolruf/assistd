@@ -294,6 +294,15 @@ impl App {
                 return;
             }
             KeyCode::Tab => {
+                // Tab on `/attach <partial>` completes the path; on
+                // any other input it falls through to the existing
+                // tool-block toggle. Putting the path-completion path
+                // first keeps the toggle a no-op when the user is
+                // mid-attach (which is what they'd expect when
+                // completing a filename).
+                if self.try_complete_attach_path() {
+                    return;
+                }
                 self.output.toggle_last_tool_block();
                 return;
             }
@@ -474,6 +483,93 @@ impl App {
         self.notice = Some((text.to_string(), Instant::now()));
     }
 
+    /// Tab completion for `/attach <partial-path>`. Returns `true` if
+    /// completion fired (so the caller skips its fallback action), or
+    /// `false` when the input isn't an attach line and the caller's
+    /// default Tab behavior should run.
+    ///
+    /// Behavior on a single Tab press:
+    /// - One match → buffer is extended to the full filename
+    ///   (with a trailing `/` for directories).
+    /// - Multiple matches → buffer is extended to the longest common
+    ///   prefix of all matches (so a second Tab can disambiguate).
+    /// - No matches → buffer is unchanged; the function still returns
+    ///   `true` so we don't fall through to the tool-block toggle.
+    fn try_complete_attach_path(&mut self) -> bool {
+        let buffer = self.input.buffer();
+        let partial = if let Some(rest) = buffer.strip_prefix("/attach ") {
+            rest
+        } else if let Some(rest) = buffer.strip_prefix("/attach_image ") {
+            rest
+        } else {
+            return false;
+        };
+        // Split off the directory portion so we know where to look.
+        // An empty `partial` lists $CWD; a trailing `/` lists that dir.
+        let (dir, file_prefix) = match partial.rsplit_once('/') {
+            Some((d, f)) => (
+                if d.is_empty() {
+                    PathBuf::from("/")
+                } else {
+                    expand_tilde(d)
+                },
+                f,
+            ),
+            None => (PathBuf::from("."), partial),
+        };
+        let entries: Vec<(String, bool)> = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if name.starts_with(file_prefix) {
+                        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        Some((name, is_dir))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Err(_) => return true,
+        };
+        if entries.is_empty() {
+            return true;
+        }
+        // Longest common prefix across all matches; for a single
+        // match this is the full name.
+        let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        let lcp = longest_common_prefix(&names);
+        let completed = if entries.len() == 1 {
+            let (name, is_dir) = &entries[0];
+            // Directories get a trailing slash so a second Tab
+            // descends into them naturally.
+            if *is_dir {
+                format!("{name}/")
+            } else {
+                name.clone()
+            }
+        } else if lcp.len() > file_prefix.len() {
+            lcp.to_string()
+        } else {
+            // Already at the LCP — nothing to extend on this Tab.
+            return true;
+        };
+        // Rebuild the buffer keeping the original `/attach[_image] `
+        // prefix and the directory portion.
+        let cmd_prefix = if buffer.starts_with("/attach_image ") {
+            "/attach_image "
+        } else {
+            "/attach "
+        };
+        let dir_part = match partial.rsplit_once('/') {
+            Some((d, _)) => format!("{d}/"),
+            None => String::new(),
+        };
+        self.input
+            .set_buffer(format!("{cmd_prefix}{dir_part}{completed}"));
+        true
+    }
+
     fn submit_with_origin(&mut self, text: String, origin: SubmitOrigin) {
         if origin == SubmitOrigin::Typed {
             // Both `/attach <path>` and bare `/attach` are vision-only;
@@ -646,6 +742,7 @@ impl App {
                 text,
                 attachments,
                 llm_tx,
+                tokio_util::sync::CancellationToken::new(),
             )
             .await;
             let _ = forwarder.await;
@@ -654,6 +751,41 @@ impl App {
             }
         });
     }
+}
+
+/// Expand a leading `~` or `~/` in a tab-completion path using
+/// `$HOME`. Falls back to the literal path when `$HOME` is unset.
+fn expand_tilde(p: &str) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    if p == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(p)
+}
+
+/// Longest common prefix across a slice of strings. `""` when the
+/// slice is empty. Operates on bytes — fine for ASCII filenames; the
+/// completion path is best-effort for non-ASCII anyway since the
+/// input is shell-style.
+fn longest_common_prefix<'a>(xs: &[&'a str]) -> &'a str {
+    let Some(first) = xs.first() else { return "" };
+    let mut end = first.len();
+    for s in &xs[1..] {
+        end = end.min(s.len());
+        while end > 0 && first.as_bytes()[..end] != s.as_bytes()[..end] {
+            end -= 1;
+        }
+        if end == 0 {
+            return "";
+        }
+    }
+    &first[..end]
 }
 
 fn presence_label(s: PresenceState) -> &'static str {
@@ -1282,5 +1414,78 @@ mod tests {
             rendered.iter().any(|l| l.contains("vision not available")),
             "expected vision error, got {rendered:?}"
         );
+    }
+
+    #[test]
+    fn longest_common_prefix_empty() {
+        assert_eq!(longest_common_prefix(&[]), "");
+    }
+
+    #[test]
+    fn longest_common_prefix_one_string() {
+        assert_eq!(longest_common_prefix(&["abc"]), "abc");
+    }
+
+    #[test]
+    fn longest_common_prefix_two_strings() {
+        assert_eq!(longest_common_prefix(&["foobar", "foobaz"]), "fooba");
+        assert_eq!(longest_common_prefix(&["abc", "xyz"]), "");
+    }
+
+    #[test]
+    fn longest_common_prefix_n_strings() {
+        assert_eq!(
+            longest_common_prefix(&["screenshot1.png", "screenshot2.png", "screenshot10.png"]),
+            "screenshot",
+        );
+    }
+
+    #[test]
+    fn tab_completion_extends_unique_match() {
+        // Build a temp dir with one file that uniquely matches.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("unique-screenshot.png");
+        std::fs::write(&target, b"fake png").unwrap();
+        let prefix = dir.path().join("unique").display().to_string();
+
+        let (mut app, _rx) = test_app_with(true);
+        for c in format!("/attach {prefix}").chars() {
+            app.on_key(typed(c));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input.buffer(), format!("/attach {}", target.display()));
+    }
+
+    #[test]
+    fn tab_completion_extends_to_lcp_on_ambiguous_match() {
+        // Two files share a prefix; first Tab should extend the buffer
+        // to the longest common prefix without picking either.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foobar"), b"a").unwrap();
+        std::fs::write(dir.path().join("foobaz"), b"b").unwrap();
+        let prefix = dir.path().join("foo").display().to_string();
+
+        let (mut app, _rx) = test_app_with(true);
+        for c in format!("/attach {prefix}").chars() {
+            app.on_key(typed(c));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            app.input.buffer(),
+            format!("/attach {}/fooba", dir.path().display())
+        );
+    }
+
+    #[test]
+    fn tab_outside_attach_falls_through_to_default_handler() {
+        // Without /attach, Tab should invoke the existing tool-block
+        // toggle path. We just verify the buffer is unchanged — the
+        // toggle is a no-op on an empty output.
+        let (mut app, _rx) = test_app_with(true);
+        for c in "hello".chars() {
+            app.on_key(typed(c));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input.buffer(), "hello");
     }
 }

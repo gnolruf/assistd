@@ -28,12 +28,50 @@ use tracing::{debug, warn};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Snapshot of a single `/props` probe. `model_id` is whatever
+/// llama-server reports as the loaded model — used by callers to
+/// detect a model swap between probes and trigger a re-probe rather
+/// than trusting a stale `vision_supported` value.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VisionState {
+    pub model_id: Option<String>,
+    pub vision_supported: bool,
+}
+
+/// Probe llama-server for both the model identifier and vision
+/// capability. Returns a default (no model id, no vision) on any
+/// failure, with the same fail-closed semantics as the historical
+/// [`detect_vision_support`] entrypoint.
+pub async fn probe_capabilities(host: &str, port: u16) -> VisionState {
+    let body = match fetch_props(host, port).await {
+        Some(v) => v,
+        None => return VisionState::default(),
+    };
+    let model_id = parse_model_id(&body);
+    let vision_supported = parse_vision_supported(&body);
+    debug!(
+        target: "assistd::llama_server",
+        "/props parsed; model_id = {model_id:?}, vision_supported = {vision_supported}"
+    );
+    VisionState {
+        model_id,
+        vision_supported,
+    }
+}
+
 /// Returns `true` iff the running llama-server reports a loaded vision
 /// encoder. Returns `false` on any error (HTTP failure, non-200,
 /// malformed JSON) and logs at `warn` so the daemon's startup log
 /// captures the reason. The caller should treat a `false` result as
 /// "vision unavailable" and fall back accordingly.
+///
+/// Thin wrapper around [`probe_capabilities`] preserved for callers
+/// that don't need the model id.
 pub async fn detect_vision_support(host: &str, port: u16) -> bool {
+    probe_capabilities(host, port).await.vision_supported
+}
+
+async fn fetch_props(host: &str, port: u16) -> Option<Value> {
     let url = format!("http://{host}:{port}/props");
     let client = match reqwest::Client::builder()
         .no_proxy()
@@ -44,48 +82,58 @@ pub async fn detect_vision_support(host: &str, port: u16) -> bool {
         Err(e) => {
             warn!(
                 target: "assistd::llama_server",
-                "vision capability probe: failed to build HTTP client: {e}; assuming no vision support"
+                "/props probe: failed to build HTTP client: {e}"
             );
-            return false;
+            return None;
         }
     };
-
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => {
             warn!(
                 target: "assistd::llama_server",
-                "vision capability probe: GET /props failed: {e}; assuming no vision support"
+                "/props probe: GET failed: {e}"
             );
-            return false;
+            return None;
         }
     };
     if !resp.status().is_success() {
         warn!(
             target: "assistd::llama_server",
-            "vision capability probe: GET /props returned {}; assuming no vision support",
+            "/props probe: GET returned {}",
             resp.status()
         );
-        return false;
+        return None;
     }
-
-    let body: Value = match resp.json().await {
-        Ok(v) => v,
+    match resp.json::<Value>().await {
+        Ok(v) => Some(v),
         Err(e) => {
             warn!(
                 target: "assistd::llama_server",
-                "vision capability probe: /props body was not JSON: {e}; assuming no vision support"
+                "/props body was not JSON: {e}"
             );
-            return false;
+            None
         }
-    };
+    }
+}
 
-    let supported = parse_vision_supported(&body);
-    debug!(
-        target: "assistd::llama_server",
-        "vision capability probe: /props parsed; vision_supported = {supported}"
-    );
-    supported
+/// Pull a model identifier from a `/props` body. llama.cpp has reported
+/// this under a few different keys (`model`, `model_path`,
+/// `default_generation_settings.model`), so try them in order. Returns
+/// `None` if no recognizable field is present.
+fn parse_model_id(body: &Value) -> Option<String> {
+    const TOP_LEVEL_KEYS: &[&str] = &["model", "model_path", "model_name"];
+    for key in TOP_LEVEL_KEYS {
+        if let Some(s) = body.get(*key).and_then(Value::as_str) {
+            return Some(s.to_string());
+        }
+    }
+    if let Some(settings) = body.get("default_generation_settings")
+        && let Some(s) = settings.get("model").and_then(Value::as_str)
+    {
+        return Some(s.to_string());
+    }
+    None
 }
 
 /// Inspect a parsed `/props` body for any field that signals
@@ -180,5 +228,43 @@ mod tests {
             "multimodal": false,
         });
         assert!(parse_vision_supported(&body));
+    }
+
+    #[test]
+    fn parses_top_level_model_field() {
+        let body = json!({"model": "bartowski/Qwen3-14B-GGUF:Q4_K_M"});
+        assert_eq!(
+            parse_model_id(&body).as_deref(),
+            Some("bartowski/Qwen3-14B-GGUF:Q4_K_M")
+        );
+    }
+
+    #[test]
+    fn parses_top_level_model_path_when_model_absent() {
+        let body = json!({"model_path": "/var/cache/llm/qwen-vl.gguf"});
+        assert_eq!(
+            parse_model_id(&body).as_deref(),
+            Some("/var/cache/llm/qwen-vl.gguf")
+        );
+    }
+
+    #[test]
+    fn parses_nested_default_generation_settings_model() {
+        let body = json!({
+            "default_generation_settings": {"model": "nested/model"},
+        });
+        assert_eq!(parse_model_id(&body).as_deref(), Some("nested/model"));
+    }
+
+    #[test]
+    fn returns_none_when_no_model_field_present() {
+        let body = json!({"total_slots": 1});
+        assert_eq!(parse_model_id(&body), None);
+    }
+
+    #[test]
+    fn ignores_non_string_model_value() {
+        let body = json!({"model": 42});
+        assert_eq!(parse_model_id(&body), None);
     }
 }

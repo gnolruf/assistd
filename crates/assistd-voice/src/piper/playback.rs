@@ -108,7 +108,7 @@ impl RodioPlaybackWorker {
     pub async fn drain(&self) -> Result<(), PiperError> {
         let player = self.player.clone();
         let (tx, rx) = oneshot::channel();
-        std::thread::Builder::new()
+        thread::Builder::new()
             .name("piper-rodio-drain".into())
             .spawn(move || {
                 player.sleep_until_end();

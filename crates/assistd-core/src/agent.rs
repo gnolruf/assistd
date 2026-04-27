@@ -19,6 +19,7 @@ use assistd_llm::{LlmBackend, LlmEvent, StepOutcome, ToolCall, ToolResultPayload
 use assistd_tools::{Attachment, ToolRegistry};
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 /// Run one agent turn end-to-end.
@@ -37,7 +38,17 @@ use tracing::{debug, info, instrument, warn};
 ///
 /// Cancellation: if `tx` is closed (client disconnected) between
 /// iterations, the loop returns `Ok(())` without running further tool
-/// calls or LLM round trips.
+/// calls or LLM round trips. Callers can also explicitly cancel by
+/// signalling the [`CancellationToken`] — useful when the daemon needs
+/// to stop a long-running LLM step or tool call promptly (e.g. a slow
+/// MCP tool when the user disconnects). The token is checked between
+/// iterations and the LLM step / tool dispatch run inside a
+/// `select!` against it so cancellation propagates without waiting
+/// for the inner future to complete on its own.
+///
+/// Pass [`CancellationToken::new`] (a fresh, never-cancelled token) if
+/// the caller doesn't need explicit cancellation — the
+/// `tx.is_closed()` path keeps existing behaviour for that case.
 #[instrument(skip_all, name = "agent_turn")]
 pub async fn run_agent_turn(
     backend: Arc<dyn LlmBackend>,
@@ -46,31 +57,44 @@ pub async fn run_agent_turn(
     user_text: String,
     user_attachments: Vec<Attachment>,
     tx: mpsc::Sender<LlmEvent>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     backend.push_user(user_text, user_attachments).await?;
     let schemas = tools.openai_schemas();
 
     for iteration in 0..max_iterations {
-        if tx.is_closed() {
+        if tx.is_closed() || cancel.is_cancelled() {
             debug!(
                 target: "assistd::agent",
                 iteration,
-                "client disconnected between iterations; stopping"
+                cancelled = cancel.is_cancelled(),
+                "stopping between iterations (client gone or explicit cancel)"
             );
             return Ok(());
         }
 
-        let outcome = match backend.step(schemas.clone(), tx.clone()).await {
-            Ok(o) => o,
-            Err(e) => {
-                let _ = tx
-                    .send(LlmEvent::Delta {
-                        text: format!("\n[agent error: {e}]\n"),
-                    })
-                    .await;
-                let _ = tx.send(LlmEvent::Done).await;
-                return Err(e);
+        let outcome = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                debug!(
+                    target: "assistd::agent",
+                    iteration,
+                    "cancellation fired during LLM step; stopping"
+                );
+                return Ok(());
             }
+            r = backend.step(schemas.clone(), tx.clone()) => match r {
+                Ok(o) => o,
+                Err(e) => {
+                    let _ = tx
+                        .send(LlmEvent::Delta {
+                            text: format!("\n[agent error: {e}]\n"),
+                        })
+                        .await;
+                    let _ = tx.send(LlmEvent::Done).await;
+                    return Err(e);
+                }
+            },
         };
 
         match outcome {
@@ -81,12 +105,13 @@ pub async fn run_agent_turn(
             StepOutcome::ToolCalls(calls) => {
                 let mut results = Vec::with_capacity(calls.len());
                 for call in calls {
-                    if tx.is_closed() {
+                    if tx.is_closed() || cancel.is_cancelled() {
                         debug!(
                             target: "assistd::agent",
                             iteration,
                             tool = %call.name,
-                            "client disconnected mid-call; stopping without dispatch"
+                            cancelled = cancel.is_cancelled(),
+                            "stopping mid-call (client gone or explicit cancel) without dispatch"
                         );
                         // Unwind: push synthetic errors for all pending calls
                         // so conversation state isn't left with a dangling
@@ -305,6 +330,13 @@ mod tests {
         pushed_users: StdMutex<Vec<String>>,
         pushed_attachments: StdMutex<Vec<Vec<Attachment>>>,
         pushed_results: StdMutex<Vec<Vec<ToolResultPayload>>>,
+        /// Counts every entry into `step` (including ones cancelled
+        /// before they finish). Used by cancellation tests to verify
+        /// the loop didn't iterate past a cancellation point.
+        step_calls: std::sync::atomic::AtomicUsize,
+        /// Optional artificial delay inside `step` so cancellation
+        /// tests can fire while the step is still pending.
+        slow_step: StdMutex<Option<std::time::Duration>>,
     }
 
     impl MockBackend {
@@ -314,7 +346,14 @@ mod tests {
                 pushed_users: StdMutex::new(Vec::new()),
                 pushed_attachments: StdMutex::new(Vec::new()),
                 pushed_results: StdMutex::new(Vec::new()),
+                step_calls: std::sync::atomic::AtomicUsize::new(0),
+                slow_step: StdMutex::new(None),
             })
+        }
+
+        fn slow_step_ms(self: Arc<Self>, ms: u64) -> Arc<Self> {
+            *self.slow_step.lock().unwrap() = Some(std::time::Duration::from_millis(ms));
+            self
         }
     }
 
@@ -348,6 +387,15 @@ mod tests {
             _tools: Vec<Value>,
             tx: mpsc::Sender<LlmEvent>,
         ) -> anyhow::Result<StepOutcome> {
+            self.step_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Honour any configured slow-step delay BEFORE consuming
+            // an outcome — cancellation tests rely on this future
+            // being long-lived so the cancel signal can race it.
+            let delay = *self.slow_step.lock().unwrap();
+            if let Some(d) = delay {
+                tokio::time::sleep(d).await;
+            }
             let outcome = {
                 let mut q = self.outcomes.lock().unwrap();
                 if q.is_empty() {
@@ -406,6 +454,7 @@ mod tests {
             "what is 2+2?".into(),
             Vec::new(),
             tx,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -431,6 +480,7 @@ mod tests {
             "say hello".into(),
             Vec::new(),
             tx,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -493,6 +543,7 @@ mod tests {
             "how many?".into(),
             Vec::new(),
             tx,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -528,9 +579,17 @@ mod tests {
         let backend = MockBackend::with(outcomes);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(64);
-        run_agent_turn(backend, tools, 3, "loop it".into(), Vec::new(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend,
+            tools,
+            3,
+            "loop it".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let events = collect(&mut rx).await;
 
         let delta_text: String = events
@@ -561,9 +620,17 @@ mod tests {
         ]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), tools, 10, "go".into(), Vec::new(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "go".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         drop(collect(&mut rx).await);
         let pushed = backend.pushed_results.lock().unwrap();
         assert_eq!(pushed.len(), 1);
@@ -606,9 +673,17 @@ mod tests {
             StepOutcome::Final,
         ]);
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(backend.clone(), reg, 10, "go".into(), Vec::new(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend.clone(),
+            reg,
+            10,
+            "go".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         drop(collect(&mut rx).await);
         let pushed = backend.pushed_results.lock().unwrap();
         let payload = &pushed[0][0];
@@ -633,14 +708,94 @@ mod tests {
         drop(rx);
         // Channel is closed from the start, so the very first is_closed
         // check bails the loop before any step runs.
-        run_agent_turn(backend.clone(), tools, 10, "go".into(), Vec::new(), tx)
-            .await
-            .unwrap();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "go".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         // With the receiver already dropped, no step was called.
         let pushed = backend.pushed_results.lock().unwrap();
         assert!(
             pushed.is_empty(),
             "no tool results should be pushed after disconnect: {pushed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_before_first_step_stops_loop_immediately() {
+        // The token is cancelled before the loop starts. The very
+        // first iteration's pre-step check sees `cancel.is_cancelled()`
+        // and bails — no step is ever called.
+        let backend = MockBackend::with(vec![
+            StepOutcome::Final,
+            // If we get here the cancellation didn't take effect.
+            StepOutcome::Final,
+        ]);
+        let tools = tools_with_echo();
+        let (tx, _rx) = mpsc::channel::<LlmEvent>(16);
+        let token = CancellationToken::new();
+        token.cancel();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "go".into(),
+            Vec::new(),
+            tx,
+            token,
+        )
+        .await
+        .unwrap();
+        // user push happened (it's the first thing in the loop), but
+        // no step ran.
+        assert_eq!(backend.pushed_users.lock().unwrap().len(), 1);
+        assert_eq!(
+            backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_slow_step_preempts_loop() {
+        // Fire a cancellation while the LLM step is still pending,
+        // and verify run_agent_turn returns promptly via the
+        // tokio::select! against `cancel.cancelled()` rather than
+        // waiting for the step future to complete on its own.
+        let backend = MockBackend::with(vec![StepOutcome::Final]).slow_step_ms(2_000);
+        let tools = tools_with_echo();
+        let (tx, _rx) = mpsc::channel::<LlmEvent>(16);
+        let token = CancellationToken::new();
+        let token_for_kicker = token.clone();
+        // Spawn a task that fires cancel after a short delay.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            token_for_kicker.cancel();
+        });
+        let started = std::time::Instant::now();
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "go".into(),
+            Vec::new(),
+            tx,
+            token,
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+        // The slow step is 2s; if cancellation didn't preempt we'd
+        // be waiting that long. Allow a generous 500ms buffer for
+        // CI scheduling variance.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "cancellation did not preempt slow step (elapsed: {elapsed:?})"
         );
     }
 }

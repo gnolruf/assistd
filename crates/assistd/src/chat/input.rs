@@ -47,6 +47,14 @@ impl InputLine {
         &self.buffer
     }
 
+    /// Replace the entire buffer with `text` and place the cursor at
+    /// the end. Used by tab completion to extend a `/attach <path>`
+    /// prefix in place without rebuilding the InputLine.
+    pub fn set_buffer(&mut self, text: String) {
+        self.cursor = text.len();
+        self.buffer = text;
+    }
+
     /// Cursor column in characters (not bytes). Suitable for placing the
     /// terminal cursor when rendering the input line.
     pub fn cursor_col(&self) -> u16 {
