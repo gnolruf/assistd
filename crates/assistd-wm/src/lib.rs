@@ -1,3 +1,13 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::print_stdout,
+        clippy::print_stderr
+    )
+)]
+
 //! Window manager / compositor integration trait.
 //!
 //! Milestone 8 ships concrete implementations for i3, Sway, and Hyprland

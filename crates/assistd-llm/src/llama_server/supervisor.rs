@@ -117,7 +117,7 @@ impl Supervisor {
 
     async fn supervise_once(&mut self) -> Result<CycleResult, LlamaServerError> {
         let mut child = ChildProcess::spawn(&self.cfg, &self.model)?;
-        *self.pid.lock().expect("pid mutex poisoned") = child.pid();
+        *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = child.pid();
         let ready_timeout = Duration::from_secs(self.cfg.ready_timeout_secs);
         let health = HealthChecker::new(&self.cfg.host, self.cfg.port, ready_timeout)?;
 
@@ -145,17 +145,17 @@ impl Supervisor {
         match phase1 {
             Phase1::Ready => { /* fall through */ }
             Phase1::ChildExited(status) => {
-                *self.pid.lock().expect("pid mutex poisoned") = None;
+                *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 return Ok(CycleResult::FailedToStart { status });
             }
             Phase1::ShuttingDown => {
                 child.shutdown(TERM_TIMEOUT).await?;
-                *self.pid.lock().expect("pid mutex poisoned") = None;
+                *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 return Ok(CycleResult::ShutdownRequested);
             }
             Phase1::StartupError(e) => {
                 child.shutdown(TERM_TIMEOUT).await?;
-                *self.pid.lock().expect("pid mutex poisoned") = None;
+                *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 return Err(e);
             }
         }
@@ -178,7 +178,7 @@ impl Supervisor {
                 Ok(CycleResult::ShutdownRequested)
             }
         };
-        *self.pid.lock().expect("pid mutex poisoned") = None;
+        *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
         result
     }
 }

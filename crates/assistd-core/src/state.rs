@@ -2,7 +2,8 @@ use crate::{Config, PresenceManager, run_agent_turn};
 use anyhow::Result;
 use assistd_ipc::{Event, PresenceState, Request, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
-use assistd_tools::ToolRegistry;
+use assistd_memory::{MemoryStore, NoMemoryStore};
+use assistd_tools::{Attachment, ToolRegistry};
 use assistd_voice::{
     ContinuousListener, SentenceBuffer, SpeakDecision, VoiceInput, VoiceOutputController,
 };
@@ -10,6 +11,25 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tracing::Instrument;
+
+/// Convert wire-level [`assistd_ipc::ImageAttachment`] entries into the
+/// internal [`Attachment`] type the agent loop expects. Returns the first
+/// decode error so the caller can surface it cleanly to the client.
+fn decode_wire_attachments(
+    wire: &[assistd_ipc::ImageAttachment],
+) -> std::result::Result<Vec<Attachment>, String> {
+    wire.iter()
+        .map(|w| {
+            let bytes = w
+                .decode_bytes()
+                .map_err(|e| format!("base64 decode failed for {}: {e}", w.mime))?;
+            Ok(Attachment::Image {
+                mime: w.mime.clone(),
+                bytes,
+            })
+        })
+        .collect()
+}
 
 /// Shared, long-lived daemon state handed to every request handler.
 ///
@@ -29,6 +49,17 @@ pub struct AppState {
     /// When TTS is disabled in config or the build, the inner backend
     /// is `NoVoiceOutput` which silently accepts every speak() call.
     pub voice_output: Arc<VoiceOutputController>,
+    /// Re-probes `/props` at the top of each query so a model swap on
+    /// the running llama-server flips the vision gate. `None` in tests
+    /// where there is no real llama-server to probe — `handle_query`
+    /// then skips the revalidation step entirely.
+    pub vision_revalidator: Option<Arc<crate::VisionRevalidator>>,
+    /// Persistent key/value memory shared across sessions. Wired to
+    /// [`assistd_memory::NoMemoryStore`] in builds without a backend
+    /// configured; Milestone 4 swaps in the SQLite-backed concrete
+    /// implementation. Held as `Arc<dyn MemoryStore>` so the trait
+    /// boundary stays the same regardless of backend.
+    pub memory: Arc<dyn MemoryStore>,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `run_agent_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
@@ -55,8 +86,27 @@ impl AppState {
             voice,
             listener,
             voice_output,
+            vision_revalidator: None,
+            memory: Arc::new(NoMemoryStore),
             agent_turn_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Builder-style setter for the optional vision revalidator. Kept
+    /// out of [`Self::new`] so existing test constructors don't need to
+    /// supply it.
+    pub fn with_vision_revalidator(mut self, r: Arc<crate::VisionRevalidator>) -> Self {
+        self.vision_revalidator = Some(r);
+        self
+    }
+
+    /// Builder-style setter for the memory backend. Kept out of
+    /// [`Self::new`] so existing test constructors keep working with
+    /// the default `NoMemoryStore`. Milestone 4's SQLite store will
+    /// be threaded through this method.
+    pub fn with_memory(mut self, m: Arc<dyn MemoryStore>) -> Self {
+        self.memory = m;
+        self
     }
 
     /// Route a single incoming request to the appropriate subsystem.
@@ -67,7 +117,26 @@ impl AppState {
     /// [`Event::Error`] if one hasn't been emitted already.
     pub async fn dispatch(self: Arc<Self>, req: Request, tx: mpsc::Sender<Event>) -> Result<()> {
         match req {
-            Request::Query { id, text } => self.handle_query(id, text, tx).await,
+            Request::Query {
+                id,
+                text,
+                attachments,
+                version,
+            } => {
+                if let Some(v) = version {
+                    if v > assistd_ipc::PROTOCOL_VERSION {
+                        tracing::warn!(
+                            client = v,
+                            server = assistd_ipc::PROTOCOL_VERSION,
+                            "client sent newer protocol version than daemon understands; \
+                             extra fields will be ignored"
+                        );
+                    }
+                } else {
+                    tracing::debug!("client did not send protocol version; treating as legacy v1");
+                }
+                self.handle_query(id, text, attachments, tx).await
+            }
             Request::SetPresence { id, target } => self.handle_set_presence(id, target, tx).await,
             Request::GetPresence { id } => self.handle_get_presence(id, tx).await,
             Request::Cycle { id } => self.handle_cycle(id, tx).await,
@@ -87,8 +156,33 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         text: String,
+        wire_attachments: Vec<assistd_ipc::ImageAttachment>,
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
+        // Re-probe llama-server's loaded model so a runtime model swap
+        // (e.g. a fresh `/models/load`) flips the vision gate before
+        // either this turn's image attachments OR the agent's
+        // see/screenshot tool calls run against a stale capability.
+        // Always called — the probe is a single local HTTP GET with a
+        // 2s timeout, and only mutates the gate on actual change.
+        if let Some(rev) = self.vision_revalidator.as_ref() {
+            rev.revalidate().await;
+        }
+        // Decode wire attachments into internal Attachment values up
+        // front so a malformed base64 payload fails before we wake the
+        // model — saves the user the GPU round-trip on a bad request.
+        let attachments: Vec<Attachment> = match decode_wire_attachments(&wire_attachments) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id: id.clone(),
+                        message: format!("invalid attachment: {e}"),
+                    })
+                    .await;
+                return Err(anyhow::anyhow!("invalid attachment: {e}"));
+            }
+        };
         // Auto-wake and take an in-flight guard: a query in any
         // non-Active state blocks here until the daemon is ready to
         // serve. The returned guard keeps the daemon `Active` for the
@@ -124,13 +218,34 @@ impl AppState {
         let llm = self.llm.clone();
         let tools = self.tools.clone();
         let max_iterations = self.config.agent.max_iterations;
-        let generator =
-            tokio::spawn(
-                async move {
-                    run_agent_turn(llm, tools, max_iterations, text, Vec::new(), llm_tx).await
-                }
-                .in_current_span(),
-            );
+        // Cancellation token: wired to the agent loop so a slow LLM
+        // step or tool dispatch can be preempted promptly. Today we
+        // only fire it when this function returns (drop) — that
+        // unblocks the agent task if the dispatch loop below bailed
+        // mid-stream. Future MCP work will also fire it on explicit
+        // shutdown signals.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_for_agent = cancel.clone();
+        // Drop guard: when this function returns for any reason
+        // (including early bail from the dispatch loop below), the
+        // guard cancels the token, ensuring the agent task wakes up
+        // and exits even if it's parked in `backend.step`.
+        let _cancel_on_return = cancel.clone().drop_guard();
+        let generator = tokio::spawn(
+            async move {
+                run_agent_turn(
+                    llm,
+                    tools,
+                    max_iterations,
+                    text,
+                    attachments,
+                    llm_tx,
+                    cancel_for_agent,
+                )
+                .await
+            }
+            .in_current_span(),
+        );
 
         // Sentence buffer + speech worker. Each completed sentence is
         // sent to a per-query worker task that calls voice_output.speak
@@ -660,7 +775,7 @@ impl AppState {
         // Auto-feed the agent loop, reusing the Query handler so
         // streaming deltas, tool calls, and Done all land on the
         // same connection and correlate to this request's id.
-        self.handle_query(id, text, tx).await
+        self.handle_query(id, text, Vec::new(), tx).await
     }
 }
 
@@ -731,6 +846,8 @@ mod tests {
         let req = Request::Query {
             id: "q1".into(),
             text: "hello".into(),
+            attachments: Vec::new(),
+            version: None,
         };
 
         state.dispatch(req, tx).await.unwrap();
@@ -816,6 +933,8 @@ mod tests {
         let req = Request::Query {
             id: "q-err".into(),
             text: "boom".into(),
+            attachments: Vec::new(),
+            version: None,
         };
 
         let err = state.dispatch(req, tx).await.unwrap_err();
@@ -921,6 +1040,8 @@ mod tests {
         let req = Request::Query {
             id: "req-42".into(),
             text: "go".into(),
+            attachments: Vec::new(),
+            version: None,
         };
         state.dispatch(req, tx).await.unwrap();
 
@@ -1421,6 +1542,8 @@ mod tests {
                 Request::Query {
                     id: "ord".into(),
                     text: "First. Second. Third. End.".into(),
+                    attachments: Vec::new(),
+                    version: None,
                 },
                 tx,
             )
@@ -1530,6 +1653,8 @@ mod tests {
                 Request::Query {
                     id: "pf".into(),
                     text: "go".into(),
+                    attachments: Vec::new(),
+                    version: None,
                 },
                 tx,
             )
@@ -1568,6 +1693,8 @@ mod tests {
                 Request::Query {
                     id: "pf0".into(),
                     text: "go".into(),
+                    attachments: Vec::new(),
+                    version: None,
                 },
                 tx,
             )
@@ -1726,6 +1853,8 @@ mod tests {
                 Request::Query {
                     id: "tc".into(),
                     text: "go".into(),
+                    attachments: Vec::new(),
+                    version: None,
                 },
                 tx,
             )
@@ -1761,6 +1890,8 @@ mod tests {
                 Request::Query {
                     id: "drain".into(),
                     text: "Hello world.".into(),
+                    attachments: Vec::new(),
+                    version: None,
                 },
                 tx,
             )

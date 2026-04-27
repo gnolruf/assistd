@@ -6,6 +6,8 @@ members = [
     "crates/assistd-core",
     "crates/assistd-ipc",
     "crates/assistd-llm",
+    "crates/assistd-mcp",
+    "crates/assistd-memory",
     "crates/assistd-voice",
     "crates/assistd-tools",
     "crates/assistd-wm",
@@ -24,6 +26,8 @@ assistd-config = { version = "0.1", path = "crates/assistd-config" }
 assistd-core   = { version = "0.1", path = "crates/assistd-core" }
 assistd-ipc    = { version = "0.1", path = "crates/assistd-ipc" }
 assistd-llm    = { version = "0.1", path = "crates/assistd-llm" }
+assistd-mcp    = { version = "0.1", path = "crates/assistd-mcp" }
+assistd-memory = { version = "0.1", path = "crates/assistd-memory" }
 assistd-voice  = { version = "0.1", path = "crates/assistd-voice" }
 assistd-tools  = { version = "0.1", path = "crates/assistd-tools" }
 assistd-wm     = { version = "0.1", path = "crates/assistd-wm" }
@@ -31,7 +35,11 @@ assistd-wm     = { version = "0.1", path = "crates/assistd-wm" }
 # External crates
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+# Workspace base for tokio: no features. Each crate opts into the
+# minimum it needs via per-manifest `features = [...]`. The binary
+# (`assistd-cli`) is the only crate that takes `["full"]`.
+tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
@@ -57,6 +65,37 @@ which = "7"
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
 ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+# Workspace-wide lint baseline. Each crate inherits via
+# `[lints] workspace = true` in its own Cargo.toml. Tightens defaults
+# without going to clippy::pedantic, which would surface hundreds of
+# stylistic warnings across the existing 100+ source files; pedantic
+# can be turned on incrementally per-crate later if there's appetite.
+[workspace.lints.rust]
+# `deny` (not `forbid`) so individual call sites that legitimately
+# need libc / process-group / kill semantics can opt in with a
+# scoped `#[allow(unsafe_code)]` and a comment explaining why.
+unsafe_code = "deny"
+# Lint groups must have priority -1 so individual lint overrides
+# (none below today, but future per-lint overrides) win over them.
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Catch leftover dbg! before it ships. `print_stdout` / `print_stderr`
+# are intentionally NOT denied here — the CLI surface (`assistd send`
+# error reporting, fake-server diagnostics) writes to stdout/stderr
+# legitimately, and chasing those down with per-call allows is
+# higher-cost-than-value. Revisit when there's a clear "production"
+# vs "CLI surface" boundary worth enforcing.
+dbg_macro = "deny"
+# `unwrap_used` / `expect_used` likewise: tests already opt out via
+# `#![cfg_attr(test, allow(...))]` in each lib. The remaining
+# production sites are a backlog item — landing them as `warn` here
+# would surface 16 warnings we can't fix in this refinement pass.
+# Keep them off the workspace baseline for now so CI stays green;
+# tightening incrementally per-crate is the follow-up.
 
 [profile.release]
 lto = "thin"

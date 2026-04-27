@@ -1,3 +1,14 @@
+#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::print_stdout,
+        clippy::print_stderr
+    )
+)]
+
 //! Wire-level IPC types shared between the assistd daemon and its clients.
 //!
 //! Kept in its own crate so a client-only build can depend on just these
@@ -14,8 +25,42 @@
 //! Every event carries the originating request's `id`, so a future
 //! multiplexing transport can correlate concurrent in-flight requests.
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Wire-protocol version. Bumped when an existing field's semantics
+/// change in a non-additive way; new optional fields don't bump this.
+/// Servers log a warning and continue when they see a version they
+/// don't understand, so additive evolution stays compatible.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// An image attachment carried over the wire alongside a [`Request::Query`].
+/// `data_base64` is standard base64 (with padding); the daemon decodes
+/// it back into raw bytes before handing it to the LLM. `mime` is one of
+/// the values `assistd-tools::attachment` accepts (image/png, image/jpeg,
+/// image/webp).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageAttachment {
+    pub mime: String,
+    pub data_base64: String,
+}
+
+impl ImageAttachment {
+    /// Build from raw bytes. Allocates the base64-encoded string.
+    pub fn from_bytes(mime: impl Into<String>, bytes: &[u8]) -> Self {
+        Self {
+            mime: mime.into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    /// Decode `data_base64` back to bytes. Returns `Err` if the field is
+    /// not valid base64.
+    pub fn decode_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
+        base64::engine::general_purpose::STANDARD.decode(&self.data_base64)
+    }
+}
 
 /// Coarse daemon lifecycle state exposed on the wire so clients and the
 /// daemon can agree on resource usage. `Sleeping` means llama-server is
@@ -65,77 +110,90 @@ pub enum Request {
     Query {
         id: String,
         text: String,
+        /// Image attachments to surface as vision inputs on this turn.
+        /// Empty for text-only queries; deserializes from missing fields
+        /// for backward compat.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<ImageAttachment>,
+        /// Wire-protocol version the client speaks. None means a
+        /// legacy client (pre-versioning); the daemon accepts these
+        /// for now but logs a warning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<u32>,
     },
     /// Drive the daemon to a specific presence state.
-    SetPresence {
-        id: String,
-        target: PresenceState,
-    },
+    SetPresence { id: String, target: PresenceState },
     /// Report the daemon's current presence state.
-    GetPresence {
-        id: String,
-    },
+    GetPresence { id: String },
     /// Atomically advance the daemon one step along
     /// `Active → Drowsy → Sleeping → Active`.
-    Cycle {
-        id: String,
-    },
+    Cycle { id: String },
     /// Begin a push-to-talk recording. Returns immediately with `Done`
     /// once cpal has opened the device; audio is buffered in the daemon
     /// until a matching `PttStop` arrives.
-    PttStart {
-        id: String,
-    },
+    PttStart { id: String },
     /// End the push-to-talk recording and transcribe what was captured.
     /// Emits `VoiceState::Transcribing`, then `Transcription { text }`,
     /// then the text is dispatched internally as a `Query` whose
     /// streaming `Delta`s flow back on the same connection before `Done`.
-    PttStop {
-        id: String,
-    },
+    PttStop { id: String },
     /// Enable hands-free continuous listening. The daemon keeps the mic
     /// open and auto-dispatches each VAD-segmented utterance as a
     /// `Query`. Emits `ListenState { active: true }` + `Done`.
     /// Rejects with `Error` when a PTT recording is already in flight.
-    ListenStart {
-        id: String,
-    },
+    ListenStart { id: String },
     /// Disable continuous listening. Emits `ListenState { active: false }`
     /// + `Done`. Idempotent when already stopped.
-    ListenStop {
-        id: String,
-    },
+    ListenStop { id: String },
     /// Flip continuous listening on/off in a single call. Emits the
     /// post-toggle `ListenState` + `Done`.
-    ListenToggle {
-        id: String,
-    },
+    ListenToggle { id: String },
     /// Report whether continuous listening is currently active. Emits
     /// `ListenState` + `Done` with no state change.
-    GetListenState {
-        id: String,
-    },
+    GetListenState { id: String },
     /// Flip TTS on/off at runtime. Off cancels in-flight playback and
     /// drains any subsequent sentences for the active query without
     /// speaking them; on resumes for the next sentence delivered. Emits
     /// the post-toggle `VoiceOutputState` + `Done`.
-    VoiceToggle {
-        id: String,
-    },
+    VoiceToggle { id: String },
     /// Abort the current TTS response: drop the rest of the audio queue
     /// and any pending sentences for the active query. Does not change
     /// the enabled flag. Emits `VoiceOutputState` + `Done`.
-    VoiceSkip {
-        id: String,
-    },
+    VoiceSkip { id: String },
     /// Report whether TTS is currently enabled. Emits `VoiceOutputState`
     /// + `Done` with no state change.
-    GetVoiceState {
-        id: String,
-    },
+    GetVoiceState { id: String },
 }
 
 impl Request {
+    /// Build a text-only [`Request::Query`] tagged with the current
+    /// [`PROTOCOL_VERSION`]. Use this in clients to keep call sites
+    /// short; legacy struct-literal construction still works for
+    /// callers that need to set `attachments` explicitly.
+    pub fn query(id: impl Into<String>, text: impl Into<String>) -> Self {
+        Request::Query {
+            id: id.into(),
+            text: text.into(),
+            attachments: Vec::new(),
+            version: Some(PROTOCOL_VERSION),
+        }
+    }
+
+    /// Build a [`Request::Query`] with one or more image attachments,
+    /// tagged with the current [`PROTOCOL_VERSION`].
+    pub fn query_with_attachments(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        attachments: Vec<ImageAttachment>,
+    ) -> Self {
+        Request::Query {
+            id: id.into(),
+            text: text.into(),
+            attachments,
+            version: Some(PROTOCOL_VERSION),
+        }
+    }
+
     /// Returns the request id every variant carries.
     pub fn id(&self) -> &str {
         match self {
@@ -259,14 +317,73 @@ mod tests {
 
     #[test]
     fn request_roundtrip() {
+        // Legacy struct-literal form: empty attachments + no version are
+        // both skipped on serialize so the wire shape is unchanged from
+        // pre-multimodality clients.
         let req = Request::Query {
             id: "req-1".into(),
             text: "ping".into(),
+            attachments: Vec::new(),
+            version: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(json, r#"{"type":"query","id":"req-1","text":"ping"}"#);
         let parsed: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn request_query_with_version_and_attachments_roundtrip() {
+        let req = Request::query_with_attachments(
+            "req-2",
+            "describe this",
+            vec![ImageAttachment::from_bytes(
+                "image/png",
+                &[0xDE, 0xAD, 0xBE, 0xEF],
+            )],
+        );
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""version":1"#));
+        assert!(json.contains(r#""data_base64":"3q2+7w==""#));
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn request_query_helper_emits_current_version() {
+        let req = Request::query("req-3", "hi");
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(&format!(r#""version":{PROTOCOL_VERSION}"#)));
+    }
+
+    #[test]
+    fn legacy_query_payload_deserializes_with_default_attachments() {
+        // A pre-multimodality client emits the original two-field shape.
+        // Older daemons keep accepting it: attachments defaults to empty,
+        // version defaults to None.
+        let json = r#"{"type":"query","id":"req-4","text":"hello"}"#;
+        let parsed: Request = serde_json::from_str(json).unwrap();
+        match parsed {
+            Request::Query {
+                id,
+                text,
+                attachments,
+                version,
+            } => {
+                assert_eq!(id, "req-4");
+                assert_eq!(text, "hello");
+                assert!(attachments.is_empty());
+                assert_eq!(version, None);
+            }
+            _ => panic!("expected Query"),
+        }
+    }
+
+    #[test]
+    fn image_attachment_round_trips_through_base64() {
+        let payload = b"\x89PNG\r\n\x1a\n";
+        let att = ImageAttachment::from_bytes("image/png", payload);
+        assert_eq!(att.decode_bytes().unwrap(), payload);
     }
 
     #[test]

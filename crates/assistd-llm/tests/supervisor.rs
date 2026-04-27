@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+
 //! Integration tests for the llama-server supervisor.
 //!
 //! These tests are gated behind the `test-support` feature because they need

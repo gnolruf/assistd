@@ -127,11 +127,17 @@ impl Tool for RunTool {
         })
     }
 
+    #[tracing::instrument(skip(self, args), fields(cmd = tracing::field::Empty))]
     async fn invoke(&self, args: Value) -> Result<Value> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("`command` (string) is required"))?;
+        // Surface the command name as a span field for filtering. The
+        // full command line can be long; the first whitespace-bounded
+        // token is the most useful identifier in trace output.
+        let cmd_token = command.split_whitespace().next().unwrap_or("");
+        tracing::Span::current().record("cmd", cmd_token);
 
         let start = Instant::now();
         let chain = match parse_chain(command) {

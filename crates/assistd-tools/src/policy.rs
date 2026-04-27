@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+
 //! Command-execution policy: confirmation gates, pattern matchers, and
 //! sandbox probing.
 //!

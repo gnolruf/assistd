@@ -142,7 +142,7 @@ impl OneShotSynth {
         if !status.success() {
             let tail_joined = stderr_tail
                 .lock()
-                .expect("stderr tail mutex poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>()
@@ -201,7 +201,7 @@ async fn drain_stderr(stderr: ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         tracing::debug!(target: "assistd::voice::piper", "{line}");
-        let mut guard = tail.lock().expect("stderr tail mutex poisoned");
+        let mut guard = tail.lock().unwrap_or_else(|e| e.into_inner());
         if guard.len() == 20 {
             guard.pop_front();
         }

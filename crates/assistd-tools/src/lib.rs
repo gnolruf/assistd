@@ -1,3 +1,13 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::print_stdout,
+        clippy::print_stderr
+    )
+)]
+
 //! Tool-use subsystem: the trait every invokable tool implements, plus
 //! the registry the LLM looks up tool calls in.
 //!
@@ -15,6 +25,7 @@ pub mod commands;
 pub mod policy;
 pub mod presentation;
 pub mod run;
+pub mod vision;
 
 pub use attachment::{LoadImageError, load_image_attachment};
 pub use chain::{Chain, ParseError, execute, parse_chain};
@@ -25,6 +36,7 @@ pub use policy::{
 };
 pub use presentation::{PresentResult, present};
 pub use run::RunTool;
+pub use vision::VisionGate;
 
 use anyhow::Result;
 use async_trait::async_trait;

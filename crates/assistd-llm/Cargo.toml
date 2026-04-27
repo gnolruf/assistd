@@ -14,7 +14,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "process", "net"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
@@ -35,3 +35,6 @@ tempfile = "3"
 name = "fake_llama_server"
 path = "src/bin/fake_llama_server.rs"
 required-features = ["test-support"]
+
+[lints]
+workspace = true

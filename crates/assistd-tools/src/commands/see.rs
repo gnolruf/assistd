@@ -6,6 +6,7 @@
 //! next turn.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -13,17 +14,18 @@ use async_trait::async_trait;
 use crate::attachment::{LoadImageError, load_image_attachment};
 use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line, io_error_nav};
 use crate::commands::cat::human_size;
+use crate::vision::VisionGate;
 
 pub struct SeeCommand {
-    /// Set at startup from a `/props` probe of the running llama-server.
-    /// When `false`, `run()` short-circuits to the vision-not-available
-    /// error without touching the filesystem.
-    vision_enabled: bool,
+    /// Shared, runtime-mutable vision flag. Read on every `run()` so a
+    /// model swap on the running llama-server (revalidated by the
+    /// daemon) flips the gate without rebuilding the registry.
+    gate: Arc<VisionGate>,
 }
 
 impl SeeCommand {
-    pub fn new(vision_enabled: bool) -> Self {
-        Self { vision_enabled }
+    pub fn new(gate: Arc<VisionGate>) -> Self {
+        Self { gate }
     }
 }
 
@@ -34,7 +36,7 @@ impl Default for SeeCommand {
     /// per-command tests construct an instance without rethreading the
     /// flag through every call site.
     fn default() -> Self {
-        Self::new(true)
+        Self::new(VisionGate::new(true))
     }
 }
 
@@ -45,7 +47,7 @@ impl Command for SeeCommand {
     }
 
     fn summary(&self) -> &'static str {
-        if self.vision_enabled {
+        if self.gate.supported() {
             "attach an image file as a vision input for the next LLM turn"
         } else {
             "(unavailable: model has no vision encoder)"
@@ -65,7 +67,7 @@ impl Command for SeeCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        if !self.vision_enabled {
+        if !self.gate.supported() {
             return Ok(CommandOutput::failed(
                 1,
                 error_line(
@@ -114,6 +116,16 @@ impl Command for SeeCommand {
             Err(LoadImageError::Io { source, .. }) => Ok(CommandOutput::failed(
                 1,
                 io_error_nav("see", path, &source).into_bytes(),
+            )),
+            Err(e @ LoadImageError::TooLarge { .. }) => Ok(CommandOutput::failed(
+                1,
+                error_line(
+                    "see",
+                    e.user_message(),
+                    "Use",
+                    "a smaller image (resize or crop)",
+                )
+                .into_bytes(),
             )),
             Err(LoadImageError::Unrecognized { .. }) => Ok(CommandOutput::failed(
                 1,
@@ -264,7 +276,7 @@ mod tests {
     /// usage).
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
-        let out = SeeCommand::new(false)
+        let out = SeeCommand::new(VisionGate::new(false))
             .run(CommandInput {
                 args: vec!["/tmp/some-image.png".into()],
                 stdin: Vec::new(),
@@ -287,7 +299,29 @@ mod tests {
 
     #[test]
     fn summary_changes_when_vision_disabled() {
-        assert!(SeeCommand::new(true).summary().contains("attach an image"));
-        assert!(SeeCommand::new(false).summary().contains("unavailable"));
+        assert!(
+            SeeCommand::new(VisionGate::new(true))
+                .summary()
+                .contains("attach an image")
+        );
+        assert!(
+            SeeCommand::new(VisionGate::new(false))
+                .summary()
+                .contains("unavailable")
+        );
+    }
+
+    #[test]
+    fn gate_flip_changes_summary_dynamically() {
+        // The whole point of VisionGate: a single Arc shared with the
+        // daemon's revalidation path can flip a long-lived command from
+        // "available" to "unavailable" mid-process without rebuilding.
+        let gate = VisionGate::new(true);
+        let cmd = SeeCommand::new(gate.clone());
+        assert!(cmd.summary().contains("attach an image"));
+        gate.set(false);
+        assert!(cmd.summary().contains("unavailable"));
+        gate.set(true);
+        assert!(cmd.summary().contains("attach an image"));
     }
 }

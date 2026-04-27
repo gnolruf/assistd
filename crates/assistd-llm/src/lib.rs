@@ -1,3 +1,13 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::print_stdout,
+        clippy::print_stderr
+    )
+)]
+
 //! LLM backend trait and stub implementations.
 //!
 //! Concrete backends (`llama.cpp`, `ollama`, etc.) live in their own
@@ -10,7 +20,8 @@ pub mod llama_server;
 
 pub use chat::{ChatClientError, LlamaChatClient};
 pub use llama_server::{
-    LlamaServerControl, LlamaServerError, LlamaService, ReadyState, detect_vision_support,
+    LlamaServerControl, LlamaServerError, LlamaService, ReadyState, VisionState,
+    detect_vision_support, probe_capabilities,
 };
 
 use anyhow::Result;

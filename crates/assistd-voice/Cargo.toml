@@ -37,7 +37,7 @@ test-support = ["whisper", "mic", "listen", "tts", "dep:hound"]
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "process"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 assistd-ipc = { workspace = true }
@@ -69,7 +69,10 @@ which = { workspace = true, optional = true }
 hound = { version = "3.5", optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 hound = "3.5"
+
+[lints]
+workspace = true

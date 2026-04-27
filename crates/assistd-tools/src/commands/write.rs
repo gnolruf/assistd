@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -243,7 +245,7 @@ fn expand_tilde(raw: &str) -> Result<PathBuf, PathResolveError> {
 /// not touch disk. On absolute paths, a leading `/..` is silently discarded
 /// (same as the kernel's behaviour).
 pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
-    let mut out: Vec<Component> = Vec::new();
+    let mut out: Vec<Component<'_>> = Vec::new();
     for comp in path.components() {
         match comp {
             Component::CurDir => {}

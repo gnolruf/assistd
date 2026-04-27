@@ -1,3 +1,4 @@
+#![allow(elided_lifetimes_in_paths)] // ratatui Frame<'_> is mostly noise; project style is to elide it
 //! Pure ratatui render for the chat TUI. No state mutation beyond the
 //! output pane's wrap cache and the app's last-viewport-height sink, both
 //! of which must be updated during layout.

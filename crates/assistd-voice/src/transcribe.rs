@@ -131,10 +131,7 @@ pub struct QueueConfig {
 /// crate free of a concrete builder type.
 pub type CpuFallbackFactory = Arc<
     dyn Fn() -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = Result<Arc<dyn Transcriber>, TranscriptionError>>
-                    + Send,
-            >,
+            Box<dyn Future<Output = Result<Arc<dyn Transcriber>, TranscriptionError>> + Send>,
         > + Send
         + Sync,
 >;
