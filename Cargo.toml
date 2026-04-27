@@ -79,7 +79,12 @@ unsafe_code = "deny"
 # Lint groups must have priority -1 so individual lint overrides
 # (none below today, but future per-lint overrides) win over them.
 rust_2018_idioms = { level = "warn", priority = -1 }
-unused_qualifications = "warn"
+# `unused_qualifications` is intentionally NOT in the baseline. With
+# `-D warnings` in CI, it would error on perfectly readable test code
+# that uses `anyhow::Result<()>` / `std::time::Duration` for clarity
+# at the call site (where the import alone wouldn't disambiguate). If
+# we ever want this back, scope it as a per-crate opt-in rather than
+# a workspace blanket.
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
