@@ -191,9 +191,26 @@ pub enum Request {
         #[serde(default)]
         prefix: String,
     },
+    /// Enumerate full `(id, key, value)` rows whose key starts with
+    /// `prefix`. Streams one [`Event::MemoryRow`] per match in
+    /// lexicographic key order, then a terminal `Done`. `limit = 0`
+    /// means "no cap" (matches the `MemorySearch` convention).
+    MemoryListAll {
+        id: String,
+        #[serde(default)]
+        prefix: String,
+        #[serde(default)]
+        limit: u32,
+    },
     /// Remove `key` from the memory store. No-op when absent. Emits
     /// `Done` on success.
     MemoryDelete { id: String, key: String },
+    /// Remove the memory whose row id is `memory_id`. Emits a single
+    /// [`Event::MemoryForgetResult`] (with `deleted: false` when the
+    /// id didn't match any row), then a terminal `Done`. Distinct from
+    /// `MemoryDelete` so the CLI can take an integer id and the daemon
+    /// can echo back the deleted key.
+    MemoryForget { id: String, memory_id: i64 },
     /// Semantic search over persisted conversation chunks. Embeds the
     /// query and ranks past messages by cosine similarity. Emits zero
     /// or more `SemanticHit` events ordered best-first, then `Done`.
@@ -256,7 +273,9 @@ impl Request {
             | Request::MemorySave { id, .. }
             | Request::MemoryLoad { id, .. }
             | Request::MemoryList { id, .. }
+            | Request::MemoryListAll { id, .. }
             | Request::MemoryDelete { id, .. }
+            | Request::MemoryForget { id, .. }
             | Request::MemorySemanticSearch { id, .. } => id,
         }
     }
@@ -282,7 +301,9 @@ impl Request {
             Request::MemorySave { .. } => "memory_save",
             Request::MemoryLoad { .. } => "memory_load",
             Request::MemoryList { .. } => "memory_list",
+            Request::MemoryListAll { .. } => "memory_list_all",
             Request::MemoryDelete { .. } => "memory_delete",
+            Request::MemoryForget { .. } => "memory_forget",
             Request::MemorySemanticSearch { .. } => "memory_semantic_search",
         }
     }
@@ -371,6 +392,27 @@ pub enum Event {
     /// order. Always emitted exactly once before the terminal `Done`,
     /// even when empty.
     MemoryKeys { id: String, keys: Vec<String> },
+    /// One `(id, key, value)` row emitted by `MemoryListAll`. The
+    /// daemon streams these in lexicographic key order, then a
+    /// terminal `Done`. `memory_id` is the SQLite row id — the CLI
+    /// uses it as the argument to `assistd memory forget <id>`.
+    MemoryRow {
+        id: String,
+        memory_id: i64,
+        key: String,
+        value: String,
+    },
+    /// Result of a `MemoryForget`. Always emitted exactly once before
+    /// the terminal `Done`. `deleted = false` (with `key = None`)
+    /// signals that no row with the given id existed — the CLI maps
+    /// this to a "no memory with id=N" stderr message and exit 2.
+    /// `key = Some(k)` carries the deleted row's key so the CLI can
+    /// echo `forgot id=N key=k`.
+    MemoryForgetResult {
+        id: String,
+        deleted: bool,
+        key: Option<String>,
+    },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -398,6 +440,8 @@ impl Event {
             | Event::SemanticHit { id, .. }
             | Event::MemoryValue { id, .. }
             | Event::MemoryKeys { id, .. }
+            | Event::MemoryRow { id, .. }
+            | Event::MemoryForgetResult { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }
@@ -569,12 +613,48 @@ mod tests {
                 id: "r4".into(),
                 key: "k".into(),
             },
+            Request::MemoryListAll {
+                id: "r5".into(),
+                prefix: "fact:".into(),
+                limit: 0,
+            },
+            Request::MemoryForget {
+                id: "r6".into(),
+                memory_id: 42,
+            },
         ];
         for r in cases {
             let parsed: Request =
                 serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
             assert_eq!(parsed, r);
         }
+    }
+
+    #[test]
+    fn memory_list_all_request_omits_optional_fields() {
+        // Both `prefix` and `limit` use `#[serde(default)]`, so a
+        // pre-feature client that only sends `id` should still parse
+        // (additive evolution).
+        let json = r#"{"type":"memory_list_all","id":"r"}"#;
+        let parsed: Request = serde_json::from_str(json).unwrap();
+        match parsed {
+            Request::MemoryListAll { id, prefix, limit } => {
+                assert_eq!(id, "r");
+                assert_eq!(prefix, "");
+                assert_eq!(limit, 0);
+            }
+            _ => panic!("expected MemoryListAll"),
+        }
+    }
+
+    #[test]
+    fn memory_forget_request_carries_id() {
+        let req = Request::MemoryForget {
+            id: "r".into(),
+            memory_id: 7,
+        };
+        assert_eq!(req.id(), "r");
+        assert_eq!(req.kind(), "memory_forget");
     }
 
     #[test]
@@ -612,11 +692,47 @@ mod tests {
                 id: "r".into(),
                 keys: vec!["a".into(), "b".into()],
             },
+            Event::MemoryRow {
+                id: "r".into(),
+                memory_id: 17,
+                key: "fact:user.name".into(),
+                value: "Ben".into(),
+            },
+            Event::MemoryForgetResult {
+                id: "r".into(),
+                deleted: true,
+                key: Some("fact:user.name".into()),
+            },
+            Event::MemoryForgetResult {
+                id: "r".into(),
+                deleted: false,
+                key: None,
+            },
         ];
         for e in cases {
             let parsed: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
             assert_eq!(parsed, e);
         }
+    }
+
+    #[test]
+    fn memory_row_and_forget_result_are_not_terminal() {
+        let row = Event::MemoryRow {
+            id: "r".into(),
+            memory_id: 1,
+            key: "k".into(),
+            value: "v".into(),
+        };
+        assert!(!row.is_terminal());
+        assert_eq!(row.id(), "r");
+
+        let forget = Event::MemoryForgetResult {
+            id: "f".into(),
+            deleted: true,
+            key: Some("k".into()),
+        };
+        assert!(!forget.is_terminal());
+        assert_eq!(forget.id(), "f");
     }
 
     #[test]

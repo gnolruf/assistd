@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::MemoryStore;
+use crate::{MemoryRecord, MemoryStore};
 
 use super::connection::SqliteHandle;
 use super::writer::{WriteCall, WriteOp};
@@ -83,6 +83,14 @@ impl MemoryStore for SqliteMemoryStore {
         .await
     }
 
+    async fn delete_by_id(&self, id: i64) -> Result<Option<String>> {
+        WriteCall::run(self.handle.writer(), |ack| WriteOp::DeleteMemoryById {
+            id,
+            ack,
+        })
+        .await
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         // SQLite `LIKE` with a literal terminator is the simple path —
         // we escape `%` and `_` in the prefix so a key like `pref:%`
@@ -105,6 +113,34 @@ impl MemoryStore for SqliteMemoryStore {
             })
             .await
             .context("memory list")
+    }
+
+    async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
+        let escaped = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("{escaped}%");
+        self.handle
+            .conn()
+            .call(move |c| {
+                let mut stmt = c.prepare(
+                    "SELECT id, key, value FROM memories \
+                     WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![pattern], |r| {
+                        Ok(MemoryRecord {
+                            id: r.get(0)?,
+                            key: r.get(1)?,
+                            value: r.get(2)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .context("memory list_full")
     }
 }
 
@@ -160,6 +196,49 @@ mod tests {
         store.save("other:c", "3".into()).await.unwrap();
         let keys = store.list("pref:").await.unwrap();
         assert_eq!(keys, vec!["pref:a", "pref:b"]);
+    }
+
+    #[tokio::test]
+    async fn list_full_returns_id_key_value_in_lex_order() {
+        let (store, _w) = fresh().await;
+        store.save("pref:b", "two".into()).await.unwrap();
+        store.save("pref:a", "one".into()).await.unwrap();
+        store.save("other:c", "three".into()).await.unwrap();
+        let rows = store.list_full("pref:").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].key, "pref:a");
+        assert_eq!(rows[0].value, "one");
+        assert_eq!(rows[1].key, "pref:b");
+        assert_eq!(rows[1].value, "two");
+        assert!(rows[0].id > 0 && rows[1].id > 0);
+        assert_ne!(rows[0].id, rows[1].id);
+    }
+
+    #[tokio::test]
+    async fn list_full_empty_prefix_returns_all_rows() {
+        let (store, _w) = fresh().await;
+        store.save("a", "1".into()).await.unwrap();
+        store.save("b", "2".into()).await.unwrap();
+        let rows = store.list_full("").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].key, "a");
+        assert_eq!(rows[1].key, "b");
+    }
+
+    #[tokio::test]
+    async fn delete_by_id_returns_some_key_on_hit() {
+        let (store, _w) = fresh().await;
+        let id = store.save("fact:user.name", "Ben".into()).await.unwrap();
+        let removed = store.delete_by_id(id).await.unwrap();
+        assert_eq!(removed.as_deref(), Some("fact:user.name"));
+        assert_eq!(store.load("fact:user.name").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn delete_by_id_returns_none_on_miss() {
+        let (store, _w) = fresh().await;
+        let removed = store.delete_by_id(99_999).await.unwrap();
+        assert!(removed.is_none());
     }
 
     #[tokio::test]

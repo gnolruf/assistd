@@ -14,6 +14,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use assistd_memory::{ConversationStore, MemoryStore, SearchHit, TurnSummary};
 
+pub use assistd_memory::MemoryRecord;
+
 /// Default cap on `search` / `list` result sizes when the IPC client
 /// asks for `limit = 0` (the wire default for the `MemorySearch`
 /// variant). Big enough to be useful for casual `assistd memory search`
@@ -55,6 +57,23 @@ impl MemoryOps {
 
     pub async fn delete(&self, key: &str) -> Result<()> {
         self.store.delete(key).await
+    }
+
+    /// Delete a memory by row id. Returns `Some(key)` of the deleted
+    /// row on hit, `None` when no row matched. Used by the IPC
+    /// `MemoryForget` handler so the CLI can echo the key back to the
+    /// user (`forgot id=N key=...`) and distinguish hit/miss without
+    /// a second probe.
+    pub async fn forget(&self, id: i64) -> Result<Option<String>> {
+        self.store.delete_by_id(id).await
+    }
+
+    /// Like [`MemoryOps::list`] but returns full `(id, key, value)`
+    /// rows in one round trip — used by the `assistd memory list` CLI.
+    /// Order is whatever the backend yields (lexicographic by key for
+    /// the SQLite impl).
+    pub async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
+        self.store.list_full(prefix).await
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {

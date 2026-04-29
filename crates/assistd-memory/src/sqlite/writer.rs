@@ -65,6 +65,15 @@ pub enum WriteOp {
         key: String,
         ack: oneshot::Sender<Result<()>>,
     },
+    /// Delete a memory by row id. Returns the key of the deleted row
+    /// on hit so the IPC `MemoryForget` handler can echo it back to
+    /// the CLI; returns `None` when no row with that id exists. The
+    /// `memory_embeddings.memory_id ... ON DELETE CASCADE` FK cleans
+    /// the embedding row in the same statement.
+    DeleteMemoryById {
+        id: i64,
+        ack: oneshot::Sender<Result<Option<String>>>,
+    },
     /// Persist one chunk of a conversation message. Returns the chunk
     /// rowid via the ack so the caller can dispatch an embed job.
     StoreChunk {
@@ -196,6 +205,10 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
         }
         WriteOp::DeleteMemory { key, ack } => {
             let res = delete_memory(conn, key).await;
+            let _ = ack.send(res);
+        }
+        WriteOp::DeleteMemoryById { id, ack } => {
+            let res = delete_memory_by_id(conn, id).await;
             let _ = ack.send(res);
         }
         WriteOp::StoreChunk {
@@ -381,6 +394,33 @@ async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
     })
     .await
     .context("delete_memory")
+}
+
+async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String>> {
+    // `RETURNING key` (SQLite >= 3.35) gives us the deleted row's key
+    // in the same round trip; `QueryReturnedNoRows` means the id
+    // didn't exist. The `memory_embeddings.memory_id` FK has
+    // `ON DELETE CASCADE`, so the embedding row drops with the memory
+    // — no second statement needed.
+    conn.call(move |c| {
+        let result = c
+            .query_row(
+                "DELETE FROM memories WHERE id = ?1 RETURNING key",
+                rusqlite::params![id],
+                |r| r.get::<_, String>(0),
+            )
+            .map(Some)
+            .or_else(|e| {
+                if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            })?;
+        Ok(result)
+    })
+    .await
+    .context("delete_memory_by_id")
 }
 
 async fn store_chunk(

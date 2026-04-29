@@ -145,7 +145,9 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             Event::MemoryHit { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
-            | Event::MemoryKeys { .. } => {}
+            | Event::MemoryKeys { .. }
+            | Event::MemoryRow { .. }
+            | Event::MemoryForgetResult { .. } => {}
             Event::Done { .. } => {
                 if wrote_anything {
                     writeln!(stdout)?;
