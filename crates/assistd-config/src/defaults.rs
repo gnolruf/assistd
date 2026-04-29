@@ -28,8 +28,14 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local deskto
      over guessing when a question is about this machine or its files. Pipes \
      (|), and/or (&&, ||), and sequencing (;) are supported inside a single \
      `run` call, so a one-liner like `cat log.txt | grep ERROR | wc -l` is \
-     usually better than three separate tool calls. Answer precisely and in \
-     a conversational tone.";
+     usually better than three separate tool calls. You also have `remember` \
+     and `recall` tools for cross-conversation memory: call `remember` when \
+     the user states a durable preference or fact about themselves (e.g. \
+     editor preference, timezone, name) and call `recall` (with `prefix=\"\"` \
+     to list all, or a key prefix like `\"user.\"` to filter) at the start of \
+     a turn when prior preferences might help personalize the response. \
+     Memories dedup by key — re-saving the same key updates its value. \
+     Answer precisely and in a conversational tone.";
 
 pub const DEFAULT_VOICE_HOTKEY: &str = "Super+Space";
 /// Upper bound on push-to-talk recording length, in seconds. A held

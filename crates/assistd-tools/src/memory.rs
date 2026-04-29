@@ -62,6 +62,28 @@ impl MemoryOps {
         self.conversations.search(query, limit).await
     }
 
+    /// List `(key, value)` pairs for keys matching `prefix`, capped at
+    /// `limit`. Returned in the order [`MemoryStore::list`] yields keys
+    /// (lexicographic for the SQLite impl). Used by the LLM-facing
+    /// `recall` tool to fetch a batch of memories in one call.
+    ///
+    /// Implementation is N+1 (`list` + a `load` per key). That's fine
+    /// here: reads bypass the writer queue (`conn.call` direct), N is
+    /// small (the default cap is ~50), and a future hot path can lift
+    /// this into a single SQL by widening the [`MemoryStore`] trait.
+    /// Keys whose `load` returns `None` (raced delete) are silently
+    /// skipped so a transient inconsistency never surfaces as an error.
+    pub async fn list_pairs(&self, prefix: &str, limit: usize) -> Result<Vec<(String, String)>> {
+        let keys = self.store.list(prefix).await?;
+        let mut pairs = Vec::with_capacity(keys.len().min(limit));
+        for key in keys.into_iter().take(limit) {
+            if let Some(value) = self.store.load(&key).await? {
+                pairs.push((key, value));
+            }
+        }
+        Ok(pairs)
+    }
+
     pub async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>> {
         let limit = if limit == 0 {
             DEFAULT_SEARCH_LIMIT

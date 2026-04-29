@@ -80,7 +80,7 @@ pub use state::AppState;
 
 use anyhow::{Context, Result};
 use assistd_tools::{
-    ConfirmationGate, RunTool, SandboxRequest,
+    ConfirmationGate, MemoryOps, RecallTool, RememberTool, RunTool, SandboxRequest,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WcCommand,
@@ -116,11 +116,18 @@ use tracing::warn;
 /// re-evaluated on every command invocation, so a daemon-side
 /// revalidation that flips it after a model swap takes effect without
 /// rebuilding the registry.
+///
+/// `memory_ops` is the combined CRUD façade backing the LLM-callable
+/// `remember` and `recall` tools. The daemon passes a SQLite-backed
+/// handle; the chat TUI (no persistence today) passes one built over
+/// [`assistd_memory::NoMemoryStore`] so the same tools register but
+/// silently no-op there.
 pub fn build_tools(
     config: &Config,
     overflow_dir: PathBuf,
     gate: Arc<dyn ConfirmationGate>,
     vision_gate: Arc<assistd_tools::VisionGate>,
+    memory_ops: Arc<MemoryOps>,
 ) -> Result<Arc<ToolRegistry>> {
     if overflow_dir.exists() {
         std::fs::remove_dir_all(&overflow_dir).with_context(|| {
@@ -216,6 +223,11 @@ pub fn build_tools(
         &config.tools.output,
         overflow_dir,
     ));
+    // LLM-callable cross-conversation memory. Both share one
+    // `MemoryOps` (cheap clone — two `Arc`s) so the model sees a
+    // consistent view between save and load.
+    tools.register(RememberTool::new(memory_ops.clone()));
+    tools.register(RecallTool::new(memory_ops));
     Ok(Arc::new(tools))
 }
 

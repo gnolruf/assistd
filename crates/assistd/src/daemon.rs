@@ -8,7 +8,7 @@ use assistd_memory::{
     ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, SqliteConversationStore,
     SqliteHandle, SqliteMemoryStore,
 };
-use assistd_tools::DenyAllGate;
+use assistd_tools::{DenyAllGate, MemoryOps};
 use assistd_voice::{
     MicContinuousListener, MicVoiceInput, QueueConfig, QueuedTranscriber, Transcriber,
     WhisperTranscriberBuilder, build_cpu_fallback,
@@ -263,32 +263,17 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
 
-    // IPC-connected clients (including `assistd query`) have no interactive
-    // channel, so destructive bash commands are denied by default. To
-    // approve such commands, run them from the chat TUI where the modal
-    // overlay can prompt the user.
-    let tools = assistd_core::build_tools(
-        &config,
-        overflow_dir.clone(),
-        Arc::new(DenyAllGate),
-        vision_gate.clone(),
-    )?;
-    info!(
-        "tools: registered {} (overflow dir {})",
-        tools.len(),
-        overflow_dir.display()
-    );
-
-    // Snapshot the continuous listen config before `config` is moved
-    // into `AppState`. Controls start_on_launch and pause semantics.
-    let continuous_enabled = config.voice.enabled && config.voice.continuous.enabled;
-    let continuous_start_on_launch = config.voice.continuous.start_on_launch;
-
     // Persistent memory: open the SQLite store if enabled. The
     // `try-warn-fallback` shape mirrors voice input/output above —
     // any failure (bad path, FS readonly, etc.) downgrades to the
     // `NoMemoryStore` placeholder so the daemon still starts and the
     // user gets a startup warning instead of a hard error.
+    //
+    // Opened BEFORE `build_tools` because the LLM-callable `remember`
+    // and `recall` tools need an `Arc<MemoryOps>` to register against;
+    // the placeholder fallback keeps the registration unconditional so
+    // a startup error doesn't change the tool surface visible to the
+    // model.
     let (memory_store, conversation_store, memory_writer_handle, session_id_for_state) = if config
         .memory
         .enabled
@@ -348,6 +333,35 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     // reaching back through `Arc<AppState>`.
     let conv_store_for_shutdown = conversation_store.clone();
     let session_for_shutdown = session_id_for_state.clone();
+    // Combined façade handed to `build_tools` so the LLM-callable
+    // `remember` / `recall` tools can read & write through the same
+    // single SQLite writer used by chat-turn persistence.
+    let memory_ops = Arc::new(MemoryOps::new(
+        memory_store.clone(),
+        conversation_store.clone(),
+    ));
+
+    // IPC-connected clients (including `assistd query`) have no interactive
+    // channel, so destructive bash commands are denied by default. To
+    // approve such commands, run them from the chat TUI where the modal
+    // overlay can prompt the user.
+    let tools = assistd_core::build_tools(
+        &config,
+        overflow_dir.clone(),
+        Arc::new(DenyAllGate),
+        vision_gate.clone(),
+        memory_ops,
+    )?;
+    info!(
+        "tools: registered {} (overflow dir {})",
+        tools.len(),
+        overflow_dir.display()
+    );
+
+    // Snapshot the continuous listen config before `config` is moved
+    // into `AppState`. Controls start_on_launch and pause semantics.
+    let continuous_enabled = config.voice.enabled && config.voice.continuous.enabled;
+    let continuous_start_on_launch = config.voice.continuous.start_on_launch;
 
     let state = Arc::new(
         AppState::new(

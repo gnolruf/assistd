@@ -23,6 +23,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use assistd_core::{Config, PresenceManager, SleepConfig, ToolRegistry};
 use assistd_llm::{FailedBackend, LlamaChatClient, LlmBackend};
+use assistd_memory::{NoConversationStore, NoMemoryStore};
+use assistd_tools::MemoryOps;
 
 use crate::idle_monitor;
 use clap::Args;
@@ -131,11 +133,21 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let vision_enabled = initial_vision_state.vision_supported;
     let vision_gate = assistd_tools::VisionGate::new(vision_enabled);
 
+    // The TUI doesn't open a SQLite store today, so the LLM-callable
+    // `remember` / `recall` tools register against `NoMemoryStore`
+    // placeholders — they appear in the model's tool schema but every
+    // call silently no-ops (saves succeed, recalls report `(no memories)`).
+    // Persistent memory in the TUI is a future enhancement.
+    let memory_ops = Arc::new(MemoryOps::new(
+        Arc::new(NoMemoryStore),
+        Arc::new(NoConversationStore),
+    ));
     let tools = assistd_core::build_tools(
         &config,
         tui_overflow_dir.clone(),
         Arc::new(TuiGate::new(confirm_tx)),
         vision_gate.clone(),
+        memory_ops,
     )?;
     info!(
         "tools: registered {} (overflow dir {})",
