@@ -16,6 +16,8 @@ mod listen;
 #[cfg(feature = "daemon")]
 mod listen_dispatcher;
 #[cfg(feature = "client")]
+mod memory_cli;
+#[cfg(feature = "client")]
 mod presence;
 #[cfg(feature = "client")]
 mod ptt;
@@ -111,6 +113,11 @@ enum Commands {
     /// Open an interactive chat TUI
     #[cfg(feature = "chat")]
     Chat(chat::ChatArgs),
+
+    /// Inspect or mutate persistent memory: search conversation
+    /// history, save / load / list / delete key-value memories.
+    #[cfg(feature = "client")]
+    Memory(memory_cli::MemoryArgs),
 }
 
 #[tokio::main]
@@ -151,5 +158,7 @@ async fn main() -> Result<()> {
         Commands::VoiceState => voice_ctl::run(voice_ctl::VoiceCtlAction::State).await,
         #[cfg(feature = "chat")]
         Commands::Chat(args) => chat::run(args).await,
+        #[cfg(feature = "client")]
+        Commands::Memory(args) => memory_cli::run(args).await,
     }
 }

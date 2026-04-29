@@ -2,8 +2,11 @@ use crate::{Config, PresenceManager, run_agent_turn};
 use anyhow::Result;
 use assistd_ipc::{Event, PresenceState, Request, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
-use assistd_memory::{MemoryStore, NoMemoryStore};
-use assistd_tools::{Attachment, ToolRegistry};
+use assistd_memory::{
+    ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, PersistedMessage,
+    SessionId, TurnId,
+};
+use assistd_tools::{Attachment, MemoryOps, ToolRegistry};
 use assistd_voice::{
     ContinuousListener, SentenceBuffer, SpeakDecision, VoiceInput, VoiceOutputController,
 };
@@ -60,6 +63,19 @@ pub struct AppState {
     /// implementation. Held as `Arc<dyn MemoryStore>` so the trait
     /// boundary stays the same regardless of backend.
     pub memory: Arc<dyn MemoryStore>,
+    /// Persistent conversation history (sessions, turns, messages, FTS).
+    /// Sibling to [`Self::memory`]; both bind to a `NoConversationStore`
+    /// placeholder when memory is disabled in config.
+    pub conversations: Arc<dyn ConversationStore>,
+    /// Combined CRUD façade exposing both the KV [`Self::memory`] and
+    /// the richer [`Self::conversations`] under one handle. Used by the
+    /// IPC dispatch arms for `Request::Memory*`.
+    pub memory_ops: Arc<MemoryOps>,
+    /// Identifier for this daemon process's session, set at startup by
+    /// [`assistd_memory::ConversationStore::begin_session`]. Every row
+    /// the persistence hook writes gets tagged with it so a future
+    /// `assistd memory search` knows which daemon run produced it.
+    pub session_id: Arc<SessionId>,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `run_agent_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
@@ -78,6 +94,9 @@ impl AppState {
         listener: Arc<dyn ContinuousListener>,
         voice_output: Arc<VoiceOutputController>,
     ) -> Self {
+        let memory: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
+        let conversations: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
+        let memory_ops = Arc::new(MemoryOps::new(memory.clone(), conversations.clone()));
         Self {
             config,
             llm,
@@ -87,7 +106,10 @@ impl AppState {
             listener,
             voice_output,
             vision_revalidator: None,
-            memory: Arc::new(NoMemoryStore),
+            memory,
+            conversations,
+            memory_ops,
+            session_id: Arc::new(SessionId::new()),
             agent_turn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -105,7 +127,30 @@ impl AppState {
     /// the default `NoMemoryStore`. Milestone 4's SQLite store will
     /// be threaded through this method.
     pub fn with_memory(mut self, m: Arc<dyn MemoryStore>) -> Self {
-        self.memory = m;
+        self.memory = m.clone();
+        // Keep memory_ops in sync so downstream dispatch arms see the
+        // SQLite-backed store too. `MemoryOps` is just two `Arc`s — a
+        // cheap rebuild beats forcing every caller to remember to set
+        // both fields.
+        self.memory_ops = Arc::new(MemoryOps::new(m, self.conversations.clone()));
+        self
+    }
+
+    /// Builder-style setter for the conversation store. Mirrors
+    /// [`Self::with_memory`] — required when wiring the SQLite backend
+    /// at daemon startup.
+    pub fn with_conversations(mut self, c: Arc<dyn ConversationStore>) -> Self {
+        self.conversations = c.clone();
+        self.memory_ops = Arc::new(MemoryOps::new(self.memory.clone(), c));
+        self
+    }
+
+    /// Override the daemon's session id. Set at startup once
+    /// [`assistd_memory::ConversationStore::begin_session`] has
+    /// returned the persisted uuid; tests skip this and inherit the
+    /// auto-generated default.
+    pub fn with_session(mut self, s: Arc<SessionId>) -> Self {
+        self.session_id = s;
         self
     }
 
@@ -149,6 +194,175 @@ impl AppState {
             Request::VoiceToggle { id } => self.handle_voice_toggle(id, tx).await,
             Request::VoiceSkip { id } => self.handle_voice_skip(id, tx).await,
             Request::GetVoiceState { id } => self.handle_get_voice_state(id, tx).await,
+            Request::MemorySearch { id, query, limit } => {
+                self.handle_memory_search(id, query, limit, tx).await
+            }
+            Request::MemorySave { id, key, value } => {
+                self.handle_memory_save(id, key, value, tx).await
+            }
+            Request::MemoryLoad { id, key } => self.handle_memory_load(id, key, tx).await,
+            Request::MemoryList { id, prefix } => self.handle_memory_list(id, prefix, tx).await,
+            Request::MemoryDelete { id, key } => self.handle_memory_delete(id, key, tx).await,
+        }
+    }
+
+    /// Fire-and-forget persist of one message. Spawns a task that
+    /// awaits the writer's oneshot ack and logs failures — the caller
+    /// (the chat-turn dispatch loop) returns immediately so DB latency
+    /// never throttles token streaming.
+    fn persist_message_fire_and_forget(&self, turn: Option<TurnId>, msg: PersistedMessage) {
+        let conv = self.conversations.clone();
+        let session = self.session_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = conv.append_message(&session, turn, msg).await {
+                tracing::warn!(
+                    target: "assistd::memory",
+                    error = %e,
+                    "failed to persist message (continuing)"
+                );
+            }
+        });
+    }
+
+    async fn handle_memory_search(
+        self: Arc<Self>,
+        id: String,
+        query: String,
+        limit: u32,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        match self.memory_ops.search(&query, limit as usize).await {
+            Ok(hits) => {
+                for h in hits {
+                    let _ = tx
+                        .send(Event::MemoryHit {
+                            id: id.clone(),
+                            conversation_id: h.conversation_id,
+                            session_id: h.session_id,
+                            timestamp: h.timestamp,
+                            role: h.role.as_wire().into(),
+                            snippet: h.snippet,
+                        })
+                        .await;
+                }
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("memory search failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn handle_memory_save(
+        self: Arc<Self>,
+        id: String,
+        key: String,
+        value: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        match self.memory_ops.save(&key, value).await {
+            Ok(()) => {
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("memory save failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn handle_memory_load(
+        self: Arc<Self>,
+        id: String,
+        key: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        match self.memory_ops.load(&key).await {
+            Ok(value) => {
+                let _ = tx
+                    .send(Event::MemoryValue {
+                        id: id.clone(),
+                        key,
+                        value,
+                    })
+                    .await;
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("memory load failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn handle_memory_list(
+        self: Arc<Self>,
+        id: String,
+        prefix: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        match self.memory_ops.list(&prefix).await {
+            Ok(keys) => {
+                let _ = tx
+                    .send(Event::MemoryKeys {
+                        id: id.clone(),
+                        keys,
+                    })
+                    .await;
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("memory list failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn handle_memory_delete(
+        self: Arc<Self>,
+        id: String,
+        key: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        match self.memory_ops.delete(&key).await {
+            Ok(()) => {
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("memory delete failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
         }
     }
 
@@ -213,6 +427,33 @@ impl AppState {
         // conversation state atomically — otherwise a second query
         // could push its own user message between this turn's steps.
         let _agent_guard = self.agent_turn_lock.clone().lock_owned().await;
+
+        // Persistence: open a turn now that we hold the agent guard.
+        // begin_turn lands a row in `turns`; a `None` return means the
+        // backend is `NoConversationStore` and we silently skip
+        // persistence for the rest of the turn. We await the oneshot
+        // here because every following persistence call needs the
+        // resulting `TurnId` — but it's a single channel hop, not a
+        // disk write of the streaming response.
+        let turn_id: Option<TurnId> =
+            match self.conversations.begin_turn(&self.session_id, &text).await {
+                Ok(t) if t.0 != 0 => Some(t),
+                // NoConversationStore returns TurnId(0); treat that as "no
+                // persistence configured" without logging.
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "assistd::memory",
+                        error = %e,
+                        "begin_turn failed; turn will not be persisted"
+                    );
+                    None
+                }
+            };
+        // Mirror the user's prompt into the conversations table on the
+        // way to the LLM — fire-and-forget so the dispatch loop below
+        // never waits on disk.
+        self.persist_message_fire_and_forget(turn_id, PersistedMessage::user(text.clone()));
 
         let (llm_tx, mut llm_rx) = mpsc::channel::<LlmEvent>(32);
         let llm = self.llm.clone();
@@ -312,6 +553,11 @@ impl AppState {
             None
         };
 
+        // Persistence accumulator: tee every `LlmEvent::Delta { text }`
+        // into this string so the assistant's full reply gets written
+        // as one row at end-of-turn. Cleared on each Tool/Done flush.
+        let mut assistant_accum = String::new();
+
         let mut client_alive = true;
 
         loop {
@@ -346,6 +592,9 @@ impl AppState {
             let (wire_event, sentences_to_speak): (Event, Vec<String>) = match llm_event {
                 LlmEvent::Delta { text } => {
                     let sentences = sentence_buf.push(&text);
+                    // Persistence tee — accumulate the assistant's
+                    // full reply for one row at Done.
+                    assistant_accum.push_str(&text);
                     (
                         Event::Delta {
                             id: id.clone(),
@@ -355,11 +604,32 @@ impl AppState {
                     )
                 }
                 LlmEvent::ToolCall {
-                    id: _call_id,
+                    id: call_id,
                     name,
                     arguments,
                 } => {
                     awaiting_tool_result = true;
+                    // Flush any narration we'd accumulated so the
+                    // pre-tool-call assistant text doesn't get glued
+                    // onto the tool result downstream. Then write the
+                    // assistant_with_tool_calls row mirroring the
+                    // in-memory `push_assistant_with_tool_calls` shape.
+                    if !assistant_accum.is_empty() {
+                        let pre_text = std::mem::take(&mut assistant_accum);
+                        self.persist_message_fire_and_forget(
+                            turn_id,
+                            PersistedMessage::assistant_text(pre_text),
+                        );
+                    }
+                    let calls_json = serde_json::json!([{
+                        "id":        call_id,
+                        "name":      name,
+                        "arguments": arguments,
+                    }]);
+                    self.persist_message_fire_and_forget(
+                        turn_id,
+                        PersistedMessage::assistant_tool_calls(calls_json),
+                    );
                     (
                         Event::ToolCall {
                             id: id.clone(),
@@ -370,11 +640,23 @@ impl AppState {
                     )
                 }
                 LlmEvent::ToolResult {
-                    id: _call_id,
+                    id: call_id,
                     name,
                     result,
                 } => {
                     awaiting_tool_result = false;
+                    // Persist the tool-result row. We extract the
+                    // human-readable `output` field if present
+                    // (RunTool's shape) and fall back to the raw JSON.
+                    let body = result
+                        .get("output")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| result.to_string());
+                    self.persist_message_fire_and_forget(
+                        turn_id,
+                        PersistedMessage::tool_result(body, call_id, name.clone()),
+                    );
                     (
                         Event::ToolResult {
                             id: id.clone(),
@@ -387,6 +669,15 @@ impl AppState {
                 LlmEvent::Done => {
                     let tail = sentence_buf.finish();
                     let sentences = tail.into_iter().collect();
+                    // Final assistant row: whatever text accumulated
+                    // since the last tool-call flush.
+                    if !assistant_accum.is_empty() {
+                        let final_text = std::mem::take(&mut assistant_accum);
+                        self.persist_message_fire_and_forget(
+                            turn_id,
+                            PersistedMessage::assistant_text(final_text),
+                        );
+                    }
                     (Event::Done { id: id.clone() }, sentences)
                 }
             };
@@ -429,6 +720,23 @@ impl AppState {
         // for audio to finish playing.
         let gen_result = generator.await;
         drop(_agent_guard);
+
+        // Close out the persisted turn whether we exited cleanly,
+        // hit an LLM error, or the client disconnected mid-stream —
+        // every path lands an `ended_at` timestamp on the row.
+        // Fire-and-forget like the message persistence above.
+        if let Some(t) = turn_id {
+            let conv = self.conversations.clone();
+            tokio::spawn(async move {
+                if let Err(e) = conv.end_turn(t).await {
+                    tracing::warn!(
+                        target: "assistd::memory",
+                        error = %e,
+                        "end_turn failed (continuing)"
+                    );
+                }
+            });
+        }
 
         // Now await the speech worker. _request_guard is still held so
         // presence stays Active through playback.

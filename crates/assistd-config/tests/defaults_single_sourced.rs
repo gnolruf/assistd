@@ -29,6 +29,21 @@ fn llama_server_defaults_match_constants() {
 }
 
 #[test]
+fn memory_defaults_match_constants() {
+    let c = MemoryConfig::default();
+    assert_eq!(c.enabled, DEFAULT_MEMORY_ENABLED);
+    assert_eq!(c.retention_days, DEFAULT_MEMORY_RETENTION_DAYS);
+    assert_eq!(c.db_path, default_memory_db_path());
+    // Default path resolution always ends in `assistd/memory.db`
+    // regardless of whether $XDG_DATA_HOME is set in the test env.
+    assert!(
+        c.db_path.ends_with("assistd/memory.db"),
+        "unexpected default db_path: {}",
+        c.db_path
+    );
+}
+
+#[test]
 fn model_defaults_match_constants() {
     let c = ModelConfig::default();
     assert_eq!(c.name, DEFAULT_MODEL_NAME);

@@ -14,6 +14,7 @@ default = ["daemon", "client", "chat"]
 daemon = [
     "dep:assistd-core",
     "dep:assistd-llm",
+    "dep:assistd-memory",
     "dep:assistd-voice",
     "dep:assistd-wm",
     "dep:tracing",
@@ -47,10 +48,11 @@ tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 
 # Daemon-only
-assistd-core  = { workspace = true, optional = true }
-assistd-llm   = { workspace = true, optional = true }
-assistd-voice = { workspace = true, optional = true }
-assistd-wm    = { workspace = true, optional = true }
+assistd-core   = { workspace = true, optional = true }
+assistd-llm    = { workspace = true, optional = true }
+assistd-memory = { workspace = true, optional = true }
+assistd-voice  = { workspace = true, optional = true }
+assistd-wm     = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 global-hotkey = { version = "0.7", optional = true }

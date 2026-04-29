@@ -38,6 +38,14 @@
 //! `delete` succeed silently — so an agent calling them in this
 //! configuration just behaves as if it has no long-term memory.
 
+pub mod migrations;
+pub mod sqlite;
+
+pub use sqlite::{
+    ConversationStore, NoConversationStore, PersistedMessage, PersistedRole, SearchHit, SessionId,
+    SqliteConversationStore, SqliteHandle, SqliteMemoryStore, TurnId, TurnSummary,
+};
+
 use anyhow::Result;
 use async_trait::async_trait;
 
