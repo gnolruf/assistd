@@ -4,6 +4,10 @@ use assistd_core::{
     PresenceManager, VoiceInput, VoiceOutput,
 };
 use assistd_llm::LlamaChatClient;
+use assistd_memory::{
+    ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, SqliteConversationStore,
+    SqliteHandle, SqliteMemoryStore,
+};
 use assistd_tools::DenyAllGate;
 use assistd_voice::{
     MicContinuousListener, MicVoiceInput, QueueConfig, QueuedTranscriber, Transcriber,
@@ -280,6 +284,71 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let continuous_enabled = config.voice.enabled && config.voice.continuous.enabled;
     let continuous_start_on_launch = config.voice.continuous.start_on_launch;
 
+    // Persistent memory: open the SQLite store if enabled. The
+    // `try-warn-fallback` shape mirrors voice input/output above —
+    // any failure (bad path, FS readonly, etc.) downgrades to the
+    // `NoMemoryStore` placeholder so the daemon still starts and the
+    // user gets a startup warning instead of a hard error.
+    let (memory_store, conversation_store, memory_writer_handle, session_id_for_state) = if config
+        .memory
+        .enabled
+    {
+        let db_path = std::path::PathBuf::from(&config.memory.db_path);
+        match SqliteHandle::open(&db_path, shutdown_tx.subscribe()).await {
+            Ok((handle, writer_handle)) => {
+                let handle = Arc::new(handle);
+                let conv_store = Arc::new(SqliteConversationStore::new(handle.clone()));
+                let mem_store = Arc::new(SqliteMemoryStore::new(handle));
+                let session = match conv_store.begin_session(std::process::id()).await {
+                    Ok(s) => Arc::new(s),
+                    Err(e) => {
+                        tracing::warn!(
+                            "memory: begin_session failed: {e:#}; continuing without session row"
+                        );
+                        Arc::new(assistd_memory::SessionId::new())
+                    }
+                };
+                info!(
+                    "memory: SQLite ready at {} (session={})",
+                    db_path.display(),
+                    session
+                );
+                (
+                    mem_store as Arc<dyn MemoryStore>,
+                    conv_store as Arc<dyn ConversationStore>,
+                    Some(writer_handle),
+                    session,
+                )
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "memory: failed to open {} ({e:#}); persistence disabled this run",
+                    db_path.display()
+                );
+                (
+                    Arc::new(NoMemoryStore) as Arc<dyn MemoryStore>,
+                    Arc::new(NoConversationStore) as Arc<dyn ConversationStore>,
+                    None,
+                    Arc::new(assistd_memory::SessionId::new()),
+                )
+            }
+        }
+    } else {
+        info!("memory: disabled in config (memory.enabled = false)");
+        (
+            Arc::new(NoMemoryStore) as Arc<dyn MemoryStore>,
+            Arc::new(NoConversationStore) as Arc<dyn ConversationStore>,
+            None,
+            Arc::new(assistd_memory::SessionId::new()),
+        )
+    };
+    // Keep a clone of the conversation store for the shutdown path
+    // below — `state` will own the canonical handle, but we want to
+    // call `end_session` after the socket has drained without
+    // reaching back through `Arc<AppState>`.
+    let conv_store_for_shutdown = conversation_store.clone();
+    let session_for_shutdown = session_id_for_state.clone();
+
     let state = Arc::new(
         AppState::new(
             config,
@@ -290,7 +359,10 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             listener.clone(),
             voice_output,
         )
-        .with_vision_revalidator(vision_revalidator),
+        .with_vision_revalidator(vision_revalidator)
+        .with_memory(memory_store)
+        .with_conversations(conversation_store)
+        .with_session(session_id_for_state),
     );
 
     let listen_handles = if continuous_enabled {
@@ -318,6 +390,17 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         tracing::error!("presence shutdown error: {e:#}");
     }
 
+    // Mark the persisted session as ended before draining the writer
+    // so the row's `ended_at` is set in the same final flush. Failures
+    // are logged but never block shutdown — the session row simply
+    // stays open and a future pass can heuristically close it.
+    if let Err(e) = conv_store_for_shutdown
+        .end_session(&session_for_shutdown)
+        .await
+    {
+        tracing::warn!("memory: end_session failed at shutdown: {e:#}");
+    }
+
     if let Some(h) = hotkey_handle {
         let _ = h.await;
     }
@@ -330,6 +413,12 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     if let Some(handles) = listen_handles {
         let _ = handles.forwarder.await;
         let _ = handles.presence_gate.await;
+    }
+    if let Some(h) = memory_writer_handle {
+        // Awaiting the writer ensures the in-flight queue is drained
+        // before the daemon process exits — otherwise a SIGTERM could
+        // truncate the last few `append_message` writes.
+        let _ = h.await;
     }
 
     serve_result?;

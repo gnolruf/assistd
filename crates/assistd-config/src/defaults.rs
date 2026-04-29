@@ -103,6 +103,30 @@ pub const DEFAULT_SCREENSHOT_TIMEOUT_SECS: u64 = 5;
 
 pub const DEFAULT_AGENT_MAX_ITERATIONS: u32 = 20;
 
+pub const DEFAULT_MEMORY_ENABLED: bool = true;
+/// `0` means keep forever. The retention sweeper isn't shipped yet; the
+/// field exists so future work doesn't need a schema-version bump.
+pub const DEFAULT_MEMORY_RETENTION_DAYS: u32 = 0;
+/// Path under which the daemon's SQLite memory DB lives. Resolves to
+/// `$XDG_DATA_HOME/assistd/memory.db` when set, else
+/// `$HOME/.local/share/assistd/memory.db`. Mirrors the manual XDG
+/// lookup at `top.rs::Config::default_path()` so we don't pull in the
+/// `dirs` crate just for one path.
+pub fn default_memory_db_path() -> String {
+    let data_dir = match std::env::var_os("XDG_DATA_HOME") {
+        Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            std::path::PathBuf::from(home).join(".local/share")
+        }
+    };
+    data_dir
+        .join("assistd")
+        .join("memory.db")
+        .to_string_lossy()
+        .into_owned()
+}
+
 pub fn default_gpu_allowlist() -> Vec<String> {
     vec![
         "Xorg".into(),

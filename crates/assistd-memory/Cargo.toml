@@ -7,11 +7,23 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "fs", "time"] }
 tracing = { workspace = true }
+# SQLite-backed implementation lives in the `sqlite` submodule. These
+# deps are pulled in unconditionally because the daemon always opts in —
+# tests still use `:memory:` so they don't need a feature gate.
+rusqlite = { workspace = true }
+tokio-rusqlite = { workspace = true }
+rusqlite_migration = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

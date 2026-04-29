@@ -163,6 +163,37 @@ pub enum Request {
     /// Report whether TTS is currently enabled. Emits `VoiceOutputState`
     /// + `Done` with no state change.
     GetVoiceState { id: String },
+    /// Full-text search over persisted conversation content. Emits zero
+    /// or more `MemoryHit` events followed by `Done`. `limit = 0` is
+    /// treated as the daemon's default cap.
+    MemorySearch {
+        id: String,
+        query: String,
+        #[serde(default)]
+        limit: u32,
+    },
+    /// Persist a string value under `key`. Overwrites any existing
+    /// value at the same key. Emits `Done` (no payload) on success.
+    MemorySave {
+        id: String,
+        key: String,
+        value: String,
+    },
+    /// Read the value previously stored at `key`. Emits a single
+    /// `MemoryValue` (with `value: None` when the key is absent) and
+    /// then `Done`.
+    MemoryLoad { id: String, key: String },
+    /// Enumerate keys whose name starts with `prefix`. Emits a single
+    /// `MemoryKeys` event with the matching keys, then `Done`. An
+    /// empty prefix lists every key.
+    MemoryList {
+        id: String,
+        #[serde(default)]
+        prefix: String,
+    },
+    /// Remove `key` from the memory store. No-op when absent. Emits
+    /// `Done` on success.
+    MemoryDelete { id: String, key: String },
 }
 
 impl Request {
@@ -209,7 +240,12 @@ impl Request {
             | Request::GetListenState { id }
             | Request::VoiceToggle { id }
             | Request::VoiceSkip { id }
-            | Request::GetVoiceState { id } => id,
+            | Request::GetVoiceState { id }
+            | Request::MemorySearch { id, .. }
+            | Request::MemorySave { id, .. }
+            | Request::MemoryLoad { id, .. }
+            | Request::MemoryList { id, .. }
+            | Request::MemoryDelete { id, .. } => id,
         }
     }
 
@@ -230,6 +266,11 @@ impl Request {
             Request::VoiceToggle { .. } => "voice_toggle",
             Request::VoiceSkip { .. } => "voice_skip",
             Request::GetVoiceState { .. } => "get_voice_state",
+            Request::MemorySearch { .. } => "memory_search",
+            Request::MemorySave { .. } => "memory_save",
+            Request::MemoryLoad { .. } => "memory_load",
+            Request::MemoryList { .. } => "memory_list",
+            Request::MemoryDelete { .. } => "memory_delete",
         }
     }
 }
@@ -272,6 +313,30 @@ pub enum Event {
     /// / `VoiceSkip` / `GetVoiceState`. Skip leaves the flag unchanged
     /// (true if synthesis was on before the skip).
     VoiceOutputState { id: String, enabled: bool },
+    /// One full-text-search hit emitted by `MemorySearch`. The daemon
+    /// emits zero or more of these in score order, then a terminal
+    /// `Done`. `snippet` carries the FTS5 `snippet()` excerpt with
+    /// `<mark>match</mark>` highlighting around the matched terms.
+    MemoryHit {
+        id: String,
+        conversation_id: i64,
+        session_id: String,
+        timestamp: String,
+        role: String,
+        snippet: String,
+    },
+    /// Result of a `MemoryLoad`. `value` is `None` when the key was
+    /// absent — the daemon still emits the event so the client knows
+    /// the lookup completed.
+    MemoryValue {
+        id: String,
+        key: String,
+        value: Option<String>,
+    },
+    /// Result of a `MemoryList`. Keys are returned in lexicographic
+    /// order. Always emitted exactly once before the terminal `Done`,
+    /// even when empty.
+    MemoryKeys { id: String, keys: Vec<String> },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -295,6 +360,9 @@ impl Event {
             | Event::Transcription { id, .. }
             | Event::ListenState { id, .. }
             | Event::VoiceOutputState { id, .. }
+            | Event::MemoryHit { id, .. }
+            | Event::MemoryValue { id, .. }
+            | Event::MemoryKeys { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }
@@ -428,6 +496,93 @@ mod tests {
         };
         let parsed: Event = serde_json::from_str(&serde_json::to_string(&evt).unwrap()).unwrap();
         assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn memory_search_request_roundtrip_with_default_limit() {
+        // Omitting `limit` should round-trip as 0; the daemon treats 0
+        // as "use default cap" — kept off the wire by `#[serde(default)]`.
+        let json = r#"{"type":"memory_search","id":"r","query":"foo"}"#;
+        let parsed: Request = serde_json::from_str(json).unwrap();
+        match parsed {
+            Request::MemorySearch { id, query, limit } => {
+                assert_eq!(id, "r");
+                assert_eq!(query, "foo");
+                assert_eq!(limit, 0);
+            }
+            _ => panic!("expected MemorySearch"),
+        }
+    }
+
+    #[test]
+    fn memory_save_load_list_delete_request_roundtrip() {
+        let cases = vec![
+            Request::MemorySave {
+                id: "r1".into(),
+                key: "k".into(),
+                value: "v".into(),
+            },
+            Request::MemoryLoad {
+                id: "r2".into(),
+                key: "k".into(),
+            },
+            Request::MemoryList {
+                id: "r3".into(),
+                prefix: "pref:".into(),
+            },
+            Request::MemoryDelete {
+                id: "r4".into(),
+                key: "k".into(),
+            },
+        ];
+        for r in cases {
+            let parsed: Request =
+                serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+            assert_eq!(parsed, r);
+        }
+    }
+
+    #[test]
+    fn memory_event_roundtrip() {
+        let cases = vec![
+            Event::MemoryHit {
+                id: "r".into(),
+                conversation_id: 42,
+                session_id: "s".into(),
+                timestamp: "2026-04-28T00:00:00Z".into(),
+                role: "assistant".into(),
+                snippet: "…the <mark>match</mark>…".into(),
+            },
+            Event::MemoryValue {
+                id: "r".into(),
+                key: "k".into(),
+                value: Some("v".into()),
+            },
+            Event::MemoryValue {
+                id: "r".into(),
+                key: "absent".into(),
+                value: None,
+            },
+            Event::MemoryKeys {
+                id: "r".into(),
+                keys: vec!["a".into(), "b".into()],
+            },
+        ];
+        for e in cases {
+            let parsed: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+            assert_eq!(parsed, e);
+        }
+    }
+
+    #[test]
+    fn memory_request_id_helper_returns_inner() {
+        let req = Request::MemorySearch {
+            id: "abc".into(),
+            query: "q".into(),
+            limit: 10,
+        };
+        assert_eq!(req.id(), "abc");
+        assert_eq!(req.kind(), "memory_search");
     }
 
     #[test]

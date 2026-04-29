@@ -8,6 +8,7 @@ use crate::compositor::CompositorConfig;
 use crate::daemon::DaemonConfig;
 use crate::errors::ConfigError;
 use crate::llama::LlamaServerConfig;
+use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
 use crate::presence::PresenceConfig;
 use crate::remote::RemoteConfig;
@@ -33,6 +34,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 impl Config {
@@ -310,6 +313,16 @@ impl Config {
 
         if self.agent.max_iterations == 0 {
             errors.push("agent.max_iterations must be greater than 0".into());
+        }
+
+        if self.memory.enabled && self.memory.db_path.is_empty() {
+            errors.push("memory.db_path must not be empty when memory.enabled".into());
+        }
+        if self.memory.retention_days > 36500 {
+            errors.push(
+                "memory.retention_days exceeds 100 years; check for a typo (use 0 for forever)"
+                    .into(),
+            );
         }
 
         if errors.is_empty() {

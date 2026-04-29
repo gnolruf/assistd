@@ -65,6 +65,16 @@ which = "7"
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
 ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# Persistent memory store. `rusqlite` ships with `bundled` so we don't depend
+# on a system libsqlite3 — keeps `cargo build` reproducible across distros.
+# `blob` enables `Connection::blob_open` for the embeddings BLOB column.
+# `tokio-rusqlite` runs the connection on a dedicated thread and serves
+# `conn.call(|c| ...)` closures over a channel — exactly the writer-task
+# pattern Milestone 4 needs (see crates/assistd-memory/src/sqlite/writer.rs).
+rusqlite = { version = "0.31", features = ["bundled", "blob"] }
+tokio-rusqlite = "0.5"
+rusqlite_migration = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
 # Workspace-wide lint baseline. Each crate inherits via
 # `[lints] workspace = true` in its own Cargo.toml. Tightens defaults

@@ -22,6 +22,7 @@ pub mod attachment;
 pub mod chain;
 pub mod command;
 pub mod commands;
+pub mod memory;
 pub mod policy;
 pub mod presentation;
 pub mod run;
@@ -30,6 +31,7 @@ pub mod vision;
 pub use attachment::{LoadImageError, load_image_attachment};
 pub use chain::{Chain, ParseError, execute, parse_chain};
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
+pub use memory::MemoryOps;
 pub use policy::{
     AlwaysAllowGate, ConfirmationGate, ConfirmationRequest, DenyAllGate, ResolvedSandboxMode,
     SandboxInfo, SandboxRequest, matches_denylist, matches_destructive, probe_sandbox,
