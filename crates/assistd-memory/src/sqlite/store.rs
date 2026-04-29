@@ -24,15 +24,14 @@ impl SqliteMemoryStore {
     }
 
     /// Save a memory with provenance — links the row back to the
-    /// conversation row that produced it. Used by the daemon's
-    /// extract-and-save flows; the trait method below leaves source
-    /// NULL for callers that don't have one handy.
+    /// conversation row that produced it. Returns the row id of the
+    /// saved memory so callers can FK an embedding row.
     pub async fn save_with_source(
         &self,
         key: &str,
         value: String,
         source_conversation_id: Option<i64>,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let key = key.to_string();
         WriteCall::run(self.handle.writer(), |ack| WriteOp::SaveMemory {
             key,
@@ -46,7 +45,7 @@ impl SqliteMemoryStore {
 
 #[async_trait]
 impl MemoryStore for SqliteMemoryStore {
-    async fn save(&self, key: &str, value: String) -> Result<()> {
+    async fn save(&self, key: &str, value: String) -> Result<i64> {
         self.save_with_source(key, value, None).await
     }
 

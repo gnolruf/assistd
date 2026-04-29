@@ -37,7 +37,11 @@ impl MemoryOps {
         }
     }
 
-    pub async fn save(&self, key: &str, value: String) -> Result<()> {
+    /// Save a key/value memory. Returns the row id of the saved memory
+    /// so the caller (typically `RememberTool`) can enqueue an embed
+    /// job that FKs the new row. The IPC `MemorySave` handler discards
+    /// the id; the LLM-callable `remember` tool consumes it.
+    pub async fn save(&self, key: &str, value: String) -> Result<i64> {
         self.store.save(key, value).await
     }
 

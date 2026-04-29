@@ -140,6 +140,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assistd-core",
+ "assistd-embed",
  "assistd-ipc",
  "assistd-llm",
  "assistd-memory",
@@ -183,6 +184,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assistd-config",
+ "assistd-embed",
  "assistd-ipc",
  "assistd-llm",
  "assistd-memory",
@@ -198,6 +200,23 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "assistd-embed"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assistd-config",
+ "assistd-memory",
+ "async-trait",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 
@@ -271,6 +290,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assistd-config",
+ "assistd-embed",
  "assistd-memory",
  "async-trait",
  "base64",

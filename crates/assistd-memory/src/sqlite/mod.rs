@@ -16,6 +16,7 @@
 
 pub mod connection;
 pub mod conversations;
+pub mod embeddings;
 pub mod store;
 pub mod writer;
 
@@ -24,4 +25,8 @@ pub use conversations::{
     ConversationStore, NoConversationStore, PersistedMessage, PersistedRole, SearchHit, SessionId,
     SqliteConversationStore, TurnId, TurnSummary,
 };
+pub use embeddings::{
+    EmbeddingHit, MemoryHit, NoSemanticStore, SemanticStore, SqliteSemanticStore, vector_to_blob,
+};
 pub use store::SqliteMemoryStore;
+pub use writer::WriteOp;

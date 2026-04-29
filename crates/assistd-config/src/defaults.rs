@@ -113,6 +113,25 @@ pub const DEFAULT_MEMORY_ENABLED: bool = true;
 /// `0` means keep forever. The retention sweeper isn't shipped yet; the
 /// field exists so future work doesn't need a schema-version bump.
 pub const DEFAULT_MEMORY_RETENTION_DAYS: u32 = 0;
+
+pub const DEFAULT_EMBEDDING_ENABLED: bool = true;
+/// HuggingFace id passed verbatim to the embed server's `--hf-repo`.
+/// 768-dim, ~140 MB Q4, strong retrieval quality on conversational text.
+pub const DEFAULT_EMBEDDING_MODEL: &str =
+    "nomic-ai/nomic-embed-text-v1.5-GGUF:nomic-embed-text-v1.5.Q4_K_M.gguf";
+pub const DEFAULT_EMBEDDING_HOST: &str = "127.0.0.1";
+/// Distinct from `DEFAULT_LLAMA_PORT` (8385) and `DEFAULT_REMOTE_PORT`
+/// (8384). Validated for collisions in `Config::validate()`.
+pub const DEFAULT_EMBEDDING_PORT: u16 = 8386;
+/// CPU-only by default — small embedders are CPU-fast, and pinning them
+/// off the GPU prevents VRAM contention with the chat model.
+pub const DEFAULT_EMBEDDING_GPU_LAYERS: u32 = 0;
+pub const DEFAULT_EMBEDDING_READY_TIMEOUT_SECS: u64 = 300;
+pub const DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_EMBEDDING_TOP_K: u32 = 5;
+pub const DEFAULT_EMBEDDING_CHUNK_CHARS: usize = 512;
+pub const DEFAULT_EMBEDDING_CHUNK_OVERLAP: usize = 64;
+pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 /// Path under which the daemon's SQLite memory DB lives. Resolves to
 /// `$XDG_DATA_HOME/assistd/memory.db` when set, else
 /// `$HOME/.local/share/assistd/memory.db`. Mirrors the manual XDG

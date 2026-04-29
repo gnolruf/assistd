@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 assistd-config = { workspace = true }
+assistd-embed = { workspace = true }
 assistd-ipc = { workspace = true }
 assistd-llm = { workspace = true }
 assistd-memory = { workspace = true }

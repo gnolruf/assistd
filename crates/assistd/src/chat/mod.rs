@@ -142,12 +142,23 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         Arc::new(NoMemoryStore),
         Arc::new(NoConversationStore),
     ));
+    // The TUI also doesn't run the embed subsystem — pass No-Op
+    // fallbacks so `recall`/`search_memory` register but no-op.
+    let no_embedder: Arc<dyn assistd_embed::Embedder> = Arc::new(assistd_embed::NoEmbedder);
+    let no_semantic: Arc<dyn assistd_memory::SemanticStore> =
+        Arc::new(assistd_memory::NoSemanticStore);
+    let (no_embed_tx, no_embed_rx) = tokio::sync::mpsc::channel::<assistd_embed::EmbedJob>(1);
+    drop(no_embed_rx);
     let tools = assistd_core::build_tools(
         &config,
         tui_overflow_dir.clone(),
         Arc::new(TuiGate::new(confirm_tx)),
         vision_gate.clone(),
         memory_ops,
+        no_embedder,
+        no_semantic,
+        no_embed_tx,
+        String::new(),
     )?;
     info!(
         "tools: registered {} (overflow dir {})",

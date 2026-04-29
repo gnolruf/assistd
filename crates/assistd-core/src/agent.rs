@@ -790,12 +790,25 @@ mod tests {
         let memory_ops = Arc::new(MemoryOps::new(mem, conv));
 
         let mut tools = ToolRegistry::new();
-        tools.register(RememberTool::new(memory_ops.clone()));
-        tools.register(RecallTool::new(memory_ops));
+        // Closed embed channel + NoEmbedder/NoSemanticStore — the test
+        // exercises the prefix path only, so we don't need the embed
+        // subsystem wired up.
+        let (embed_tx, embed_rx) = tokio::sync::mpsc::channel::<assistd_embed::EmbedJob>(1);
+        drop(embed_rx);
+        let no_embedder: Arc<dyn assistd_embed::Embedder> = Arc::new(assistd_embed::NoEmbedder);
+        let no_semantic: Arc<dyn assistd_memory::SemanticStore> =
+            Arc::new(assistd_memory::NoSemanticStore);
+        tools.register(RememberTool::new(memory_ops.clone(), embed_tx));
+        tools.register(RecallTool::new(
+            memory_ops,
+            no_embedder,
+            no_semantic,
+            String::new(),
+        ));
         let tools = Arc::new(tools);
 
         // Step 1: model calls remember(...) — Step 2: model calls
-        // recall(prefix="") — Step 3: Final.
+        // recall(query="", mode="prefix") — Step 3: Final.
         let backend = MockBackend::with(vec![
             StepOutcome::ToolCalls(vec![ToolCall {
                 id: "c-1".into(),
@@ -808,7 +821,7 @@ mod tests {
             StepOutcome::ToolCalls(vec![ToolCall {
                 id: "c-2".into(),
                 name: "recall".into(),
-                arguments: serde_json::json!({"prefix": ""}),
+                arguments: serde_json::json!({"query": "", "mode": "prefix"}),
             }]),
             StepOutcome::Final,
         ]);

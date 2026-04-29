@@ -79,8 +79,11 @@ pub use presence::{PresenceManager, RequestGuard};
 pub use state::AppState;
 
 use anyhow::{Context, Result};
+use assistd_embed::{EmbedJob, Embedder};
+use assistd_memory::SemanticStore;
 use assistd_tools::{
     ConfirmationGate, MemoryOps, RecallTool, RememberTool, RunTool, SandboxRequest,
+    SearchMemoryTool,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WcCommand,
@@ -91,6 +94,7 @@ use assistd_tools::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::warn;
 
 /// Build the shared tool registry used by both the daemon and the chat
@@ -122,12 +126,21 @@ use tracing::warn;
 /// handle; the chat TUI (no persistence today) passes one built over
 /// [`assistd_memory::NoMemoryStore`] so the same tools register but
 /// silently no-op there.
+// Subsystem injection point — every call site (daemon, TUI) wires the
+// same set of cross-cutting handles into the registered tools. The
+// alternative shape (a builder struct) saves nothing here because the
+// two real call sites both pass *all* params.
+#[allow(clippy::too_many_arguments)]
 pub fn build_tools(
     config: &Config,
     overflow_dir: PathBuf,
     gate: Arc<dyn ConfirmationGate>,
     vision_gate: Arc<assistd_tools::VisionGate>,
     memory_ops: Arc<MemoryOps>,
+    embedder: Arc<dyn Embedder>,
+    semantic: Arc<dyn SemanticStore>,
+    embed_tx: mpsc::Sender<EmbedJob>,
+    embedding_model: String,
 ) -> Result<Arc<ToolRegistry>> {
     if overflow_dir.exists() {
         std::fs::remove_dir_all(&overflow_dir).with_context(|| {
@@ -223,11 +236,20 @@ pub fn build_tools(
         &config.tools.output,
         overflow_dir,
     ));
-    // LLM-callable cross-conversation memory. Both share one
-    // `MemoryOps` (cheap clone — two `Arc`s) so the model sees a
-    // consistent view between save and load.
-    tools.register(RememberTool::new(memory_ops.clone()));
-    tools.register(RecallTool::new(memory_ops));
+    // LLM-callable cross-conversation memory. `RememberTool` queues an
+    // embed job for the saved value so semantic recall finds memories
+    // by paraphrase. `RecallTool` supports both prefix browsing
+    // (cheap, deterministic) and semantic match (requires embedder +
+    // semantic store). `SearchMemoryTool` is a sibling that searches
+    // *past conversation history* rather than saved facts.
+    tools.register(RememberTool::new(memory_ops.clone(), embed_tx));
+    tools.register(RecallTool::new(
+        memory_ops,
+        embedder.clone(),
+        semantic.clone(),
+        embedding_model.clone(),
+    ));
+    tools.register(SearchMemoryTool::new(embedder, semantic, embedding_model));
     Ok(Arc::new(tools))
 }
 

@@ -194,6 +194,17 @@ pub enum Request {
     /// Remove `key` from the memory store. No-op when absent. Emits
     /// `Done` on success.
     MemoryDelete { id: String, key: String },
+    /// Semantic search over persisted conversation chunks. Embeds the
+    /// query and ranks past messages by cosine similarity. Emits zero
+    /// or more `SemanticHit` events ordered best-first, then `Done`.
+    /// `limit = 0` is treated as the daemon's default cap (matches the
+    /// `MemorySearch` FTS5 path).
+    MemorySemanticSearch {
+        id: String,
+        query: String,
+        #[serde(default)]
+        limit: u32,
+    },
 }
 
 impl Request {
@@ -245,7 +256,8 @@ impl Request {
             | Request::MemorySave { id, .. }
             | Request::MemoryLoad { id, .. }
             | Request::MemoryList { id, .. }
-            | Request::MemoryDelete { id, .. } => id,
+            | Request::MemoryDelete { id, .. }
+            | Request::MemorySemanticSearch { id, .. } => id,
         }
     }
 
@@ -271,11 +283,17 @@ impl Request {
             Request::MemoryLoad { .. } => "memory_load",
             Request::MemoryList { .. } => "memory_list",
             Request::MemoryDelete { .. } => "memory_delete",
+            Request::MemorySemanticSearch { .. } => "memory_semantic_search",
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Note: `Eq` is intentionally not derived. `Event::SemanticHit`
+/// carries an `f32` similarity score and `f32: !Eq`. Tests compare
+/// events with `PartialEq` (sufficient for `assert_eq!`) — an `Eq`
+/// bound is only needed for hashing/Set membership, neither of which
+/// the IPC layer requires.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     /// A streamed chunk of response text.
@@ -325,6 +343,22 @@ pub enum Event {
         role: String,
         snippet: String,
     },
+    /// One semantic-search hit emitted by `MemorySemanticSearch`. The
+    /// daemon emits zero or more of these ranked by cosine similarity
+    /// (best-first), then a terminal `Done`. Unlike `MemoryHit`,
+    /// `content` is the *full* parent message text (not a snippet) —
+    /// chunks may cut mid-sentence, so the surface message is the
+    /// useful unit for the model. `similarity` is in `[0.0, 1.0]`.
+    SemanticHit {
+        id: String,
+        conversation_id: i64,
+        chunk_id: i64,
+        session_id: String,
+        timestamp: String,
+        role: String,
+        content: String,
+        similarity: f32,
+    },
     /// Result of a `MemoryLoad`. `value` is `None` when the key was
     /// absent — the daemon still emits the event so the client knows
     /// the lookup completed.
@@ -361,6 +395,7 @@ impl Event {
             | Event::ListenState { id, .. }
             | Event::VoiceOutputState { id, .. }
             | Event::MemoryHit { id, .. }
+            | Event::SemanticHit { id, .. }
             | Event::MemoryValue { id, .. }
             | Event::MemoryKeys { id, .. }
             | Event::Error { id, .. }
@@ -553,6 +588,16 @@ mod tests {
                 role: "assistant".into(),
                 snippet: "…the <mark>match</mark>…".into(),
             },
+            Event::SemanticHit {
+                id: "r".into(),
+                conversation_id: 42,
+                chunk_id: 7,
+                session_id: "s".into(),
+                timestamp: "2026-04-28T00:00:00Z".into(),
+                role: "user".into(),
+                content: "the rust embeddings daemon".into(),
+                similarity: 0.87,
+            },
             Event::MemoryValue {
                 id: "r".into(),
                 key: "k".into(),
@@ -572,6 +617,19 @@ mod tests {
             let parsed: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
             assert_eq!(parsed, e);
         }
+    }
+
+    #[test]
+    fn memory_semantic_search_request_roundtrip() {
+        let req = Request::MemorySemanticSearch {
+            id: "ms-1".into(),
+            query: "the rust thing we discussed".into(),
+            limit: 5,
+        };
+        let parsed: Request = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.id(), "ms-1");
+        assert_eq!(req.kind(), "memory_semantic_search");
     }
 
     #[test]

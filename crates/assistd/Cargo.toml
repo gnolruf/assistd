@@ -13,6 +13,7 @@ path = "src/main.rs"
 default = ["daemon", "client", "chat"]
 daemon = [
     "dep:assistd-core",
+    "dep:assistd-embed",
     "dep:assistd-llm",
     "dep:assistd-memory",
     "dep:assistd-voice",
@@ -49,6 +50,7 @@ tokio-util = { workspace = true }
 
 # Daemon-only
 assistd-core   = { workspace = true, optional = true }
+assistd-embed  = { workspace = true, optional = true }
 assistd-llm    = { workspace = true, optional = true }
 assistd-memory = { workspace = true, optional = true }
 assistd-voice  = { workspace = true, optional = true }

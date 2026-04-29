@@ -89,12 +89,18 @@ pub trait Summarizer: Send + Sync {
 /// Layout invariants:
 /// - `system_prompt` is injected at the head of `as_wire_messages()` only when
 ///   non-empty.
+/// - `transient_context`, if `Some`, is rendered as a *second* system message
+///   immediately after `system_prompt` and is intended to live for exactly
+///   one [`crate::LlmBackend::step`] call. The chat client clears it via
+///   [`Self::consume_transient_context`] once the stream commits, so a
+///   follow-up turn re-runs retrieval rather than reusing stale context.
 /// - `messages` never contains a pre-baked system-prompt message; it holds
 ///   user/assistant turns plus at most one synthetic summary message (role
 ///   `System`, content prefixed with `SUMMARY_PREFIX`) that sits at index 0.
 #[derive(Debug)]
 pub struct Conversation {
     system_prompt: String,
+    transient_context: Option<String>,
     messages: Vec<Message>,
 }
 
@@ -102,8 +108,32 @@ impl Conversation {
     pub fn new(system_prompt: String) -> Self {
         Self {
             system_prompt,
+            transient_context: None,
             messages: Vec::new(),
         }
+    }
+
+    /// Set a one-shot system message rendered between the static
+    /// `system_prompt` and the conversation history. Overwrites any
+    /// existing pending transient (the auto-injection path always
+    /// rewrites the whole block, so the latest retrieval wins).
+    pub fn set_transient_context(&mut self, text: String) {
+        self.transient_context = Some(text);
+    }
+
+    /// Take the pending transient context, leaving `None` behind. The
+    /// chat client calls this from `commit_step` after a successful
+    /// stream so the next turn starts clean. On `PreEmitError` the
+    /// transient is *not* consumed — a retry should see the same context.
+    pub fn consume_transient_context(&mut self) -> Option<String> {
+        self.transient_context.take()
+    }
+
+    /// Test/diag helper. Production callers should use the consume
+    /// path so the transient is read at most once per turn.
+    #[cfg(test)]
+    pub fn transient_context(&self) -> Option<&str> {
+        self.transient_context.as_deref()
     }
 
     pub fn push_user(&mut self, content: String) {
@@ -175,6 +205,10 @@ impl Conversation {
                 TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(&self.system_prompt)),
             );
         }
+        if let Some(ctx) = &self.transient_context {
+            total = total
+                .saturating_add(TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(ctx)));
+        }
         for m in &self.messages {
             total = total.saturating_add(approx_message_tokens(m));
         }
@@ -189,11 +223,22 @@ impl Conversation {
     /// carrying `tool_calls` render with `content: null` (omitted) and a
     /// populated `tool_calls` array.
     pub fn as_wire_messages(&self) -> Vec<wire::ChatMessage<'_>> {
-        let mut out = Vec::with_capacity(self.messages.len() + 1);
+        let mut out = Vec::with_capacity(self.messages.len() + 2);
         if !self.system_prompt.is_empty() {
             out.push(wire::ChatMessage {
                 role: Role::System.as_wire(),
                 content: Some(wire::ContentBody::Text(&self.system_prompt)),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+        if let Some(ctx) = &self.transient_context {
+            // `&self` keeps `as_wire_messages` idempotent: rendering twice
+            // before `consume_transient_context` produces the same payload.
+            // The chat client consumes after the stream commits.
+            out.push(wire::ChatMessage {
+                role: Role::System.as_wire(),
+                content: Some(wire::ContentBody::Text(ctx)),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -576,6 +621,63 @@ mod tests {
             context_length: ctx,
         };
         (chat, model)
+    }
+
+    #[test]
+    fn transient_context_renders_as_second_system_message() {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("hello".into());
+        c.set_transient_context("Relevant past context: …".into());
+        let wire = c.as_wire_messages();
+        // Expect: [system=sys, system=transient, user=hello]
+        assert_eq!(wire.len(), 3);
+        assert_eq!(wire[0].role, "system");
+        assert_eq!(wire[1].role, "system");
+        match &wire[1].content {
+            Some(wire::ContentBody::Text(t)) => assert!(t.starts_with("Relevant past context")),
+            _ => panic!("expected text body on transient system message"),
+        }
+        assert_eq!(wire[2].role, "user");
+    }
+
+    #[test]
+    fn transient_context_omitted_when_unset() {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("hi".into());
+        let wire = c.as_wire_messages();
+        // Only the static system prompt + the user message.
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0].role, "system");
+        assert_eq!(wire[1].role, "user");
+    }
+
+    #[test]
+    fn render_is_idempotent_until_consumed() {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("hi".into());
+        c.set_transient_context("ctx".into());
+        let n1 = c.as_wire_messages().len();
+        let n2 = c.as_wire_messages().len();
+        assert_eq!(n1, n2, "as_wire_messages must be idempotent");
+        // Consume clears the slot.
+        let consumed = c.consume_transient_context();
+        assert_eq!(consumed.as_deref(), Some("ctx"));
+        let n3 = c.as_wire_messages().len();
+        assert_eq!(n3, n1 - 1, "after consume, transient is gone");
+        // Subsequent consume returns None.
+        assert_eq!(c.consume_transient_context(), None);
+    }
+
+    #[test]
+    fn approx_total_tokens_includes_transient_context() {
+        let mut c = Conversation::new("sys".into());
+        let baseline = c.approx_total_tokens();
+        c.set_transient_context("a".repeat(100));
+        let with_ctx = c.approx_total_tokens();
+        assert!(
+            with_ctx > baseline,
+            "transient context must contribute to budget math: {baseline} → {with_ctx}"
+        );
     }
 
     #[test]

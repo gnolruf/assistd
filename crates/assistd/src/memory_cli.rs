@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use assistd_ipc::{Event, Request, socket_path};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use uuid::Uuid;
@@ -22,15 +22,21 @@ pub struct MemoryArgs {
 
 #[derive(Subcommand)]
 pub enum MemoryAction {
-    /// Full-text search over persisted conversation content.
+    /// Search persisted conversation content. Two modes:
+    /// - `fts` (default): SQLite FTS5 full-text search. Supports phrase
+    ///   queries (`"foo bar"`), boolean ops (`foo AND bar`), and prefix
+    ///   matches (`foo*`).
+    /// - `semantic`: cosine-similarity search over embedded chunks.
+    ///   Robust to paraphrase. Requires the embedding subsystem.
     Search {
-        /// Query string. Passed verbatim to SQLite FTS5 — supports
-        /// phrase queries (`"foo bar"`), boolean ops (`foo AND bar`),
-        /// and prefix matches (`foo*`).
+        /// Query string. Interpretation depends on `--mode`.
         query: String,
         /// Cap on number of hits returned.
         #[arg(long, default_value = "20")]
         limit: u32,
+        /// Search mode. Defaults to `fts` (legacy behavior).
+        #[arg(long, value_enum, default_value_t = SearchMode::Fts)]
+        mode: SearchMode,
     },
     /// Persist a value under `key`. Overwrites any prior value.
     Save { key: String, value: String },
@@ -46,10 +52,27 @@ pub enum MemoryAction {
     Delete { key: String },
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum SearchMode {
+    /// SQLite FTS5 keyword search. Fast, exact, deterministic.
+    Fts,
+    /// Cosine-similarity over embeddings. Paraphrase-tolerant.
+    Semantic,
+}
+
 impl MemoryAction {
     fn into_request(self, id: String) -> Request {
         match self {
-            MemoryAction::Search { query, limit } => Request::MemorySearch { id, query, limit },
+            MemoryAction::Search {
+                query,
+                limit,
+                mode: SearchMode::Fts,
+            } => Request::MemorySearch { id, query, limit },
+            MemoryAction::Search {
+                query,
+                limit,
+                mode: SearchMode::Semantic,
+            } => Request::MemorySemanticSearch { id, query, limit },
             MemoryAction::Save { key, value } => Request::MemorySave { id, key, value },
             MemoryAction::Load { key } => Request::MemoryLoad { id, key },
             MemoryAction::List { prefix } => Request::MemoryList { id, prefix },
@@ -100,6 +123,26 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 let session_short = session_id.chars().take(8).collect::<String>();
                 println!(
                     "{timestamp}  {role:9}  conv={conversation_id:<6}  sess={session_short}  {snippet}"
+                );
+            }
+            Event::SemanticHit {
+                conversation_id,
+                session_id,
+                timestamp,
+                role,
+                content,
+                similarity,
+                ..
+            } => {
+                // Same column layout as MemoryHit but with similarity
+                // score instead of `<mark>` highlighting. `content` is
+                // the full message text (single line — collapse newlines
+                // so columns stay aligned).
+                let session_short = session_id.chars().take(8).collect::<String>();
+                let single_line = content.replace('\n', " ");
+                println!(
+                    "{timestamp}  {role:9}  conv={conversation_id:<6}  sess={session_short}  sim={:.2}  {single_line}",
+                    similarity
                 );
             }
             Event::MemoryValue { key, value, .. } => match value {

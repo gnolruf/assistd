@@ -101,6 +101,36 @@ impl SqliteHandle {
     pub(super) fn writer(&self) -> &mpsc::Sender<WriteOp> {
         &self.writer_tx
     }
+
+    /// Cheap clone of the writer-task `Arc<Sender>`. Exposed for
+    /// `assistd-core` (chunking on the persistence path) and
+    /// `assistd-embed` (the embedder task ack'ing back into the same
+    /// writer queue) — both live outside this crate so the
+    /// `pub(super) fn writer(&self)` accessor isn't visible to them.
+    pub fn writer_tx(&self) -> Arc<mpsc::Sender<WriteOp>> {
+        self.writer_tx.clone()
+    }
+
+    /// Convenience: persist a chunk and return its rowid. Used by
+    /// `state.rs::persist_message_fire_and_forget` after `append_message`
+    /// so the chunk row can be embedded in the background.
+    pub async fn store_chunk(
+        &self,
+        conversation_id: i64,
+        chunk_index: i64,
+        content: String,
+        token_count: Option<i64>,
+    ) -> anyhow::Result<i64> {
+        use super::writer::WriteCall;
+        WriteCall::run(self.writer(), |ack| WriteOp::StoreChunk {
+            conversation_id,
+            chunk_index,
+            content,
+            token_count,
+            ack,
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
