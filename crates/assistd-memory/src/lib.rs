@@ -38,12 +38,16 @@
 //! `delete` succeed silently — so an agent calling them in this
 //! configuration just behaves as if it has no long-term memory.
 
+pub mod chunking;
 pub mod migrations;
 pub mod sqlite;
 
+pub use chunking::{ChunkingConfig, chunk_message};
 pub use sqlite::{
-    ConversationStore, NoConversationStore, PersistedMessage, PersistedRole, SearchHit, SessionId,
-    SqliteConversationStore, SqliteHandle, SqliteMemoryStore, TurnId, TurnSummary,
+    ConversationStore, EmbeddingHit, MemoryHit, NoConversationStore, NoSemanticStore,
+    PersistedMessage, PersistedRole, SearchHit, SemanticStore, SessionId, SqliteConversationStore,
+    SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, TurnId, TurnSummary, WriteOp,
+    vector_to_blob,
 };
 
 use anyhow::Result;
@@ -59,7 +63,13 @@ pub trait MemoryStore: Send + Sync + 'static {
     /// durability semantics (write-through vs. periodic flush) — the
     /// trait makes no guarantees beyond "the next `load(key)` from
     /// this process should observe the write".
-    async fn save(&self, key: &str, value: String) -> Result<()>;
+    ///
+    /// Returns the row id of the saved memory. Callers that don't need
+    /// it (the IPC `MemorySave` handler) discard the value; callers
+    /// that want to enqueue an embed job for the saved value (the
+    /// `RememberTool`) use the id to FK the `memory_embeddings` row.
+    /// The `NoMemoryStore` placeholder returns `Ok(0)`.
+    async fn save(&self, key: &str, value: String) -> Result<i64>;
 
     /// Read the value previously stored at `key`. Returns `Ok(None)`
     /// when the key is absent (distinct from an `Err` path, which is
@@ -85,9 +95,9 @@ pub struct NoMemoryStore;
 
 #[async_trait]
 impl MemoryStore for NoMemoryStore {
-    async fn save(&self, key: &str, _value: String) -> Result<()> {
+    async fn save(&self, key: &str, _value: String) -> Result<i64> {
         tracing::debug!(target: "assistd::memory", key, "save: no backend configured (drop)");
-        Ok(())
+        Ok(0)
     }
 
     async fn load(&self, _key: &str) -> Result<Option<String>> {
@@ -117,7 +127,8 @@ mod tests {
         // as absent on load. This is the contract the agent loop
         // depends on for the no-backend configuration.
         let store = NoMemoryStore;
-        store.save("fact:user.name", "Ben".into()).await.unwrap();
+        let id = store.save("fact:user.name", "Ben".into()).await.unwrap();
+        assert_eq!(id, 0, "no-backend save returns sentinel id 0");
         assert_eq!(store.load("fact:user.name").await.unwrap(), None);
     }
 

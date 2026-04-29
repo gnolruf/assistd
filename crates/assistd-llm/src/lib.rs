@@ -133,6 +133,19 @@ pub trait LlmBackend: Send + Sync + 'static {
     /// Implementations that do not support tool use may return
     /// `StepOutcome::Final` and ignore `tools`.
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> Result<StepOutcome>;
+
+    /// Stash a one-shot system message that the next [`Self::step`] (or
+    /// [`Self::generate`]) renders alongside the static system prompt.
+    /// The implementation must consume the slot once the request
+    /// commits, so a follow-up turn re-runs retrieval. Used by the
+    /// daemon's auto-injection path to inject "Relevant past context: …"
+    /// from semantic retrieval.
+    ///
+    /// Default implementation is a no-op so existing test backends and
+    /// future stubs don't need to track per-turn context.
+    async fn set_transient_context(&self, _text: String) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Trivial backend that echoes the user's most recent push as a single

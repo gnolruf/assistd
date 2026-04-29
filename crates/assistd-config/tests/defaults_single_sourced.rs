@@ -44,6 +44,25 @@ fn memory_defaults_match_constants() {
 }
 
 #[test]
+fn embedding_defaults_match_constants() {
+    let c = EmbeddingConfig::default();
+    assert_eq!(c.enabled, DEFAULT_EMBEDDING_ENABLED);
+    assert_eq!(c.model, DEFAULT_EMBEDDING_MODEL);
+    assert_eq!(c.host, DEFAULT_EMBEDDING_HOST);
+    assert_eq!(c.port, DEFAULT_EMBEDDING_PORT);
+    assert_eq!(c.gpu_layers, DEFAULT_EMBEDDING_GPU_LAYERS);
+    assert_eq!(c.ready_timeout_secs, DEFAULT_EMBEDDING_READY_TIMEOUT_SECS);
+    assert_eq!(
+        c.request_timeout_secs,
+        DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS
+    );
+    assert_eq!(c.top_k, DEFAULT_EMBEDDING_TOP_K);
+    assert_eq!(c.chunk_chars, DEFAULT_EMBEDDING_CHUNK_CHARS);
+    assert_eq!(c.chunk_overlap_chars, DEFAULT_EMBEDDING_CHUNK_OVERLAP);
+    assert_eq!(c.auto_inject, DEFAULT_EMBEDDING_AUTO_INJECT);
+}
+
+#[test]
 fn model_defaults_match_constants() {
     let c = ModelConfig::default();
     assert_eq!(c.name, DEFAULT_MODEL_NAME);

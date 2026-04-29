@@ -1,10 +1,13 @@
 use crate::{Config, PresenceManager, run_agent_turn};
 use anyhow::Result;
+use assistd_config::EmbeddingConfig;
+use assistd_embed::{EmbedJob, Embedder, NoEmbedder};
 use assistd_ipc::{Event, PresenceState, Request, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_memory::{
-    ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, PersistedMessage,
-    SessionId, TurnId,
+    ChunkingConfig, ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore,
+    NoSemanticStore, PersistedMessage, PersistedRole, SemanticStore, SessionId, SqliteHandle,
+    TurnId, chunk_message,
 };
 use assistd_tools::{Attachment, MemoryOps, ToolRegistry};
 use assistd_voice::{
@@ -14,6 +17,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tracing::Instrument;
+
+/// Truncate `s` to at most `max_chars` *characters* (not bytes), appending
+/// an ellipsis when truncated. Walks `char_indices` so we never split a
+/// multi-byte character. Used to keep injected context lines short.
+fn truncate_for_context(s: &str, max_chars: usize) -> String {
+    let total = s.chars().count();
+    if total <= max_chars {
+        return s.replace('\n', " ");
+    }
+    let cutoff = s
+        .char_indices()
+        .nth(max_chars)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len());
+    let mut head = s[..cutoff].replace('\n', " ");
+    head.push('…');
+    head
+}
 
 /// Convert wire-level [`assistd_ipc::ImageAttachment`] entries into the
 /// internal [`Attachment`] type the agent loop expects. Returns the first
@@ -76,6 +97,30 @@ pub struct AppState {
     /// the persistence hook writes gets tagged with it so a future
     /// `assistd memory search` knows which daemon run produced it.
     pub session_id: Arc<SessionId>,
+    /// Embedder used for query-side embedding (`inject_semantic_context`)
+    /// and for the LLM-callable `recall` / `search_memory` tools. The
+    /// background embedder task that processes [`Self::embed_tx`] holds
+    /// its own clone of this `Arc`.
+    pub embedder: Arc<dyn Embedder>,
+    /// Top-K vector retrieval over `embeddings` (chunks) and
+    /// `memory_embeddings` (memories). Wired to `NoSemanticStore` when
+    /// the embedding subsystem is disabled or fails to start.
+    pub semantic: Arc<dyn SemanticStore>,
+    /// Bounded queue feeding the embedder task. `try_send` from the
+    /// persistence hook so a wedged embedder never backpressures
+    /// streaming. When the subsystem is disabled, the receiver is
+    /// dropped and `try_send` no-ops with a warn (acceptable — an
+    /// unindexed chunk can be picked up by a future backfill).
+    pub embed_tx: mpsc::Sender<EmbedJob>,
+    /// Direct handle to the SQLite store, used solely for
+    /// [`SqliteHandle::store_chunk`] from the persistence hook.
+    /// `None` when the memory subsystem is disabled (`NoConversationStore`
+    /// short-circuits before chunking would matter).
+    pub chunks: Option<Arc<SqliteHandle>>,
+    /// Snapshot of `[embedding]` config so the persistence hook can
+    /// build a `ChunkingConfig` without re-reading the top-level
+    /// `Config` struct on every message.
+    pub embedding_cfg: EmbeddingConfig,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `run_agent_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
@@ -97,6 +142,13 @@ impl AppState {
         let memory: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
         let conversations: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
         let memory_ops = Arc::new(MemoryOps::new(memory.clone(), conversations.clone()));
+        let embedding_cfg = config.embedding.clone();
+        // Bounded with capacity 1 + dropped receiver = closed channel.
+        // Every `try_send` will fail; the persistence hook degrades to
+        // chunk-only behavior, which is what we want when the embedding
+        // subsystem isn't wired in.
+        let (embed_tx, embed_rx) = mpsc::channel::<EmbedJob>(1);
+        drop(embed_rx);
         Self {
             config,
             llm,
@@ -110,6 +162,11 @@ impl AppState {
             conversations,
             memory_ops,
             session_id: Arc::new(SessionId::new()),
+            embedder: Arc::new(NoEmbedder),
+            semantic: Arc::new(NoSemanticStore),
+            embed_tx,
+            chunks: None,
+            embedding_cfg,
             agent_turn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -151,6 +208,45 @@ impl AppState {
     /// auto-generated default.
     pub fn with_session(mut self, s: Arc<SessionId>) -> Self {
         self.session_id = s;
+        self
+    }
+
+    /// Builder-style setter for the embedder. Defaults to `NoEmbedder`
+    /// so tests and fallback paths still satisfy the trait bound.
+    pub fn with_embedder(mut self, e: Arc<dyn Embedder>) -> Self {
+        self.embedder = e;
+        self
+    }
+
+    /// Builder-style setter for the semantic-search store.
+    pub fn with_semantic(mut self, s: Arc<dyn SemanticStore>) -> Self {
+        self.semantic = s;
+        self
+    }
+
+    /// Builder-style setter for the embed-job sender. The daemon
+    /// supplies a live channel wired to the embedder task; tests can
+    /// inherit the closed sentinel from `new()`.
+    pub fn with_embed_tx(mut self, tx: mpsc::Sender<EmbedJob>) -> Self {
+        self.embed_tx = tx;
+        self
+    }
+
+    /// Builder-style setter for the SQLite handle, needed by the
+    /// persistence hook to send `WriteOp::StoreChunk`. Daemon startup
+    /// passes the same `Arc` it builds the conversation/memory stores
+    /// from; tests leave this as `None`.
+    pub fn with_chunks(mut self, h: Arc<SqliteHandle>) -> Self {
+        self.chunks = Some(h);
+        self
+    }
+
+    /// Builder-style setter for the embedding subsystem config. Default
+    /// is `Config::default().embedding` (matches the daemon's startup
+    /// path); tests can override to drive the persistence hook with a
+    /// disabled or differently-tuned config.
+    pub fn with_embedding_cfg(mut self, cfg: EmbeddingConfig) -> Self {
+        self.embedding_cfg = cfg;
         self
     }
 
@@ -203,25 +299,210 @@ impl AppState {
             Request::MemoryLoad { id, key } => self.handle_memory_load(id, key, tx).await,
             Request::MemoryList { id, prefix } => self.handle_memory_list(id, prefix, tx).await,
             Request::MemoryDelete { id, key } => self.handle_memory_delete(id, key, tx).await,
+            Request::MemorySemanticSearch { id, query, limit } => {
+                self.handle_memory_semantic_search(id, query, limit, tx)
+                    .await
+            }
         }
     }
 
-    /// Fire-and-forget persist of one message. Spawns a task that
-    /// awaits the writer's oneshot ack and logs failures — the caller
-    /// (the chat-turn dispatch loop) returns immediately so DB latency
-    /// never throttles token streaming.
+    /// Fire-and-forget persist of one message. Spawns a task that:
+    /// 1. Writes the row via the conversation store (returns row id).
+    /// 2. If the row is a User/Assistant text message and embedding is
+    ///    enabled, splits the content into chunks, persists each chunk
+    ///    (returns chunk id), and `try_send`s an `EmbedJob::Chunk` for
+    ///    each so the embedder task can index it.
+    ///
+    /// The whole pipeline is on a `tokio::spawn`'d task so the dispatch
+    /// loop never waits on disk or the embed queue. `try_send` (not
+    /// `send`) so a wedged embedder doesn't backpressure persistence —
+    /// dropped jobs just leave the chunk row unindexed for the next
+    /// backfill pass.
     fn persist_message_fire_and_forget(&self, turn: Option<TurnId>, msg: PersistedMessage) {
         let conv = self.conversations.clone();
         let session = self.session_id.clone();
+        let chunks_handle = self.chunks.clone();
+        let embed_tx = self.embed_tx.clone();
+        let embedding_enabled = self.embedding_cfg.enabled;
+        let chunking_cfg = ChunkingConfig {
+            chunk_chars: self.embedding_cfg.chunk_chars,
+            overlap_chars: self.embedding_cfg.chunk_overlap_chars,
+        };
+        // Snapshot what we need for chunking *before* moving `msg` into
+        // append_message. Tool-call assistant rows and tool-result rows
+        // skip chunking: the former have empty content, the latter are
+        // JSON-y noise that pollutes semantic search (FTS5 still covers
+        // them via the conversations table).
+        let should_embed = embedding_enabled
+            && chunks_handle.is_some()
+            && matches!(msg.role, PersistedRole::User | PersistedRole::Assistant)
+            && !msg.content.is_empty()
+            && msg.tool_calls.is_none();
+        let content_for_chunks = if should_embed {
+            Some(msg.content.clone())
+        } else {
+            None
+        };
         tokio::spawn(async move {
-            if let Err(e) = conv.append_message(&session, turn, msg).await {
-                tracing::warn!(
-                    target: "assistd::memory",
-                    error = %e,
-                    "failed to persist message (continuing)"
-                );
+            let row_id = match conv.append_message(&session, turn, msg).await {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "assistd::memory",
+                        error = %e,
+                        "failed to persist message (continuing)"
+                    );
+                    return;
+                }
+            };
+            // NoConversationStore returns 0 — nothing to chunk.
+            let Some(content) = content_for_chunks else {
+                return;
+            };
+            let Some(chunks_handle) = chunks_handle else {
+                return;
+            };
+            if row_id == 0 {
+                return;
+            }
+            for (idx, chunk) in chunk_message(&content, &chunking_cfg)
+                .into_iter()
+                .enumerate()
+            {
+                match chunks_handle
+                    .store_chunk(row_id, idx as i64, chunk.clone(), None)
+                    .await
+                {
+                    Ok(chunk_id) => {
+                        if embed_tx
+                            .try_send(EmbedJob::Chunk {
+                                chunk_id,
+                                text: chunk,
+                            })
+                            .is_err()
+                        {
+                            tracing::debug!(
+                                target: "assistd::embed",
+                                chunk_id,
+                                "embed queue full or closed; dropping job"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        target: "assistd::memory",
+                        conversation_id = row_id,
+                        chunk_index = idx,
+                        error = %e,
+                        "failed to persist chunk (continuing)"
+                    ),
+                }
             }
         });
+    }
+
+    /// Embed the user query, find the top-K nearest conversation chunks,
+    /// and stash a "Relevant past context: …" system message on the LLM
+    /// backend's conversation. Consumed by the next `step` and cleared
+    /// so a follow-up turn re-runs retrieval.
+    ///
+    /// Best-effort: returns errors but the caller treats every failure
+    /// (embedder down, no hits, dim mismatch, …) as "skip injection".
+    async fn inject_semantic_context(&self, query: &str) -> Result<()> {
+        // Skip very short queries — no useful semantic signal in 1-2
+        // chars, and the cost of a wasted embed call is non-zero.
+        if query.trim().chars().count() < 3 {
+            return Ok(());
+        }
+        let vec = self.embedder.embed(query.to_string()).await?;
+        let model = self.embedder.model().to_string();
+        if model.is_empty() {
+            // NoEmbedder path: model() == "" → never matches stored
+            // rows. Bail without a write.
+            return Ok(());
+        }
+        let top_k = self.embedding_cfg.top_k as usize;
+        let hits = self.semantic.nearest_chunks(vec, top_k, &model).await?;
+        if hits.is_empty() {
+            return Ok(());
+        }
+        let mut block = String::from("Relevant past context:\n");
+        for h in hits {
+            let snippet = truncate_for_context(&h.content, 200);
+            // One line per hit; format keeps the model-visible block
+            // compact and predictable. `as_wire()` is "user"/"assistant".
+            block.push_str(&format!(
+                "- [{} {} sim={:.0}%] {}\n",
+                h.timestamp,
+                h.role.as_wire(),
+                h.similarity * 100.0,
+                snippet
+            ));
+        }
+        self.llm.set_transient_context(block).await?;
+        Ok(())
+    }
+
+    async fn handle_memory_semantic_search(
+        self: Arc<Self>,
+        id: String,
+        query: String,
+        limit: u32,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        let model = self.embedder.model().to_string();
+        if model.is_empty() {
+            // Embedding subsystem disabled — emit Done with no hits.
+            // Mirrors the behavior of `MemorySearch` against an empty
+            // FTS5 index: clean stream, no error.
+            let _ = tx.send(Event::Done { id }).await;
+            return Ok(());
+        }
+        let limit = if limit == 0 {
+            assistd_tools::DEFAULT_SEARCH_LIMIT
+        } else {
+            limit as usize
+        };
+        let vec = match self.embedder.embed(query).await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("embed failed: {e:#}"),
+                    })
+                    .await;
+                return Err(e);
+            }
+        };
+        match self.semantic.nearest_chunks(vec, limit, &model).await {
+            Ok(hits) => {
+                for h in hits {
+                    let _ = tx
+                        .send(Event::SemanticHit {
+                            id: id.clone(),
+                            conversation_id: h.conversation_id,
+                            chunk_id: h.chunk_id,
+                            session_id: h.session_id,
+                            timestamp: h.timestamp,
+                            role: h.role.as_wire().into(),
+                            content: h.content,
+                            similarity: h.similarity,
+                        })
+                        .await;
+                }
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("semantic search failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
     }
 
     async fn handle_memory_search(
@@ -268,7 +549,11 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
         match self.memory_ops.save(&key, value).await {
-            Ok(()) => {
+            // The IPC `MemorySave` handler doesn't surface the row id —
+            // its only callers are the `assistd memory save` CLI which
+            // just wants confirmation. Discard the id; the LLM tool
+            // (`RememberTool`) is the one that consumes it directly.
+            Ok(_id) => {
                 let _ = tx.send(Event::Done { id }).await;
                 Ok(())
             }
@@ -454,6 +739,22 @@ impl AppState {
         // way to the LLM — fire-and-forget so the dispatch loop below
         // never waits on disk.
         self.persist_message_fire_and_forget(turn_id, PersistedMessage::user(text.clone()));
+
+        // Auto-inject "Relevant past context: …" from semantic search
+        // before the LLM runs. AC #3: every query that hits an enabled
+        // embedder gets retrieval context as a transient system message.
+        // Best-effort: any failure (embedder down, dim mismatch, empty
+        // hits) downgrades to debug-log + no injection.
+        if self.embedding_cfg.enabled
+            && self.embedding_cfg.auto_inject
+            && let Err(e) = self.inject_semantic_context(&text).await
+        {
+            tracing::debug!(
+                target: "assistd::embed",
+                error = %e,
+                "semantic context injection failed; continuing without it"
+            );
+        }
 
         let (llm_tx, mut llm_rx) = mpsc::channel::<LlmEvent>(32);
         let llm = self.llm.clone();

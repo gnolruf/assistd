@@ -295,9 +295,24 @@ impl LlmBackend for LlamaChatClient {
         match outcome {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)
-            | StreamOutcome::ClientDisconnected(accum) => commit_step(&mut conv, accum),
+            | StreamOutcome::ClientDisconnected(accum) => {
+                let result = commit_step(&mut conv, accum);
+                // Successful commit (Final or ToolCalls) consumes the
+                // transient context — the next turn must re-run
+                // retrieval rather than reuse stale hits. PreEmitError
+                // path leaves it in place so a retry sees the same
+                // injected block.
+                let _ = conv.consume_transient_context();
+                result
+            }
             StreamOutcome::PreEmitError(e) => Err(anyhow::Error::new(e)),
         }
+    }
+
+    async fn set_transient_context(&self, text: String) -> Result<()> {
+        let mut conv = self.conv.lock().await;
+        conv.set_transient_context(text);
+        Ok(())
     }
 }
 

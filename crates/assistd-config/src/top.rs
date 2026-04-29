@@ -6,6 +6,7 @@ use crate::agent::AgentConfig;
 use crate::chat::ChatConfig;
 use crate::compositor::CompositorConfig;
 use crate::daemon::DaemonConfig;
+use crate::embedding::EmbeddingConfig;
 use crate::errors::ConfigError;
 use crate::llama::LlamaServerConfig;
 use crate::memory::MemoryConfig;
@@ -36,6 +37,8 @@ pub struct Config {
     pub agent: AgentConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
 }
 
 impl Config {
@@ -323,6 +326,49 @@ impl Config {
                 "memory.retention_days exceeds 100 years; check for a typo (use 0 for forever)"
                     .into(),
             );
+        }
+
+        if self.embedding.enabled {
+            if self.embedding.model.trim().is_empty() {
+                errors.push("embedding.model must not be empty when embedding.enabled".into());
+            } else if !is_valid_hf_id(&self.embedding.model) {
+                errors.push("embedding.model must be of the form '<owner>/<repo>:<file>'".into());
+            }
+            if self.embedding.host.is_empty() {
+                errors.push("embedding.host must not be empty when embedding.enabled".into());
+            }
+            if self.embedding.port == 0 {
+                errors.push("embedding.port must not be 0".into());
+            }
+            if self.embedding.port == self.llama_server.port {
+                errors.push(
+                    "embedding.port must differ from llama_server.port (the chat server)".into(),
+                );
+            }
+            if self.remote.enabled && self.embedding.port == self.remote.port {
+                errors.push(
+                    "embedding.port must differ from remote.port when remote access is enabled"
+                        .into(),
+                );
+            }
+            if self.embedding.top_k == 0 {
+                errors.push("embedding.top_k must be greater than 0".into());
+            }
+            if self.embedding.chunk_chars == 0 {
+                errors.push("embedding.chunk_chars must be greater than 0".into());
+            }
+            if self.embedding.chunk_overlap_chars >= self.embedding.chunk_chars {
+                errors.push(
+                    "embedding.chunk_overlap_chars must be strictly less than embedding.chunk_chars"
+                        .into(),
+                );
+            }
+            if self.embedding.ready_timeout_secs == 0 {
+                errors.push("embedding.ready_timeout_secs must be greater than 0".into());
+            }
+            if self.embedding.request_timeout_secs == 0 {
+                errors.push("embedding.request_timeout_secs must be greater than 0".into());
+            }
         }
 
         if errors.is_empty() {

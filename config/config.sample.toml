@@ -398,3 +398,58 @@ hotkey = "Super+Escape"
 # Capture subprocess timeout in seconds. Must be > 0. A wedged compositor
 # is killed at the deadline and the command returns exit 137.
 # timeout_secs = 5
+
+[memory]
+# Persistent memory: SQLite-backed conversation history + saved facts (the
+# `remember` / `recall` LLM tools). Master switch — when false the daemon
+# binds the no-op placeholder and skips opening the DB.
+# enabled = true
+# Path to the SQLite database file. Default resolves to
+# $XDG_DATA_HOME/assistd/memory.db (or $HOME/.local/share/assistd/memory.db).
+# db_path = "/home/you/.local/share/assistd/memory.db"
+# Days to retain history. 0 means keep forever. (The retention sweeper
+# isn't shipped yet; the field exists so future work doesn't need a
+# schema-version bump.)
+# retention_days = 0
+
+[embedding]
+# Semantic memory search: a separate, dedicated llama-server instance
+# (port distinct from llama_server.port) that serves /v1/embeddings.
+# Independent of the chat router — embeddings keep working when chat
+# is Drowsy/Sleeping. Each user query auto-injects the top-K most
+# similar past chunks as a "Relevant past context: …" system message,
+# and the LLM gets `recall(mode="semantic")` and `search_memory` tools.
+#
+# Master switch. When false the daemon binds NoEmbedder + NoSemanticStore
+# and the retrieval-touching tools register but no-op silently.
+# enabled = true
+# HuggingFace id passed verbatim to the embed server's --hf-repo.
+# Format: <owner>/<repo>:<file>. The default is a small (~140 MB Q4),
+# 768-dim model with strong retrieval quality on conversational text.
+# model = "nomic-ai/nomic-embed-text-v1.5-GGUF:nomic-embed-text-v1.5.Q4_K_M.gguf"
+# Bind host. Should be loopback.
+# host = "127.0.0.1"
+# Bind port. MUST differ from llama_server.port and remote.port.
+# port = 8386
+# -ngl count for the embed server. Default 0 (CPU only) so the embed
+# model never competes with the chat model for VRAM. Small embedders
+# are CPU-fast; only raise this if your chat model leaves VRAM headroom.
+# gpu_layers = 0
+# Seconds to wait for /health to come up after spawn. First-time HF
+# downloads may need minutes.
+# ready_timeout_secs = 300
+# Per-request HTTP timeout against /v1/embeddings.
+# request_timeout_secs = 30
+# How many nearest-neighbor matches to retrieve per query for
+# auto-injection and the search_memory tool's default.
+# top_k = 5
+# Char-window size for chunking conversation messages. Messages
+# shorter than this become a single chunk.
+# chunk_chars = 512
+# Char-overlap between consecutive chunks so semantically coherent
+# runs don't get cut at chunk boundaries. Must be < chunk_chars.
+# chunk_overlap_chars = 64
+# When true, every user query auto-injects the top-K conversation
+# chunks as a "Relevant past context: …" system message. Set false
+# to require explicit `search_memory` tool invocations only.
+# auto_inject = true

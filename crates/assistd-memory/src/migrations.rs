@@ -108,10 +108,35 @@ CREATE TABLE embeddings (
 CREATE INDEX idx_embeddings_model ON embeddings(model);
 "#;
 
+/// V2: per-memory embeddings.
+///
+/// Adds a sibling table to `embeddings` that indexes the `memories` KV
+/// rows for semantic recall. Kept separate from `embeddings` (which is
+/// chunk-keyed) because (a) the data sources are independent — chunks
+/// are unstructured conversation text, memories are key/value facts —
+/// and (b) `ON DELETE CASCADE` on each FK gives free cleanup when the
+/// parent row is deleted, with no nullable FKs or CHECK constraints.
+///
+/// `UNIQUE(memory_id)` is what makes the
+/// `INSERT ... ON CONFLICT(memory_id) DO UPDATE` upsert work — re-saving
+/// the same memory key (which keeps its row id) overwrites the embedding
+/// in place, so a stale vector never survives a value change.
+const V2_SQL: &str = r#"
+CREATE TABLE memory_embeddings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id   INTEGER NOT NULL UNIQUE REFERENCES memories(id) ON DELETE CASCADE,
+    model       TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX idx_memory_embeddings_model ON memory_embeddings(model);
+"#;
+
 /// Build the full migration set. `'static` because the SQL is embedded
 /// in the binary; rusqlite_migration just needs read access.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1_SQL)])
+    Migrations::new(vec![M::up(V1_SQL), M::up(V2_SQL)])
 }
 
 /// Apply all pending migrations to `conn`. Idempotent: re-running on an
@@ -164,8 +189,10 @@ mod tests {
             "idx_conversations_turn",
             "idx_embeddings_model",
             "idx_memories_key",
+            "idx_memory_embeddings_model",
             "idx_turns_session",
             "memories",
+            "memory_embeddings",
             "schema_migrations",
             "sessions",
             "turns",

@@ -3,10 +3,11 @@ use assistd_core::{
     AppState, Config, ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput,
     PresenceManager, VoiceInput, VoiceOutput,
 };
+use assistd_embed::{EmbedService, Embedder, LlamaEmbedder, NoEmbedder, spawn_embedder_task};
 use assistd_llm::LlamaChatClient;
 use assistd_memory::{
-    ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, SqliteConversationStore,
-    SqliteHandle, SqliteMemoryStore,
+    ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, NoSemanticStore,
+    SemanticStore, SqliteConversationStore, SqliteHandle, SqliteMemoryStore, SqliteSemanticStore,
 };
 use assistd_tools::{DenyAllGate, MemoryOps};
 use assistd_voice::{
@@ -274,16 +275,19 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     // the placeholder fallback keeps the registration unconditional so
     // a startup error doesn't change the tool surface visible to the
     // model.
-    let (memory_store, conversation_store, memory_writer_handle, session_id_for_state) = if config
-        .memory
-        .enabled
-    {
+    let (
+        memory_store,
+        conversation_store,
+        memory_writer_handle,
+        session_id_for_state,
+        sqlite_handle,
+    ) = if config.memory.enabled {
         let db_path = std::path::PathBuf::from(&config.memory.db_path);
         match SqliteHandle::open(&db_path, shutdown_tx.subscribe()).await {
             Ok((handle, writer_handle)) => {
                 let handle = Arc::new(handle);
                 let conv_store = Arc::new(SqliteConversationStore::new(handle.clone()));
-                let mem_store = Arc::new(SqliteMemoryStore::new(handle));
+                let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
                 let session = match conv_store.begin_session(std::process::id()).await {
                     Ok(s) => Arc::new(s),
                     Err(e) => {
@@ -303,6 +307,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
                     conv_store as Arc<dyn ConversationStore>,
                     Some(writer_handle),
                     session,
+                    Some(handle),
                 )
             }
             Err(e) => {
@@ -315,6 +320,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
                     Arc::new(NoConversationStore) as Arc<dyn ConversationStore>,
                     None,
                     Arc::new(assistd_memory::SessionId::new()),
+                    None,
                 )
             }
         }
@@ -325,6 +331,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             Arc::new(NoConversationStore) as Arc<dyn ConversationStore>,
             None,
             Arc::new(assistd_memory::SessionId::new()),
+            None,
         )
     };
     // Keep a clone of the conversation store for the shutdown path
@@ -341,6 +348,123 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         conversation_store.clone(),
     ));
 
+    // Embedding subsystem: try-warn-fallback like memory and voice. A
+    // failed start downgrades to NoEmbedder + NoSemanticStore + closed
+    // channel, so retrieval-touching tools register but no-op rather
+    // than crashing the daemon. Independent of memory.enabled — but if
+    // memory is off, we wire NoSemanticStore even on success since
+    // there's no DB to read embeddings from.
+    let (
+        embedder,
+        semantic_store,
+        embed_tx,
+        embed_service_handle,
+        embedder_task_handle,
+        embedding_model_name,
+    ) = if config.embedding.enabled {
+        match EmbedService::start(config.embedding.clone(), shutdown_tx.subscribe()).await {
+            Ok(svc) => {
+                // Build the HTTP client; probe dim. Failure here downgrades
+                // the whole subsystem to fallback so tools still register.
+                match LlamaEmbedder::new(
+                    &config.embedding.host,
+                    config.embedding.port,
+                    config.embedding.model.clone(),
+                    std::time::Duration::from_secs(config.embedding.request_timeout_secs),
+                )
+                .await
+                {
+                    Ok(client) => {
+                        let model_name = config.embedding.model.clone();
+                        let embedder_arc: Arc<dyn Embedder> = Arc::new(client);
+                        let semantic: Arc<dyn SemanticStore> = match sqlite_handle.as_ref() {
+                            Some(h) => Arc::new(SqliteSemanticStore::new(h.clone())),
+                            None => Arc::new(NoSemanticStore),
+                        };
+                        let writer_tx = sqlite_handle
+                            .as_ref()
+                            .map(|h| h.writer_tx())
+                            .unwrap_or_else(|| {
+                                // No DB — embedder task has nowhere to ack
+                                // back to. Build a closed sender so any
+                                // try_send still no-ops and the worker
+                                // exits cleanly on shutdown.
+                                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                                drop(rx);
+                                Arc::new(tx)
+                            });
+                        let (etx, erx) = tokio::sync::mpsc::channel(256);
+                        let task = spawn_embedder_task(
+                            embedder_arc.clone(),
+                            writer_tx,
+                            erx,
+                            shutdown_tx.subscribe(),
+                        );
+                        info!(
+                            "embedding: ready (model={}, dim={}, port={})",
+                            embedder_arc.model(),
+                            embedder_arc.dim(),
+                            config.embedding.port,
+                        );
+                        (
+                            embedder_arc,
+                            semantic,
+                            etx,
+                            Some(svc),
+                            Some(task),
+                            model_name,
+                        )
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "embedding: client probe failed ({e:#}); semantic search disabled this run"
+                        );
+                        // Still hold svc so its supervisor task gets
+                        // awaited on shutdown — abandoning it would leak
+                        // the child until the daemon exits.
+                        let (tx, rx) = tokio::sync::mpsc::channel(1);
+                        drop(rx);
+                        (
+                            Arc::new(NoEmbedder) as Arc<dyn Embedder>,
+                            Arc::new(NoSemanticStore) as Arc<dyn SemanticStore>,
+                            tx,
+                            Some(svc),
+                            None,
+                            String::new(),
+                        )
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "embedding: failed to start ({e:#}); semantic search disabled this run"
+                );
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                drop(rx);
+                (
+                    Arc::new(NoEmbedder) as Arc<dyn Embedder>,
+                    Arc::new(NoSemanticStore) as Arc<dyn SemanticStore>,
+                    tx,
+                    None,
+                    None,
+                    String::new(),
+                )
+            }
+        }
+    } else {
+        info!("embedding: disabled in config (embedding.enabled = false)");
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        (
+            Arc::new(NoEmbedder) as Arc<dyn Embedder>,
+            Arc::new(NoSemanticStore) as Arc<dyn SemanticStore>,
+            tx,
+            None,
+            None,
+            String::new(),
+        )
+    };
+
     // IPC-connected clients (including `assistd query`) have no interactive
     // channel, so destructive bash commands are denied by default. To
     // approve such commands, run them from the chat TUI where the modal
@@ -351,6 +475,10 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         Arc::new(DenyAllGate),
         vision_gate.clone(),
         memory_ops,
+        embedder.clone(),
+        semantic_store.clone(),
+        embed_tx.clone(),
+        embedding_model_name.clone(),
     )?;
     info!(
         "tools: registered {} (overflow dir {})",
@@ -363,21 +491,28 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let continuous_enabled = config.voice.enabled && config.voice.continuous.enabled;
     let continuous_start_on_launch = config.voice.continuous.start_on_launch;
 
-    let state = Arc::new(
-        AppState::new(
-            config,
-            Arc::new(chat),
-            presence.clone(),
-            tools,
-            voice.clone(),
-            listener.clone(),
-            voice_output,
-        )
-        .with_vision_revalidator(vision_revalidator)
-        .with_memory(memory_store)
-        .with_conversations(conversation_store)
-        .with_session(session_id_for_state),
-    );
+    let embedding_cfg_for_state = config.embedding.clone();
+    let mut state_builder = AppState::new(
+        config,
+        Arc::new(chat),
+        presence.clone(),
+        tools,
+        voice.clone(),
+        listener.clone(),
+        voice_output,
+    )
+    .with_vision_revalidator(vision_revalidator)
+    .with_memory(memory_store)
+    .with_conversations(conversation_store)
+    .with_session(session_id_for_state)
+    .with_embedder(embedder)
+    .with_semantic(semantic_store)
+    .with_embed_tx(embed_tx)
+    .with_embedding_cfg(embedding_cfg_for_state);
+    if let Some(handle) = sqlite_handle.clone() {
+        state_builder = state_builder.with_chunks(handle);
+    }
+    let state = Arc::new(state_builder);
 
     let listen_handles = if continuous_enabled {
         Some(listen_dispatcher::spawn(
@@ -427,6 +562,19 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     if let Some(handles) = listen_handles {
         let _ = handles.forwarder.await;
         let _ = handles.presence_gate.await;
+    }
+    // Embedder task runs BEFORE the memory writer drains so any
+    // in-flight EmbedJob lands as a StoreChunkEmbedding/StoreMemoryEmbedding
+    // op in the writer queue, which then drains.
+    if let Some(h) = embedder_task_handle {
+        let _ = h.await;
+    }
+    // Then tear down the embed-server process. The supervisor task
+    // observes the shared shutdown watch (already flipped) and exits.
+    if let Some(svc) = embed_service_handle {
+        if let Err(e) = svc.shutdown().await {
+            tracing::warn!("embed-server shutdown error: {e:#}");
+        }
     }
     if let Some(h) = memory_writer_handle {
         // Awaiting the writer ensures the in-flight queue is drained

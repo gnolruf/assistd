@@ -55,10 +55,52 @@ pub enum WriteOp {
         key: String,
         value: String,
         source_conversation_id: Option<i64>,
-        ack: oneshot::Sender<Result<()>>,
+        /// Returns the row id of the inserted/updated memory. Callers
+        /// that fire-and-forget `save` (the IPC `MemorySave` handler)
+        /// can ignore it; callers that want to enqueue an embed job for
+        /// the value (the `RememberTool`) need it to FK the embedding.
+        ack: oneshot::Sender<Result<i64>>,
     },
     DeleteMemory {
         key: String,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    /// Persist one chunk of a conversation message. Returns the chunk
+    /// rowid via the ack so the caller can dispatch an embed job.
+    StoreChunk {
+        conversation_id: i64,
+        chunk_index: i64,
+        content: String,
+        token_count: Option<i64>,
+        ack: oneshot::Sender<Result<i64>>,
+    },
+    /// Store an embedding vector for a `conversation_chunks` row.
+    /// Idempotent on `(chunk_id)` via `ON CONFLICT(conversation_chunk_id)
+    /// DO UPDATE` — the unique FK column lets a re-embed overwrite.
+    StoreChunkEmbedding {
+        chunk_id: i64,
+        model: String,
+        dim: i64,
+        vector: Vec<u8>,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    /// Store an embedding vector for a `memories` row. Idempotent on
+    /// `(memory_id)` for the same reason as above — when a memory is
+    /// re-saved (UPSERT keeps the row id), the embedding refreshes in
+    /// place rather than accumulating duplicates.
+    StoreMemoryEmbedding {
+        memory_id: i64,
+        model: String,
+        dim: i64,
+        vector: Vec<u8>,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    /// Drop every chunk (and cascade-drop its embedding) for one
+    /// conversation row. Currently unused — added for the future
+    /// "re-chunk" workflow when a user edits or deletes a turn so the
+    /// FK shape doesn't need a follow-up migration.
+    DeleteChunksForConversation {
+        conversation_id: i64,
         ack: oneshot::Sender<Result<()>>,
     },
 }
@@ -154,6 +196,43 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
         }
         WriteOp::DeleteMemory { key, ack } => {
             let res = delete_memory(conn, key).await;
+            let _ = ack.send(res);
+        }
+        WriteOp::StoreChunk {
+            conversation_id,
+            chunk_index,
+            content,
+            token_count,
+            ack,
+        } => {
+            let res = store_chunk(conn, conversation_id, chunk_index, content, token_count).await;
+            let _ = ack.send(res);
+        }
+        WriteOp::StoreChunkEmbedding {
+            chunk_id,
+            model,
+            dim,
+            vector,
+            ack,
+        } => {
+            let res = store_chunk_embedding(conn, chunk_id, model, dim, vector).await;
+            let _ = ack.send(res);
+        }
+        WriteOp::StoreMemoryEmbedding {
+            memory_id,
+            model,
+            dim,
+            vector,
+            ack,
+        } => {
+            let res = store_memory_embedding(conn, memory_id, model, dim, vector).await;
+            let _ = ack.send(res);
+        }
+        WriteOp::DeleteChunksForConversation {
+            conversation_id,
+            ack,
+        } => {
+            let res = delete_chunks_for_conversation(conn, conversation_id).await;
             let _ = ack.send(res);
         }
     }
@@ -266,22 +345,30 @@ async fn save_memory(
     key: String,
     value: String,
     source: Option<i64>,
-) -> Result<()> {
+) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
-    conn.call(move |c| {
-        c.execute(
-            "INSERT INTO memories (key, value, source_conversation_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)
-             ON CONFLICT(key) DO UPDATE SET
-                 value = excluded.value,
-                 source_conversation_id = excluded.source_conversation_id,
-                 updated_at = excluded.updated_at",
-            rusqlite::params![key, value, source, now],
-        )?;
-        Ok(())
-    })
-    .await
-    .context("save_memory")
+    // `RETURNING id` (SQLite >= 3.35) gives us the row id of either the
+    // freshly-inserted row or the row updated via ON CONFLICT. Saves an
+    // extra `SELECT id FROM memories WHERE key = ?` round-trip — and the
+    // caller (`RememberTool`) needs the id to FK an embedding row.
+    let id = conn
+        .call(move |c| {
+            let id: i64 = c.query_row(
+                "INSERT INTO memories (key, value, source_conversation_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)
+                 ON CONFLICT(key) DO UPDATE SET
+                     value = excluded.value,
+                     source_conversation_id = excluded.source_conversation_id,
+                     updated_at = excluded.updated_at
+                 RETURNING id",
+                rusqlite::params![key, value, source, now],
+                |r| r.get(0),
+            )?;
+            Ok(id)
+        })
+        .await
+        .context("save_memory")?;
+    Ok(id)
 }
 
 async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
@@ -294,6 +381,98 @@ async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
     })
     .await
     .context("delete_memory")
+}
+
+async fn store_chunk(
+    conn: &Connection,
+    conversation_id: i64,
+    chunk_index: i64,
+    content: String,
+    token_count: Option<i64>,
+) -> Result<i64> {
+    let id = conn
+        .call(move |c| {
+            // Idempotent on (conversation_id, chunk_index): re-running
+            // chunking for the same row replaces in place.
+            let id: i64 = c.query_row(
+                "INSERT INTO conversation_chunks (conversation_id, chunk_index, content, token_count)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(conversation_id, chunk_index) DO UPDATE SET
+                     content = excluded.content,
+                     token_count = excluded.token_count
+                 RETURNING id",
+                rusqlite::params![conversation_id, chunk_index, content, token_count],
+                |r| r.get(0),
+            )?;
+            Ok(id)
+        })
+        .await
+        .context("store_chunk")?;
+    Ok(id)
+}
+
+async fn store_chunk_embedding(
+    conn: &Connection,
+    chunk_id: i64,
+    model: String,
+    dim: i64,
+    vector: Vec<u8>,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO embeddings (conversation_chunk_id, model, dim, vector, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(conversation_chunk_id) DO UPDATE SET
+                 model = excluded.model,
+                 dim = excluded.dim,
+                 vector = excluded.vector,
+                 created_at = excluded.created_at",
+            rusqlite::params![chunk_id, model, dim, vector, now],
+        )?;
+        Ok(())
+    })
+    .await
+    .context("store_chunk_embedding")
+}
+
+async fn store_memory_embedding(
+    conn: &Connection,
+    memory_id: i64,
+    model: String,
+    dim: i64,
+    vector: Vec<u8>,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.call(move |c| {
+        c.execute(
+            "INSERT INTO memory_embeddings (memory_id, model, dim, vector, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(memory_id) DO UPDATE SET
+                 model = excluded.model,
+                 dim = excluded.dim,
+                 vector = excluded.vector,
+                 created_at = excluded.created_at",
+            rusqlite::params![memory_id, model, dim, vector, now],
+        )?;
+        Ok(())
+    })
+    .await
+    .context("store_memory_embedding")
+}
+
+async fn delete_chunks_for_conversation(conn: &Connection, conversation_id: i64) -> Result<()> {
+    conn.call(move |c| {
+        // ON DELETE CASCADE on the embeddings FK takes care of dropping
+        // any matching `embeddings` rows.
+        c.execute(
+            "DELETE FROM conversation_chunks WHERE conversation_id = ?1",
+            rusqlite::params![conversation_id],
+        )?;
+        Ok(())
+    })
+    .await
+    .context("delete_chunks_for_conversation")
 }
 
 /// Re-export the role wire mapping used by [`append_message`] so callers
