@@ -762,6 +762,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_loop_routes_remember_then_recall() {
+        // Drive the full loop through the same `RememberTool` /
+        // `RecallTool` impls the daemon registers, against a real
+        // SQLite-backed `MemoryOps`. Remember the pair on the first
+        // step, recall it on the second, then assert the recall's
+        // tool_result event surfaces the saved key:value to the model.
+        // Pins AC #1 + AC #2 wire-level: the pair is round-trippable
+        // through one agent turn.
+        use assistd_memory::{
+            ConversationStore, MemoryStore, SqliteConversationStore, SqliteHandle,
+            SqliteMemoryStore,
+        };
+        use assistd_tools::{MemoryOps, RecallTool, RememberTool};
+        use tokio::sync::watch;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("memory.db");
+        // Leak the tempdir for the test — `path` must outlive the
+        // handle, and cleanup happens at process exit.
+        std::mem::forget(temp);
+        let (_tx, rx) = watch::channel(false);
+        let (handle, _writer) = SqliteHandle::open(&path, rx).await.unwrap();
+        let handle = Arc::new(handle);
+        let mem: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(handle.clone()));
+        let conv: Arc<dyn ConversationStore> = Arc::new(SqliteConversationStore::new(handle));
+        let memory_ops = Arc::new(MemoryOps::new(mem, conv));
+
+        let mut tools = ToolRegistry::new();
+        tools.register(RememberTool::new(memory_ops.clone()));
+        tools.register(RecallTool::new(memory_ops));
+        let tools = Arc::new(tools);
+
+        // Step 1: model calls remember(...) — Step 2: model calls
+        // recall(prefix="") — Step 3: Final.
+        let backend = MockBackend::with(vec![
+            StepOutcome::ToolCalls(vec![ToolCall {
+                id: "c-1".into(),
+                name: "remember".into(),
+                arguments: serde_json::json!({
+                    "key": "editor_preference",
+                    "value": "vim",
+                }),
+            }]),
+            StepOutcome::ToolCalls(vec![ToolCall {
+                id: "c-2".into(),
+                name: "recall".into(),
+                arguments: serde_json::json!({"prefix": ""}),
+            }]),
+            StepOutcome::Final,
+        ]);
+
+        let (tx, mut rx) = mpsc::channel(32);
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "I prefer vim over emacs".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let events = collect(&mut rx).await;
+
+        // Two ToolCalls emitted, one for each step.
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ToolCall { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["remember", "recall"]);
+
+        // The recall ToolResult must carry the saved pair in `output`.
+        let recall_output = events
+            .iter()
+            .find_map(|e| match e {
+                LlmEvent::ToolResult { name, result, .. } if name == "recall" => Some(
+                    result
+                        .get("output")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                _ => None,
+            })
+            .expect("expected a recall ToolResult");
+        assert!(
+            recall_output.contains("editor_preference: vim"),
+            "recall must surface saved pair to the model: {recall_output:?}"
+        );
+
+        // And the model saw the recall's content pushed back as a
+        // tool_result on the second step's pushed_results.
+        let pushed = backend.pushed_results.lock().unwrap();
+        assert_eq!(pushed.len(), 2);
+        assert!(
+            pushed[1][0].content.contains("editor_preference: vim"),
+            "second push_tool_results should carry the recall's body: {:?}",
+            pushed[1][0].content
+        );
+    }
+
+    #[tokio::test]
     async fn cancellation_during_slow_step_preempts_loop() {
         // Fire a cancellation while the LLM step is still pending,
         // and verify run_agent_turn returns promptly via the
