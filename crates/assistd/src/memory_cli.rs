@@ -23,31 +23,37 @@ pub struct MemoryArgs {
 #[derive(Subcommand)]
 pub enum MemoryAction {
     /// Search persisted conversation content. Two modes:
-    /// - `fts` (default): SQLite FTS5 full-text search. Supports phrase
-    ///   queries (`"foo bar"`), boolean ops (`foo AND bar`), and prefix
-    ///   matches (`foo*`).
-    /// - `semantic`: cosine-similarity search over embedded chunks.
-    ///   Robust to paraphrase. Requires the embedding subsystem.
+    /// - `semantic` (default): cosine-similarity search over embedded
+    ///   chunks. Robust to paraphrase. Requires the embedding
+    ///   subsystem.
+    /// - `fts`: SQLite FTS5 full-text search. Supports phrase queries
+    ///   (`"foo bar"`), boolean ops (`foo AND bar`), and prefix matches
+    ///   (`foo*`).
     Search {
         /// Query string. Interpretation depends on `--mode`.
         query: String,
         /// Cap on number of hits returned.
-        #[arg(long, default_value = "20")]
+        #[arg(long, default_value = "5")]
         limit: u32,
-        /// Search mode. Defaults to `fts` (legacy behavior).
-        #[arg(long, value_enum, default_value_t = SearchMode::Fts)]
+        /// Search mode. Defaults to `semantic` (the most-relevant
+        /// ranking; pass `--mode fts` for keyword/exact-phrase work).
+        #[arg(long, value_enum, default_value_t = SearchMode::Semantic)]
         mode: SearchMode,
     },
     /// Persist a value under `key`. Overwrites any prior value.
     Save { key: String, value: String },
     /// Read the value previously stored at `key`.
     Load { key: String },
-    /// List keys whose name starts with `prefix`. Empty prefix lists
-    /// every key.
+    /// List all stored memories (id, key, value) whose key starts with
+    /// `prefix`. Empty prefix lists every memory. Output is one
+    /// tab-separated row per memory in lexicographic key order.
     List {
         #[arg(default_value = "")]
         prefix: String,
     },
+    /// Forget the memory with row id `id`. Prints `forgot id=N key=...`
+    /// on success; exits 2 with `no memory with id=N` on miss.
+    Forget { id: i64 },
     /// Remove `key` from the store. No-op if absent.
     Delete { key: String },
 }
@@ -75,7 +81,12 @@ impl MemoryAction {
             } => Request::MemorySemanticSearch { id, query, limit },
             MemoryAction::Save { key, value } => Request::MemorySave { id, key, value },
             MemoryAction::Load { key } => Request::MemoryLoad { id, key },
-            MemoryAction::List { prefix } => Request::MemoryList { id, prefix },
+            MemoryAction::List { prefix } => Request::MemoryListAll {
+                id,
+                prefix,
+                limit: 0,
+            },
+            MemoryAction::Forget { id: memory_id } => Request::MemoryForget { id, memory_id },
             MemoryAction::Delete { key } => Request::MemoryDelete { id, key },
         }
     }
@@ -89,6 +100,15 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             path.display()
         )
     })?;
+
+    // Capture the forget target id before `into_request` consumes the
+    // action — needed so the `MemoryForgetResult` printer can echo it
+    // back on the miss path (`no memory with id=N`), where the daemon
+    // doesn't carry a key.
+    let forget_target = match &args.action {
+        MemoryAction::Forget { id } => Some(*id),
+        _ => None,
+    };
 
     let (read_half, mut write_half) = stream.into_split();
     let req = args.action.into_request(Uuid::new_v4().to_string());
@@ -156,6 +176,43 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 for k in keys {
                     println!("{k}");
                 }
+            }
+            Event::MemoryRow {
+                memory_id,
+                key,
+                value,
+                ..
+            } => {
+                // Tab-separated id, key, value. Collapse newlines in
+                // value so a multi-line memory doesn't break the row
+                // boundary in shell pipelines.
+                let single_line = value.replace('\n', " ");
+                println!("{memory_id}\t{key}\t{single_line}");
+            }
+            Event::MemoryForgetResult {
+                deleted: true,
+                key: Some(k),
+                ..
+            } => {
+                let id = forget_target.unwrap_or(0);
+                println!("forgot id={id} key={k}");
+            }
+            Event::MemoryForgetResult { deleted: false, .. } => {
+                let id = forget_target.unwrap_or(0);
+                eprintln!("no memory with id={id}");
+                std::process::exit(2);
+            }
+            // `MemoryForgetResult { deleted: true, key: None }` is not
+            // produced by the daemon (a delete-by-id always has a key
+            // when it hits a row), but the type allows it; treat it as
+            // a successful no-op so we don't trip the missing-id exit.
+            Event::MemoryForgetResult {
+                deleted: true,
+                key: None,
+                ..
+            } => {
+                let id = forget_target.unwrap_or(0);
+                println!("forgot id={id}");
             }
             Event::Done { .. } => return Ok(()),
             Event::Error { message, .. } => {

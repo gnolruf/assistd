@@ -298,7 +298,13 @@ impl AppState {
             }
             Request::MemoryLoad { id, key } => self.handle_memory_load(id, key, tx).await,
             Request::MemoryList { id, prefix } => self.handle_memory_list(id, prefix, tx).await,
+            Request::MemoryListAll { id, prefix, limit } => {
+                self.handle_memory_list_all(id, prefix, limit, tx).await
+            }
             Request::MemoryDelete { id, key } => self.handle_memory_delete(id, key, tx).await,
+            Request::MemoryForget { id, memory_id } => {
+                self.handle_memory_forget(id, memory_id, tx).await
+            }
             Request::MemorySemanticSearch { id, query, limit } => {
                 self.handle_memory_semantic_search(id, query, limit, tx)
                     .await
@@ -644,6 +650,78 @@ impl AppState {
                     .send(Event::Error {
                         id,
                         message: format!("memory delete failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn handle_memory_list_all(
+        self: Arc<Self>,
+        id: String,
+        prefix: String,
+        limit: u32,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        match self.memory_ops.list_full(&prefix).await {
+            Ok(rows) => {
+                // `limit = 0` means no cap (matches the wire convention used
+                // by `MemorySearch`). Otherwise truncate after the SQL has
+                // already ordered lexicographically by key.
+                let cap = if limit == 0 {
+                    rows.len()
+                } else {
+                    rows.len().min(limit as usize)
+                };
+                for row in rows.into_iter().take(cap) {
+                    let _ = tx
+                        .send(Event::MemoryRow {
+                            id: id.clone(),
+                            memory_id: row.id,
+                            key: row.key,
+                            value: row.value,
+                        })
+                        .await;
+                }
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("memory list_all failed: {e:#}"),
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn handle_memory_forget(
+        self: Arc<Self>,
+        id: String,
+        memory_id: i64,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        match self.memory_ops.forget(memory_id).await {
+            Ok(removed) => {
+                let _ = tx
+                    .send(Event::MemoryForgetResult {
+                        id: id.clone(),
+                        deleted: removed.is_some(),
+                        key: removed,
+                    })
+                    .await;
+                let _ = tx.send(Event::Done { id }).await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("memory forget failed: {e:#}"),
                     })
                     .await;
                 Err(e)

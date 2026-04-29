@@ -115,7 +115,8 @@ enum Commands {
     Chat(chat::ChatArgs),
 
     /// Inspect or mutate persistent memory: search conversation
-    /// history, save / load / list / delete key-value memories.
+    /// history, save / load / list / forget / delete key-value
+    /// memories.
     #[cfg(feature = "client")]
     Memory(memory_cli::MemoryArgs),
 }

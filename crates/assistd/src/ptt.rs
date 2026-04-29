@@ -101,7 +101,9 @@ pub async fn run(action: PttAction) -> Result<()> {
             Event::MemoryHit { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
-            | Event::MemoryKeys { .. } => {}
+            | Event::MemoryKeys { .. }
+            | Event::MemoryRow { .. }
+            | Event::MemoryForgetResult { .. } => {}
             Event::Done { .. } => {
                 if wrote_delta {
                     writeln!(stdout)?;

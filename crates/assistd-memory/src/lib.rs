@@ -53,6 +53,17 @@ pub use sqlite::{
 use anyhow::Result;
 use async_trait::async_trait;
 
+/// One row from the `memories` table, exposed as a single struct for
+/// callers that need the row id alongside the key/value pair (the
+/// `assistd memory list` CLI prints `id\tkey\tvalue`; the `forget <id>`
+/// CLI takes the id from this struct's earlier output).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRecord {
+    pub id: i64,
+    pub key: String,
+    pub value: String,
+}
+
 /// Persistent key/value memory accessible to the daemon and the
 /// agent loop. Implementors must be `Send + Sync + 'static` because
 /// `AppState` holds them as `Arc<dyn MemoryStore>`.
@@ -81,11 +92,25 @@ pub trait MemoryStore: Send + Sync + 'static {
     /// remember it" and saves a probe-then-delete round trip.
     async fn delete(&self, key: &str) -> Result<()>;
 
+    /// Remove the row with `id`. Returns `Ok(Some(key))` with the key
+    /// of the deleted row on hit, `Ok(None)` when no row matched —
+    /// callers that need to distinguish hit/miss (the `assistd memory
+    /// forget <id>` CLI) use the option, callers that don't can ignore
+    /// it. Errs only on backend failure.
+    async fn delete_by_id(&self, id: i64) -> Result<Option<String>>;
+
     /// Enumerate keys whose name starts with `prefix`. Order is
     /// unspecified. Used for namespaced categories (`pref:`, `fact:`,
     /// `summary:`) so the agent can list "all preferences" without
     /// scanning the whole store.
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
+
+    /// Enumerate full rows whose key starts with `prefix`. Like
+    /// [`MemoryStore::list`] but returns `(id, key, value)` triples in
+    /// one round trip — used by the `assistd memory list` CLI which
+    /// prints all three fields. Order is unspecified at the trait
+    /// level (the SQLite impl yields lexicographic by key).
+    async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>>;
 }
 
 /// Successful-no-op fallback used when no persistent backend is
@@ -108,7 +133,15 @@ impl MemoryStore for NoMemoryStore {
         Ok(())
     }
 
+    async fn delete_by_id(&self, _id: i64) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     async fn list(&self, _prefix: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_full(&self, _prefix: &str) -> Result<Vec<MemoryRecord>> {
         Ok(Vec::new())
     }
 }
@@ -139,9 +172,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_memory_store_delete_by_id_returns_none() {
+        let store = NoMemoryStore;
+        assert!(store.delete_by_id(42).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn no_memory_store_list_returns_empty() {
         let store = NoMemoryStore;
         assert!(store.list("fact:").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_memory_store_list_full_returns_empty() {
+        let store = NoMemoryStore;
+        assert!(store.list_full("fact:").await.unwrap().is_empty());
     }
 
     #[test]
