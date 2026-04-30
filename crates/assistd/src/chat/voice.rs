@@ -1,178 +1,172 @@
-//! Chat-TUI-side glue for the push-to-talk voice pipeline.
+//! Chat-TUI voice glue, daemon-window edition.
 //!
-//! The chat TUI doesn't connect to the daemon's Unix socket — it
-//! runs the whole stack in-process. So the voice hotkey listener
-//! (shared with the daemon) drives a `MicVoiceInput` directly, and a
-//! watch-channel subscriber forwards state transitions to the App
-//! via the TUI's `VoiceEvent` channel.
+//! The TUI no longer owns a `MicVoiceInput` — the daemon does. We
+//! still spawn the global hotkey listener locally because PTT
+//! keystrokes need to arrive at the foreground process. The
+//! press/release callbacks dispatch `Request::PttStart` and
+//! `Request::PttStop` to the daemon over IPC; the daemon's
+//! response stream (`VoiceState` → `Transcription` → `Delta`s →
+//! `Done`) is forwarded onto the App's `ChatEvent` channel as
+//! `ChatEvent::Wire(_)` so the same reducer that handles
+//! query-driven streaming updates the listening indicator and the
+//! output pane uniformly.
 
 use std::sync::Arc;
 
-use assistd_core::{Config, NoVoiceInput, VoiceCaptureState, VoiceInput};
-use assistd_voice::MicVoiceInput;
+use assistd_core::Config;
+use assistd_ipc::{IpcClient, Request, VoiceCaptureState};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
+use uuid::Uuid;
 
+use super::app::ChatEvent;
 use crate::hotkey;
 
-/// Messages emitted by the voice pipeline into the TUI event loop.
-#[derive(Debug, Clone)]
-pub enum VoiceEvent {
-    /// Capture state moved to a new value. The TUI reducer updates
-    /// the "Listening…" / "transcribing…" indicator.
-    State(VoiceCaptureState),
-    /// Final transcription from the last PTT cycle. Empty string
-    /// means VAD trimmed the audio down to silence.
-    Transcription(String),
-    /// Non-fatal voice pipeline error — surfaced as a TUI notice,
-    /// does not terminate the listener.
-    Error(String),
-}
-
-/// Handle to the background pieces of the TUI's voice pipeline.
-/// Fields are retained (not dropped) so the hotkey listener and
-/// state-forwarder Arc references stay alive for the TUI lifetime.
-/// `voice` is exposed in case the chat TUI ever needs to reach into
-/// the trait directly (e.g. a keyboard-bound "mute" toggle).
+/// Handles owned by the voice glue. Held by the caller for the
+/// lifetime of the TUI session so the hotkey listener doesn't drop
+/// its `Arc` references mid-run. Voice itself runs in the daemon —
+/// this struct exists only to keep the local hotkey thread alive.
 #[allow(dead_code)]
 pub struct VoicePipeline {
-    pub voice: Arc<dyn VoiceInput>,
     pub hotkey_handle: Option<JoinHandle<()>>,
-    pub state_forwarder: JoinHandle<()>,
 }
 
-/// Build the voice subsystem for the chat TUI.
+/// Build the chat-TUI voice pipeline.
 ///
-/// - If `voice.enabled = false`, returns a `NoVoiceInput` stub so
-///   downstream code doesn't need to special-case absence.
-/// - On success, spawns:
-///     1. The shared `hotkey::spawn_listener` (press = start record,
-///        release = stop + transcribe). Skipped when
-///        `voice.hotkey` is empty or the WM is Wayland-only.
-///     2. A state forwarder that watches the trait's `subscribe()`
-///        channel and pushes `VoiceEvent::State` into the TUI.
-/// - The worker that awaits a completed transcription and emits
-///   `VoiceEvent::Transcription` is attached inside the hotkey's
-///   release handler (via a custom release_callback).
+/// - When `voice.enabled = false`, returns a placeholder with no
+///   hotkey bound — the daemon's voice IPC remains reachable for
+///   anything that wants to drive PTT manually (`assistd ptt-start`).
+/// - Otherwise spawns `crate::hotkey::spawn_listener` against an
+///   IPC-shimmed [`assistd_voice::VoiceInput`] proxy whose
+///   `start_recording` and `stop_and_transcribe` issue Unix-socket
+///   requests to the daemon. The daemon's streaming response flows
+///   into `chat_tx` so the UI reducer sees Whisper transitions and
+///   the auto-dispatched query response.
 pub async fn spawn(
     config: &Config,
-    tx: mpsc::Sender<VoiceEvent>,
+    ipc: Arc<IpcClient>,
+    chat_tx: mpsc::Sender<ChatEvent>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> VoicePipeline {
-    let voice: Arc<dyn VoiceInput> = if config.voice.enabled {
-        info!(
-            "voice: building mic input ({})",
-            config.voice.transcription.model
-        );
-        match MicVoiceInput::from_config(&config.voice).await {
-            Ok(v) => Arc::new(v),
-            Err(e) => {
-                warn!("voice input failed to initialize: {e:#}");
-                let _ = tx
-                    .send(VoiceEvent::Error(format!("init failed: {e}")))
-                    .await;
-                Arc::new(NoVoiceInput::new())
-            }
-        }
-    } else {
-        Arc::new(NoVoiceInput::new())
-    };
+    if !config.voice.enabled {
+        info!("voice: disabled in config; PTT hotkey will not bind");
+        return VoicePipeline {
+            hotkey_handle: None,
+        };
+    }
 
-    let state_forwarder = spawn_state_forwarder(voice.clone(), tx.clone(), shutdown_rx.clone());
+    info!(
+        "voice: routing PTT through daemon IPC (hotkey={:?})",
+        config.voice.hotkey
+    );
 
-    // For the TUI we replace the hotkey's bare `start/stop` calls
-    // with a wrapper that also forwards the transcription result as
-    // a VoiceEvent — so the TUI can auto-submit without reaching
-    // back into the voice trait.
-    let tui_voice = Arc::new(TuiVoiceAdapter {
-        inner: voice.clone(),
-        tx: tx.clone(),
-    });
+    // The hotkey listener was originally written to call into a local
+    // `Arc<dyn VoiceInput>`. The daemon-window edition keeps the
+    // public surface unchanged but routes both lifecycle methods over
+    // the wire.
+    let proxy: Arc<dyn assistd_voice::VoiceInput> = Arc::new(IpcVoiceProxy::new(ipc, chat_tx));
     let hotkey_handle = hotkey::spawn_listener(
         &config.presence,
         &config.voice,
-        None, // chat TUI doesn't own a PresenceManager for hotkey use
-        tui_voice,
-        None, // chat TUI doesn't run the continuous listener
-        None, // chat TUI doesn't own a VoiceOutputController either
+        None, // chat TUI doesn't own a PresenceManager
+        proxy,
+        None, // continuous-listen runs in the daemon
+        None, // VoiceOutputController also lives in the daemon
         shutdown_rx,
     );
 
-    VoicePipeline {
-        voice,
-        hotkey_handle,
-        state_forwarder,
-    }
+    VoicePipeline { hotkey_handle }
 }
 
-fn spawn_state_forwarder(
-    voice: Arc<dyn VoiceInput>,
-    tx: mpsc::Sender<VoiceEvent>,
-    mut shutdown: watch::Receiver<bool>,
-) -> JoinHandle<()> {
-    let mut rx = voice.subscribe();
-    tokio::spawn(async move {
-        // Seed with the initial state so the indicator reflects
-        // reality even if the first real transition is far off.
-        let initial = *rx.borrow_and_update();
-        let _ = tx.send(VoiceEvent::State(initial)).await;
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        break;
-                    }
-                }
-                changed = rx.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    let s = *rx.borrow_and_update();
-                    if tx.send(VoiceEvent::State(s)).await.is_err() {
-                        break;
-                    }
-                }
-            }
+/// `VoiceInput` adapter that forwards calls to the daemon's IPC
+/// surface. `start_recording` does a one-shot `PttStart`. The hotkey
+/// listener calls `stop_and_transcribe` when the user releases the
+/// PTT key — that goes through `PttStop`, whose response stream the
+/// daemon dispatches as a Query. We forward every event onto the
+/// app's `ChatEvent::Wire` channel and return the transcription text
+/// so the listener's existing log line doesn't go silent. Reducer
+/// logic in `App::on_wire_event` handles the actual UI updates.
+struct IpcVoiceProxy {
+    ipc: Arc<IpcClient>,
+    chat_tx: mpsc::Sender<ChatEvent>,
+    state: watch::Sender<VoiceCaptureState>,
+    state_rx: watch::Receiver<VoiceCaptureState>,
+}
+
+impl IpcVoiceProxy {
+    fn new(ipc: Arc<IpcClient>, chat_tx: mpsc::Sender<ChatEvent>) -> Self {
+        let (state, state_rx) = watch::channel(VoiceCaptureState::Idle);
+        Self {
+            ipc,
+            chat_tx,
+            state,
+            state_rx,
         }
-    })
-}
+    }
 
-/// Wraps the real VoiceInput so that when the hotkey listener calls
-/// `stop_and_transcribe`, the result is also forwarded into the TUI
-/// event channel as a `VoiceEvent::Transcription`. Without this,
-/// the transcription text would only be visible to the listener's
-/// log line.
-struct TuiVoiceAdapter {
-    inner: Arc<dyn VoiceInput>,
-    tx: mpsc::Sender<VoiceEvent>,
+    fn set_state(&self, s: VoiceCaptureState) {
+        let _ = self.state.send(s);
+    }
 }
 
 #[async_trait::async_trait]
-impl VoiceInput for TuiVoiceAdapter {
+impl assistd_voice::VoiceInput for IpcVoiceProxy {
     async fn start_recording(&self) -> anyhow::Result<()> {
-        self.inner.start_recording().await
+        self.set_state(VoiceCaptureState::Recording);
+        let req = Request::PttStart {
+            id: Uuid::new_v4().to_string(),
+        };
+        let mut stream = self.ipc.one_shot(req).await.map_err(anyhow::Error::from)?;
+        // PttStart streams VoiceState transitions, then Done. Forward
+        // them onto the wire channel so the indicator updates.
+        while let Some(ev) = stream.next_event().await? {
+            let terminal = ev.is_terminal();
+            let _ = self.chat_tx.send(ChatEvent::Wire(ev)).await;
+            if terminal {
+                break;
+            }
+        }
+        Ok(())
     }
 
     async fn stop_and_transcribe(&self) -> anyhow::Result<String> {
-        match self.inner.stop_and_transcribe().await {
-            Ok(text) => {
-                let _ = self.tx.send(VoiceEvent::Transcription(text.clone())).await;
-                Ok(text)
+        self.set_state(VoiceCaptureState::Transcribing);
+        let req = Request::PttStop {
+            id: Uuid::new_v4().to_string(),
+        };
+        let mut stream = self.ipc.one_shot(req).await.map_err(anyhow::Error::from)?;
+        let mut transcript = String::new();
+        while let Some(ev) = stream.next_event().await? {
+            // Capture the transcription text for the listener's
+            // return value; it also flows out as a wire event so the
+            // App reducer can render it.
+            if let assistd_ipc::Event::Transcription { text, .. } = &ev {
+                transcript = text.clone();
             }
-            Err(e) => {
-                let msg = format!("{e:#}");
-                let _ = self.tx.send(VoiceEvent::Error(msg.clone())).await;
-                Err(e)
+            if let assistd_ipc::Event::VoiceState { state, .. } = &ev {
+                self.set_state(*state);
+            }
+            let terminal = ev.is_terminal();
+            let _ = self.chat_tx.send(ChatEvent::Wire(ev)).await;
+            if terminal {
+                break;
             }
         }
+        self.set_state(VoiceCaptureState::Idle);
+        Ok(transcript)
     }
 
     fn state(&self) -> VoiceCaptureState {
-        self.inner.state()
+        *self.state_rx.borrow()
     }
 
     fn subscribe(&self) -> watch::Receiver<VoiceCaptureState> {
-        self.inner.subscribe()
+        self.state_rx.clone()
     }
+}
+
+#[allow(dead_code)] // used only when the `chat` feature compiles voice off
+fn _suppress_unused_warn() {
+    warn!("voice glue unused");
 }

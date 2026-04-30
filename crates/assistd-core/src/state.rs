@@ -307,6 +307,25 @@ impl AppState {
                     .await
             }
             Request::MemoryReindex { id } => self.handle_memory_reindex(id, tx).await,
+            Request::GetCapabilities { id } => self.handle_get_capabilities(id, tx).await,
+            // ConfirmResponse is intercepted by the connection-level
+            // read loop (see `assistd-core/src/socket.rs`) and routed to
+            // the active confirmation gate's pending oneshot. If we see
+            // it as the *initial* request on a fresh connection there
+            // is no in-flight prompt to satisfy — surface as an error
+            // so a buggy client gets a clear signal instead of timing out.
+            Request::ConfirmResponse { id, confirm_id, .. } => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!(
+                            "ConfirmResponse(confirm_id={confirm_id}) received with no \
+                             matching ConfirmRequest in flight on this connection"
+                        ),
+                    })
+                    .await;
+                Ok(())
+            }
         }
     }
 
@@ -1514,6 +1533,43 @@ impl AppState {
             .send(Event::VoiceOutputState {
                 id: id.clone(),
                 enabled: self.voice_output.enabled(),
+            })
+            .await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
+    /// Probe the running llama-server's capabilities and surface the
+    /// model name in one shot — lets clients render `vision: on/off`
+    /// without reaching into the HTTP API directly. Re-probes per
+    /// request because a model swap on a long-lived daemon can flip
+    /// the vision flag between calls.
+    async fn handle_get_capabilities(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        let probe = assistd_llm::probe_capabilities(
+            &self.config.llama_server.host,
+            self.config.llama_server.port,
+        )
+        .await;
+        // Match the TUI's old basename rendering: prefer the part after
+        // the last `/` (e.g. `Qwen3-14B-GGUF:Q4_K_M` from
+        // `bartowski/Qwen3-14B-GGUF:Q4_K_M`), fall back to the full
+        // string when there's no `/`.
+        let model_name = self
+            .config
+            .model
+            .name
+            .rsplit_once('/')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| self.config.model.name.clone());
+        let _ = tx
+            .send(Event::Capabilities {
+                id: id.clone(),
+                vision: probe.vision_supported,
+                model_name,
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;

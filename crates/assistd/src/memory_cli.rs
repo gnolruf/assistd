@@ -7,11 +7,9 @@
 //! daemon owns the writer, and a CLI grabbing the file lock while it's
 //! mid-write would risk corruption).
 
-use anyhow::{Context, Result};
-use assistd_ipc::{Event, Request, socket_path};
+use anyhow::Result;
+use assistd_ipc::{Event, IpcClient, Request};
 use clap::{Args, Subcommand};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use uuid::Uuid;
 
 #[derive(Args)]
@@ -85,14 +83,6 @@ impl MemoryAction {
 }
 
 pub async fn run(args: MemoryArgs) -> Result<()> {
-    let path = socket_path();
-    let stream = UnixStream::connect(&path).await.with_context(|| {
-        format!(
-            "assistd daemon is not running (could not connect to {})",
-            path.display()
-        )
-    })?;
-
     // Capture the forget target id before `into_request` consumes the
     // action — needed so the `MemoryForgetResult` printer can echo it
     // back on the miss path (`no memory with id=N`), where the daemon
@@ -105,26 +95,21 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
     // before `into_request` moves the action.
     let reindex_quiet = matches!(&args.action, MemoryAction::Reindex { quiet: true });
 
-    let (read_half, mut write_half) = stream.into_split();
     let req = args.action.into_request(Uuid::new_v4().to_string());
-    let mut body = serde_json::to_string(&req)?;
-    body.push('\n');
-    write_half.write_all(body.as_bytes()).await?;
-    write_half.shutdown().await?;
+    let mut stream = IpcClient::new()
+        .one_shot(req)
+        .await
+        .map_err(crate::ipc_helper::map_not_reachable)?;
 
-    let mut reader = BufReader::new(read_half);
     // Track the last reindex kind so a kind change emits a newline
     // before the new kind's progress line — keeps the chunks → memories
     // transition from clobbering the chunks total under `\r` rewrites.
     let mut last_reindex_kind: Option<String> = None;
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            anyhow::bail!("daemon closed the connection without sending a terminal event");
-        }
-        let event: Event = serde_json::from_str(line.trim())
-            .with_context(|| format!("invalid JSON from daemon: {}", line.trim()))?;
+        let event = match stream.next_event().await? {
+            Some(ev) => ev,
+            None => anyhow::bail!("daemon closed the connection without sending a terminal event"),
+        };
 
         match event {
             Event::SemanticHit {

@@ -1,5 +1,6 @@
 use crate::AppState;
 use assistd_ipc::{Event, Request};
+use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -193,28 +194,107 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
     // when several requests are in flight on different connections.
     let span = tracing::info_span!("ipc", id = %req.id(), req = req.kind());
 
+    // Per-connection router for mid-stream confirmation prompts. The
+    // `IpcConfirmationGate` (if installed in the daemon's tool registry)
+    // reads it from the `CONFIRM_ROUTER` task-local during dispatch;
+    // the read loop below routes inbound `Request::ConfirmResponse`
+    // lines to it. The wire channel is cloned so the router can emit
+    // its own `Event::ConfirmRequest` events into the same forward
+    // pipeline as dispatch.
+    let router = ConfirmRouter::new(req.id().to_string(), tx.clone());
+
     // Dispatch and event-forwarding run concurrently on this task rather
     // than on a spawned child. If the task is cancelled (e.g. the outer
     // accept loop hits its shutdown grace and calls `JoinSet::shutdown`),
     // both halves are torn down together — the dispatcher can't be
     // orphaned.
-    let dispatch_fut = async move { dispatch_state.dispatch(req, tx).await };
+    let router_for_dispatch = router.clone();
+    let dispatch_fut = async move {
+        CONFIRM_ROUTER
+            .scope(router_for_dispatch, dispatch_state.dispatch(req, tx))
+            .await
+    };
     let forward_fut = async {
         while let Some(event) = rx.recv().await {
             write_event(&mut write_half, &event).await?;
         }
-        Ok::<(), SocketError>(())
+        Ok::<_, SocketError>(write_half)
     };
 
-    let (dispatch_res, forward_res) = async { tokio::join!(dispatch_fut, forward_fut) }
-        .instrument(span)
-        .await;
+    // Read loop: drains additional client lines (mostly
+    // `Request::ConfirmResponse`, possibly nothing if the client is a
+    // legacy CLI that shut down its write half). Exits on EOF or
+    // I/O error so the connection can finish even if the client
+    // disconnects mid-stream. Every dispatched response routes
+    // through the router; unknown additional Requests are logged
+    // and ignored — we don't surface them to the client because
+    // doing so would muddle the streaming Event protocol.
+    let router_for_reader = router.clone();
+    let read_fut = async move {
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            match reader.read_line(&mut buf).await {
+                Ok(0) => {
+                    // Half-close from the client (the legacy CLI
+                    // pattern). Exit cleanly.
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    debug!("connection read loop ended: {e}");
+                    break;
+                }
+            }
+            let trimmed = buf.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Request>(trimmed) {
+                Ok(Request::ConfirmResponse {
+                    confirm_id, allow, ..
+                }) => {
+                    if let Err(reason) = router_for_reader.route_response(&confirm_id, allow) {
+                        warn!(confirm_id = %confirm_id, reason, "unmatched ConfirmResponse");
+                    }
+                }
+                Ok(other) => {
+                    warn!(
+                        kind = other.kind(),
+                        "unexpected mid-stream request; only ConfirmResponse is honored after the \
+                         initial request"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "invalid mid-stream JSON; ignoring line");
+                }
+            }
+        }
+    };
+
+    // Run dispatch + forward + read concurrently. When dispatch
+    // returns, drop the router so any still-pending oneshots resolve
+    // to "deny" (see `ConfirmRouter::ask`). The forward future then
+    // sees `rx.recv()` return None once both `tx` clones are dropped.
+    let (dispatch_res, forward_res, _) = async {
+        let read_handle = tokio::spawn(read_fut);
+        let (d, f) = tokio::join!(dispatch_fut, forward_fut);
+        // dispatch is done — drop the router clone we held outside
+        // the task so the read loop's clone is the only remaining
+        // reference (we'll abort it next).
+        drop(router);
+        // Stop reading more client input — dispatch is over.
+        read_handle.abort();
+        let _ = read_handle.await;
+        (d, f, ())
+    }
+    .instrument(span)
+    .await;
 
     if let Err(e) = dispatch_res {
         error!("dispatch error: {e:#}");
     }
-    forward_res?;
-
+    let mut write_half = forward_res?;
     write_half.shutdown().await?;
     Ok(())
 }
@@ -941,6 +1021,98 @@ mod tests {
             assert!(matches!(events.last(), Some(Event::Done { .. })));
         })
         .await;
+    }
+
+    /// Sending a `ConfirmResponse` as the *initial* request is a
+    /// protocol error — there's no in-flight prompt to satisfy. The
+    /// daemon surfaces it as `Event::Error` so a buggy client gets
+    /// a clear signal instead of a hang.
+    #[tokio::test]
+    async fn confirm_response_as_initial_request_returns_error() {
+        with_server(test_state(), |path| async move {
+            let events = send_request_collect_events(
+                &path,
+                r#"{"type":"confirm_response","id":"cr-1","confirm_id":"x","allow":true}"#,
+            )
+            .await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Event::Error { id, message })
+                        if id == "cr-1" && message.contains("ConfirmResponse")
+                ),
+                "got {events:?}"
+            );
+        })
+        .await;
+    }
+
+    /// A mid-stream `ConfirmResponse` whose `confirm_id` doesn't match
+    /// any pending prompt is logged + ignored; the daemon doesn't
+    /// crash and the original stream still terminates cleanly.
+    #[tokio::test]
+    async fn unmatched_mid_stream_confirm_response_does_not_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistd.sock");
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_path = path.clone();
+        let state = test_state();
+        let server = tokio::spawn(async move {
+            serve_at(&server_path, state, async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        });
+        wait_for_listener(&path).await;
+
+        // Open a Query connection without shutting the write half;
+        // the EchoBackend's stream is so fast that we may already see
+        // Done before our second write lands. That's fine — the test
+        // is "doesn't crash."
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(br#"{"type":"query","id":"q1","text":"ping"}"#)
+            .await
+            .unwrap();
+        write.write_all(b"\n").await.unwrap();
+        // Now send an unmatched ConfirmResponse — there is no
+        // in-flight prompt because the EchoBackend doesn't trigger
+        // tools.
+        write
+            .write_all(
+                br#"{"type":"confirm_response","id":"cr-x","confirm_id":"missing","allow":false}"#,
+            )
+            .await
+            .unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.shutdown().await.unwrap();
+
+        let mut reader = BufReader::new(read);
+        let mut events = Vec::new();
+        loop {
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            let event: Event = serde_json::from_str(line.trim()).unwrap();
+            let terminal = event.is_terminal();
+            events.push(event);
+            if terminal {
+                break;
+            }
+        }
+        // The Query still gets its Delta + Done. The unmatched
+        // ConfirmResponse is silently discarded by the read loop.
+        assert!(
+            matches!(events.last(), Some(Event::Done { id }) if id == "q1"),
+            "got {events:?}"
+        );
+
+        tx.send(()).unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

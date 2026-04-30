@@ -17,11 +17,15 @@
 //! (variable expansion, here-docs, command substitution), so they are not
 //! the real defense — the bwrap sandbox is.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
+
+use assistd_ipc::Event;
 
 /// Describes a request for user confirmation before executing a destructive
 /// command. Passed to [`ConfirmationGate::confirm`].
@@ -82,6 +86,162 @@ pub struct AlwaysAllowGate;
 impl ConfirmationGate for AlwaysAllowGate {
     async fn confirm(&self, _req: ConfirmationRequest) -> bool {
         true
+    }
+}
+
+/// Per-connection routing table for in-flight confirmation prompts.
+///
+/// One [`ConfirmRouter`] is created per IPC connection. The connection
+/// handler installs it into the [`CONFIRM_ROUTER`] task-local before
+/// calling `dispatch`, so the [`IpcConfirmationGate`] can find it
+/// without explicit plumbing through every tool. The connection's
+/// read loop calls [`ConfirmRouter::route_response`] when it sees an
+/// inbound `Request::ConfirmResponse`, signalling the matching
+/// pending oneshot.
+///
+/// Concurrency: routing is keyed on a fresh `confirm_id` per `ask`
+/// call, so two concurrent connections each get their own pending
+/// table, and a single connection that asks multiple confirms
+/// in sequence routes responses correctly.
+pub struct ConfirmRouter {
+    /// Originating IPC request id — used as `Event::ConfirmRequest::id`
+    /// for trace correlation. Set once per connection.
+    request_id: String,
+    /// Wire channel back to the client. Cloned from the connection
+    /// handler's main event sender.
+    wire: mpsc::Sender<Event>,
+    /// Pending confirmation prompts, keyed by `confirm_id`. The lock
+    /// is held only across HashMap insert/remove — no `.await` is
+    /// held under the guard, so std::sync::Mutex is sufficient.
+    pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+}
+
+impl ConfirmRouter {
+    /// Build a router. `request_id` is the id of the connection's
+    /// initial Request; every emitted [`Event::ConfirmRequest`] carries
+    /// it.
+    pub fn new(request_id: String, wire: mpsc::Sender<Event>) -> Arc<Self> {
+        Arc::new(Self {
+            request_id,
+            wire,
+            pending: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Forward the daemon's prompt to the connected client and await
+    /// the response. Returns `false` on any failure mode (channel
+    /// drop, dispatch shutdown, malformed response) — the gate
+    /// contract says never hang the agent.
+    pub async fn ask(&self, req: ConfirmationRequest) -> bool {
+        let confirm_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        {
+            // SAFETY: poisoning would mean another task panicked while
+            // holding the lock. Recover by taking the inner; one
+            // dropped sender just denies the affected confirm — the
+            // agent loop continues correctly.
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.insert(confirm_id.clone(), tx);
+        }
+
+        let event = Event::ConfirmRequest {
+            id: self.request_id.clone(),
+            confirm_id: confirm_id.clone(),
+            tool: req.tool.clone(),
+            script: req.script.clone(),
+            matched_pattern: req.matched_pattern.clone(),
+        };
+        if self.wire.send(event).await.is_err() {
+            // Wire dead — clean up and deny.
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&confirm_id);
+            warn!(
+                target: "assistd::policy",
+                tool = %req.tool,
+                "destructive command denied: client disconnected before confirm"
+            );
+            return false;
+        }
+
+        match rx.await {
+            Ok(allow) => allow,
+            Err(_) => {
+                // Pending sender dropped without responding — happens
+                // when the connection's read loop ends before a reply
+                // arrives. Deny.
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&confirm_id);
+                warn!(
+                    target: "assistd::policy",
+                    tool = %req.tool,
+                    "destructive command denied: confirmation channel dropped"
+                );
+                false
+            }
+        }
+    }
+
+    /// Route an inbound `Request::ConfirmResponse` to its matching
+    /// pending oneshot. Returns `Err` (logged by the caller) when the
+    /// response doesn't match any in-flight prompt — that signals
+    /// either a buggy client or a confirm whose deadline already
+    /// expired.
+    pub fn route_response(&self, confirm_id: &str, allow: bool) -> Result<(), &'static str> {
+        let sender = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(confirm_id);
+        match sender {
+            Some(tx) => {
+                let _ = tx.send(allow);
+                Ok(())
+            }
+            None => Err("no pending confirm for this confirm_id"),
+        }
+    }
+}
+
+tokio::task_local! {
+    /// Per-connection [`ConfirmRouter`] in scope while [`AppState::dispatch`]
+    /// runs. The connection handler in `assistd-core::socket` installs
+    /// it; [`IpcConfirmationGate::confirm`] reads it. Tasks spawned by
+    /// dispatch inherit this task-local automatically because
+    /// `tokio::task_local!` propagates through `tokio::spawn`.
+    pub static CONFIRM_ROUTER: Arc<ConfirmRouter>;
+}
+
+/// Confirmation gate that forwards prompts to whatever IPC client is
+/// driving the active connection. Reads the per-connection
+/// [`ConfirmRouter`] from [`CONFIRM_ROUTER`] (the task-local installed
+/// by the socket handler) and asks it to round-trip the prompt.
+///
+/// When called from a code path that has no [`ConfirmRouter`] in scope
+/// (daemon-internal dispatch with no client wire — e.g. an autonomous
+/// continuous-listener-driven query, or a unit test), falls back to
+/// deny so the agent loop never hangs.
+#[derive(Debug, Default)]
+pub struct IpcConfirmationGate;
+
+#[async_trait]
+impl ConfirmationGate for IpcConfirmationGate {
+    async fn confirm(&self, req: ConfirmationRequest) -> bool {
+        match CONFIRM_ROUTER.try_with(Arc::clone) {
+            Ok(router) => router.ask(req).await,
+            Err(_) => {
+                warn!(
+                    target: "assistd::policy",
+                    tool = %req.tool,
+                    pattern = %req.matched_pattern,
+                    "destructive command denied: no IPC client attached to ask"
+                );
+                false
+            }
+        }
     }
 }
 

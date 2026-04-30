@@ -1,11 +1,9 @@
-use anyhow::{Context, Result};
-use assistd_ipc::{Event, ImageAttachment, Request, socket_path};
+use anyhow::Result;
+use assistd_ipc::{Event, ImageAttachment, IpcClient, IpcClientError, Request};
 use assistd_tools::attachment::{LoadImageError, MAX_IMAGE_BYTES};
 use clap::Args;
 use std::io::Write;
 use std::path::PathBuf;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use uuid::Uuid;
 
 /// Tool-call preview cap: long commands are truncated to keep the status
@@ -55,39 +53,29 @@ pub async fn run(args: QueryArgs) -> Result<()> {
         }
     }
 
-    let path = socket_path();
-
-    let stream = UnixStream::connect(&path).await.with_context(|| {
-        format!(
-            "assistd daemon is not running (could not connect to {})",
-            path.display()
-        )
-    })?;
-
-    let (read_half, mut write_half) = stream.into_split();
+    let client = IpcClient::new();
     let req = if wire_attachments.is_empty() {
         Request::query(Uuid::new_v4().to_string(), args.text)
     } else {
         Request::query_with_attachments(Uuid::new_v4().to_string(), args.text, wire_attachments)
     };
-    let mut body = serde_json::to_string(&req)?;
-    body.push('\n');
-    write_half.write_all(body.as_bytes()).await?;
-    write_half.shutdown().await?;
+    let mut stream = client.one_shot(req).await.map_err(|e| match e {
+        IpcClientError::NotReachable { path, source } => anyhow::anyhow!(
+            "assistd daemon is not running (could not connect to {}): {source}",
+            path.display()
+        ),
+        other => anyhow::Error::from(other),
+    })?;
 
-    let mut reader = BufReader::new(read_half);
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     let mut wrote_anything = false;
 
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            anyhow::bail!("daemon closed the connection without sending a terminal event");
-        }
-        let event: Event = serde_json::from_str(line.trim())
-            .with_context(|| format!("invalid JSON from daemon: {}", line.trim()))?;
+        let event = match stream.next_event().await? {
+            Some(ev) => ev,
+            None => anyhow::bail!("daemon closed the connection without sending a terminal event"),
+        };
 
         match event {
             Event::Delta { text, .. } => {
@@ -147,7 +135,19 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             | Event::MemoryKeys { .. }
             | Event::MemoryRow { .. }
             | Event::MemoryForgetResult { .. }
-            | Event::ReindexProgress { .. } => {}
+            | Event::ReindexProgress { .. }
+            | Event::Capabilities { .. } => {}
+            // `assistd query` is one-shot non-interactive: it can't
+            // answer a confirm prompt. The daemon-side gate denies
+            // when the connection drops, so we just note the event
+            // and keep reading until the agent emits its denial Done.
+            // The interactive flow lives in the TUI via DialogConnection.
+            Event::ConfirmRequest { .. } => {
+                eprintln!(
+                    "[daemon asked for destructive-command confirmation; denying \
+                     (non-interactive query)]"
+                );
+            }
             Event::Done { .. } => {
                 if wrote_anything {
                     writeln!(stdout)?;

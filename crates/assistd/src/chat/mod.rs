@@ -2,13 +2,20 @@
 
 //! Interactive ratatui-based chat TUI.
 //!
-//! `assistd chat` loads the existing config, starts its own llama-server
-//! via `LlamaService`, creates a `LlamaChatClient`, and drives a
-//! three-region terminal UI (output / status / input) with live streaming
-//! tokens, readline-style input, and a VRAM/throughput status bar.
+//! `assistd chat` is a thin window onto the running daemon. It loads
+//! the existing config, probes the daemon's Unix socket (auto-spawning
+//! `assistd daemon` when nothing is listening), and drives a
+//! three-region terminal UI (output / status / input) by streaming
+//! `Event`s back from the daemon over IPC.
+//!
+//! No LLM service, voice pipeline, presence manager, tool registry,
+//! or memory store is constructed in this process — all of that lives
+//! in the daemon. The TUI only owns: ratatui rendering, key handling,
+//! the local hotkey grab (PTT keystrokes need to arrive at the
+//! foreground process), VRAM/throughput probes, and attachment
+//! staging.
 
 mod app;
-mod gate;
 mod input;
 mod output;
 mod throughput;
@@ -16,30 +23,28 @@ mod ui;
 mod voice;
 mod vram;
 
-use std::path::PathBuf;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use assistd_core::{Config, PresenceManager, SleepConfig, ToolRegistry};
-use assistd_llm::{FailedBackend, LlamaChatClient, LlmBackend};
-use assistd_memory::{NoConversationStore, NoMemoryStore};
-use assistd_tools::MemoryOps;
-
-use crate::idle_monitor;
+use assistd_core::{Config, SleepConfig};
+use assistd_ipc::{Event, IpcClient, Request};
 use clap::Args;
-use crossterm::event::{self, Event, EventStream};
+use crossterm::event::{self, Event as TermEvent, EventStream};
 use crossterm::{cursor, execute, terminal};
 use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::{Picker, ProtocolType};
+use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 use tracing::info;
+use uuid::Uuid;
 
 use self::app::{App, ChatEvent};
-use self::gate::{PendingConfirmation, TuiGate};
 
 #[derive(Args)]
 pub struct ChatArgs {
@@ -50,20 +55,18 @@ pub struct ChatArgs {
 
 pub async fn run(args: ChatArgs) -> Result<()> {
     // Redirect process-level stderr to a sibling log file BEFORE any
-    // subsystem initialization runs. C libraries (ALSA's JACK/OSS
-    // fallback probing, whisper.cpp when hooks aren't yet installed,
-    // future TTS backends) write diagnostics straight to fd 2; without
-    // this they leak into the ratatui draw surface and glitch the TUI.
+    // subsystem initialization runs. C libraries (ratatui-image's
+    // graphics-protocol probes, future TTS backends, …) write
+    // diagnostics straight to fd 2; without this they leak into the
+    // ratatui draw surface and glitch the TUI.
     let _stderr_redirect = redirect_stderr_to_log()?;
 
-    let config_path = match args.config {
+    let config_path = match args.config.clone() {
         Some(p) => p,
         None => Config::default_path()?,
     };
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
-    idle_monitor::validate(&config.sleep)?;
-    assistd_voice::mic_validate(&config.voice)?;
 
     let _log_guard = init_file_tracing()?;
 
@@ -73,167 +76,115 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let (shutdown_tx, _) = watch::channel(false);
     install_signal_handler(shutdown_tx.clone());
 
-    // Process-scoped overflow dir: the chat TUI and the daemon must not
-    // share a path, otherwise their startup resets race each other.
-    let tui_overflow_dir =
-        std::env::temp_dir().join(format!("assistd-chat-{}", std::process::id()));
-
-    // The TUI gate forwards destructive-command prompts to the modal
-    // overlay via this channel. Capacity 8 is generous — we process one
-    // at a time and the agent loop is blocked waiting for the response.
-    let (confirm_tx, confirm_rx) = mpsc::channel::<PendingConfirmation>(8);
-
-    println!("loading model {} ...", config.model.name);
-
-    let (presence, client, startup_error) = match PresenceManager::new_active(
-        config.llama_server.clone(),
-        config.model.clone(),
-        shutdown_tx.subscribe(),
-    )
-    .await
-    {
-        Ok(presence) => {
-            info!(
-                "llama-server ready on {}:{}",
-                config.llama_server.host, config.llama_server.port
-            );
-            let client: Arc<dyn LlmBackend> = Arc::new(LlamaChatClient::new(
-                &config.chat,
-                &config.llama_server,
-                &config.model,
-            )?);
-            (Some(presence), client, None)
+    // Probe the daemon socket; auto-spawn a detached daemon when
+    // nothing is listening. The spawned daemon survives this TUI
+    // session — booting llama-server is expensive and other clients
+    // (`assistd query`, scheduled tasks, future TUIs) will want it
+    // up between sessions.
+    let ipc = Arc::new(IpcClient::new());
+    let mut startup_error: Option<String> = None;
+    if UnixStream::connect(ipc.socket_path()).await.is_err() {
+        info!(
+            "daemon not reachable at {}; auto-spawning",
+            ipc.socket_path().display()
+        );
+        match spawn_daemon_detached(args.config.as_deref()) {
+            Ok(()) => {
+                if let Err(e) = wait_for_socket(ipc.socket_path(), Duration::from_secs(30)).await {
+                    startup_error = Some(format!(
+                        "daemon spawned but socket never became ready: {e}"
+                    ));
+                }
+            }
+            Err(e) => {
+                startup_error = Some(format!(
+                    "could not auto-start daemon: {e}; run `assistd daemon` manually then retry"
+                ));
+            }
         }
-        Err(e) => {
-            let msg = e.to_string();
-            tracing::error!("llama-server failed to start: {msg}");
-            let client: Arc<dyn LlmBackend> = Arc::new(FailedBackend::new(msg.clone()));
-            (None, client, Some(msg))
-        }
-    };
+    }
 
-    // Capability probe — only meaningful when llama-server actually
-    // came up. The FailedBackend path already surfaces the startup
-    // error to the TUI, so skip the misleading mmproj warning in that
-    // case. Held in a VisionGate so a daemon-side revalidation flips
-    // see/screenshot/attach_image without a registry rebuild.
-    let initial_vision_state = if presence.is_some() {
-        let s =
-            assistd_llm::probe_capabilities(&config.llama_server.host, config.llama_server.port)
-                .await;
-        if s.vision_supported {
-            info!("vision: enabled (model has mmproj)");
-        } else {
-            tracing::warn!("Vision not available: mmproj not loaded.");
+    // Capabilities probe — single one-shot at startup so the status
+    // bar can render `vision: on/off` and the model name without
+    // hammering the wire each tick. Failures fall back to defaults.
+    let (vision_enabled, daemon_model_name) = if startup_error.is_none() {
+        match get_capabilities(&ipc).await {
+            Ok((vision, name)) => (vision, name),
+            Err(e) => {
+                info!("get_capabilities failed: {e:#}");
+                (false, String::new())
+            }
         }
-        s
     } else {
-        assistd_llm::VisionState::default()
+        (false, String::new())
     };
-    let vision_enabled = initial_vision_state.vision_supported;
-    let vision_gate = assistd_tools::VisionGate::new(vision_enabled);
-
-    // The TUI doesn't open a SQLite store today, so the LLM-callable
-    // `remember` / `recall` tools register against `NoMemoryStore`
-    // placeholders — they appear in the model's tool schema but every
-    // call silently no-ops (saves succeed, recalls report `(no memories)`).
-    // Persistent memory in the TUI is a future enhancement.
-    let memory_ops = Arc::new(MemoryOps::new(
-        Arc::new(NoMemoryStore),
-        Arc::new(NoConversationStore),
-    ));
-    // The TUI also doesn't run the embed subsystem — pass No-Op
-    // fallbacks so `recall`/`reminisce` register but no-op.
-    let no_embedder: Arc<dyn assistd_embed::Embedder> = Arc::new(assistd_embed::NoEmbedder);
-    let no_semantic: Arc<dyn assistd_memory::SemanticStore> =
-        Arc::new(assistd_memory::NoSemanticStore);
-    let (no_embed_tx, no_embed_rx) = tokio::sync::mpsc::channel::<assistd_embed::EmbedJob>(1);
-    drop(no_embed_rx);
-    let tools = assistd_core::build_tools(
-        &config,
-        tui_overflow_dir.clone(),
-        Arc::new(TuiGate::new(confirm_tx)),
-        vision_gate.clone(),
-        memory_ops,
-        no_embedder,
-        no_semantic,
-        no_embed_tx,
-        String::new(),
-    )?;
-    info!(
-        "tools: registered {} (overflow dir {})",
-        tools.len(),
-        tui_overflow_dir.display()
-    );
+    let model_name = if daemon_model_name.is_empty() {
+        config
+            .model
+            .name
+            .rsplit_once('/')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| config.model.name.clone())
+    } else {
+        daemon_model_name
+    };
 
     let mut resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
-    let idle_monitor_handle = presence.as_ref().and_then(|p| {
-        idle_monitor::spawn_monitor(&config.sleep, p.clone(), shutdown_tx.subscribe())
-    });
+    // Voice pipeline: the hotkey listener stays in this TUI process
+    // (PTT keystrokes need the foreground X11/Wayland focus), but
+    // press/release dispatch over IPC instead of touching mics in
+    // this process. The daemon owns Whisper.
+    let (chat_tx, mut chat_rx) = mpsc::channel::<ChatEvent>(64);
+    let _voice_pipeline = voice::spawn(
+        &config,
+        ipc.clone(),
+        chat_tx.clone(),
+        shutdown_tx.subscribe(),
+    )
+    .await;
 
-    // Voice pipeline: builds a `MicVoiceInput`, spawns the hotkey
-    // listener (press/release), and gives us a channel of
-    // VoiceEvents to plumb into the event loop. Always returns a
-    // handle — even when voice is disabled, which just gives a
-    // `NoVoiceInput` + no hotkey bound.
-    let (voice_tx, voice_rx) = mpsc::channel::<voice::VoiceEvent>(32);
-    // Keep the pipeline's handles alive for the lifetime of the TUI
-    // so the hotkey listener and state forwarder don't drop their
-    // `Arc<dyn VoiceInput>` reference. Dropped at the end of
-    // `run()` after the shutdown signal fires.
-    let _voice_pipeline = voice::spawn(&config, voice_tx, shutdown_tx.subscribe()).await;
-
-    let model_name = config
-        .model
-        .name
-        .rsplit_once('/')
-        .map(|(_, rest)| rest.to_string())
-        .unwrap_or_else(|| config.model.name.clone());
+    // Status polling: every 2 s, fan out three Get* requests in
+    // parallel and forward their states as wire events into chat_tx.
+    // Cadence is conservative — presence transitions take many
+    // seconds and the daemon is the source of truth. A future PR can
+    // replace this with `Request::Subscribe` once the daemon exposes
+    // its watch channels.
+    let _polling_handle = spawn_status_polling(
+        ipc.clone(),
+        chat_tx.clone(),
+        shutdown_tx.subscribe(),
+    );
 
     let run_result = run_tui(
-        client,
-        tools,
-        config.agent.max_iterations,
+        ipc.clone(),
+        chat_tx,
+        &mut chat_rx,
         model_name,
         config.sleep.clone(),
-        presence.clone(),
         vision_enabled,
         &mut resource_rx,
         shutdown_tx.clone(),
         startup_error,
-        confirm_rx,
-        voice_rx,
     )
     .await;
 
     let _ = shutdown_tx.send(true);
-    if let Some(h) = idle_monitor_handle {
-        let _ = h.await;
-    }
-    if let Some(p) = presence {
-        if let Err(e) = p.sleep().await {
-            tracing::error!("presence shutdown error: {e:#}");
-        }
-    }
     info!("assistd chat stopped");
     run_result
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_tui(
-    client: Arc<dyn LlmBackend>,
-    tools: Arc<ToolRegistry>,
-    max_iterations: u32,
+    ipc: Arc<IpcClient>,
+    chat_tx: mpsc::Sender<ChatEvent>,
+    chat_rx: &mut mpsc::Receiver<ChatEvent>,
     model_name: String,
     sleep_cfg: SleepConfig,
-    presence: Option<Arc<PresenceManager>>,
     vision_enabled: bool,
     resource_rx: &mut watch::Receiver<vram::ResourceState>,
     shutdown_tx: watch::Sender<bool>,
     startup_error: Option<String>,
-    mut confirmation_rx: mpsc::Receiver<PendingConfirmation>,
-    mut voice_rx: mpsc::Receiver<voice::VoiceEvent>,
 ) -> Result<()> {
     terminal::enable_raw_mode().context("enable_raw_mode")?;
     if let Err(e) = execute!(
@@ -252,11 +203,6 @@ async fn run_tui(
     }));
     let _guard = TerminalGuard;
 
-    // Probe terminal graphics support immediately after entering the
-    // alternate screen and before reading any events (per
-    // `Picker::from_query_stdio` docs). Halfblocks is treated as "no
-    // graphics" so `/attach` falls back to filename-only display on
-    // non-graphics terminals — chunky ASCII thumbnails are gimmicky.
     let picker = match Picker::from_query_stdio() {
         Ok(p)
             if matches!(
@@ -289,30 +235,25 @@ async fn run_tui(
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
-    let (chat_tx, mut chat_rx) = mpsc::channel::<ChatEvent>(64);
     let mut app = App::new(
-        client,
-        tools,
-        max_iterations,
+        ipc,
         chat_tx,
         model_name,
         sleep_cfg,
-        presence.clone(),
         vision_enabled,
         picker,
     );
 
     if let Some(err) = startup_error {
         app.output
-            .push_error(&format!("llama-server failed to start: {err}"));
+            .push_error(&format!("daemon startup: {err}"));
         app.output
-            .push_error("check config and model path, then restart");
+            .push_error("once the daemon is reachable, retry your query");
     }
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut shutdown_rx = shutdown_tx.subscribe();
-    let mut presence_rx = presence.as_ref().map(|p| p.subscribe());
 
     terminal.draw(|f| ui::render(f, &mut app))?;
 
@@ -323,8 +264,8 @@ async fn run_tui(
         tokio::select! {
             maybe_ev = events.next() => {
                 match maybe_ev {
-                    Some(Ok(Event::Key(k))) => app.on_key(k),
-                    Some(Ok(Event::Resize(_, _))) => {}
+                    Some(Ok(TermEvent::Key(k))) => app.on_key(k),
+                    Some(Ok(TermEvent::Resize(_, _))) => {}
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
                         tracing::error!("terminal event error: {e}");
@@ -334,7 +275,7 @@ async fn run_tui(
                 }
             }
             Some(ev) = chat_rx.recv() => {
-                app.on_llm_event(ev);
+                app.on_chat_event(ev);
             }
             _ = tick.tick() => {
                 app.on_tick();
@@ -342,29 +283,6 @@ async fn run_tui(
             Ok(_) = resource_rx.changed() => {
                 let v = resource_rx.borrow_and_update().clone();
                 app.on_resources(v);
-            }
-            Some(pending) = confirmation_rx.recv() => {
-                app.open_confirmation_modal(pending);
-            }
-            Some(v) = voice_rx.recv() => {
-                match v {
-                    voice::VoiceEvent::State(s) => app.on_voice_state(s),
-                    voice::VoiceEvent::Transcription(text) => app.on_transcription(text),
-                    voice::VoiceEvent::Error(msg) => app.on_voice_error(msg),
-                }
-            }
-            presence_changed = async {
-                match presence_rx.as_mut() {
-                    Some(rx) => rx.changed().await.map(|_| true),
-                    None => std::future::pending().await,
-                }
-            } => {
-                if presence_changed.is_ok() {
-                    if let Some(rx) = presence_rx.as_mut() {
-                        let s = *rx.borrow_and_update();
-                        app.on_presence(s);
-                    }
-                }
             }
             _ = shutdown_rx.changed() => {
                 break;
@@ -375,6 +293,138 @@ async fn run_tui(
 
     drop(terminal);
     Ok(())
+}
+
+/// Auto-spawn a detached daemon child. We exec the same binary
+/// (`current_exe`) so a `cargo run` build doesn't accidentally fork
+/// off a stale system install. `setsid` makes the daemon its own
+/// session leader so it survives the TUI's controlling-terminal
+/// closing; we drop the `Child` handle without reaping, which is
+/// fine because the daemon already self-handles SIGTERM.
+fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe().context("std::env::current_exe()")?;
+    let mut cmd = Command::new(&exe);
+    cmd.arg("daemon").arg("--client-mode");
+    if let Some(p) = config {
+        cmd.arg("--config").arg(p);
+    }
+    // Logs already go to chat-stderr.log via the daemon's tracing setup;
+    // a /dev/null here keeps any unbuffered C-library prints from
+    // backing up into a never-read pipe.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: pre_exec runs in the forked child after fork() and before
+    // exec(). `libc::setsid` is async-signal-safe per POSIX, which
+    // is the bar tokio's std::process docs require here.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().with_context(|| {
+        format!("could not spawn daemon binary at {}", exe.display())
+    })?;
+    info!("spawned daemon pid {}", child.id());
+    // Drop the handle: don't wait, don't kill. The daemon is now its
+    // own process group leader and outlives this TUI session.
+    drop(child);
+    Ok(())
+}
+
+/// Poll-connect the socket until it accepts or `deadline` passes.
+/// 100 ms cadence: fast enough that a snappy daemon (already running
+/// with weights loaded) feels instant, slow enough not to spin the
+/// CPU during a cold start.
+async fn wait_for_socket(path: &Path, deadline: Duration) -> Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        if UnixStream::connect(path).await.is_ok() {
+            return Ok(());
+        }
+        if start.elapsed() >= deadline {
+            anyhow::bail!(
+                "timed out after {:?} waiting for daemon socket at {}",
+                deadline,
+                path.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Probe the daemon's runtime capabilities. Returns
+/// `(vision_enabled, model_name)`. Errors are non-fatal — the caller
+/// falls back to config-derived defaults.
+async fn get_capabilities(ipc: &IpcClient) -> Result<(bool, String)> {
+    let req = Request::GetCapabilities {
+        id: Uuid::new_v4().to_string(),
+    };
+    let mut stream = ipc.one_shot(req).await?;
+    let mut vision = false;
+    let mut model_name = String::new();
+    loop {
+        match stream.next_event().await? {
+            Some(Event::Capabilities {
+                vision: v,
+                model_name: m,
+                ..
+            }) => {
+                vision = v;
+                model_name = m;
+            }
+            Some(Event::Done { .. }) => return Ok((vision, model_name)),
+            Some(Event::Error { message, .. }) => anyhow::bail!("{message}"),
+            Some(_) => {} // ignore stray events
+            None => anyhow::bail!("daemon closed without responding"),
+        }
+    }
+}
+
+/// Background task that polls daemon state every 2 s. Each tick
+/// fans out three concurrent one-shot requests and forwards their
+/// terminal events as `ChatEvent::Wire` so the App reducer can
+/// update the status bar uniformly.
+fn spawn_status_polling(
+    ipc: Arc<IpcClient>,
+    chat_tx: mpsc::Sender<ChatEvent>,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = tick.tick() => {
+                    poll_one(&ipc, &chat_tx, Request::GetPresence { id: Uuid::new_v4().to_string() }).await;
+                    poll_one(&ipc, &chat_tx, Request::GetVoiceState { id: Uuid::new_v4().to_string() }).await;
+                    poll_one(&ipc, &chat_tx, Request::GetListenState { id: Uuid::new_v4().to_string() }).await;
+                }
+            }
+        }
+    })
+}
+
+async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Request) {
+    let kind = req.kind();
+    let mut stream = match ipc.one_shot(req).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("status poll {kind} failed: {e}");
+            return;
+        }
+    };
+    while let Ok(Some(ev)) = stream.next_event().await {
+        if ev.is_terminal() {
+            break;
+        }
+        let _ = chat_tx.send(ChatEvent::Wire(ev)).await;
+    }
 }
 
 fn install_signal_handler(shutdown_tx: watch::Sender<bool>) {

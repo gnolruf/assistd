@@ -29,6 +29,11 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(feature = "client")]
+pub mod client;
+#[cfg(feature = "client")]
+pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
+
 /// Wire-protocol version. Bumped when an existing field's semantics
 /// change in a non-additive way; new optional fields don't bump this.
 /// Servers log a warning and continue when they see a version they
@@ -222,6 +227,22 @@ pub enum Request {
     /// processed, then a terminal `Done` (or `Error` on a fatal
     /// embedder failure). Backs `assistd memory reindex`.
     MemoryReindex { id: String },
+    /// Client's reply to a daemon-issued [`Event::ConfirmRequest`].
+    /// Sent on the *same* socket connection as the originating request
+    /// (Query, PttStop, etc.) — see the protocol notes at the top of
+    /// this module. The daemon routes the response by `confirm_id`,
+    /// not by `id`, so a single in-flight stream can ask multiple
+    /// confirms without ambiguity.
+    ConfirmResponse {
+        id: String,
+        confirm_id: String,
+        allow: bool,
+    },
+    /// Probe the daemon's runtime capabilities (vision support, model
+    /// name). Emits a single [`Event::Capabilities`] then `Done`.
+    /// Called by clients (TUI, CLI) at startup to render UI state that
+    /// otherwise required them to reach into llama-server directly.
+    GetCapabilities { id: String },
 }
 
 impl Request {
@@ -276,7 +297,9 @@ impl Request {
             | Request::MemoryDelete { id, .. }
             | Request::MemoryForget { id, .. }
             | Request::MemorySemanticSearch { id, .. }
-            | Request::MemoryReindex { id, .. } => id,
+            | Request::MemoryReindex { id, .. }
+            | Request::ConfirmResponse { id, .. }
+            | Request::GetCapabilities { id, .. } => id,
         }
     }
 
@@ -305,6 +328,8 @@ impl Request {
             Request::MemoryForget { .. } => "memory_forget",
             Request::MemorySemanticSearch { .. } => "memory_semantic_search",
             Request::MemoryReindex { .. } => "memory_reindex",
+            Request::ConfirmResponse { .. } => "confirm_response",
+            Request::GetCapabilities { .. } => "get_capabilities",
         }
     }
 }
@@ -412,6 +437,30 @@ pub enum Event {
         done: u32,
         total: u32,
     },
+    /// Mid-stream prompt: a tool dispatched by the daemon needs the
+    /// user to authorize a destructive action. The daemon parks the
+    /// agent loop until it sees a matching [`Request::ConfirmResponse`]
+    /// on the same connection. Clients without a UI for this should
+    /// reply `allow: false`; if the connection drops without a
+    /// response, the gate denies. `id` echoes the originating
+    /// request's id; `confirm_id` is the routing key.
+    ConfirmRequest {
+        id: String,
+        confirm_id: String,
+        tool: String,
+        script: String,
+        matched_pattern: String,
+    },
+    /// Response to [`Request::GetCapabilities`]. `vision` is true when
+    /// the loaded model has a multimodal projector and the daemon's
+    /// `/attach` path will accept images. `model_name` is the
+    /// short-form model identifier (the basename of `model.name`,
+    /// matching what the TUI status bar shows).
+    Capabilities {
+        id: String,
+        vision: bool,
+        model_name: String,
+    },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -441,6 +490,8 @@ impl Event {
             | Event::MemoryRow { id, .. }
             | Event::MemoryForgetResult { id, .. }
             | Event::ReindexProgress { id, .. }
+            | Event::ConfirmRequest { id, .. }
+            | Event::Capabilities { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }
@@ -1016,6 +1067,56 @@ mod tests {
         };
         assert!(!evt.is_terminal());
         assert_eq!(evt.id(), "vt-1");
+    }
+
+    #[test]
+    fn confirm_request_event_roundtrip() {
+        let evt = Event::ConfirmRequest {
+            id: "req-1".into(),
+            confirm_id: "c-abc".into(),
+            tool: "bash".into(),
+            script: "rm -rf /tmp/foo".into(),
+            matched_pattern: "rm -rf".into(),
+        };
+        let parsed: Event = serde_json::from_str(&serde_json::to_string(&evt).unwrap()).unwrap();
+        assert_eq!(parsed, evt);
+        assert_eq!(evt.id(), "req-1");
+        assert!(!evt.is_terminal());
+    }
+
+    #[test]
+    fn confirm_response_request_roundtrip() {
+        let req = Request::ConfirmResponse {
+            id: "req-1".into(),
+            confirm_id: "c-abc".into(),
+            allow: true,
+        };
+        let parsed: Request = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.id(), "req-1");
+        assert_eq!(req.kind(), "confirm_response");
+    }
+
+    #[test]
+    fn get_capabilities_request_roundtrip() {
+        let req = Request::GetCapabilities { id: "cap-1".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"get_capabilities","id":"cap-1"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.kind(), "get_capabilities");
+    }
+
+    #[test]
+    fn capabilities_event_roundtrip() {
+        let evt = Event::Capabilities {
+            id: "cap-1".into(),
+            vision: true,
+            model_name: "Qwen3-14B-GGUF:Q4_K_M".into(),
+        };
+        let parsed: Event = serde_json::from_str(&serde_json::to_string(&evt).unwrap()).unwrap();
+        assert_eq!(parsed, evt);
+        assert!(!evt.is_terminal());
     }
 
     #[test]
