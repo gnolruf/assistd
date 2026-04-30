@@ -188,21 +188,19 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             }
             Event::ReindexProgress {
                 kind, done, total, ..
-            } => {
-                if !reindex_quiet {
-                    use std::io::Write;
-                    let mut err = std::io::stderr();
-                    let kind_changed = last_reindex_kind.as_deref() != Some(kind.as_str());
-                    if kind_changed && last_reindex_kind.is_some() {
-                        let _ = writeln!(err);
-                    }
-                    last_reindex_kind = Some(kind.clone());
-                    // `\r` rewrites the same line for successive ticks
-                    // within one kind; the newline above moves to a
-                    // fresh line on transitions.
-                    let _ = write!(err, "\rreindex {kind}: {done}/{total}");
-                    let _ = err.flush();
+            } if !reindex_quiet => {
+                use std::io::Write;
+                let mut err = std::io::stderr();
+                let kind_changed = last_reindex_kind.as_deref() != Some(kind.as_str());
+                if kind_changed && last_reindex_kind.is_some() {
+                    let _ = writeln!(err);
                 }
+                last_reindex_kind = Some(kind.clone());
+                // `\r` rewrites the same line for successive ticks
+                // within one kind; the newline above moves to a
+                // fresh line on transitions.
+                let _ = write!(err, "\rreindex {kind}: {done}/{total}");
+                let _ = err.flush();
             }
             // `MemoryForgetResult { deleted: true, key: None }` is not
             // produced by the daemon (a delete-by-id always has a key
