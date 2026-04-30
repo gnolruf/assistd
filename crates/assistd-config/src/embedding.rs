@@ -23,8 +23,8 @@ use crate::defaults::{
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingConfig {
     /// Master switch. When `false` the daemon binds the `NoEmbedder`
-    /// placeholder, the `search_memory` tool returns empty, and
-    /// `recall(mode="semantic")` falls back to "(no memories)".
+    /// placeholder; the `recall` and `reminisce` tools both fall back
+    /// to "(no memories)" / "(no past conversations indexed)".
     #[serde(default = "default_embedding_enabled")]
     pub enabled: bool,
     /// HuggingFace model id passed verbatim to llama-server's
@@ -53,7 +53,7 @@ pub struct EmbeddingConfig {
     #[serde(default = "default_embedding_request_timeout_secs")]
     pub request_timeout_secs: u64,
     /// How many nearest-neighbor matches to retrieve per query for
-    /// auto-injection and the `search_memory` tool's default.
+    /// auto-injection and the `reminisce` tool's default.
     #[serde(default = "default_embedding_top_k")]
     pub top_k: u32,
     /// Char-window size for chunking conversation messages. Messages
@@ -68,8 +68,8 @@ pub struct EmbeddingConfig {
     pub chunk_overlap_chars: usize,
     /// When `true`, every user query embeds the prompt and prepends
     /// the top-K conversation chunks as a "Relevant past context:"
-    /// system message. Disable to require explicit `search_memory`
-    /// tool invocations instead.
+    /// system message. Disable to require explicit `reminisce` tool
+    /// invocations instead.
     #[serde(default = "default_embedding_auto_inject")]
     pub auto_inject: bool,
 }

@@ -98,12 +98,12 @@ pub async fn run(action: PttAction) -> Result<()> {
             Event::Presence { .. } => {}
             Event::ListenState { .. } => {}
             Event::VoiceOutputState { .. } => {}
-            Event::MemoryHit { .. }
-            | Event::SemanticHit { .. }
+            Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }
             | Event::MemoryRow { .. }
-            | Event::MemoryForgetResult { .. } => {}
+            | Event::MemoryForgetResult { .. }
+            | Event::ReindexProgress { .. } => {}
             Event::Done { .. } => {
                 if wrote_delta {
                     writeln!(stdout)?;

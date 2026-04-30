@@ -163,15 +163,6 @@ pub enum Request {
     /// Report whether TTS is currently enabled. Emits `VoiceOutputState`
     /// + `Done` with no state change.
     GetVoiceState { id: String },
-    /// Full-text search over persisted conversation content. Emits zero
-    /// or more `MemoryHit` events followed by `Done`. `limit = 0` is
-    /// treated as the daemon's default cap.
-    MemorySearch {
-        id: String,
-        query: String,
-        #[serde(default)]
-        limit: u32,
-    },
     /// Persist a string value under `key`. Overwrites any existing
     /// value at the same key. Emits `Done` (no payload) on success.
     MemorySave {
@@ -194,7 +185,7 @@ pub enum Request {
     /// Enumerate full `(id, key, value)` rows whose key starts with
     /// `prefix`. Streams one [`Event::MemoryRow`] per match in
     /// lexicographic key order, then a terminal `Done`. `limit = 0`
-    /// means "no cap" (matches the `MemorySearch` convention).
+    /// means "no cap".
     MemoryListAll {
         id: String,
         #[serde(default)]
@@ -214,14 +205,23 @@ pub enum Request {
     /// Semantic search over persisted conversation chunks. Embeds the
     /// query and ranks past messages by cosine similarity. Emits zero
     /// or more `SemanticHit` events ordered best-first, then `Done`.
-    /// `limit = 0` is treated as the daemon's default cap (matches the
-    /// `MemorySearch` FTS5 path).
+    /// `limit = 0` is treated as the daemon's default cap. Backs the
+    /// `assistd memory reminisce` CLI subcommand and the LLM-callable
+    /// `reminisce` tool.
     MemorySemanticSearch {
         id: String,
         query: String,
         #[serde(default)]
         limit: u32,
     },
+    /// Re-embed every memory and conversation-chunk row that has no
+    /// embedding under the daemon's currently-configured embedding
+    /// model. Used to recover after a model swap or after a run where
+    /// the embedding subsystem was unavailable. Emits one
+    /// [`Event::ReindexProgress`] per kind/transition plus per item
+    /// processed, then a terminal `Done` (or `Error` on a fatal
+    /// embedder failure). Backs `assistd memory reindex`.
+    MemoryReindex { id: String },
 }
 
 impl Request {
@@ -269,14 +269,14 @@ impl Request {
             | Request::VoiceToggle { id }
             | Request::VoiceSkip { id }
             | Request::GetVoiceState { id }
-            | Request::MemorySearch { id, .. }
             | Request::MemorySave { id, .. }
             | Request::MemoryLoad { id, .. }
             | Request::MemoryList { id, .. }
             | Request::MemoryListAll { id, .. }
             | Request::MemoryDelete { id, .. }
             | Request::MemoryForget { id, .. }
-            | Request::MemorySemanticSearch { id, .. } => id,
+            | Request::MemorySemanticSearch { id, .. }
+            | Request::MemoryReindex { id, .. } => id,
         }
     }
 
@@ -297,7 +297,6 @@ impl Request {
             Request::VoiceToggle { .. } => "voice_toggle",
             Request::VoiceSkip { .. } => "voice_skip",
             Request::GetVoiceState { .. } => "get_voice_state",
-            Request::MemorySearch { .. } => "memory_search",
             Request::MemorySave { .. } => "memory_save",
             Request::MemoryLoad { .. } => "memory_load",
             Request::MemoryList { .. } => "memory_list",
@@ -305,6 +304,7 @@ impl Request {
             Request::MemoryDelete { .. } => "memory_delete",
             Request::MemoryForget { .. } => "memory_forget",
             Request::MemorySemanticSearch { .. } => "memory_semantic_search",
+            Request::MemoryReindex { .. } => "memory_reindex",
         }
     }
 }
@@ -352,24 +352,12 @@ pub enum Event {
     /// / `VoiceSkip` / `GetVoiceState`. Skip leaves the flag unchanged
     /// (true if synthesis was on before the skip).
     VoiceOutputState { id: String, enabled: bool },
-    /// One full-text-search hit emitted by `MemorySearch`. The daemon
-    /// emits zero or more of these in score order, then a terminal
-    /// `Done`. `snippet` carries the FTS5 `snippet()` excerpt with
-    /// `<mark>match</mark>` highlighting around the matched terms.
-    MemoryHit {
-        id: String,
-        conversation_id: i64,
-        session_id: String,
-        timestamp: String,
-        role: String,
-        snippet: String,
-    },
     /// One semantic-search hit emitted by `MemorySemanticSearch`. The
     /// daemon emits zero or more of these ranked by cosine similarity
-    /// (best-first), then a terminal `Done`. Unlike `MemoryHit`,
-    /// `content` is the *full* parent message text (not a snippet) —
-    /// chunks may cut mid-sentence, so the surface message is the
-    /// useful unit for the model. `similarity` is in `[0.0, 1.0]`.
+    /// (best-first), then a terminal `Done`. `content` is the *full*
+    /// parent message text (not a snippet) — chunks may cut
+    /// mid-sentence, so the surface message is the useful unit for the
+    /// model. `similarity` is in `[0.0, 1.0]`.
     SemanticHit {
         id: String,
         conversation_id: i64,
@@ -413,6 +401,17 @@ pub enum Event {
         deleted: bool,
         key: Option<String>,
     },
+    /// Progress update for a `MemoryReindex` run. `kind` is `"chunks"`
+    /// or `"memories"`; `done` is how many of `total` rows of that kind
+    /// have been embedded so far. The daemon emits these incrementally
+    /// (one per item) so the CLI can render a progress meter. The
+    /// stream terminates with `Done` after both kinds finish.
+    ReindexProgress {
+        id: String,
+        kind: String,
+        done: u32,
+        total: u32,
+    },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -436,12 +435,12 @@ impl Event {
             | Event::Transcription { id, .. }
             | Event::ListenState { id, .. }
             | Event::VoiceOutputState { id, .. }
-            | Event::MemoryHit { id, .. }
             | Event::SemanticHit { id, .. }
             | Event::MemoryValue { id, .. }
             | Event::MemoryKeys { id, .. }
             | Event::MemoryRow { id, .. }
             | Event::MemoryForgetResult { id, .. }
+            | Event::ReindexProgress { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }
@@ -578,22 +577,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_search_request_roundtrip_with_default_limit() {
-        // Omitting `limit` should round-trip as 0; the daemon treats 0
-        // as "use default cap" — kept off the wire by `#[serde(default)]`.
-        let json = r#"{"type":"memory_search","id":"r","query":"foo"}"#;
-        let parsed: Request = serde_json::from_str(json).unwrap();
-        match parsed {
-            Request::MemorySearch { id, query, limit } => {
-                assert_eq!(id, "r");
-                assert_eq!(query, "foo");
-                assert_eq!(limit, 0);
-            }
-            _ => panic!("expected MemorySearch"),
-        }
-    }
-
-    #[test]
     fn memory_save_load_list_delete_request_roundtrip() {
         let cases = vec![
             Request::MemorySave {
@@ -658,16 +641,33 @@ mod tests {
     }
 
     #[test]
+    fn memory_reindex_request_round_trips() {
+        let req = Request::MemoryReindex { id: "r".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"memory_reindex","id":"r"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.kind(), "memory_reindex");
+    }
+
+    #[test]
+    fn reindex_progress_event_round_trips() {
+        let ev = Event::ReindexProgress {
+            id: "r".into(),
+            kind: "chunks".into(),
+            done: 3,
+            total: 10,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ev);
+        assert_eq!(ev.id(), "r");
+        assert!(!ev.is_terminal());
+    }
+
+    #[test]
     fn memory_event_roundtrip() {
         let cases = vec![
-            Event::MemoryHit {
-                id: "r".into(),
-                conversation_id: 42,
-                session_id: "s".into(),
-                timestamp: "2026-04-28T00:00:00Z".into(),
-                role: "assistant".into(),
-                snippet: "…the <mark>match</mark>…".into(),
-            },
             Event::SemanticHit {
                 id: "r".into(),
                 conversation_id: 42,
@@ -746,17 +746,6 @@ mod tests {
         assert_eq!(parsed, req);
         assert_eq!(req.id(), "ms-1");
         assert_eq!(req.kind(), "memory_semantic_search");
-    }
-
-    #[test]
-    fn memory_request_id_helper_returns_inner() {
-        let req = Request::MemorySearch {
-            id: "abc".into(),
-            query: "q".into(),
-            limit: 10,
-        };
-        assert_eq!(req.id(), "abc");
-        assert_eq!(req.kind(), "memory_search");
     }
 
     #[test]

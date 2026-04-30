@@ -82,8 +82,10 @@ async fn turn_persists_across_store_reopen() {
         let convs = SqliteConversationStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle);
 
-        // FTS5 search over message content — the predicate that
-        // `assistd memory search` will run.
+        // FTS5 search over message content. The CLI no longer exposes
+        // this path (semantic-only), but the index/query is still
+        // exercised here as the storage-layer contract until the FTS5
+        // schema is removed in a follow-up.
         let hits = convs.search("rust", 10).await.unwrap();
         assert!(
             hits.iter()

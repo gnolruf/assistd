@@ -406,6 +406,26 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
                             embedder_arc.dim(),
                             config.embedding.port,
                         );
+                        // Surface stranded embeddings (rows under a
+                        // different model than the current config) at
+                        // startup so a model swap is visible instead of
+                        // silently producing `(no memories)` from
+                        // `recall` / `reminisce`. Failures are best-effort
+                        // — a warning here must not gate daemon startup.
+                        match semantic.count_stale(&model_name).await {
+                            Ok((n, models)) if n > 0 => {
+                                tracing::warn!(
+                                    "embedding: {n} rows exist under non-current model(s) {models:?}; \
+                                     run `assistd memory reindex` to rebuild against {model_name}"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::debug!(
+                                    "embedding: count_stale check failed ({e:#}); skipping diagnostic"
+                                );
+                            }
+                        }
                         (
                             embedder_arc,
                             semantic,

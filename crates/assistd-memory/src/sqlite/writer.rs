@@ -320,17 +320,19 @@ async fn append_message(
     let turn_id = turn.map(|t| t.0);
     let id = conn
         .call(move |c| {
-            // seq is per-session monotonic. Compute it inside the same
-            // implicit transaction as the INSERT so concurrent writers
-            // (none today, but cheap insurance) cannot collide.
-            let seq: i64 = c
-                .query_row(
-                    "SELECT COALESCE(MAX(seq), -1) + 1 FROM conversations WHERE session_id = ?1",
-                    rusqlite::params![session],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            c.execute(
+            // seq is per-session monotonic. Wrap the SELECT + INSERT in
+            // an explicit transaction so the two statements observe a
+            // consistent snapshot of `conversations` and so a SELECT
+            // failure surfaces as itself rather than as a UNIQUE
+            // collision on the follow-up INSERT (which is what the old
+            // `.unwrap_or(0)` produced).
+            let tx = c.transaction()?;
+            let seq: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(seq), -1) + 1 FROM conversations WHERE session_id = ?1",
+                rusqlite::params![session],
+                |r| r.get(0),
+            )?;
+            tx.execute(
                 "INSERT INTO conversations
                     (session_id, turn_id, seq, timestamp, role, content, tool_calls, tool_call_id, tool_name)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -346,7 +348,9 @@ async fn append_message(
                     msg.tool_name,
                 ],
             )?;
-            Ok(c.last_insert_rowid())
+            let id = tx.last_insert_rowid();
+            tx.commit()?;
+            Ok(id)
         })
         .await
         .context("append_message")?;

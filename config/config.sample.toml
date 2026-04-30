@@ -418,7 +418,8 @@ hotkey = "Super+Escape"
 # Independent of the chat router — embeddings keep working when chat
 # is Drowsy/Sleeping. Each user query auto-injects the top-K most
 # similar past chunks as a "Relevant past context: …" system message,
-# and the LLM gets `recall(mode="semantic")` and `search_memory` tools.
+# and the LLM gets the `recall` (saved facts) and `reminisce` (past
+# conversation) tools, both backed by semantic search.
 #
 # Master switch. When false the daemon binds NoEmbedder + NoSemanticStore
 # and the retrieval-touching tools register but no-op silently.
@@ -441,7 +442,7 @@ hotkey = "Super+Escape"
 # Per-request HTTP timeout against /v1/embeddings.
 # request_timeout_secs = 30
 # How many nearest-neighbor matches to retrieve per query for
-# auto-injection and the search_memory tool's default.
+# auto-injection and the reminisce tool's default.
 # top_k = 5
 # Char-window size for chunking conversation messages. Messages
 # shorter than this become a single chunk.
@@ -451,5 +452,5 @@ hotkey = "Super+Escape"
 # chunk_overlap_chars = 64
 # When true, every user query auto-injects the top-K conversation
 # chunks as a "Relevant past context: …" system message. Set false
-# to require explicit `search_memory` tool invocations only.
+# to require explicit `reminisce` tool invocations only.
 # auto_inject = true

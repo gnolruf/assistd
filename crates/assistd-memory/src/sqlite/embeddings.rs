@@ -84,6 +84,49 @@ pub trait SemanticStore: Send + Sync + 'static {
     /// configured model? Returned as `(chunks, memories)`. Useful in
     /// tests and a future `assistd memory stats` view.
     async fn count_for_model(&self, model: &str) -> Result<(i64, i64)>;
+
+    /// Diagnostic: rows whose `model` does NOT equal `current`. Used by
+    /// the daemon at startup to warn when a config change has stranded
+    /// pre-existing embeddings under a different model name (the
+    /// retrieval queries filter by model, so stale rows are invisible
+    /// until reindexed). Returns total stale row count + the distinct
+    /// model names that own them, sorted lexicographically.
+    async fn count_stale(&self, current: &str) -> Result<(i64, Vec<String>)>;
+
+    /// Memories that have no embedding under `current`. The reindex
+    /// handler embeds and stores each `(id, value)` to bring them back
+    /// into the recall index. A row appears here when (a) the memory
+    /// was saved while the embedder subsystem was down, or (b) the
+    /// configured embedding model has changed since the row was
+    /// indexed.
+    async fn memories_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>>;
+
+    /// Conversation chunks that have no embedding under `current`.
+    /// Symmetric to [`SemanticStore::memories_missing_embedding`].
+    async fn chunks_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>>;
+
+    /// Persist a freshly-computed embedding for a `conversation_chunks`
+    /// row. Idempotent on `(chunk_id)` via the same UPSERT the
+    /// background embedder task uses. Used by the reindex handler so
+    /// it can dispatch directly without going through the embedder
+    /// task's mpsc.
+    async fn store_chunk_embedding(
+        &self,
+        chunk_id: i64,
+        model: String,
+        dim: i64,
+        vector: Vec<u8>,
+    ) -> Result<()>;
+
+    /// Persist a freshly-computed embedding for a `memories` row.
+    /// Symmetric to [`SemanticStore::store_chunk_embedding`].
+    async fn store_memory_embedding(
+        &self,
+        memory_id: i64,
+        model: String,
+        dim: i64,
+        vector: Vec<u8>,
+    ) -> Result<()>;
 }
 
 /// Successful-no-op fallback used when the embedding subsystem is
@@ -110,6 +153,33 @@ impl SemanticStore for NoSemanticStore {
     }
     async fn count_for_model(&self, _model: &str) -> Result<(i64, i64)> {
         Ok((0, 0))
+    }
+    async fn count_stale(&self, _current: &str) -> Result<(i64, Vec<String>)> {
+        Ok((0, Vec::new()))
+    }
+    async fn memories_missing_embedding(&self, _current: &str) -> Result<Vec<(i64, String)>> {
+        Ok(Vec::new())
+    }
+    async fn chunks_missing_embedding(&self, _current: &str) -> Result<Vec<(i64, String)>> {
+        Ok(Vec::new())
+    }
+    async fn store_chunk_embedding(
+        &self,
+        _chunk_id: i64,
+        _model: String,
+        _dim: i64,
+        _vector: Vec<u8>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn store_memory_embedding(
+        &self,
+        _memory_id: i64,
+        _model: String,
+        _dim: i64,
+        _vector: Vec<u8>,
+    ) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -327,6 +397,118 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .context("count_for_model")
+    }
+
+    async fn count_stale(&self, current: &str) -> Result<(i64, Vec<String>)> {
+        let current = current.to_string();
+        self.handle
+            .conn()
+            .call(move |c| {
+                let mut total: i64 = 0;
+                let mut models: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                let sql = "SELECT model, count(*)
+                           FROM embeddings WHERE model != ?1 GROUP BY model
+                           UNION ALL
+                           SELECT model, count(*)
+                           FROM memory_embeddings WHERE model != ?1 GROUP BY model";
+                let mut stmt = c.prepare(sql)?;
+                let rows = stmt.query_map(rusqlite::params![current], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                for r in rows {
+                    let (model, n) = r?;
+                    total += n;
+                    models.insert(model);
+                }
+                Ok((total, models.into_iter().collect::<Vec<_>>()))
+            })
+            .await
+            .context("count_stale")
+    }
+
+    async fn memories_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>> {
+        let current = current.to_string();
+        self.handle
+            .conn()
+            .call(move |c| {
+                let mut stmt = c.prepare(
+                    "SELECT m.id, m.value
+                     FROM memories m
+                     LEFT JOIN memory_embeddings e
+                       ON e.memory_id = m.id AND e.model = ?1
+                     WHERE e.id IS NULL
+                     ORDER BY m.id",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![current], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .context("memories_missing_embedding")
+    }
+
+    async fn chunks_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>> {
+        let current = current.to_string();
+        self.handle
+            .conn()
+            .call(move |c| {
+                let mut stmt = c.prepare(
+                    "SELECT cc.id, cc.content
+                     FROM conversation_chunks cc
+                     LEFT JOIN embeddings e
+                       ON e.conversation_chunk_id = cc.id AND e.model = ?1
+                     WHERE e.id IS NULL
+                     ORDER BY cc.id",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![current], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .context("chunks_missing_embedding")
+    }
+
+    async fn store_chunk_embedding(
+        &self,
+        chunk_id: i64,
+        model: String,
+        dim: i64,
+        vector: Vec<u8>,
+    ) -> Result<()> {
+        use super::writer::{WriteCall, WriteOp};
+        WriteCall::run(self.handle.writer(), |ack| WriteOp::StoreChunkEmbedding {
+            chunk_id,
+            model,
+            dim,
+            vector,
+            ack,
+        })
+        .await
+    }
+
+    async fn store_memory_embedding(
+        &self,
+        memory_id: i64,
+        model: String,
+        dim: i64,
+        vector: Vec<u8>,
+    ) -> Result<()> {
+        use super::writer::{WriteCall, WriteOp};
+        WriteCall::run(self.handle.writer(), |ack| WriteOp::StoreMemoryEmbedding {
+            memory_id,
+            model,
+            dim,
+            vector,
+            ack,
+        })
+        .await
     }
 }
 
@@ -685,6 +867,198 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(s.count_for_model("m").await.unwrap(), (0, 0));
+        let (n, models) = s.count_stale("m").await.unwrap();
+        assert_eq!(n, 0);
+        assert!(models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
+        let (handle, _w) = fresh().await;
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::BeginSession {
+                session_id: "sess-mx".into(),
+                daemon_pid: 1,
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::AppendMessage {
+                session_id: "sess-mx".into(),
+                turn_id: None,
+                msg: PersistedMessage::user("x"),
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        let conv_id = rx.await.unwrap().unwrap();
+
+        // Two chunks: one indexed under "new", one indexed under "old".
+        let _ = insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "new").await;
+        let _ = insert_chunk_with_vec(&handle, conv_id, 1, &unit_vec(0.5), "old").await;
+        // One unindexed chunk (no embedding row at all).
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::StoreChunk {
+                conversation_id: conv_id,
+                chunk_index: 2,
+                content: "naked-chunk".into(),
+                token_count: None,
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        let naked_chunk = rx.await.unwrap().unwrap();
+
+        // Two memories: one indexed under "new", one bare.
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::SaveMemory {
+                key: "indexed".into(),
+                value: "v1".into(),
+                source_conversation_id: None,
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        let indexed_mem = rx.await.unwrap().unwrap();
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::StoreMemoryEmbedding {
+                memory_id: indexed_mem,
+                model: "new".into(),
+                dim: 2,
+                vector: vector_to_blob(&unit_vec(0.0)),
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::SaveMemory {
+                key: "bare".into(),
+                value: "v2".into(),
+                source_conversation_id: None,
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        let bare_mem = rx.await.unwrap().unwrap();
+
+        let s = SqliteSemanticStore::new(handle);
+        // Under current = "new":
+        // - Chunks missing: the "old"-indexed chunk + the naked one.
+        // - Memories missing: just the bare memory.
+        let chunks = s.chunks_missing_embedding("new").await.unwrap();
+        assert_eq!(chunks.len(), 2);
+        let chunk_contents: Vec<&str> = chunks.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(chunk_contents.contains(&"chunk1")); // old-indexed
+        assert!(chunk_contents.contains(&"naked-chunk"));
+        assert!(chunks.iter().any(|(id, _)| *id == naked_chunk));
+
+        let memories = s.memories_missing_embedding("new").await.unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].0, bare_mem);
+        assert_eq!(memories[0].1, "v2");
+
+        // store_*_embedding should be idempotent: write under "new"
+        // and the row drops out of the missing list.
+        s.store_memory_embedding(
+            bare_mem,
+            "new".to_string(),
+            2,
+            vector_to_blob(&unit_vec(0.0)),
+        )
+        .await
+        .unwrap();
+        let memories = s.memories_missing_embedding("new").await.unwrap();
+        assert!(memories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn count_stale_aggregates_across_chunks_and_memories() {
+        let (handle, _w) = fresh().await;
+        // Create a conversation row to FK chunk inserts.
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::BeginSession {
+                session_id: "sess-stale".into(),
+                daemon_pid: 1,
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::AppendMessage {
+                session_id: "sess-stale".into(),
+                turn_id: None,
+                msg: PersistedMessage::user("x"),
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        let conv_id = rx.await.unwrap().unwrap();
+
+        // Two chunks under "old-A", one under "old-B", one under "new".
+        let _ = insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "old-A").await;
+        let _ = insert_chunk_with_vec(&handle, conv_id, 1, &unit_vec(0.5), "old-A").await;
+        let _ = insert_chunk_with_vec(&handle, conv_id, 2, &unit_vec(1.0), "old-B").await;
+        let _ = insert_chunk_with_vec(&handle, conv_id, 3, &unit_vec(1.5), "new").await;
+
+        // One memory embedding under "old-A".
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::SaveMemory {
+                key: "k".into(),
+                value: "v".into(),
+                source_conversation_id: None,
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        let mem_id = rx.await.unwrap().unwrap();
+        let (tx, rx) = oneshot::channel();
+        handle
+            .writer()
+            .send(WriteOp::StoreMemoryEmbedding {
+                memory_id: mem_id,
+                model: "old-A".into(),
+                dim: 2,
+                vector: vector_to_blob(&unit_vec(0.0)),
+                ack: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+
+        let s = SqliteSemanticStore::new(handle);
+        // Current = "new" → 2 chunk rows under old-A + 1 chunk under old-B
+        // + 1 memory under old-A = 4 stale rows, two distinct models.
+        let (n, models) = s.count_stale("new").await.unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(models, vec!["old-A".to_string(), "old-B".to_string()]);
+
+        // Switching current to "old-A" should leave only the "old-B"
+        // chunk + the "new" chunk as stale = 2 rows, two models.
+        let (n, models) = s.count_stale("old-A").await.unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(models, vec!["new".to_string(), "old-B".to_string()]);
     }
 
     #[test]

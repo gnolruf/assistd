@@ -95,10 +95,10 @@ pub struct AppState {
     /// Identifier for this daemon process's session, set at startup by
     /// [`assistd_memory::ConversationStore::begin_session`]. Every row
     /// the persistence hook writes gets tagged with it so a future
-    /// `assistd memory search` knows which daemon run produced it.
+    /// `assistd memory reminisce` knows which daemon run produced it.
     pub session_id: Arc<SessionId>,
     /// Embedder used for query-side embedding (`inject_semantic_context`)
-    /// and for the LLM-callable `recall` / `search_memory` tools. The
+    /// and for the LLM-callable `recall` / `reminisce` tools. The
     /// background embedder task that processes [`Self::embed_tx`] holds
     /// its own clone of this `Arc`.
     pub embedder: Arc<dyn Embedder>,
@@ -290,9 +290,6 @@ impl AppState {
             Request::VoiceToggle { id } => self.handle_voice_toggle(id, tx).await,
             Request::VoiceSkip { id } => self.handle_voice_skip(id, tx).await,
             Request::GetVoiceState { id } => self.handle_get_voice_state(id, tx).await,
-            Request::MemorySearch { id, query, limit } => {
-                self.handle_memory_search(id, query, limit, tx).await
-            }
             Request::MemorySave { id, key, value } => {
                 self.handle_memory_save(id, key, value, tx).await
             }
@@ -309,6 +306,7 @@ impl AppState {
                 self.handle_memory_semantic_search(id, query, limit, tx)
                     .await
             }
+            Request::MemoryReindex { id } => self.handle_memory_reindex(id, tx).await,
         }
     }
 
@@ -337,8 +335,7 @@ impl AppState {
         // Snapshot what we need for chunking *before* moving `msg` into
         // append_message. Tool-call assistant rows and tool-result rows
         // skip chunking: the former have empty content, the latter are
-        // JSON-y noise that pollutes semantic search (FTS5 still covers
-        // them via the conversations table).
+        // JSON-y noise that pollutes semantic search.
         let should_embed = embedding_enabled
             && chunks_handle.is_some()
             && matches!(msg.role, PersistedRole::User | PersistedRole::Assistant)
@@ -457,9 +454,8 @@ impl AppState {
     ) -> Result<()> {
         let model = self.embedder.model().to_string();
         if model.is_empty() {
-            // Embedding subsystem disabled — emit Done with no hits.
-            // Mirrors the behavior of `MemorySearch` against an empty
-            // FTS5 index: clean stream, no error.
+            // Embedding subsystem disabled — emit Done with no hits so
+            // the CLI sees a clean empty stream, not an error.
             let _ = tx.send(Event::Done { id }).await;
             return Ok(());
         }
@@ -504,42 +500,6 @@ impl AppState {
                     .send(Event::Error {
                         id,
                         message: format!("semantic search failed: {e:#}"),
-                    })
-                    .await;
-                Err(e)
-            }
-        }
-    }
-
-    async fn handle_memory_search(
-        self: Arc<Self>,
-        id: String,
-        query: String,
-        limit: u32,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
-        match self.memory_ops.search(&query, limit as usize).await {
-            Ok(hits) => {
-                for h in hits {
-                    let _ = tx
-                        .send(Event::MemoryHit {
-                            id: id.clone(),
-                            conversation_id: h.conversation_id,
-                            session_id: h.session_id,
-                            timestamp: h.timestamp,
-                            role: h.role.as_wire().into(),
-                            snippet: h.snippet,
-                        })
-                        .await;
-                }
-                let _ = tx.send(Event::Done { id }).await;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("memory search failed: {e:#}"),
                     })
                     .await;
                 Err(e)
@@ -666,9 +626,10 @@ impl AppState {
     ) -> Result<()> {
         match self.memory_ops.list_full(&prefix).await {
             Ok(rows) => {
-                // `limit = 0` means no cap (matches the wire convention used
-                // by `MemorySearch`). Otherwise truncate after the SQL has
-                // already ordered lexicographically by key.
+                // `limit = 0` means no cap (matches the wire convention
+                // used by other search-style memory variants). Otherwise
+                // truncate after the SQL has already ordered
+                // lexicographically by key.
                 let cap = if limit == 0 {
                     rows.len()
                 } else {
@@ -727,6 +688,157 @@ impl AppState {
                 Err(e)
             }
         }
+    }
+
+    /// Embed every memory and every conversation chunk that has no
+    /// embedding under the daemon's currently-configured model. Streams
+    /// `ReindexProgress` events as items complete; finishes with `Done`
+    /// (or `Error` if no embedder is configured). Per-item failures
+    /// during embed/write are logged and counted as still-done so a
+    /// single bad row doesn't wedge the whole run — same log-and-drop
+    /// posture as the background embedder task.
+    async fn handle_memory_reindex(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        let model = self.embedder.model().to_string();
+        if model.is_empty() {
+            let _ = tx
+                .send(Event::Error {
+                    id,
+                    message: "embedding subsystem disabled; cannot reindex".to_string(),
+                })
+                .await;
+            return Ok(());
+        }
+        let dim = self.embedder.dim() as i64;
+
+        let chunks = match self.semantic.chunks_missing_embedding(&model).await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("reindex: list missing chunks: {e:#}"),
+                    })
+                    .await;
+                return Err(e);
+            }
+        };
+        let memories = match self.semantic.memories_missing_embedding(&model).await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("reindex: list missing memories: {e:#}"),
+                    })
+                    .await;
+                return Err(e);
+            }
+        };
+        let chunks_total = chunks.len() as u32;
+        let memories_total = memories.len() as u32;
+
+        // Always emit a kickoff progress for each kind so a client that
+        // only sees `(0, 0)` still learns the totals before receiving
+        // `Done` — useful when the run has nothing to do.
+        let _ = tx
+            .send(Event::ReindexProgress {
+                id: id.clone(),
+                kind: "chunks".to_string(),
+                done: 0,
+                total: chunks_total,
+            })
+            .await;
+        let _ = tx
+            .send(Event::ReindexProgress {
+                id: id.clone(),
+                kind: "memories".to_string(),
+                done: 0,
+                total: memories_total,
+            })
+            .await;
+
+        let mut done = 0u32;
+        for (chunk_id, text) in chunks {
+            match self.embedder.embed(text).await {
+                Ok(vec) => {
+                    let blob = assistd_memory::vector_to_blob(&vec);
+                    if let Err(e) = self
+                        .semantic
+                        .store_chunk_embedding(chunk_id, model.clone(), dim, blob)
+                        .await
+                    {
+                        tracing::warn!(
+                            target: "assistd::memory",
+                            chunk_id,
+                            error = %e,
+                            "reindex: store_chunk_embedding failed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "assistd::memory",
+                        chunk_id,
+                        error = %e,
+                        "reindex: embed chunk failed"
+                    );
+                }
+            }
+            done = done.saturating_add(1);
+            let _ = tx
+                .send(Event::ReindexProgress {
+                    id: id.clone(),
+                    kind: "chunks".to_string(),
+                    done,
+                    total: chunks_total,
+                })
+                .await;
+        }
+
+        let mut done = 0u32;
+        for (memory_id, value) in memories {
+            match self.embedder.embed(value).await {
+                Ok(vec) => {
+                    let blob = assistd_memory::vector_to_blob(&vec);
+                    if let Err(e) = self
+                        .semantic
+                        .store_memory_embedding(memory_id, model.clone(), dim, blob)
+                        .await
+                    {
+                        tracing::warn!(
+                            target: "assistd::memory",
+                            memory_id,
+                            error = %e,
+                            "reindex: store_memory_embedding failed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "assistd::memory",
+                        memory_id,
+                        error = %e,
+                        "reindex: embed memory failed"
+                    );
+                }
+            }
+            done = done.saturating_add(1);
+            let _ = tx
+                .send(Event::ReindexProgress {
+                    id: id.clone(),
+                    kind: "memories".to_string(),
+                    done,
+                    total: memories_total,
+                })
+                .await;
+        }
+
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
     }
 
     pub async fn handle_query(
