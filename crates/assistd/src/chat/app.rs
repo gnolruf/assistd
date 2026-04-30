@@ -79,10 +79,7 @@ pub enum ChatEvent {
         protocol: Option<StatefulProtocol>,
     },
     /// `/attach <path>` failed (missing file, unsupported format, etc.).
-    AttachFailed {
-        path: String,
-        message: String,
-    },
+    AttachFailed { path: String, message: String },
 }
 
 impl std::fmt::Debug for ChatEvent {

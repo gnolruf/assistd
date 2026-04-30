@@ -9,10 +9,10 @@ mod daemon;
 mod gpu_monitor;
 #[cfg(any(feature = "daemon", feature = "chat"))]
 mod hotkey;
-#[cfg(any(feature = "client", feature = "chat"))]
-mod ipc_helper;
 #[cfg(any(feature = "daemon", feature = "chat"))]
 mod idle_monitor;
+#[cfg(any(feature = "client", feature = "chat"))]
+mod ipc_helper;
 #[cfg(feature = "client")]
 mod listen;
 #[cfg(feature = "daemon")]

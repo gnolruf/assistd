@@ -91,9 +91,8 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         match spawn_daemon_detached(args.config.as_deref()) {
             Ok(()) => {
                 if let Err(e) = wait_for_socket(ipc.socket_path(), Duration::from_secs(30)).await {
-                    startup_error = Some(format!(
-                        "daemon spawned but socket never became ready: {e}"
-                    ));
+                    startup_error =
+                        Some(format!("daemon spawned but socket never became ready: {e}"));
                 }
             }
             Err(e) => {
@@ -150,11 +149,8 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     // seconds and the daemon is the source of truth. A future PR can
     // replace this with `Request::Subscribe` once the daemon exposes
     // its watch channels.
-    let _polling_handle = spawn_status_polling(
-        ipc.clone(),
-        chat_tx.clone(),
-        shutdown_tx.subscribe(),
-    );
+    let _polling_handle =
+        spawn_status_polling(ipc.clone(), chat_tx.clone(), shutdown_tx.subscribe());
 
     let run_result = run_tui(
         ipc.clone(),
@@ -235,18 +231,10 @@ async fn run_tui(
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
-    let mut app = App::new(
-        ipc,
-        chat_tx,
-        model_name,
-        sleep_cfg,
-        vision_enabled,
-        picker,
-    );
+    let mut app = App::new(ipc, chat_tx, model_name, sleep_cfg, vision_enabled, picker);
 
     if let Some(err) = startup_error {
-        app.output
-            .push_error(&format!("daemon startup: {err}"));
+        app.output.push_error(&format!("daemon startup: {err}"));
         app.output
             .push_error("once the daemon is reachable, retry your query");
     }
@@ -327,9 +315,9 @@ fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
             Ok(())
         });
     }
-    let child = cmd.spawn().with_context(|| {
-        format!("could not spawn daemon binary at {}", exe.display())
-    })?;
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("could not spawn daemon binary at {}", exe.display()))?;
     info!("spawned daemon pid {}", child.id());
     // Drop the handle: don't wait, don't kill. The daemon is now its
     // own process group leader and outlives this TUI session.

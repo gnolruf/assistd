@@ -346,10 +346,7 @@ mod tests {
             let mut second = String::new();
             reader.read_line(&mut second).await.unwrap();
             let req: Request = serde_json::from_str(second.trim()).unwrap();
-            assert!(matches!(
-                req,
-                Request::ConfirmResponse { allow: true, .. }
-            ));
+            assert!(matches!(req, Request::ConfirmResponse { allow: true, .. }));
 
             // Emit Done.
             let mut done = serde_json::to_string(&Event::Done { id: "r".into() }).unwrap();
