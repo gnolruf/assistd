@@ -1,10 +1,13 @@
-//! LLM-callable memory tools: `remember` and `recall`.
+//! LLM-callable memory tools: `remember`, `recall`, and `reminisce`.
 //!
-//! Both tools sit alongside [`crate::RunTool`] in the daemon's
-//! [`crate::ToolRegistry`]. The model decides when to invoke them; both
-//! delegate straight to [`MemoryOps`], which writes through the same
-//! single SQLite writer the chat-turn persistence path uses (so saves
-//! never block the agent thread for disk).
+//! All three sit alongside [`crate::RunTool`] in the daemon's
+//! [`crate::ToolRegistry`]. The model decides when to invoke them.
+//! `remember`/`recall` operate on saved key/value facts via [`MemoryOps`],
+//! which writes through the same single SQLite writer the chat-turn
+//! persistence path uses (so saves never block the agent thread for
+//! disk). `reminisce` is the parallel verb for *past dialogue* — it
+//! runs semantic search over the chunked conversation history, not over
+//! saved facts.
 //!
 //! Dedup is by key: the `memories` table has `key TEXT NOT NULL UNIQUE`
 //! and `save_memory` does `ON CONFLICT(key) DO UPDATE`, so re-saving the
@@ -159,22 +162,16 @@ impl Tool for RememberTool {
     }
 }
 
-/// LLM-callable tool that returns previously-saved memories.
+/// LLM-callable tool that returns previously-saved memories ranked by
+/// semantic similarity to the query. Embeds the query and ranks
+/// memories by cosine similarity against the saved values' embeddings,
+/// so the user can describe a fact in different words than the stored
+/// key/value text and still hit it. Falls back to the no-memories
+/// sentinel when the embedding subsystem is disabled (or no memories
+/// have been embedded yet).
 ///
-/// Supports two query modes:
-/// - `prefix`: list keys starting with the query string (`""` lists all).
-///   Cheap, deterministic, ideal for hierarchical browsing like `user.*`.
-/// - `semantic`: embed the query and rank memories by cosine similarity
-///   against the saved values' embeddings. Robust to paraphrase — works
-///   even when the user describes the fact in different words than the
-///   stored key/value text. Falls back to the no-memories sentinel when
-///   the embedding subsystem is disabled (or no memories have been
-///   embedded yet).
-///
-/// Both modes return `<key>: <value>` lines so the model's downstream
-/// formatting stays uniform.
+/// Returns `<key>: <value>` lines.
 pub struct RecallTool {
-    ops: Arc<MemoryOps>,
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
     /// Embedding model name used to filter `memory_embeddings` rows by
@@ -185,63 +182,15 @@ pub struct RecallTool {
 
 impl RecallTool {
     pub fn new(
-        ops: Arc<MemoryOps>,
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
         embedding_model: String,
     ) -> Self {
         Self {
-            ops,
             embedder,
             semantic,
             embedding_model,
         }
-    }
-
-    async fn recall_prefix(&self, prefix: &str) -> Result<(String, bool, usize)> {
-        // Probe `list` first so we can detect overflow vs. exactly-cap.
-        let total_keys = self.ops.list(prefix).await?.len();
-        let mut pairs = self.ops.list_pairs(prefix, RECALL_LIMIT).await?;
-        pairs.sort_by(|a, b| a.0.cmp(&b.0));
-        let truncated = total_keys > RECALL_LIMIT;
-        Ok((format_pairs(&pairs), truncated, pairs.len()))
-    }
-
-    async fn recall_semantic(&self, query: &str) -> Result<(String, bool, usize)> {
-        if self.embedding_model.is_empty() {
-            // Embedding subsystem disabled — degrade gracefully so the
-            // model can fall back to prefix mode without erroring.
-            return Ok(("(no memories)".to_string(), false, 0));
-        }
-        let vec = match self.embedder.embed(query.to_string()).await {
-            Ok(v) => v,
-            Err(e) => {
-                // Best-effort: log and return empty rather than
-                // surfacing as a tool error. The LLM can retry with
-                // prefix mode if it cares.
-                tracing::debug!(
-                    target: "assistd::embed",
-                    error = %e,
-                    "recall(semantic) embed failed; returning empty"
-                );
-                return Ok(("(no memories)".to_string(), false, 0));
-            }
-        };
-        let hits = self
-            .semantic
-            .nearest_memories(vec, RECALL_LIMIT, &self.embedding_model)
-            .await?;
-        if hits.is_empty() {
-            return Ok(("(no memories)".to_string(), false, 0));
-        }
-        // Render the same `<key>: <value>` shape as the prefix path so
-        // downstream formatting in the model stays uniform.
-        let pairs: Vec<(String, String)> = hits
-            .iter()
-            .map(|h| (h.key.clone(), h.value.clone()))
-            .collect();
-        let n = pairs.len();
-        Ok((format_pairs(&pairs), false, n))
     }
 }
 
@@ -255,44 +204,30 @@ impl Tool for RecallTool {
         "Retrieve previously remembered facts and preferences about the user. \
          Call this when prior context might help (e.g. answering \"what editor \
          should I use?\", personalizing a response, or whenever the user \
-         references something they told you before). \
-         Two query modes: \
-         (1) `mode=\"prefix\"` lists keys starting with `query` — pass `query=\"\"` \
-         to list every memory, or `query=\"user.\"` to filter by namespace. \
-         (2) `mode=\"semantic\"` embeds `query` and ranks memories by meaning. \
-         Use semantic for natural-language questions like \"what editor do I \
-         prefer?\"; use prefix for hierarchical browsing. \
-         Returns up to 50 `<key>: <value>` lines. If no memories match, the \
-         output is `(no memories)`."
+         references something they told you before). Embeds `query` and ranks \
+         memories by semantic similarity, so paraphrased questions still match \
+         the stored fact (e.g. \"what editor do I prefer?\" finds an \
+         `editor_preference` memory). Returns up to 50 `<key>: <value>` lines. \
+         If no memories match, the output is `(no memories)`."
     }
 
     fn parameters_schema(&self) -> Value {
-        // `query` and `mode` are both required because
-        // `ToolRegistry::openai_schemas` hardcodes `strict: true`, which
-        // requires every declared property to appear in `required`.
         json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Either a key prefix (when mode=\"prefix\") or \
-                                    a natural-language question (when mode=\"semantic\"). \
-                                    Pass \"\" with mode=\"prefix\" to list every memory."
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["prefix", "semantic"],
-                    "description": "How to match. \"prefix\" lists keys starting with \
-                                    `query`. \"semantic\" embeds `query` and ranks memories \
-                                    by meaning (use for paraphrase-tolerant lookup)."
+                    "description": "Natural-language question. The model embeds \
+                                    this and ranks memories by cosine similarity \
+                                    against their stored values."
                 }
             },
-            "required": ["query", "mode"]
+            "required": ["query"]
         })
     }
 
-    #[tracing::instrument(skip(self, args), fields(mode = tracing::field::Empty))]
+    #[tracing::instrument(skip(self, args))]
     async fn invoke(&self, args: Value) -> Result<Value> {
         let start = Instant::now();
         let query = args
@@ -300,37 +235,53 @@ impl Tool for RecallTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("`query` (string) is required"))?
             .to_string();
-        let mode = args
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("`mode` (string, \"prefix\" or \"semantic\") is required"))?
-            .to_string();
-        tracing::Span::current().record("mode", mode.as_str());
 
-        let (output, truncated, returned) = match mode.as_str() {
-            "prefix" => self.recall_prefix(&query).await?,
-            "semantic" => self.recall_semantic(&query).await?,
-            other => {
-                return Err(anyhow!(
-                    "`mode` must be \"prefix\" or \"semantic\" (got {other:?})"
-                ));
+        let (output, returned) = if self.embedding_model.is_empty() {
+            // Embedding subsystem disabled — no semantic index to search.
+            ("(no memories)".to_string(), 0)
+        } else {
+            match self.embedder.embed(query).await {
+                Ok(vec) => {
+                    let hits = self
+                        .semantic
+                        .nearest_memories(vec, RECALL_LIMIT, &self.embedding_model)
+                        .await?;
+                    if hits.is_empty() {
+                        ("(no memories)".to_string(), 0)
+                    } else {
+                        let pairs: Vec<(String, String)> = hits
+                            .iter()
+                            .map(|h| (h.key.clone(), h.value.clone()))
+                            .collect();
+                        let n = pairs.len();
+                        (format_pairs(&pairs), n)
+                    }
+                }
+                Err(e) => {
+                    // Best-effort: log and return empty rather than
+                    // surfacing as a tool error. The LLM can retry next turn.
+                    tracing::debug!(
+                        target: "assistd::embed",
+                        error = %e,
+                        "recall embed failed; returning empty"
+                    );
+                    ("(no memories)".to_string(), 0)
+                }
             }
         };
 
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
             target: "assistd::memory",
-            mode = %mode,
             returned = returned,
-            truncated = truncated,
             duration_ms = duration_ms,
-            "recall returned pairs"
+            "recall returned"
         );
         Ok(json!({
             "output":      output,
             "exit_code":   0,
             "duration_ms": duration_ms,
-            "truncated":   truncated,
+            "truncated":   false,
         }))
     }
 }
@@ -353,18 +304,18 @@ fn format_pairs(pairs: &[(String, String)]) -> String {
 }
 
 /// LLM-callable tool that searches *past conversation history* for
-/// messages similar in meaning to the query. Different data source from
-/// `recall`, which works over saved key/value facts. Use this when the
-/// user references something they "discussed before" or "worked on
-/// last month" — paraphrase-tolerant semantic search over the chunked
-/// conversation log.
-pub struct SearchMemoryTool {
+/// messages similar in meaning to the query. Complement to `recall`:
+/// `recall` looks up saved key/value facts, `reminisce` looks up past
+/// dialogue. Use this when the user references something they
+/// "discussed before" or "worked on last month" — paraphrase-tolerant
+/// semantic search over the chunked conversation log.
+pub struct ReminisceTool {
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
     embedding_model: String,
 }
 
-impl SearchMemoryTool {
+impl ReminisceTool {
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
@@ -379,17 +330,17 @@ impl SearchMemoryTool {
 }
 
 #[async_trait]
-impl Tool for SearchMemoryTool {
+impl Tool for ReminisceTool {
     fn name(&self) -> &str {
-        "search_memory"
+        "reminisce"
     }
 
     fn description(&self) -> &str {
         "Search past conversation history (across sessions) for messages \
-         similar in meaning to a query. Differs from `recall`: `recall` \
-         looks up *saved facts* (key/value), while `search_memory` searches \
-         *past dialogue text* — use it when the user references something \
-         they 'discussed before' or 'worked on last month'. Robust to \
+         similar in meaning to a query. Complement to `recall`: `recall` \
+         looks up *saved facts* (key/value), `reminisce` searches *past \
+         dialogue text* — use it when the user references something they \
+         'discussed before' or 'worked on last month'. Robust to \
          paraphrase: a query like \"that rust project we discussed\" will \
          match a past message about \"the assistd embedding daemon in Rust\". \
          Returns up to `limit` ranked snippets with timestamps and roles."
@@ -449,7 +400,7 @@ impl Tool for SearchMemoryTool {
                 tracing::debug!(
                     target: "assistd::embed",
                     error = %e,
-                    "search_memory embed failed; returning empty"
+                    "reminisce embed failed; returning empty"
                 );
                 return Ok(json!({
                     "output":      "(embedding unavailable)",
@@ -490,7 +441,7 @@ impl Tool for SearchMemoryTool {
             target: "assistd::embed",
             returned = hits.len(),
             duration_ms = duration_ms,
-            "search_memory returned chunks"
+            "reminisce returned chunks"
         );
         Ok(json!({
             "output":      output,
@@ -639,138 +590,42 @@ mod tests {
     // --- Recall ----------------------------------------------------------
 
     #[tokio::test]
-    async fn recall_returns_pairs_sorted() {
-        let (ops, _w) = fresh_ops().await;
-        ops.save("user.name", "Ben".into()).await.unwrap();
-        ops.save("editor_preference", "vim".into()).await.unwrap();
-        ops.save("user.timezone", "PST".into()).await.unwrap();
-        let tool = RecallTool::new(ops, no_embedder(), no_semantic(), String::new());
+    async fn recall_with_disabled_embedder_returns_no_memories() {
+        // NoEmbedder + empty model name → invoke short-circuits to the
+        // no-memories sentinel. Matches the behavior the LLM sees when
+        // embedding is turned off in config.
+        let tool = RecallTool::new(no_embedder(), no_semantic(), String::new());
         let result = tool
-            .invoke(json!({"query": "", "mode": "prefix"}))
+            .invoke(json!({"query": "what editor do I prefer"}))
             .await
             .unwrap();
+        assert_eq!(result["output"], "(no memories)");
         assert_eq!(result["exit_code"], 0);
         assert_eq!(result["truncated"], false);
-        let output = result["output"].as_str().unwrap();
-        let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(
-            lines,
-            vec![
-                "editor_preference: vim",
-                "user.name: Ben",
-                "user.timezone: PST",
-            ]
-        );
     }
 
     #[tokio::test]
-    async fn recall_filters_by_prefix() {
-        let (ops, _w) = fresh_ops().await;
-        ops.save("user.name", "Ben".into()).await.unwrap();
-        ops.save("user.timezone", "PST".into()).await.unwrap();
-        ops.save("editor_preference", "vim".into()).await.unwrap();
-        let tool = RecallTool::new(ops, no_embedder(), no_semantic(), String::new());
-        let result = tool
-            .invoke(json!({"query": "user.", "mode": "prefix"}))
-            .await
-            .unwrap();
-        let output = result["output"].as_str().unwrap();
-        assert!(output.contains("user.name: Ben"), "{output}");
-        assert!(output.contains("user.timezone: PST"), "{output}");
-        assert!(
-            !output.contains("editor_preference"),
-            "prefix filter should exclude editor_preference: {output}"
-        );
-    }
-
-    #[tokio::test]
-    async fn recall_empty_returns_no_memories_marker() {
-        let (ops, _w) = fresh_ops().await;
-        let tool = RecallTool::new(ops, no_embedder(), no_semantic(), String::new());
-        let result = tool
-            .invoke(json!({"query": "", "mode": "prefix"}))
-            .await
-            .unwrap();
-        assert_eq!(result["output"], "(no memories)");
-        assert_eq!(result["truncated"], false);
-    }
-
-    #[tokio::test]
-    async fn recall_caps_at_limit() {
-        // Save more than RECALL_LIMIT entries; recall returns exactly
-        // RECALL_LIMIT and reports truncated.
-        let (ops, _w) = fresh_ops().await;
-        for i in 0..(RECALL_LIMIT + 5) {
-            // Zero-pad the index so lexicographic sort matches numeric
-            // — otherwise key.10 sorts before key.2, and the bookkeeping
-            // about which 50 we kept becomes confusing.
-            ops.save(&format!("k.{i:03}"), format!("v{i}"))
-                .await
-                .unwrap();
-        }
-        let tool = RecallTool::new(ops, no_embedder(), no_semantic(), String::new());
-        let result = tool
-            .invoke(json!({"query": "k.", "mode": "prefix"}))
-            .await
-            .unwrap();
-        assert_eq!(result["truncated"], true);
-        let output = result["output"].as_str().unwrap();
-        assert_eq!(output.lines().count(), RECALL_LIMIT);
-    }
-
-    #[tokio::test]
-    async fn recall_with_no_memory_store_no_ops() {
-        // TUI graceful path: NoMemoryStore returns empty for `list`, so
-        // recall reports the no-memories marker rather than erroring.
-        let tool = RecallTool::new(no_ops(), no_embedder(), no_semantic(), String::new());
-        let result = tool
-            .invoke(json!({"query": "", "mode": "prefix"}))
-            .await
-            .unwrap();
+    async fn recall_with_no_semantic_hits_returns_marker() {
+        // Embedder is wired (model name non-empty) but the semantic
+        // store has no memories indexed → still the no-memories sentinel.
+        // NoSemanticStore returns empty for nearest_memories regardless
+        // of the model name, so we just need a non-empty model string to
+        // get past the disabled short-circuit.
+        let tool = RecallTool::new(no_embedder(), no_semantic(), "some-model".into());
+        let result = tool.invoke(json!({"query": "anything"})).await.unwrap();
         assert_eq!(result["output"], "(no memories)");
     }
 
     #[tokio::test]
-    async fn recall_rejects_missing_args() {
-        // strict-mode schema requires `query` and `mode` — a missing
-        // arg is a protocol error from the model and surfaces as Err.
-        let tool = RecallTool::new(no_ops(), no_embedder(), no_semantic(), String::new());
+    async fn recall_rejects_missing_query() {
+        // strict-mode schema requires `query` — a missing arg is a
+        // protocol error from the model and surfaces as Err.
+        let tool = RecallTool::new(no_embedder(), no_semantic(), String::new());
         let err = tool.invoke(json!({})).await.unwrap_err();
         assert!(
             err.to_string().contains("query"),
             "expected error to mention `query`: {err}"
         );
-        let err = tool.invoke(json!({"query": "anything"})).await.unwrap_err();
-        assert!(
-            err.to_string().contains("mode"),
-            "expected error to mention `mode`: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn recall_rejects_invalid_mode() {
-        let tool = RecallTool::new(no_ops(), no_embedder(), no_semantic(), String::new());
-        let err = tool
-            .invoke(json!({"query": "x", "mode": "bogus"}))
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("prefix") || err.to_string().contains("semantic"),
-            "expected error to list valid modes: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn recall_semantic_with_disabled_embedder_returns_no_memories() {
-        // NoEmbedder + empty model name → recall_semantic short-circuits
-        // to the no-memories sentinel (matches the behavior the LLM
-        // sees when embedding is turned off in config).
-        let tool = RecallTool::new(no_ops(), no_embedder(), no_semantic(), String::new());
-        let result = tool
-            .invoke(json!({"query": "what editor do I prefer", "mode": "semantic"}))
-            .await
-            .unwrap();
-        assert_eq!(result["output"], "(no memories)");
     }
 
     // --- Schema sanity ---------------------------------------------------
@@ -782,13 +637,8 @@ mod tests {
         // contract that every property is required.
         let mut reg = ToolRegistry::new();
         reg.register(RememberTool::new(no_ops(), closed_embed_tx()));
-        reg.register(RecallTool::new(
-            no_ops(),
-            no_embedder(),
-            no_semantic(),
-            String::new(),
-        ));
-        reg.register(SearchMemoryTool::new(
+        reg.register(RecallTool::new(no_embedder(), no_semantic(), String::new()));
+        reg.register(ReminisceTool::new(
             no_embedder(),
             no_semantic(),
             String::new(),
@@ -809,13 +659,12 @@ mod tests {
         assert_eq!(recall["strict"], true);
         let req = recall["parameters"]["required"].as_array().unwrap();
         let names: Vec<&str> = req.iter().filter_map(|v| v.as_str()).collect();
-        assert!(names.contains(&"query"));
-        assert!(names.contains(&"mode"));
+        assert_eq!(names, vec!["query"]);
 
-        let search = &schemas[2]["function"];
-        assert_eq!(search["name"], "search_memory");
-        assert_eq!(search["strict"], true);
-        let req = search["parameters"]["required"].as_array().unwrap();
+        let reminisce = &schemas[2]["function"];
+        assert_eq!(reminisce["name"], "reminisce");
+        assert_eq!(reminisce["strict"], true);
+        let req = reminisce["parameters"]["required"].as_array().unwrap();
         let names: Vec<&str> = req.iter().filter_map(|v| v.as_str()).collect();
         assert!(names.contains(&"query"));
         assert!(names.contains(&"limit"));
@@ -848,26 +697,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remember_then_recall_round_trip() {
-        // Belt-and-suspenders: drive both tools end-to-end against the
-        // same MemoryOps and verify the saved pair shows up in recall.
+    async fn remember_then_recall_round_trip_no_embedder() {
+        // Belt-and-suspenders: drive both tools end-to-end. With the
+        // embedding subsystem disabled, recall reports the no-memories
+        // sentinel even though the save did land in SQLite — proves the
+        // wire-up is sane in the disabled-embedder configuration.
+        // Semantic-on round-trip lives in the embedder integration test.
         let (ops, _w) = fresh_ops().await;
         let remember = RememberTool::new(ops.clone(), closed_embed_tx());
-        let recall = RecallTool::new(ops, no_embedder(), no_semantic(), String::new());
+        let recall = RecallTool::new(no_embedder(), no_semantic(), String::new());
         remember
             .invoke(json!({"key": "editor_preference", "value": "vim"}))
             .await
             .unwrap();
-        let result = recall
-            .invoke(json!({"query": "", "mode": "prefix"}))
-            .await
-            .unwrap();
-        assert!(
-            result["output"]
-                .as_str()
-                .unwrap()
-                .contains("editor_preference: vim"),
-            "recall should surface the saved pair: {result:#}"
+        // The save must hit the underlying store regardless of the
+        // embedder state — verify directly rather than through recall,
+        // which would short-circuit on the empty model name.
+        assert_eq!(
+            ops.load("editor_preference").await.unwrap().as_deref(),
+            Some("vim")
         );
+        let result = recall.invoke(json!({"query": "vim"})).await.unwrap();
+        assert_eq!(result["output"], "(no memories)");
     }
 }

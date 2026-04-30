@@ -142,8 +142,7 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             // Memory* events shouldn't appear on a Query stream — the
             // daemon only emits them on `Request::Memory*`. Tolerate
             // them silently in case a future feature reuses the wire.
-            Event::MemoryHit { .. }
-            | Event::SemanticHit { .. }
+            Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }
             | Event::MemoryRow { .. }

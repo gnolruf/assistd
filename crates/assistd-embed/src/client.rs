@@ -7,7 +7,7 @@
 //! callers size their `Vec<f32>` buffers without a downstream round-trip.
 //!
 //! L2 normalisation happens here, before the vector leaves the crate, so
-//! every consumer (chunk indexing, query injection, `recall`/`search_memory`)
+//! every consumer (chunk indexing, query injection, `recall`/`reminisce`)
 //! can compute cosine as a plain dot product against stored vectors that
 //! were normalised the same way.
 

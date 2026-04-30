@@ -95,10 +95,10 @@ pub struct AppState {
     /// Identifier for this daemon process's session, set at startup by
     /// [`assistd_memory::ConversationStore::begin_session`]. Every row
     /// the persistence hook writes gets tagged with it so a future
-    /// `assistd memory search` knows which daemon run produced it.
+    /// `assistd memory reminisce` knows which daemon run produced it.
     pub session_id: Arc<SessionId>,
     /// Embedder used for query-side embedding (`inject_semantic_context`)
-    /// and for the LLM-callable `recall` / `search_memory` tools. The
+    /// and for the LLM-callable `recall` / `reminisce` tools. The
     /// background embedder task that processes [`Self::embed_tx`] holds
     /// its own clone of this `Arc`.
     pub embedder: Arc<dyn Embedder>,
@@ -290,9 +290,6 @@ impl AppState {
             Request::VoiceToggle { id } => self.handle_voice_toggle(id, tx).await,
             Request::VoiceSkip { id } => self.handle_voice_skip(id, tx).await,
             Request::GetVoiceState { id } => self.handle_get_voice_state(id, tx).await,
-            Request::MemorySearch { id, query, limit } => {
-                self.handle_memory_search(id, query, limit, tx).await
-            }
             Request::MemorySave { id, key, value } => {
                 self.handle_memory_save(id, key, value, tx).await
             }
@@ -337,8 +334,7 @@ impl AppState {
         // Snapshot what we need for chunking *before* moving `msg` into
         // append_message. Tool-call assistant rows and tool-result rows
         // skip chunking: the former have empty content, the latter are
-        // JSON-y noise that pollutes semantic search (FTS5 still covers
-        // them via the conversations table).
+        // JSON-y noise that pollutes semantic search.
         let should_embed = embedding_enabled
             && chunks_handle.is_some()
             && matches!(msg.role, PersistedRole::User | PersistedRole::Assistant)
@@ -457,9 +453,8 @@ impl AppState {
     ) -> Result<()> {
         let model = self.embedder.model().to_string();
         if model.is_empty() {
-            // Embedding subsystem disabled — emit Done with no hits.
-            // Mirrors the behavior of `MemorySearch` against an empty
-            // FTS5 index: clean stream, no error.
+            // Embedding subsystem disabled — emit Done with no hits so
+            // the CLI sees a clean empty stream, not an error.
             let _ = tx.send(Event::Done { id }).await;
             return Ok(());
         }
@@ -504,42 +499,6 @@ impl AppState {
                     .send(Event::Error {
                         id,
                         message: format!("semantic search failed: {e:#}"),
-                    })
-                    .await;
-                Err(e)
-            }
-        }
-    }
-
-    async fn handle_memory_search(
-        self: Arc<Self>,
-        id: String,
-        query: String,
-        limit: u32,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
-        match self.memory_ops.search(&query, limit as usize).await {
-            Ok(hits) => {
-                for h in hits {
-                    let _ = tx
-                        .send(Event::MemoryHit {
-                            id: id.clone(),
-                            conversation_id: h.conversation_id,
-                            session_id: h.session_id,
-                            timestamp: h.timestamp,
-                            role: h.role.as_wire().into(),
-                            snippet: h.snippet,
-                        })
-                        .await;
-                }
-                let _ = tx.send(Event::Done { id }).await;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("memory search failed: {e:#}"),
                     })
                     .await;
                 Err(e)
@@ -666,9 +625,10 @@ impl AppState {
     ) -> Result<()> {
         match self.memory_ops.list_full(&prefix).await {
             Ok(rows) => {
-                // `limit = 0` means no cap (matches the wire convention used
-                // by `MemorySearch`). Otherwise truncate after the SQL has
-                // already ordered lexicographically by key.
+                // `limit = 0` means no cap (matches the wire convention
+                // used by other search-style memory variants). Otherwise
+                // truncate after the SQL has already ordered
+                // lexicographically by key.
                 let cap = if limit == 0 {
                     rows.len()
                 } else {

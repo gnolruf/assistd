@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use assistd_ipc::{Event, Request, socket_path};
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use uuid::Uuid;
@@ -22,23 +22,18 @@ pub struct MemoryArgs {
 
 #[derive(Subcommand)]
 pub enum MemoryAction {
-    /// Search persisted conversation content. Two modes:
-    /// - `semantic` (default): cosine-similarity search over embedded
-    ///   chunks. Robust to paraphrase. Requires the embedding
-    ///   subsystem.
-    /// - `fts`: SQLite FTS5 full-text search. Supports phrase queries
-    ///   (`"foo bar"`), boolean ops (`foo AND bar`), and prefix matches
-    ///   (`foo*`).
-    Search {
-        /// Query string. Interpretation depends on `--mode`.
+    /// Semantic search over persisted conversation content. Embeds the
+    /// query and ranks past messages by cosine similarity, so
+    /// paraphrased phrasings still hit. Requires the embedding
+    /// subsystem; with embeddings disabled the daemon emits zero hits
+    /// and a clean Done.
+    Reminisce {
+        /// Natural-language query. The daemon embeds this and finds
+        /// the top-`limit` most semantically similar past messages.
         query: String,
         /// Cap on number of hits returned.
         #[arg(long, default_value = "5")]
         limit: u32,
-        /// Search mode. Defaults to `semantic` (the most-relevant
-        /// ranking; pass `--mode fts` for keyword/exact-phrase work).
-        #[arg(long, value_enum, default_value_t = SearchMode::Semantic)]
-        mode: SearchMode,
     },
     /// Persist a value under `key`. Overwrites any prior value.
     Save { key: String, value: String },
@@ -58,27 +53,12 @@ pub enum MemoryAction {
     Delete { key: String },
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub enum SearchMode {
-    /// SQLite FTS5 keyword search. Fast, exact, deterministic.
-    Fts,
-    /// Cosine-similarity over embeddings. Paraphrase-tolerant.
-    Semantic,
-}
-
 impl MemoryAction {
     fn into_request(self, id: String) -> Request {
         match self {
-            MemoryAction::Search {
-                query,
-                limit,
-                mode: SearchMode::Fts,
-            } => Request::MemorySearch { id, query, limit },
-            MemoryAction::Search {
-                query,
-                limit,
-                mode: SearchMode::Semantic,
-            } => Request::MemorySemanticSearch { id, query, limit },
+            MemoryAction::Reminisce { query, limit } => {
+                Request::MemorySemanticSearch { id, query, limit }
+            }
             MemoryAction::Save { key, value } => Request::MemorySave { id, key, value },
             MemoryAction::Load { key } => Request::MemoryLoad { id, key },
             MemoryAction::List { prefix } => Request::MemoryListAll {
@@ -128,23 +108,6 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             .with_context(|| format!("invalid JSON from daemon: {}", line.trim()))?;
 
         match event {
-            Event::MemoryHit {
-                conversation_id,
-                session_id,
-                timestamp,
-                role,
-                snippet,
-                ..
-            } => {
-                // One line per hit: timestamp, role, conversation row
-                // id, snippet (with FTS5 `<mark>` highlights). Short
-                // session-id prefix gives users a stable handle for
-                // follow-up queries without wasting columns.
-                let session_short = session_id.chars().take(8).collect::<String>();
-                println!(
-                    "{timestamp}  {role:9}  conv={conversation_id:<6}  sess={session_short}  {snippet}"
-                );
-            }
             Event::SemanticHit {
                 conversation_id,
                 session_id,
@@ -154,10 +117,12 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 similarity,
                 ..
             } => {
-                // Same column layout as MemoryHit but with similarity
-                // score instead of `<mark>` highlighting. `content` is
-                // the full message text (single line — collapse newlines
-                // so columns stay aligned).
+                // One line per hit: timestamp, role, conversation row
+                // id, similarity score, full message content. Short
+                // session-id prefix gives users a stable handle for
+                // follow-up queries without wasting columns. `content`
+                // is the full message text (single line — collapse
+                // newlines so columns stay aligned).
                 let session_short = session_id.chars().take(8).collect::<String>();
                 let single_line = content.replace('\n', " ");
                 println!(

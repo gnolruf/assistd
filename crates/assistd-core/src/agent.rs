@@ -765,11 +765,14 @@ mod tests {
     async fn agent_loop_routes_remember_then_recall() {
         // Drive the full loop through the same `RememberTool` /
         // `RecallTool` impls the daemon registers, against a real
-        // SQLite-backed `MemoryOps`. Remember the pair on the first
-        // step, recall it on the second, then assert the recall's
-        // tool_result event surfaces the saved key:value to the model.
-        // Pins AC #1 + AC #2 wire-level: the pair is round-trippable
-        // through one agent turn.
+        // SQLite-backed `MemoryOps`. Remember on the first step, recall
+        // on the second, then assert both calls were routed and that
+        // the save landed in the underlying store. With the embedding
+        // subsystem disabled (NoEmbedder/NoSemanticStore + empty model
+        // name), recall short-circuits to the `(no memories)` sentinel —
+        // the agent-loop wiring is what's under test here, not the
+        // semantic round-trip (which is exercised in the embedder
+        // integration tests).
         use assistd_memory::{
             ConversationStore, MemoryStore, SqliteConversationStore, SqliteHandle,
             SqliteMemoryStore,
@@ -787,28 +790,20 @@ mod tests {
         let handle = Arc::new(handle);
         let mem: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(handle.clone()));
         let conv: Arc<dyn ConversationStore> = Arc::new(SqliteConversationStore::new(handle));
-        let memory_ops = Arc::new(MemoryOps::new(mem, conv));
+        let memory_ops = Arc::new(MemoryOps::new(mem.clone(), conv));
 
         let mut tools = ToolRegistry::new();
-        // Closed embed channel + NoEmbedder/NoSemanticStore — the test
-        // exercises the prefix path only, so we don't need the embed
-        // subsystem wired up.
         let (embed_tx, embed_rx) = tokio::sync::mpsc::channel::<assistd_embed::EmbedJob>(1);
         drop(embed_rx);
         let no_embedder: Arc<dyn assistd_embed::Embedder> = Arc::new(assistd_embed::NoEmbedder);
         let no_semantic: Arc<dyn assistd_memory::SemanticStore> =
             Arc::new(assistd_memory::NoSemanticStore);
-        tools.register(RememberTool::new(memory_ops.clone(), embed_tx));
-        tools.register(RecallTool::new(
-            memory_ops,
-            no_embedder,
-            no_semantic,
-            String::new(),
-        ));
+        tools.register(RememberTool::new(memory_ops, embed_tx));
+        tools.register(RecallTool::new(no_embedder, no_semantic, String::new()));
         let tools = Arc::new(tools);
 
         // Step 1: model calls remember(...) — Step 2: model calls
-        // recall(query="", mode="prefix") — Step 3: Final.
+        // recall(...) — Step 3: Final.
         let backend = MockBackend::with(vec![
             StepOutcome::ToolCalls(vec![ToolCall {
                 id: "c-1".into(),
@@ -821,7 +816,7 @@ mod tests {
             StepOutcome::ToolCalls(vec![ToolCall {
                 id: "c-2".into(),
                 name: "recall".into(),
-                arguments: serde_json::json!({"query": "", "mode": "prefix"}),
+                arguments: serde_json::json!({"query": "what editor do I prefer"}),
             }]),
             StepOutcome::Final,
         ]);
@@ -850,7 +845,19 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["remember", "recall"]);
 
-        // The recall ToolResult must carry the saved pair in `output`.
+        // Save landed in the underlying SQLite store (the wire-level
+        // contract for `remember`).
+        assert_eq!(
+            mem.load("editor_preference").await.unwrap().as_deref(),
+            Some("vim")
+        );
+
+        // Recall's ToolResult and the second push_tool_results carry
+        // the no-memories sentinel — the embedder is disabled, so
+        // semantic search has nothing to return. The point of this
+        // assertion is that the recall result *was* round-tripped back
+        // to the model on the next step (proving the loop wiring), not
+        // that the data was actually retrievable.
         let recall_output = events
             .iter()
             .find_map(|e| match e {
@@ -864,20 +871,11 @@ mod tests {
                 _ => None,
             })
             .expect("expected a recall ToolResult");
-        assert!(
-            recall_output.contains("editor_preference: vim"),
-            "recall must surface saved pair to the model: {recall_output:?}"
-        );
+        assert_eq!(recall_output, "(no memories)");
 
-        // And the model saw the recall's content pushed back as a
-        // tool_result on the second step's pushed_results.
         let pushed = backend.pushed_results.lock().unwrap();
         assert_eq!(pushed.len(), 2);
-        assert!(
-            pushed[1][0].content.contains("editor_preference: vim"),
-            "second push_tool_results should carry the recall's body: {:?}",
-            pushed[1][0].content
-        );
+        assert_eq!(pushed[1][0].content, "(no memories)");
     }
 
     #[tokio::test]

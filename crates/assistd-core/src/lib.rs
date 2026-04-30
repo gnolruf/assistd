@@ -82,8 +82,7 @@ use anyhow::{Context, Result};
 use assistd_embed::{EmbedJob, Embedder};
 use assistd_memory::SemanticStore;
 use assistd_tools::{
-    ConfirmationGate, MemoryOps, RecallTool, RememberTool, RunTool, SandboxRequest,
-    SearchMemoryTool,
+    ConfirmationGate, MemoryOps, RecallTool, RememberTool, ReminisceTool, RunTool, SandboxRequest,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WcCommand,
@@ -238,18 +237,17 @@ pub fn build_tools(
     ));
     // LLM-callable cross-conversation memory. `RememberTool` queues an
     // embed job for the saved value so semantic recall finds memories
-    // by paraphrase. `RecallTool` supports both prefix browsing
-    // (cheap, deterministic) and semantic match (requires embedder +
-    // semantic store). `SearchMemoryTool` is a sibling that searches
-    // *past conversation history* rather than saved facts.
-    tools.register(RememberTool::new(memory_ops.clone(), embed_tx));
+    // by paraphrase. `RecallTool` ranks saved facts by semantic
+    // similarity to the query (single-mode; the embedder is always
+    // co-resident). `ReminisceTool` is the sibling that searches *past
+    // conversation history* rather than saved facts.
+    tools.register(RememberTool::new(memory_ops, embed_tx));
     tools.register(RecallTool::new(
-        memory_ops,
         embedder.clone(),
         semantic.clone(),
         embedding_model.clone(),
     ));
-    tools.register(SearchMemoryTool::new(embedder, semantic, embedding_model));
+    tools.register(ReminisceTool::new(embedder, semantic, embedding_model));
     Ok(Arc::new(tools))
 }
 

@@ -33,7 +33,7 @@ pub use attachment::{LoadImageError, load_image_attachment};
 pub use chain::{Chain, ParseError, execute, parse_chain};
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
 pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
-pub use memory_tools::{RecallTool, RememberTool, SearchMemoryTool};
+pub use memory_tools::{RecallTool, RememberTool, ReminisceTool};
 pub use policy::{
     AlwaysAllowGate, ConfirmationGate, ConfirmationRequest, DenyAllGate, ResolvedSandboxMode,
     SandboxInfo, SandboxRequest, matches_denylist, matches_destructive, probe_sandbox,
