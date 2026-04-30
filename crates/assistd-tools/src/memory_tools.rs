@@ -18,7 +18,7 @@
 //! `^[a-z0-9._]+$` validator below rejects whitespace/uppercase so two
 //! turns about the same concept don't drift onto different keys.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
@@ -37,10 +37,10 @@ use crate::memory::MemoryOps;
 /// context small. 50 is plenty for a single user's preferences.
 const RECALL_LIMIT: usize = 50;
 
-/// Validation regex for memory keys. `lazy_static`-free: built once per
-/// invoke, which is fine here (one tool call per turn) — and avoids a
-/// new `OnceLock` for a single-line regex.
+/// Validation regex for memory keys.
 const KEY_PATTERN: &str = r"^[a-z0-9._]+$";
+static KEY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
 /// LLM-callable tool that saves a `(key, value)` pair into persistent
 /// memory. Holds a clone of [`MemoryOps`] so it can write through the
@@ -118,8 +118,7 @@ impl Tool for RememberTool {
             .to_string();
         tracing::Span::current().record("key", key.as_str());
 
-        let re = Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles");
-        if !re.is_match(&key) {
+        if !KEY_RE.is_match(&key) {
             return Err(anyhow!(
                 "`key` must match {KEY_PATTERN} (snake_case + dot \
                  namespacing, e.g. editor_preference or user.name)"

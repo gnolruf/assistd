@@ -102,7 +102,8 @@ pub async fn run(action: PttAction) -> Result<()> {
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }
             | Event::MemoryRow { .. }
-            | Event::MemoryForgetResult { .. } => {}
+            | Event::MemoryForgetResult { .. }
+            | Event::ReindexProgress { .. } => {}
             Event::Done { .. } => {
                 if wrote_delta {
                     writeln!(stdout)?;

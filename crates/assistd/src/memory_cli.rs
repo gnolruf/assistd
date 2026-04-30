@@ -51,6 +51,17 @@ pub enum MemoryAction {
     Forget { id: i64 },
     /// Remove `key` from the store. No-op if absent.
     Delete { key: String },
+    /// Re-embed every memory and conversation chunk that has no
+    /// embedding under the daemon's currently-configured model.
+    /// Recovers from a model swap or from runs where the embedding
+    /// subsystem was unavailable. Prints one progress line per kind
+    /// (chunks, memories) updated as each item completes.
+    Reindex {
+        /// Suppress the per-item progress lines; print only the final
+        /// summary. Useful in scripts.
+        #[arg(long)]
+        quiet: bool,
+    },
 }
 
 impl MemoryAction {
@@ -68,6 +79,7 @@ impl MemoryAction {
             },
             MemoryAction::Forget { id: memory_id } => Request::MemoryForget { id, memory_id },
             MemoryAction::Delete { key } => Request::MemoryDelete { id, key },
+            MemoryAction::Reindex { .. } => Request::MemoryReindex { id },
         }
     }
 }
@@ -89,6 +101,9 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
         MemoryAction::Forget { id } => Some(*id),
         _ => None,
     };
+    // Same idea for the reindex progress printer: capture `--quiet`
+    // before `into_request` moves the action.
+    let reindex_quiet = matches!(&args.action, MemoryAction::Reindex { quiet: true });
 
     let (read_half, mut write_half) = stream.into_split();
     let req = args.action.into_request(Uuid::new_v4().to_string());
@@ -98,6 +113,10 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
     write_half.shutdown().await?;
 
     let mut reader = BufReader::new(read_half);
+    // Track the last reindex kind so a kind change emits a newline
+    // before the new kind's progress line — keeps the chunks → memories
+    // transition from clobbering the chunks total under `\r` rewrites.
+    let mut last_reindex_kind: Option<String> = None;
     loop {
         let mut line = String::new();
         let n = reader.read_line(&mut line).await?;
@@ -167,6 +186,24 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 eprintln!("no memory with id={id}");
                 std::process::exit(2);
             }
+            Event::ReindexProgress {
+                kind, done, total, ..
+            } => {
+                if !reindex_quiet {
+                    use std::io::Write;
+                    let mut err = std::io::stderr();
+                    let kind_changed = last_reindex_kind.as_deref() != Some(kind.as_str());
+                    if kind_changed && last_reindex_kind.is_some() {
+                        let _ = writeln!(err);
+                    }
+                    last_reindex_kind = Some(kind.clone());
+                    // `\r` rewrites the same line for successive ticks
+                    // within one kind; the newline above moves to a
+                    // fresh line on transitions.
+                    let _ = write!(err, "\rreindex {kind}: {done}/{total}");
+                    let _ = err.flush();
+                }
+            }
             // `MemoryForgetResult { deleted: true, key: None }` is not
             // produced by the daemon (a delete-by-id always has a key
             // when it hits a row), but the type allows it; treat it as
@@ -179,7 +216,12 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 let id = forget_target.unwrap_or(0);
                 println!("forgot id={id}");
             }
-            Event::Done { .. } => return Ok(()),
+            Event::Done { .. } => {
+                if last_reindex_kind.is_some() && !reindex_quiet {
+                    eprintln!();
+                }
+                return Ok(());
+            }
             Event::Error { message, .. } => {
                 eprintln!("daemon error: {message}");
                 std::process::exit(1);

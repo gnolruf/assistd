@@ -296,7 +296,14 @@ impl ConversationStore for SqliteConversationStore {
         // Reads bypass the writer channel — SQLite in WAL mode handles
         // concurrent readers fine, and routing them through the writer
         // would queue them behind any in-flight inserts.
-        let q = query.to_string();
+        //
+        // Wrap the user-supplied query in an FTS5 literal phrase so
+        // grammar metacharacters (`*`, `+`, `-`, `OR`, quotes, …) are
+        // matched as text rather than parsed as operators. Today only
+        // tests call this method, but future callers (CLI re-exposure,
+        // an LLM tool) inherit safe-by-default behaviour. A future
+        // `search_raw` sibling can opt back into FTS5 grammar.
+        let q = fts5_literal(query);
         let limit = limit as i64;
         self.handle
             .conn()
@@ -386,6 +393,25 @@ impl ConversationStore for SqliteConversationStore {
 // import lint via direct reference.
 #[allow(dead_code)]
 fn _force_oneshot_referenced(_: oneshot::Receiver<Result<()>>) {}
+
+/// Wrap a user-supplied query as an FTS5 literal phrase by surrounding
+/// it with double-quotes and doubling any internal quotes (per FTS5's
+/// quoted-string rules). The result is safe to paste into a `MATCH`
+/// expression as a single phrase token.
+fn fts5_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        if ch == '"' {
+            out.push('"');
+            out.push('"');
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('"');
+    out
+}
 
 #[cfg(test)]
 mod tests {
@@ -491,5 +517,35 @@ mod tests {
         let store = NoConversationStore;
         assert!(store.search("anything", 10).await.unwrap().is_empty());
         assert!(store.recent_turns(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_handles_fts5_grammar_safely() {
+        // Inputs that would parse-error under raw FTS5 grammar must
+        // round-trip through the literal-phrase escape without
+        // surfacing as Err. We don't assert on hits — the default
+        // tokenizer's behaviour on these inputs is implementation
+        // detail; we only assert the call succeeds.
+        let (store, _w) = fresh_store().await;
+        let session = store.begin_session(1).await.unwrap();
+        let turn = store.begin_turn(&session, "ignore").await.unwrap();
+        store
+            .append_message(&session, Some(turn), PersistedMessage::user("she said hi"))
+            .await
+            .unwrap();
+
+        // Unmatched quote — would be a parse error pre-escape.
+        store.search("say \"hi", 10).await.unwrap();
+        // Operator-looking input — would be parsed as boolean OR.
+        store.search("apple OR banana", 10).await.unwrap();
+        // Wildcard star — would be a prefix match pre-escape.
+        store.search("foo*", 10).await.unwrap();
+    }
+
+    #[test]
+    fn fts5_literal_doubles_internal_quotes() {
+        assert_eq!(fts5_literal("foo"), "\"foo\"");
+        assert_eq!(fts5_literal("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(fts5_literal(""), "\"\"");
     }
 }
