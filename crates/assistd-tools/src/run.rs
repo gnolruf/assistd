@@ -252,10 +252,12 @@ mod tests {
         Arc::new(r)
     }
 
-    /// Full 9-command registry matching the daemon's production set.
-    /// Used by Level-0 description tests that need to verify every
-    /// command name flows into the LLM-facing schema.
+    /// Full registry matching the daemon's production set. Used by
+    /// Level-0 description tests that need to verify every command
+    /// name flows into the LLM-facing schema.
     fn full_registry() -> Arc<CommandRegistry> {
+        use crate::commands::WmCommand;
+        use assistd_wm::NoWindowManager;
         let mut r = CommandRegistry::new();
         r.register(CatCommand);
         r.register(LsCommand);
@@ -267,6 +269,7 @@ mod tests {
         r.register(ScreenshotCommand::default());
         r.register(WebCommand::new());
         r.register(BashCommand::default());
+        r.register(WmCommand::new(Arc::new(NoWindowManager)));
         Arc::new(r)
     }
 
@@ -752,6 +755,7 @@ mod tests {
             "screenshot",
             "web",
             "bash",
+            "wm",
         ] {
             assert!(desc.contains(name), "description missing `{name}`: {desc}");
         }
@@ -830,6 +834,7 @@ mod tests {
             "screenshot",
             "web",
             "bash",
+            "wm",
         ] {
             assert!(desc.contains(name), "schema description missing `{name}`");
         }

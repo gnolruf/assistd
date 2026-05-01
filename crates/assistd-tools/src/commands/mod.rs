@@ -11,6 +11,7 @@ pub mod screenshot;
 pub mod see;
 pub mod wc;
 pub mod web;
+pub mod wm;
 pub mod write;
 
 pub use bash::{BashCommand, BashPolicyCfg};
@@ -22,4 +23,5 @@ pub use screenshot::{Backend as ScreenshotBackendKind, ScreenshotCommand, Screen
 pub use see::SeeCommand;
 pub use wc::WcCommand;
 pub use web::WebCommand;
+pub use wm::WmCommand;
 pub use write::{WriteCommand, WritePolicyCfg};

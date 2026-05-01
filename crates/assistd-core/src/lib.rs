@@ -92,7 +92,7 @@ use assistd_tools::{
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WcCommand,
-        WebCommand, WriteCommand, WritePolicyCfg,
+        WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
     },
     probe_sandbox,
 };
@@ -102,18 +102,18 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-/// Build the shared tool registry used by both the daemon and the chat
-/// TUI. Clears and recreates `overflow_dir` so per-process spill files
-/// land in a known-empty location at every startup.
+/// Build the tool registry consumed by the daemon. Clears and recreates
+/// `overflow_dir` so per-process spill files land in a known-empty
+/// location at every startup.
 ///
-/// `overflow_dir` is taken as an owned parameter so callers (daemon vs
-/// TUI) can use different paths — sharing one directory would race
-/// when both processes try to reset it.
+/// `overflow_dir` is taken as an owned parameter so the caller chooses
+/// the path — kept for future call sites that need a different spill
+/// directory.
 ///
-/// `gate` is consulted by destructive bash commands. The daemon passes a
-/// `DenyAllGate` (headless path: no interactive confirmation available);
-/// the chat TUI passes a `TuiGate` that forwards prompts to the user via
-/// a modal overlay.
+/// `gate` is consulted by destructive bash commands. The daemon passes
+/// an `IpcConfirmationGate` that forwards prompts to the active IPC
+/// client (the TUI is one such client) and falls through to deny when
+/// no router is in scope.
 ///
 /// `vision_gate` is a shared, runtime-mutable flag (see
 /// [`assistd_tools::VisionGate`]) initialised from a `/props` probe of
@@ -128,13 +128,17 @@ use tracing::warn;
 ///
 /// `memory_ops` is the combined CRUD façade backing the LLM-callable
 /// `remember` and `recall` tools. The daemon passes a SQLite-backed
-/// handle; the chat TUI (no persistence today) passes one built over
-/// [`assistd_memory::NoMemoryStore`] so the same tools register but
-/// silently no-op there.
-// Subsystem injection point — every call site (daemon, TUI) wires the
-// same set of cross-cutting handles into the registered tools. The
-// alternative shape (a builder struct) saves nothing here because the
-// two real call sites both pass *all* params.
+/// handle.
+///
+/// `window_manager` backs the LLM-callable `wm` command. The daemon
+/// passes either a connected `I3Backend` (when `[compositor].type =
+/// "i3"` and the i3 socket is reachable) or [`NoWindowManager`] when
+/// the configured backend is unavailable; the latter makes every `wm`
+/// subcommand short-circuit with a uniform "compositor not connected"
+/// error rather than failing per-subcommand.
+// Subsystem injection point — the daemon wires the cross-cutting
+// handles into the registered tools. The alternative shape (a builder
+// struct) saves nothing here because there's only one real call site.
 #[allow(clippy::too_many_arguments)]
 pub fn build_tools(
     config: &Config,
@@ -146,6 +150,7 @@ pub fn build_tools(
     semantic: Arc<dyn SemanticStore>,
     embed_tx: mpsc::Sender<EmbedJob>,
     embedding_model: String,
+    window_manager: Arc<dyn WindowManager>,
 ) -> Result<Arc<ToolRegistry>> {
     if overflow_dir.exists() {
         std::fs::remove_dir_all(&overflow_dir).with_context(|| {
@@ -234,6 +239,7 @@ pub fn build_tools(
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
     commands.register(WebCommand::new());
     commands.register(BashCommand::new(bash_cfg, sandbox, gate));
+    commands.register(WmCommand::new(window_manager));
 
     let mut tools = ToolRegistry::new();
     tools.register(RunTool::new(
