@@ -12,6 +12,7 @@
 //! - `wm resize <class> <grow|shrink> <px>` — width-only resize
 //! - `wm list` — TSV `<class>\t<workspace>\t<title>`
 //! - `wm workspaces` — TSV `<num>\t<name>\t<focused>\t<output>`
+//! - `wm outputs` — TSV `<name>\t<active>\t<primary>\t<mode>\t<scale>\t<focused_workspace>`
 //! - `wm layout <default|tabbed|stacking|splith|splitv>` — set the
 //!   focused container's layout
 //!
@@ -33,6 +34,7 @@ use async_trait::async_trait;
 use tokio::process::Command as ProcCommand;
 
 use assistd_wm::WindowManager;
+use assistd_wm::criteria::escape_for_criteria;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
 
@@ -75,6 +77,7 @@ impl Command for WmCommand {
            resize <class> <grow|shrink> <px>      width-only resize\n  \
            list                                   TSV: class, workspace, title\n  \
            workspaces                             TSV: num, name, focused, output\n  \
+           outputs                                TSV: name, active, primary, mode, scale, focused_workspace\n  \
            layout <default|tabbed|stacking|splith|splitv>\n                                          \
          set the focused container's layout\n\
          \n\
@@ -111,6 +114,7 @@ impl Command for WmCommand {
             "resize" => handle_resize(self.wm.as_ref(), rest).await,
             "list" => handle_list(self.wm.as_ref()).await,
             "workspaces" => handle_workspaces(self.wm.as_ref()).await,
+            "outputs" => handle_outputs(self.wm.as_ref()).await,
             "layout" => handle_layout(self.wm.as_ref(), rest).await,
             other => Ok(CommandOutput::failed(
                 2,
@@ -118,7 +122,7 @@ impl Command for WmCommand {
                     NAME,
                     format_args!("unknown subcommand '{other}'"),
                     "Available",
-                    "focus, move, open, active, resize, list, workspaces, layout",
+                    "focus, move, open, active, resize, list, workspaces, outputs, layout",
                 )
                 .into_bytes(),
             )),
@@ -352,6 +356,57 @@ async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
     }
 }
 
+async fn handle_outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
+    match wm.list_outputs().await {
+        Ok(mut outputs) => {
+            outputs.sort_by(|a, b| a.name.cmp(&b.name));
+            let mut out = String::new();
+            for o in outputs {
+                out.push_str(&o.name);
+                out.push('\t');
+                out.push(if o.active { '*' } else { '-' });
+                out.push('\t');
+                out.push(if o.primary { '*' } else { '-' });
+                out.push('\t');
+                match o.current_mode {
+                    Some((w, h, hz)) => {
+                        // Sway reports refresh in mHz; emit a friendly Hz
+                        // form rounded to the nearest integer when the
+                        // mantissa is exactly zero, else 3-decimal Hz.
+                        let hz_int = hz / 1000;
+                        let hz_frac = hz % 1000;
+                        if hz_frac == 0 {
+                            out.push_str(&format!("{w}x{h}@{hz_int}Hz"));
+                        } else {
+                            out.push_str(&format!("{w}x{h}@{hz_int}.{:03}Hz", hz_frac));
+                        }
+                    }
+                    None => out.push('-'),
+                }
+                out.push('\t');
+                match o.scale {
+                    Some(s) => out.push_str(&format!("{s}")),
+                    None => out.push('-'),
+                }
+                out.push('\t');
+                out.push_str(o.focused_workspace.as_deref().unwrap_or("-"));
+                out.push('\n');
+            }
+            Ok(CommandOutput::ok(out.into_bytes()))
+        }
+        Err(e) => Ok(CommandOutput::failed(
+            1,
+            error_line(
+                NAME,
+                format_args!("outputs failed: {e}"),
+                "Note",
+                "the active backend may not support output enumeration (i3 does not)",
+            )
+            .into_bytes(),
+        )),
+    }
+}
+
 async fn handle_workspaces(wm: &dyn WindowManager) -> Result<CommandOutput> {
     match wm.list_workspaces().await {
         Ok(mut workspaces) => {
@@ -422,20 +477,10 @@ async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
     }
 }
 
-/// Escape `\` and `"` for inclusion inside an i3 criteria value
-/// (`[class="…"]`). Mirrors the helper in `assistd_wm::i3`; duplicated
-/// here because the trait surface uses [`WindowManager::run_raw`] for
-/// resize/layout and the caller is responsible for syntax. Backslashes
-/// are escaped first so we don't double-escape the slash inserted in
-/// front of quotes.
-fn escape_for_criteria(s: &str) -> String {
-    s.replace('\\', r"\\").replace('"', r#"\""#)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assistd_wm::{NoWindowManager, Window, WindowId, WorkspaceId, WorkspaceInfo};
+    use assistd_wm::{NoWindowManager, OutputInfo, Window, WindowId, WorkspaceId, WorkspaceInfo};
     use std::sync::Mutex;
 
     /// Test fixture for [`WindowManager`]. Records every call so tests
@@ -446,6 +491,7 @@ mod tests {
         connected: bool,
         windows: Vec<Window>,
         workspaces: Vec<WorkspaceInfo>,
+        outputs: Vec<OutputInfo>,
         focused: Option<WindowId>,
         focus_calls: Mutex<Vec<WindowId>>,
         move_calls: Mutex<Vec<(WindowId, WorkspaceId)>>,
@@ -455,7 +501,9 @@ mod tests {
         raw_err: Option<String>,
         list_windows_err: Option<String>,
         list_workspaces_err: Option<String>,
+        list_outputs_err: Option<String>,
         focused_err: Option<String>,
+        list_outputs_unsupported: bool,
     }
 
     impl StubWm {
@@ -514,6 +562,20 @@ mod tests {
                 anyhow::bail!("{msg}");
             }
             Ok(())
+        }
+        async fn list_outputs(&self) -> Result<Vec<OutputInfo>> {
+            if self.list_outputs_unsupported {
+                // Mirror the trait default — backends that don't
+                // implement outputs should bubble up a "not supported"
+                // error rather than an empty Vec, so the wm tool can
+                // tell the LLM the difference between a connected
+                // machine with zero monitors and an i3-class backend.
+                anyhow::bail!("backend does not support output enumeration");
+            }
+            if let Some(msg) = &self.list_outputs_err {
+                anyhow::bail!("{msg}");
+            }
+            Ok(self.outputs.clone())
         }
         fn is_connected(&self) -> bool {
             self.connected
@@ -835,11 +897,102 @@ mod tests {
         assert!(SUMMARY.len() <= 80, "{} chars: {SUMMARY}", SUMMARY.len());
     }
 
-    #[test]
-    fn escape_for_criteria_matches_i3_helper() {
-        assert_eq!(escape_for_criteria("Firefox"), "Firefox");
-        assert_eq!(escape_for_criteria(r#"a"b"#), r#"a\"b"#);
-        assert_eq!(escape_for_criteria(r"a\b"), r"a\\b");
-        assert_eq!(escape_for_criteria(r#"a"b\c"#), r#"a\"b\\c"#);
+    #[tokio::test]
+    async fn outputs_emits_tsv_sorted_by_name() {
+        let stub = Arc::new(StubWm {
+            connected: true,
+            outputs: vec![
+                OutputInfo {
+                    name: "DP-2".into(),
+                    active: true,
+                    primary: false,
+                    current_mode: Some((2560, 1440, 144_000)),
+                    scale: Some(1.0),
+                    focused_workspace: Some("3".into()),
+                },
+                OutputInfo {
+                    name: "DP-1".into(),
+                    active: true,
+                    primary: true,
+                    current_mode: Some((1920, 1080, 60_000)),
+                    scale: Some(1.5),
+                    focused_workspace: Some("1:web".into()),
+                },
+            ],
+            ..Default::default()
+        });
+        let out = run_wm(stub, &["outputs"]).await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "DP-1\t*\t*\t1920x1080@60Hz\t1.5\t1:web\nDP-2\t*\t-\t2560x1440@144Hz\t1\t3\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn outputs_handles_missing_fields_with_dash() {
+        let stub = Arc::new(StubWm {
+            connected: true,
+            outputs: vec![OutputInfo {
+                name: "HDMI-A-1".into(),
+                active: false,
+                primary: false,
+                current_mode: None,
+                scale: None,
+                focused_workspace: None,
+            }],
+            ..Default::default()
+        });
+        let out = run_wm(stub, &["outputs"]).await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, b"HDMI-A-1\t-\t-\t-\t-\t-\n");
+    }
+
+    #[tokio::test]
+    async fn outputs_unsupported_backend_emits_error_with_note() {
+        // Mirrors the i3-class case: list_outputs returns
+        // "does not support" so wm outputs surfaces a helpful error
+        // rather than empty stdout.
+        let stub = Arc::new(StubWm {
+            connected: true,
+            list_outputs_unsupported: true,
+            ..Default::default()
+        });
+        let out = run_wm(stub, &["outputs"]).await;
+        assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("[error] wm: outputs failed"), "{stderr}");
+        assert!(stderr.contains("Note:"), "{stderr}");
+        assert!(stderr.contains("i3 does not"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn outputs_propagates_runtime_error() {
+        let stub = Arc::new(StubWm {
+            connected: true,
+            list_outputs_err: Some("sway socket dropped".into()),
+            ..Default::default()
+        });
+        let out = run_wm(stub, &["outputs"]).await;
+        assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("[error] wm: outputs failed"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn unknown_subcommand_lists_outputs_in_available() {
+        // Regression check that the help hint includes the new subcommand.
+        let out = run_wm(Arc::new(StubWm::connected()), &["bogus"]).await;
+        assert_eq!(out.exit_code, 2);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("outputs"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn help_block_advertises_outputs_subcommand() {
+        let out = run_wm(Arc::new(StubWm::connected()), &[]).await;
+        assert_eq!(out.exit_code, 2);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("outputs"), "{stdout}");
     }
 }
