@@ -297,6 +297,7 @@ dependencies = [
  "assistd-embed",
  "assistd-ipc",
  "assistd-memory",
+ "assistd-wm",
  "async-trait",
  "base64",
  "infer",

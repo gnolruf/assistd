@@ -555,6 +555,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         semantic_store.clone(),
         embed_tx.clone(),
         embedding_model_name.clone(),
+        window_manager.clone(),
     )?;
     info!(
         "tools: registered {} (overflow dir {})",

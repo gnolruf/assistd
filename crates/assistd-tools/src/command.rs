@@ -271,8 +271,10 @@ mod tests {
     fn every_registered_command_emits_convention_compliant_error() {
         use crate::commands::{
             BashCommand, CatCommand, GrepCommand, LsCommand, ScreenshotCommand, SeeCommand,
-            WcCommand, WebCommand, WriteCommand,
+            WcCommand, WebCommand, WmCommand, WriteCommand,
         };
+        use assistd_wm::NoWindowManager;
+        use std::sync::Arc as StdArc;
 
         fn contains_hint(s: &str) -> bool {
             s.contains("Use:")
@@ -362,6 +364,17 @@ mod tests {
                     vec!["rm -rf /".into()],
                 )),
             ),
+            // wm against the disconnected NoWindowManager exercises the
+            // mock-mode short-circuit — every subcommand returns the
+            // same `[error] wm: compositor not connected. Check: …`
+            // line, so any subcommand argv works as the failure driver.
+            (
+                "wm",
+                rt.block_on(run_cmd(
+                    WmCommand::new(StdArc::new(NoWindowManager)),
+                    vec!["focus".into(), "Firefox".into()],
+                )),
+            ),
         ];
 
         for (name, out) in cases {
@@ -393,8 +406,10 @@ mod tests {
     fn every_registered_command_has_nonempty_help_and_summary() {
         use crate::commands::{
             BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, ScreenshotCommand,
-            SeeCommand, WcCommand, WebCommand, WriteCommand,
+            SeeCommand, WcCommand, WebCommand, WmCommand, WriteCommand,
         };
+        use assistd_wm::NoWindowManager;
+        use std::sync::Arc as StdArc;
         let mut reg = CommandRegistry::new();
         reg.register(CatCommand);
         reg.register(LsCommand);
@@ -406,7 +421,8 @@ mod tests {
         reg.register(ScreenshotCommand::default());
         reg.register(WebCommand::new());
         reg.register(BashCommand::default());
-        assert_eq!(reg.len(), 10);
+        reg.register(WmCommand::new(StdArc::new(NoWindowManager)));
+        assert_eq!(reg.len(), 11);
         for (name, summary) in reg.sorted_summaries() {
             assert!(!summary.is_empty(), "{name} has empty summary");
             assert!(

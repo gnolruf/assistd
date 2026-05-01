@@ -21,7 +21,7 @@ use tokio_i3ipc::{
     reply,
 };
 
-use crate::{WindowId, WindowManager, WorkspaceId};
+use crate::{Window, WindowId, WindowManager, WorkspaceId, WorkspaceInfo};
 
 /// Cached focus state. Seeded from `get_tree()` at startup, then updated
 /// by the event task on every `Window::Focus` event. The trait surface
@@ -168,6 +168,74 @@ impl WindowManager for I3Backend {
 
     async fn focused_window(&self) -> Result<Option<WindowId>> {
         Ok(self.snapshot.read().await.focused_window.clone())
+    }
+
+    async fn list_windows(&self) -> Result<Vec<Window>> {
+        let tree = self
+            .cmd
+            .lock()
+            .await
+            .get_tree()
+            .await
+            .context("i3 GET_TREE")?;
+        let mut out = Vec::new();
+        collect_windows(&tree, None, &mut out);
+        Ok(out)
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        let ws = self
+            .cmd
+            .lock()
+            .await
+            .get_workspaces()
+            .await
+            .context("i3 GET_WORKSPACES")?;
+        Ok(ws
+            .into_iter()
+            .map(|w| WorkspaceInfo {
+                num: w.num,
+                name: w.name,
+                focused: w.focused,
+                output: w.output,
+            })
+            .collect())
+    }
+
+    async fn run_raw(&self, payload: &str) -> Result<()> {
+        self.run(payload).await
+    }
+}
+
+/// Walk the i3 tree recursively, emitting one [`Window`] per leaf node
+/// that has both an X11 window id and a class. Tracks the most recent
+/// `NodeType::Workspace` ancestor in `current_ws` so each window can be
+/// tagged with the workspace it lives on.
+///
+/// Children of a non-workspace node inherit the parent's workspace
+/// context; children of a workspace node use that workspace's name.
+/// Floating nodes are walked alongside tiling nodes — both are real
+/// windows the user can focus.
+fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<Window>) {
+    let next_ws = if matches!(node.node_type, reply::NodeType::Workspace) {
+        node.name.as_deref()
+    } else {
+        current_ws
+    };
+
+    if node.window.is_some()
+        && let Some(props) = node.window_properties.as_ref()
+        && let Some(class) = props.class.clone()
+    {
+        out.push(Window {
+            id: class,
+            title: props.title.clone(),
+            workspace: next_ws.map(|s| s.to_string()),
+        });
+    }
+
+    for child in node.nodes.iter().chain(node.floating_nodes.iter()) {
+        collect_windows(child, next_ws, out);
     }
 }
 
