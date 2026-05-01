@@ -37,6 +37,22 @@ async fn connects_and_reads_focused_window() {
         "expected at least one focused window in the live i3 session"
     );
 
+    // Same snapshot, richer view: title + workspace seeded alongside
+    // the class. We don't assert title/workspace are Some — a freshly-
+    // mapped window or scratchpad can leave them None — but class
+    // should match `focused_window()` above.
+    let ctx = handle
+        .backend
+        .focused_context()
+        .await
+        .expect("focused_context query failed")
+        .expect("expected Some(FocusedWindowContext) for a focused session");
+    println!("focused context = {:?}", ctx);
+    assert_eq!(
+        ctx.class, focused,
+        "focused_context().class should agree with focused_window()"
+    );
+
     // Give the event task a brief window to confirm it's running and
     // subscribed (no assertion — just exercising the loop).
     tokio::time::sleep(Duration::from_millis(50)).await;

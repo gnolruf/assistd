@@ -440,29 +440,29 @@ impl AppState {
     }
 
     /// Embed the user query, find the top-K nearest conversation chunks,
-    /// and stash a "Relevant past context: …" system message on the LLM
-    /// backend's conversation. Consumed by the next `step` and cleared
-    /// so a follow-up turn re-runs retrieval.
+    /// and return a "Relevant past context: …" block to inject as a
+    /// transient system message. Returns `Ok(None)` when retrieval is a
+    /// no-op (short query, NoEmbedder, no hits).
     ///
-    /// Best-effort: returns errors but the caller treats every failure
-    /// (embedder down, no hits, dim mismatch, …) as "skip injection".
-    async fn inject_semantic_context(&self, query: &str) -> Result<()> {
+    /// Best-effort: errors propagate but the caller treats every failure
+    /// (embedder down, dim mismatch, …) as "skip injection".
+    async fn build_semantic_context(&self, query: &str) -> Result<Option<String>> {
         // Skip very short queries — no useful semantic signal in 1-2
         // chars, and the cost of a wasted embed call is non-zero.
         if query.trim().chars().count() < 3 {
-            return Ok(());
+            return Ok(None);
         }
         let vec = self.embedder.embed(query.to_string()).await?;
         let model = self.embedder.model().to_string();
         if model.is_empty() {
             // NoEmbedder path: model() == "" → never matches stored
             // rows. Bail without a write.
-            return Ok(());
+            return Ok(None);
         }
         let top_k = self.embedding_cfg.top_k as usize;
         let hits = self.semantic.nearest_chunks(vec, top_k, &model).await?;
         if hits.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let mut block = String::from("Relevant past context:\n");
         for h in hits {
@@ -477,10 +477,88 @@ impl AppState {
                 snippet
             ));
         }
-        self.llm.set_transient_context(block).await?;
-        Ok(())
+        Ok(Some(block))
     }
 
+    /// Format the focused-window snapshot as a `Current desktop context`
+    /// block for the LLM's per-turn transient system message. Returns
+    /// `None` when the window manager has no opinion (no compositor
+    /// connected, nothing focused, all fields empty).
+    ///
+    /// Errors from the WM backend degrade silently to `None` so a flaky
+    /// compositor never blocks the user's turn.
+    async fn build_window_context(&self) -> Option<String> {
+        let ctx = match self.window_manager.focused_context().await {
+            Ok(Some(c)) => c,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::debug!(
+                    target: "assistd::context",
+                    error = %e,
+                    "WindowManager::focused_context failed; skipping window context",
+                );
+                return None;
+            }
+        };
+        format_window_context_block(&ctx)
+    }
+}
+
+/// Render a [`assistd_wm::FocusedWindowContext`] into the prompt
+/// fragment injected as a transient system message. Pure (no async,
+/// no `&self`) so it's directly unit-testable. Returns `None` when
+/// every field is empty.
+fn format_window_context_block(ctx: &assistd_wm::FocusedWindowContext) -> Option<String> {
+    if ctx.class.is_none() && ctx.title.is_none() && ctx.workspace.is_none() {
+        return None;
+    }
+    let mut block = String::from("Current desktop context:\n");
+    let class_for_line = ctx.class.as_deref();
+    let title_for_line = ctx.title.as_deref();
+    if class_for_line.is_some() || title_for_line.is_some() {
+        match (class_for_line, title_for_line) {
+            (Some(c), Some(t)) => block.push_str(&format!("- Focused window: {c} — {t}\n")),
+            (Some(c), None) => block.push_str(&format!("- Focused window: {c}\n")),
+            (None, Some(t)) => block.push_str(&format!("- Focused window: (unknown) — {t}\n")),
+            (None, None) => unreachable!(),
+        }
+    }
+    if let Some(ws) = ctx.workspace.as_deref() {
+        block.push_str(&format!("- Workspace: {ws}\n"));
+    }
+    let is_term = ctx
+        .class
+        .as_deref()
+        .map(assistd_wm::is_terminal_class)
+        .unwrap_or(false);
+    let kind = if is_term { "terminal" } else { "non-terminal" };
+    block.push_str(&format!("The user is interacting with a {kind} window."));
+    if is_term {
+        // Bias the LLM toward in-place execution. Phrasing references
+        // the actual `run` tool's sub-command names so the model maps
+        // the hint cleanly onto its tool schema.
+        block.push_str(
+            " If the user asks to run a command, build, or test, prefer calling `run` \
+             with `command: \"bash\"` (executing the command in this terminal context) over \
+             launching a new terminal via `run` with `command: \"wm\"`.",
+        );
+    }
+    Some(block)
+}
+
+/// Concatenate the semantic and window context blocks with a blank
+/// line between them. Returns `None` only when both inputs are `None`.
+/// Pure / unit-testable.
+fn combine_context_blocks(semantic: Option<String>, window: Option<String>) -> Option<String> {
+    match (semantic, window) {
+        (None, None) => None,
+        (Some(s), None) => Some(s),
+        (None, Some(w)) => Some(w),
+        (Some(s), Some(w)) => Some(format!("{}\n{}", s.trim_end(), w)),
+    }
+}
+
+impl AppState {
     async fn handle_memory_semantic_search(
         self: Arc<Self>,
         id: String,
@@ -966,19 +1044,40 @@ impl AppState {
         // never waits on disk.
         self.persist_message_fire_and_forget(turn_id, PersistedMessage::user(text.clone()));
 
-        // Auto-inject "Relevant past context: …" from semantic search
-        // before the LLM runs. AC #3: every query that hits an enabled
-        // embedder gets retrieval context as a transient system message.
-        // Best-effort: any failure (embedder down, dim mismatch, empty
-        // hits) downgrades to debug-log + no injection.
-        if self.embedding_cfg.enabled
-            && self.embedding_cfg.auto_inject
-            && let Err(e) = self.inject_semantic_context(&text).await
+        // Auto-inject the LLM's per-turn transient system message. Two
+        // sources, composed at the call site because the conversation's
+        // transient slot is a single `Option<String>` (a second
+        // `set_transient_context` call would clobber the first):
+        //   1. Semantic recall — top-K conversation chunks (gated on
+        //      embedding config, like before).
+        //   2. Window context — focused class/title/workspace from the
+        //      WM event task. Always-on; degrades to None when no
+        //      compositor is connected. Carries a terminal-bias hint
+        //      when the focused class is a known terminal emulator.
+        // Both are best-effort: any failure debug-logs and continues.
+        let semantic = if self.embedding_cfg.enabled && self.embedding_cfg.auto_inject {
+            match self.build_semantic_context(&text).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::debug!(
+                        target: "assistd::embed",
+                        error = %e,
+                        "semantic context injection failed; continuing without it",
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let window = self.build_window_context().await;
+        if let Some(block) = combine_context_blocks(semantic, window)
+            && let Err(e) = self.llm.set_transient_context(block).await
         {
             tracing::debug!(
-                target: "assistd::embed",
+                target: "assistd::context",
                 error = %e,
-                "semantic context injection failed; continuing without it"
+                "set_transient_context failed; continuing without it",
             );
         }
 
@@ -2772,5 +2871,104 @@ mod tests {
         let _ = collect_events(rx).await;
         // wait_idle invoked exactly once after the channel closes.
         assert_eq!(recorder.wait_idle_count(), 1);
+    }
+
+    fn ctx(
+        class: Option<&str>,
+        title: Option<&str>,
+        ws: Option<&str>,
+    ) -> assistd_wm::FocusedWindowContext {
+        assistd_wm::FocusedWindowContext {
+            class: class.map(str::to_string),
+            title: title.map(str::to_string),
+            workspace: ws.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn format_window_context_block_full_terminal_includes_hint() {
+        let block = format_window_context_block(&ctx(
+            Some("Alacritty"),
+            Some("nvim ~ src/main.rs"),
+            Some("2"),
+        ))
+        .expect("Some block expected for non-empty ctx");
+        assert!(block.starts_with("Current desktop context:\n"));
+        assert!(block.contains("- Focused window: Alacritty — nvim ~ src/main.rs\n"));
+        assert!(block.contains("- Workspace: 2\n"));
+        assert!(block.contains("interacting with a terminal window."));
+        // AC#3: hint references the actual `run` sub-command names.
+        assert!(block.contains("`command: \"bash\"`"));
+        assert!(block.contains("`command: \"wm\"`"));
+    }
+
+    #[test]
+    fn format_window_context_block_non_terminal_omits_hint() {
+        let block = format_window_context_block(&ctx(
+            Some("firefox"),
+            Some("Anthropic - claude.ai"),
+            Some("3"),
+        ))
+        .expect("Some block expected for non-empty ctx");
+        assert!(block.contains("interacting with a non-terminal window."));
+        assert!(!block.contains("command: \"bash\""));
+        assert!(!block.contains("command: \"wm\""));
+    }
+
+    #[test]
+    fn format_window_context_block_omits_missing_fields() {
+        // Class only — no title bar, no workspace line.
+        let block = format_window_context_block(&ctx(Some("Alacritty"), None, None)).expect("Some");
+        assert!(block.contains("- Focused window: Alacritty\n"));
+        assert!(!block.contains(" — "));
+        assert!(!block.contains("- Workspace:"));
+    }
+
+    #[test]
+    fn format_window_context_block_returns_none_for_empty_ctx() {
+        assert!(format_window_context_block(&ctx(None, None, None)).is_none());
+    }
+
+    #[test]
+    fn format_window_context_block_workspace_only() {
+        // Edge case: focus event was cleared by a Close but the
+        // active workspace is still tracked. Should still produce a
+        // block (just the workspace line + non-terminal kind).
+        let block = format_window_context_block(&ctx(None, None, Some("scratch"))).expect("Some");
+        assert!(!block.contains("- Focused window:"));
+        assert!(block.contains("- Workspace: scratch\n"));
+        assert!(block.contains("non-terminal window."));
+    }
+
+    #[test]
+    fn combine_context_blocks_merges_with_blank_line() {
+        let merged = combine_context_blocks(
+            Some("Relevant past context:\n- foo\n".into()),
+            Some("Current desktop context:\n- bar".into()),
+        )
+        .expect("Some");
+        // Trailing newline of semantic block trimmed; blank line inserted
+        // between the two blocks so the LLM sees clean separation.
+        assert_eq!(
+            merged,
+            "Relevant past context:\n- foo\nCurrent desktop context:\n- bar"
+        );
+    }
+
+    #[test]
+    fn combine_context_blocks_passes_through_singletons() {
+        assert_eq!(
+            combine_context_blocks(Some("a".into()), None),
+            Some("a".into())
+        );
+        assert_eq!(
+            combine_context_blocks(None, Some("b".into())),
+            Some("b".into())
+        );
+    }
+
+    #[test]
+    fn combine_context_blocks_returns_none_for_both_none() {
+        assert!(combine_context_blocks(None, None).is_none());
     }
 }
