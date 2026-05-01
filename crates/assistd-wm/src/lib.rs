@@ -66,6 +66,57 @@ pub struct WorkspaceInfo {
     pub output: String,
 }
 
+/// Snapshot of what the user is currently looking at. Returned by
+/// [`WindowManager::focused_context`]. Each field is independently
+/// optional because compositors deliver focus / title / workspace
+/// state through separate events; a backend may have any subset.
+///
+/// Built from the backend's cached event snapshot — no IPC round-trip
+/// — so callers can read it cheaply on every LLM query.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FocusedWindowContext {
+    /// X11 `WM_CLASS` of the focused window (or compositor-equivalent).
+    pub class: Option<String>,
+    /// `_NET_WM_NAME` / `WM_NAME` of the focused window.
+    pub title: Option<String>,
+    /// Name of the workspace currently holding focus.
+    pub workspace: Option<String>,
+}
+
+/// Best-effort allowlist of X11 `WM_CLASS` values for terminal
+/// emulators. Matched case-insensitively because compositors and apps
+/// disagree on capitalization (`xterm` vs `XTerm`, `alacritty` vs
+/// `Alacritty`). Future work: surface extra classes via config.
+const TERMINAL_CLASSES: &[&str] = &[
+    "Alacritty",
+    "kitty",
+    "XTerm",
+    "UXTerm",
+    "URxvt",
+    "rxvt-unicode",
+    "st-256color",
+    "st",
+    "Gnome-terminal",
+    "Konsole",
+    "Terminator",
+    "Tilix",
+    "foot",
+    "footclient",
+    "WezTerm",
+    "org.wezfurlong.wezterm",
+    "Xfce4-terminal",
+    "Termite",
+];
+
+/// Returns true when `class` looks like a terminal emulator. The list
+/// is intentionally conservative: emitters not in [`TERMINAL_CLASSES`]
+/// fall through as non-terminal (no hint emitted, but no wrong hint).
+pub fn is_terminal_class(class: &str) -> bool {
+    TERMINAL_CLASSES
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(class))
+}
+
 #[async_trait]
 pub trait WindowManager: Send + Sync + 'static {
     /// Focus the window with the given id.
@@ -83,6 +134,17 @@ pub trait WindowManager: Send + Sync + 'static {
 
     /// Enumerate every workspace the compositor knows about.
     async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
+
+    /// Return a snapshot of the currently focused window's class,
+    /// title, and the active workspace. Used by the daemon to inject
+    /// passive desktop context into the LLM's per-turn system prompt.
+    ///
+    /// Returns `Ok(None)` when nothing is focused or the backend has
+    /// no opinion. The default impl returns `Ok(None)` so backends
+    /// without event-snapshot support compile unchanged.
+    async fn focused_context(&self) -> Result<Option<FocusedWindowContext>> {
+        Ok(None)
+    }
 
     /// Send a raw, backend-specific command payload. Used for operations
     /// that have no typed return value and where adding a per-operation
@@ -182,5 +244,37 @@ mod tests {
     #[test]
     fn version_is_not_empty() {
         assert!(!version().is_empty());
+    }
+
+    #[test]
+    fn is_terminal_class_matches_known_emulators() {
+        assert!(is_terminal_class("Alacritty"));
+        assert!(is_terminal_class("kitty"));
+        assert!(is_terminal_class("WezTerm"));
+        assert!(is_terminal_class("foot"));
+    }
+
+    #[test]
+    fn is_terminal_class_is_case_insensitive() {
+        // X11 WM_CLASS capitalization varies in practice; users on
+        // `alacritty` vs `Alacritty` should both get the terminal hint.
+        assert!(is_terminal_class("alacritty"));
+        assert!(is_terminal_class("XTERM"));
+        assert!(is_terminal_class("xterm"));
+    }
+
+    #[test]
+    fn is_terminal_class_rejects_non_terminals() {
+        assert!(!is_terminal_class("firefox"));
+        assert!(!is_terminal_class("code"));
+        assert!(!is_terminal_class(""));
+        assert!(!is_terminal_class("Slack"));
+    }
+
+    #[tokio::test]
+    async fn no_window_manager_focused_context_is_none() {
+        // Default trait impl returns Ok(None); NoWindowManager inherits
+        // it because we don't override.
+        assert!(NoWindowManager.focused_context().await.unwrap().is_none());
     }
 }
