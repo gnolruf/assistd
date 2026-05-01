@@ -77,6 +77,10 @@ rusqlite = { version = "0.31", features = ["bundled", "blob"] }
 tokio-rusqlite = "0.5"
 rusqlite_migration = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# i3 IPC client for the WindowManager backend in assistd-wm. Async, built
+# on tokio's UnixStream — fails cleanly on non-i3 systems with a connect
+# error so the daemon can degrade to NoWindowManager.
+tokio-i3ipc = "0.16"
 
 # Workspace-wide lint baseline. Each crate inherits via
 # `[lints] workspace = true` in its own Cargo.toml. Tightens defaults

@@ -7,6 +7,10 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio-i3ipc = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

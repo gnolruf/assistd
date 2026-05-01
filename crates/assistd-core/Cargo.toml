@@ -15,6 +15,7 @@ assistd-tools = { workspace = true }
 # don't want mic support (e.g. a headless-minimal daemon build) can
 # override this elsewhere in their feature set.
 assistd-voice = { workspace = true }
+assistd-wm    = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
