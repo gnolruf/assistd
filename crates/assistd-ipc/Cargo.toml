@@ -8,6 +8,20 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
+# `client` feature enables the typed `IpcClient` wrapper. Pulled in by
+# the daemon binary (chat TUI + CLI subcommands); a leaf consumer that
+# only needs the wire types can depend on `assistd-ipc` with default
+# features off and skip the tokio link.
+tokio = { workspace = true, optional = true, features = ["net", "io-util", "rt", "macros", "time"] }
+thiserror = { workspace = true, optional = true }
+
+[features]
+default = []
+client = ["dep:tokio", "dep:thiserror"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

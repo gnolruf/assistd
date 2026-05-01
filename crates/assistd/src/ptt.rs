@@ -13,10 +13,8 @@
 
 use std::io::Write;
 
-use anyhow::{Context, Result};
-use assistd_ipc::{Event, Request, VoiceCaptureState, socket_path};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use anyhow::Result;
+use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
 use uuid::Uuid;
 
 /// Which phase of the PTT cycle the CLI is asking the daemon to run.
@@ -36,33 +34,19 @@ impl PttAction {
 }
 
 pub async fn run(action: PttAction) -> Result<()> {
-    let path = socket_path();
-
-    let stream = UnixStream::connect(&path).await.with_context(|| {
-        format!(
-            "assistd daemon is not running (could not connect to {})",
-            path.display()
-        )
-    })?;
-
-    let (read_half, mut write_half) = stream.into_split();
     let req = action.to_request(Uuid::new_v4().to_string());
-    let mut body = serde_json::to_string(&req)?;
-    body.push('\n');
-    write_half.write_all(body.as_bytes()).await?;
-    write_half.shutdown().await?;
+    let mut stream = IpcClient::new()
+        .one_shot(req)
+        .await
+        .map_err(crate::ipc_helper::map_not_reachable)?;
 
-    let mut reader = BufReader::new(read_half);
     let mut stdout = std::io::stdout().lock();
     let mut wrote_delta = false;
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            anyhow::bail!("daemon closed the connection without sending a terminal event");
-        }
-        let event: Event = serde_json::from_str(line.trim())
-            .with_context(|| format!("invalid JSON from daemon: {}", line.trim()))?;
+        let event = match stream.next_event().await? {
+            Some(ev) => ev,
+            None => anyhow::bail!("daemon closed the connection without sending a terminal event"),
+        };
 
         match event {
             Event::VoiceState { state, .. } => {
@@ -103,7 +87,17 @@ pub async fn run(action: PttAction) -> Result<()> {
             | Event::MemoryKeys { .. }
             | Event::MemoryRow { .. }
             | Event::MemoryForgetResult { .. }
-            | Event::ReindexProgress { .. } => {}
+            | Event::ReindexProgress { .. }
+            | Event::Capabilities { .. } => {}
+            // `assistd ptt-stop` is one-shot non-interactive — same
+            // story as `assistd query`. Daemon's gate denies on
+            // disconnect; we just note and keep reading.
+            Event::ConfirmRequest { .. } => {
+                eprintln!(
+                    "[daemon asked for destructive-command confirmation; denying \
+                     (non-interactive ptt)]"
+                );
+            }
             Event::Done { .. } => {
                 if wrote_delta {
                     writeln!(stdout)?;

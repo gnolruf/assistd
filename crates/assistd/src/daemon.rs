@@ -9,7 +9,7 @@ use assistd_memory::{
     ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, NoSemanticStore,
     SemanticStore, SqliteConversationStore, SqliteHandle, SqliteMemoryStore, SqliteSemanticStore,
 };
-use assistd_tools::{DenyAllGate, MemoryOps};
+use assistd_tools::{IpcConfirmationGate, MemoryOps};
 use assistd_voice::{
     MicContinuousListener, MicVoiceInput, QueueConfig, QueuedTranscriber, Transcriber,
     WhisperTranscriberBuilder, build_cpu_fallback,
@@ -29,6 +29,14 @@ pub struct DaemonArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
     #[arg(long, short)]
     pub config: Option<PathBuf>,
+    /// Defer the global PTT hotkey to a connected client (e.g. the
+    /// chat TUI). Set automatically when the daemon is auto-spawned by
+    /// `assistd chat`. With this flag the daemon does not register a
+    /// global hotkey itself; voice capture is driven exclusively by
+    /// IPC `PttStart`/`PttStop` requests. Useful when the operator
+    /// wants the TUI's hotkey grab to win without a key-binding race.
+    #[arg(long, default_value_t = false)]
+    pub client_mode: bool,
 }
 
 pub async fn run(args: DaemonArgs) -> Result<()> {
@@ -250,15 +258,26 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         config.voice.synthesis.enabled,
     );
 
-    let hotkey_handle = hotkey::spawn_listener(
-        &config.presence,
-        &config.voice,
-        Some(presence.clone()),
-        voice.clone(),
-        Some(listener.clone()),
-        Some(voice_output.clone()),
-        shutdown_tx.subscribe(),
-    );
+    // In `--client-mode` the daemon defers the global hotkey to the
+    // attached client (the chat TUI grabs it instead). Two processes
+    // can't both grab the same X11/Wayland key, and the TUI is what
+    // the user is looking at, so it wins. Daemon-internal voice
+    // capture in this mode flows exclusively through IPC PttStart /
+    // PttStop requests.
+    let hotkey_handle = if args.client_mode {
+        info!("hotkey: deferred to client (--client-mode)");
+        None
+    } else {
+        hotkey::spawn_listener(
+            &config.presence,
+            &config.voice,
+            Some(presence.clone()),
+            voice.clone(),
+            Some(listener.clone()),
+            Some(voice_output.clone()),
+            shutdown_tx.subscribe(),
+        )
+    };
     let gpu_monitor_handle =
         gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
     let idle_monitor_handle =
@@ -485,14 +504,19 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         )
     };
 
-    // IPC-connected clients (including `assistd query`) have no interactive
-    // channel, so destructive bash commands are denied by default. To
-    // approve such commands, run them from the chat TUI where the modal
-    // overlay can prompt the user.
+    // Destructive bash commands prompt the active IPC client through
+    // `IpcConfirmationGate`: the per-connection `ConfirmRouter`
+    // (installed by `assistd-core::socket::handle_connection` into the
+    // CONFIRM_ROUTER task-local) emits `Event::ConfirmRequest` and
+    // awaits a `Request::ConfirmResponse` on the same connection.
+    // Connections with no router in scope (autonomous daemon-internal
+    // dispatch — e.g. continuous-listener-driven queries with no TUI
+    // attached) fall through to deny, mirroring the previous
+    // `DenyAllGate` behavior.
     let tools = assistd_core::build_tools(
         &config,
         overflow_dir.clone(),
-        Arc::new(DenyAllGate),
+        Arc::new(IpcConfirmationGate),
         vision_gate.clone(),
         memory_ops,
         embedder.clone(),

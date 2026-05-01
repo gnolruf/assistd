@@ -39,8 +39,10 @@ chat = [
 ]
 
 [dependencies]
-# Always-on — shared CLI plumbing and wire protocol
-assistd-ipc   = { workspace = true }
+# Always-on — shared CLI plumbing and wire protocol. The `client`
+# feature pulls in the typed `IpcClient` socket wrapper used by every
+# CLI subcommand and the chat TUI.
+assistd-ipc   = { workspace = true, features = ["client"] }
 assistd-tools = { workspace = true }  # the `client` --image flag uses load_image_attachment
 anyhow = { workspace = true }
 clap = { workspace = true }

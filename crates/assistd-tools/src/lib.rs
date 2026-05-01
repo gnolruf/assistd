@@ -35,8 +35,9 @@ pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegis
 pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
 pub use memory_tools::{RecallTool, RememberTool, ReminisceTool};
 pub use policy::{
-    AlwaysAllowGate, ConfirmationGate, ConfirmationRequest, DenyAllGate, ResolvedSandboxMode,
-    SandboxInfo, SandboxRequest, matches_denylist, matches_destructive, probe_sandbox,
+    AlwaysAllowGate, CONFIRM_ROUTER, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
+    DenyAllGate, IpcConfirmationGate, ResolvedSandboxMode, SandboxInfo, SandboxRequest,
+    matches_denylist, matches_destructive, probe_sandbox,
 };
 pub use presentation::{PresentResult, present};
 pub use run::RunTool;

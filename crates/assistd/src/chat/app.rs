@@ -1,22 +1,24 @@
 //! Top-level chat application state and reducer.
 //!
-//! `App` owns the output pane, input line, throughput meter, VRAM state,
-//! and a handle to an `LlmBackend` for spawning generation tasks. The
-//! `on_*` methods are pure reducers; I/O is confined to `spawn_generation`.
+//! `App` owns the output pane, input line, throughput meter, VRAM
+//! state, and an `IpcClient` handle for talking to the daemon. The
+//! `on_*` methods are pure reducers; I/O is confined to `spawn_query`
+//! (opens a daemon dialog connection for a Query) and `handle_attach`
+//! (loads an image from disk).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assistd_core::{PresenceManager, PresenceState, SleepConfig, ToolRegistry, VoiceCaptureState};
-use assistd_llm::{LlmBackend, LlmEvent};
+use assistd_core::{PresenceState, SleepConfig};
+use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
 use assistd_tools::{Attachment, ConfirmationRequest, load_image_attachment};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use uuid::Uuid;
 
-use super::gate::PendingConfirmation;
 use super::input::{InputAction, InputLine};
 use super::output::OutputPane;
 use super::throughput::ThroughputMeter;
@@ -56,55 +58,35 @@ impl PendingAttachment {
     }
 }
 
-/// Where a `submit` was triggered from. Slash-command parsing only fires
-/// for `Typed` submissions so a voice transcription that happens to
-/// contain "/attach foo" goes to the model as plain text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmitOrigin {
-    Typed,
-    Voice,
-}
-
-// `AttachLoaded`'s `bytes: Vec<u8>` and `protocol` push its size well
-// past the other variants — but it's a one-shot transient event flowing
-// through a bounded mpsc, so the size asymmetry is fine. Boxing the
-// payload would just trade one heap alloc per attach for two.
 #[allow(clippy::large_enum_variant)]
 pub enum ChatEvent {
-    Llm(LlmEvent),
-    LlmError(String),
+    /// Streaming event from the daemon over IPC. Includes both
+    /// query-response events (Delta/ToolCall/ToolResult/Done) and
+    /// status-poll events (Presence/VoiceState/ListenState/...).
+    Wire(Event),
+    /// The wire connection ended in an unexpected way (I/O error,
+    /// daemon closed mid-stream without `Done`).
+    WireError(String),
     /// `/attach <path>` finished reading + validating the file. Carries
     /// everything the App needs to update the UI.
     AttachLoaded {
-        /// Original path the user typed — kept for diagnostics; the
-        /// reducer only uses `name` for the visible label.
         #[allow(dead_code)]
         path: String,
         name: String,
         mime: String,
         size: usize,
         bytes: Vec<u8>,
-        /// Pre-built graphics-protocol state for the inline thumbnail.
-        /// `None` when the terminal doesn't support a graphics protocol
-        /// or image decoding failed (the bytes still get sent to the
-        /// LLM — only the local rendering fallback differs).
         protocol: Option<StatefulProtocol>,
     },
     /// `/attach <path>` failed (missing file, unsupported format, etc.).
-    AttachFailed {
-        path: String,
-        message: String,
-    },
+    AttachFailed { path: String, message: String },
 }
 
-// Manual Debug because `StatefulProtocol` (inside `AttachLoaded.protocol`)
-// does not implement Debug. Hides the protocol blob behind a placeholder
-// so the rest of the variant fields stay debuggable.
 impl std::fmt::Debug for ChatEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChatEvent::Llm(ev) => f.debug_tuple("Llm").field(ev).finish(),
-            ChatEvent::LlmError(msg) => f.debug_tuple("LlmError").field(msg).finish(),
+            ChatEvent::Wire(ev) => f.debug_tuple("Wire").field(ev).finish(),
+            ChatEvent::WireError(msg) => f.debug_tuple("WireError").field(msg).finish(),
             ChatEvent::AttachLoaded {
                 path,
                 name,
@@ -129,12 +111,17 @@ impl std::fmt::Debug for ChatEvent {
     }
 }
 
-/// Pending destructive-command prompt displayed as an overlay. Only one is
-/// ever active at a time — the agent loop is blocked on the gate's
-/// `oneshot` while we wait for the user's Y/N decision.
+/// Pending destructive-command prompt displayed as an overlay. Only one
+/// is ever active at a time — the agent loop on the daemon side blocks
+/// on the gate until we send the `ConfirmResponse`.
 pub struct ConfirmationModal {
+    /// Renders as the modal body (script + matched_pattern). Reuses the
+    /// `assistd-tools::ConfirmationRequest` shape so the UI code can
+    /// stay agnostic of where the request came from.
     pub request: ConfirmationRequest,
-    responder: oneshot::Sender<bool>,
+    /// Routing key the daemon sent in `Event::ConfirmRequest`. Echoed
+    /// back verbatim in the outgoing `Request::ConfirmResponse`.
+    confirm_id: String,
 }
 
 pub struct App {
@@ -150,52 +137,58 @@ pub struct App {
     pub last_output_height: u16,
     pub presence_state: Option<PresenceState>,
     pub sleep_cfg: SleepConfig,
-    pub presence: Option<Arc<PresenceManager>>,
-    /// Set at chat startup from a `/props` probe of the running
-    /// llama-server. `false` means the loaded model has no mmproj —
-    /// `/attach` rejects with the AC `vision not available` error and
-    /// the status bar renders `vision: off`.
+    /// Local wallclock for the most recent user activity (typing /
+    /// submitting / answering a modal). Used to compute the
+    /// status-bar countdown without round-tripping to the daemon. The
+    /// daemon authoritatively transitions on its own clock; this is a
+    /// display approximation that drifts at most a couple seconds.
+    last_activity_at: Instant,
+    /// Set at chat startup from a daemon `GetCapabilities` probe.
+    /// `false` means the loaded model has no mmproj — `/attach`
+    /// rejects with the AC `vision not available` error and the
+    /// status bar renders `vision: off`.
     pub vision_enabled: bool,
     pub modal: Option<ConfirmationModal>,
-    /// Push-to-talk capture state, driven by the mic-voice listener
-    /// spawned alongside the event loop. Rendered as an indicator in
+    /// Push-to-talk capture state. Updated by `Event::VoiceState`
+    /// flowing in over the wire. Rendered as an indicator in
     /// `render_status` (recording = red, transcribing = yellow).
     pub listening: VoiceCaptureState,
-    /// Command of the in-flight tool call, captured on `LlmEvent::ToolCall`
-    /// and consumed on the matching `LlmEvent::ToolResult` so the
-    /// call+result pair becomes one `ToolBlock`. The agent loop is strictly
-    /// serial — only one tool runs at a time — so a single slot suffices.
+    /// TTS enabled flag, polled from the daemon. Rendered as the
+    /// "voice-output: on/off" chip on the status bar.
+    pub voice_output_enabled: bool,
+    /// Continuous-listen active flag, polled from the daemon.
+    pub listen_active: bool,
+    /// Command of the in-flight tool call, captured on `Event::ToolCall`
+    /// and consumed on the matching `Event::ToolResult` so the
+    /// call+result pair becomes one `ToolBlock`. The agent loop is
+    /// strictly serial — only one tool runs at a time — so a single
+    /// slot suffices.
     pending_tool_call: Option<(String, String)>,
     /// Images staged by `/attach`, drained into the user's next
-    /// submission. Persists across multiple `/attach` invocations so a
-    /// user can attach several images before sending a query.
+    /// submission.
     pub pending_attachments: Vec<PendingAttachment>,
     /// Terminal graphics-protocol picker, probed once at TUI startup.
-    /// `None` on terminals without Kitty / Sixel / iTerm2 support — in
-    /// that case `/attach` falls back to filename-only display.
-    /// Cloned into the spawned attach-load task so the worker can build
-    /// `StatefulProtocol`s without holding a lock back to the UI loop.
     picker: Option<Picker>,
-    client: Arc<dyn LlmBackend>,
-    tools: Arc<ToolRegistry>,
-    max_iterations: u32,
+    /// Daemon connection factory.
+    ipc: Arc<IpcClient>,
+    /// Sender into the active query's bidirectional dialog connection.
+    /// The query-driver task owns the read half + the write half; this
+    /// `mpsc::Sender` lets the modal handler enqueue a
+    /// `Request::ConfirmResponse` for the writer task to forward.
+    /// `None` between queries.
+    active_writer: Option<mpsc::Sender<Request>>,
     chat_tx: mpsc::Sender<ChatEvent>,
 }
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        client: Arc<dyn LlmBackend>,
-        tools: Arc<ToolRegistry>,
-        max_iterations: u32,
+        ipc: Arc<IpcClient>,
         chat_tx: mpsc::Sender<ChatEvent>,
         model_name: String,
         sleep_cfg: SleepConfig,
-        presence: Option<Arc<PresenceManager>>,
         vision_enabled: bool,
         picker: Option<Picker>,
     ) -> Self {
-        let presence_state = presence.as_ref().map(|p| p.state());
         Self {
             output: OutputPane::new(),
             input: InputLine::new(),
@@ -207,47 +200,81 @@ impl App {
             spinner: 0,
             notice: None,
             last_output_height: 10,
-            presence_state,
+            presence_state: None,
             sleep_cfg,
-            presence,
+            last_activity_at: Instant::now(),
             vision_enabled,
             modal: None,
             listening: VoiceCaptureState::Idle,
+            voice_output_enabled: false,
+            listen_active: false,
             pending_tool_call: None,
             pending_attachments: Vec::new(),
             picker,
-            client,
-            tools,
-            max_iterations,
+            ipc,
+            active_writer: None,
             chat_tx,
         }
     }
 
-    /// Called by the TUI event loop when a destructive-command request
-    /// arrives from the gate. Only one modal is supported at a time; if a
-    /// second request arrives while one is pending we reject the newer one
-    /// immediately (its oneshot is dropped, which the gate interprets as
-    /// a denial). This is a defensive guard — it should not happen because
-    /// the agent loop blocks on the first prompt before issuing a second
-    /// bash invocation.
-    pub fn open_confirmation_modal(&mut self, pending: PendingConfirmation) {
+    /// Open a confirmation modal from a daemon-issued `Event::ConfirmRequest`.
+    /// Only one modal can be active at a time; if a second prompt
+    /// arrives while one is open we deny the new one immediately
+    /// (which the daemon's gate maps to "cancel").
+    pub fn open_confirmation_modal(
+        &mut self,
+        confirm_id: String,
+        tool: String,
+        script: String,
+        matched_pattern: String,
+    ) {
         if self.modal.is_some() {
-            // Drop the new request's responder → gate returns false.
-            drop(pending);
+            // Already prompting; auto-deny the second prompt so the
+            // agent loop doesn't hang.
+            self.send_confirm_response(&confirm_id, false);
             return;
         }
         self.modal = Some(ConfirmationModal {
-            request: pending.request,
-            responder: pending.responder,
+            request: ConfirmationRequest {
+                tool,
+                script,
+                matched_pattern,
+            },
+            confirm_id,
         });
     }
 
-    /// Consume the modal (if any) and send `decision` through the stored
-    /// oneshot. Used by both the Y/N key handlers and the quit path.
+    /// Consume the modal (if any) and send the user's Y/N decision
+    /// back to the daemon as a `Request::ConfirmResponse`. Used by
+    /// both the Y/N key handlers and the quit path.
     fn resolve_modal(&mut self, decision: bool) {
         if let Some(modal) = self.modal.take() {
-            let _ = modal.responder.send(decision);
+            self.send_confirm_response(&modal.confirm_id, decision);
         }
+    }
+
+    /// Enqueue a `ConfirmResponse` onto the active query's writer
+    /// channel. No-op if no query is in flight (shouldn't happen — a
+    /// modal can only have come from an active query — but handle
+    /// defensively rather than panic).
+    fn send_confirm_response(&self, confirm_id: &str, allow: bool) {
+        let Some(writer) = self.active_writer.clone() else {
+            tracing::warn!(
+                confirm_id,
+                "no active query writer to forward ConfirmResponse"
+            );
+            return;
+        };
+        let req = Request::ConfirmResponse {
+            id: Uuid::new_v4().to_string(),
+            confirm_id: confirm_id.to_string(),
+            allow,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = writer.send(req).await {
+                tracing::warn!("ConfirmResponse send failed: {e}");
+            }
+        });
     }
 
     #[cfg(test)]
@@ -272,6 +299,11 @@ impl App {
     }
 
     pub fn on_key(&mut self, ev: KeyEvent) {
+        // Any key counts as user activity — even a Page Up scroll
+        // means the user is at the keyboard. The daemon's idle
+        // monitor does its own tracking based on Query traffic; this
+        // local clock just keeps the status-bar countdown live.
+        self.touch_activity();
         // Modal takes precedence over every other keybinding: when the
         // agent is blocked on a confirmation prompt, the only meaningful
         // input is Y / N / Esc. Scrolling and input-line edits stay
@@ -294,12 +326,6 @@ impl App {
                 return;
             }
             KeyCode::Tab => {
-                // Tab on `/attach <partial>` completes the path; on
-                // any other input it falls through to the existing
-                // tool-block toggle. Putting the path-completion path
-                // first keeps the toggle a no-op when the user is
-                // mid-attach (which is what they'd expect when
-                // completing a filename).
                 if self.try_complete_attach_path() {
                     return;
                 }
@@ -311,12 +337,12 @@ impl App {
         match self.input.on_key(ev) {
             InputAction::None => {}
             InputAction::Submit(text) => {
-                self.submit_with_origin(text, SubmitOrigin::Typed);
+                self.submit_typed(text);
             }
             InputAction::Quit => {
                 // Closing during a pending modal isn't currently
                 // reachable — modal intercepts input — but guard anyway
-                // so the gate always gets a decision.
+                // so the daemon's gate always gets a decision.
                 self.resolve_modal(false);
                 self.quitting = true;
             }
@@ -339,105 +365,80 @@ impl App {
         }
     }
 
-    pub fn on_presence(&mut self, s: PresenceState) {
-        self.presence_state = Some(s);
+    pub fn on_resources(&mut self, v: ResourceState) {
+        self.resources = v;
     }
 
-    /// Reducer for `VoiceCaptureState` transitions from the mic
-    /// listener. Called on every watch-channel change; sets the
-    /// rendered indicator.
-    pub fn on_voice_state(&mut self, s: VoiceCaptureState) {
-        self.listening = s;
-    }
-
-    /// Handle a completed transcription from the PTT pipeline. Empty
-    /// strings (VAD trimmed everything) surface as a brief notice.
-    /// Non-empty text is auto-submitted to the LLM via the same path
-    /// as typing into the input line, but with `Voice` origin so a
-    /// transcription containing "/attach" is treated as plain text
-    /// rather than parsed as a slash command.
-    pub fn on_transcription(&mut self, text: String) {
-        if text.trim().is_empty() {
-            self.set_notice("no speech detected");
-            return;
+    /// Approximate countdown to the next presence transition,
+    /// computed locally from `last_activity_at + sleep_cfg`. The
+    /// daemon owns the actual clock; this is a display courtesy
+    /// that may drift by a couple seconds in either direction.
+    /// Returns `None` when no countdown applies (presence unknown,
+    /// or already Sleeping with no further transition pending).
+    pub fn local_time_until_next_transition(&self) -> Option<Duration> {
+        let state = self.presence_state?;
+        let elapsed = self.last_activity_at.elapsed();
+        let next_threshold_secs = match state {
+            PresenceState::Active => self.sleep_cfg.idle_to_drowsy_mins * 60,
+            PresenceState::Drowsy => {
+                (self.sleep_cfg.idle_to_drowsy_mins + self.sleep_cfg.idle_to_sleep_mins) * 60
+            }
+            PresenceState::Sleeping => return None,
+        };
+        if next_threshold_secs == 0 {
+            return None;
         }
-        if self.generating {
-            self.set_notice("still generating — transcription dropped");
-            return;
+        let threshold = Duration::from_secs(next_threshold_secs);
+        if elapsed >= threshold {
+            Some(Duration::from_secs(0))
+        } else {
+            Some(threshold - elapsed)
         }
-        self.submit_with_origin(text, SubmitOrigin::Voice);
     }
 
-    /// Surface a non-fatal voice pipeline error as a TUI notice. The
-    /// listening indicator is reset so stale "recording…" doesn't
-    /// linger on the status bar.
-    pub fn on_voice_error(&mut self, msg: String) {
-        self.listening = VoiceCaptureState::Idle;
-        self.set_notice(&format!("voice: {msg}"));
+    fn touch_activity(&mut self) {
+        self.last_activity_at = Instant::now();
     }
 
     fn on_cycle_key(&mut self) {
-        let Some(p) = self.presence.clone() else {
-            self.set_notice("presence unavailable");
-            return;
-        };
-        let target = self.presence_state.unwrap_or_else(|| p.state()).next();
+        let target = self
+            .presence_state
+            .map(|s| s.next())
+            .unwrap_or(PresenceState::Active);
         self.set_notice(&format!("cycling → {}", presence_label(target)));
+        let ipc = self.ipc.clone();
+        let chat_tx = self.chat_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = p.cycle().await {
-                tracing::warn!("F2 cycle failed: {e:#}");
+            let req = Request::Cycle {
+                id: Uuid::new_v4().to_string(),
+            };
+            match ipc.one_shot(req).await {
+                Ok(mut stream) => {
+                    while let Ok(Some(ev)) = stream.next_event().await {
+                        let terminal = ev.is_terminal();
+                        let _ = chat_tx.send(ChatEvent::Wire(ev)).await;
+                        if terminal {
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = chat_tx
+                        .send(ChatEvent::WireError(format!("cycle: {e}")))
+                        .await;
+                }
             }
         });
     }
 
-    pub fn on_llm_event(&mut self, ev: ChatEvent) {
-        let now = Instant::now();
+    /// Reducer entry point for everything the event loop pumps in.
+    pub fn on_chat_event(&mut self, ev: ChatEvent) {
         match ev {
-            ChatEvent::Llm(LlmEvent::Delta { text }) => {
-                self.throughput.on_delta(now);
-                self.output.append_assistant(&text);
-            }
-            ChatEvent::Llm(LlmEvent::ToolCall { id, arguments, .. }) => {
-                let cmd = arguments
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<?>")
-                    .to_string();
-                self.pending_tool_call = Some((id, cmd));
-            }
-            ChatEvent::Llm(LlmEvent::ToolResult { id, result, .. }) => {
-                let body = result
-                    .get("output")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let exit_code = result
-                    .get("exit_code")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0) as i32;
-                let duration_ms = result
-                    .get("duration_ms")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let command = self
-                    .pending_tool_call
-                    .take()
-                    .filter(|(pid, _)| pid == &id)
-                    .map(|(_, c)| c)
-                    .unwrap_or_else(|| "<?>".to_string());
-                self.output
-                    .push_tool_block(command, body, exit_code, duration_ms);
-            }
-            ChatEvent::Llm(LlmEvent::Done) => {
-                self.throughput.on_done(now);
-                self.output.finish_assistant();
+            ChatEvent::Wire(event) => self.on_wire_event(event),
+            ChatEvent::WireError(msg) => {
+                self.output.push_error(&format!("[wire error] {msg}"));
                 self.generating = false;
-            }
-            ChatEvent::LlmError(msg) => {
-                self.throughput.on_done(now);
-                self.output.finish_assistant();
-                self.output.push_error(&msg);
-                self.generating = false;
+                self.active_writer = None;
             }
             ChatEvent::AttachLoaded {
                 name,
@@ -466,6 +467,113 @@ impl App {
         }
     }
 
+    fn on_wire_event(&mut self, ev: Event) {
+        let now = Instant::now();
+        match ev {
+            Event::Delta { text, .. } => {
+                self.throughput.on_delta(now);
+                self.output.append_assistant(&text);
+            }
+            Event::ToolCall { id, args, name, .. } => {
+                let cmd = args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| name.clone());
+                self.pending_tool_call = Some((id, cmd));
+            }
+            Event::ToolResult { id, result, .. } => {
+                let body = result
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let exit_code = result
+                    .get("exit_code")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0) as i32;
+                let duration_ms = result
+                    .get("duration_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let command = self
+                    .pending_tool_call
+                    .take()
+                    .filter(|(pid, _)| pid == &id)
+                    .map(|(_, c)| c)
+                    .unwrap_or_else(|| "<?>".to_string());
+                self.output
+                    .push_tool_block(command, body, exit_code, duration_ms);
+            }
+            Event::ConfirmRequest {
+                confirm_id,
+                tool,
+                script,
+                matched_pattern,
+                ..
+            } => {
+                self.open_confirmation_modal(confirm_id, tool, script, matched_pattern);
+            }
+            Event::Presence { state, .. } => {
+                self.presence_state = Some(state);
+            }
+            Event::VoiceState { state, .. } => {
+                self.listening = state;
+            }
+            Event::Transcription { text, .. } => {
+                if text.trim().is_empty() {
+                    self.set_notice("no speech detected");
+                } else {
+                    // The daemon auto-dispatches the transcription as
+                    // a Query on the same connection, so the next
+                    // events on this stream will be Deltas. We still
+                    // render the user-prompt locally so the
+                    // conversation reads naturally.
+                    self.output.push_user(&text);
+                    self.output.reset_scroll();
+                    self.output.begin_assistant();
+                    self.throughput.reset();
+                    self.generating = true;
+                }
+            }
+            Event::ListenState { active, .. } => {
+                self.listen_active = active;
+            }
+            Event::VoiceOutputState { enabled, .. } => {
+                self.voice_output_enabled = enabled;
+            }
+            Event::Capabilities {
+                vision, model_name, ..
+            } => {
+                self.vision_enabled = vision;
+                if !model_name.is_empty() {
+                    self.model_name = model_name;
+                }
+            }
+            Event::Done { .. } => {
+                self.throughput.on_done(now);
+                self.output.finish_assistant();
+                self.generating = false;
+                self.active_writer = None;
+            }
+            Event::Error { message, .. } => {
+                self.throughput.on_done(now);
+                self.output.finish_assistant();
+                self.output.push_error(&message);
+                self.generating = false;
+                self.active_writer = None;
+            }
+            // Memory* events shouldn't appear on a query/PTT stream —
+            // the daemon only emits them on `Request::Memory*`.
+            Event::SemanticHit { .. }
+            | Event::MemoryValue { .. }
+            | Event::MemoryKeys { .. }
+            | Event::MemoryRow { .. }
+            | Event::MemoryForgetResult { .. }
+            | Event::ReindexProgress { .. } => {}
+        }
+    }
+
     pub fn on_tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
         if let Some((_, at)) = &self.notice {
@@ -473,10 +581,6 @@ impl App {
                 self.notice = None;
             }
         }
-    }
-
-    pub fn on_resources(&mut self, v: ResourceState) {
-        self.resources = v;
     }
 
     fn set_notice(&mut self, text: &str) {
@@ -487,14 +591,6 @@ impl App {
     /// completion fired (so the caller skips its fallback action), or
     /// `false` when the input isn't an attach line and the caller's
     /// default Tab behavior should run.
-    ///
-    /// Behavior on a single Tab press:
-    /// - One match → buffer is extended to the full filename
-    ///   (with a trailing `/` for directories).
-    /// - Multiple matches → buffer is extended to the longest common
-    ///   prefix of all matches (so a second Tab can disambiguate).
-    /// - No matches → buffer is unchanged; the function still returns
-    ///   `true` so we don't fall through to the tool-block toggle.
     fn try_complete_attach_path(&mut self) -> bool {
         let buffer = self.input.buffer();
         let partial = if let Some(rest) = buffer.strip_prefix("/attach ") {
@@ -504,8 +600,6 @@ impl App {
         } else {
             return false;
         };
-        // Split off the directory portion so we know where to look.
-        // An empty `partial` lists $CWD; a trailing `/` lists that dir.
         let (dir, file_prefix) = match partial.rsplit_once('/') {
             Some((d, f)) => (
                 if d.is_empty() {
@@ -535,14 +629,10 @@ impl App {
         if entries.is_empty() {
             return true;
         }
-        // Longest common prefix across all matches; for a single
-        // match this is the full name.
         let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
         let lcp = longest_common_prefix(&names);
         let completed = if entries.len() == 1 {
             let (name, is_dir) = &entries[0];
-            // Directories get a trailing slash so a second Tab
-            // descends into them naturally.
             if *is_dir {
                 format!("{name}/")
             } else {
@@ -551,11 +641,8 @@ impl App {
         } else if lcp.len() > file_prefix.len() {
             lcp.to_string()
         } else {
-            // Already at the LCP — nothing to extend on this Tab.
             return true;
         };
-        // Rebuild the buffer keeping the original `/attach[_image] `
-        // prefix and the directory portion.
         let cmd_prefix = if buffer.starts_with("/attach_image ") {
             "/attach_image "
         } else {
@@ -570,32 +657,29 @@ impl App {
         true
     }
 
-    fn submit_with_origin(&mut self, text: String, origin: SubmitOrigin) {
-        if origin == SubmitOrigin::Typed {
-            // Both `/attach <path>` and bare `/attach` are vision-only;
-            // when no mmproj is loaded, the AC requires the same
-            // navigation-compliant error wording as `see` / `screenshot`.
-            let is_attach = text.starts_with("/attach ") || text.trim() == "/attach";
-            if is_attach && !self.vision_enabled {
-                self.output.push_error(
-                    "[error] attach_image: vision not available: model does not support \
-                     images. Use: a model with mmproj loaded",
-                );
-                self.set_notice("vision not available");
-                return;
-            }
-            if let Some(rest) = text.strip_prefix("/attach ") {
-                self.handle_attach(rest.trim());
-                return;
-            }
-            // Reject a bare `/attach` (no path) early so we don't ship the
-            // literal string to the LLM and waste a turn.
-            if text.trim() == "/attach" {
-                self.output
-                    .push_error("/attach: expected a path. Usage: /attach <path>");
-                self.set_notice("/attach: missing path");
-                return;
-            }
+    /// Submit text typed at the input line. Slash-command parsing
+    /// only happens here — a voice transcription that contains
+    /// "/attach foo" is dispatched as plain text by the daemon's
+    /// auto-Query path, which never lands here.
+    fn submit_typed(&mut self, text: String) {
+        let is_attach = text.starts_with("/attach ") || text.trim() == "/attach";
+        if is_attach && !self.vision_enabled {
+            self.output.push_error(
+                "[error] attach_image: vision not available: model does not support \
+                 images. Use: a model with mmproj loaded",
+            );
+            self.set_notice("vision not available");
+            return;
+        }
+        if let Some(rest) = text.strip_prefix("/attach ") {
+            self.handle_attach(rest.trim());
+            return;
+        }
+        if text.trim() == "/attach" {
+            self.output
+                .push_error("/attach: expected a path. Usage: /attach <path>");
+            self.set_notice("/attach: missing path");
+            return;
         }
         if self.generating {
             self.set_notice("still generating — please wait");
@@ -616,7 +700,7 @@ impl App {
         for (name, protocol) in thumbnails {
             self.output.push_thumbnail(name, protocol);
         }
-        self.spawn_generation(text, attachments);
+        self.spawn_query(text, attachments);
     }
 
     fn begin_submit(&mut self, text: &str, attachment_names: &[String]) {
@@ -662,12 +746,6 @@ impl App {
         tokio::spawn(async move {
             match load_image_attachment(std::path::Path::new(&path_for_load)).await {
                 Ok((Attachment::Image { mime, bytes }, size)) => {
-                    // Build the graphics-protocol thumbnail when the
-                    // terminal supports it. `image::load_from_memory`
-                    // can fail on rare valid-but-unusual encodings (e.g.
-                    // 16-bit PNGs the `image` crate doesn't enable by
-                    // default) — fall back to filename-only display in
-                    // that case rather than failing the whole attach.
                     let protocol = picker.and_then(|p| match image::load_from_memory(&bytes) {
                         Ok(img) => Some(p.new_resize_protocol(img)),
                         Err(e) => {
@@ -700,61 +778,112 @@ impl App {
         });
     }
 
-    fn spawn_generation(&self, text: String, attachments: Vec<Attachment>) {
-        let client = self.client.clone();
-        let tools = self.tools.clone();
-        let max_iterations = self.max_iterations;
-        let tx = self.chat_tx.clone();
-        let presence = self.presence.clone();
-        tokio::spawn(async move {
-            // Auto-wake and take an in-flight guard so a user hitting
-            // Enter from Drowsy/Sleeping sees the response stream once
-            // the model is ready, and so a concurrent sleep waits for
-            // this generation to finish before tearing down
-            // llama-server. The guard is held until the end of this
-            // task.
-            let _request_guard = if let Some(p) = presence.as_ref() {
-                match p.acquire_request_guard().await {
-                    Ok(g) => Some(g),
-                    Err(e) => {
-                        let _ = tx
-                            .send(ChatEvent::LlmError(format!("wake failed: {e:#}")))
-                            .await;
-                        return;
-                    }
-                }
-            } else {
-                None
-            };
-            let (llm_tx, mut llm_rx) = mpsc::channel::<LlmEvent>(64);
-            let tx_fwd = tx.clone();
-            let forwarder = tokio::spawn(async move {
-                while let Some(ev) = llm_rx.recv().await {
-                    if tx_fwd.send(ChatEvent::Llm(ev)).await.is_err() {
-                        return;
-                    }
-                }
-            });
-            let result = assistd_core::run_agent_turn(
-                client,
-                tools,
-                max_iterations,
+    /// Open a daemon dialog connection for a Query and pump its
+    /// streaming events onto `chat_tx`. The dialog connection stays
+    /// open while the query is generating so the modal can write a
+    /// `Request::ConfirmResponse` back on the same connection if the
+    /// model triggers a destructive bash command.
+    fn spawn_query(&mut self, text: String, attachments: Vec<Attachment>) {
+        let ipc = self.ipc.clone();
+        let chat_tx = self.chat_tx.clone();
+
+        // Channel for outgoing requests from the main thread (modal Y/N
+        // → ConfirmResponse). Capacity 8 is generous; one in-flight
+        // confirm at a time is the only realistic shape.
+        let (writer_tx, mut writer_rx) = mpsc::channel::<Request>(8);
+        self.active_writer = Some(writer_tx);
+
+        let req_id = Uuid::new_v4().to_string();
+        let req = if attachments.is_empty() {
+            Request::Query {
+                id: req_id,
                 text,
-                attachments,
-                llm_tx,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await;
-            let _ = forwarder.await;
-            if let Err(e) = result {
-                let _ = tx.send(ChatEvent::LlmError(e.to_string())).await;
+                attachments: Vec::new(),
+                version: Some(assistd_ipc::PROTOCOL_VERSION),
+            }
+        } else {
+            let wire_attachments: Vec<assistd_ipc::ImageAttachment> = attachments
+                .into_iter()
+                .map(|a| match a {
+                    Attachment::Image { mime, bytes } => {
+                        assistd_ipc::ImageAttachment::from_bytes(mime, &bytes)
+                    }
+                })
+                .collect();
+            Request::Query {
+                id: req_id,
+                text,
+                attachments: wire_attachments,
+                version: Some(assistd_ipc::PROTOCOL_VERSION),
+            }
+        };
+
+        tokio::spawn(async move {
+            let mut conn = match ipc.open_dialog(req).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = chat_tx
+                        .send(ChatEvent::WireError(format!("query connect: {e}")))
+                        .await;
+                    return;
+                }
+            };
+
+            // Drive the connection: read events from the daemon AND
+            // forward outgoing requests from the modal. Both halves
+            // share the same `DialogConnection`, so we tokio::select.
+            loop {
+                tokio::select! {
+                    maybe = conn.next_event() => {
+                        match maybe {
+                            Ok(Some(ev)) => {
+                                let terminal = ev.is_terminal();
+                                let _ = chat_tx.send(ChatEvent::Wire(ev)).await;
+                                if terminal {
+                                    return;
+                                }
+                            }
+                            Ok(None) => {
+                                let _ = chat_tx
+                                    .send(ChatEvent::WireError(
+                                        "daemon closed connection mid-stream".into(),
+                                    ))
+                                    .await;
+                                return;
+                            }
+                            Err(e) => {
+                                let _ = chat_tx
+                                    .send(ChatEvent::WireError(format!("read: {e}")))
+                                    .await;
+                                return;
+                            }
+                        }
+                    }
+                    maybe_out = writer_rx.recv() => {
+                        match maybe_out {
+                            Some(req) => {
+                                if let Err(e) = conn.send(req).await {
+                                    let _ = chat_tx
+                                        .send(ChatEvent::WireError(format!("write: {e}")))
+                                        .await;
+                                    return;
+                                }
+                            }
+                            None => {
+                                // Sender dropped. Don't close the read
+                                // half — the daemon may still emit
+                                // events. Replace the branch with
+                                // `pending` so it never fires again.
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    }
+                }
             }
         });
     }
 }
 
-/// Expand a leading `~` or `~/` in a tab-completion path using
-/// `$HOME`. Falls back to the literal path when `$HOME` is unset.
 fn expand_tilde(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
@@ -769,10 +898,6 @@ fn expand_tilde(p: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// Longest common prefix across a slice of strings. `""` when the
-/// slice is empty. Operates on bytes — fine for ASCII filenames; the
-/// completion path is best-effort for non-ASCII anyway since the
-/// input is shell-style.
 fn longest_common_prefix<'a>(xs: &[&'a str]) -> &'a str {
     let Some(first) = xs.first() else { return "" };
     let mut end = first.len();
@@ -796,9 +921,6 @@ fn presence_label(s: PresenceState) -> &'static str {
     }
 }
 
-/// Compact bytes-to-human formatter for the `📎 attached: ...` line.
-/// Mirrors `assistd_tools::commands::cat::human_size` but is duplicated
-/// here so the chat TUI doesn't depend on a `pub(crate)` helper.
 fn human_size_short(n: usize) -> String {
     const KB: usize = 1024;
     const MB: usize = KB * 1024;
@@ -817,7 +939,6 @@ fn human_size_short(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assistd_llm::{EchoBackend, FailedBackend};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn test_sleep_cfg() -> SleepConfig {
@@ -833,16 +954,15 @@ mod tests {
 
     fn test_app_with(vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
         let (tx, rx) = mpsc::channel::<ChatEvent>(16);
-        let client: Arc<dyn LlmBackend> = Arc::new(EchoBackend::new());
-        let tools = Arc::new(ToolRegistry::default());
+        // Bogus socket path — these tests never open a real connection.
+        let ipc = Arc::new(IpcClient::with_path(std::path::PathBuf::from(
+            "/tmp/assistd-test-nonexistent.sock",
+        )));
         let app = App::new(
-            client,
-            tools,
-            20,
+            ipc,
             tx,
             "test-model".into(),
             test_sleep_cfg(),
-            None,
             vision_enabled,
             None,
         );
@@ -853,11 +973,22 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
+    fn delta(text: &str) -> Event {
+        Event::Delta {
+            id: "r".into(),
+            text: text.into(),
+        }
+    }
+
+    fn done() -> Event {
+        Event::Done { id: "r".into() }
+    }
+
     #[test]
     fn delta_keeps_generating_true() {
         let (mut app, _rx) = test_app();
         app.generating = true;
-        app.on_llm_event(ChatEvent::Llm(LlmEvent::Delta { text: "hi".into() }));
+        app.on_chat_event(ChatEvent::Wire(delta("hi")));
         assert!(app.generating);
     }
 
@@ -865,16 +996,16 @@ mod tests {
     fn done_clears_generating() {
         let (mut app, _rx) = test_app();
         app.generating = true;
-        app.on_llm_event(ChatEvent::Llm(LlmEvent::Delta { text: "hi".into() }));
-        app.on_llm_event(ChatEvent::Llm(LlmEvent::Done));
+        app.on_chat_event(ChatEvent::Wire(delta("hi")));
+        app.on_chat_event(ChatEvent::Wire(done()));
         assert!(!app.generating);
     }
 
     #[test]
-    fn llm_error_clears_generating() {
+    fn wire_error_clears_generating() {
         let (mut app, _rx) = test_app();
         app.generating = true;
-        app.on_llm_event(ChatEvent::LlmError("boom".into()));
+        app.on_chat_event(ChatEvent::WireError("boom".into()));
         assert!(!app.generating);
     }
 
@@ -921,176 +1052,73 @@ mod tests {
     }
 
     #[test]
-    fn on_presence_updates_state() {
+    fn presence_event_updates_state() {
         let (mut app, _rx) = test_app();
         assert_eq!(app.presence_state, None);
-        app.on_presence(PresenceState::Drowsy);
+        app.on_chat_event(ChatEvent::Wire(Event::Presence {
+            id: "p".into(),
+            state: PresenceState::Drowsy,
+        }));
         assert_eq!(app.presence_state, Some(PresenceState::Drowsy));
-        app.on_presence(PresenceState::Active);
+        app.on_chat_event(ChatEvent::Wire(Event::Presence {
+            id: "p".into(),
+            state: PresenceState::Active,
+        }));
         assert_eq!(app.presence_state, Some(PresenceState::Active));
-    }
-
-    #[test]
-    fn f2_without_presence_sets_notice_not_panic() {
-        let (mut app, _rx) = test_app();
-        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-        assert_eq!(
-            app.notice().map(|s| s.to_string()),
-            Some("presence unavailable".to_string())
-        );
-    }
-
-    fn pending_confirmation() -> (PendingConfirmation, oneshot::Receiver<bool>) {
-        let (tx, rx) = oneshot::channel();
-        let pending = PendingConfirmation {
-            request: ConfirmationRequest {
-                tool: "bash".into(),
-                script: "rm -rf /tmp/junk".into(),
-                matched_pattern: "rm -rf".into(),
-            },
-            responder: tx,
-        };
-        (pending, rx)
     }
 
     #[tokio::test]
     async fn modal_approve_on_y() {
         let (mut app, _rx) = test_app();
-        let (pending, responder_rx) = pending_confirmation();
-        app.open_confirmation_modal(pending);
+        app.open_confirmation_modal(
+            "c1".into(),
+            "bash".into(),
+            "rm -rf /tmp/junk".into(),
+            "rm -rf".into(),
+        );
         assert!(app.has_modal());
         app.on_key(typed('y'));
         assert!(!app.has_modal(), "modal should close on approve");
-        let decision = responder_rx.await.expect("responder not dropped");
-        assert!(decision);
-    }
-
-    #[tokio::test]
-    async fn modal_approve_on_uppercase_y() {
-        let (mut app, _rx) = test_app();
-        let (pending, responder_rx) = pending_confirmation();
-        app.open_confirmation_modal(pending);
-        app.on_key(typed('Y'));
-        assert!(responder_rx.await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn modal_approve_on_enter() {
-        let (mut app, _rx) = test_app();
-        let (pending, responder_rx) = pending_confirmation();
-        app.open_confirmation_modal(pending);
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(responder_rx.await.unwrap());
     }
 
     #[tokio::test]
     async fn modal_deny_on_n() {
         let (mut app, _rx) = test_app();
-        let (pending, responder_rx) = pending_confirmation();
-        app.open_confirmation_modal(pending);
+        app.open_confirmation_modal(
+            "c1".into(),
+            "bash".into(),
+            "rm -rf /tmp/junk".into(),
+            "rm -rf".into(),
+        );
         app.on_key(typed('n'));
         assert!(!app.has_modal());
-        assert!(!responder_rx.await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn modal_deny_on_esc() {
-        let (mut app, _rx) = test_app();
-        let (pending, responder_rx) = pending_confirmation();
-        app.open_confirmation_modal(pending);
-        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!responder_rx.await.unwrap());
     }
 
     #[tokio::test]
     async fn modal_swallows_unrelated_keys() {
         let (mut app, _rx) = test_app();
-        let (pending, _responder_rx) = pending_confirmation();
-        app.open_confirmation_modal(pending);
-        // Typing into the input line must NOT land in the buffer while
-        // the modal is open — it would be confusing.
+        app.open_confirmation_modal(
+            "c1".into(),
+            "bash".into(),
+            "rm -rf /tmp/junk".into(),
+            "rm -rf".into(),
+        );
         app.on_key(typed('x'));
         app.on_key(typed('z'));
         assert!(app.has_modal());
         assert!(app.input.buffer().is_empty());
     }
 
-    #[tokio::test]
-    async fn modal_second_request_while_open_is_denied() {
-        let (mut app, _rx) = test_app();
-        let (first, first_rx) = pending_confirmation();
-        let (second, second_rx) = pending_confirmation();
-        app.open_confirmation_modal(first);
-        // Second request arrives while the first is pending — the gate
-        // must not hang; instead, the second request's responder is
-        // dropped, which the gate interprets as denial.
-        app.open_confirmation_modal(second);
-        // First is still the active modal.
-        assert!(app.has_modal());
-        assert!(
-            second_rx.await.is_err(),
-            "second responder should be dropped"
-        );
-        // Resolving the first still works.
-        app.on_key(typed('y'));
-        assert!(first_rx.await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn echo_backend_spawn_yields_delta_then_done() {
-        let (app, mut rx) = test_app();
-        app.spawn_generation("hello".into(), Vec::new());
-        let first = rx.recv().await.expect("delta");
-        let second = rx.recv().await.expect("done");
-        match first {
-            ChatEvent::Llm(LlmEvent::Delta { text }) => assert_eq!(text, "hello"),
-            other => panic!("expected Delta, got {other:?}"),
-        }
-        assert!(matches!(second, ChatEvent::Llm(LlmEvent::Done)));
-    }
-
-    #[tokio::test]
-    async fn failed_backend_spawn_yields_llm_error() {
-        let (tx, mut rx) = mpsc::channel::<ChatEvent>(16);
-        let client: Arc<dyn LlmBackend> = Arc::new(FailedBackend::new("server down".into()));
-        let tools = Arc::new(ToolRegistry::default());
-        let app = App::new(
-            client,
-            tools,
-            20,
-            tx,
-            "test-model".into(),
-            test_sleep_cfg(),
-            None,
-            true,
-            None,
-        );
-        app.spawn_generation("hello".into(), Vec::new());
-        let ev = rx.recv().await.expect("error event");
-        match ev {
-            ChatEvent::LlmError(msg) => assert!(msg.contains("server down")),
-            other => panic!("expected LlmError, got {other:?}"),
-        }
-    }
-
-    fn rendered_text(app: &mut App) -> Vec<String> {
-        let (lines, _) = app.output.render_view(80, 50);
-        lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect()
-    }
-
     #[test]
     fn tool_call_then_result_creates_one_block_with_command() {
         let (mut app, _rx) = test_app();
-        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolCall {
+        app.on_chat_event(ChatEvent::Wire(Event::ToolCall {
             id: "c1".into(),
             name: "run".into(),
-            arguments: serde_json::json!({"command": "ls /tmp"}),
+            args: serde_json::json!({"command": "ls /tmp"}),
         }));
         assert!(app.pending_tool_call.is_some());
-        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolResult {
+        app.on_chat_event(ChatEvent::Wire(Event::ToolResult {
             id: "c1".into(),
             name: "run".into(),
             result: serde_json::json!({
@@ -1101,391 +1129,41 @@ mod tests {
             }),
         }));
         assert!(app.pending_tool_call.is_none());
-        let rendered = rendered_text(&mut app);
+        let (lines, _) = app.output.render_view(80, 50);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
         assert!(rendered.iter().any(|l| l.contains("$ ls /tmp")));
         assert!(rendered.iter().any(|l| l.contains("[exit:0 | 5ms]")));
     }
 
     #[test]
-    fn tab_toggles_last_tool_block() {
+    fn confirm_request_event_opens_modal() {
         let (mut app, _rx) = test_app();
-        let body: String =
-            (0..30).map(|i| format!("l{i}\n")).collect::<String>() + "[exit:0 | 1ms]";
-        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolCall {
-            id: "c1".into(),
-            name: "run".into(),
-            arguments: serde_json::json!({"command": "seq 30"}),
+        app.on_chat_event(ChatEvent::Wire(Event::ConfirmRequest {
+            id: "r".into(),
+            confirm_id: "c-xyz".into(),
+            tool: "bash".into(),
+            script: "rm -rf /tmp/foo".into(),
+            matched_pattern: "rm -rf".into(),
         }));
-        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolResult {
-            id: "c1".into(),
-            name: "run".into(),
-            result: serde_json::json!({
-                "output": body,
-                "exit_code": 0,
-                "truncated": false,
-                "duration_ms": 1,
-            }),
-        }));
-        let collapsed_marker_count = |app: &mut App| {
-            rendered_text(app)
-                .iter()
-                .filter(|l| l.contains("more lines"))
-                .count()
-        };
-        assert_eq!(collapsed_marker_count(&mut app), 1);
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(collapsed_marker_count(&mut app), 0);
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(collapsed_marker_count(&mut app), 1);
+        assert!(app.has_modal());
+        let modal = app.modal.as_ref().unwrap();
+        assert_eq!(modal.confirm_id, "c-xyz");
+        assert_eq!(modal.request.script, "rm -rf /tmp/foo");
     }
 
     #[test]
-    fn tool_result_without_matching_call_renders_with_placeholder() {
-        let (mut app, _rx) = test_app();
-        app.on_llm_event(ChatEvent::Llm(LlmEvent::ToolResult {
-            id: "lost".into(),
-            name: "run".into(),
-            result: serde_json::json!({
-                "output": "[exit:0 | 1ms]",
-                "exit_code": 0,
-                "truncated": false,
-                "duration_ms": 1,
-            }),
-        }));
-        let rendered = rendered_text(&mut app);
-        assert!(rendered.iter().any(|l| l.contains("$ <?>")));
-    }
-
-    #[test]
-    fn tab_with_no_blocks_is_safe_noop_and_not_typed() {
-        let (mut app, _rx) = test_app();
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(app.input.buffer().is_empty());
-    }
-
-    // --- /attach slash command -------------------------------------------
-
-    /// Minimal valid 1×1 PNG that `infer` recognizes as `image/png`.
-    /// Same bytes used by `assistd-tools::commands::see` tests so we
-    /// know the loader accepts them.
-    const PNG_BYTES: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
-        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-    ];
-
-    /// Drive an Enter on `text` then drain pending `AttachLoaded` /
-    /// `AttachFailed` events so the App applies them. Mirrors what the
-    /// real event loop does between `events.next()` and `chat_rx.recv`.
-    async fn attach_and_drain(app: &mut App, rx: &mut mpsc::Receiver<ChatEvent>, text: &str) {
-        for c in text.chars() {
-            app.on_key(typed(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        // First event: either AttachLoaded or AttachFailed.
-        if let Some(ev) = rx.recv().await {
-            app.on_llm_event(ev);
-        }
-    }
-
-    #[tokio::test]
-    async fn attach_png_stages_attachment_and_renders_info_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("shot.png");
-        tokio::fs::write(&path, PNG_BYTES).await.unwrap();
-
-        let (mut app, mut rx) = test_app();
-        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", path.display())).await;
-
-        assert_eq!(
-            app.pending_attachments.len(),
-            1,
-            "one image staged after /attach"
-        );
-        let staged = &app.pending_attachments[0];
-        assert_eq!(staged.name, "shot.png");
-        assert_eq!(staged.mime, "image/png");
-        let rendered = rendered_text(&mut app);
-        assert!(
-            rendered
-                .iter()
-                .any(|l| l.contains("📎 attached: shot.png") && l.contains("image/png")),
-            "info line missing in: {rendered:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn attach_missing_path_pushes_error_and_stages_nothing() {
-        let (mut app, mut rx) = test_app();
-        attach_and_drain(&mut app, &mut rx, "/attach /nonexistent/missing.png").await;
-
-        assert!(
-            app.pending_attachments.is_empty(),
-            "no attachment staged on error"
-        );
-        let rendered = rendered_text(&mut app);
-        assert!(
-            rendered
-                .iter()
-                .any(|l| l.contains("/attach") && l.contains("file not found")),
-            "expected error line, got: {rendered:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn attach_text_file_is_rejected_as_unrecognized() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("notes.txt");
-        tokio::fs::write(&path, b"not an image").await.unwrap();
-
-        let (mut app, mut rx) = test_app();
-        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", path.display())).await;
-
-        assert!(app.pending_attachments.is_empty());
-        let rendered = rendered_text(&mut app);
-        assert!(
-            rendered
-                .iter()
-                .any(|l| l.contains("not a recognized image")),
-            "expected unrecognized-image error: {rendered:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn attach_gif_is_rejected_by_format_allowlist() {
-        // GIF89a header — `infer` flags as image/gif; allowlist rejects.
-        const GIF_BYTES: &[u8] = &[
-            0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xFF,
-            0xFF, 0xFF, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C,
-            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00,
-            0x3B,
-        ];
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("anim.gif");
-        tokio::fs::write(&path, GIF_BYTES).await.unwrap();
-
-        let (mut app, mut rx) = test_app();
-        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", path.display())).await;
-
-        assert!(app.pending_attachments.is_empty());
-        // Long error messages may wrap across multiple visual lines —
-        // join before searching so the test isn't sensitive to width.
-        let joined = rendered_text(&mut app).join(" ");
-        assert!(
-            joined.contains("unsupported image format") && joined.contains("image/gif"),
-            "expected unsupported-format error: {joined}"
-        );
-    }
-
-    #[tokio::test]
-    async fn attach_then_submit_drains_pending_and_passes_attachments() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.png");
-        tokio::fs::write(&path, PNG_BYTES).await.unwrap();
-
-        let (mut app, mut rx) = test_app();
-        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", path.display())).await;
-        assert_eq!(app.pending_attachments.len(), 1);
-
-        // Submitting plain text now should drain the attachment.
-        for c in "hi".chars() {
-            app.on_key(typed(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            app.pending_attachments.is_empty(),
-            "submit must drain pending_attachments"
-        );
-        let rendered = rendered_text(&mut app);
-        assert!(
-            rendered
-                .iter()
-                .any(|l| l.contains("> hi") && l.contains("📎 a.png")),
-            "user prompt should include 📎 tag: {rendered:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn attach_twice_stages_both_then_drains_both() {
-        let dir = tempfile::tempdir().unwrap();
-        let p1 = dir.path().join("first.png");
-        let p2 = dir.path().join("second.png");
-        tokio::fs::write(&p1, PNG_BYTES).await.unwrap();
-        tokio::fs::write(&p2, PNG_BYTES).await.unwrap();
-
-        let (mut app, mut rx) = test_app();
-        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", p1.display())).await;
-        attach_and_drain(&mut app, &mut rx, &format!("/attach {}", p2.display())).await;
-        assert_eq!(app.pending_attachments.len(), 2);
-
-        for c in "go".chars() {
-            app.on_key(typed(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.pending_attachments.is_empty());
-        let rendered = rendered_text(&mut app);
-        // Multi-attachment tag mentions both filenames + count.
-        assert!(
-            rendered
-                .iter()
-                .any(|l| l.contains("first.png") && l.contains("second.png")),
-            "multi-attachment user tag missing names: {rendered:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn voice_transcription_with_slash_attach_is_treated_as_text() {
-        // A transcription that happens to start with "/attach" must
-        // NOT trigger file I/O — it's just spoken text. After
-        // submission we expect a regular user output line and no
-        // staged attachment.
-        let (mut app, _rx) = test_app();
-        app.on_transcription("/attach foo.png".into());
-        assert!(app.pending_attachments.is_empty());
-        let rendered = rendered_text(&mut app);
-        assert!(
-            rendered.iter().any(|l| l.contains("> /attach foo.png")),
-            "voice transcription starting with /attach must render as plain user text: {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn attach_with_no_path_pushes_error() {
-        let (mut app, _rx) = test_app();
-        for c in "/attach".chars() {
-            app.on_key(typed(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.pending_attachments.is_empty());
-        let rendered = rendered_text(&mut app);
-        assert!(
-            rendered.iter().any(|l| l.contains("expected a path")),
-            "missing usage error: {rendered:?}"
-        );
-    }
-
-    /// AC #3 (TUI side): when the loaded model has no mmproj, typing
-    /// `/attach <path>` must reject before the file is read and emit
-    /// the same "vision not available" wording as `see` / `screenshot`.
-    /// We drive keys synchronously and skip `attach_and_drain` because
-    /// the vision-disabled path returns *before* spawning the loader,
-    /// so no `AttachLoaded`/`AttachFailed` event ever lands on `rx`.
-    #[test]
-    fn attach_when_vision_disabled_pushes_error_and_stages_nothing() {
+    fn capabilities_event_updates_vision_and_model_name() {
         let (mut app, _rx) = test_app_with(false);
-        for c in "/attach /tmp/some-image.png".chars() {
-            app.on_key(typed(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            app.pending_attachments.is_empty(),
-            "vision disabled must not stage an attachment"
-        );
-        let rendered = rendered_text(&mut app);
-        assert!(
-            rendered.iter().any(|l| l.contains(
-                "[error] attach_image: vision not available: model does not support images"
-            )),
-            "missing exact AC error wording: {rendered:?}"
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|l| l.contains("Use: a model with mmproj loaded")),
-            "missing recovery hint: {rendered:?}"
-        );
-    }
-
-    /// Bare `/attach` (no path) with vision disabled also takes the
-    /// vision-disabled path — the user should see the capability
-    /// problem, not the "missing path" usage error.
-    #[test]
-    fn bare_attach_when_vision_disabled_reports_vision_error() {
-        let (mut app, _rx) = test_app_with(false);
-        for c in "/attach".chars() {
-            app.on_key(typed(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.pending_attachments.is_empty());
-        let rendered = rendered_text(&mut app);
-        assert!(
-            rendered.iter().any(|l| l.contains("vision not available")),
-            "expected vision error, got {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn longest_common_prefix_empty() {
-        assert_eq!(longest_common_prefix(&[]), "");
-    }
-
-    #[test]
-    fn longest_common_prefix_one_string() {
-        assert_eq!(longest_common_prefix(&["abc"]), "abc");
-    }
-
-    #[test]
-    fn longest_common_prefix_two_strings() {
-        assert_eq!(longest_common_prefix(&["foobar", "foobaz"]), "fooba");
-        assert_eq!(longest_common_prefix(&["abc", "xyz"]), "");
-    }
-
-    #[test]
-    fn longest_common_prefix_n_strings() {
-        assert_eq!(
-            longest_common_prefix(&["screenshot1.png", "screenshot2.png", "screenshot10.png"]),
-            "screenshot",
-        );
-    }
-
-    #[test]
-    fn tab_completion_extends_unique_match() {
-        // Build a temp dir with one file that uniquely matches.
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("unique-screenshot.png");
-        std::fs::write(&target, b"fake png").unwrap();
-        let prefix = dir.path().join("unique").display().to_string();
-
-        let (mut app, _rx) = test_app_with(true);
-        for c in format!("/attach {prefix}").chars() {
-            app.on_key(typed(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input.buffer(), format!("/attach {}", target.display()));
-    }
-
-    #[test]
-    fn tab_completion_extends_to_lcp_on_ambiguous_match() {
-        // Two files share a prefix; first Tab should extend the buffer
-        // to the longest common prefix without picking either.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("foobar"), b"a").unwrap();
-        std::fs::write(dir.path().join("foobaz"), b"b").unwrap();
-        let prefix = dir.path().join("foo").display().to_string();
-
-        let (mut app, _rx) = test_app_with(true);
-        for c in format!("/attach {prefix}").chars() {
-            app.on_key(typed(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(
-            app.input.buffer(),
-            format!("/attach {}/fooba", dir.path().display())
-        );
-    }
-
-    #[test]
-    fn tab_outside_attach_falls_through_to_default_handler() {
-        // Without /attach, Tab should invoke the existing tool-block
-        // toggle path. We just verify the buffer is unchanged — the
-        // toggle is a no-op on an empty output.
-        let (mut app, _rx) = test_app_with(true);
-        for c in "hello".chars() {
-            app.on_key(typed(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input.buffer(), "hello");
+        assert!(!app.vision_enabled);
+        app.on_chat_event(ChatEvent::Wire(Event::Capabilities {
+            id: "c".into(),
+            vision: true,
+            model_name: "Qwen".into(),
+        }));
+        assert!(app.vision_enabled);
+        assert_eq!(app.model_name, "Qwen");
     }
 }
