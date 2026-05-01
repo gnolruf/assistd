@@ -226,8 +226,13 @@ enabled = false
 # skip_hotkey = ""
 
 [compositor]
-# Tiling compositor to integrate with. One of: i3, sway, hyprland
-type = "sway"
+# Tiling compositor to integrate with. One of: auto, i3, sway, hyprland.
+# `auto` (the default) inspects the running session at startup and picks
+# a backend. Detection priority: $SWAYSOCK → sway, $I3SOCK → i3,
+# $HYPRLAND_INSTANCE_SIGNATURE → hyprland, then $XDG_CURRENT_DESKTOP.
+# Set this explicitly only to override the detection — e.g. when you
+# want to run a sway session against the i3 backend, or vice versa.
+type = "auto"
 
 [sleep]
 # Whether to suspend the machine (true) or just deactivate (false).

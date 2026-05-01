@@ -11,14 +11,40 @@
 //! Window manager / compositor integration trait.
 //!
 //! Milestone 8 ships concrete implementations for i3, Sway, and Hyprland
-//! that speak their respective IPC protocols. The i3 backend lands first
-//! ([`i3::I3Backend`]); Sway and Hyprland follow in later PRs.
+//! that speak their respective IPC protocols. The i3 ([`i3::I3Backend`])
+//! and Sway ([`sway::SwayBackend`]) backends are landed; Hyprland
+//! follows in a later PR. The daemon picks one at startup based on
+//! `[compositor].type` in `config.toml` (or runtime detection when
+//! `type = "auto"` — see `assistd_config::compositor::detect_from_env`).
 
 use anyhow::Result;
 use async_trait::async_trait;
 
+pub mod criteria;
 pub mod i3;
+pub mod sway;
 pub use i3::{I3Backend, I3Handle};
+pub use sway::{SwayBackend, SwayHandle};
+
+/// Aggregated shutdown handle for the active WM backend, so the daemon
+/// can hold a single `Option<WmHandle>` regardless of which backend
+/// was started. Each variant wraps the per-backend handle's own event
+/// task; [`WmHandle::shutdown`] dispatches.
+pub enum WmHandle {
+    I3(I3Handle),
+    Sway(SwayHandle),
+}
+
+impl WmHandle {
+    /// Drains the per-backend event task. The daemon should flip its
+    /// shutdown watch first; this just awaits the task's exit.
+    pub async fn shutdown(self) {
+        match self {
+            Self::I3(h) => h.shutdown().await,
+            Self::Sway(h) => h.shutdown().await,
+        }
+    }
+}
 
 /// Identifier for a window or client in the compositor's namespace.
 /// Represented as a string because i3, Sway, and Hyprland each use
@@ -64,6 +90,32 @@ pub struct WorkspaceInfo {
     pub focused: bool,
     /// Monitor / output name (e.g. `"DP-1"`).
     pub output: String,
+}
+
+/// One row of [`WindowManager::list_outputs`]. Sway exposes rich output
+/// metadata (mode, scale, refresh, focused workspace) over IPC; i3's
+/// equivalent reply is much sparser, so the trait method is opt-in:
+/// backends without an implementation return `Err` so callers can
+/// distinguish "not supported" from "no monitors".
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputInfo {
+    /// Connector / output name (e.g. `"DP-1"`, `"eDP-1"`, `"HDMI-A-1"`).
+    pub name: String,
+    /// Whether the output is currently active (powered, has a mode).
+    pub active: bool,
+    /// X11/i3 sense of "primary"; on Sway this is always `false` because
+    /// Wayland has no primary-output concept.
+    pub primary: bool,
+    /// Current resolution + refresh as `(width, height, refresh_mHz)`.
+    /// `None` for disabled outputs or when the compositor doesn't expose
+    /// it.
+    pub current_mode: Option<(u32, u32, u32)>,
+    /// Output scale factor (e.g. `1.0`, `1.5`, `2.0`). `None` when not
+    /// reported by the compositor.
+    pub scale: Option<f64>,
+    /// Name of the workspace currently visible on this output. `None`
+    /// for disabled outputs.
+    pub focused_workspace: Option<String>,
 }
 
 /// Snapshot of what the user is currently looking at. Returned by
@@ -153,6 +205,18 @@ pub trait WindowManager: Send + Sync + 'static {
     /// keep this behind subcommands that document the expected dialect.
     async fn run_raw(&self, payload: &str) -> Result<()>;
 
+    /// Enumerate the compositor's outputs (monitors). Sway exposes a
+    /// detailed reply via `GET_OUTPUTS`; i3's reply is much sparser, so
+    /// the default implementation returns `Err` and i3-class backends
+    /// inherit it. Callers that surface this through a tool (`wm
+    /// outputs`) must translate the error into a "not supported"
+    /// message rather than an empty list, so users see the difference
+    /// between an unsupported backend and a connected machine with zero
+    /// monitors.
+    async fn list_outputs(&self) -> Result<Vec<OutputInfo>> {
+        anyhow::bail!("backend does not support output enumeration")
+    }
+
     /// Report whether the backend is actually connected to a compositor.
     /// The default `true` covers concrete backends; [`NoWindowManager`]
     /// overrides to `false` so callers can short-circuit with a single
@@ -186,6 +250,9 @@ impl WindowManager for NoWindowManager {
         anyhow::bail!("no window manager backend is configured")
     }
     async fn run_raw(&self, _payload: &str) -> Result<()> {
+        anyhow::bail!("no window manager backend is configured")
+    }
+    async fn list_outputs(&self) -> Result<Vec<OutputInfo>> {
         anyhow::bail!("no window manager backend is configured")
     }
     fn is_connected(&self) -> bool {
@@ -234,6 +301,44 @@ mod tests {
     #[tokio::test]
     async fn no_window_manager_refuses_run_raw() {
         assert!(NoWindowManager.run_raw("focus").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn no_window_manager_refuses_list_outputs() {
+        assert!(NoWindowManager.list_outputs().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn default_list_outputs_reports_unsupported() {
+        // The default trait impl errors so backends that don't override
+        // (i.e. I3Backend) propagate "not supported" rather than an
+        // empty Vec — see the OutputInfo doc-comment for the rationale.
+        struct MinimalWm;
+
+        #[async_trait]
+        impl WindowManager for MinimalWm {
+            async fn focus(&self, _w: &WindowId) -> Result<()> {
+                Ok(())
+            }
+            async fn move_to_workspace(&self, _w: &WindowId, _ws: &WorkspaceId) -> Result<()> {
+                Ok(())
+            }
+            async fn focused_window(&self) -> Result<Option<WindowId>> {
+                Ok(None)
+            }
+            async fn list_windows(&self) -> Result<Vec<Window>> {
+                Ok(Vec::new())
+            }
+            async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+                Ok(Vec::new())
+            }
+            async fn run_raw(&self, _payload: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let err = MinimalWm.list_outputs().await.unwrap_err();
+        assert!(err.to_string().contains("does not support"), "{err}");
     }
 
     #[test]

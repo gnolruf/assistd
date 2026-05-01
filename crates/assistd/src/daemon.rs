@@ -14,7 +14,7 @@ use assistd_voice::{
     MicContinuousListener, MicVoiceInput, QueueConfig, QueuedTranscriber, Transcriber,
     WhisperTranscriberBuilder, build_cpu_fallback,
 };
-use assistd_wm::{I3Backend, I3Handle};
+use assistd_wm::{I3Backend, SwayBackend, WmHandle};
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -506,19 +506,44 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     };
 
     // Window-manager backend: try-warn-fallback like memory/embedding
-    // above. The i3 backend opens two Unix sockets (one for commands,
-    // one for the event stream) — connect failure on macOS dev boxes
-    // or non-i3 sessions degrades to `NoWindowManager` so the daemon
-    // still starts and `wm.focus(...)` simply errors at call time.
-    // Sway and Hyprland backends land in follow-up Milestone 8 PRs.
-    let (window_manager, i3_handle): (Arc<dyn WindowManager>, Option<I3Handle>) =
-        match config.compositor.compositor_type {
+    // above. Each backend opens two Unix sockets (one for commands,
+    // one for the event stream) — connect failure (e.g. macOS dev box,
+    // non-matching session) degrades to `NoWindowManager` so the
+    // daemon still starts and `wm.focus(...)` simply errors at call
+    // time. Auto resolves the configured `auto` to a concrete
+    // compositor via $SWAYSOCK / $I3SOCK / $HYPRLAND_INSTANCE_SIGNATURE
+    // / $XDG_CURRENT_DESKTOP — see assistd_config::compositor::detect_from_env.
+    let resolved_compositor = match config.compositor.compositor_type {
+        CompositorType::Auto => {
+            let detected = assistd_core::config::compositor::detect_from_env(
+                std::env::var_os("SWAYSOCK").is_some(),
+                std::env::var_os("I3SOCK").is_some(),
+                std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
+                std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+            );
+            match detected {
+                Some(c) => {
+                    info!("wm: auto-detected compositor = {:?}", c);
+                    c
+                }
+                None => {
+                    info!(
+                        "wm: auto-detect found no supported compositor (no $SWAYSOCK/$I3SOCK/$HYPRLAND_INSTANCE_SIGNATURE/$XDG_CURRENT_DESKTOP); window ops disabled"
+                    );
+                    CompositorType::Auto
+                }
+            }
+        }
+        explicit => explicit,
+    };
+    let (window_manager, wm_handle): (Arc<dyn WindowManager>, Option<WmHandle>) =
+        match resolved_compositor {
             CompositorType::I3 => match I3Backend::start(shutdown_tx.subscribe()).await {
                 Ok(handle) => {
                     info!("wm: i3 backend connected");
                     (
                         handle.backend.clone() as Arc<dyn WindowManager>,
-                        Some(handle),
+                        Some(WmHandle::I3(handle)),
                     )
                 }
                 Err(e) => {
@@ -526,12 +551,25 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
                     (Arc::new(NoWindowManager), None)
                 }
             },
-            CompositorType::Sway => {
-                info!("wm: sway backend not yet implemented; window ops disabled");
-                (Arc::new(NoWindowManager), None)
-            }
+            CompositorType::Sway => match SwayBackend::start(shutdown_tx.subscribe()).await {
+                Ok(handle) => {
+                    info!("wm: sway backend connected");
+                    (
+                        handle.backend.clone() as Arc<dyn WindowManager>,
+                        Some(WmHandle::Sway(handle)),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!("wm: sway backend unavailable ({e:#}); window ops disabled");
+                    (Arc::new(NoWindowManager), None)
+                }
+            },
             CompositorType::Hyprland => {
                 info!("wm: hyprland backend not yet implemented; window ops disabled");
+                (Arc::new(NoWindowManager), None)
+            }
+            CompositorType::Auto => {
+                // Auto-detection failed above — fall through silently.
                 (Arc::new(NoWindowManager), None)
             }
         };
@@ -641,7 +679,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         let _ = handles.forwarder.await;
         let _ = handles.presence_gate.await;
     }
-    if let Some(h) = i3_handle {
+    if let Some(h) = wm_handle {
         h.shutdown().await;
     }
     // Embedder task runs BEFORE the memory writer drains so any

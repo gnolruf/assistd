@@ -81,6 +81,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # on tokio's UnixStream — fails cleanly on non-i3 systems with a connect
 # error so the daemon can degrade to NoWindowManager.
 tokio-i3ipc = "0.16"
+# Sway IPC client (sibling backend to tokio-i3ipc). Built on async-io so
+# its futures live on a smol reactor; that reactor coexists with the
+# workspace tokio runtime at the cost of one background thread, which is
+# acceptable since the WM event path is not on the LLM hot loop.
+swayipc-async = "3"
 
 # Workspace-wide lint baseline. Each crate inherits via
 # `[lints] workspace = true` in its own Cargo.toml. Tightens defaults
