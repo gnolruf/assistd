@@ -1,7 +1,7 @@
 use anyhow::Result;
 use assistd_core::{
-    AppState, Config, ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput,
-    PresenceManager, VoiceInput, VoiceOutput,
+    AppState, CompositorType, Config, ContinuousListener, NoContinuousListener, NoVoiceInput,
+    NoVoiceOutput, NoWindowManager, PresenceManager, VoiceInput, VoiceOutput, WindowManager,
 };
 use assistd_embed::{EmbedService, Embedder, LlamaEmbedder, NoEmbedder, spawn_embedder_task};
 use assistd_llm::LlamaChatClient;
@@ -14,6 +14,7 @@ use assistd_voice::{
     MicContinuousListener, MicVoiceInput, QueueConfig, QueuedTranscriber, Transcriber,
     WhisperTranscriberBuilder, build_cpu_fallback,
 };
+use assistd_wm::{I3Backend, I3Handle};
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -504,6 +505,37 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         )
     };
 
+    // Window-manager backend: try-warn-fallback like memory/embedding
+    // above. The i3 backend opens two Unix sockets (one for commands,
+    // one for the event stream) — connect failure on macOS dev boxes
+    // or non-i3 sessions degrades to `NoWindowManager` so the daemon
+    // still starts and `wm.focus(...)` simply errors at call time.
+    // Sway and Hyprland backends land in follow-up Milestone 8 PRs.
+    let (window_manager, i3_handle): (Arc<dyn WindowManager>, Option<I3Handle>) =
+        match config.compositor.compositor_type {
+            CompositorType::I3 => match I3Backend::start(shutdown_tx.subscribe()).await {
+                Ok(handle) => {
+                    info!("wm: i3 backend connected");
+                    (
+                        handle.backend.clone() as Arc<dyn WindowManager>,
+                        Some(handle),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!("wm: i3 backend unavailable ({e:#}); window ops disabled");
+                    (Arc::new(NoWindowManager), None)
+                }
+            },
+            CompositorType::Sway => {
+                info!("wm: sway backend not yet implemented; window ops disabled");
+                (Arc::new(NoWindowManager), None)
+            }
+            CompositorType::Hyprland => {
+                info!("wm: hyprland backend not yet implemented; window ops disabled");
+                (Arc::new(NoWindowManager), None)
+            }
+        };
+
     // Destructive bash commands prompt the active IPC client through
     // `IpcConfirmationGate`: the per-connection `ConfirmRouter`
     // (installed by `assistd-core::socket::handle_connection` into the
@@ -552,7 +584,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     .with_embedder(embedder)
     .with_semantic(semantic_store)
     .with_embed_tx(embed_tx)
-    .with_embedding_cfg(embedding_cfg_for_state);
+    .with_embedding_cfg(embedding_cfg_for_state)
+    .with_window_manager(window_manager);
     if let Some(handle) = sqlite_handle.clone() {
         state_builder = state_builder.with_chunks(handle);
     }
@@ -606,6 +639,9 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     if let Some(handles) = listen_handles {
         let _ = handles.forwarder.await;
         let _ = handles.presence_gate.await;
+    }
+    if let Some(h) = i3_handle {
+        h.shutdown().await;
     }
     // Embedder task runs BEFORE the memory writer drains so any
     // in-flight EmbedJob lands as a StoreChunkEmbedding/StoreMemoryEmbedding

@@ -72,6 +72,12 @@ pub use assistd_voice::{
     VoiceInput, VoiceOutput, VoiceOutputController,
 };
 
+// Re-exports from `assistd-wm`. Window-manager trait + the `No*`
+// placeholder used when no compositor backend is configured. The
+// daemon imports concrete backends (`I3Backend`, `I3Handle`) directly
+// from `assistd_wm`.
+pub use assistd_wm::{NoWindowManager, WindowManager};
+
 // In-crate exports. `AppState` is the daemon's shared state container;
 // `PresenceManager` owns the presence machine and llama-server lifecycle;
 // `RequestGuard` is the RAII handle held for the duration of a request.

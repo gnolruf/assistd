@@ -13,6 +13,7 @@ use assistd_tools::{Attachment, MemoryOps, ToolRegistry};
 use assistd_voice::{
     ContinuousListener, SentenceBuffer, SpeakDecision, VoiceInput, VoiceOutputController,
 };
+use assistd_wm::{NoWindowManager, WindowManager};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
@@ -121,6 +122,12 @@ pub struct AppState {
     /// build a `ChunkingConfig` without re-reading the top-level
     /// `Config` struct on every message.
     pub embedding_cfg: EmbeddingConfig,
+    /// Compositor / window-manager backend. Wired to
+    /// [`assistd_wm::NoWindowManager`] when no compositor backend is
+    /// configured or the configured backend failed to connect at
+    /// startup; otherwise a concrete backend (e.g. `I3Backend`) speaks
+    /// the compositor's IPC protocol.
+    pub window_manager: Arc<dyn WindowManager>,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `run_agent_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
@@ -167,6 +174,7 @@ impl AppState {
             embed_tx,
             chunks: None,
             embedding_cfg,
+            window_manager: Arc::new(NoWindowManager),
             agent_turn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -247,6 +255,15 @@ impl AppState {
     /// disabled or differently-tuned config.
     pub fn with_embedding_cfg(mut self, cfg: EmbeddingConfig) -> Self {
         self.embedding_cfg = cfg;
+        self
+    }
+
+    /// Builder-style setter for the window-manager backend. Defaults to
+    /// `NoWindowManager` so existing test constructors keep working;
+    /// the daemon supplies a concrete backend (e.g. `I3Backend`) when
+    /// the configured compositor is reachable at startup.
+    pub fn with_window_manager(mut self, wm: Arc<dyn WindowManager>) -> Self {
+        self.window_manager = wm;
         self
     }
 
