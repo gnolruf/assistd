@@ -34,28 +34,20 @@ use tokio::task::JoinHandle;
 
 use crate::criteria::format_workspace_target;
 use crate::error::ipc_ctx;
+use crate::snapshot::{
+    self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
+};
 use crate::{
     FocusedWindowContext, Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError,
     WmResult, Window, WorkspaceId, WorkspaceInfo,
 };
 
-/// Cached focus state. Seeded from `get_tree()` + `get_workspaces()` at
-/// startup, then updated on each Sway `Window::Focus`, `Window::Title`,
-/// `Window::Close`, and `Workspace::Focus` event so synchronous reads
-/// don't round-trip the IPC socket.
-///
-/// PR 3b stores both the compositor con_id (the [`WindowId`] returned
-/// to callers) and the raw `app_id` / class string used for the system-
-/// prompt context block. On Sway, `focused_class` prefers `app_id`
-/// (Wayland-native) and falls back to the X11 `class` for XWayland —
-/// see the module-level doc.
-#[derive(Default, Clone)]
-struct Snapshot {
-    focused_id: Option<WindowId>,
-    focused_class: Option<String>,
-    focused_title: Option<String>,
-    active_workspace: Option<String>,
-}
+// PR 4: the Snapshot struct + apply-event race rules now live in
+// `crate::snapshot` so the i3 and Sway backends share them. Sway's
+// `focused_class` semantics (prefer `app_id` for Wayland-native
+// windows, fall back to the X11 class for XWayland views) live in
+// `handle_window_event` below, where we project the native event into
+// the shared `(id, class, title)` tuple.
 
 /// Cast a sway `Node.id` (`i64`) to a [`WindowId`]. Sway never emits
 /// non-positive ids in practice, but the bounds check keeps the
@@ -144,7 +136,7 @@ impl SwayBackend {
                                         .current
                                         .as_ref()
                                         .and_then(|n| n.name.clone());
-                                    snap_for_task.write().await.active_workspace = ws;
+                                    apply_workspace_focus(&snap_for_task, ws).await;
                                 }
                             }
                             Some(Ok(_)) => {}
@@ -199,24 +191,11 @@ impl WindowManager for SwayBackend {
     }
 
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
-        Ok(self.snapshot.read().await.focused_id)
+        Ok(snapshot::read_focused_id(&self.snapshot).await)
     }
 
     async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
-        let s = self.snapshot.read().await;
-        if s.focused_id.is_none()
-            && s.focused_class.is_none()
-            && s.focused_title.is_none()
-            && s.active_workspace.is_none()
-        {
-            return Ok(None);
-        }
-        Ok(Some(FocusedWindowContext {
-            id: s.focused_id,
-            class: s.focused_class.clone(),
-            title: s.focused_title.clone(),
-            workspace: s.active_workspace.clone(),
-        }))
+        Ok(snapshot::read_focused_context(&self.snapshot).await)
     }
 
     async fn list_windows(&self) -> WmResult<Vec<Window>> {
@@ -391,17 +370,18 @@ async fn seed_snapshot(cmd: &mut Connection) -> Result<Snapshot> {
     })
 }
 
-/// Apply one Sway `Window` event to the cached focus snapshot.
-///
-/// Race rules (mirror i3 backend; key on the unique con_id rather than
-/// the class/app_id, so two windows of the same app don't alias):
-/// - `Focus` overwrites id + class/app_id + title from the new container.
-/// - `Title` only takes effect when the event's con_id matches the
-///   currently-focused id — title events from background windows must
-///   not overwrite the foreground title.
-/// - `Close` clears focus state only when the closed container is the
-///   focused one. Workspace is left intact.
+/// Project a Sway `WindowEvent` into the shared snapshot's
+/// `(id, class, title, kind)` tuple and dispatch to
+/// [`apply_window_event`]. The Sway-specific bits — `app_id` lookup,
+/// XWayland fallback, name-vs-window_properties.title preference —
+/// live here; the race rules live in `crate::snapshot`.
 async fn handle_window_event(w: &swayipc_async::WindowEvent, snap: &Arc<RwLock<Snapshot>>) {
+    let kind = match w.change {
+        WindowChange::Focus => WindowChangeKind::Focus,
+        WindowChange::Title => WindowChangeKind::Title,
+        WindowChange::Close => WindowChangeKind::Close,
+        _ => return,
+    };
     let id = sway_id(w.container.id);
     let class = w.container.app_id.clone().or_else(|| {
         w.container
@@ -415,30 +395,7 @@ async fn handle_window_event(w: &swayipc_async::WindowEvent, snap: &Arc<RwLock<S
             .as_ref()
             .and_then(|p| p.title.clone())
     });
-    match w.change {
-        WindowChange::Focus => {
-            let mut s = snap.write().await;
-            s.focused_id = id;
-            s.focused_class = class;
-            s.focused_title = title;
-        }
-        WindowChange::Title => {
-            let mut s = snap.write().await;
-            if s.focused_id == id && id.is_some() {
-                s.focused_title = title;
-                s.focused_class = class;
-            }
-        }
-        WindowChange::Close => {
-            let mut s = snap.write().await;
-            if s.focused_id == id && id.is_some() {
-                s.focused_id = None;
-                s.focused_class = None;
-                s.focused_title = None;
-            }
-        }
-        _ => {}
-    }
+    apply_window_event(snap, kind, id, class, title).await;
 }
 
 fn walk_focused(node: &Node) -> Option<&Node> {

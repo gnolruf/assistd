@@ -23,28 +23,18 @@ use tokio_i3ipc::{
 
 use crate::criteria::format_workspace_target;
 use crate::error::ipc_ctx;
+use crate::snapshot::{
+    self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
+};
 use crate::{
     FocusedWindowContext, Layout, ResizeDir, WindowId, WindowManager, WmError, WmResult, Window,
     WorkspaceId, WorkspaceInfo,
 };
 
-/// Cached focus state. Seeded from `get_tree()` + `get_workspaces()`
-/// at startup, then updated by the event task on each `Window::Focus`,
-/// `Window::Title`, `Window::Close`, and `Workspace::Focus` event so
-/// the synchronous reads in [`I3Backend::focused_window`] and
-/// [`I3Backend::focused_context`] hit memory rather than IPC.
-///
-/// PR 3b stores both the compositor con_id (the [`WindowId`] returned
-/// to callers) and the raw X11 class string (used for the system-prompt
-/// context block). The id is what changes on every `Focus` event; the
-/// class is what the model sees when it asks "what app is in front".
-#[derive(Default, Clone)]
-struct Snapshot {
-    focused_id: Option<WindowId>,
-    focused_class: Option<String>,
-    focused_title: Option<String>,
-    active_workspace: Option<String>,
-}
+// PR 4: the Snapshot struct + apply-event race rules now live in
+// `crate::snapshot` so the i3 and Sway backends share them. This file
+// only owns the i3-specific connection plumbing and reply-to-snapshot
+// projection.
 
 /// `WindowManager` impl wrapping a single i3 IPC command socket.
 /// Held inside `Arc<dyn WindowManager>` by the daemon's `AppState`.
@@ -122,7 +112,7 @@ impl I3Backend {
                                         .current
                                         .as_ref()
                                         .and_then(|n| n.name.clone());
-                                    snap_for_task.write().await.active_workspace = ws;
+                                    apply_workspace_focus(&snap_for_task, ws).await;
                                 }
                             }
                             Some(Ok(_)) => {}
@@ -182,24 +172,11 @@ impl WindowManager for I3Backend {
     }
 
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
-        Ok(self.snapshot.read().await.focused_id)
+        Ok(snapshot::read_focused_id(&self.snapshot).await)
     }
 
     async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
-        let s = self.snapshot.read().await;
-        if s.focused_id.is_none()
-            && s.focused_class.is_none()
-            && s.focused_title.is_none()
-            && s.active_workspace.is_none()
-        {
-            return Ok(None);
-        }
-        Ok(Some(FocusedWindowContext {
-            id: s.focused_id,
-            class: s.focused_class.clone(),
-            title: s.focused_title.clone(),
-            workspace: s.active_workspace.clone(),
-        }))
+        Ok(snapshot::read_focused_context(&self.snapshot).await)
     }
 
     async fn list_windows(&self) -> WmResult<Vec<Window>> {
@@ -329,18 +306,18 @@ async fn seed_snapshot(cmd: &mut I3) -> Result<Snapshot> {
     })
 }
 
-/// Apply one i3 `Window` event to the cached focus snapshot.
-///
-/// Race rules (key on con_id, the unique container handle, rather than
-/// class — two windows of the same class would otherwise alias each
-/// other in title/close updates):
-/// - `Focus` overwrites id + class + title from the new container.
-/// - `Title` only takes effect when the event's con_id matches the
-///   currently-focused id — title events from background windows
-///   must not overwrite the foreground title.
-/// - `Close` clears id + class + title only when the closed container
-///   is the focused one. Workspace is left intact.
+/// Project an i3 `WindowData` event into the shared snapshot's
+/// `(id, class, title, kind)` tuple and dispatch to
+/// [`apply_window_event`]. The compositor-specific projection (reading
+/// `container.id`, `window_properties.class`, etc.) lives here; the
+/// "what changes when" rules live in `crate::snapshot`.
 async fn handle_window_event(w: &tokio_i3ipc::event::WindowData, snap: &Arc<RwLock<Snapshot>>) {
+    let kind = match w.change {
+        WindowChange::Focus => WindowChangeKind::Focus,
+        WindowChange::Title => WindowChangeKind::Title,
+        WindowChange::Close => WindowChangeKind::Close,
+        _ => return,
+    };
     let id = WindowId::new(w.container.id as u64);
     let class = w
         .container
@@ -348,33 +325,7 @@ async fn handle_window_event(w: &tokio_i3ipc::event::WindowData, snap: &Arc<RwLo
         .as_ref()
         .and_then(|p| p.class.clone());
     let title = w.container.name.clone();
-    match w.change {
-        WindowChange::Focus => {
-            let mut s = snap.write().await;
-            s.focused_id = id;
-            s.focused_class = class;
-            s.focused_title = title;
-        }
-        WindowChange::Title => {
-            let mut s = snap.write().await;
-            if s.focused_id == id && id.is_some() {
-                s.focused_title = title;
-                // Class can also drift on Title events when an app
-                // changes its WM_CLASS late; keep them in sync for
-                // the same id.
-                s.focused_class = class;
-            }
-        }
-        WindowChange::Close => {
-            let mut s = snap.write().await;
-            if s.focused_id == id && id.is_some() {
-                s.focused_id = None;
-                s.focused_class = None;
-                s.focused_title = None;
-            }
-        }
-        _ => {}
-    }
+    apply_window_event(snap, kind, id, class, title).await;
 }
 
 fn walk_focused(node: &reply::Node) -> Option<&reply::Node> {

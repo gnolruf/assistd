@@ -22,6 +22,7 @@ use async_trait::async_trait;
 pub(crate) mod criteria;
 pub mod error;
 pub mod i3;
+pub(crate) mod snapshot;
 pub mod sway;
 pub use error::{WmError, WmResult};
 pub use i3::{I3Backend, I3Handle};
