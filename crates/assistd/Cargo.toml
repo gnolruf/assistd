@@ -15,6 +15,7 @@ daemon = [
     "dep:assistd-core",
     "dep:assistd-embed",
     "dep:assistd-llm",
+    "dep:assistd-mcp",
     "dep:assistd-memory",
     "dep:assistd-voice",
     "dep:assistd-wm",
@@ -54,6 +55,7 @@ tokio-util = { workspace = true }
 assistd-core   = { workspace = true, optional = true }
 assistd-embed  = { workspace = true, optional = true }
 assistd-llm    = { workspace = true, optional = true }
+assistd-mcp    = { workspace = true, optional = true }
 assistd-memory = { workspace = true, optional = true }
 assistd-voice  = { workspace = true, optional = true }
 assistd-wm     = { workspace = true, optional = true }

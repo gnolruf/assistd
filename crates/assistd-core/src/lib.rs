@@ -48,9 +48,10 @@ pub use agent::run_agent_turn;
 pub use assistd_config as config;
 pub use assistd_config::{
     AgentConfig, BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config,
-    ConfigError, ContinuousListenConfig, DaemonConfig, LlamaServerConfig, ModelConfig,
-    PresenceConfig, RemoteConfig, ScreenshotBackend, SleepConfig, SynthesisConfig, ToolsBashConfig,
-    ToolsConfig, ToolsOutputConfig, ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig,
+    ConfigError, ContinuousListenConfig, DaemonConfig, LlamaServerConfig, McpConfig,
+    McpServerConfig, McpTransport, ModelConfig, PresenceConfig, RemoteConfig, ScreenshotBackend,
+    SleepConfig, SynthesisConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
+    ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig,
 };
 
 // Re-exports from `assistd-ipc`. Wire-protocol types crossing the
@@ -151,6 +152,7 @@ pub fn build_tools(
     embed_tx: mpsc::Sender<EmbedJob>,
     embedding_model: String,
     window_manager: Arc<dyn WindowManager>,
+    mcp_tools: Vec<Box<dyn assistd_tools::Tool>>,
 ) -> Result<Arc<ToolRegistry>> {
     if overflow_dir.exists() {
         std::fs::remove_dir_all(&overflow_dir).with_context(|| {
@@ -260,6 +262,13 @@ pub fn build_tools(
         embedding_model.clone(),
     ));
     tools.register(ReminisceTool::new(embedder, semantic, embedding_model));
+
+    // MCP tools registered LAST so a malicious server cannot shadow the
+    // native tool names by claiming `run` / `remember` / etc. — the
+    // registry's linear lookup returns the first match.
+    for t in mcp_tools {
+        tools.register_boxed(t);
+    }
     Ok(Arc::new(tools))
 }
 

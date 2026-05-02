@@ -18,9 +18,15 @@ use assistd_wm::{I3Backend, SwayBackend, WmHandle};
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing::info;
+
+use assistd_core::{McpServerConfig, McpTransport};
+use assistd_mcp::{
+    McpServerHandle, SseConfig, StdioConfig, TransportConfig, adapt_handle_as_tools,
+};
 
 use crate::voice_probe::PresenceGpuProbe;
 use crate::{gpu_monitor, hotkey, idle_monitor, listen_dispatcher};
@@ -574,6 +580,55 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             }
         };
 
+    // MCP servers: one supervisor per `[[mcp.servers]]`. Try-warn-fallback
+    // per server — a server that fails to spawn or fails initial
+    // discovery is logged and skipped; one bad server doesn't cascade
+    // into a daemon-startup failure. The handles park here for the
+    // daemon's lifetime; their supervisors observe the shared shutdown
+    // watch and tear down cleanly when it flips.
+    let (mcp_handles, mcp_tools): (Vec<McpServerHandle>, Vec<Box<dyn assistd_tools::Tool>>) =
+        if config.mcp.enabled {
+            let mut handles: Vec<McpServerHandle> = Vec::new();
+            let mut tools_acc: Vec<Box<dyn assistd_tools::Tool>> = Vec::new();
+            for s_cfg in &config.mcp.servers {
+                let transport_cfg = build_transport_config(s_cfg);
+                let label = s_cfg.name.clone();
+                match McpServerHandle::start(label.clone(), transport_cfg, shutdown_tx.subscribe())
+                    .await
+                {
+                    Ok(handle) => {
+                        let prefix = format!("mcp__{}", handle.name);
+                        match adapt_handle_as_tools(&handle, &prefix).await {
+                            Ok(t) => {
+                                info!(
+                                    "mcp: {} ready ({} tools, transport={:?})",
+                                    handle.name,
+                                    t.len(),
+                                    s_cfg.transport
+                                );
+                                tools_acc.extend(t);
+                                handles.push(handle);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "mcp: {} discovery failed ({e:#}); shutting down server",
+                                    handle.name
+                                );
+                                handle.shutdown().await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("mcp: {label} failed to start ({e:#}); skipping");
+                    }
+                }
+            }
+            (handles, tools_acc)
+        } else {
+            info!("mcp: disabled in config (mcp.enabled = false)");
+            (Vec::new(), Vec::new())
+        };
+
     // Destructive bash commands prompt the active IPC client through
     // `IpcConfirmationGate`: the per-connection `ConfirmRouter`
     // (installed by `assistd-core::socket::handle_connection` into the
@@ -594,6 +649,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         embed_tx.clone(),
         embedding_model_name.clone(),
         window_manager.clone(),
+        mcp_tools,
     )?;
     info!(
         "tools: registered {} (overflow dir {})",
@@ -682,6 +738,16 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     if let Some(h) = wm_handle {
         h.shutdown().await;
     }
+    // MCP supervisors observe the shared shutdown_tx (already flipped
+    // by the signal task before serve() returned) and exit on their
+    // own; awaiting their per-server shutdown lets them flush any
+    // in-flight calls and SIGTERM their children before the daemon
+    // process exits. Done before the embedder shutdown so MCP-driven
+    // EmbedJobs (if any future MCP tool funnels into embeddings) land
+    // in the writer queue first.
+    for handle in mcp_handles {
+        handle.shutdown().await;
+    }
     // Embedder task runs BEFORE the memory writer drains so any
     // in-flight EmbedJob lands as a StoreChunkEmbedding/StoreMemoryEmbedding
     // op in the writer queue, which then drains.
@@ -705,6 +771,26 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     serve_result?;
     info!("assistd stopped");
     Ok(())
+}
+
+fn build_transport_config(s: &McpServerConfig) -> TransportConfig {
+    match s.transport {
+        McpTransport::Stdio => {
+            let mut cfg = StdioConfig::new(s.name.clone(), s.command.clone().unwrap_or_default());
+            cfg.args = s.args.clone();
+            cfg.env = s.env.clone();
+            cfg.request_timeout = Duration::from_secs(s.request_timeout_secs);
+            TransportConfig::Stdio(cfg)
+        }
+        McpTransport::Sse => {
+            let mut cfg = SseConfig::new(s.name.clone(), s.url.clone().unwrap_or_default());
+            cfg.headers = s.headers.clone();
+            cfg.request_timeout = Duration::from_secs(s.request_timeout_secs);
+            cfg.read_timeout = Duration::from_secs(s.sse_read_timeout_secs);
+            cfg.ping_interval = Duration::from_secs(s.sse_ping_interval_secs);
+            TransportConfig::Sse(cfg)
+        }
+    }
 }
 
 pub fn init_config() -> Result<()> {

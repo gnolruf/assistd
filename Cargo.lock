@@ -143,6 +143,7 @@ dependencies = [
  "assistd-embed",
  "assistd-ipc",
  "assistd-llm",
+ "assistd-mcp",
  "assistd-memory",
  "assistd-tools",
  "assistd-voice",
@@ -263,10 +264,15 @@ dependencies = [
  "assistd-tools",
  "async-trait",
  "base64",
+ "futures-util",
+ "libc",
+ "reqwest",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

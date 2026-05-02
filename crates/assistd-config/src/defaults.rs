@@ -132,6 +132,19 @@ pub const DEFAULT_EMBEDDING_TOP_K: u32 = 5;
 pub const DEFAULT_EMBEDDING_CHUNK_CHARS: usize = 512;
 pub const DEFAULT_EMBEDDING_CHUNK_OVERLAP: usize = 64;
 pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
+
+/// MCP (Model Context Protocol) — opt-in. Existing users on upgrade
+/// haven't authored any servers; default-off keeps their startup
+/// noise-free. They flip `enabled = true` when they add their first
+/// `[[mcp.servers]]` block.
+pub const DEFAULT_MCP_ENABLED: bool = false;
+pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: u64 = 30;
+/// SSE-only. Catches a server that holds the SSE socket open while
+/// sitting wedged. Per-read deadline applied via `reqwest::ClientBuilder::read_timeout`.
+pub const DEFAULT_MCP_SSE_READ_TIMEOUT_SECS: u64 = 30;
+/// SSE-only. Period of the separate ping task that detects "socket
+/// open but server not processing requests".
+pub const DEFAULT_MCP_SSE_PING_INTERVAL_SECS: u64 = 15;
 /// Path under which the daemon's SQLite memory DB lives. Resolves to
 /// `$XDG_DATA_HOME/assistd/memory.db` when set, else
 /// `$HOME/.local/share/assistd/memory.db`. Mirrors the manual XDG
