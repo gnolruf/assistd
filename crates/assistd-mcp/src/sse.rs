@@ -311,7 +311,10 @@ impl McpClient for SseMcpClient {
 
     async fn invoke(&self, name: &str, arguments: Value) -> AnyResult<ToolResult> {
         let result = self
-            .call("tools/call", json!({ "name": name, "arguments": arguments }))
+            .call(
+                "tools/call",
+                json!({ "name": name, "arguments": arguments }),
+            )
             .await?;
         let content_arr = result
             .get("content")
@@ -430,8 +433,14 @@ async fn read_loop(
             Some(Ok(bytes)) => {
                 parser.push(&bytes);
                 while let Some(event) = parser.next_event() {
-                    handle_event(event, &correlator, &post_url, &mut endpoint_ready_tx, &label)
-                        .await;
+                    handle_event(
+                        event,
+                        &correlator,
+                        &post_url,
+                        &mut endpoint_ready_tx,
+                        &label,
+                    )
+                    .await;
                 }
             }
             Some(Err(e)) => {
@@ -791,7 +800,10 @@ mod tests {
     #[test]
     fn leading_space_after_colon_stripped() {
         let mut p = EventParser::new();
-        let events = drive(&mut p, &[b"data:nospaces\ndata: leading-space-stripped\n\n"]);
+        let events = drive(
+            &mut p,
+            &[b"data:nospaces\ndata: leading-space-stripped\n\n"],
+        );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "nospaces\nleading-space-stripped");
     }

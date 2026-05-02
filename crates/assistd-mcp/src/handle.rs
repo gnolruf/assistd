@@ -23,8 +23,8 @@ use tracing::{error, info, warn};
 
 use crate::backoff::{MAX_CONSECUTIVE_FAILURES, MIN_HEALTHY_SECONDS, backoff_delay};
 use crate::error::McpError;
-use crate::stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
 use crate::sse::{SseConfig, SseLifeline, SseMcpClient};
+use crate::stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
 use crate::{McpClient, ToolResult, ToolSchema};
 
 /// Coarse health status published by the supervisor on every state change.

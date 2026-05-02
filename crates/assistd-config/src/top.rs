@@ -403,16 +403,12 @@ impl Config {
                             ));
                         }
                         if s.url.is_some() {
-                            errors.push(format!(
-                                "mcp.servers[{i}] (stdio) must not set `url`"
-                            ));
+                            errors.push(format!("mcp.servers[{i}] (stdio) must not set `url`"));
                         }
                     }
                     McpTransport::Sse => {
                         match s.url.as_deref() {
-                            None => errors.push(format!(
-                                "mcp.servers[{i}] (sse) must set `url`"
-                            )),
+                            None => errors.push(format!("mcp.servers[{i}] (sse) must set `url`")),
                             Some(u) => {
                                 if u.trim().is_empty() {
                                     errors.push(format!(
@@ -426,16 +422,12 @@ impl Config {
                             }
                         }
                         if s.command.is_some() {
-                            errors.push(format!(
-                                "mcp.servers[{i}] (sse) must not set `command`"
-                            ));
+                            errors.push(format!("mcp.servers[{i}] (sse) must not set `command`"));
                         }
                     }
                 }
                 if s.request_timeout_secs == 0 {
-                    errors.push(format!(
-                        "mcp.servers[{i}].request_timeout_secs must be > 0"
-                    ));
+                    errors.push(format!("mcp.servers[{i}].request_timeout_secs must be > 0"));
                 }
                 if matches!(s.transport, McpTransport::Sse) {
                     if s.sse_read_timeout_secs == 0 {

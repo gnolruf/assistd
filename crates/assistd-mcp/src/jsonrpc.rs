@@ -141,10 +141,7 @@ impl Correlator {
     }
 
     pub fn in_flight(&self) -> usize {
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 

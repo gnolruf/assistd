@@ -170,7 +170,10 @@ mod tests {
         let s = &cfg.servers[0];
         assert_eq!(s.transport, McpTransport::Sse);
         assert_eq!(s.url.as_deref(), Some("https://mcp.example.com/sse"));
-        assert_eq!(s.headers.get("Authorization").map(String::as_str), Some("Bearer xyz"));
+        assert_eq!(
+            s.headers.get("Authorization").map(String::as_str),
+            Some("Bearer xyz")
+        );
         assert!(s.command.is_none());
     }
 

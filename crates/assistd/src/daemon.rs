@@ -593,12 +593,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             for s_cfg in &config.mcp.servers {
                 let transport_cfg = build_transport_config(s_cfg);
                 let label = s_cfg.name.clone();
-                match McpServerHandle::start(
-                    label.clone(),
-                    transport_cfg,
-                    shutdown_tx.subscribe(),
-                )
-                .await
+                match McpServerHandle::start(label.clone(), transport_cfg, shutdown_tx.subscribe())
+                    .await
                 {
                     Ok(handle) => {
                         let prefix = format!("mcp__{}", handle.name);
@@ -623,9 +619,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "mcp: {label} failed to start ({e:#}); skipping"
-                        );
+                        tracing::warn!("mcp: {label} failed to start ({e:#}); skipping");
                     }
                 }
             }
@@ -782,8 +776,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 fn build_transport_config(s: &McpServerConfig) -> TransportConfig {
     match s.transport {
         McpTransport::Stdio => {
-            let mut cfg =
-                StdioConfig::new(s.name.clone(), s.command.clone().unwrap_or_default());
+            let mut cfg = StdioConfig::new(s.name.clone(), s.command.clone().unwrap_or_default());
             cfg.args = s.args.clone();
             cfg.env = s.env.clone();
             cfg.request_timeout = Duration::from_secs(s.request_timeout_secs);

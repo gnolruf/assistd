@@ -113,10 +113,7 @@ mod tests {
             },
             "mcp__web__search".into(),
         );
-        (
-            HealthRoutedTool::new(inner, "web".into(), rx),
-            tx,
-        )
+        (HealthRoutedTool::new(inner, "web".into(), rx), tx)
     }
 
     #[tokio::test]
