@@ -308,9 +308,7 @@ async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
                 None => "-".into(),
             };
             let app = ctx.class.as_deref().unwrap_or("-");
-            Ok(CommandOutput::ok(
-                format!("{id_str}\t{app}\n").into_bytes(),
-            ))
+            Ok(CommandOutput::ok(format!("{id_str}\t{app}\n").into_bytes()))
         }
         Ok(None) => Ok(CommandOutput::ok(Vec::new())),
         Err(e) => {

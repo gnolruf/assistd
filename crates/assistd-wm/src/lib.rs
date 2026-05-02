@@ -431,8 +431,7 @@ pub trait WindowManager: Send + Sync + 'static {
     async fn focus(&self, window: &WindowId) -> WmResult<()>;
 
     /// Move the named window to the given workspace.
-    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId)
-    -> WmResult<()>;
+    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()>;
 
     /// Return the id of the currently focused window, or `None` when no
     /// window holds focus (e.g. an empty workspace).
@@ -590,7 +589,10 @@ mod tests {
 
     #[tokio::test]
     async fn no_window_manager_refuses_layout() {
-        let err = NoWindowManager.set_layout(Layout::Tabbed).await.unwrap_err();
+        let err = NoWindowManager
+            .set_layout(Layout::Tabbed)
+            .await
+            .unwrap_err();
         assert!(matches!(err, WmError::Disconnected));
     }
 
@@ -604,7 +606,10 @@ mod tests {
 
     #[test]
     fn window_id_parses_decimal_only() {
-        assert_eq!("42".parse::<WindowId>().unwrap(), WindowId::new(42).unwrap());
+        assert_eq!(
+            "42".parse::<WindowId>().unwrap(),
+            WindowId::new(42).unwrap()
+        );
         // 0 has no NonZeroU64 representation.
         assert!("0".parse::<WindowId>().is_err());
         // Non-numeric input: rejected.
@@ -664,12 +669,7 @@ mod tests {
             async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
                 Ok(Vec::new())
             }
-            async fn resize_width(
-                &self,
-                _w: &WindowId,
-                _d: ResizeDir,
-                _p: u32,
-            ) -> WmResult<()> {
+            async fn resize_width(&self, _w: &WindowId, _d: ResizeDir, _p: u32) -> WmResult<()> {
                 Ok(())
             }
             async fn set_layout(&self, _l: Layout) -> WmResult<()> {

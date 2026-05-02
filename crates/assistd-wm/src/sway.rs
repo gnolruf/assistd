@@ -40,8 +40,8 @@ use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
 use crate::{
-    FocusedWindowContext, Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError,
-    WmResult, Window, WorkspaceId, WorkspaceInfo,
+    FocusedWindowContext, Layout, OutputInfo, ResizeDir, Window, WindowId, WindowManager, WmError,
+    WmResult, WorkspaceId, WorkspaceInfo,
 };
 
 // PR 4: the Snapshot struct + apply-event race rules now live in
@@ -133,24 +133,20 @@ impl SwayBackend {
     async fn run(&self, payload: &str) -> WmResult<()> {
         let mut guard = self.cmd.lock().await;
         let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let outcomes = match tokio::time::timeout(
-            crate::WM_IPC_TIMEOUT,
-            conn.run_command(payload),
-        )
-        .await
-        {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway RUN_COMMAND"));
-            }
-            Ok(Ok(v)) => v,
-        };
+        let outcomes =
+            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.run_command(payload)).await {
+                Err(_) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+                }
+                Ok(Err(e)) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(ipc_ctx(e, "sway RUN_COMMAND"));
+                }
+                Ok(Ok(v)) => v,
+            };
         for r in outcomes {
             r.map_err(|e| WmError::Rejected(format!("{payload}: {e}")))?;
         }
@@ -550,7 +546,10 @@ mod tests {
     #[test]
     fn resize_payload_renders_id_in_decimal() {
         let p = sway_resize_payload(&id(1234567890), ResizeDir::Shrink, 5);
-        assert_eq!(p, r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#);
+        assert_eq!(
+            p,
+            r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#
+        );
     }
 
     #[test]

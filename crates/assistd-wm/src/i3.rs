@@ -27,7 +27,7 @@ use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
 use crate::{
-    FocusedWindowContext, Layout, ResizeDir, WindowId, WindowManager, WmError, WmResult, Window,
+    FocusedWindowContext, Layout, ResizeDir, Window, WindowId, WindowManager, WmError, WmResult,
     WorkspaceId, WorkspaceInfo,
 };
 
@@ -116,26 +116,22 @@ impl I3Backend {
     async fn run(&self, payload: &str) -> WmResult<()> {
         let mut guard = self.cmd.lock().await;
         let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let results = match tokio::time::timeout(
-            crate::WM_IPC_TIMEOUT,
-            conn.run_command(payload),
-        )
-        .await
-        {
-            Err(_) => {
-                // Wedged i3 — drop the conn so the supervisor reconnects
-                // instead of holding the broken socket forever.
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "i3 RUN_COMMAND"));
-            }
-            Ok(Ok(v)) => v,
-        };
+        let results =
+            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.run_command(payload)).await {
+                Err(_) => {
+                    // Wedged i3 — drop the conn so the supervisor reconnects
+                    // instead of holding the broken socket forever.
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+                }
+                Ok(Err(e)) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(ipc_ctx(e, "i3 RUN_COMMAND"));
+                }
+                Ok(Ok(v)) => v,
+            };
         for r in results {
             if !r.success {
                 return Err(WmError::Rejected(format!(
@@ -226,7 +222,8 @@ impl WindowManager for I3Backend {
         direction: ResizeDir,
         pixels: u32,
     ) -> WmResult<()> {
-        self.run(&i3_resize_payload(window, direction, pixels)).await
+        self.run(&i3_resize_payload(window, direction, pixels))
+            .await
     }
 
     async fn set_layout(&self, layout: Layout) -> WmResult<()> {
@@ -384,7 +381,14 @@ async fn supervisor_loop(
 ) {
     // First pass: drive the events conn we got at startup. cmd is
     // already in `Some(_)` state, no reconnect needed yet.
-    if !drive_events(initial_events, snapshot.clone(), reconnect.clone(), &mut shutdown).await {
+    if !drive_events(
+        initial_events,
+        snapshot.clone(),
+        reconnect.clone(),
+        &mut shutdown,
+    )
+    .await
+    {
         tracing::info!("i3 supervisor exited (shutdown during initial events stream)");
         return;
     }
@@ -414,8 +418,13 @@ async fn supervisor_loop(
                 *backend.cmd.lock().await = Some(cmd);
                 attempt = 0;
                 tracing::info!("i3 backend reconnected");
-                if !drive_events(events_conn, snapshot.clone(), reconnect.clone(), &mut shutdown)
-                    .await
+                if !drive_events(
+                    events_conn,
+                    snapshot.clone(),
+                    reconnect.clone(),
+                    &mut shutdown,
+                )
+                .await
                 {
                     tracing::info!("i3 supervisor exited (shutdown during events stream)");
                     return;
@@ -482,7 +491,10 @@ mod tests {
         // No need for escape — con_id is a decimal integer literal,
         // never a free-form string.
         let p = i3_resize_payload(&id(1234567890), ResizeDir::Shrink, 5);
-        assert_eq!(p, r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#);
+        assert_eq!(
+            p,
+            r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#
+        );
     }
 
     #[test]
