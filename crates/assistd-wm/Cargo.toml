@@ -4,14 +4,24 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Both backends ship by default so a fresh `cargo build` Just Works on
+# the developer's machine. Downstream packagers / niche-target builds
+# can opt out with `--no-default-features --features i3` (or sway).
+# Hyprland is a placeholder — the backend is not yet implemented.
+default = ["i3", "sway"]
+i3 = ["dep:tokio-i3ipc"]
+sway = ["dep:swayipc-async"]
+hyprland = []
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "sync"] }
-tokio-i3ipc = { workspace = true }
-swayipc-async = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-i3ipc = { workspace = true, optional = true }
+swayipc-async = { workspace = true, optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

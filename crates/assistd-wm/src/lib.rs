@@ -22,8 +22,10 @@ use async_trait::async_trait;
 pub(crate) mod backoff;
 pub(crate) mod criteria;
 pub mod error;
+#[cfg(feature = "i3")]
 pub mod i3;
 pub(crate) mod snapshot;
+#[cfg(feature = "sway")]
 pub mod sway;
 
 /// Per-call IPC timeout — `run_command`, `get_tree`, `get_workspaces`,
@@ -32,24 +34,35 @@ pub mod sway;
 /// wedges with it.
 pub(crate) const WM_IPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub use error::{WmError, WmResult};
+#[cfg(feature = "i3")]
 pub use i3::{I3Backend, I3Handle};
+#[cfg(feature = "sway")]
 pub use sway::{SwayBackend, SwayHandle};
 
 /// Aggregated shutdown handle for the active WM backend, so the daemon
 /// can hold a single `Option<WmHandle>` regardless of which backend
-/// was started. Each variant wraps the per-backend handle's own event
-/// task; [`WmHandle::shutdown`] dispatches.
+/// was started. Each variant wraps the per-backend supervisor task;
+/// [`WmHandle::shutdown`] dispatches.
+///
+/// The variants are feature-gated to match the backend modules — a
+/// build with `--no-default-features --features i3` only sees
+/// `WmHandle::I3` and the daemon's match becomes exhaustive against
+/// the smaller enum.
 pub enum WmHandle {
+    #[cfg(feature = "i3")]
     I3(I3Handle),
+    #[cfg(feature = "sway")]
     Sway(SwayHandle),
 }
 
 impl WmHandle {
-    /// Drains the per-backend event task. The daemon should flip its
-    /// shutdown watch first; this just awaits the task's exit.
+    /// Drains the per-backend supervisor task. The daemon should flip
+    /// its shutdown watch first; this just awaits the task's exit.
     pub async fn shutdown(self) {
         match self {
+            #[cfg(feature = "i3")]
             Self::I3(h) => h.shutdown().await,
+            #[cfg(feature = "sway")]
             Self::Sway(h) => h.shutdown().await,
         }
     }
