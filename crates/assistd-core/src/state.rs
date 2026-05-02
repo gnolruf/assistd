@@ -2878,7 +2878,10 @@ mod tests {
         title: Option<&str>,
         ws: Option<&str>,
     ) -> assistd_wm::FocusedWindowContext {
+        // PR 3b adds an `id: Option<WindowId>` field; the prompt
+        // formatter doesn't render it, so the helper leaves it None.
         assistd_wm::FocusedWindowContext {
+            id: None,
             class: class.map(str::to_string),
             title: title.map(str::to_string),
             workspace: ws.map(str::to_string),
