@@ -459,3 +459,45 @@ hotkey = "Super+Escape"
 # chunks as a "Relevant past context: …" system message. Set false
 # to require explicit `reminisce` tool invocations only.
 # auto_inject = true
+
+# ----------------------------------------------------------------------
+# [mcp] — Model Context Protocol client
+# ----------------------------------------------------------------------
+# Connect to external MCP servers and surface their tools to the LLM
+# alongside the daemon's native tools (`run`, `remember`, etc.). Each
+# discovered tool is exposed under the registry name
+# `mcp__<server-name>__<tool-name>`.
+#
+# Two transports:
+#   * "stdio" — daemon spawns a child process and speaks newline-delimited
+#     JSON-RPC over its stdin/stdout. Required: `command` (and optional
+#     `args` / `env`).
+#   * "sse"  — daemon connects to an HTTP+SSE endpoint. Required: `url`
+#     (and optional `headers`). Read timeout + periodic ping detect a
+#     wedged remote server even when the SSE socket stays open.
+#
+# Crash handling: if a server dies, the supervisor restarts it with
+# exponential backoff (1s, 2s, 4s, ..., 60s); after 5 consecutive
+# failures it parks permanently for the rest of the daemon lifetime.
+# While a server is down, calls to its tools return a typed error to
+# the model rather than hanging.
+
+# [mcp]
+# enabled = false
+#
+# [[mcp.servers]]
+# name = "filesystem"
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"]
+#
+# [[mcp.servers]]
+# name = "remote-search"
+# transport = "sse"
+# url = "https://mcp.example.com/sse"
+# request_timeout_secs = 30
+# sse_read_timeout_secs = 30
+# sse_ping_interval_secs = 15
+#
+# [mcp.servers.headers]
+# Authorization = "Bearer YOUR_TOKEN_HERE"

@@ -86,6 +86,9 @@ tokio-i3ipc = "0.16"
 # workspace tokio runtime at the cost of one background thread, which is
 # acceptable since the WM event path is not on the LLM hot loop.
 swayipc-async = "3"
+# URL parsing for the MCP SSE transport (POST endpoint resolution and
+# absolute/relative URL handling on the SSE `endpoint` event).
+url = "2"
 
 # Workspace-wide lint baseline. Each crate inherits via
 # `[lints] workspace = true` in its own Cargo.toml. Tightens defaults

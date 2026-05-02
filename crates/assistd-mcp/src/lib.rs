@@ -8,24 +8,29 @@
     )
 )]
 
-//! MCP (Model Context Protocol) **client** trait sketch.
+//! MCP (Model Context Protocol) **client** for assistd.
 //!
-//! Milestone 5 will land a concrete `stdio` JSON-RPC implementation
-//! plus per-server lifecycle (spawn, ready-probe, restart-on-crash).
-//! This crate exists ahead of that work to settle the trait shape and
-//! the bridge into the existing [`assistd_tools::Tool`] registry, so
-//! we're not retrofitting `AppState` and the agent loop mid-feature.
+//! Two transports are supported: newline-delimited JSON-RPC over a
+//! child process's stdin/stdout ([`stdio::StdioMcpClient`]) and HTTP+SSE
+//! ([`sse::SseMcpClient`]). Each MCP server is wrapped in a
+//! [`handle::McpServerHandle`] whose supervisor task spawns/restarts
+//! the transport with exponential backoff (capped at five consecutive
+//! failures, then permanently parked).
 //!
 //! # Architecture
 //!
 //! From the daemon's perspective, an MCP server is a *tool source*:
-//! - On startup, the daemon connects to each configured MCP server.
-//! - `list_tools` returns each server's tool catalog.
-//! - For each entry, the daemon wraps it in an [`McpToolAdapter`] and
-//!   registers it with the existing `ToolRegistry` — same registry
-//!   the LLM already iterates for OpenAI-style schemas.
-//! - When the LLM calls a wrapped tool, the adapter forwards the
-//!   call to [`McpClient::invoke`] on the originating server.
+//! - On startup, the daemon connects to each configured MCP server via
+//!   [`McpServerHandle::start`] and immediately calls
+//!   [`adapt_handle_as_tools`] to discover the server's tool catalog.
+//! - Each discovered tool is wrapped in an [`McpToolAdapter`] (which
+//!   in turn is wrapped in a [`health_route::HealthRoutedTool`]) and
+//!   registered with the existing `ToolRegistry` alongside native tools.
+//! - When the LLM calls a wrapped tool, the health-routed adapter checks
+//!   the supervisor's health watch; if the server is healthy the call
+//!   forwards to [`McpClient::invoke`], otherwise the wrapper returns a
+//!   synthetic tool-error JSON immediately so the model never hangs on
+//!   a dead transport.
 //!
 //! # Why a separate trait, not a `Tool` impl?
 //!
@@ -39,26 +44,39 @@
 //!
 //! # Image-bearing tool results
 //!
-//! [`ToolResult::Image`] feeds straight into the existing
-//! `assistd_tools::Attachment::Image` so a remote screenshot tool
-//! lands in the same vision-input pipeline as the local
-//! `screenshot` command. This is the reason the IPC schema work in
-//! `assistd-ipc` carries `ImageAttachment` over the wire — keeping
-//! local and remote attachments shape-compatible end-to-end.
+//! [`ToolResult::Image`] is rendered into the same JSON shape the
+//! `RunTool` already emits: a top-level `output`/`exit_code`/`truncated`
+//! envelope plus an `attachments` array carrying the image bytes as
+//! base64. The agent loop's existing `parse_attachment` helper lifts
+//! those into `Attachment::Image` for the next turn — same path as the
+//! local `see` / `screenshot` commands.
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use assistd_tools::{Attachment, Tool};
+use assistd_tools::Tool;
 use async_trait::async_trait;
 use serde_json::{Value, json};
+
+pub mod backoff;
+pub mod error;
+pub mod handle;
+pub mod health_route;
+pub mod jsonrpc;
+pub mod sse;
+pub mod stdio;
+
+pub use error::McpError;
+pub use handle::{HealthState, McpServerHandle, SwitchingClient, TransportConfig};
+pub use health_route::HealthRoutedTool;
+pub use sse::{SseConfig, SseLifeline, SseMcpClient};
+pub use stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
 
 /// One tool exposed by an MCP server.
 #[derive(Debug, Clone)]
 pub struct ToolSchema {
-    /// Tool name as it will appear in the LLM's `tools` list. The
-    /// daemon may decorate this (e.g. `mcp:server-name:tool-name`)
-    /// before registration to avoid collisions across servers.
+    /// Server-native tool name (no daemon-side prefix). The daemon
+    /// decorates this when registering — see [`adapt_client_as_tools`].
     pub name: String,
     /// Human-readable description the LLM sees.
     pub description: String,
@@ -82,11 +100,11 @@ pub enum ToolResult {
 pub trait McpClient: Send + Sync + 'static {
     /// List all tools the server currently exposes. Called at
     /// startup; concrete implementations may refresh on demand
-    /// (Milestone 5) but must be safe to call concurrently.
+    /// but must be safe to call concurrently.
     async fn list_tools(&self) -> Result<Vec<ToolSchema>>;
 
     /// Invoke `name` with `arguments`. The daemon strips any
-    /// registry-side prefix (e.g. `mcp:server-name:`) before
+    /// registry-side prefix (e.g. `mcp__server-name__`) before
     /// forwarding, so `name` is the server-native identifier.
     async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult>;
 }
@@ -98,7 +116,7 @@ pub struct McpToolAdapter {
     client: Arc<dyn McpClient>,
     schema: ToolSchema,
     /// The name as exposed to the LLM. May be a prefixed form
-    /// (`mcp:foo:bar`) when the daemon namespaces multiple servers.
+    /// (`mcp__foo__bar`) when the daemon namespaces multiple servers.
     /// We carry the *server-native* name in `schema.name` and the
     /// *registry* name here so `invoke` can strip the prefix.
     registry_name: String,
@@ -134,49 +152,64 @@ impl Tool for McpToolAdapter {
     }
 }
 
-/// Map a [`ToolResult`] into the JSON shape `RunTool` already emits
-/// to the LLM. `Image` results carry their bytes alongside the JSON
-/// so the tool dispatch site can lift them into [`Attachment::Image`]
-/// for the next turn — same as `see` / `screenshot`.
+/// Render an [`McpClient`] [`ToolResult`] into the JSON shape the agent
+/// loop already understands. The shape mirrors what `RunTool` emits via
+/// `assistd_tools::PresentResult`:
+///
+/// ```json
+/// {
+///   "type": "text" | "image" | "json",
+///   "output": "...",                    // model-visible body
+///   "exit_code": 0,
+///   "duration_ms": 0,
+///   "truncated": false,
+///   "attachments": [...]                // present only for Image
+/// }
+/// ```
+///
+/// `attachments[].data` is the base64-encoded image bytes (NOT
+/// `bytes_base64`); this matches `assistd_core::agent::parse_attachment`.
 fn tool_result_to_json(r: ToolResult) -> Value {
     match r {
-        ToolResult::Text(s) => json!({ "type": "text", "text": s }),
-        ToolResult::Json(v) => json!({ "type": "json", "value": v }),
-        ToolResult::Image { mime, bytes } => json!({
-            "type": "image",
-            "mime": mime,
-            // Raw bytes inlined as base64 keeps the JSON-only contract
-            // of `Tool::invoke`. The dispatch site (Milestone 5) decodes
-            // and lifts to Attachment::Image before the next LLM turn.
-            "bytes_base64": base64_encode(&bytes),
+        ToolResult::Text(s) => json!({
+            "type": "text",
+            "output": s,
+            "exit_code": 0,
+            "duration_ms": 0,
+            "truncated": false,
         }),
+        ToolResult::Json(v) => json!({
+            "type": "json",
+            "output": v.to_string(),
+            "value": v,
+            "exit_code": 0,
+            "duration_ms": 0,
+            "truncated": false,
+        }),
+        ToolResult::Image { mime, bytes } => {
+            let len = bytes.len();
+            let data_b64 = base64_encode(&bytes);
+            json!({
+                "type": "image",
+                "output": format!("(image: {mime}, {len} bytes)"),
+                "exit_code": 0,
+                "duration_ms": 0,
+                "truncated": false,
+                "attachments": [
+                    {"type": "image", "mime": mime, "data": data_b64}
+                ],
+            })
+        }
     }
-}
-
-/// Lift a JSON-encoded image (as produced by [`tool_result_to_json`])
-/// back into an [`Attachment::Image`] for the LLM's next turn. Returns
-/// `None` if the value isn't an `image`-typed result. Will be called
-/// from the agent loop when Milestone 5 wires MCP into the dispatch.
-pub fn image_attachment_from_tool_result(v: &Value) -> Option<Attachment> {
-    if v.get("type").and_then(Value::as_str) != Some("image") {
-        return None;
-    }
-    let mime = v.get("mime").and_then(Value::as_str)?;
-    let b64 = v.get("bytes_base64").and_then(Value::as_str)?;
-    let bytes = base64_decode(b64).ok()?;
-    Some(Attachment::Image {
-        mime: mime.to_string(),
-        bytes,
-    })
 }
 
 /// Build [`Tool`] registry entries for every tool an MCP client
-/// exposes. The daemon will call this once per configured server at
-/// startup, prefix the names with the server label to avoid
-/// collisions, and register each entry with the existing
-/// `ToolRegistry`. No concrete client implementation lives here yet —
-/// Milestone 5 lands one and the wiring just becomes a `for server in
-/// config.mcp.servers { ... }` loop in `build_tools`.
+/// exposes. The daemon decorates the registry name with `name_prefix`
+/// (typically `mcp__<server>`) using `__` as a separator — `:` is
+/// illegal in OpenAI/Anthropic function names.
+///
+/// This sibling does NOT wrap entries in [`HealthRoutedTool`]; use
+/// [`adapt_handle_as_tools`] for production daemon wiring.
 pub async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
     name_prefix: &str,
@@ -184,11 +217,7 @@ pub async fn adapt_client_as_tools(
     let schemas = client.list_tools().await?;
     let mut out: Vec<Box<dyn Tool>> = Vec::with_capacity(schemas.len());
     for schema in schemas {
-        let registry_name = if name_prefix.is_empty() {
-            schema.name.clone()
-        } else {
-            format!("{name_prefix}:{}", schema.name)
-        };
+        let registry_name = registry_name(name_prefix, &schema.name);
         out.push(Box::new(McpToolAdapter::new(
             client.clone(),
             schema,
@@ -198,14 +227,40 @@ pub async fn adapt_client_as_tools(
     Ok(out)
 }
 
+/// Production wiring: build [`Tool`] entries for every tool exposed by
+/// the server, each wrapped in a [`HealthRoutedTool`] keyed off the
+/// supervisor's health watch. Use this when registering MCP tools in
+/// the daemon's tool registry.
+pub async fn adapt_handle_as_tools(
+    handle: &McpServerHandle,
+    name_prefix: &str,
+) -> Result<Vec<Box<dyn Tool>>> {
+    let client = handle.client();
+    let schemas = client.list_tools().await?;
+    let health_rx = handle.watch_health();
+    let server_name = handle.name.clone();
+
+    let mut out: Vec<Box<dyn Tool>> = Vec::with_capacity(schemas.len());
+    for schema in schemas {
+        let registry_name = registry_name(name_prefix, &schema.name);
+        let adapter = McpToolAdapter::new(client.clone(), schema, registry_name);
+        let routed = HealthRoutedTool::new(adapter, server_name.clone(), health_rx.clone());
+        out.push(Box::new(routed));
+    }
+    Ok(out)
+}
+
+fn registry_name(prefix: &str, server_native: &str) -> String {
+    if prefix.is_empty() {
+        server_native.to_string()
+    } else {
+        format!("{prefix}__{server_native}")
+    }
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     use base64_dep::Engine;
     base64_dep::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-fn base64_decode(s: &str) -> Result<Vec<u8>, base64_dep::DecodeError> {
-    use base64_dep::Engine;
-    base64_dep::engine::general_purpose::STANDARD.decode(s)
 }
 
 // Internal alias to keep base64 a single import path. assistd-tools
@@ -255,23 +310,23 @@ mod tests {
     #[tokio::test]
     async fn adapter_forwards_tool_metadata() {
         let client = one_tool_client();
-        let tools = adapt_client_as_tools(client, "mcp:web").await.unwrap();
+        let tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name(), "mcp:web:search");
+        assert_eq!(tools[0].name(), "mcp__web__search");
         assert_eq!(tools[0].description(), "search the web");
     }
 
     #[tokio::test]
     async fn adapter_strips_prefix_before_invoking() {
-        // Registry sees `mcp:web:search` but the upstream server
+        // Registry sees `mcp__web__search` but the upstream server
         // expects bare `search`. The adapter must forward the
         // server-native name.
         let client = one_tool_client();
-        let tools = adapt_client_as_tools(client, "mcp:web").await.unwrap();
+        let tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
         let tool = tools.into_iter().next().unwrap();
         let out = tool.invoke(json!({"q": "rust"})).await.unwrap();
         assert_eq!(out["type"], "text");
-        let text = out["text"].as_str().unwrap();
+        let text = out["output"].as_str().unwrap();
         assert!(text.starts_with("called search "), "{text}");
     }
 
@@ -283,39 +338,43 @@ mod tests {
     }
 
     #[test]
-    fn image_tool_result_serialises_to_base64_json() {
+    fn image_tool_result_lifts_into_attachments_array() {
         let v = tool_result_to_json(ToolResult::Image {
             mime: "image/png".into(),
             bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
         });
         assert_eq!(v["type"], "image");
-        assert_eq!(v["mime"], "image/png");
-        assert_eq!(v["bytes_base64"], "3q2+7w==");
+        assert_eq!(v["exit_code"], 0);
+        assert_eq!(v["truncated"], false);
+        let attachments = v["attachments"].as_array().expect("attachments array");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0]["type"], "image");
+        assert_eq!(attachments[0]["mime"], "image/png");
+        // Matches the agent loop's `parse_attachment`, which decodes
+        // `attachments[i]["data"]` (NOT `bytes_base64`).
+        assert_eq!(attachments[0]["data"], "3q2+7w==");
+        // Body should describe the image so the model has something to
+        // anchor its next turn against.
+        let output = v["output"].as_str().unwrap();
+        assert!(output.contains("image/png"));
+        assert!(output.contains("4 bytes"));
     }
 
     #[test]
-    fn image_round_trips_through_json_to_attachment() {
-        let bytes = vec![1u8, 2, 3, 4, 5, 6];
-        let json = tool_result_to_json(ToolResult::Image {
-            mime: "image/jpeg".into(),
-            bytes: bytes.clone(),
-        });
-        let lifted = image_attachment_from_tool_result(&json).expect("must lift");
-        match lifted {
-            Attachment::Image {
-                mime,
-                bytes: lifted_bytes,
-            } => {
-                assert_eq!(mime, "image/jpeg");
-                assert_eq!(lifted_bytes, bytes);
-            }
-        }
+    fn text_tool_result_uses_dispatch_envelope() {
+        let v = tool_result_to_json(ToolResult::Text("hello".into()));
+        assert_eq!(v["type"], "text");
+        assert_eq!(v["output"], "hello");
+        assert_eq!(v["exit_code"], 0);
+        assert_eq!(v["truncated"], false);
     }
 
     #[test]
-    fn image_lift_returns_none_for_non_image_result() {
-        let v = tool_result_to_json(ToolResult::Text("hi".into()));
-        assert!(image_attachment_from_tool_result(&v).is_none());
+    fn json_tool_result_carries_value_and_string_output() {
+        let v = tool_result_to_json(ToolResult::Json(json!({"answer": 42})));
+        assert_eq!(v["type"], "json");
+        assert_eq!(v["value"], json!({"answer": 42}));
+        assert!(v["output"].as_str().unwrap().contains("answer"));
     }
 
     #[test]

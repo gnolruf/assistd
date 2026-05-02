@@ -9,6 +9,7 @@ use crate::daemon::DaemonConfig;
 use crate::embedding::EmbeddingConfig;
 use crate::errors::ConfigError;
 use crate::llama::LlamaServerConfig;
+use crate::mcp::{McpConfig, McpTransport};
 use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
 use crate::presence::PresenceConfig;
@@ -39,6 +40,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub embedding: EmbeddingConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 impl Config {
@@ -368,6 +371,84 @@ impl Config {
             }
             if self.embedding.request_timeout_secs == 0 {
                 errors.push("embedding.request_timeout_secs must be greater than 0".into());
+            }
+        }
+
+        if self.mcp.enabled {
+            use std::collections::HashSet;
+            let mut seen: HashSet<&str> = HashSet::new();
+            for (i, s) in self.mcp.servers.iter().enumerate() {
+                let trimmed = s.name.trim();
+                if trimmed.is_empty() {
+                    errors.push(format!("mcp.servers[{i}].name must not be empty"));
+                } else if !seen.insert(trimmed) {
+                    errors.push(format!(
+                        "mcp.servers[{i}].name '{trimmed}' is duplicated; names must be unique"
+                    ));
+                }
+                if !trimmed
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                {
+                    errors.push(format!(
+                        "mcp.servers[{i}].name must use only ASCII letters, digits, '_' or '-' \
+                         (becomes part of the LLM-visible tool name `mcp__<name>__<tool>`)"
+                    ));
+                }
+                match s.transport {
+                    McpTransport::Stdio => {
+                        if s.command.as_deref().is_none_or(|c| c.trim().is_empty()) {
+                            errors.push(format!(
+                                "mcp.servers[{i}] (stdio) must set non-empty `command`"
+                            ));
+                        }
+                        if s.url.is_some() {
+                            errors.push(format!(
+                                "mcp.servers[{i}] (stdio) must not set `url`"
+                            ));
+                        }
+                    }
+                    McpTransport::Sse => {
+                        match s.url.as_deref() {
+                            None => errors.push(format!(
+                                "mcp.servers[{i}] (sse) must set `url`"
+                            )),
+                            Some(u) => {
+                                if u.trim().is_empty() {
+                                    errors.push(format!(
+                                        "mcp.servers[{i}] (sse) `url` must not be empty"
+                                    ));
+                                } else if !(u.starts_with("http://") || u.starts_with("https://")) {
+                                    errors.push(format!(
+                                        "mcp.servers[{i}].url must start with http:// or https://"
+                                    ));
+                                }
+                            }
+                        }
+                        if s.command.is_some() {
+                            errors.push(format!(
+                                "mcp.servers[{i}] (sse) must not set `command`"
+                            ));
+                        }
+                    }
+                }
+                if s.request_timeout_secs == 0 {
+                    errors.push(format!(
+                        "mcp.servers[{i}].request_timeout_secs must be > 0"
+                    ));
+                }
+                if matches!(s.transport, McpTransport::Sse) {
+                    if s.sse_read_timeout_secs == 0 {
+                        errors.push(format!(
+                            "mcp.servers[{i}].sse_read_timeout_secs must be > 0"
+                        ));
+                    }
+                    if s.sse_ping_interval_secs == 0 {
+                        errors.push(format!(
+                            "mcp.servers[{i}].sse_ping_interval_secs must be > 0"
+                        ));
+                    }
+                }
             }
         }
 

@@ -81,6 +81,13 @@ impl ToolRegistry {
         self.tools.push(Box::new(tool));
     }
 
+    /// Register an already-boxed tool. Used by code that builds tools
+    /// dynamically (the MCP adapter, where each server's tool set is
+    /// discovered at runtime and returned as `Vec<Box<dyn Tool>>`).
+    pub fn register_boxed(&mut self, tool: Box<dyn Tool>) {
+        self.tools.push(tool);
+    }
+
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()
