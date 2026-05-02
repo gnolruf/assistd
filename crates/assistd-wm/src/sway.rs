@@ -32,7 +32,7 @@ use swayipc_async::{Connection, Event, EventType, Node, NodeType, WindowChange, 
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 
-use crate::criteria::{escape_for_criteria, format_workspace_target};
+use crate::criteria::format_workspace_target;
 use crate::error::ipc_ctx;
 use crate::{
     FocusedWindowContext, Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError,
@@ -44,17 +44,28 @@ use crate::{
 /// `Window::Close`, and `Workspace::Focus` event so synchronous reads
 /// don't round-trip the IPC socket.
 ///
-/// The field is named `focused_class` to match the i3 backend, but on
-/// Sway it stores `app_id` for Wayland-native windows and falls back to
-/// the X11 class only for XWayland views — see the module-level doc.
-/// Stored as raw `String` (rather than [`WindowId`]) so it doubles as
-/// the source of [`FocusedWindowContext::class`] for the prompt-injection
-/// path; conversion to [`WindowId`] happens at the trait method boundary.
+/// PR 3b stores both the compositor con_id (the [`WindowId`] returned
+/// to callers) and the raw `app_id` / class string used for the system-
+/// prompt context block. On Sway, `focused_class` prefers `app_id`
+/// (Wayland-native) and falls back to the X11 `class` for XWayland —
+/// see the module-level doc.
 #[derive(Default, Clone)]
 struct Snapshot {
+    focused_id: Option<WindowId>,
     focused_class: Option<String>,
     focused_title: Option<String>,
     active_workspace: Option<String>,
+}
+
+/// Cast a sway `Node.id` (`i64`) to a [`WindowId`]. Sway never emits
+/// non-positive ids in practice, but the bounds check keeps the
+/// conversion total — non-positive ids are silently dropped (the
+/// caller treats them as "no id available").
+fn sway_id(raw: i64) -> Option<WindowId> {
+    if raw <= 0 {
+        return None;
+    }
+    WindowId::new(raw as u64)
 }
 
 /// `WindowManager` impl wrapping a single Sway IPC command socket.
@@ -177,33 +188,31 @@ impl SwayBackend {
 #[async_trait]
 impl WindowManager for SwayBackend {
     async fn focus(&self, window: &WindowId) -> WmResult<()> {
-        let cmd = composite_criteria_command(window, "focus");
+        let cmd = format!(r#"[con_id="{}"] focus"#, window.get());
         self.run(&cmd).await
     }
 
     async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
         let target = format_workspace_target(workspace);
-        let action = format!("move container to {target}");
-        let cmd = composite_criteria_command(window, &action);
+        let cmd = format!(r#"[con_id="{}"] move container to {target}"#, window.get());
         self.run(&cmd).await
     }
 
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
-        Ok(self
-            .snapshot
-            .read()
-            .await
-            .focused_class
-            .clone()
-            .map(WindowId::from))
+        Ok(self.snapshot.read().await.focused_id)
     }
 
     async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
         let s = self.snapshot.read().await;
-        if s.focused_class.is_none() && s.focused_title.is_none() && s.active_workspace.is_none() {
+        if s.focused_id.is_none()
+            && s.focused_class.is_none()
+            && s.focused_title.is_none()
+            && s.active_workspace.is_none()
+        {
             return Ok(None);
         }
         Ok(Some(FocusedWindowContext {
+            id: s.focused_id,
             class: s.focused_class.clone(),
             title: s.focused_title.clone(),
             workspace: s.active_workspace.clone(),
@@ -284,22 +293,16 @@ impl WindowManager for SwayBackend {
     }
 }
 
-/// Emit a Sway command that runs `action` against either `[app_id="X"]`
-/// or `[class="X"]` — Wayland-native windows expose `app_id`, XWayland
-/// views expose `class`. Sway processes the two clauses sequentially;
-/// each clause that matches 0 windows is a silent success, so the
-/// composite is safe even when only one form applies.
-fn composite_criteria_command(window: &WindowId, action: &str) -> String {
-    let escaped = escape_for_criteria(window.as_str());
-    format!(r#"[app_id="{escaped}"] {action}; [class="{escaped}"] {action}"#)
-}
-
-/// Format the Sway RUN_COMMAND payload for `resize_width`. Uses the
-/// same `app_id|class` composite as `focus` / `move_to_workspace` so a
-/// caller-provided id matches whichever form Sway has registered.
+/// Format the Sway RUN_COMMAND payload for `resize_width`. PR 3b
+/// drops the `app_id|class` composite — Sway accepts `[con_id=N]`
+/// criteria for any window regardless of XWayland-vs-Wayland origin.
 fn sway_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
-    let action = format!("resize {} width {} px or 0 ppt", direction.as_str(), pixels);
-    composite_criteria_command(window, &action)
+    format!(
+        r#"[con_id="{}"] resize {} width {} px or 0 ppt"#,
+        window.get(),
+        direction.as_str(),
+        pixels,
+    )
 }
 
 /// Format the Sway RUN_COMMAND payload for `set_layout`. Acts on the
@@ -323,24 +326,28 @@ fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>)
         current_ws
     };
 
-    if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon) {
+    if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
+        && let Some(id) = sway_id(node.id)
+    {
+        // Prefer Wayland-native app_id; fall back to the X11 class for
+        // XWayland views. A leaf with neither falls through with
+        // app: None — the LLM can still target it by con_id.
         let class = node
             .window_properties
             .as_ref()
             .and_then(|p| p.class.clone());
-        let id = node.app_id.clone().or(class);
-        if let Some(id) = id {
-            let title = node.name.clone().or_else(|| {
-                node.window_properties
-                    .as_ref()
-                    .and_then(|p| p.title.clone())
-            });
-            out.push(Window {
-                id: WindowId::from(id),
-                title,
-                workspace: next_ws.map(|s| s.to_string()),
-            });
-        }
+        let app = node.app_id.clone().or(class);
+        let title = node.name.clone().or_else(|| {
+            node.window_properties
+                .as_ref()
+                .and_then(|p| p.title.clone())
+        });
+        out.push(Window {
+            id,
+            app,
+            title,
+            workspace: next_ws.map(|s| s.to_string()),
+        });
     }
 
     for child in node.nodes.iter().chain(node.floating_nodes.iter()) {
@@ -354,6 +361,7 @@ async fn seed_snapshot(cmd: &mut Connection) -> Result<Snapshot> {
         .await
         .map_err(|e| anyhow::anyhow!("sway GET_TREE: {e}"))?;
     let focused = walk_focused(&tree);
+    let focused_id = focused.and_then(|n| sway_id(n.id));
     let focused_class = focused.and_then(|n| {
         n.app_id
             .clone()
@@ -376,6 +384,7 @@ async fn seed_snapshot(cmd: &mut Connection) -> Result<Snapshot> {
         }
     };
     Ok(Snapshot {
+        focused_id,
         focused_class,
         focused_title,
         active_workspace,
@@ -384,16 +393,17 @@ async fn seed_snapshot(cmd: &mut Connection) -> Result<Snapshot> {
 
 /// Apply one Sway `Window` event to the cached focus snapshot.
 ///
-/// Race rules (mirror i3 backend):
-/// - `Focus` overwrites both class/app_id and title from the new
-///   container.
-/// - `Title` only takes effect when the event's id matches the
+/// Race rules (mirror i3 backend; key on the unique con_id rather than
+/// the class/app_id, so two windows of the same app don't alias):
+/// - `Focus` overwrites id + class/app_id + title from the new container.
+/// - `Title` only takes effect when the event's con_id matches the
 ///   currently-focused id — title events from background windows must
 ///   not overwrite the foreground title.
 /// - `Close` clears focus state only when the closed container is the
 ///   focused one. Workspace is left intact.
 async fn handle_window_event(w: &swayipc_async::WindowEvent, snap: &Arc<RwLock<Snapshot>>) {
-    let id = w.container.app_id.clone().or_else(|| {
+    let id = sway_id(w.container.id);
+    let class = w.container.app_id.clone().or_else(|| {
         w.container
             .window_properties
             .as_ref()
@@ -408,19 +418,21 @@ async fn handle_window_event(w: &swayipc_async::WindowEvent, snap: &Arc<RwLock<S
     match w.change {
         WindowChange::Focus => {
             let mut s = snap.write().await;
-            s.focused_class = id;
+            s.focused_id = id;
+            s.focused_class = class;
             s.focused_title = title;
         }
         WindowChange::Title => {
             let mut s = snap.write().await;
-            // Only honor title updates for the currently-focused id.
-            if s.focused_class == id && id.is_some() {
+            if s.focused_id == id && id.is_some() {
                 s.focused_title = title;
+                s.focused_class = class;
             }
         }
         WindowChange::Close => {
             let mut s = snap.write().await;
-            if s.focused_class == id && id.is_some() {
+            if s.focused_id == id && id.is_some() {
+                s.focused_id = None;
                 s.focused_class = None;
                 s.focused_title = None;
             }
@@ -445,49 +457,31 @@ fn walk_focused(node: &Node) -> Option<&Node> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn composite_criteria_command_emits_app_id_and_class_clauses() {
-        let s = composite_criteria_command(&WindowId::from("firefox"), "focus");
-        assert_eq!(s, r#"[app_id="firefox"] focus; [class="firefox"] focus"#);
+    fn id(n: u64) -> WindowId {
+        WindowId::new(n).expect("test ids are non-zero")
     }
 
     #[test]
-    fn composite_criteria_command_escapes_special_chars() {
-        let s = composite_criteria_command(&WindowId::from(r#"a"b\c"#), "focus");
-        assert_eq!(s, r#"[app_id="a\"b\\c"] focus; [class="a\"b\\c"] focus"#);
+    fn resize_payload_uses_con_id_criteria() {
+        // PR 3b: Sway's `[con_id=N]` is a single-clause match — no
+        // more `app_id|class` composite, since con_id covers Wayland-
+        // native and XWayland views uniformly.
+        let p = sway_resize_payload(&id(42), ResizeDir::Grow, 50);
+        assert_eq!(p, r#"[con_id="42"] resize grow width 50 px or 0 ppt"#);
     }
 
     #[test]
-    fn composite_criteria_command_uses_full_action() {
-        let s = composite_criteria_command(
-            &WindowId::from("kitty"),
-            "move container to workspace number 3",
-        );
-        assert_eq!(
-            s,
-            r#"[app_id="kitty"] move container to workspace number 3; [class="kitty"] move container to workspace number 3"#
-        );
+    fn resize_payload_renders_id_in_decimal() {
+        let p = sway_resize_payload(&id(1234567890), ResizeDir::Shrink, 5);
+        assert_eq!(p, r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#);
     }
 
     #[test]
-    fn resize_payload_shape_and_escape() {
-        // Sway mirrors the focus dispatch's `app_id|class` composite so
-        // the resize lands regardless of which identifier the
-        // user-supplied id matches.
-        let p = sway_resize_payload(&WindowId::from("firefox"), ResizeDir::Grow, 50);
-        assert_eq!(
-            p,
-            r#"[app_id="firefox"] resize grow width 50 px or 0 ppt; [class="firefox"] resize grow width 50 px or 0 ppt"#
-        );
-    }
-
-    #[test]
-    fn resize_payload_escapes_quote_and_backslash() {
-        let p = sway_resize_payload(&WindowId::from(r#"a"b\c"#), ResizeDir::Shrink, 5);
-        assert_eq!(
-            p,
-            r#"[app_id="a\"b\\c"] resize shrink width 5 px or 0 ppt; [class="a\"b\\c"] resize shrink width 5 px or 0 ppt"#
-        );
+    fn sway_id_rejects_non_positive() {
+        assert!(sway_id(0).is_none());
+        assert!(sway_id(-1).is_none());
+        assert!(sway_id(-12345).is_none());
+        assert_eq!(sway_id(42), WindowId::new(42));
     }
 
     #[test]

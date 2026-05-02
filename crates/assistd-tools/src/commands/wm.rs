@@ -89,17 +89,18 @@ impl Command for WmCommand {
         "usage: wm <subcommand> [args...]\n\
          \n\
          Manage windows and workspaces via the active compositor backend \
-         (i3, sway, or hyprland). Window identifiers are X11 classes on \
-         i3 (e.g. \"Firefox\", \"code\") — see `wm list` for the exact \
-         strings to use.\n\
+         (i3, sway, or hyprland). Window identifiers are decimal con_ids \
+         (e.g. \"94567128432192\") — run `wm list` first to find the id \
+         for the window you want to act on; the second column is the \
+         application label.\n\
          \n\
          Subcommands:\n  \
-           focus <class>                          focus the named window\n  \
-           move <class> <workspace>               move window to workspace\n  \
+           focus <id>                             focus the window with this con_id\n  \
+           move <id> <workspace>                  move window to workspace\n  \
            open <app> [args...]                   launch an application\n  \
-           active                                 class of the focused window\n  \
-           resize <class> <grow|shrink> <px>      width-only resize\n  \
-           list                                   TSV: class, workspace, title\n  \
+           active                                 TSV: id, app of the focused window\n  \
+           resize <id> <grow|shrink> <px>         width-only resize\n  \
+           list                                   TSV: id, app, workspace, title\n  \
            workspaces                             TSV: num, name, focused, output\n  \
            outputs                                TSV: name, active, primary, mode, scale, focused_workspace\n  \
            layout <default|tabbed|stacking|splith|splitv>\n                                          \
@@ -167,20 +168,21 @@ fn help_output(text: String) -> CommandOutput {
 
 // --------- subcommand handlers ---------
 
-const FOCUS_HELP: &str = "usage: wm focus <class>\n\
+const FOCUS_HELP: &str = "usage: wm focus <id>\n\
     \n\
-    Focus the window with the given class. Use `wm list` to see \
-    available windows.\n";
+    Focus the window with the given decimal con_id. Run `wm list` \
+    first to find ids — the first column is the id, the second is \
+    the application label.\n";
 
 async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.is_empty() {
         return Ok(help_output(FOCUS_HELP.to_string()));
     }
-    // PR 3a: arg parsing into WindowId is currently infallible (any
-    // string is a valid id). PR 3b will tighten this to a decimal
-    // con_id parser and reject non-numeric input here.
-    let class_arg = &args[0];
-    let id: WindowId = class_arg.parse().expect("WindowId parser is infallible");
+    let id_arg = &args[0];
+    let id: WindowId = match id_arg.parse() {
+        Ok(i) => i,
+        Err(_) => return Ok(parse_id_error("focus", id_arg)),
+    };
     match wm.focus(&id).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
         Err(e) => {
@@ -189,7 +191,7 @@ async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<Command
                 1,
                 error_line(
                     NAME,
-                    format_args!("focus '{class_arg}' failed: {e}"),
+                    format_args!("focus {id_arg} failed: {e}"),
                     label,
                     hint,
                 )
@@ -199,9 +201,25 @@ async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<Command
     }
 }
 
-const MOVE_HELP: &str = "usage: wm move <class> <workspace>\n\
+/// Render the `[error] wm: <op>: …` line for "user passed a non-numeric
+/// or non-positive id". Centralized so focus / move / resize stay in
+/// sync. Exit code 2 mirrors the validation errors elsewhere in `wm`.
+fn parse_id_error(op: &'static str, raw: &str) -> CommandOutput {
+    CommandOutput::failed(
+        2,
+        error_line(
+            NAME,
+            format_args!("{op}: '{raw}' is not a valid window id (positive decimal con_id)"),
+            "Use",
+            "wm list to see ids — first TSV column",
+        )
+        .into_bytes(),
+    )
+}
+
+const MOVE_HELP: &str = "usage: wm move <id> <workspace>\n\
     \n\
-    Move the window with the given class to the named workspace. \
+    Move the window with the given con_id to the named workspace. \
     Numeric workspace identifiers (e.g. `3`) match by number; \
     non-numeric identifiers match by exact name.\n";
 
@@ -209,9 +227,12 @@ async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandO
     if args.len() < 2 {
         return Ok(help_output(MOVE_HELP.to_string()));
     }
-    let class_arg = &args[0];
+    let id_arg = &args[0];
     let workspace_arg = &args[1];
-    let id: WindowId = class_arg.parse().expect("WindowId parser is infallible");
+    let id: WindowId = match id_arg.parse() {
+        Ok(i) => i,
+        Err(_) => return Ok(parse_id_error("move", id_arg)),
+    };
     let workspace: WorkspaceId = workspace_arg
         .parse()
         .expect("WorkspaceId parser is infallible");
@@ -223,7 +244,7 @@ async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandO
                 1,
                 error_line(
                     NAME,
-                    format_args!("move '{class_arg}' to '{workspace_arg}' failed: {e}"),
+                    format_args!("move {id_arg} to '{workspace_arg}' failed: {e}"),
                     label,
                     hint,
                 )
@@ -277,11 +298,19 @@ async fn handle_open(args: &[String]) -> Result<CommandOutput> {
 }
 
 async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
-    match wm.focused_window().await {
-        Ok(Some(id)) => {
-            let mut out = String::from(id).into_bytes();
-            out.push(b'\n');
-            Ok(CommandOutput::ok(out))
+    // Use focused_context (one snapshot read) so the LLM gets both the
+    // con_id (column 1, pipe-able to `wm focus`) and the human label
+    // (column 2, used to disambiguate id collisions when reading).
+    match wm.focused_context().await {
+        Ok(Some(ctx)) => {
+            let id_str = match ctx.id {
+                Some(i) => i.to_string(),
+                None => "-".into(),
+            };
+            let app = ctx.class.as_deref().unwrap_or("-");
+            Ok(CommandOutput::ok(
+                format!("{id_str}\t{app}\n").into_bytes(),
+            ))
         }
         Ok(None) => Ok(CommandOutput::ok(Vec::new())),
         Err(e) => {
@@ -294,7 +323,7 @@ async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
     }
 }
 
-const RESIZE_HELP: &str = "usage: wm resize <class> <grow|shrink> <px>\n\
+const RESIZE_HELP: &str = "usage: wm resize <id> <grow|shrink> <px>\n\
     \n\
     Resize the named window's width by the given pixel amount. \
     Direction is one of `grow` or `shrink`; <px> is a non-negative \
@@ -304,7 +333,11 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
     if args.len() < 3 {
         return Ok(help_output(RESIZE_HELP.to_string()));
     }
-    let class = &args[0];
+    let id_arg = &args[0];
+    let id: WindowId = match id_arg.parse() {
+        Ok(i) => i,
+        Err(_) => return Ok(parse_id_error("resize", id_arg)),
+    };
     let direction: ResizeDir = match args[1].parse() {
         Ok(d) => d,
         Err(_) => {
@@ -317,7 +350,7 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
                         args[1]
                     ),
                     "Use",
-                    "wm resize <class> <grow|shrink> <px>",
+                    "wm resize <id> <grow|shrink> <px>",
                 )
                 .into_bytes(),
             ));
@@ -335,13 +368,12 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
                         args[2]
                     ),
                     "Use",
-                    "wm resize <class> <grow|shrink> <px>",
+                    "wm resize <id> <grow|shrink> <px>",
                 )
                 .into_bytes(),
             ));
         }
     };
-    let id: WindowId = class.parse().expect("WindowId parser is infallible");
     match wm.resize_width(&id, direction, amount).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
         Err(e) => {
@@ -350,7 +382,7 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
                 1,
                 error_line(
                     NAME,
-                    format_args!("resize '{class}' failed: {e}"),
+                    format_args!("resize {id_arg} failed: {e}"),
                     label,
                     hint,
                 )
@@ -361,18 +393,31 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
 }
 
 async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
+    use std::fmt::Write;
     match wm.list_windows().await {
         Ok(mut windows) => {
+            // Group by workspace (ascending lexicographic), then by app
+            // label so two windows of the same app sit together. The
+            // LLM scans this list to find an id by app+title, so
+            // proximity matters more than chronological order.
             windows.sort_by(|a, b| {
                 a.workspace
                     .as_deref()
                     .unwrap_or("")
                     .cmp(b.workspace.as_deref().unwrap_or(""))
+                    .then_with(|| {
+                        a.app
+                            .as_deref()
+                            .unwrap_or("")
+                            .cmp(b.app.as_deref().unwrap_or(""))
+                    })
                     .then_with(|| a.id.cmp(&b.id))
             });
             let mut out = String::new();
             for w in windows {
-                out.push_str(w.id.as_str());
+                let _ = write!(&mut out, "{}", w.id);
+                out.push('\t');
+                out.push_str(w.app.as_deref().unwrap_or("-"));
                 out.push('\t');
                 out.push_str(w.workspace.as_deref().unwrap_or("-"));
                 out.push('\t');
@@ -514,10 +559,16 @@ async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
 mod tests {
     use super::*;
     use assistd_wm::{
-        Layout, NoWindowManager, OutputInfo, ResizeDir, Window, WindowId, WmResult, WorkspaceId,
-        WorkspaceInfo,
+        FocusedWindowContext, Layout, NoWindowManager, OutputInfo, ResizeDir, Window, WindowId,
+        WmResult, WorkspaceId, WorkspaceInfo,
     };
     use std::sync::Mutex;
+
+    /// Test-only id constructor — every fixture id is non-zero by
+    /// construction, so this `expect` is unreachable at runtime.
+    fn id(n: u64) -> WindowId {
+        WindowId::new(n).expect("test ids are non-zero")
+    }
 
     /// Test fixture for [`WindowManager`]. Records every call so tests
     /// can assert on the typed argument tuples that would be dispatched
@@ -530,6 +581,10 @@ mod tests {
         workspaces: Vec<WorkspaceInfo>,
         outputs: Vec<OutputInfo>,
         focused: Option<WindowId>,
+        /// Human-readable label of the focused window — surfaced via
+        /// `focused_context().class`. Independent of `focused` so tests
+        /// can exercise "id present but app unknown" code paths.
+        focused_app: Option<String>,
         focus_calls: Mutex<Vec<WindowId>>,
         move_calls: Mutex<Vec<(WindowId, WorkspaceId)>>,
         resize_calls: Mutex<Vec<(WindowId, ResizeDir, u32)>>,
@@ -566,7 +621,7 @@ mod tests {
     #[async_trait]
     impl WindowManager for StubWm {
         async fn focus(&self, window: &WindowId) -> WmResult<()> {
-            self.focus_calls.lock().unwrap().push(window.clone());
+            self.focus_calls.lock().unwrap().push(*window);
             if let Some(msg) = &self.focus_err {
                 return Err(ipc_err(msg));
             }
@@ -580,7 +635,7 @@ mod tests {
             self.move_calls
                 .lock()
                 .unwrap()
-                .push((window.clone(), workspace.clone()));
+                .push((*window, workspace.clone()));
             if let Some(msg) = &self.move_err {
                 return Err(ipc_err(msg));
             }
@@ -590,7 +645,21 @@ mod tests {
             if let Some(msg) = &self.focused_err {
                 return Err(ipc_err(msg));
             }
-            Ok(self.focused.clone())
+            Ok(self.focused)
+        }
+        async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
+            if let Some(msg) = &self.focused_err {
+                return Err(ipc_err(msg));
+            }
+            if self.focused.is_none() && self.focused_app.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(FocusedWindowContext {
+                id: self.focused,
+                class: self.focused_app.clone(),
+                title: None,
+                workspace: None,
+            }))
         }
         async fn list_windows(&self) -> WmResult<Vec<Window>> {
             if let Some(msg) = &self.list_windows_err {
@@ -613,7 +682,7 @@ mod tests {
             self.resize_calls
                 .lock()
                 .unwrap()
-                .push((window.clone(), direction, pixels));
+                .push((*window, direction, pixels));
             if let Some(msg) = &self.resize_err {
                 return Err(ipc_err(msg));
             }
@@ -694,7 +763,7 @@ mod tests {
         // Ensures the production `NoWindowManager` produces the same
         // behavior as the StubWm disconnected path — this is the gate
         // for the "mock mode" acceptance criterion.
-        let out = run_wm(Arc::new(NoWindowManager), &["focus", "Firefox"]).await;
+        let out = run_wm(Arc::new(NoWindowManager), &["focus", "42"]).await;
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -711,12 +780,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn focus_calls_backend_with_class() {
+    async fn focus_calls_backend_with_id() {
         let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["focus", "Firefox"]).await;
+        let out = run_wm(stub.clone(), &["focus", "42"]).await;
         assert_eq!(out.exit_code, 0);
         let calls = stub.focus_calls.lock().unwrap();
-        assert_eq!(*calls, vec![WindowId::from("Firefox")]);
+        assert_eq!(*calls, vec![id(42)]);
+    }
+
+    #[tokio::test]
+    async fn focus_rejects_non_numeric_arg() {
+        // PR 3b: the LLM must use `wm list` to get a numeric con_id;
+        // passing the X11 class (the old PR 3a behavior) is now an
+        // explicit error.
+        let stub = Arc::new(StubWm::connected());
+        let out = run_wm(stub.clone(), &["focus", "Firefox"]).await;
+        assert_eq!(out.exit_code, 2);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("not a valid window id"), "{stderr}");
+        assert!(stderr.contains("wm list"), "{stderr}");
+        assert!(stub.focus_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -726,13 +809,10 @@ mod tests {
             focus_err: Some("i3 socket dropped".into()),
             ..Default::default()
         });
-        let out = run_wm(stub, &["focus", "Firefox"]).await;
+        let out = run_wm(stub, &["focus", "42"]).await;
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] wm: focus 'Firefox' failed"),
-            "{stderr}"
-        );
+        assert!(stderr.contains("[error] wm: focus 42 failed"), "{stderr}");
         // Backend Ipc errors route through the "Check: compositor
         // connection" hint — different from the static "Use: wm list"
         // hint that the pre-WmError handler emitted unconditionally.
@@ -748,7 +828,7 @@ mod tests {
 
     #[test]
     fn hint_for_not_found() {
-        let (label, hint) = hint_for(&WmError::NotFound("Firefox".into()));
+        let (label, hint) = hint_for(&WmError::NotFound(id(42)));
         assert_eq!(label, "Use");
         assert!(hint.contains("wm list"), "{hint}");
     }
@@ -781,7 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn move_needs_two_args() {
-        let out = run_wm(Arc::new(StubWm::connected()), &["move", "Firefox"]).await;
+        let out = run_wm(Arc::new(StubWm::connected()), &["move", "42"]).await;
         assert_eq!(out.exit_code, 2);
         assert!(String::from_utf8_lossy(&out.stdout).contains("usage: wm move"));
     }
@@ -789,15 +869,22 @@ mod tests {
     #[tokio::test]
     async fn move_calls_backend() {
         let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["move", "Firefox", "3"]).await;
+        let out = run_wm(stub.clone(), &["move", "42", "3"]).await;
         assert_eq!(out.exit_code, 0);
         let calls = stub.move_calls.lock().unwrap();
         // "3" parses as numeric → WorkspaceId::Num(3); the args are
         // typed all the way through to the backend now.
-        assert_eq!(
-            *calls,
-            vec![(WindowId::from("Firefox"), WorkspaceId::Num(3))]
-        );
+        assert_eq!(*calls, vec![(id(42), WorkspaceId::Num(3))]);
+    }
+
+    #[tokio::test]
+    async fn move_rejects_non_numeric_id() {
+        let stub = Arc::new(StubWm::connected());
+        let out = run_wm(stub.clone(), &["move", "Firefox", "3"]).await;
+        assert_eq!(out.exit_code, 2);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("not a valid window id"), "{stderr}");
+        assert!(stub.move_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -824,15 +911,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_prints_focused_class() {
+    async fn active_prints_id_tab_app() {
+        // wm active emits `<id>\t<app>\n` so the LLM can pipe either
+        // column: `wm focus $(wm active | cut -f1)` or read the app
+        // label from column 2 to confirm what's focused.
         let stub = Arc::new(StubWm {
             connected: true,
-            focused: Some("Firefox".into()),
+            focused: Some(id(42)),
+            focused_app: Some("Firefox".into()),
             ..Default::default()
         });
         let out = run_wm(stub, &["active"]).await;
         assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"Firefox\n");
+        assert_eq!(out.stdout, b"42\tFirefox\n");
+    }
+
+    #[tokio::test]
+    async fn active_renders_dash_when_app_missing() {
+        let stub = Arc::new(StubWm {
+            connected: true,
+            focused: Some(id(7)),
+            focused_app: None,
+            ..Default::default()
+        });
+        let out = run_wm(stub, &["active"]).await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, b"7\t-\n");
     }
 
     #[tokio::test]
@@ -845,11 +949,7 @@ mod tests {
 
     #[tokio::test]
     async fn resize_too_few_args_returns_help() {
-        let out = run_wm(
-            Arc::new(StubWm::connected()),
-            &["resize", "Firefox", "grow"],
-        )
-        .await;
+        let out = run_wm(Arc::new(StubWm::connected()), &["resize", "42", "grow"]).await;
         assert_eq!(out.exit_code, 2);
         assert!(String::from_utf8_lossy(&out.stdout).contains("usage: wm resize"));
     }
@@ -858,7 +958,7 @@ mod tests {
     async fn resize_bad_direction_errors() {
         let out = run_wm(
             Arc::new(StubWm::connected()),
-            &["resize", "Firefox", "sideways", "10"],
+            &["resize", "42", "sideways", "10"],
         )
         .await;
         assert_eq!(out.exit_code, 2);
@@ -871,7 +971,7 @@ mod tests {
     async fn resize_bad_pixel_count_errors() {
         let out = run_wm(
             Arc::new(StubWm::connected()),
-            &["resize", "Firefox", "grow", "lots"],
+            &["resize", "42", "grow", "lots"],
         )
         .await;
         assert_eq!(out.exit_code, 2);
@@ -882,52 +982,49 @@ mod tests {
     #[tokio::test]
     async fn resize_dispatches_typed_args() {
         // wm.rs passes the parsed direction + pixel count to the
-        // backend's typed `resize_width` method. The literal i3-syntax
-        // payload (`[class="…"] resize …`) and its escape semantics are
-        // tested in `assistd_wm::i3::tests` directly — wm.rs no longer
-        // formats the payload itself.
+        // backend's typed `resize_width` method. The literal con_id
+        // payload (`[con_id="…"] resize …`) is tested in
+        // `assistd_wm::i3::tests` / `sway::tests` directly.
         let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["resize", "Firefox", "grow", "50"]).await;
+        let out = run_wm(stub.clone(), &["resize", "42", "grow", "50"]).await;
         assert_eq!(out.exit_code, 0);
         let calls = stub.resize_calls.lock().unwrap();
-        assert_eq!(
-            *calls,
-            vec![(WindowId::from("Firefox"), ResizeDir::Grow, 50)]
-        );
+        assert_eq!(*calls, vec![(id(42), ResizeDir::Grow, 50)]);
     }
 
     #[tokio::test]
-    async fn resize_passes_special_chars_unaltered() {
-        // The class arg flows through to the backend without
-        // transformation; backends own the escape step. This guards
-        // against a regression where wm.rs starts pre-escaping
-        // (which would double-escape once the backend escapes again).
+    async fn resize_rejects_non_numeric_id() {
         let stub = Arc::new(StubWm::connected());
-        let _ = run_wm(stub.clone(), &["resize", r#"a"b\c"#, "shrink", "5"]).await;
-        let calls = stub.resize_calls.lock().unwrap();
-        assert_eq!(
-            *calls,
-            vec![(WindowId::from(r#"a"b\c"#), ResizeDir::Shrink, 5)]
-        );
+        let out = run_wm(stub.clone(), &["resize", "Firefox", "grow", "5"]).await;
+        assert_eq!(out.exit_code, 2);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("not a valid window id"), "{stderr}");
+        assert!(stub.resize_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn list_emits_tsv_sorted_by_workspace_then_class() {
+    async fn list_emits_tsv_sorted_by_workspace_then_app() {
+        // PR 3b list format: `<id>\t<app>\t<workspace>\t<title>`.
+        // Sorted by workspace, then app, then id — so two Firefox
+        // windows on the same workspace sit together.
         let stub = Arc::new(StubWm {
             connected: true,
             windows: vec![
                 Window {
-                    id: "Firefox".into(),
+                    id: id(1001),
+                    app: Some("Firefox".into()),
                     title: Some("GitHub".into()),
                     workspace: Some("3".into()),
                 },
                 Window {
-                    id: "code".into(),
+                    id: id(1002),
+                    app: Some("code".into()),
                     title: Some("wm.rs".into()),
                     workspace: Some("1".into()),
                 },
                 Window {
-                    id: "Alacritty".into(),
+                    id: id(1003),
+                    app: Some("Alacritty".into()),
                     title: None,
                     workspace: Some("1".into()),
                 },
@@ -938,16 +1035,17 @@ mod tests {
         assert_eq!(out.exit_code, 0);
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "Alacritty\t1\t\ncode\t1\twm.rs\nFirefox\t3\tGitHub\n"
+            "1003\tAlacritty\t1\t\n1002\tcode\t1\twm.rs\n1001\tFirefox\t3\tGitHub\n"
         );
     }
 
     #[tokio::test]
-    async fn list_orphans_use_dash_for_workspace() {
+    async fn list_orphans_use_dash_for_missing_columns() {
         let stub = Arc::new(StubWm {
             connected: true,
             windows: vec![Window {
-                id: "Scratch".into(),
+                id: id(7),
+                app: None,
                 title: Some("notes".into()),
                 workspace: None,
             }],
@@ -955,7 +1053,7 @@ mod tests {
         });
         let out = run_wm(stub, &["list"]).await;
         assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"Scratch\t-\tnotes\n");
+        assert_eq!(out.stdout, b"7\t-\t-\tnotes\n");
     }
 
     #[tokio::test]

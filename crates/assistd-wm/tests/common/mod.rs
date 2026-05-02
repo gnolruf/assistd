@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use assistd_wm::{WindowId, WindowManager};
+use assistd_wm::WindowManager;
 
 /// `focused_window()` should return Some(class) for a session with at
 /// least one mapped, focused window — which is the common case on a
@@ -40,15 +40,12 @@ pub async fn assert_focused_context_agrees(wm: &Arc<dyn WindowManager>) {
         .await
         .expect("focused_context query failed")
         .expect("expected Some(FocusedWindowContext) for a focused session");
-    // `focused` is now `Option<WindowId>` (newtype around the class
-    // string in PR 3a); `ctx.class` is the raw `Option<String>` for
-    // human display. Compare via &str to keep the contract intact while
-    // the inner repr stabilizes (PR 3b will switch WindowId to a
-    // NonZeroU64 con_id and the contract here changes shape with it).
+    // PR 3b: focused_window() returns the compositor con_id; the
+    // focused_context().id field carries the same id, surfaced from the
+    // same snapshot read. Both are `Option<WindowId>` (NonZeroU64).
     assert_eq!(
-        ctx.class.as_deref(),
-        focused.as_ref().map(WindowId::as_str),
-        "focused_context().class should agree with focused_window()"
+        ctx.id, focused,
+        "focused_context().id should agree with focused_window()"
     );
 }
 

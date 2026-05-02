@@ -47,64 +47,67 @@ impl WmHandle {
     }
 }
 
-/// Identifier for a window or client in the compositor's namespace.
+/// Opaque identifier for a window in the compositor's namespace.
 ///
-/// PR 3a: opaque newtype around `String` — same payload as the prior
-/// `pub type WindowId = String` alias, but the wrapper prevents
-/// argument swaps in `move_to_workspace(window, workspace)` and lets
-/// PR 3b retarget the inner repr (compositor con_id, `NonZeroU64`)
-/// without churning every call site again.
+/// Wraps the compositor's container id — i3 emits this as
+/// `reply::Node.id: usize`, Sway as `Node.id: i64` — so two windows of
+/// the same X11 class (e.g. two Firefox windows) can be addressed
+/// independently. The criteria string for both compositors is
+/// `[con_id="N"]`.
 ///
-/// For now, the inner string is the X11 class on the i3 backend or the
-/// `app_id`/class fallback on Sway. PR 3b moves this to the
-/// compositor's unique container id so two windows of the same class
-/// can be addressed independently.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WindowId(String);
+/// `NonZeroU64` is chosen so `Option<WindowId>` is the same size as a
+/// bare `u64` and so a zero id (which neither compositor emits, but
+/// which would be ambiguous if it ever appeared) is unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WindowId(pub std::num::NonZeroU64);
 
 impl WindowId {
-    /// Borrow the inner string. Use this where backend code needs
-    /// `&str` for criteria escaping or `format!`-style interpolation.
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// Construct a [`WindowId`] from a raw `u64`. Returns `None` for 0
+    /// — the compositor never emits zero, so the wrapper takes that as
+    /// a structural error signal rather than treating it as valid.
+    pub fn new(raw: u64) -> Option<Self> {
+        std::num::NonZeroU64::new(raw).map(WindowId)
+    }
+
+    /// Unwrap to the raw `u64`. Useful for IPC payload formatting
+    /// (`format!("{}", id.get())` produces `"42"`).
+    pub fn get(self) -> u64 {
+        self.0.get()
     }
 }
 
 impl std::fmt::Display for WindowId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        write!(f, "{}", self.0.get())
     }
 }
 
-impl AsRef<str> for WindowId {
-    fn as_ref(&self) -> &str {
-        &self.0
+/// Returned by [`WindowId::from_str`] when the input is not a positive
+/// decimal integer. The caller already has the offending input and
+/// renders its own message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseWindowIdError;
+
+impl std::fmt::Display for ParseWindowIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("expected positive decimal con_id")
     }
 }
 
-impl From<String> for WindowId {
-    fn from(s: String) -> Self {
-        WindowId(s)
-    }
-}
-
-impl From<&str> for WindowId {
-    fn from(s: &str) -> Self {
-        WindowId(s.to_string())
-    }
-}
-
-impl From<WindowId> for String {
-    fn from(w: WindowId) -> String {
-        w.0
-    }
-}
+impl std::error::Error for ParseWindowIdError {}
 
 impl std::str::FromStr for WindowId {
-    type Err = std::convert::Infallible;
+    type Err = ParseWindowIdError;
 
+    /// Parse a decimal con_id. Hex / leading-`0x` is rejected — Sway's
+    /// id space is large enough that decimal is the only consistent
+    /// rendering, and non-numeric ids would just be confusing for the
+    /// LLM that's piping `wm list` output back into `wm focus`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(WindowId(s.to_string()))
+        s.parse::<u64>()
+            .ok()
+            .and_then(WindowId::new)
+            .ok_or(ParseWindowIdError)
     }
 }
 
@@ -183,14 +186,21 @@ impl From<u32> for WorkspaceId {
 }
 
 /// One row of [`WindowManager::list_windows`]. The trait's wider methods
-/// (`focus`, `move_to_workspace`) take a [`WindowId`] alone; this struct
-/// is the richer view returned to surfaces (the `wm list` command) that
-/// need title and workspace context to format human-readable output.
+/// (`focus`, `move_to_workspace`) take a [`WindowId`] (con_id) alone;
+/// this struct is the richer view returned to surfaces (the `wm list`
+/// command) that need a human-readable label and workspace context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
-    /// Identifier usable with [`WindowManager::focus`] /
-    /// [`WindowManager::move_to_workspace`]. For i3 this is the X11 class.
+    /// Compositor-unique id, usable with [`WindowManager::focus`] /
+    /// [`WindowManager::move_to_workspace`]. Emitted as the leading
+    /// `<id>` column in `wm list` so the LLM can pipe it back.
     pub id: WindowId,
+    /// Human-readable application label — X11 `WM_CLASS` on i3, or
+    /// `app_id` (Wayland-native) / `class` (XWayland) on Sway. `None`
+    /// when the window has neither set, which is rare. Surfaced as the
+    /// second column of `wm list` so the LLM can disambiguate ids by
+    /// app name.
+    pub app: Option<String>,
     /// `_NET_WM_NAME` / `WM_NAME`. Missing on some transient or just-
     /// mapped windows.
     pub title: Option<String>,
@@ -345,7 +355,14 @@ pub struct ParseLayoutError;
 /// — so callers can read it cheaply on every LLM query.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FocusedWindowContext {
-    /// X11 `WM_CLASS` of the focused window (or compositor-equivalent).
+    /// Compositor con_id of the focused window. Surfaced for callers
+    /// that want to wire `wm focus $(wm active)` flows; the system-
+    /// prompt block does not render it (the model picks windows by
+    /// human description, so a numeric id is just token waste).
+    pub id: Option<WindowId>,
+    /// X11 `WM_CLASS` (or `app_id` on Wayland-native sway) of the
+    /// focused window. Used for the "Current desktop context" block
+    /// the daemon injects into the LLM's per-turn system prompt.
     pub class: Option<String>,
     /// `_NET_WM_NAME` / `WM_NAME` of the focused window.
     pub title: Option<String>,
@@ -512,16 +529,20 @@ mod tests {
         assert!(NoWindowManager.focused_window().await.unwrap().is_none());
     }
 
+    fn id1() -> WindowId {
+        WindowId::new(1).expect("1 is non-zero")
+    }
+
     #[tokio::test]
     async fn no_window_manager_refuses_focus() {
-        assert!(NoWindowManager.focus(&"win1".into()).await.is_err());
+        assert!(NoWindowManager.focus(&id1()).await.is_err());
     }
 
     #[tokio::test]
     async fn no_window_manager_refuses_move() {
         assert!(
             NoWindowManager
-                .move_to_workspace(&"win1".into(), &"3".into())
+                .move_to_workspace(&id1(), &WorkspaceId::Num(3))
                 .await
                 .is_err()
         );
@@ -540,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn no_window_manager_refuses_resize() {
         let err = NoWindowManager
-            .resize_width(&"win".into(), ResizeDir::Grow, 10)
+            .resize_width(&id1(), ResizeDir::Grow, 10)
             .await
             .unwrap_err();
         assert!(matches!(err, WmError::Disconnected));
@@ -558,6 +579,24 @@ mod tests {
         assert_eq!("shrink".parse::<ResizeDir>().unwrap(), ResizeDir::Shrink);
         assert_eq!(ResizeDir::Grow.to_string(), "grow");
         assert!("sideways".parse::<ResizeDir>().is_err());
+    }
+
+    #[test]
+    fn window_id_parses_decimal_only() {
+        assert_eq!("42".parse::<WindowId>().unwrap(), WindowId::new(42).unwrap());
+        // 0 has no NonZeroU64 representation.
+        assert!("0".parse::<WindowId>().is_err());
+        // Non-numeric input: rejected.
+        assert!("Firefox".parse::<WindowId>().is_err());
+        // Negative: rejected (u64 doesn't accept "-1").
+        assert!("-1".parse::<WindowId>().is_err());
+        // Hex / leading-0x: rejected.
+        assert!("0x2a".parse::<WindowId>().is_err());
+    }
+
+    #[test]
+    fn window_id_display_is_decimal() {
+        assert_eq!(WindowId::new(42).unwrap().to_string(), "42");
     }
 
     #[test]

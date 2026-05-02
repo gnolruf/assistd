@@ -21,7 +21,7 @@ use tokio_i3ipc::{
     reply,
 };
 
-use crate::criteria::{escape_for_criteria, format_workspace_target};
+use crate::criteria::format_workspace_target;
 use crate::error::ipc_ctx;
 use crate::{
     FocusedWindowContext, Layout, ResizeDir, WindowId, WindowManager, WmError, WmResult, Window,
@@ -34,13 +34,13 @@ use crate::{
 /// the synchronous reads in [`I3Backend::focused_window`] and
 /// [`I3Backend::focused_context`] hit memory rather than IPC.
 ///
-/// `focused_class` is the raw X11 class string from the i3 reply —
-/// stored as `String` rather than [`WindowId`] because this snapshot
-/// also feeds `focused_context()`'s human-readable
-/// [`FocusedWindowContext::class`] field. Conversion to [`WindowId`]
-/// happens at the trait method boundary.
+/// PR 3b stores both the compositor con_id (the [`WindowId`] returned
+/// to callers) and the raw X11 class string (used for the system-prompt
+/// context block). The id is what changes on every `Focus` event; the
+/// class is what the model sees when it asks "what app is in front".
 #[derive(Default, Clone)]
 struct Snapshot {
+    focused_id: Option<WindowId>,
     focused_class: Option<String>,
     focused_title: Option<String>,
     active_workspace: Option<String>,
@@ -171,36 +171,31 @@ impl I3Backend {
 #[async_trait]
 impl WindowManager for I3Backend {
     async fn focus(&self, window: &WindowId) -> WmResult<()> {
-        let cmd = format!(r#"[class="{}"] focus"#, escape_for_criteria(window.as_str()));
+        let cmd = format!(r#"[con_id="{}"] focus"#, window.get());
         self.run(&cmd).await
     }
 
     async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
         let target = format_workspace_target(workspace);
-        let cmd = format!(
-            r#"[class="{}"] move container to {}"#,
-            escape_for_criteria(window.as_str()),
-            target,
-        );
+        let cmd = format!(r#"[con_id="{}"] move container to {target}"#, window.get(),);
         self.run(&cmd).await
     }
 
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
-        Ok(self
-            .snapshot
-            .read()
-            .await
-            .focused_class
-            .clone()
-            .map(WindowId::from))
+        Ok(self.snapshot.read().await.focused_id)
     }
 
     async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
         let s = self.snapshot.read().await;
-        if s.focused_class.is_none() && s.focused_title.is_none() && s.active_workspace.is_none() {
+        if s.focused_id.is_none()
+            && s.focused_class.is_none()
+            && s.focused_title.is_none()
+            && s.active_workspace.is_none()
+        {
             return Ok(None);
         }
         Ok(Some(FocusedWindowContext {
+            id: s.focused_id,
             class: s.focused_class.clone(),
             title: s.focused_title.clone(),
             workspace: s.active_workspace.clone(),
@@ -257,8 +252,8 @@ impl WindowManager for I3Backend {
 /// so unit tests can assert on the literal string without a live i3.
 fn i3_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
     format!(
-        r#"[class="{}"] resize {} width {} px or 0 ppt"#,
-        escape_for_criteria(window.as_str()),
+        r#"[con_id="{}"] resize {} width {} px or 0 ppt"#,
+        window.get(),
         direction.as_str(),
         pixels,
     )
@@ -272,14 +267,14 @@ fn i3_layout_payload(layout: Layout) -> String {
 }
 
 /// Walk the i3 tree recursively, emitting one [`Window`] per leaf node
-/// that has both an X11 window id and a class. Tracks the most recent
-/// `NodeType::Workspace` ancestor in `current_ws` so each window can be
-/// tagged with the workspace it lives on.
+/// that has an X11 window backing (i.e. real, mapped clients — not
+/// containers). Tracks the most recent `NodeType::Workspace` ancestor
+/// in `current_ws` so each window can be tagged with the workspace it
+/// lives on.
 ///
-/// Children of a non-workspace node inherit the parent's workspace
-/// context; children of a workspace node use that workspace's name.
-/// Floating nodes are walked alongside tiling nodes — both are real
-/// windows the user can focus.
+/// PR 3b: the [`Window::id`] is the i3 con_id (`reply::Node.id`),
+/// which is unique. The X11 class moves into [`Window::app`] for human
+/// display (`wm list`'s second column).
 fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<Window>) {
     let next_ws = if matches!(node.node_type, reply::NodeType::Workspace) {
         node.name.as_deref()
@@ -288,12 +283,16 @@ fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<W
     };
 
     if node.window.is_some()
-        && let Some(props) = node.window_properties.as_ref()
-        && let Some(class) = props.class.clone()
+        && let Some(id) = WindowId::new(node.id as u64)
     {
+        let (app, title) = match node.window_properties.as_ref() {
+            Some(props) => (props.class.clone(), props.title.clone()),
+            None => (None, None),
+        };
         out.push(Window {
-            id: WindowId::from(class),
-            title: props.title.clone(),
+            id,
+            app,
+            title,
             workspace: next_ws.map(|s| s.to_string()),
         });
     }
@@ -306,6 +305,7 @@ fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<W
 async fn seed_snapshot(cmd: &mut I3) -> Result<Snapshot> {
     let tree = cmd.get_tree().await.context("i3 GET_TREE")?;
     let focused = walk_focused(&tree);
+    let focused_id = focused.and_then(|n| WindowId::new(n.id as u64));
     let focused_class = focused
         .and_then(|n| n.window_properties.as_ref())
         .and_then(|p| p.class.clone());
@@ -322,6 +322,7 @@ async fn seed_snapshot(cmd: &mut I3) -> Result<Snapshot> {
         }
     };
     Ok(Snapshot {
+        focused_id,
         focused_class,
         focused_title,
         active_workspace,
@@ -330,14 +331,17 @@ async fn seed_snapshot(cmd: &mut I3) -> Result<Snapshot> {
 
 /// Apply one i3 `Window` event to the cached focus snapshot.
 ///
-/// Race rules:
-/// - `Focus` overwrites both class and title from the new container.
-/// - `Title` only takes effect when the event's class matches the
-///   currently-focused class — title events from background windows
+/// Race rules (key on con_id, the unique container handle, rather than
+/// class — two windows of the same class would otherwise alias each
+/// other in title/close updates):
+/// - `Focus` overwrites id + class + title from the new container.
+/// - `Title` only takes effect when the event's con_id matches the
+///   currently-focused id — title events from background windows
 ///   must not overwrite the foreground title.
-/// - `Close` clears class + title only when the closed container is
-///   the focused one. Workspace is left intact.
+/// - `Close` clears id + class + title only when the closed container
+///   is the focused one. Workspace is left intact.
 async fn handle_window_event(w: &tokio_i3ipc::event::WindowData, snap: &Arc<RwLock<Snapshot>>) {
+    let id = WindowId::new(w.container.id as u64);
     let class = w
         .container
         .window_properties
@@ -347,20 +351,24 @@ async fn handle_window_event(w: &tokio_i3ipc::event::WindowData, snap: &Arc<RwLo
     match w.change {
         WindowChange::Focus => {
             let mut s = snap.write().await;
+            s.focused_id = id;
             s.focused_class = class;
             s.focused_title = title;
         }
         WindowChange::Title => {
             let mut s = snap.write().await;
-            // Only honor title updates for the currently-focused class.
-            // (i3 emits Title events for background windows too.)
-            if s.focused_class == class && class.is_some() {
+            if s.focused_id == id && id.is_some() {
                 s.focused_title = title;
+                // Class can also drift on Title events when an app
+                // changes its WM_CLASS late; keep them in sync for
+                // the same id.
+                s.focused_class = class;
             }
         }
         WindowChange::Close => {
             let mut s = snap.write().await;
-            if s.focused_class == class && class.is_some() {
+            if s.focused_id == id && id.is_some() {
+                s.focused_id = None;
                 s.focused_class = None;
                 s.focused_title = None;
             }
@@ -385,18 +393,22 @@ fn walk_focused(node: &reply::Node) -> Option<&reply::Node> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn resize_payload_shape_and_escape() {
-        let p = i3_resize_payload(&WindowId::from("Firefox"), ResizeDir::Grow, 50);
-        assert_eq!(p, r#"[class="Firefox"] resize grow width 50 px or 0 ppt"#);
+    fn id(n: u64) -> WindowId {
+        WindowId::new(n).expect("test ids are non-zero")
     }
 
     #[test]
-    fn resize_payload_escapes_quote_and_backslash() {
-        // Catches a regression where a class containing the criteria
-        // delimiters (`"`, `\`) would inject into the i3 command.
-        let p = i3_resize_payload(&WindowId::from(r#"a"b\c"#), ResizeDir::Shrink, 5);
-        assert_eq!(p, r#"[class="a\"b\\c"] resize shrink width 5 px or 0 ppt"#);
+    fn resize_payload_uses_con_id_criteria() {
+        let p = i3_resize_payload(&id(42), ResizeDir::Grow, 50);
+        assert_eq!(p, r#"[con_id="42"] resize grow width 50 px or 0 ppt"#);
+    }
+
+    #[test]
+    fn resize_payload_renders_id_in_decimal() {
+        // No need for escape — con_id is a decimal integer literal,
+        // never a free-form string.
+        let p = i3_resize_payload(&id(1234567890), ResizeDir::Shrink, 5);
+        assert_eq!(p, r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#);
     }
 
     #[test]
