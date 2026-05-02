@@ -28,7 +28,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use swayipc_async::{Connection, Event, EventType, Node, NodeType, WindowChange, WorkspaceChange};
+use swayipc_async::{
+    Connection, Event, EventStream, EventType, Node, NodeType, WindowChange, WorkspaceChange,
+};
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 
@@ -62,9 +64,15 @@ fn sway_id(raw: i64) -> Option<WindowId> {
 
 /// `WindowManager` impl wrapping a single Sway IPC command socket.
 /// Held inside `Arc<dyn WindowManager>` by the daemon's `AppState`.
+///
+/// PR 5: cmd is `Option<Connection>`. The supervisor task sets it to
+/// `None` while reconnecting after a socket drop or a timeout strike,
+/// and `Some` once the new connection is seeded. Trait-method helpers
+/// short-circuit with [`WmError::Disconnected`] for the None state.
 pub struct SwayBackend {
-    cmd: Arc<Mutex<Connection>>,
+    cmd: Arc<Mutex<Option<Connection>>>,
     snapshot: Arc<RwLock<Snapshot>>,
+    reconnect: Arc<tokio::sync::Notify>,
 }
 
 /// Returned by [`SwayBackend::start`] alongside the backend itself. The
@@ -72,38 +80,27 @@ pub struct SwayBackend {
 /// block — same pattern as `I3Handle`.
 pub struct SwayHandle {
     pub backend: Arc<SwayBackend>,
-    event_task: JoinHandle<()>,
+    supervisor_task: JoinHandle<()>,
 }
 
 impl SwayHandle {
     pub async fn shutdown(self) {
-        // The daemon flips `shutdown_tx` first; the event task selects
-        // on `shutdown.changed()` and exits. Awaiting here just drains.
-        let _ = self.event_task.await;
+        // The daemon flips `shutdown_tx` first; the supervisor task
+        // selects on `shutdown.changed()` and exits.
+        let _ = self.supervisor_task.await;
     }
 }
 
 impl SwayBackend {
     /// Connect to Sway's IPC sockets, seed the focused-window snapshot,
-    /// and spawn the background event task.
+    /// and spawn the supervisor task that drives the event stream and
+    /// reconnects on socket drops.
     ///
-    /// Returns `Err` when the Sway socket isn't reachable (Sway not
-    /// running, `$SWAYSOCK` unset, X11/i3 session, …). The daemon
-    /// catches that and substitutes `NoWindowManager` so the rest of
-    /// startup proceeds.
-    pub async fn start(mut shutdown: watch::Receiver<bool>) -> WmResult<SwayHandle> {
-        // Two connections: `subscribe()` consumes its connection by
-        // value, so a single socket can't multiplex command + event
-        // traffic. Same constraint as i3.
-        let mut cmd = Connection::new()
-            .await
-            .map_err(|e| ipc_ctx(e, "connect to sway IPC (cmd socket)"))?;
-        let events_conn = Connection::new()
-            .await
-            .map_err(|e| ipc_ctx(e, "connect to sway IPC (events socket)"))?;
-
-        // Seed snapshot before wrapping cmd in the Mutex — get_tree()
-        // and get_workspaces() need `&mut Connection`.
+    /// Returns `Err` only on the initial connect failure. After
+    /// startup, transient socket errors (e.g. `swaymsg reload`) are
+    /// handled in-process by the supervisor.
+    pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<SwayHandle> {
+        let (mut cmd, stream) = connect_pair().await?;
         let initial = match seed_snapshot(&mut cmd).await {
             Ok(s) => s,
             Err(e) => {
@@ -112,64 +109,48 @@ impl SwayBackend {
             }
         };
         let snapshot = Arc::new(RwLock::new(initial));
-
-        let mut stream = events_conn
-            .subscribe([EventType::Window, EventType::Workspace])
-            .await
-            .map_err(|e| ipc_ctx(e, "subscribe to sway window+workspace events"))?;
-
-        let snap_for_task = snapshot.clone();
-        let event_task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown.changed() => {
-                        if *shutdown.borrow() { break; }
-                    }
-                    evt = stream.next() => {
-                        match evt {
-                            Some(Ok(Event::Window(w))) => {
-                                handle_window_event(&w, &snap_for_task).await;
-                            }
-                            Some(Ok(Event::Workspace(d))) => {
-                                if matches!(d.change, WorkspaceChange::Focus) {
-                                    let ws = d
-                                        .current
-                                        .as_ref()
-                                        .and_then(|n| n.name.clone());
-                                    apply_workspace_focus(&snap_for_task, ws).await;
-                                }
-                            }
-                            Some(Ok(_)) => {}
-                            Some(Err(e)) => {
-                                tracing::warn!("sway event stream error: {e}");
-                                break;
-                            }
-                            None => break, // socket closed
-                        }
-                    }
-                }
-            }
-            tracing::info!("sway event task exited");
-        });
-
+        let reconnect = Arc::new(tokio::sync::Notify::new());
         let backend = Arc::new(Self {
-            cmd: Arc::new(Mutex::new(cmd)),
-            snapshot,
+            cmd: Arc::new(Mutex::new(Some(cmd))),
+            snapshot: snapshot.clone(),
+            reconnect: reconnect.clone(),
         });
+
+        let supervisor_task = tokio::spawn(supervisor_loop(
+            backend.clone(),
+            stream,
+            snapshot,
+            reconnect,
+            shutdown,
+        ));
+
         Ok(SwayHandle {
             backend,
-            event_task,
+            supervisor_task,
         })
     }
 
     async fn run(&self, payload: &str) -> WmResult<()> {
-        let outcomes = self
-            .cmd
-            .lock()
-            .await
-            .run_command(payload)
-            .await
-            .map_err(|e| ipc_ctx(e, "sway RUN_COMMAND"))?;
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let outcomes = match tokio::time::timeout(
+            crate::WM_IPC_TIMEOUT,
+            conn.run_command(payload),
+        )
+        .await
+        {
+            Err(_) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(ipc_ctx(e, "sway RUN_COMMAND"));
+            }
+            Ok(Ok(v)) => v,
+        };
         for r in outcomes {
             r.map_err(|e| WmError::Rejected(format!("{payload}: {e}")))?;
         }
@@ -199,26 +180,43 @@ impl WindowManager for SwayBackend {
     }
 
     async fn list_windows(&self) -> WmResult<Vec<Window>> {
-        let tree = self
-            .cmd
-            .lock()
-            .await
-            .get_tree()
-            .await
-            .map_err(|e| ipc_ctx(e, "sway GET_TREE"))?;
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let tree = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_tree()).await {
+            Err(_) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(ipc_ctx(e, "sway GET_TREE"));
+            }
+            Ok(Ok(t)) => t,
+        };
+        drop(guard);
         let mut out = Vec::new();
         collect_windows(&tree, None, &mut out);
         Ok(out)
     }
 
     async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
-        let ws = self
-            .cmd
-            .lock()
-            .await
-            .get_workspaces()
-            .await
-            .map_err(|e| ipc_ctx(e, "sway GET_WORKSPACES"))?;
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let ws = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
+            Err(_) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(ipc_ctx(e, "sway GET_WORKSPACES"));
+            }
+            Ok(Ok(w)) => w,
+        };
         Ok(ws
             .into_iter()
             .map(|w| WorkspaceInfo {
@@ -245,13 +243,21 @@ impl WindowManager for SwayBackend {
     }
 
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
-        let outputs = self
-            .cmd
-            .lock()
-            .await
-            .get_outputs()
-            .await
-            .map_err(|e| ipc_ctx(e, "sway GET_OUTPUTS"))?;
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let outputs = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_outputs()).await {
+            Err(_) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(ipc_ctx(e, "sway GET_OUTPUTS"));
+            }
+            Ok(Ok(v)) => v,
+        };
         Ok(outputs
             .into_iter()
             .map(|o| OutputInfo {
@@ -269,6 +275,120 @@ impl WindowManager for SwayBackend {
                 focused_workspace: o.current_workspace,
             })
             .collect())
+    }
+}
+
+/// Open the cmd + events socket pair and subscribe events. Pulled out
+/// of `start()` so the supervisor can reuse it on each reconnect.
+async fn connect_pair() -> WmResult<(Connection, EventStream)> {
+    let cmd = Connection::new()
+        .await
+        .map_err(|e| ipc_ctx(e, "connect to sway IPC (cmd socket)"))?;
+    let events_conn = Connection::new()
+        .await
+        .map_err(|e| ipc_ctx(e, "connect to sway IPC (events socket)"))?;
+    let stream = events_conn
+        .subscribe([EventType::Window, EventType::Workspace])
+        .await
+        .map_err(|e| ipc_ctx(e, "subscribe to sway window+workspace events"))?;
+    Ok((cmd, stream))
+}
+
+/// Drive one events stream until it errors or the supervisor signals
+/// a forced reconnect. Returns `false` if shutdown was observed
+/// (caller exits cleanly), `true` if the inner loop fell through and
+/// the caller should reconnect.
+async fn drive_events(
+    mut stream: EventStream,
+    snapshot: Arc<RwLock<Snapshot>>,
+    reconnect: Arc<tokio::sync::Notify>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() { return false; }
+            }
+            _ = reconnect.notified() => {
+                return true;
+            }
+            evt = stream.next() => {
+                match evt {
+                    Some(Ok(Event::Window(w))) => handle_window_event(&w, &snapshot).await,
+                    Some(Ok(Event::Workspace(d))) => {
+                        if matches!(d.change, WorkspaceChange::Focus) {
+                            let ws = d.current.as_ref().and_then(|n| n.name.clone());
+                            apply_workspace_focus(&snapshot, ws).await;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        tracing::warn!("sway event stream error: {e}");
+                        return true;
+                    }
+                    None => return true, // socket closed
+                }
+            }
+        }
+    }
+}
+
+/// Outer reconnect loop. Mirrors the i3 supervisor: drive events
+/// through `drive_events`; on fall-through, drop cmd, sleep with
+/// exponential backoff, reconnect, re-seed, repeat.
+async fn supervisor_loop(
+    backend: Arc<SwayBackend>,
+    initial_stream: EventStream,
+    snapshot: Arc<RwLock<Snapshot>>,
+    reconnect: Arc<tokio::sync::Notify>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    if !drive_events(
+        initial_stream,
+        snapshot.clone(),
+        reconnect.clone(),
+        &mut shutdown,
+    )
+    .await
+    {
+        tracing::info!("sway supervisor exited (shutdown during initial events stream)");
+        return;
+    }
+
+    let mut attempt: u32 = 0;
+    loop {
+        *backend.cmd.lock().await = None;
+        tracing::warn!("sway disconnected; reconnecting (attempt {})", attempt + 1);
+
+        let delay = crate::backoff::backoff_delay(attempt);
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    tracing::info!("sway supervisor exited (shutdown during backoff)");
+                    return;
+                }
+            }
+            _ = tokio::time::sleep(delay) => {}
+        }
+
+        match connect_pair().await {
+            Ok((mut cmd, stream)) => {
+                if let Ok(s) = seed_snapshot(&mut cmd).await {
+                    *snapshot.write().await = s;
+                }
+                *backend.cmd.lock().await = Some(cmd);
+                attempt = 0;
+                tracing::info!("sway backend reconnected");
+                if !drive_events(stream, snapshot.clone(), reconnect.clone(), &mut shutdown).await {
+                    tracing::info!("sway supervisor exited (shutdown during events stream)");
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("sway reconnect failed: {e}; will retry after backoff");
+                attempt = attempt.saturating_add(1);
+            }
+        }
     }
 }
 

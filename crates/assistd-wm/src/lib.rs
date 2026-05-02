@@ -19,11 +19,18 @@
 
 use async_trait::async_trait;
 
+pub(crate) mod backoff;
 pub(crate) mod criteria;
 pub mod error;
 pub mod i3;
 pub(crate) mod snapshot;
 pub mod sway;
+
+/// Per-call IPC timeout — `run_command`, `get_tree`, `get_workspaces`,
+/// `get_outputs`. A wedged compositor must release within one user
+/// turn or the daemon's "every-turn-injects-window-context" path
+/// wedges with it.
+pub(crate) const WM_IPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub use error::{WmError, WmResult};
 pub use i3::{I3Backend, I3Handle};
 pub use sway::{SwayBackend, SwayHandle};
