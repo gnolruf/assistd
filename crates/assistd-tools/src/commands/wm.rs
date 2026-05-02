@@ -33,10 +33,35 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::process::Command as ProcCommand;
 
-use assistd_wm::WindowManager;
 use assistd_wm::criteria::escape_for_criteria;
+use assistd_wm::{WindowManager, WmError};
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
+
+/// Pick the `(label, hint)` pair attached to a [`WmError`] for the
+/// `[error] wm: …. <label>: <hint>` line the LLM sees. The variant
+/// determines the recovery action; the handler-specific operation is
+/// already in the message body (`"focus 'Firefox' failed: …"`), so the
+/// hint stays per-variant rather than per-handler.
+fn hint_for(err: &WmError) -> (&'static str, &'static str) {
+    match err {
+        WmError::Disconnected => (
+            "Check",
+            "[compositor] in config.toml and that i3/sway/hyprland is running",
+        ),
+        WmError::NotFound(_) => ("Use", "wm list to find the right window"),
+        WmError::Rejected(_) => ("Try", "wm list to verify the window/workspace exists"),
+        WmError::Timeout(_) => (
+            "Note",
+            "compositor unresponsive; retry once before assuming it crashed",
+        ),
+        WmError::Unsupported(_) => (
+            "Note",
+            "the active backend may not support this operation (i3 does not list outputs)",
+        ),
+        WmError::Ipc(_) => ("Check", "compositor connection (see daemon logs)"),
+    }
+}
 
 const NAME: &str = "wm";
 const SUMMARY: &str = "manage windows and workspaces (focus, move, open, list, workspaces, etc.)";
@@ -155,16 +180,19 @@ async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<Command
     let class = &args[0];
     match wm.focus(class).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("focus '{class}' failed: {e}"),
-                "Use",
-                "wm list to see available windows",
-            )
-            .into_bytes(),
-        )),
+        Err(e) => {
+            let (label, hint) = hint_for(&e);
+            Ok(CommandOutput::failed(
+                1,
+                error_line(
+                    NAME,
+                    format_args!("focus '{class}' failed: {e}"),
+                    label,
+                    hint,
+                )
+                .into_bytes(),
+            ))
+        }
     }
 }
 
@@ -182,16 +210,19 @@ async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandO
     let workspace = &args[1];
     match wm.move_to_workspace(class, workspace).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("move '{class}' to '{workspace}' failed: {e}"),
-                "Use",
-                "wm list and wm workspaces to verify both exist",
-            )
-            .into_bytes(),
-        )),
+        Err(e) => {
+            let (label, hint) = hint_for(&e);
+            Ok(CommandOutput::failed(
+                1,
+                error_line(
+                    NAME,
+                    format_args!("move '{class}' to '{workspace}' failed: {e}"),
+                    label,
+                    hint,
+                )
+                .into_bytes(),
+            ))
+        }
     }
 }
 
@@ -246,16 +277,13 @@ async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(out))
         }
         Ok(None) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("active failed: {e}"),
-                "Check",
-                "compositor connection (see daemon logs)",
-            )
-            .into_bytes(),
-        )),
+        Err(e) => {
+            let (label, hint) = hint_for(&e);
+            Ok(CommandOutput::failed(
+                1,
+                error_line(NAME, format_args!("active failed: {e}"), label, hint).into_bytes(),
+            ))
+        }
     }
 }
 
@@ -309,16 +337,19 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
     );
     match wm.run_raw(&payload).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("resize '{class}' failed: {e}"),
-                "Use",
-                "wm list to see available windows",
-            )
-            .into_bytes(),
-        )),
+        Err(e) => {
+            let (label, hint) = hint_for(&e);
+            Ok(CommandOutput::failed(
+                1,
+                error_line(
+                    NAME,
+                    format_args!("resize '{class}' failed: {e}"),
+                    label,
+                    hint,
+                )
+                .into_bytes(),
+            ))
+        }
     }
 }
 
@@ -343,16 +374,13 @@ async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
             }
             Ok(CommandOutput::ok(out.into_bytes()))
         }
-        Err(e) => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("list failed: {e}"),
-                "Check",
-                "compositor connection (see daemon logs)",
-            )
-            .into_bytes(),
-        )),
+        Err(e) => {
+            let (label, hint) = hint_for(&e);
+            Ok(CommandOutput::failed(
+                1,
+                error_line(NAME, format_args!("list failed: {e}"), label, hint).into_bytes(),
+            ))
+        }
     }
 }
 
@@ -394,16 +422,13 @@ async fn handle_outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
             }
             Ok(CommandOutput::ok(out.into_bytes()))
         }
-        Err(e) => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("outputs failed: {e}"),
-                "Note",
-                "the active backend may not support output enumeration (i3 does not)",
-            )
-            .into_bytes(),
-        )),
+        Err(e) => {
+            let (label, hint) = hint_for(&e);
+            Ok(CommandOutput::failed(
+                1,
+                error_line(NAME, format_args!("outputs failed: {e}"), label, hint).into_bytes(),
+            ))
+        }
     }
 }
 
@@ -424,16 +449,13 @@ async fn handle_workspaces(wm: &dyn WindowManager) -> Result<CommandOutput> {
             }
             Ok(CommandOutput::ok(out.into_bytes()))
         }
-        Err(e) => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("workspaces failed: {e}"),
-                "Check",
-                "compositor connection (see daemon logs)",
-            )
-            .into_bytes(),
-        )),
+        Err(e) => {
+            let (label, hint) = hint_for(&e);
+            Ok(CommandOutput::failed(
+                1,
+                error_line(NAME, format_args!("workspaces failed: {e}"), label, hint).into_bytes(),
+            ))
+        }
     }
 }
 
@@ -464,23 +486,28 @@ async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
     let payload = format!("layout {name}");
     match wm.run_raw(&payload).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("layout '{name}' failed: {e}"),
-                "Check",
-                "compositor connection (see daemon logs)",
-            )
-            .into_bytes(),
-        )),
+        Err(e) => {
+            let (label, hint) = hint_for(&e);
+            Ok(CommandOutput::failed(
+                1,
+                error_line(
+                    NAME,
+                    format_args!("layout '{name}' failed: {e}"),
+                    label,
+                    hint,
+                )
+                .into_bytes(),
+            ))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assistd_wm::{NoWindowManager, OutputInfo, Window, WindowId, WorkspaceId, WorkspaceInfo};
+    use assistd_wm::{
+        NoWindowManager, OutputInfo, Window, WindowId, WmResult, WorkspaceId, WorkspaceInfo,
+    };
     use std::sync::Mutex;
 
     /// Test fixture for [`WindowManager`]. Records every call so tests
@@ -515,12 +542,21 @@ mod tests {
         }
     }
 
+    /// Wrap a `&Option<String>` as a `WmError::Ipc(anyhow!(msg))`. Tests
+    /// that want to inject a backend failure write `focus_err: Some("…")`;
+    /// without typed variants they used `anyhow::bail!`. The Ipc variant
+    /// preserves the message body (which the tests assert on) and routes
+    /// through the `Check: compositor connection` recovery hint.
+    fn ipc_err(msg: &str) -> WmError {
+        WmError::Ipc(anyhow::anyhow!("{msg}"))
+    }
+
     #[async_trait]
     impl WindowManager for StubWm {
-        async fn focus(&self, window: &WindowId) -> Result<()> {
+        async fn focus(&self, window: &WindowId) -> WmResult<()> {
             self.focus_calls.lock().unwrap().push(window.clone());
             if let Some(msg) = &self.focus_err {
-                anyhow::bail!("{msg}");
+                return Err(ipc_err(msg));
             }
             Ok(())
         }
@@ -528,52 +564,51 @@ mod tests {
             &self,
             window: &WindowId,
             workspace: &WorkspaceId,
-        ) -> Result<()> {
+        ) -> WmResult<()> {
             self.move_calls
                 .lock()
                 .unwrap()
                 .push((window.clone(), workspace.clone()));
             if let Some(msg) = &self.move_err {
-                anyhow::bail!("{msg}");
+                return Err(ipc_err(msg));
             }
             Ok(())
         }
-        async fn focused_window(&self) -> Result<Option<WindowId>> {
+        async fn focused_window(&self) -> WmResult<Option<WindowId>> {
             if let Some(msg) = &self.focused_err {
-                anyhow::bail!("{msg}");
+                return Err(ipc_err(msg));
             }
             Ok(self.focused.clone())
         }
-        async fn list_windows(&self) -> Result<Vec<Window>> {
+        async fn list_windows(&self) -> WmResult<Vec<Window>> {
             if let Some(msg) = &self.list_windows_err {
-                anyhow::bail!("{msg}");
+                return Err(ipc_err(msg));
             }
             Ok(self.windows.clone())
         }
-        async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
             if let Some(msg) = &self.list_workspaces_err {
-                anyhow::bail!("{msg}");
+                return Err(ipc_err(msg));
             }
             Ok(self.workspaces.clone())
         }
-        async fn run_raw(&self, payload: &str) -> Result<()> {
+        async fn run_raw(&self, payload: &str) -> WmResult<()> {
             self.raw_calls.lock().unwrap().push(payload.to_string());
             if let Some(msg) = &self.raw_err {
-                anyhow::bail!("{msg}");
+                return Err(ipc_err(msg));
             }
             Ok(())
         }
-        async fn list_outputs(&self) -> Result<Vec<OutputInfo>> {
+        async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
             if self.list_outputs_unsupported {
                 // Mirror the trait default — backends that don't
-                // implement outputs should bubble up a "not supported"
-                // error rather than an empty Vec, so the wm tool can
-                // tell the LLM the difference between a connected
+                // implement outputs return Unsupported so the wm tool
+                // can tell the LLM the difference between a connected
                 // machine with zero monitors and an i3-class backend.
-                anyhow::bail!("backend does not support output enumeration");
+                return Err(WmError::Unsupported("output enumeration"));
             }
             if let Some(msg) = &self.list_outputs_err {
-                anyhow::bail!("{msg}");
+                return Err(ipc_err(msg));
             }
             Ok(self.outputs.clone())
         }
@@ -671,7 +706,50 @@ mod tests {
             stderr.contains("[error] wm: focus 'Firefox' failed"),
             "{stderr}"
         );
-        assert!(stderr.contains("Use:"), "{stderr}");
+        // Backend Ipc errors route through the "Check: compositor
+        // connection" hint — different from the static "Use: wm list"
+        // hint that the pre-WmError handler emitted unconditionally.
+        assert!(stderr.contains("Check:"), "{stderr}");
+    }
+
+    #[test]
+    fn hint_for_disconnected() {
+        let (label, hint) = hint_for(&WmError::Disconnected);
+        assert_eq!(label, "Check");
+        assert!(hint.contains("config.toml"), "{hint}");
+    }
+
+    #[test]
+    fn hint_for_not_found() {
+        let (label, hint) = hint_for(&WmError::NotFound("Firefox".into()));
+        assert_eq!(label, "Use");
+        assert!(hint.contains("wm list"), "{hint}");
+    }
+
+    #[test]
+    fn hint_for_rejected() {
+        let (label, _) = hint_for(&WmError::Rejected("focus: bad criteria".into()));
+        assert_eq!(label, "Try");
+    }
+
+    #[test]
+    fn hint_for_timeout() {
+        let (label, hint) = hint_for(&WmError::Timeout(std::time::Duration::from_secs(5)));
+        assert_eq!(label, "Note");
+        assert!(hint.contains("retry"), "{hint}");
+    }
+
+    #[test]
+    fn hint_for_unsupported() {
+        let (label, hint) = hint_for(&WmError::Unsupported("output enumeration"));
+        assert_eq!(label, "Note");
+        assert!(hint.contains("i3 does not"), "{hint}");
+    }
+
+    #[test]
+    fn hint_for_ipc() {
+        let (label, _) = hint_for(&WmError::Ipc(anyhow::anyhow!("socket dropped")));
+        assert_eq!(label, "Check");
     }
 
     #[tokio::test]

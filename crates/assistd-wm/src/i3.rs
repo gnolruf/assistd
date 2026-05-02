@@ -22,7 +22,11 @@ use tokio_i3ipc::{
 };
 
 use crate::criteria::{escape_for_criteria, format_workspace_target};
-use crate::{FocusedWindowContext, Window, WindowId, WindowManager, WorkspaceId, WorkspaceInfo};
+use crate::error::ipc_ctx;
+use crate::{
+    FocusedWindowContext, WindowId, WindowManager, WmError, WmResult, Window, WorkspaceId,
+    WorkspaceInfo,
+};
 
 /// Cached focus state. Seeded from `get_tree()` + `get_workspaces()`
 /// at startup, then updated by the event task on each `Window::Focus`,
@@ -68,19 +72,19 @@ impl I3Backend {
     /// Returns `Err` when the i3 socket isn't reachable (i3 not running,
     /// `I3SOCK` unset, non-Linux dev box, …). The daemon catches that
     /// and substitutes `NoWindowManager` so the rest of startup proceeds.
-    pub async fn start(mut shutdown: watch::Receiver<bool>) -> Result<I3Handle> {
+    pub async fn start(mut shutdown: watch::Receiver<bool>) -> WmResult<I3Handle> {
         // Two sockets: `listen()` consumes its connection by value, so a
         // single socket can't multiplex command + event traffic.
         let mut cmd = I3::connect()
             .await
-            .context("connect to i3 IPC (cmd socket)")?;
+            .map_err(|e| ipc_ctx(e, "connect to i3 IPC (cmd socket)"))?;
         let mut events_conn = I3::connect()
             .await
-            .context("connect to i3 IPC (events socket)")?;
+            .map_err(|e| ipc_ctx(e, "connect to i3 IPC (events socket)"))?;
         events_conn
             .subscribe([Subscribe::Window, Subscribe::Workspace])
             .await
-            .context("subscribe to i3 window+workspace events")?;
+            .map_err(|e| ipc_ctx(e, "subscribe to i3 window+workspace events"))?;
 
         // Seed snapshot before wrapping cmd in the Mutex — reuses the
         // command socket since `get_tree()` needs `&mut`.
@@ -138,20 +142,20 @@ impl I3Backend {
         })
     }
 
-    async fn run(&self, payload: &str) -> Result<()> {
+    async fn run(&self, payload: &str) -> WmResult<()> {
         let results = self
             .cmd
             .lock()
             .await
             .run_command(payload)
             .await
-            .with_context(|| format!("i3 RUN_COMMAND failed: {payload}"))?;
+            .map_err(|e| ipc_ctx(e, "i3 RUN_COMMAND"))?;
         for r in results {
             if !r.success {
-                anyhow::bail!(
-                    "i3 rejected command `{payload}`: {}",
-                    r.error.unwrap_or_default()
-                );
+                return Err(WmError::Rejected(format!(
+                    "{payload}: {}",
+                    r.error.unwrap_or_else(|| "unknown error".into())
+                )));
             }
         }
         Ok(())
@@ -160,12 +164,12 @@ impl I3Backend {
 
 #[async_trait]
 impl WindowManager for I3Backend {
-    async fn focus(&self, window: &WindowId) -> Result<()> {
+    async fn focus(&self, window: &WindowId) -> WmResult<()> {
         let cmd = format!(r#"[class="{}"] focus"#, escape_for_criteria(window));
         self.run(&cmd).await
     }
 
-    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> Result<()> {
+    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
         let target = format_workspace_target(workspace);
         let cmd = format!(
             r#"[class="{}"] move container to {}"#,
@@ -175,11 +179,11 @@ impl WindowManager for I3Backend {
         self.run(&cmd).await
     }
 
-    async fn focused_window(&self) -> Result<Option<WindowId>> {
+    async fn focused_window(&self) -> WmResult<Option<WindowId>> {
         Ok(self.snapshot.read().await.focused_class.clone())
     }
 
-    async fn focused_context(&self) -> Result<Option<FocusedWindowContext>> {
+    async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
         let s = self.snapshot.read().await;
         if s.focused_class.is_none() && s.focused_title.is_none() && s.active_workspace.is_none() {
             return Ok(None);
@@ -191,27 +195,27 @@ impl WindowManager for I3Backend {
         }))
     }
 
-    async fn list_windows(&self) -> Result<Vec<Window>> {
+    async fn list_windows(&self) -> WmResult<Vec<Window>> {
         let tree = self
             .cmd
             .lock()
             .await
             .get_tree()
             .await
-            .context("i3 GET_TREE")?;
+            .map_err(|e| ipc_ctx(e, "i3 GET_TREE"))?;
         let mut out = Vec::new();
         collect_windows(&tree, None, &mut out);
         Ok(out)
     }
 
-    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+    async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
         let ws = self
             .cmd
             .lock()
             .await
             .get_workspaces()
             .await
-            .context("i3 GET_WORKSPACES")?;
+            .map_err(|e| ipc_ctx(e, "i3 GET_WORKSPACES"))?;
         Ok(ws
             .into_iter()
             .map(|w| WorkspaceInfo {
@@ -223,7 +227,7 @@ impl WindowManager for I3Backend {
             .collect())
     }
 
-    async fn run_raw(&self, payload: &str) -> Result<()> {
+    async fn run_raw(&self, payload: &str) -> WmResult<()> {
         self.run(payload).await
     }
 }

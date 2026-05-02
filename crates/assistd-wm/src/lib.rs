@@ -17,12 +17,13 @@
 //! `[compositor].type` in `config.toml` (or runtime detection when
 //! `type = "auto"` — see `assistd_config::compositor::detect_from_env`).
 
-use anyhow::Result;
 use async_trait::async_trait;
 
 pub mod criteria;
+pub mod error;
 pub mod i3;
 pub mod sway;
+pub use error::{WmError, WmResult};
 pub use i3::{I3Backend, I3Handle};
 pub use sway::{SwayBackend, SwayHandle};
 
@@ -172,20 +173,21 @@ pub fn is_terminal_class(class: &str) -> bool {
 #[async_trait]
 pub trait WindowManager: Send + Sync + 'static {
     /// Focus the window with the given id.
-    async fn focus(&self, window: &WindowId) -> Result<()>;
+    async fn focus(&self, window: &WindowId) -> WmResult<()>;
 
     /// Move the named window to the given workspace.
-    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> Result<()>;
+    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId)
+    -> WmResult<()>;
 
     /// Return the id of the currently focused window, or `None` when no
     /// window holds focus (e.g. an empty workspace).
-    async fn focused_window(&self) -> Result<Option<WindowId>>;
+    async fn focused_window(&self) -> WmResult<Option<WindowId>>;
 
     /// Enumerate every mapped window the compositor knows about.
-    async fn list_windows(&self) -> Result<Vec<Window>>;
+    async fn list_windows(&self) -> WmResult<Vec<Window>>;
 
     /// Enumerate every workspace the compositor knows about.
-    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
+    async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>>;
 
     /// Return a snapshot of the currently focused window's class,
     /// title, and the active workspace. Used by the daemon to inject
@@ -194,7 +196,7 @@ pub trait WindowManager: Send + Sync + 'static {
     /// Returns `Ok(None)` when nothing is focused or the backend has
     /// no opinion. The default impl returns `Ok(None)` so backends
     /// without event-snapshot support compile unchanged.
-    async fn focused_context(&self) -> Result<Option<FocusedWindowContext>> {
+    async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
         Ok(None)
     }
 
@@ -203,25 +205,25 @@ pub trait WindowManager: Send + Sync + 'static {
     /// trait method would be a thin wrapper around a string format
     /// (resize, layout, …). Callers are responsible for the syntax —
     /// keep this behind subcommands that document the expected dialect.
-    async fn run_raw(&self, payload: &str) -> Result<()>;
+    async fn run_raw(&self, payload: &str) -> WmResult<()>;
 
     /// Enumerate the compositor's outputs (monitors). Sway exposes a
     /// detailed reply via `GET_OUTPUTS`; i3's reply is much sparser, so
-    /// the default implementation returns `Err` and i3-class backends
-    /// inherit it. Callers that surface this through a tool (`wm
-    /// outputs`) must translate the error into a "not supported"
-    /// message rather than an empty list, so users see the difference
-    /// between an unsupported backend and a connected machine with zero
-    /// monitors.
-    async fn list_outputs(&self) -> Result<Vec<OutputInfo>> {
-        anyhow::bail!("backend does not support output enumeration")
+    /// the default implementation returns [`WmError::Unsupported`] and
+    /// i3-class backends inherit it. Callers that surface this through
+    /// a tool (`wm outputs`) must translate the error into a "not
+    /// supported" message rather than an empty list, so users see the
+    /// difference between an unsupported backend and a connected
+    /// machine with zero monitors.
+    async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
+        Err(WmError::Unsupported("output enumeration"))
     }
 
     /// Report whether the backend is actually connected to a compositor.
     /// The default `true` covers concrete backends; [`NoWindowManager`]
     /// overrides to `false` so callers can short-circuit with a single
     /// "compositor not connected" message instead of waiting for the
-    /// generic `bail!` from each operation.
+    /// generic [`WmError::Disconnected`] from each operation.
     fn is_connected(&self) -> bool {
         true
     }
@@ -234,26 +236,30 @@ pub struct NoWindowManager;
 
 #[async_trait]
 impl WindowManager for NoWindowManager {
-    async fn focus(&self, _window: &WindowId) -> Result<()> {
-        anyhow::bail!("no window manager backend is configured")
+    async fn focus(&self, _window: &WindowId) -> WmResult<()> {
+        Err(WmError::Disconnected)
     }
-    async fn move_to_workspace(&self, _window: &WindowId, _workspace: &WorkspaceId) -> Result<()> {
-        anyhow::bail!("no window manager backend is configured")
+    async fn move_to_workspace(
+        &self,
+        _window: &WindowId,
+        _workspace: &WorkspaceId,
+    ) -> WmResult<()> {
+        Err(WmError::Disconnected)
     }
-    async fn focused_window(&self) -> Result<Option<WindowId>> {
+    async fn focused_window(&self) -> WmResult<Option<WindowId>> {
         Ok(None)
     }
-    async fn list_windows(&self) -> Result<Vec<Window>> {
-        anyhow::bail!("no window manager backend is configured")
+    async fn list_windows(&self) -> WmResult<Vec<Window>> {
+        Err(WmError::Disconnected)
     }
-    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
-        anyhow::bail!("no window manager backend is configured")
+    async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
+        Err(WmError::Disconnected)
     }
-    async fn run_raw(&self, _payload: &str) -> Result<()> {
-        anyhow::bail!("no window manager backend is configured")
+    async fn run_raw(&self, _payload: &str) -> WmResult<()> {
+        Err(WmError::Disconnected)
     }
-    async fn list_outputs(&self) -> Result<Vec<OutputInfo>> {
-        anyhow::bail!("no window manager backend is configured")
+    async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
+        Err(WmError::Disconnected)
     }
     fn is_connected(&self) -> bool {
         false
@@ -317,28 +323,28 @@ mod tests {
 
         #[async_trait]
         impl WindowManager for MinimalWm {
-            async fn focus(&self, _w: &WindowId) -> Result<()> {
+            async fn focus(&self, _w: &WindowId) -> WmResult<()> {
                 Ok(())
             }
-            async fn move_to_workspace(&self, _w: &WindowId, _ws: &WorkspaceId) -> Result<()> {
+            async fn move_to_workspace(&self, _w: &WindowId, _ws: &WorkspaceId) -> WmResult<()> {
                 Ok(())
             }
-            async fn focused_window(&self) -> Result<Option<WindowId>> {
+            async fn focused_window(&self) -> WmResult<Option<WindowId>> {
                 Ok(None)
             }
-            async fn list_windows(&self) -> Result<Vec<Window>> {
+            async fn list_windows(&self) -> WmResult<Vec<Window>> {
                 Ok(Vec::new())
             }
-            async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+            async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
                 Ok(Vec::new())
             }
-            async fn run_raw(&self, _payload: &str) -> Result<()> {
+            async fn run_raw(&self, _payload: &str) -> WmResult<()> {
                 Ok(())
             }
         }
 
         let err = MinimalWm.list_outputs().await.unwrap_err();
-        assert!(err.to_string().contains("does not support"), "{err}");
+        assert!(matches!(err, WmError::Unsupported(op) if op == "output enumeration"));
     }
 
     #[test]

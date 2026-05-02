@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use swayipc_async::{Connection, Event, EventType, Node, NodeType, WindowChange, WorkspaceChange};
@@ -33,8 +33,10 @@ use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 
 use crate::criteria::{escape_for_criteria, format_workspace_target};
+use crate::error::ipc_ctx;
 use crate::{
-    FocusedWindowContext, OutputInfo, Window, WindowId, WindowManager, WorkspaceId, WorkspaceInfo,
+    FocusedWindowContext, OutputInfo, WindowId, WindowManager, WmError, WmResult, Window,
+    WorkspaceId, WorkspaceInfo,
 };
 
 /// Cached focus state. Seeded from `get_tree()` + `get_workspaces()` at
@@ -83,16 +85,16 @@ impl SwayBackend {
     /// running, `$SWAYSOCK` unset, X11/i3 session, …). The daemon
     /// catches that and substitutes `NoWindowManager` so the rest of
     /// startup proceeds.
-    pub async fn start(mut shutdown: watch::Receiver<bool>) -> Result<SwayHandle> {
+    pub async fn start(mut shutdown: watch::Receiver<bool>) -> WmResult<SwayHandle> {
         // Two connections: `subscribe()` consumes its connection by
         // value, so a single socket can't multiplex command + event
         // traffic. Same constraint as i3.
         let mut cmd = Connection::new()
             .await
-            .map_err(|e| anyhow::anyhow!("connect to sway IPC (cmd socket): {e}"))?;
+            .map_err(|e| ipc_ctx(e, "connect to sway IPC (cmd socket)"))?;
         let events_conn = Connection::new()
             .await
-            .map_err(|e| anyhow::anyhow!("connect to sway IPC (events socket): {e}"))?;
+            .map_err(|e| ipc_ctx(e, "connect to sway IPC (events socket)"))?;
 
         // Seed snapshot before wrapping cmd in the Mutex — get_tree()
         // and get_workspaces() need `&mut Connection`.
@@ -108,7 +110,7 @@ impl SwayBackend {
         let mut stream = events_conn
             .subscribe([EventType::Window, EventType::Workspace])
             .await
-            .map_err(|e| anyhow::anyhow!("subscribe to sway window+workspace events: {e}"))?;
+            .map_err(|e| ipc_ctx(e, "subscribe to sway window+workspace events"))?;
 
         let snap_for_task = snapshot.clone();
         let event_task = tokio::spawn(async move {
@@ -154,16 +156,16 @@ impl SwayBackend {
         })
     }
 
-    async fn run(&self, payload: &str) -> Result<()> {
+    async fn run(&self, payload: &str) -> WmResult<()> {
         let outcomes = self
             .cmd
             .lock()
             .await
             .run_command(payload)
             .await
-            .map_err(|e| anyhow::anyhow!("sway RUN_COMMAND failed: {payload}: {e}"))?;
+            .map_err(|e| ipc_ctx(e, "sway RUN_COMMAND"))?;
         for r in outcomes {
-            r.with_context(|| format!("sway rejected `{payload}`"))?;
+            r.map_err(|e| WmError::Rejected(format!("{payload}: {e}")))?;
         }
         Ok(())
     }
@@ -171,23 +173,23 @@ impl SwayBackend {
 
 #[async_trait]
 impl WindowManager for SwayBackend {
-    async fn focus(&self, window: &WindowId) -> Result<()> {
+    async fn focus(&self, window: &WindowId) -> WmResult<()> {
         let cmd = composite_criteria_command(window, "focus");
         self.run(&cmd).await
     }
 
-    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> Result<()> {
+    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
         let target = format_workspace_target(workspace);
         let action = format!("move container to {target}");
         let cmd = composite_criteria_command(window, &action);
         self.run(&cmd).await
     }
 
-    async fn focused_window(&self) -> Result<Option<WindowId>> {
+    async fn focused_window(&self) -> WmResult<Option<WindowId>> {
         Ok(self.snapshot.read().await.focused_class.clone())
     }
 
-    async fn focused_context(&self) -> Result<Option<FocusedWindowContext>> {
+    async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
         let s = self.snapshot.read().await;
         if s.focused_class.is_none() && s.focused_title.is_none() && s.active_workspace.is_none() {
             return Ok(None);
@@ -199,27 +201,27 @@ impl WindowManager for SwayBackend {
         }))
     }
 
-    async fn list_windows(&self) -> Result<Vec<Window>> {
+    async fn list_windows(&self) -> WmResult<Vec<Window>> {
         let tree = self
             .cmd
             .lock()
             .await
             .get_tree()
             .await
-            .map_err(|e| anyhow::anyhow!("sway GET_TREE: {e}"))?;
+            .map_err(|e| ipc_ctx(e, "sway GET_TREE"))?;
         let mut out = Vec::new();
         collect_windows(&tree, None, &mut out);
         Ok(out)
     }
 
-    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+    async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
         let ws = self
             .cmd
             .lock()
             .await
             .get_workspaces()
             .await
-            .map_err(|e| anyhow::anyhow!("sway GET_WORKSPACES: {e}"))?;
+            .map_err(|e| ipc_ctx(e, "sway GET_WORKSPACES"))?;
         Ok(ws
             .into_iter()
             .map(|w| WorkspaceInfo {
@@ -231,18 +233,18 @@ impl WindowManager for SwayBackend {
             .collect())
     }
 
-    async fn run_raw(&self, payload: &str) -> Result<()> {
+    async fn run_raw(&self, payload: &str) -> WmResult<()> {
         self.run(payload).await
     }
 
-    async fn list_outputs(&self) -> Result<Vec<OutputInfo>> {
+    async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
         let outputs = self
             .cmd
             .lock()
             .await
             .get_outputs()
             .await
-            .map_err(|e| anyhow::anyhow!("sway GET_OUTPUTS: {e}"))?;
+            .map_err(|e| ipc_ctx(e, "sway GET_OUTPUTS"))?;
         Ok(outputs
             .into_iter()
             .map(|o| OutputInfo {
