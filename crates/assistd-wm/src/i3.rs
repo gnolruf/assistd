@@ -24,8 +24,8 @@ use tokio_i3ipc::{
 use crate::criteria::{escape_for_criteria, format_workspace_target};
 use crate::error::ipc_ctx;
 use crate::{
-    FocusedWindowContext, WindowId, WindowManager, WmError, WmResult, Window, WorkspaceId,
-    WorkspaceInfo,
+    FocusedWindowContext, Layout, ResizeDir, WindowId, WindowManager, WmError, WmResult, Window,
+    WorkspaceId, WorkspaceInfo,
 };
 
 /// Cached focus state. Seeded from `get_tree()` + `get_workspaces()`
@@ -227,9 +227,36 @@ impl WindowManager for I3Backend {
             .collect())
     }
 
-    async fn run_raw(&self, payload: &str) -> WmResult<()> {
-        self.run(payload).await
+    async fn resize_width(
+        &self,
+        window: &WindowId,
+        direction: ResizeDir,
+        pixels: u32,
+    ) -> WmResult<()> {
+        self.run(&i3_resize_payload(window, direction, pixels)).await
     }
+
+    async fn set_layout(&self, layout: Layout) -> WmResult<()> {
+        self.run(&i3_layout_payload(layout)).await
+    }
+}
+
+/// Format the i3 RUN_COMMAND payload for `resize_width`. Factored out
+/// so unit tests can assert on the literal string without a live i3.
+fn i3_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
+    format!(
+        r#"[class="{}"] resize {} width {} px or 0 ppt"#,
+        escape_for_criteria(window),
+        direction.as_str(),
+        pixels,
+    )
+}
+
+/// Format the i3 RUN_COMMAND payload for `set_layout`. The bare
+/// `layout <name>` form acts on the focused container — the same shape
+/// `i3-msg layout …` produces.
+fn i3_layout_payload(layout: Layout) -> String {
+    format!("layout {}", layout.as_str())
 }
 
 /// Walk the i3 tree recursively, emitting one [`Window`] per leaf node
@@ -340,4 +367,38 @@ fn walk_focused(node: &reply::Node) -> Option<&reply::Node> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_payload_shape_and_escape() {
+        let p = i3_resize_payload(&"Firefox".to_string(), ResizeDir::Grow, 50);
+        assert_eq!(p, r#"[class="Firefox"] resize grow width 50 px or 0 ppt"#);
+    }
+
+    #[test]
+    fn resize_payload_escapes_quote_and_backslash() {
+        // Catches a regression where a class containing the criteria
+        // delimiters (`"`, `\`) would inject into the i3 command.
+        let p = i3_resize_payload(&r#"a"b\c"#.to_string(), ResizeDir::Shrink, 5);
+        assert_eq!(p, r#"[class="a\"b\\c"] resize shrink width 5 px or 0 ppt"#);
+    }
+
+    #[test]
+    fn layout_payload_emits_bare_form() {
+        // i3 / sway treat `layout <name>` as acting on the focused
+        // container — no criteria prefix.
+        for (l, expected) in [
+            (Layout::Default, "layout default"),
+            (Layout::Tabbed, "layout tabbed"),
+            (Layout::Stacking, "layout stacking"),
+            (Layout::SplitH, "layout splith"),
+            (Layout::SplitV, "layout splitv"),
+        ] {
+            assert_eq!(i3_layout_payload(l), expected);
+        }
+    }
 }

@@ -35,8 +35,8 @@ use tokio::task::JoinHandle;
 use crate::criteria::{escape_for_criteria, format_workspace_target};
 use crate::error::ipc_ctx;
 use crate::{
-    FocusedWindowContext, OutputInfo, WindowId, WindowManager, WmError, WmResult, Window,
-    WorkspaceId, WorkspaceInfo,
+    FocusedWindowContext, Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError,
+    WmResult, Window, WorkspaceId, WorkspaceInfo,
 };
 
 /// Cached focus state. Seeded from `get_tree()` + `get_workspaces()` at
@@ -233,8 +233,18 @@ impl WindowManager for SwayBackend {
             .collect())
     }
 
-    async fn run_raw(&self, payload: &str) -> WmResult<()> {
-        self.run(payload).await
+    async fn resize_width(
+        &self,
+        window: &WindowId,
+        direction: ResizeDir,
+        pixels: u32,
+    ) -> WmResult<()> {
+        self.run(&sway_resize_payload(window, direction, pixels))
+            .await
+    }
+
+    async fn set_layout(&self, layout: Layout) -> WmResult<()> {
+        self.run(&sway_layout_payload(layout)).await
     }
 
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
@@ -273,6 +283,21 @@ impl WindowManager for SwayBackend {
 fn composite_criteria_command(window: &WindowId, action: &str) -> String {
     let escaped = escape_for_criteria(window);
     format!(r#"[app_id="{escaped}"] {action}; [class="{escaped}"] {action}"#)
+}
+
+/// Format the Sway RUN_COMMAND payload for `resize_width`. Uses the
+/// same `app_id|class` composite as `focus` / `move_to_workspace` so a
+/// caller-provided id matches whichever form Sway has registered.
+fn sway_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
+    let action = format!("resize {} width {} px or 0 ppt", direction.as_str(), pixels);
+    composite_criteria_command(window, &action)
+}
+
+/// Format the Sway RUN_COMMAND payload for `set_layout`. Acts on the
+/// focused container — same form i3 uses, since Sway speaks the i3
+/// IPC dialect for `layout`.
+fn sway_layout_payload(layout: Layout) -> String {
+    format!("layout {}", layout.as_str())
 }
 
 /// Walk Sway's tree recursively, emitting one [`Window`] per leaf view.
@@ -433,5 +458,39 @@ mod tests {
             s,
             r#"[app_id="kitty"] move container to workspace number 3; [class="kitty"] move container to workspace number 3"#
         );
+    }
+
+    #[test]
+    fn resize_payload_shape_and_escape() {
+        // Sway mirrors the focus dispatch's `app_id|class` composite so
+        // the resize lands regardless of which identifier the
+        // user-supplied id matches.
+        let p = sway_resize_payload(&"firefox".to_string(), ResizeDir::Grow, 50);
+        assert_eq!(
+            p,
+            r#"[app_id="firefox"] resize grow width 50 px or 0 ppt; [class="firefox"] resize grow width 50 px or 0 ppt"#
+        );
+    }
+
+    #[test]
+    fn resize_payload_escapes_quote_and_backslash() {
+        let p = sway_resize_payload(&r#"a"b\c"#.to_string(), ResizeDir::Shrink, 5);
+        assert_eq!(
+            p,
+            r#"[app_id="a\"b\\c"] resize shrink width 5 px or 0 ppt; [class="a\"b\\c"] resize shrink width 5 px or 0 ppt"#
+        );
+    }
+
+    #[test]
+    fn layout_payload_emits_bare_form() {
+        // No criteria prefix — Sway speaks the i3 dialect for layout
+        // and acts on the focused container.
+        for (l, expected) in [
+            (Layout::Default, "layout default"),
+            (Layout::Tabbed, "layout tabbed"),
+            (Layout::SplitH, "layout splith"),
+        ] {
+            assert_eq!(sway_layout_payload(l), expected);
+        }
     }
 }

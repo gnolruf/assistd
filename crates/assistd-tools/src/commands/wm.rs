@@ -33,8 +33,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::process::Command as ProcCommand;
 
-use assistd_wm::criteria::escape_for_criteria;
-use assistd_wm::{WindowManager, WmError};
+use assistd_wm::{Layout, ResizeDir, WindowManager, WmError};
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
 
@@ -298,19 +297,24 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
         return Ok(help_output(RESIZE_HELP.to_string()));
     }
     let class = &args[0];
-    let direction = args[1].as_str();
-    if direction != "grow" && direction != "shrink" {
-        return Ok(CommandOutput::failed(
-            2,
-            error_line(
-                NAME,
-                format_args!("resize: direction must be 'grow' or 'shrink', got '{direction}'"),
-                "Use",
-                "wm resize <class> <grow|shrink> <px>",
-            )
-            .into_bytes(),
-        ));
-    }
+    let direction: ResizeDir = match args[1].parse() {
+        Ok(d) => d,
+        Err(_) => {
+            return Ok(CommandOutput::failed(
+                2,
+                error_line(
+                    NAME,
+                    format_args!(
+                        "resize: direction must be 'grow' or 'shrink', got '{}'",
+                        args[1]
+                    ),
+                    "Use",
+                    "wm resize <class> <grow|shrink> <px>",
+                )
+                .into_bytes(),
+            ));
+        }
+    };
     let amount: u32 = match args[2].parse() {
         Ok(n) => n,
         Err(_) => {
@@ -329,13 +333,7 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
             ));
         }
     };
-    let payload = format!(
-        r#"[class="{}"] resize {} width {} px or 0 ppt"#,
-        escape_for_criteria(class),
-        direction,
-        amount,
-    );
-    match wm.run_raw(&payload).await {
+    match wm.resize_width(class, direction, amount).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
         Err(e) => {
             let (label, hint) = hint_for(&e);
@@ -469,22 +467,23 @@ async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
     if args.is_empty() {
         return Ok(help_output(LAYOUT_HELP.to_string()));
     }
-    let name = args[0].as_str();
-    let valid = ["default", "tabbed", "stacking", "splith", "splitv"];
-    if !valid.contains(&name) {
-        return Ok(CommandOutput::failed(
-            2,
-            error_line(
-                NAME,
-                format_args!("layout: '{name}' is not a known layout"),
-                "Use",
-                "default | tabbed | stacking | splith | splitv",
-            )
-            .into_bytes(),
-        ));
-    }
-    let payload = format!("layout {name}");
-    match wm.run_raw(&payload).await {
+    let raw = args[0].as_str();
+    let layout: Layout = match raw.parse() {
+        Ok(l) => l,
+        Err(_) => {
+            return Ok(CommandOutput::failed(
+                2,
+                error_line(
+                    NAME,
+                    format_args!("layout: '{raw}' is not a known layout"),
+                    "Use",
+                    "default | tabbed | stacking | splith | splitv",
+                )
+                .into_bytes(),
+            ));
+        }
+    };
+    match wm.set_layout(layout).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
         Err(e) => {
             let (label, hint) = hint_for(&e);
@@ -492,7 +491,7 @@ async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
                 1,
                 error_line(
                     NAME,
-                    format_args!("layout '{name}' failed: {e}"),
+                    format_args!("layout '{layout}' failed: {e}"),
                     label,
                     hint,
                 )
@@ -506,13 +505,15 @@ async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
 mod tests {
     use super::*;
     use assistd_wm::{
-        NoWindowManager, OutputInfo, Window, WindowId, WmResult, WorkspaceId, WorkspaceInfo,
+        Layout, NoWindowManager, OutputInfo, ResizeDir, Window, WindowId, WmResult, WorkspaceId,
+        WorkspaceInfo,
     };
     use std::sync::Mutex;
 
     /// Test fixture for [`WindowManager`]. Records every call so tests
-    /// can assert on the i3 payload that would be dispatched, and lets
-    /// each operation be wired to fail with a canned error message.
+    /// can assert on the typed argument tuples that would be dispatched
+    /// to the backend, and lets each operation be wired to fail with a
+    /// canned error message.
     #[derive(Default)]
     struct StubWm {
         connected: bool,
@@ -522,10 +523,12 @@ mod tests {
         focused: Option<WindowId>,
         focus_calls: Mutex<Vec<WindowId>>,
         move_calls: Mutex<Vec<(WindowId, WorkspaceId)>>,
-        raw_calls: Mutex<Vec<String>>,
+        resize_calls: Mutex<Vec<(WindowId, ResizeDir, u32)>>,
+        layout_calls: Mutex<Vec<Layout>>,
         focus_err: Option<String>,
         move_err: Option<String>,
-        raw_err: Option<String>,
+        resize_err: Option<String>,
+        layout_err: Option<String>,
         list_windows_err: Option<String>,
         list_workspaces_err: Option<String>,
         list_outputs_err: Option<String>,
@@ -592,9 +595,24 @@ mod tests {
             }
             Ok(self.workspaces.clone())
         }
-        async fn run_raw(&self, payload: &str) -> WmResult<()> {
-            self.raw_calls.lock().unwrap().push(payload.to_string());
-            if let Some(msg) = &self.raw_err {
+        async fn resize_width(
+            &self,
+            window: &WindowId,
+            direction: ResizeDir,
+            pixels: u32,
+        ) -> WmResult<()> {
+            self.resize_calls
+                .lock()
+                .unwrap()
+                .push((window.clone(), direction, pixels));
+            if let Some(msg) = &self.resize_err {
+                return Err(ipc_err(msg));
+            }
+            Ok(())
+        }
+        async fn set_layout(&self, layout: Layout) -> WmResult<()> {
+            self.layout_calls.lock().unwrap().push(layout);
+            if let Some(msg) = &self.layout_err {
                 return Err(ipc_err(msg));
             }
             Ok(())
@@ -848,25 +866,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resize_dispatches_correct_payload() {
+    async fn resize_dispatches_typed_args() {
+        // wm.rs passes the parsed direction + pixel count to the
+        // backend's typed `resize_width` method. The literal i3-syntax
+        // payload (`[class="…"] resize …`) and its escape semantics are
+        // tested in `assistd_wm::i3::tests` directly — wm.rs no longer
+        // formats the payload itself.
         let stub = Arc::new(StubWm::connected());
         let out = run_wm(stub.clone(), &["resize", "Firefox", "grow", "50"]).await;
         assert_eq!(out.exit_code, 0);
-        let calls = stub.raw_calls.lock().unwrap();
-        assert_eq!(
-            *calls,
-            vec![r#"[class="Firefox"] resize grow width 50 px or 0 ppt"#.to_string()]
-        );
+        let calls = stub.resize_calls.lock().unwrap();
+        assert_eq!(*calls, vec![("Firefox".to_string(), ResizeDir::Grow, 50)]);
     }
 
     #[tokio::test]
-    async fn resize_escapes_special_chars_in_class() {
+    async fn resize_passes_special_chars_unaltered() {
+        // The class arg flows through to the backend without
+        // transformation; backends own the escape step. This guards
+        // against a regression where wm.rs starts pre-escaping
+        // (which would double-escape once the backend escapes again).
         let stub = Arc::new(StubWm::connected());
         let _ = run_wm(stub.clone(), &["resize", r#"a"b\c"#, "shrink", "5"]).await;
-        let calls = stub.raw_calls.lock().unwrap();
+        let calls = stub.resize_calls.lock().unwrap();
         assert_eq!(
             *calls,
-            vec![r#"[class="a\"b\\c"] resize shrink width 5 px or 0 ppt"#.to_string()]
+            vec![(r#"a"b\c"#.to_string(), ResizeDir::Shrink, 5)]
         );
     }
 
@@ -962,12 +986,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn layout_dispatches_payload() {
+    async fn layout_dispatches_typed_arg() {
         let stub = Arc::new(StubWm::connected());
         let out = run_wm(stub.clone(), &["layout", "tabbed"]).await;
         assert_eq!(out.exit_code, 0);
-        let calls = stub.raw_calls.lock().unwrap();
-        assert_eq!(*calls, vec!["layout tabbed".to_string()]);
+        let calls = stub.layout_calls.lock().unwrap();
+        assert_eq!(*calls, vec![Layout::Tabbed]);
     }
 
     #[test]

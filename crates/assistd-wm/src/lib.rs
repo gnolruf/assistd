@@ -19,7 +19,7 @@
 
 use async_trait::async_trait;
 
-pub mod criteria;
+pub(crate) mod criteria;
 pub mod error;
 pub mod i3;
 pub mod sway;
@@ -119,6 +119,99 @@ pub struct OutputInfo {
     pub focused_workspace: Option<String>,
 }
 
+/// Direction for a width-resize operation. Decoded from the
+/// `wm resize <class> <grow|shrink> <px>` user argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeDir {
+    Grow,
+    Shrink,
+}
+
+impl ResizeDir {
+    /// i3/sway-syntax keyword used inside the `resize` command payload.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResizeDir::Grow => "grow",
+            ResizeDir::Shrink => "shrink",
+        }
+    }
+}
+
+impl std::fmt::Display for ResizeDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ResizeDir {
+    type Err = ParseResizeDirError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "grow" => Ok(ResizeDir::Grow),
+            "shrink" => Ok(ResizeDir::Shrink),
+            _ => Err(ParseResizeDirError),
+        }
+    }
+}
+
+/// Returned by [`ResizeDir::from_str`] when the input is neither
+/// `"grow"` nor `"shrink"`. Carries no data — the caller already has
+/// the offending input and renders its own message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseResizeDirError;
+
+/// Layout to apply to the focused container. Decoded from the
+/// `wm layout <name>` user argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Default,
+    Tabbed,
+    Stacking,
+    SplitH,
+    SplitV,
+}
+
+impl Layout {
+    /// i3/sway-syntax keyword used inside the `layout` command payload.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Layout::Default => "default",
+            Layout::Tabbed => "tabbed",
+            Layout::Stacking => "stacking",
+            Layout::SplitH => "splith",
+            Layout::SplitV => "splitv",
+        }
+    }
+}
+
+impl std::fmt::Display for Layout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Layout {
+    type Err = ParseLayoutError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "default" => Ok(Layout::Default),
+            "tabbed" => Ok(Layout::Tabbed),
+            "stacking" => Ok(Layout::Stacking),
+            "splith" => Ok(Layout::SplitH),
+            "splitv" => Ok(Layout::SplitV),
+            _ => Err(ParseLayoutError),
+        }
+    }
+}
+
+/// Returned by [`Layout::from_str`] when the input is not a known
+/// layout name. Carries no data; the caller already has the offending
+/// input and renders its own message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseLayoutError;
+
 /// Snapshot of what the user is currently looking at. Returned by
 /// [`WindowManager::focused_context`]. Each field is independently
 /// optional because compositors deliver focus / title / workspace
@@ -200,12 +293,20 @@ pub trait WindowManager: Send + Sync + 'static {
         Ok(None)
     }
 
-    /// Send a raw, backend-specific command payload. Used for operations
-    /// that have no typed return value and where adding a per-operation
-    /// trait method would be a thin wrapper around a string format
-    /// (resize, layout, …). Callers are responsible for the syntax —
-    /// keep this behind subcommands that document the expected dialect.
-    async fn run_raw(&self, payload: &str) -> WmResult<()>;
+    /// Resize the named window's width by `pixels`. Backends format the
+    /// compositor-specific payload internally so consumers don't reach
+    /// into IPC syntax.
+    async fn resize_width(
+        &self,
+        window: &WindowId,
+        direction: ResizeDir,
+        pixels: u32,
+    ) -> WmResult<()>;
+
+    /// Set the layout of the currently-focused container. Acts on the
+    /// focus state — no window argument — because that's how
+    /// `i3-msg layout …` and `swaymsg layout …` behave.
+    async fn set_layout(&self, layout: Layout) -> WmResult<()>;
 
     /// Enumerate the compositor's outputs (monitors). Sway exposes a
     /// detailed reply via `GET_OUTPUTS`; i3's reply is much sparser, so
@@ -255,7 +356,15 @@ impl WindowManager for NoWindowManager {
     async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
         Err(WmError::Disconnected)
     }
-    async fn run_raw(&self, _payload: &str) -> WmResult<()> {
+    async fn resize_width(
+        &self,
+        _window: &WindowId,
+        _direction: ResizeDir,
+        _pixels: u32,
+    ) -> WmResult<()> {
+        Err(WmError::Disconnected)
+    }
+    async fn set_layout(&self, _layout: Layout) -> WmResult<()> {
         Err(WmError::Disconnected)
     }
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
@@ -305,8 +414,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_window_manager_refuses_run_raw() {
-        assert!(NoWindowManager.run_raw("focus").await.is_err());
+    async fn no_window_manager_refuses_resize() {
+        let err = NoWindowManager
+            .resize_width(&"win".into(), ResizeDir::Grow, 10)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WmError::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn no_window_manager_refuses_layout() {
+        let err = NoWindowManager.set_layout(Layout::Tabbed).await.unwrap_err();
+        assert!(matches!(err, WmError::Disconnected));
+    }
+
+    #[test]
+    fn resize_dir_roundtrips() {
+        assert_eq!("grow".parse::<ResizeDir>().unwrap(), ResizeDir::Grow);
+        assert_eq!("shrink".parse::<ResizeDir>().unwrap(), ResizeDir::Shrink);
+        assert_eq!(ResizeDir::Grow.to_string(), "grow");
+        assert!("sideways".parse::<ResizeDir>().is_err());
+    }
+
+    #[test]
+    fn layout_roundtrips() {
+        for (s, l) in [
+            ("default", Layout::Default),
+            ("tabbed", Layout::Tabbed),
+            ("stacking", Layout::Stacking),
+            ("splith", Layout::SplitH),
+            ("splitv", Layout::SplitV),
+        ] {
+            assert_eq!(s.parse::<Layout>().unwrap(), l);
+            assert_eq!(l.to_string(), s);
+        }
+        assert!("spinning".parse::<Layout>().is_err());
     }
 
     #[tokio::test]
@@ -338,7 +480,15 @@ mod tests {
             async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
                 Ok(Vec::new())
             }
-            async fn run_raw(&self, _payload: &str) -> WmResult<()> {
+            async fn resize_width(
+                &self,
+                _w: &WindowId,
+                _d: ResizeDir,
+                _p: u32,
+            ) -> WmResult<()> {
+                Ok(())
+            }
+            async fn set_layout(&self, _l: Layout) -> WmResult<()> {
                 Ok(())
             }
         }
