@@ -48,15 +48,139 @@ impl WmHandle {
 }
 
 /// Identifier for a window or client in the compositor's namespace.
-/// Represented as a string because i3, Sway, and Hyprland each use
-/// different underlying id types — the i3 backend treats this as the
-/// X11 window class (e.g. `"Firefox"`).
-pub type WindowId = String;
+///
+/// PR 3a: opaque newtype around `String` — same payload as the prior
+/// `pub type WindowId = String` alias, but the wrapper prevents
+/// argument swaps in `move_to_workspace(window, workspace)` and lets
+/// PR 3b retarget the inner repr (compositor con_id, `NonZeroU64`)
+/// without churning every call site again.
+///
+/// For now, the inner string is the X11 class on the i3 backend or the
+/// `app_id`/class fallback on Sway. PR 3b moves this to the
+/// compositor's unique container id so two windows of the same class
+/// can be addressed independently.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WindowId(String);
 
-/// Workspace identifier. Same reasoning as [`WindowId`]. The i3 backend
-/// emits `workspace number N` when this parses as `u32`, otherwise
-/// `workspace "<name>"`.
-pub type WorkspaceId = String;
+impl WindowId {
+    /// Borrow the inner string. Use this where backend code needs
+    /// `&str` for criteria escaping or `format!`-style interpolation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for WindowId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for WindowId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for WindowId {
+    fn from(s: String) -> Self {
+        WindowId(s)
+    }
+}
+
+impl From<&str> for WindowId {
+    fn from(s: &str) -> Self {
+        WindowId(s.to_string())
+    }
+}
+
+impl From<WindowId> for String {
+    fn from(w: WindowId) -> String {
+        w.0
+    }
+}
+
+impl std::str::FromStr for WindowId {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(WindowId(s.to_string()))
+    }
+}
+
+/// Workspace identifier — either a number (i3/sway's `workspace number
+/// N` form, robust to renames) or a free-form name (`workspace
+/// "<name>"`).
+///
+/// Modeling this as an enum kills the parse-round-trip the previous
+/// type alias forced on `format_workspace_target`: the parser ran on
+/// every focus/move dispatch even though the caller already knew which
+/// form they meant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WorkspaceId {
+    /// Numeric workspace, addressed by `workspace number N`.
+    Num(u32),
+    /// Named workspace, addressed by `workspace "<name>"`.
+    Name(String),
+}
+
+impl WorkspaceId {
+    /// Construct a numeric workspace id.
+    pub fn num(n: u32) -> Self {
+        WorkspaceId::Num(n)
+    }
+
+    /// Construct a named workspace id. Use this for non-numeric
+    /// workspace names like `"scratch"` or `"1:web"` — note that
+    /// `"1:web"` is a *named* workspace because it does not parse as
+    /// `u32` even though it visually starts with a digit.
+    pub fn name(s: impl Into<String>) -> Self {
+        WorkspaceId::Name(s.into())
+    }
+}
+
+impl std::fmt::Display for WorkspaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkspaceId::Num(n) => write!(f, "{n}"),
+            WorkspaceId::Name(s) => f.write_str(s),
+        }
+    }
+}
+
+impl std::str::FromStr for WorkspaceId {
+    type Err = std::convert::Infallible;
+
+    /// Parse-or-name: a string that round-trips through `u32::from_str`
+    /// becomes [`WorkspaceId::Num`]; everything else is
+    /// [`WorkspaceId::Name`]. Mirrors the previous alias-based
+    /// `format_workspace_target` behaviour so call sites don't change.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(n) = s.parse::<u32>() {
+            Ok(WorkspaceId::Num(n))
+        } else {
+            Ok(WorkspaceId::Name(s.to_string()))
+        }
+    }
+}
+
+impl From<&str> for WorkspaceId {
+    fn from(s: &str) -> Self {
+        s.parse().expect("WorkspaceId parser is infallible")
+    }
+}
+
+impl From<String> for WorkspaceId {
+    fn from(s: String) -> Self {
+        s.as_str().into()
+    }
+}
+
+impl From<u32> for WorkspaceId {
+    fn from(n: u32) -> Self {
+        WorkspaceId::Num(n)
+    }
+}
 
 /// One row of [`WindowManager::list_windows`]. The trait's wider methods
 /// (`focus`, `move_to_workspace`) take a [`WindowId`] alone; this struct

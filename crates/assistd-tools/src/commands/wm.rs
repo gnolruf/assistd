@@ -33,7 +33,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::process::Command as ProcCommand;
 
-use assistd_wm::{Layout, ResizeDir, WindowManager, WmError};
+use assistd_wm::{Layout, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
 
@@ -176,8 +176,12 @@ async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<Command
     if args.is_empty() {
         return Ok(help_output(FOCUS_HELP.to_string()));
     }
-    let class = &args[0];
-    match wm.focus(class).await {
+    // PR 3a: arg parsing into WindowId is currently infallible (any
+    // string is a valid id). PR 3b will tighten this to a decimal
+    // con_id parser and reject non-numeric input here.
+    let class_arg = &args[0];
+    let id: WindowId = class_arg.parse().expect("WindowId parser is infallible");
+    match wm.focus(&id).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
         Err(e) => {
             let (label, hint) = hint_for(&e);
@@ -185,7 +189,7 @@ async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<Command
                 1,
                 error_line(
                     NAME,
-                    format_args!("focus '{class}' failed: {e}"),
+                    format_args!("focus '{class_arg}' failed: {e}"),
                     label,
                     hint,
                 )
@@ -205,9 +209,13 @@ async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandO
     if args.len() < 2 {
         return Ok(help_output(MOVE_HELP.to_string()));
     }
-    let class = &args[0];
-    let workspace = &args[1];
-    match wm.move_to_workspace(class, workspace).await {
+    let class_arg = &args[0];
+    let workspace_arg = &args[1];
+    let id: WindowId = class_arg.parse().expect("WindowId parser is infallible");
+    let workspace: WorkspaceId = workspace_arg
+        .parse()
+        .expect("WorkspaceId parser is infallible");
+    match wm.move_to_workspace(&id, &workspace).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
         Err(e) => {
             let (label, hint) = hint_for(&e);
@@ -215,7 +223,7 @@ async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandO
                 1,
                 error_line(
                     NAME,
-                    format_args!("move '{class}' to '{workspace}' failed: {e}"),
+                    format_args!("move '{class_arg}' to '{workspace_arg}' failed: {e}"),
                     label,
                     hint,
                 )
@@ -270,8 +278,8 @@ async fn handle_open(args: &[String]) -> Result<CommandOutput> {
 
 async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
     match wm.focused_window().await {
-        Ok(Some(class)) => {
-            let mut out = class.into_bytes();
+        Ok(Some(id)) => {
+            let mut out = String::from(id).into_bytes();
             out.push(b'\n');
             Ok(CommandOutput::ok(out))
         }
@@ -333,7 +341,8 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
             ));
         }
     };
-    match wm.resize_width(class, direction, amount).await {
+    let id: WindowId = class.parse().expect("WindowId parser is infallible");
+    match wm.resize_width(&id, direction, amount).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
         Err(e) => {
             let (label, hint) = hint_for(&e);
@@ -363,7 +372,7 @@ async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
             });
             let mut out = String::new();
             for w in windows {
-                out.push_str(&w.id);
+                out.push_str(w.id.as_str());
                 out.push('\t');
                 out.push_str(w.workspace.as_deref().unwrap_or("-"));
                 out.push('\t');
@@ -707,7 +716,7 @@ mod tests {
         let out = run_wm(stub.clone(), &["focus", "Firefox"]).await;
         assert_eq!(out.exit_code, 0);
         let calls = stub.focus_calls.lock().unwrap();
-        assert_eq!(*calls, vec!["Firefox".to_string()]);
+        assert_eq!(*calls, vec![WindowId::from("Firefox")]);
     }
 
     #[tokio::test]
@@ -783,7 +792,12 @@ mod tests {
         let out = run_wm(stub.clone(), &["move", "Firefox", "3"]).await;
         assert_eq!(out.exit_code, 0);
         let calls = stub.move_calls.lock().unwrap();
-        assert_eq!(*calls, vec![("Firefox".to_string(), "3".to_string())]);
+        // "3" parses as numeric → WorkspaceId::Num(3); the args are
+        // typed all the way through to the backend now.
+        assert_eq!(
+            *calls,
+            vec![(WindowId::from("Firefox"), WorkspaceId::Num(3))]
+        );
     }
 
     #[tokio::test]
@@ -876,7 +890,10 @@ mod tests {
         let out = run_wm(stub.clone(), &["resize", "Firefox", "grow", "50"]).await;
         assert_eq!(out.exit_code, 0);
         let calls = stub.resize_calls.lock().unwrap();
-        assert_eq!(*calls, vec![("Firefox".to_string(), ResizeDir::Grow, 50)]);
+        assert_eq!(
+            *calls,
+            vec![(WindowId::from("Firefox"), ResizeDir::Grow, 50)]
+        );
     }
 
     #[tokio::test]
@@ -890,7 +907,7 @@ mod tests {
         let calls = stub.resize_calls.lock().unwrap();
         assert_eq!(
             *calls,
-            vec![(r#"a"b\c"#.to_string(), ResizeDir::Shrink, 5)]
+            vec![(WindowId::from(r#"a"b\c"#), ResizeDir::Shrink, 5)]
         );
     }
 

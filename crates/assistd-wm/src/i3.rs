@@ -33,9 +33,15 @@ use crate::{
 /// `Window::Title`, `Window::Close`, and `Workspace::Focus` event so
 /// the synchronous reads in [`I3Backend::focused_window`] and
 /// [`I3Backend::focused_context`] hit memory rather than IPC.
+///
+/// `focused_class` is the raw X11 class string from the i3 reply —
+/// stored as `String` rather than [`WindowId`] because this snapshot
+/// also feeds `focused_context()`'s human-readable
+/// [`FocusedWindowContext::class`] field. Conversion to [`WindowId`]
+/// happens at the trait method boundary.
 #[derive(Default, Clone)]
 struct Snapshot {
-    focused_class: Option<WindowId>,
+    focused_class: Option<String>,
     focused_title: Option<String>,
     active_workspace: Option<String>,
 }
@@ -165,7 +171,7 @@ impl I3Backend {
 #[async_trait]
 impl WindowManager for I3Backend {
     async fn focus(&self, window: &WindowId) -> WmResult<()> {
-        let cmd = format!(r#"[class="{}"] focus"#, escape_for_criteria(window));
+        let cmd = format!(r#"[class="{}"] focus"#, escape_for_criteria(window.as_str()));
         self.run(&cmd).await
     }
 
@@ -173,14 +179,20 @@ impl WindowManager for I3Backend {
         let target = format_workspace_target(workspace);
         let cmd = format!(
             r#"[class="{}"] move container to {}"#,
-            escape_for_criteria(window),
+            escape_for_criteria(window.as_str()),
             target,
         );
         self.run(&cmd).await
     }
 
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
-        Ok(self.snapshot.read().await.focused_class.clone())
+        Ok(self
+            .snapshot
+            .read()
+            .await
+            .focused_class
+            .clone()
+            .map(WindowId::from))
     }
 
     async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
@@ -246,7 +258,7 @@ impl WindowManager for I3Backend {
 fn i3_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
     format!(
         r#"[class="{}"] resize {} width {} px or 0 ppt"#,
-        escape_for_criteria(window),
+        escape_for_criteria(window.as_str()),
         direction.as_str(),
         pixels,
     )
@@ -280,7 +292,7 @@ fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<W
         && let Some(class) = props.class.clone()
     {
         out.push(Window {
-            id: class,
+            id: WindowId::from(class),
             title: props.title.clone(),
             workspace: next_ws.map(|s| s.to_string()),
         });
@@ -375,7 +387,7 @@ mod tests {
 
     #[test]
     fn resize_payload_shape_and_escape() {
-        let p = i3_resize_payload(&"Firefox".to_string(), ResizeDir::Grow, 50);
+        let p = i3_resize_payload(&WindowId::from("Firefox"), ResizeDir::Grow, 50);
         assert_eq!(p, r#"[class="Firefox"] resize grow width 50 px or 0 ppt"#);
     }
 
@@ -383,7 +395,7 @@ mod tests {
     fn resize_payload_escapes_quote_and_backslash() {
         // Catches a regression where a class containing the criteria
         // delimiters (`"`, `\`) would inject into the i3 command.
-        let p = i3_resize_payload(&r#"a"b\c"#.to_string(), ResizeDir::Shrink, 5);
+        let p = i3_resize_payload(&WindowId::from(r#"a"b\c"#), ResizeDir::Shrink, 5);
         assert_eq!(p, r#"[class="a\"b\\c"] resize shrink width 5 px or 0 ppt"#);
     }
 

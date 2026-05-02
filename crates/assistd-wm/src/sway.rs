@@ -47,9 +47,12 @@ use crate::{
 /// The field is named `focused_class` to match the i3 backend, but on
 /// Sway it stores `app_id` for Wayland-native windows and falls back to
 /// the X11 class only for XWayland views — see the module-level doc.
+/// Stored as raw `String` (rather than [`WindowId`]) so it doubles as
+/// the source of [`FocusedWindowContext::class`] for the prompt-injection
+/// path; conversion to [`WindowId`] happens at the trait method boundary.
 #[derive(Default, Clone)]
 struct Snapshot {
-    focused_class: Option<WindowId>,
+    focused_class: Option<String>,
     focused_title: Option<String>,
     active_workspace: Option<String>,
 }
@@ -186,7 +189,13 @@ impl WindowManager for SwayBackend {
     }
 
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
-        Ok(self.snapshot.read().await.focused_class.clone())
+        Ok(self
+            .snapshot
+            .read()
+            .await
+            .focused_class
+            .clone()
+            .map(WindowId::from))
     }
 
     async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
@@ -281,7 +290,7 @@ impl WindowManager for SwayBackend {
 /// each clause that matches 0 windows is a silent success, so the
 /// composite is safe even when only one form applies.
 fn composite_criteria_command(window: &WindowId, action: &str) -> String {
-    let escaped = escape_for_criteria(window);
+    let escaped = escape_for_criteria(window.as_str());
     format!(r#"[app_id="{escaped}"] {action}; [class="{escaped}"] {action}"#)
 }
 
@@ -327,7 +336,7 @@ fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>)
                     .and_then(|p| p.title.clone())
             });
             out.push(Window {
-                id,
+                id: WindowId::from(id),
                 title,
                 workspace: next_ws.map(|s| s.to_string()),
             });
@@ -438,20 +447,20 @@ mod tests {
 
     #[test]
     fn composite_criteria_command_emits_app_id_and_class_clauses() {
-        let s = composite_criteria_command(&"firefox".to_string(), "focus");
+        let s = composite_criteria_command(&WindowId::from("firefox"), "focus");
         assert_eq!(s, r#"[app_id="firefox"] focus; [class="firefox"] focus"#);
     }
 
     #[test]
     fn composite_criteria_command_escapes_special_chars() {
-        let s = composite_criteria_command(&r#"a"b\c"#.to_string(), "focus");
+        let s = composite_criteria_command(&WindowId::from(r#"a"b\c"#), "focus");
         assert_eq!(s, r#"[app_id="a\"b\\c"] focus; [class="a\"b\\c"] focus"#);
     }
 
     #[test]
     fn composite_criteria_command_uses_full_action() {
         let s = composite_criteria_command(
-            &"kitty".to_string(),
+            &WindowId::from("kitty"),
             "move container to workspace number 3",
         );
         assert_eq!(
@@ -465,7 +474,7 @@ mod tests {
         // Sway mirrors the focus dispatch's `app_id|class` composite so
         // the resize lands regardless of which identifier the
         // user-supplied id matches.
-        let p = sway_resize_payload(&"firefox".to_string(), ResizeDir::Grow, 50);
+        let p = sway_resize_payload(&WindowId::from("firefox"), ResizeDir::Grow, 50);
         assert_eq!(
             p,
             r#"[app_id="firefox"] resize grow width 50 px or 0 ppt; [class="firefox"] resize grow width 50 px or 0 ppt"#
@@ -474,7 +483,7 @@ mod tests {
 
     #[test]
     fn resize_payload_escapes_quote_and_backslash() {
-        let p = sway_resize_payload(&r#"a"b\c"#.to_string(), ResizeDir::Shrink, 5);
+        let p = sway_resize_payload(&WindowId::from(r#"a"b\c"#), ResizeDir::Shrink, 5);
         assert_eq!(
             p,
             r#"[app_id="a\"b\\c"] resize shrink width 5 px or 0 ppt; [class="a\"b\\c"] resize shrink width 5 px or 0 ppt"#

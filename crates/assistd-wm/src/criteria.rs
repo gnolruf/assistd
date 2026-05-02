@@ -15,12 +15,12 @@ pub fn escape_for_criteria(s: &str) -> String {
 }
 
 /// Numeric workspace IDs become `workspace number N` (robust to renames);
-/// non-numeric become `workspace "<escaped name>"`.
+/// named workspaces become `workspace "<escaped name>"`. The enum
+/// variant carries the choice — no parse round-trip on every call.
 pub fn format_workspace_target(ws: &WorkspaceId) -> String {
-    if let Ok(n) = ws.parse::<u32>() {
-        format!("workspace number {n}")
-    } else {
-        format!(r#"workspace "{}""#, escape_for_criteria(ws))
+    match ws {
+        WorkspaceId::Num(n) => format!("workspace number {n}"),
+        WorkspaceId::Name(s) => format!(r#"workspace "{}""#, escape_for_criteria(s)),
     }
 }
 
@@ -40,14 +40,20 @@ mod tests {
 
     #[test]
     fn format_workspace_target_numeric() {
-        assert_eq!(format_workspace_target(&"3".into()), "workspace number 3");
-        assert_eq!(format_workspace_target(&"10".into()), "workspace number 10");
+        assert_eq!(
+            format_workspace_target(&WorkspaceId::Num(3)),
+            "workspace number 3"
+        );
+        assert_eq!(
+            format_workspace_target(&WorkspaceId::Num(10)),
+            "workspace number 10"
+        );
     }
 
     #[test]
     fn format_workspace_target_named() {
         assert_eq!(
-            format_workspace_target(&"scratch".into()),
+            format_workspace_target(&WorkspaceId::name("scratch")),
             r#"workspace "scratch""#
         );
     }
@@ -55,16 +61,27 @@ mod tests {
     #[test]
     fn format_workspace_target_named_with_quote_is_escaped() {
         assert_eq!(
-            format_workspace_target(&r#"weird"name"#.into()),
+            format_workspace_target(&WorkspaceId::name(r#"weird"name"#)),
             r#"workspace "weird\"name""#
         );
     }
 
     #[test]
-    fn format_workspace_target_u32_parseable_is_numeric() {
-        // Any string that parses as `u32` becomes `workspace number N`,
-        // including zero-padded variants — `"03"` → `workspace number 3`.
-        // i3 normalizes the number, so the semantics match.
-        assert_eq!(format_workspace_target(&"03".into()), "workspace number 3");
+    fn workspace_id_parse_or_name() {
+        // Parse-or-name preserves the prior alias semantics: digits
+        // round-trip through u32 → Num, everything else → Name.
+        // Zero-padded numbers normalize: "03" parses to 3.
+        assert_eq!("3".parse::<WorkspaceId>().unwrap(), WorkspaceId::Num(3));
+        assert_eq!("03".parse::<WorkspaceId>().unwrap(), WorkspaceId::Num(3));
+        assert_eq!(
+            "scratch".parse::<WorkspaceId>().unwrap(),
+            WorkspaceId::Name("scratch".into())
+        );
+        // "1:web" doesn't parse as u32 → Named (this matches the old
+        // alias because i3 itself treats it as a name).
+        assert_eq!(
+            "1:web".parse::<WorkspaceId>().unwrap(),
+            WorkspaceId::Name("1:web".into())
+        );
     }
 }
