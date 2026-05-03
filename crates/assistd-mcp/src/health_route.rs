@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use crate::error::{McpError, mcp_error_line};
 use crate::handle::HealthState;
 use crate::{McpToolAdapter, Tool};
 
@@ -64,19 +65,21 @@ impl Tool for HealthRoutedTool {
                 // `assistd_tools::PresentResult` so the agent loop's
                 // dispatch site (`agent.rs::dispatch_tool_call`) reads
                 // `output`/`exit_code`/`duration_ms`/`truncated` straight
-                // into the tool_role message body. The model gets a
-                // typed error it can react to without the daemon
-                // surfacing this as a transport failure.
+                // into the tool_role message body. Routing through
+                // `mcp_error_line(ServerDown)` keeps the line shape
+                // consistent with every other MCP failure the model
+                // sees, so the recovery hint (`Try: another tool while
+                // the server reconnects`) is the same regardless of
+                // whether the failure was caught at the wrapper or at
+                // the transport. `duration_ms` stays 0 — the wrapper
+                // short-circuits before any RPC, so 0 is honest.
                 Ok(json!({
                     "type": "error",
-                    "output": format!(
-                        "[error] {}: MCP server '{}' unavailable; tool cannot be called.",
-                        self.inner.name(),
-                        self.server_name,
-                    ),
+                    "output": mcp_error_line(self.inner.name(), &McpError::ServerDown),
                     "exit_code": -1,
                     "duration_ms": 0,
                     "truncated": false,
+                    "server_name": self.server_name,
                 }))
             }
         }
@@ -133,9 +136,18 @@ mod tests {
         assert_eq!(result["type"], "error");
         assert_eq!(result["exit_code"], -1);
         assert_eq!(result["truncated"], false);
+        // Server name carried out-of-band on a separate field so the
+        // message body itself can stay convention-compliant without
+        // having to embed the supervisor's identifier mid-sentence.
+        assert_eq!(result["server_name"], "web");
         let output = result["output"].as_str().unwrap();
-        assert!(output.contains("mcp__web__search"));
-        assert!(output.contains("'web'"));
+        // Convention-compliant line: `[error] <tool>: <what>. <Hint>: <recovery>\n`
+        assert!(output.starts_with("[error] mcp__web__search: "), "{output}");
+        assert!(
+            output.contains("Try:") || output.contains("Check:"),
+            "missing recovery hint: {output}"
+        );
+        assert!(output.ends_with('\n'));
     }
 
     #[tokio::test]

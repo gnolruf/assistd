@@ -165,9 +165,19 @@ async fn server_crash_short_circuits_subsequent_calls() {
         .expect("invoke returns Ok with a typed error JSON");
     assert_eq!(post["type"], "error");
     assert_eq!(post["exit_code"], -1);
+    // Server name carried out-of-band on `server_name` so the message
+    // body itself can stay convention-compliant without embedding the
+    // supervisor's identifier mid-sentence.
+    assert_eq!(post["server_name"], "fake");
     let output = post["output"].as_str().unwrap();
-    assert!(output.contains("mcp__fake__echo"));
-    assert!(output.contains("'fake'"));
+    assert!(
+        output.starts_with("[error] mcp__fake__echo: "),
+        "convention prefix missing: {output}"
+    );
+    assert!(
+        output.contains("Try:") || output.contains("Check:"),
+        "recovery hint missing: {output}"
+    );
 
     handle.shutdown().await;
 }

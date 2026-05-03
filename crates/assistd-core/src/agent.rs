@@ -878,6 +878,189 @@ mod tests {
         assert_eq!(pushed[1][0].content, "(no memories)");
     }
 
+    /// Fake `Tool` shaped like `McpToolAdapter`: returns the exact
+    /// envelope the live adapter produces (`type` / `output` /
+    /// `exit_code` / `duration_ms` / `truncated`) so the agent loop
+    /// dispatch path is exercised end-to-end without bringing
+    /// `assistd-mcp` in as a dev-dep. Carries a fixed scripted result
+    /// so the test can assert what flowed back to the model.
+    struct FakeMcpTool {
+        name: String,
+        result: Value,
+    }
+
+    #[async_trait]
+    impl assistd_tools::Tool for FakeMcpTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "fake mcp tool"
+        }
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn invoke(&self, _args: Value) -> anyhow::Result<Value> {
+            Ok(self.result.clone())
+        }
+    }
+
+    /// Acceptance: a turn that mixes an MCP-shaped tool call and a
+    /// native `run` call drives both through `dispatch_tool_call`,
+    /// emits a `ToolCall`/`ToolResult` pair for each, and pushes both
+    /// results back to the backend in order. This is the wire-level
+    /// proof that the agent loop is tool-source-agnostic — MCP tools
+    /// and native tools share the same dispatch/result/feedback path.
+    #[tokio::test]
+    async fn agent_loop_mixes_native_and_mcp_calls() {
+        use assistd_tools::commands::EchoCommand;
+        let mut reg = CommandRegistry::new();
+        reg.register(EchoCommand);
+        let mut tools = ToolRegistry::new();
+        tools.register(RunTool::new(
+            Arc::new(reg),
+            &ToolsOutputConfig::default(),
+            std::env::temp_dir().join(format!("assistd-agent-test-mix-{}", std::process::id())),
+        ));
+        // Same envelope shape `McpToolAdapter::tool_result_to_json`
+        // produces for a `ToolResult::Text("calendar entries")`.
+        tools.register(FakeMcpTool {
+            name: "mcp__google_calendar__list_events".into(),
+            result: serde_json::json!({
+                "type": "text",
+                "output": "10:00 standup\n14:00 review",
+                "exit_code": 0,
+                "duration_ms": 12,
+                "truncated": false,
+            }),
+        });
+        let tools = Arc::new(tools);
+
+        let backend = MockBackend::with(vec![
+            // Step 1: model calls the MCP tool.
+            StepOutcome::ToolCalls(vec![ToolCall {
+                id: "c-mcp".into(),
+                name: "mcp__google_calendar__list_events".into(),
+                arguments: serde_json::json!({"date": "tomorrow"}),
+            }]),
+            // Step 2: model follows up with a native `run` call —
+            // proving the loop accepts a different tool on the next
+            // step without state leaking from the prior MCP call.
+            StepOutcome::ToolCalls(vec![call("c-run", "echo hello")]),
+            StepOutcome::Final,
+        ]);
+
+        let (tx, mut rx) = mpsc::channel(32);
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "what's on my calendar tomorrow?".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let events = collect(&mut rx).await;
+
+        let names: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ToolCall { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["mcp__google_calendar__list_events", "run"],
+            "tool calls didn't fire in the scripted order"
+        );
+
+        let pushed = backend.pushed_results.lock().unwrap();
+        assert_eq!(pushed.len(), 2, "two push_tool_results round-trips");
+        assert!(
+            pushed[0][0].content.contains("standup"),
+            "MCP body must reach next step: {:?}",
+            pushed[0][0].content
+        );
+        assert!(
+            pushed[1][0].content.contains("hello"),
+            "native echo body must reach next step: {:?}",
+            pushed[1][0].content
+        );
+    }
+
+    /// Acceptance: when the MCP adapter returns its error envelope
+    /// (`exit_code: -1`, convention-compliant `output` line), the
+    /// agent loop threads it back to the model unchanged so the
+    /// recovery hint survives. Without this, a brittle catch-all
+    /// elsewhere in the dispatch path would clobber the line and the
+    /// model would lose the actionable next step.
+    #[tokio::test]
+    async fn agent_loop_propagates_mcp_error_envelope_to_next_step() {
+        let mut tools = ToolRegistry::new();
+        tools.register(FakeMcpTool {
+            name: "mcp__google_calendar__list_events".into(),
+            // Mirrors `error_envelope` in `assistd-mcp/src/lib.rs` —
+            // the line carries `Check:` which the model needs to see
+            // intact.
+            result: serde_json::json!({
+                "type": "error",
+                "output": "[error] mcp__google_calendar__list_events: \
+                           MCP server returned error code -32602: Invalid params. \
+                           Check: the arguments and try again\n",
+                "exit_code": -1,
+                "duration_ms": 7,
+                "truncated": false,
+            }),
+        });
+        let tools = Arc::new(tools);
+
+        let backend = MockBackend::with(vec![
+            StepOutcome::ToolCalls(vec![ToolCall {
+                id: "c-mcp".into(),
+                name: "mcp__google_calendar__list_events".into(),
+                arguments: serde_json::json!({}),
+            }]),
+            StepOutcome::Final,
+        ]);
+        let (tx, mut rx) = mpsc::channel(16);
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "what's on my calendar?".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        drop(collect(&mut rx).await);
+
+        let pushed = backend.pushed_results.lock().unwrap();
+        assert_eq!(pushed.len(), 1);
+        let payload = &pushed[0][0];
+        assert!(
+            payload
+                .content
+                .starts_with("[error] mcp__google_calendar__list_events: "),
+            "convention prefix lost: {:?}",
+            payload.content
+        );
+        assert!(
+            payload.content.contains("Check:"),
+            "recovery hint stripped before reaching the model: {:?}",
+            payload.content
+        );
+        assert!(
+            payload.content.contains("-32602"),
+            "rpc code lost: {:?}",
+            payload.content
+        );
+    }
+
     #[tokio::test]
     async fn cancellation_during_slow_step_preempts_loop() {
         // Fire a cancellation while the LLM step is still pending,
