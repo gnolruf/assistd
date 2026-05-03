@@ -57,6 +57,53 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
 }
 
 #[tokio::test]
+async fn external_shutdown_then_handle_shutdown_completes_quickly() {
+    // Mirrors daemon.rs:748-750 — signal task flips the shared
+    // shutdown_tx, then daemon awaits per-handle shutdown(). Both
+    // should finish well inside the 15s shutdown() ceiling.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
+        .await
+        .expect("server should start");
+
+    let _ = shutdown_tx.send(true);
+
+    let start = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+        .await
+        .expect("shutdown must not hit the 15s ceiling");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "daemon-style shutdown took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn dropping_handle_without_shutdown_aborts_supervisor() {
+    // Validates the Drop impl: dropping a handle releases the
+    // supervisor task. Detect that by holding a watch_health
+    // receiver; once the supervisor is gone its health_tx is dropped
+    // and `changed()` returns Err.
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
+        .await
+        .expect("server should start");
+
+    let mut health_rx = handle.watch_health();
+    drop(handle);
+
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        while health_rx.changed().await.is_ok() {}
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "supervisor must release health_tx within 2s after Drop"
+    );
+}
+
+#[tokio::test]
 async fn server_crash_short_circuits_subsequent_calls() {
     // Spin up the fake server, take a successful `echo`, then call
     // `crash_me` to simulate a transport death. After a brief grace
