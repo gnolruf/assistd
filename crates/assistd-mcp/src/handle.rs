@@ -126,6 +126,20 @@ impl McpServerHandle {
     }
 }
 
+impl Drop for McpServerHandle {
+    fn drop(&mut self) {
+        // Defense-in-depth for the no-shutdown() path (panics, tests,
+        // future misuse). Graceful path is `shutdown()`; here we just
+        // signal + abort. Stdio children still die because
+        // `Child::kill_on_drop(true)` is set in stdio.rs — aborting
+        // the supervisor drops the Child future, which sends SIGKILL.
+        let _ = self.supervisor_shutdown_tx.send(true);
+        if let Some(task) = self.supervisor_task.take() {
+            task.abort();
+        }
+    }
+}
+
 /// `McpClient` impl that points at the live transport via
 /// `RwLock<Option<Arc<dyn McpClient>>>`. The supervisor swaps it on
 /// crash/restart so the registry-side `McpToolAdapter` keeps holding
