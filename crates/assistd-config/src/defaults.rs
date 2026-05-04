@@ -95,6 +95,17 @@ pub const DEFAULT_PRESENCE_HOTKEY: &str = "Super+Escape";
 
 pub const DEFAULT_DAEMON_SHUTDOWN_GRACE_SECS: u64 = 5;
 
+// `[timeouts]` — hard deadlines on awaits that cross a process boundary.
+// All values are safety valves, not normal-case budgets. Every trip is
+// logged at `warn!` so an operator on slow hardware can tune the
+// offending value.
+pub const DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS: u64 = 30;
+pub const DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS: u64 = 10;
+pub const DEFAULT_TIMEOUT_PRESENCE_WAKE_LOAD_SECS: u64 = 10;
+pub const DEFAULT_TIMEOUT_PRESENCE_WAKE_COLD_START_SECS: u64 = 60;
+pub const DEFAULT_TIMEOUT_DISPATCH_ENVELOPE_SECS: u64 = 600;
+pub const DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS: u64 = 30;
+
 pub const DEFAULT_IDLE_TO_DROWSY_MINS: u64 = 30;
 pub const DEFAULT_IDLE_TO_SLEEP_MINS: u64 = 120;
 pub const DEFAULT_GPU_MONITOR_ENABLED: bool = true;

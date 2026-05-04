@@ -31,10 +31,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use assistd_config::{LlamaServerConfig, ModelConfig};
+use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::PresenceState;
 use assistd_llm::{LlamaServerControl, LlamaService};
 use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, watch};
+use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 /// Owner of the llama-server handle and the daemon-wide presence state.
@@ -50,6 +51,7 @@ pub struct PresenceManager {
     transition: AsyncMutex<()>,
     llama_server: LlamaServerConfig,
     model: ModelConfig,
+    timeouts: TimeoutsConfig,
     control: LlamaServerControl,
     // `Some` iff state is `Active` or `Drowsy`.
     llama: AsyncMutex<Option<LlamaService>>,
@@ -154,6 +156,7 @@ impl PresenceManager {
     pub async fn new_active(
         llama_server: LlamaServerConfig,
         model: ModelConfig,
+        timeouts: TimeoutsConfig,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>> {
         let control = LlamaServerControl::new(&llama_server.host, llama_server.port)
@@ -194,6 +197,7 @@ impl PresenceManager {
             transition: AsyncMutex::new(()),
             llama_server,
             model,
+            timeouts,
             control,
             llama: AsyncMutex::new(None),
             current_inner_shutdown,
@@ -432,12 +436,32 @@ impl PresenceManager {
         }
 
         // Take the service out of its slot and join its supervisor task.
+        // Bound the join with `timeouts.presence_sleep_secs` so a wedged
+        // supervisor can't pin the transition lock indefinitely. On
+        // timeout we surface an error and rely on `kill_on_drop(true)`
+        // (set in process.rs::spawn) to send SIGKILL when the service
+        // handle drops with the original future.
         let service = self.llama.lock().await.take();
         if let Some(service) = service {
-            service
-                .shutdown()
-                .await
-                .context("llama-server shutdown during sleep")?;
+            let budget = Duration::from_secs(self.timeouts.presence_sleep_secs);
+            match timeout(budget, service.shutdown()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return Err(anyhow::Error::new(e))
+                        .context("llama-server shutdown during sleep");
+                }
+                Err(_) => {
+                    warn!(
+                        target: "assistd::presence",
+                        timeout_secs = self.timeouts.presence_sleep_secs,
+                        "llama-server shutdown timed out during sleep; transition aborted"
+                    );
+                    return Err(anyhow!(
+                        "llama-server shutdown timed out after {}s during sleep",
+                        self.timeouts.presence_sleep_secs
+                    ));
+                }
+            }
         }
 
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = PresenceState::Sleeping;
@@ -473,12 +497,26 @@ impl PresenceManager {
         let _inflight = self.inflight.write().await;
 
         let started = Instant::now();
-        self.control
-            .unload_model(&self.model.name)
-            .await
-            .with_context(|| {
-                format!("llama-server /models/unload failed for {}", self.model.name)
-            })?;
+        let unload_budget = Duration::from_secs(self.timeouts.presence_drowse_secs);
+        match timeout(unload_budget, self.control.unload_model(&self.model.name)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(e).with_context(|| {
+                    format!("llama-server /models/unload failed for {}", self.model.name)
+                });
+            }
+            Err(_) => {
+                warn!(
+                    target: "assistd::presence",
+                    timeout_secs = self.timeouts.presence_drowse_secs,
+                    "llama-server /models/unload timed out during drowse; transition aborted"
+                );
+                return Err(anyhow!(
+                    "llama-server /models/unload timed out after {}s during drowse",
+                    self.timeouts.presence_drowse_secs
+                ));
+            }
+        }
 
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = PresenceState::Drowsy;
         let _ = self.state_tx.send(PresenceState::Drowsy);
@@ -511,14 +549,28 @@ impl PresenceManager {
         let _wake_marker = WakeMarker::new(Arc::clone(&self.wake_started));
 
         let started = Instant::now();
+        let load_budget = Duration::from_secs(self.timeouts.presence_wake_load_secs);
         match prior {
             PresenceState::Drowsy => {
-                self.control
-                    .load_model(&self.model.name)
-                    .await
-                    .with_context(|| {
-                        format!("llama-server /models/load failed for {}", self.model.name)
-                    })?;
+                match timeout(load_budget, self.control.load_model(&self.model.name)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        return Err(e).with_context(|| {
+                            format!("llama-server /models/load failed for {}", self.model.name)
+                        });
+                    }
+                    Err(_) => {
+                        warn!(
+                            target: "assistd::presence",
+                            timeout_secs = self.timeouts.presence_wake_load_secs,
+                            "llama-server /models/load timed out during wake; transition aborted"
+                        );
+                        return Err(anyhow!(
+                            "llama-server /models/load timed out after {}s during wake",
+                            self.timeouts.presence_wake_load_secs
+                        ));
+                    }
+                }
             }
             PresenceState::Sleeping => {
                 let (inner_tx, inner_rx) = watch::channel(false);
@@ -527,26 +579,56 @@ impl PresenceManager {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = Some(inner_tx);
 
-                let service =
-                    LlamaService::start(self.llama_server.clone(), self.model.clone(), inner_rx)
-                        .await
-                        .map_err(|e| {
-                            warn!(
-                                target: "assistd::presence",
-                                "wake cold-start failed: {e}"
-                            );
-                            anyhow!(e)
-                        })
-                        .context("llama-server cold-start failed during wake")?;
+                let cold_budget = Duration::from_secs(self.timeouts.presence_wake_cold_start_secs);
+                let service = match timeout(
+                    cold_budget,
+                    LlamaService::start(self.llama_server.clone(), self.model.clone(), inner_rx),
+                )
+                .await
+                {
+                    Ok(Ok(svc)) => svc,
+                    Ok(Err(e)) => {
+                        warn!(
+                            target: "assistd::presence",
+                            "wake cold-start failed: {e}"
+                        );
+                        return Err(anyhow!(e))
+                            .context("llama-server cold-start failed during wake");
+                    }
+                    Err(_) => {
+                        warn!(
+                            target: "assistd::presence",
+                            timeout_secs = self.timeouts.presence_wake_cold_start_secs,
+                            "llama-server cold-start timed out during wake; transition aborted"
+                        );
+                        return Err(anyhow!(
+                            "llama-server cold-start timed out after {}s during wake",
+                            self.timeouts.presence_wake_cold_start_secs
+                        ));
+                    }
+                };
 
                 *self.llama.lock().await = Some(service);
 
-                self.control
-                    .load_model(&self.model.name)
-                    .await
-                    .with_context(|| {
-                        format!("llama-server /models/load failed for {}", self.model.name)
-                    })?;
+                match timeout(load_budget, self.control.load_model(&self.model.name)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        return Err(e).with_context(|| {
+                            format!("llama-server /models/load failed for {}", self.model.name)
+                        });
+                    }
+                    Err(_) => {
+                        warn!(
+                            target: "assistd::presence",
+                            timeout_secs = self.timeouts.presence_wake_load_secs,
+                            "llama-server /models/load timed out during wake; transition aborted"
+                        );
+                        return Err(anyhow!(
+                            "llama-server /models/load timed out after {}s during wake",
+                            self.timeouts.presence_wake_load_secs
+                        ));
+                    }
+                }
             }
             PresenceState::Active => unreachable!("short-circuited above"),
         }
@@ -604,6 +686,7 @@ impl PresenceManager {
             transition: AsyncMutex::new(()),
             llama_server,
             model,
+            timeouts: TimeoutsConfig::default(),
             control,
             llama: AsyncMutex::new(None),
             current_inner_shutdown: Arc::new(StdMutex::new(None)),

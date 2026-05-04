@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 
-use assistd_config::{LlamaServerConfig, ModelConfig};
+use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_core::{
     AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceManager,
     PresenceState, ToolRegistry, VoiceOutputController,
@@ -89,9 +89,14 @@ fn model_spec() -> ModelConfig {
 async fn new_active_manager(port: u16) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     set_mode("normal");
     let (tx, rx) = watch::channel(false);
-    let m = PresenceManager::new_active(server_spec(port), model_spec(), rx)
-        .await
-        .expect("cold-start wake failed");
+    let m = PresenceManager::new_active(
+        server_spec(port),
+        model_spec(),
+        TimeoutsConfig::default(),
+        rx,
+    )
+    .await
+    .expect("cold-start wake failed");
     (m, tx)
 }
 

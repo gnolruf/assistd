@@ -1,11 +1,13 @@
 //! HTTP streaming chat client for the locally-managed llama-server.
 //!
 //! `LlamaChatClient` implements `LlmBackend`, so the daemon can drop it into
-//! `AppState::llm` exactly where `EchoBackend` used to live. A single
-//! `tokio::sync::Mutex<Conversation>` guards the entire chat history, and
-//! it is held for the full duration of the streaming HTTP call — serializing
-//! concurrent queries is the right trade-off for a single-user desktop
-//! assistant: the second query always sees the first query's final reply.
+//! `AppState::llm` exactly where `EchoBackend` used to live. A
+//! `tokio::sync::Mutex<Conversation>` guards the chat history. The mutex is
+//! held only across the cheap state-mutation phases (`push_user`,
+//! `ensure_budget`, building the wire payload, and the post-stream
+//! `push_assistant`/`rollback`). The HTTP streaming call itself runs
+//! lock-free, so a slow or hung server never blocks a concurrent
+//! `push_user`/`set_transient_context` call from another caller.
 //!
 //! Tool-use support comes via three extra `LlmBackend` methods:
 //! `push_user`, `push_tool_results`, and `step`. The agent loop in
@@ -17,11 +19,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::Result;
-use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig};
+use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_tools::Attachment;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
+use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use super::conversation::{Conversation, Summarizer, ToolCallRecord};
@@ -40,6 +43,7 @@ pub struct LlamaChatClient {
     base_url: String,
     chat: ChatConfig,
     model: ModelConfig,
+    timeouts: TimeoutsConfig,
     conv: Mutex<Conversation>,
 }
 
@@ -52,6 +56,7 @@ impl LlamaChatClient {
         chat: &ChatConfig,
         server: &LlamaServerConfig,
         model: &ModelConfig,
+        timeouts: &TimeoutsConfig,
     ) -> Result<Self, ChatClientError> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -65,13 +70,14 @@ impl LlamaChatClient {
             base_url,
             chat: chat.clone(),
             model: model.clone(),
+            timeouts: timeouts.clone(),
             conv: Mutex::new(conv),
         })
     }
 
     async fn stream_openai(
         &self,
-        payload: &wire::ChatRequest<'_>,
+        body: Vec<u8>,
         tx: &mpsc::Sender<LlmEvent>,
     ) -> StreamOutcome {
         let url = format!("{}/v1/chat/completions", self.base_url);
@@ -79,7 +85,8 @@ impl LlamaChatClient {
             .client
             .post(&url)
             .header("Accept", "text/event-stream")
-            .json(payload)
+            .header("Content-Type", "application/json")
+            .body(body)
             .send()
             .await
         {
@@ -99,13 +106,30 @@ impl LlamaChatClient {
         let mut reader = SseLineReader::new();
         let mut accum = StreamAccum::default();
         let mut saw_done = false;
+        let inactivity = Duration::from_secs(self.timeouts.stream_inactivity_secs);
 
         loop {
-            let chunk = match response.chunk().await {
-                Ok(Some(c)) => c,
-                Ok(None) => break,
-                Err(e) => {
+            let chunk = match timeout(inactivity, response.chunk()).await {
+                Ok(Ok(Some(c))) => c,
+                Ok(Ok(None)) => break,
+                Ok(Err(e)) => {
                     return fold_mid_stream_error(accum, ChatClientError::Http(e));
+                }
+                Err(_) => {
+                    warn!(
+                        target: "assistd::chat",
+                        timeout_secs = self.timeouts.stream_inactivity_secs,
+                        bytes_so_far = accum.text.len(),
+                        tool_call_builders = accum.tool_calls.len(),
+                        "SSE stream inactive past deadline; aborting read"
+                    );
+                    return fold_mid_stream_error(
+                        accum,
+                        ChatClientError::Sse(format!(
+                            "no bytes received for {}s",
+                            self.timeouts.stream_inactivity_secs
+                        )),
+                    );
                 }
             };
             reader.feed(&chunk);
@@ -179,42 +203,60 @@ impl LlamaChatClient {
 #[async_trait]
 impl LlmBackend for LlamaChatClient {
     async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> Result<()> {
-        let lock_start = std::time::Instant::now();
-        let mut conv = self.conv.lock().await;
-        if lock_start.elapsed() > Duration::from_secs(1) {
-            warn!(
-                target: "assistd::chat",
-                "chat lock contended for {:?}",
-                lock_start.elapsed()
-            );
-        }
-
-        conv.push_user(prompt);
-
-        if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
-            warn!(
-                target: "assistd::chat",
-                "ensure_budget failed ({e}); falling back to truncation"
-            );
-            conv.truncate_to_budget(&self.chat, &self.model);
-        }
-
-        let wire_messages = conv.as_wire_messages();
-        let payload = wire::ChatRequest {
-            model: self.model.name.as_str(),
-            messages: wire_messages,
-            stream: true,
-            temperature: self.chat.temperature,
-            max_tokens: self.chat.max_response_tokens,
-            top_p: self.chat.top_p,
-            top_k: self.chat.top_k,
-            min_p: self.chat.min_p,
-            presence_penalty: self.chat.presence_penalty,
-            tools: None,
-            tool_choice: None,
+        // Phase 1: build the wire body under the lock. ensure_budget
+        // may run a summarization HTTP round-trip; that's still on the
+        // locked path because it mutates `Conversation` (drops summarized
+        // turns and inserts a synthetic summary message). Locked phase
+        // is bounded — it does not include the streaming response read.
+        let body_bytes = {
+            let lock_start = std::time::Instant::now();
+            let mut conv = self.conv.lock().await;
+            if lock_start.elapsed() > Duration::from_secs(1) {
+                warn!(
+                    target: "assistd::chat",
+                    "chat lock contended for {:?}",
+                    lock_start.elapsed()
+                );
+            }
+            conv.push_user(prompt);
+            if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
+                warn!(
+                    target: "assistd::chat",
+                    "ensure_budget failed ({e}); falling back to truncation"
+                );
+                conv.truncate_to_budget(&self.chat, &self.model);
+            }
+            let wire_messages = conv.as_wire_messages();
+            let payload = wire::ChatRequest {
+                model: self.model.name.as_str(),
+                messages: wire_messages,
+                stream: true,
+                temperature: self.chat.temperature,
+                max_tokens: self.chat.max_response_tokens,
+                top_p: self.chat.top_p,
+                top_k: self.chat.top_k,
+                min_p: self.chat.min_p,
+                presence_penalty: self.chat.presence_penalty,
+                tools: None,
+                tool_choice: None,
+            };
+            match serde_json::to_vec(&payload) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Roll back the user push so the caller can retry
+                    // without observing the half-committed message.
+                    conv.rollback_last_user();
+                    return Err(anyhow::Error::new(ChatClientError::Json(e)));
+                }
+            }
         };
 
-        match self.stream_openai(&payload, &tx).await {
+        // Phase 2: stream the response with no conv lock held.
+        let outcome = self.stream_openai(body_bytes, &tx).await;
+
+        // Phase 3: re-acquire and apply the outcome.
+        let mut conv = self.conv.lock().await;
+        match outcome {
             StreamOutcome::Ok(accum) => {
                 conv.push_assistant(accum.text);
                 let _ = tx.send(LlmEvent::Done).await;
@@ -265,33 +307,44 @@ impl LlmBackend for LlamaChatClient {
     }
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> Result<StepOutcome> {
-        let mut conv = self.conv.lock().await;
-
-        if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
-            warn!(
-                target: "assistd::chat",
-                "ensure_budget failed ({e}); falling back to truncation"
-            );
-            conv.truncate_to_budget(&self.chat, &self.model);
-        }
-
-        let wire_messages = conv.as_wire_messages();
-        let has_tools = !tools.is_empty();
-        let payload = wire::ChatRequest {
-            model: self.model.name.as_str(),
-            messages: wire_messages,
-            stream: true,
-            temperature: self.chat.temperature,
-            max_tokens: self.chat.max_response_tokens,
-            top_p: self.chat.top_p,
-            top_k: self.chat.top_k,
-            min_p: self.chat.min_p,
-            presence_penalty: self.chat.presence_penalty,
-            tools: if has_tools { Some(tools) } else { None },
-            tool_choice: if has_tools { Some("auto") } else { None },
+        // Phase 1: build the wire body under the lock.
+        let body_bytes = {
+            let mut conv = self.conv.lock().await;
+            if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
+                warn!(
+                    target: "assistd::chat",
+                    "ensure_budget failed ({e}); falling back to truncation"
+                );
+                conv.truncate_to_budget(&self.chat, &self.model);
+            }
+            let wire_messages = conv.as_wire_messages();
+            let has_tools = !tools.is_empty();
+            let payload = wire::ChatRequest {
+                model: self.model.name.as_str(),
+                messages: wire_messages,
+                stream: true,
+                temperature: self.chat.temperature,
+                max_tokens: self.chat.max_response_tokens,
+                top_p: self.chat.top_p,
+                top_k: self.chat.top_k,
+                min_p: self.chat.min_p,
+                presence_penalty: self.chat.presence_penalty,
+                tools: if has_tools { Some(tools) } else { None },
+                tool_choice: if has_tools { Some("auto") } else { None },
+            };
+            match serde_json::to_vec(&payload) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(anyhow::Error::new(ChatClientError::Json(e)));
+                }
+            }
         };
 
-        let outcome = self.stream_openai(&payload, &tx).await;
+        // Phase 2: stream the response lock-free.
+        let outcome = self.stream_openai(body_bytes, &tx).await;
+
+        // Phase 3: re-acquire and commit the step outcome.
+        let mut conv = self.conv.lock().await;
         match outcome {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)

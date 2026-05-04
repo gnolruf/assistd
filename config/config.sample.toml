@@ -501,3 +501,18 @@ hotkey = "Super+Escape"
 #
 # [mcp.servers.headers]
 # Authorization = "Bearer YOUR_TOKEN_HERE"
+
+# ---- Timeouts -----------------------------------------------------------
+# Hard deadlines on awaits that cross a process boundary (HTTP, SSE
+# chunk reads, llama-server subprocess shutdown). Defaults are generous
+# safety valves, not normal-case latency budgets — every trip is logged
+# at warn so an operator on slow hardware can identify and tune the
+# offending value. Set fields here to override defaults.
+#
+# [timeouts]
+# presence_sleep_secs = 30           # presence.sleep: SIGTERM grace + slack
+# presence_drowse_secs = 10          # POST /models/unload
+# presence_wake_load_secs = 10       # POST /models/load on wake
+# presence_wake_cold_start_secs = 60 # llama-server spawn + first /health = 200
+# dispatch_envelope_secs = 600       # outer cap on a single dispatch call
+# stream_inactivity_secs = 30        # SSE per-chunk no-bytes deadline

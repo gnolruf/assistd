@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig};
+use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent, StepOutcome};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,6 +48,11 @@ enum StreamResponse {
     /// Serve a 200 OK chunked stream of the deltas, then drop the connection
     /// before emitting `[DONE]`.
     DropAfterDeltas(Vec<String>),
+    /// Serve a 200 OK chunked stream of the deltas, then go quiet — hold
+    /// the socket open without writing further bytes until the test drops
+    /// the server. Used to exercise the per-chunk inactivity timeout in
+    /// `LlamaChatClient::stream_openai`.
+    StallAfterDeltas(Vec<String>),
     /// Respond with a non-200 status and the given body.
     HttpError(u16, String),
 }
@@ -227,6 +232,21 @@ async fn handle_stream_response(
             }
             // Deliberately do not write [DONE] or a final chunk — just close.
         }
+        StreamResponse::StallAfterDeltas(deltas) => {
+            write_sse_headers(sock).await?;
+            for d in deltas {
+                let frame = format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
+                    serde_json::to_string(&d).unwrap()
+                );
+                write_chunk(sock, frame.as_bytes()).await?;
+            }
+            // Hold the socket open without writing further bytes. The
+            // client-side per-chunk inactivity timeout should fire and
+            // surface a streaming error. We sleep for far longer than
+            // any test-side timeout so the client wins the race.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
         StreamResponse::HttpError(status, body) => {
             write_error(sock, status, &body).await?;
         }
@@ -306,6 +326,7 @@ struct ClientCfg {
     chat: ChatConfig,
     server: LlamaServerConfig,
     model: ModelConfig,
+    timeouts: TimeoutsConfig,
 }
 
 fn chat_spec(port: u16) -> ClientCfg {
@@ -348,11 +369,12 @@ fn chat_spec(port: u16) -> ClientCfg {
             name: "test-model".into(),
             context_length: 12_000,
         },
+        timeouts: TimeoutsConfig::default(),
     }
 }
 
 fn build_client(cfg: &ClientCfg) -> LlamaChatClient {
-    LlamaChatClient::new(&cfg.chat, &cfg.server, &cfg.model).unwrap()
+    LlamaChatClient::new(&cfg.chat, &cfg.server, &cfg.model, &cfg.timeouts).unwrap()
 }
 
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
@@ -480,6 +502,115 @@ async fn http_500_returns_server_error() {
     let msg = format!("{:#}", result.unwrap_err());
     assert!(msg.contains("500"), "unexpected error message: {msg}");
     assert!(drain(&mut rx).await.is_empty());
+}
+
+#[tokio::test]
+async fn conv_lock_does_not_block_during_streaming() {
+    // Regression for the conv-mutex scope fix in `generate`: while one
+    // call is streaming, a concurrent `set_transient_context` (which
+    // takes the lock) must complete promptly rather than serializing
+    // behind the in-flight stream. Before the fix, the second call
+    // waited for the full stream to finish.
+    use assistd_llm::LlmBackend;
+    use std::time::Instant;
+
+    let script = Script::new();
+    // One slow stream — large number of small frames separated by
+    // `[DONE]` arrival via DropAfterDeltas would only produce one
+    // outgoing frame. Use the standard Deltas with many entries; the
+    // fake server writes them as fast as it can but the client still
+    // has to await each chunk through the SSE parser.
+    let many: Vec<String> = (0..200).map(|i| format!("d{i}")).collect();
+    script.push_stream(StreamResponse::Deltas(many)).await;
+    let (port, _server) = spawn_fake(script).await;
+
+    let client = Arc::new(build_client(&chat_spec(port)));
+    let (tx, mut rx) = mpsc::channel(1024);
+
+    // Kick off the slow generate.
+    let gen_client = client.clone();
+    let stream_task =
+        tokio::spawn(async move { gen_client.generate("first".into(), tx).await });
+
+    // Drain a few deltas to confirm the stream is mid-flight.
+    for _ in 0..3 {
+        rx.recv()
+            .await
+            .expect("at least a few deltas should arrive");
+    }
+
+    // Now: while the stream is still running, take the lock for a
+    // separate operation. With the lock-scope fix, this completes in
+    // milliseconds. Without it, this would block until the stream
+    // finishes — which we cap with an outer timeout.
+    let started = Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        client.set_transient_context("hello".into()),
+    )
+    .await
+    .expect("set_transient_context must not be blocked by an in-flight stream")
+    .expect("set_transient_context must succeed");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "set_transient_context took {:?}; conv lock was held across stream",
+        started.elapsed()
+    );
+
+    // Drain the rest of the stream and let the task complete.
+    while rx.recv().await.is_some() {}
+    stream_task
+        .await
+        .expect("stream task joined")
+        .expect("generate completed");
+}
+
+#[tokio::test]
+async fn stalled_stream_aborts_within_inactivity_timeout() {
+    // Server emits a couple of deltas then goes quiet on the socket.
+    // With `stream_inactivity_secs = 1`, the client should error within
+    // ~1s rather than hanging forever.
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::StallAfterDeltas(vec![
+            "hello".into(),
+            " ".into(),
+        ]))
+        .await;
+    let (port, _server) = spawn_fake(script).await;
+
+    let mut spec = chat_spec(port);
+    spec.timeouts.stream_inactivity_secs = 1;
+    let client =
+        LlamaChatClient::new(&spec.chat, &spec.server, &spec.model, &spec.timeouts).unwrap();
+
+    let (tx, mut rx) = mpsc::channel(32);
+    let started = std::time::Instant::now();
+    // The mid-stream timeout is folded into PartialAfterEmit because we
+    // already forwarded "hello"/" " deltas, so generate() returns Ok
+    // with a Done event. The signal is the latency: it must complete
+    // well under the test's outer 5s budget, near the configured 1s
+    // inactivity deadline.
+    let res = tokio::time::timeout(Duration::from_secs(5), client.generate("hi".into(), tx))
+        .await
+        .expect("generate must return within outer 5s budget");
+    res.expect("partial-after-emit path returns Ok");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "generate took too long ({elapsed:?}); inactivity timeout did not fire"
+    );
+
+    let events = drain(&mut rx).await;
+    let texts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            LlmEvent::Delta { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["hello".to_string(), " ".to_string()]);
+    assert!(events.iter().any(|e| matches!(e, LlmEvent::Done)));
 }
 
 #[tokio::test]

@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use assistd_config::SynthesisConfig;
 use async_trait::async_trait;
 
@@ -194,7 +194,10 @@ impl VoiceOutput for PiperVoiceOutput {
                     "piper synthesis failed"
                 );
                 self.record_failure(&e);
-                return Ok(());
+                // Surface the failure so the caller (the speech worker
+                // in state.rs) can log it loudly and a degradation
+                // shows up before the breaker trips.
+                return Err(anyhow::Error::new(e)).context("piper synthesis failed");
             }
         };
 
@@ -205,7 +208,7 @@ impl VoiceOutput for PiperVoiceOutput {
                 "piper playback enqueue failed"
             );
             self.record_failure(&e);
-            return Ok(());
+            return Err(anyhow::Error::new(e)).context("piper playback enqueue failed");
         }
 
         // Don't drain here — that would force every utterance to wait

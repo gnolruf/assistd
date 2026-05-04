@@ -14,6 +14,7 @@
 //! streaming.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -143,13 +144,28 @@ pub fn spawn_writer(
                     if *shutdown.borrow() {
                         // Drain remaining ops before exiting so an
                         // append_message issued just before SIGTERM
-                        // still lands.
+                        // still lands. `recv` (not `try_recv`) so a
+                        // task that's about to enqueue but hasn't quite
+                        // hit `send` yet still wins. The bounded outer
+                        // timeout prevents a wedged sender from
+                        // blocking daemon exit forever.
                         tracing::debug!(
                             target: "assistd::memory",
                             "shutdown received; draining writer queue"
                         );
-                        while let Ok(op) = rx.try_recv() {
-                            handle_op(&conn, op).await;
+                        let drain_deadline = Duration::from_secs(2);
+                        loop {
+                            match tokio::time::timeout(drain_deadline, rx.recv()).await {
+                                Ok(Some(op)) => handle_op(&conn, op).await,
+                                Ok(None) => break,
+                                Err(_) => {
+                                    tracing::debug!(
+                                        target: "assistd::memory",
+                                        "drain timed out with channel idle; exiting"
+                                    );
+                                    break;
+                                }
+                            }
                         }
                         break;
                     }
