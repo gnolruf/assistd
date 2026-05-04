@@ -26,6 +26,15 @@ pub use assistd_config::CodeBlockMode;
 /// pathological input — a real lang is at most a few chars.
 const MAX_LANG_LEN: usize = 32;
 
+/// Hard ceiling on `buf` size as a multiplier of `max_len`. The
+/// length safety net inside [`find_boundary`] should keep the buffer
+/// bounded in practice, but if the boundary detection ever fails to
+/// fire (regex bug, exotic content, etc.), this fallback guarantees a
+/// pathological LLM response can't grow `buf` without bound. Crossing
+/// this threshold force-flushes the accumulated text as a single
+/// synthetic sentence and logs at `warn`.
+const HARD_CEILING_MULTIPLIER: usize = 4;
+
 const ABBREVIATIONS: &[&str] = &[
     "Mr", "Mrs", "Ms", "Dr", "St", "Sr", "Jr", "Inc", "Ltd", "Co", "etc", "vs", "e.g", "i.e",
     "U.S", "U.K", "approx", "Prof", "Gen", "Capt",
@@ -83,7 +92,38 @@ impl SentenceBuffer {
         // After feeding, look for boundaries inside `buf` (pending stays
         // in `pending`; only finalized text reaches `buf`).
         self.scan_boundaries(&mut out);
+        // Defense-in-depth ceiling: scan_boundaries should keep buf
+        // under max_len, but if it ever doesn't (bug, exotic input),
+        // force-flush before memory growth becomes a problem.
+        if let Some(forced) = self.force_flush_if_oversize() {
+            out.push(forced);
+        }
         out
+    }
+
+    /// If `buf` has crossed `HARD_CEILING_MULTIPLIER * max_len` without
+    /// finding a natural boundary, drain it as one synthetic sentence
+    /// and reset. Returns `None` when within budget. Logs at `warn` so
+    /// an operator can see when the safety net fires — it shouldn't,
+    /// but observability beats a silent buffer reset.
+    fn force_flush_if_oversize(&mut self) -> Option<String> {
+        let ceiling = self.max_len.saturating_mul(HARD_CEILING_MULTIPLIER);
+        if self.buf.len() < ceiling {
+            return None;
+        }
+        tracing::warn!(
+            target: "assistd::voice::sentence",
+            buf_bytes = self.buf.len(),
+            ceiling,
+            "sentence buffer exceeded hard ceiling without natural boundary; force-flushing"
+        );
+        let raw = std::mem::take(&mut self.buf);
+        let speech = postprocess_for_speech(&raw);
+        if speech.is_empty() {
+            None
+        } else {
+            Some(speech)
+        }
     }
 
     /// Flush any remaining text on `LlmEvent::Done`. Returns at most
@@ -881,6 +921,50 @@ mod tests {
         let _ = b.push(&format!("```{long_lang}\nfoo\n```"));
         let _ = b.finish();
         // Just asserting no panic on oversize lang tag.
+    }
+
+    #[test]
+    fn force_flushes_pathological_no_boundary_input() {
+        // Defensive ceiling: if a delta of pure non-boundary chars (no
+        // whitespace, no terminator, no paragraph break) somehow grows
+        // beyond 4*max_len, force_flush_if_oversize must emit it as a
+        // single synthetic sentence rather than allow unbounded growth.
+        // Use small max_len so the test stays fast and deterministic.
+        let mut b = SentenceBuffer::new(50);
+        // 50 * 4 = 200; push 600 chars of pure ASCII letters with no
+        // boundary chars at all.
+        let blob: String = std::iter::repeat_n('a', 600).collect();
+        let out = b.push(&blob);
+        // The length safety net + force flush should both fire to keep
+        // memory bounded. Concretely, we expect at least one sentence
+        // emitted, the buffer drained or close to it, and no panic.
+        assert!(
+            !out.is_empty(),
+            "expected force-flushed sentence(s), got nothing"
+        );
+        let total_emitted: usize = out.iter().map(|s| s.len()).sum();
+        assert!(
+            total_emitted > 0,
+            "force flush emitted only empty strings: {out:?}"
+        );
+    }
+
+    #[test]
+    fn force_flush_does_not_fire_on_normal_input() {
+        // Normal content with proper sentence boundaries should not
+        // trigger the force-flush path; the natural boundaries in
+        // scan_boundaries handle everything.
+        let mut b = SentenceBuffer::new(400);
+        let out = b.push("First. Second. Third. Fourth. Fifth. Sixth.");
+        let tail = b.finish().unwrap_or_default();
+        // Combined we should have got six sentences; none should look
+        // like a force-flushed glob.
+        let combined = out.join(" ") + " " + &tail;
+        assert_eq!(
+            combined.matches('.').count(),
+            6,
+            "natural-boundary input took the force-flush path: {combined:?}"
+        );
     }
 
     #[test]

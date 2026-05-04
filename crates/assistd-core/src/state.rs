@@ -17,6 +17,7 @@ use assistd_wm::{NoWindowManager, WindowManager};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::task::TaskTracker;
 use tracing::Instrument;
 
 /// Truncate `s` to at most `max_chars` *characters* (not bytes), appending
@@ -134,6 +135,14 @@ pub struct AppState {
     /// otherwise leave the backend's conversation state with dangling
     /// `tool_calls` messages.
     agent_turn_lock: Arc<Mutex<()>>,
+    /// Tracks fire-and-forget persistence tasks (per-message
+    /// `append_message`/`store_chunk` and per-turn `end_turn` writes)
+    /// so daemon shutdown can wait for them to drain before dropping
+    /// the writer-task channel sender. Without this, an
+    /// `append_message` enqueued microseconds before SIGTERM races the
+    /// shutdown drain in [`assistd_memory::sqlite::writer::spawn_writer`]
+    /// and is silently dropped.
+    persistence_tracker: TaskTracker,
 }
 
 impl AppState {
@@ -176,7 +185,15 @@ impl AppState {
             embedding_cfg,
             window_manager: Arc::new(NoWindowManager),
             agent_turn_lock: Arc::new(Mutex::new(())),
+            persistence_tracker: TaskTracker::new(),
         }
+    }
+
+    /// Hand out a clone of the persistence tracker. Daemon shutdown
+    /// owns one and uses it to drain in-flight writes before the
+    /// writer-task channel sender drops.
+    pub fn persistence_tracker(&self) -> TaskTracker {
+        self.persistence_tracker.clone()
     }
 
     /// Builder-style setter for the optional vision revalidator. Kept
@@ -274,6 +291,36 @@ impl AppState {
     /// is responsible for surfacing `Err` to the client as an
     /// [`Event::Error`] if one hasn't been emitted already.
     pub async fn dispatch(self: Arc<Self>, req: Request, tx: mpsc::Sender<Event>) -> Result<()> {
+        let envelope = Duration::from_secs(self.config.timeouts.dispatch_envelope_secs);
+        let req_id = req.id().to_string();
+        let req_kind = req.kind();
+        let tx_for_timeout = tx.clone();
+        let inner = self.clone().dispatch_inner(req, tx);
+        match tokio::time::timeout(envelope, inner).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!(
+                    target: "assistd::state",
+                    id = %req_id,
+                    kind = req_kind,
+                    timeout_secs = self.config.timeouts.dispatch_envelope_secs,
+                    "dispatch envelope timeout exceeded; aborting request"
+                );
+                let _ = tx_for_timeout
+                    .send(Event::Error {
+                        id: req_id,
+                        message: format!(
+                            "request exceeded {}s envelope timeout",
+                            self.config.timeouts.dispatch_envelope_secs
+                        ),
+                    })
+                    .await;
+                Ok(())
+            }
+        }
+    }
+
+    async fn dispatch_inner(self: Arc<Self>, req: Request, tx: mpsc::Sender<Event>) -> Result<()> {
         match req {
             Request::Query {
                 id,
@@ -382,7 +429,7 @@ impl AppState {
         } else {
             None
         };
-        tokio::spawn(async move {
+        self.persistence_tracker.spawn(async move {
             let row_id = match conv.append_message(&session, turn, msg).await {
                 Ok(id) => id,
                 Err(e) => {
@@ -1140,11 +1187,20 @@ impl AppState {
                 while let Some(sentence) = speech_rx.recv().await {
                     match ctrl.should_speak(start_epoch) {
                         SpeakDecision::Speak => {
+                            // Truncate the snippet for logging — a long
+                            // sentence in the log line clutters the journal.
+                            let preview: String = sentence.chars().take(60).collect();
                             if let Err(e) = ctrl.inner().speak(sentence).await {
-                                tracing::debug!(
+                                // `warn` (not `debug`) so a one-off synth
+                                // failure surfaces in the journal even
+                                // before the 3-in-60s breaker trips. The
+                                // turn continues — playback failures are
+                                // never fatal to the LLM stream.
+                                tracing::warn!(
                                     target: "assistd::voice",
                                     error = %e,
-                                    "voice_output.speak failed (non-fatal)"
+                                    sentence_preview = %preview,
+                                    "voice_output.speak failed; sentence dropped"
                                 );
                             }
                         }
@@ -1353,7 +1409,7 @@ impl AppState {
         // Fire-and-forget like the message persistence above.
         if let Some(t) = turn_id {
             let conv = self.conversations.clone();
-            tokio::spawn(async move {
+            self.persistence_tracker.spawn(async move {
                 if let Err(e) = conv.end_turn(t).await {
                     tracing::warn!(
                         target: "assistd::memory",
@@ -1811,6 +1867,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistence_tracker_drains_in_flight_tasks() {
+        // AppState's persistence tracker must wait for spawned tasks to
+        // complete on shutdown drain. Spawn a slow task through the
+        // tracker; close+wait must block until that task finishes.
+        let state = test_state(Arc::new(EchoBackend::new()), PresenceState::Active);
+        let tracker = state.persistence_tracker();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        tracker.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            c.fetch_add(1, Ordering::SeqCst);
+        });
+        tracker.close();
+        tokio::time::timeout(Duration::from_secs(1), tracker.wait())
+            .await
+            .expect("tracker.wait must complete within the budget");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "tracker.wait returned before the spawned task incremented the counter"
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_query_emits_delta_then_done() {
         let state = test_state(Arc::new(EchoBackend::new()), PresenceState::Active);
         let (tx, rx) = mpsc::channel::<Event>(8);
@@ -1941,24 +2021,27 @@ mod tests {
             &self,
             _prompt: String,
             _tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             unimplemented!("uses step path")
         }
         async fn push_user(
             &self,
             _text: String,
             _attachments: Vec<assistd_tools::Attachment>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
-        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+        async fn push_tool_results(
+            &self,
+            _results: Vec<ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
         async fn step(
             &self,
             _tools: Vec<serde_json::Value>,
             _tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<StepOutcome> {
+        ) -> assistd_llm::LlmResult<StepOutcome> {
             let outcome = {
                 let mut q = self.outcomes.lock().unwrap();
                 if q.is_empty() {
@@ -2563,24 +2646,27 @@ mod tests {
             &self,
             _prompt: String,
             _tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             unimplemented!("uses step path")
         }
         async fn push_user(
             &self,
             _text: String,
             _attachments: Vec<assistd_tools::Attachment>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
-        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+        async fn push_tool_results(
+            &self,
+            _results: Vec<ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
         async fn step(
             &self,
             _tools: Vec<serde_json::Value>,
             tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<StepOutcome> {
+        ) -> assistd_llm::LlmResult<StepOutcome> {
             let script = self.script.lock().unwrap().take();
             if let Some(actions) = script {
                 for action in actions {
@@ -2707,24 +2793,27 @@ mod tests {
             &self,
             _prompt: String,
             _tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             unimplemented!("uses step path")
         }
         async fn push_user(
             &self,
             _text: String,
             _attachments: Vec<assistd_tools::Attachment>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
-        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+        async fn push_tool_results(
+            &self,
+            _results: Vec<ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
         async fn step(
             &self,
             _tools: Vec<serde_json::Value>,
             tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<StepOutcome> {
+        ) -> assistd_llm::LlmResult<StepOutcome> {
             let outcome = {
                 let mut q = self.outcomes.lock().unwrap();
                 if q.is_empty() {

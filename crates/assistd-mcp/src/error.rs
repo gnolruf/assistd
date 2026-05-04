@@ -38,8 +38,25 @@ pub enum McpError {
         data: Option<serde_json::Value>,
     },
 
+    /// Genuine wire-protocol violations (malformed JSON-RPC frames,
+    /// missing required fields in MCP responses, base64 decode of an
+    /// image attachment failed, …). Distinct from [`Self::Config`]:
+    /// `Protocol` means the server diverged from the spec, `Config`
+    /// means our local config is wrong.
     #[error("MCP protocol error: {0}")]
     Protocol(String),
+
+    /// User-config issue surfaced at connect time — bad URL, bad
+    /// header name/value, etc. Carries a context string and the
+    /// original parse error so `error.source()` walks the chain. Routed
+    /// to a "Check: <config>" recovery hint by [`mcp_error_line`] so
+    /// the operator (and the model) sees the actionable next step.
+    #[error("MCP config error: {context}: {source}")]
+    Config {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 
     #[error("MCP server is currently unavailable")]
     ServerDown,
@@ -53,13 +70,26 @@ pub enum McpError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
+    /// Wraps `reqwest::Error` directly so the source chain survives
+    /// for callers that downcast or walk `error.source()`. The Display
+    /// impl of `reqwest::Error` already gives a useful one-liner.
     #[error("HTTP error: {0}")]
-    Http(String),
+    Http(#[from] reqwest::Error),
 }
 
 impl McpError {
-    pub fn http(e: impl std::fmt::Display) -> Self {
-        Self::Http(e.to_string())
+    /// Build a [`Self::Config`] from a context string and a parse
+    /// error. Use for header/URL parse failures at connect time so the
+    /// operator sees a "Check: config.toml" recovery hint instead of a
+    /// generic "protocol error" line.
+    pub fn config(
+        context: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Config {
+            context: context.into(),
+            source: Box::new(source),
+        }
     }
 }
 
@@ -101,6 +131,10 @@ pub fn mcp_error_line(tool_name: &str, e: &McpError) -> String {
             "[error] {tool_name}: MCP protocol error: {m}. \
              Check: daemon logs for malformed responses\n"
         ),
+        McpError::Config { context, source } => format!(
+            "[error] {tool_name}: MCP config error: {context}: {source}. \
+             Check: ~/.config/assistd/config.toml `[[mcp.servers]]` block\n"
+        ),
         McpError::ServerDown => format!(
             "[error] {tool_name}: MCP server is currently unavailable. \
              Try: another tool while the server reconnects\n"
@@ -132,12 +166,30 @@ mod tests {
         s.contains("Use:") || s.contains("Try:") || s.contains("Check:") || s.contains("Available:")
     }
 
+    /// Build a real `reqwest::Error` for the test — `reqwest` doesn't
+    /// expose a public constructor, so we provoke one with a malformed
+    /// URL request. Async because the only path that yields a
+    /// `reqwest::Error` flows through `Client::execute`.
+    async fn fake_http_error() -> reqwest::Error {
+        // No proxy + a URL that fails connect-time parsing (well-formed
+        // URL but unreachable scheme) is the most reliable way to get
+        // an Error back without hitting the network.
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client builds")
+            .get("not-a-valid-url")
+            .send()
+            .await
+            .expect_err("must error on malformed URL")
+    }
+
     /// Every `McpError` variant must produce a convention-compliant line:
     /// starts with `[error] <tool>: `, includes one of the four hint words,
     /// and ends with a newline. Mirrors the gating test in
     /// `assistd-tools/src/command.rs::every_registered_command_emits_…`.
-    #[test]
-    fn every_variant_emits_convention_compliant_line() {
+    #[tokio::test]
+    async fn every_variant_emits_convention_compliant_line() {
         let cases: Vec<(&str, McpError)> = vec![
             (
                 "spawn",
@@ -160,10 +212,17 @@ mod tests {
                 },
             ),
             ("protocol", McpError::Protocol("bad frame".into())),
+            (
+                "config",
+                McpError::config(
+                    "invalid header `X-Bad`",
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "not ascii"),
+                ),
+            ),
             ("server_down", McpError::ServerDown),
             ("too_many", McpError::TooManyInFlight),
             ("io", McpError::Io(std::io::Error::other("pipe broke"))),
-            ("http", McpError::Http("503".into())),
+            ("http", McpError::Http(fake_http_error().await)),
         ];
         for (label, e) in cases {
             let line = mcp_error_line("mcp__web__search", &e);
@@ -177,6 +236,37 @@ mod tests {
             );
             assert!(line.ends_with('\n'), "{label}: missing trailing newline");
         }
+    }
+
+    /// Source chain on `Http` must walk back to the underlying
+    /// `reqwest::Error`. Regression for the previous `to_string()`
+    /// shape that lost it.
+    #[tokio::test]
+    async fn http_variant_preserves_source_chain() {
+        let original = fake_http_error().await;
+        let original_text = original.to_string();
+        let wrapped = McpError::Http(original);
+        let source = std::error::Error::source(&wrapped).expect("source chain present");
+        assert_eq!(
+            source.to_string(),
+            original_text,
+            "source must be the original reqwest::Error"
+        );
+    }
+
+    /// Config variant carries actionable context and source — the
+    /// `mcp_error_line` rendering must include both.
+    #[test]
+    fn config_variant_renders_with_check_hint_and_context() {
+        let inner = std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad bytes");
+        let e = McpError::config("invalid header `X-Bad`", inner);
+        let line = mcp_error_line("mcp__web__search", &e);
+        assert!(line.contains("invalid header `X-Bad`"), "{line}");
+        assert!(line.contains("bad bytes"), "{line}");
+        assert!(
+            line.contains("Check: ~/.config/assistd/config.toml"),
+            "{line}"
+        );
     }
 
     #[test]

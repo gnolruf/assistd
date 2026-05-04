@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 
-use assistd_config::{LlamaServerConfig, ModelConfig};
+use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_core::{
     AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceManager,
     PresenceState, ToolRegistry, VoiceOutputController,
@@ -89,9 +89,14 @@ fn model_spec() -> ModelConfig {
 async fn new_active_manager(port: u16) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     set_mode("normal");
     let (tx, rx) = watch::channel(false);
-    let m = PresenceManager::new_active(server_spec(port), model_spec(), rx)
-        .await
-        .expect("cold-start wake failed");
+    let m = PresenceManager::new_active(
+        server_spec(port),
+        model_spec(),
+        TimeoutsConfig::default(),
+        rx,
+    )
+    .await
+    .expect("cold-start wake failed");
     (m, tx)
 }
 
@@ -385,7 +390,11 @@ struct DelayBackend {
 
 #[async_trait]
 impl LlmBackend for DelayBackend {
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> anyhow::Result<()> {
+    async fn generate(
+        &self,
+        prompt: String,
+        tx: mpsc::Sender<LlmEvent>,
+    ) -> assistd_llm::LlmResult<()> {
         let _ = tx.send(LlmEvent::Delta { text: prompt }).await;
         tokio::time::sleep(self.delay).await;
         let _ = tx.send(LlmEvent::Done).await;
@@ -396,7 +405,7 @@ impl LlmBackend for DelayBackend {
         &self,
         text: String,
         _attachments: Vec<assistd_tools::Attachment>,
-    ) -> anyhow::Result<()> {
+    ) -> assistd_llm::LlmResult<()> {
         *self.last_user.lock().await = text;
         Ok(())
     }
@@ -404,7 +413,7 @@ impl LlmBackend for DelayBackend {
     async fn push_tool_results(
         &self,
         _results: Vec<assistd_llm::ToolResultPayload>,
-    ) -> anyhow::Result<()> {
+    ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
 
@@ -412,7 +421,7 @@ impl LlmBackend for DelayBackend {
         &self,
         _tools: Vec<serde_json::Value>,
         tx: mpsc::Sender<LlmEvent>,
-    ) -> anyhow::Result<assistd_llm::StepOutcome> {
+    ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
         let text = self.last_user.lock().await.clone();
         let _ = tx.send(LlmEvent::Delta { text }).await;
         tokio::time::sleep(self.delay).await;

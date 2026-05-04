@@ -15,6 +15,7 @@ use crate::model::ModelConfig;
 use crate::presence::PresenceConfig;
 use crate::remote::RemoteConfig;
 use crate::sleep::SleepConfig;
+use crate::timeouts::TimeoutsConfig;
 use crate::tools::ToolsConfig;
 use crate::voice::VoiceConfig;
 
@@ -42,6 +43,8 @@ pub struct Config {
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub timeouts: TimeoutsConfig,
 }
 
 impl Config {
@@ -442,6 +445,26 @@ impl Config {
                     }
                 }
             }
+        }
+
+        let t = &self.timeouts;
+        if t.presence_sleep_secs == 0 {
+            errors.push("timeouts.presence_sleep_secs must be greater than 0".into());
+        }
+        if t.presence_drowse_secs == 0 {
+            errors.push("timeouts.presence_drowse_secs must be greater than 0".into());
+        }
+        if t.presence_wake_load_secs == 0 {
+            errors.push("timeouts.presence_wake_load_secs must be greater than 0".into());
+        }
+        if t.presence_wake_cold_start_secs == 0 {
+            errors.push("timeouts.presence_wake_cold_start_secs must be greater than 0".into());
+        }
+        if t.dispatch_envelope_secs == 0 {
+            errors.push("timeouts.dispatch_envelope_secs must be greater than 0".into());
+        }
+        if t.stream_inactivity_secs == 0 {
+            errors.push("timeouts.stream_inactivity_secs must be greater than 0".into());
         }
 
         if errors.is_empty() {

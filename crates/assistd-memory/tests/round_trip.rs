@@ -118,3 +118,62 @@ async fn turn_persists_across_store_reopen() {
         writer.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
+    // Regression for the writer drain race: previously the shutdown
+    // branch used `try_recv` which would miss any op whose `send`
+    // hadn't quite landed before the drain loop polled. With the
+    // bounded `recv` drain, an op enqueued microseconds after the
+    // shutdown signal still lands.
+    let temp = tempfile::Builder::new().suffix(".db").tempfile().unwrap();
+    let path = temp.path().to_path_buf();
+    let session_text: String;
+
+    {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (handle, writer) = SqliteHandle::open(&path, shutdown_rx).await.unwrap();
+        let handle = Arc::new(handle);
+        let convs = SqliteConversationStore::new(handle.clone());
+
+        let session = convs.begin_session(std::process::id()).await.unwrap();
+        session_text = session.0.clone();
+        let turn = convs.begin_turn(&session, "drain race").await.unwrap();
+
+        // Fire the shutdown signal, then immediately enqueue more
+        // writes. Without the fix these would silently disappear.
+        shutdown_tx.send(true).unwrap();
+
+        convs
+            .append_message(&session, Some(turn), PersistedMessage::user("drain race"))
+            .await
+            .unwrap();
+        convs
+            .append_message(
+                &session,
+                Some(turn),
+                PersistedMessage::assistant_text("survived the drain"),
+            )
+            .await
+            .unwrap();
+        convs.end_turn(turn).await.unwrap();
+        convs.end_session(&session).await.unwrap();
+
+        drop(convs);
+        // Writer must process the post-shutdown ops before exiting.
+        writer.await.unwrap();
+    }
+
+    // Reopen and confirm the row landed.
+    let (_tx, rx) = watch::channel(false);
+    let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
+    let handle = Arc::new(handle);
+    let convs = SqliteConversationStore::new(handle);
+    let hits = convs.search("survived the drain", 5).await.unwrap();
+    assert!(
+        hits.iter().any(|h| h.session_id == session_text),
+        "post-shutdown append_message did not persist: {hits:#?}"
+    );
+    drop(convs);
+    writer.await.unwrap();
+}

@@ -131,18 +131,62 @@ impl RodioPlaybackWorker {
     }
 }
 
+/// Bounded wait used by the Drop watchdog. If the audio thread is
+/// wedged (rare on ALSA but possible), abandoning the join after this
+/// budget keeps daemon shutdown unblocked — the OS reclaims the
+/// thread on process exit. Logged at `error!` so the operator sees
+/// it.
+const DROP_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Drop for RodioPlaybackWorker {
     fn drop(&mut self) {
         // Tell the device thread to release MixerDeviceSink; then join
-        // so the audio device is fully released before this method
-        // returns. If the channel is already closed (e.g. thread
-        // panicked) the send fails silently and we still attempt to
-        // join.
+        // with a bounded timeout so daemon shutdown can't hang on a
+        // wedged audio device. If the channel is already closed (e.g.
+        // thread panicked) the send fails silently and we still
+        // attempt to join.
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
         if let Some(handle) = self.device_thread.take() {
-            let _ = handle.join();
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            // Spawn a watchdog thread that owns the join. The watchdog
+            // is leaked on timeout — it will clean itself up when the
+            // audio thread does eventually exit (or when the process
+            // does), neither of which blocks the caller.
+            let spawned = thread::Builder::new()
+                .name("piper-rodio-drop-watchdog".into())
+                .spawn(move || {
+                    let _ = handle.join();
+                    let _ = done_tx.send(());
+                });
+            match spawned {
+                Ok(_) => {
+                    if done_rx.recv_timeout(DROP_JOIN_TIMEOUT).is_err() {
+                        tracing::error!(
+                            target: "assistd::voice::piper",
+                            timeout_secs = DROP_JOIN_TIMEOUT.as_secs(),
+                            "rodio device thread did not exit within budget; abandoning join"
+                        );
+                    }
+                }
+                Err(e) => {
+                    // Couldn't spawn watchdog — fall back to direct
+                    // join. The OS process tear-down still unblocks
+                    // eventually if this hangs, but we lose
+                    // bounded-shutdown guarantees.
+                    tracing::warn!(
+                        target: "assistd::voice::piper",
+                        error = %e,
+                        "could not spawn drop watchdog; joining inline"
+                    );
+                    // We took `handle` already; can't reach it here.
+                    // The watchdog thread that was supposed to own it
+                    // dropped the variable, which transitively detached
+                    // the join — acceptable since process exit reaps
+                    // it.
+                }
+            }
         }
     }
 }

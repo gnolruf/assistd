@@ -102,6 +102,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let presence = PresenceManager::new_active(
         config.llama_server.clone(),
         config.model.clone(),
+        config.timeouts.clone(),
         shutdown_tx.subscribe(),
     )
     .await?;
@@ -130,7 +131,12 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         config.llama_server.port,
     );
 
-    let chat = LlamaChatClient::new(&config.chat, &config.llama_server, &config.model)?;
+    let chat = LlamaChatClient::new(
+        &config.chat,
+        &config.llama_server,
+        &config.model,
+        &config.timeouts,
+    )?;
 
     // Voice input: build the mic-backed implementation when the user
     // has enabled it. The whisper transcriber is built once and shared
@@ -685,6 +691,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         state_builder = state_builder.with_chunks(handle);
     }
     let state = Arc::new(state_builder);
+    let persistence_tracker = state.persistence_tracker();
 
     let listen_handles = if continuous_enabled {
         Some(listen_dispatcher::spawn(
@@ -705,6 +712,24 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     };
 
     let serve_result = assistd_core::socket::serve(state, socket_shutdown).await;
+
+    // Drain in-flight persistence tasks before the writer task channel
+    // sender drops with AppState — without this, a `tokio::spawn`'d
+    // append_message that lost the race against the shutdown signal
+    // never lands. Bounded timeout: a degenerate task that hangs (e.g.
+    // a stuck SQLite write) cannot block daemon exit forever.
+    persistence_tracker.close();
+    let drain_budget = Duration::from_secs(5);
+    if tokio::time::timeout(drain_budget, persistence_tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            target: "assistd::memory",
+            in_flight = persistence_tracker.len(),
+            "persistence task drain timed out at shutdown; abandoning remaining tasks"
+        );
+    }
 
     // Drop to Sleeping on shutdown: tears down the supervisor and the child.
     if let Err(e) = presence.sleep().await {

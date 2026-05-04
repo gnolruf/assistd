@@ -85,14 +85,14 @@ impl SseMcpClient {
     /// `initialize` handshake, and starts the periodic ping task.
     pub async fn connect(cfg: SseConfig) -> Result<(Arc<Self>, SseLifeline), McpError> {
         let base_url = Url::parse(&cfg.url)
-            .map_err(|e| McpError::Protocol(format!("invalid SSE url `{}`: {e}", cfg.url)))?;
+            .map_err(|e| McpError::config(format!("invalid SSE url `{}`", cfg.url), e))?;
 
         let mut headers = HeaderMap::new();
         for (k, v) in &cfg.headers {
             let name = HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| McpError::Protocol(format!("invalid header name `{k}`: {e}")))?;
+                .map_err(|e| McpError::config(format!("invalid header name `{k}`"), e))?;
             let value = HeaderValue::from_str(v)
-                .map_err(|e| McpError::Protocol(format!("invalid header value `{v}`: {e}")))?;
+                .map_err(|e| McpError::config(format!("invalid header value `{v}`"), e))?;
             headers.insert(name, value);
         }
 
@@ -102,8 +102,7 @@ impl SseMcpClient {
         let http = reqwest::Client::builder()
             .read_timeout(cfg.read_timeout)
             .timeout(cfg.request_timeout)
-            .build()
-            .map_err(McpError::http)?;
+            .build()?;
 
         let correlator = Arc::new(Correlator::new());
         let post_url = Arc::new(RwLock::new(None));
@@ -216,7 +215,7 @@ impl SseMcpClient {
             .header("Content-Type", "application/json")
             .send()
             .await
-            .map_err(McpError::http)?;
+            .map_err(McpError::from)?;
         if !resp.status().is_success() {
             return Err(McpError::Protocol(format!(
                 "POST notifications/initialized failed: HTTP {}",
@@ -244,7 +243,7 @@ impl SseMcpClient {
             .header("Content-Type", "application/json")
             .send()
             .await
-            .map_err(McpError::http)?;
+            .map_err(McpError::from)?;
         if !resp.status().is_success() {
             return Err(McpError::Protocol(format!(
                 "POST {method} failed: HTTP {}",

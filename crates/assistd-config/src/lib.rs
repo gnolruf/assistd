@@ -34,6 +34,7 @@ pub mod model;
 pub mod presence;
 pub mod remote;
 pub mod sleep;
+pub mod timeouts;
 pub mod tools;
 pub mod top;
 pub mod voice;
@@ -51,6 +52,7 @@ pub use model::ModelConfig;
 pub use presence::PresenceConfig;
 pub use remote::RemoteConfig;
 pub use sleep::SleepConfig;
+pub use timeouts::TimeoutsConfig;
 pub use tools::{
     BashSandboxMode, ScreenshotBackend, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
     ToolsScreenshotConfig, ToolsWriteConfig,
