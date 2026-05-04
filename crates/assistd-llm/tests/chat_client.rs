@@ -529,8 +529,7 @@ async fn conv_lock_does_not_block_during_streaming() {
 
     // Kick off the slow generate.
     let gen_client = client.clone();
-    let stream_task =
-        tokio::spawn(async move { gen_client.generate("first".into(), tx).await });
+    let stream_task = tokio::spawn(async move { gen_client.generate("first".into(), tx).await });
 
     // Drain a few deltas to confirm the stream is mid-flight.
     for _ in 0..3 {

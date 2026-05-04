@@ -219,11 +219,7 @@ impl LlmBackend for EchoBackend {
         Ok(())
     }
 
-    async fn step(
-        &self,
-        _tools: Vec<Value>,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> LlmResult<StepOutcome> {
+    async fn step(&self, _tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
         let text = std::mem::take(&mut *self.last_user.lock().await);
         if !text.is_empty() {
             let _ = tx.send(LlmEvent::Delta { text }).await;

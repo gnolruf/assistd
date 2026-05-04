@@ -320,11 +320,7 @@ impl AppState {
         }
     }
 
-    async fn dispatch_inner(
-        self: Arc<Self>,
-        req: Request,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    async fn dispatch_inner(self: Arc<Self>, req: Request, tx: mpsc::Sender<Event>) -> Result<()> {
         match req {
             Request::Query {
                 id,

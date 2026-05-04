@@ -74,11 +74,7 @@ impl LlamaChatClient {
         })
     }
 
-    async fn stream_openai(
-        &self,
-        body: Vec<u8>,
-        tx: &mpsc::Sender<LlmEvent>,
-    ) -> StreamOutcome {
+    async fn stream_openai(&self, body: Vec<u8>, tx: &mpsc::Sender<LlmEvent>) -> StreamOutcome {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let mut response = match self
             .client
@@ -305,11 +301,7 @@ impl LlmBackend for LlamaChatClient {
         Ok(())
     }
 
-    async fn step(
-        &self,
-        tools: Vec<Value>,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> LlmResult<StepOutcome> {
+    async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
         // Phase 1: build the wire body under the lock.
         let body_bytes = {
             let mut conv = self.conv.lock().await;

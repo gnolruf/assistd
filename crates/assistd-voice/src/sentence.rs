@@ -119,7 +119,11 @@ impl SentenceBuffer {
         );
         let raw = std::mem::take(&mut self.buf);
         let speech = postprocess_for_speech(&raw);
-        if speech.is_empty() { None } else { Some(speech) }
+        if speech.is_empty() {
+            None
+        } else {
+            Some(speech)
+        }
     }
 
     /// Flush any remaining text on `LlmEvent::Done`. Returns at most

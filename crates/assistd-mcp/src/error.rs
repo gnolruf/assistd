@@ -263,7 +263,10 @@ mod tests {
         let line = mcp_error_line("mcp__web__search", &e);
         assert!(line.contains("invalid header `X-Bad`"), "{line}");
         assert!(line.contains("bad bytes"), "{line}");
-        assert!(line.contains("Check: ~/.config/assistd/config.toml"), "{line}");
+        assert!(
+            line.contains("Check: ~/.config/assistd/config.toml"),
+            "{line}"
+        );
     }
 
     #[test]
