@@ -34,10 +34,6 @@ pub struct PendingAttachment {
     /// the user-prompt tag.
     pub name: String,
     pub mime: String,
-    /// Reserved for future use (token-budget hints) — held alongside the
-    /// bytes so we don't have to rescan on display.
-    #[allow(dead_code)]
-    pub size: usize,
     pub bytes: Vec<u8>,
     /// Pre-built terminal-graphics protocol for inline thumbnail
     /// rendering. `None` on terminals without graphics support — the
@@ -58,7 +54,21 @@ impl PendingAttachment {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
+/// Payload for [`ChatEvent::AttachLoaded`]. Boxed inside the enum so a
+/// `Vec<u8>` of image bytes plus a `StatefulProtocol` (which holds its
+/// own pre-built per-cell terminal-graphics buffers) doesn't bloat the
+/// other variants — `Wire(Event)` and `WireError(String)` were paying
+/// the maximum-variant size on every send before the box.
+pub struct AttachLoadedPayload {
+    #[allow(dead_code)]
+    pub path: String,
+    pub name: String,
+    pub mime: String,
+    pub size: usize,
+    pub bytes: Vec<u8>,
+    pub protocol: Option<StatefulProtocol>,
+}
+
 pub enum ChatEvent {
     /// Streaming event from the daemon over IPC. Includes both
     /// query-response events (Delta/ToolCall/ToolResult/Done) and
@@ -69,15 +79,7 @@ pub enum ChatEvent {
     WireError(String),
     /// `/attach <path>` finished reading + validating the file. Carries
     /// everything the App needs to update the UI.
-    AttachLoaded {
-        #[allow(dead_code)]
-        path: String,
-        name: String,
-        mime: String,
-        size: usize,
-        bytes: Vec<u8>,
-        protocol: Option<StatefulProtocol>,
-    },
+    AttachLoaded(Box<AttachLoadedPayload>),
     /// `/attach <path>` failed (missing file, unsupported format, etc.).
     AttachFailed { path: String, message: String },
 }
@@ -87,20 +89,13 @@ impl std::fmt::Debug for ChatEvent {
         match self {
             ChatEvent::Wire(ev) => f.debug_tuple("Wire").field(ev).finish(),
             ChatEvent::WireError(msg) => f.debug_tuple("WireError").field(msg).finish(),
-            ChatEvent::AttachLoaded {
-                path,
-                name,
-                mime,
-                size,
-                protocol,
-                ..
-            } => f
+            ChatEvent::AttachLoaded(p) => f
                 .debug_struct("AttachLoaded")
-                .field("path", path)
-                .field("name", name)
-                .field("mime", mime)
-                .field("size", size)
-                .field("has_thumbnail", &protocol.is_some())
+                .field("path", &p.path)
+                .field("name", &p.name)
+                .field("mime", &p.mime)
+                .field("size", &p.size)
+                .field("has_thumbnail", &p.protocol.is_some())
                 .finish(),
             ChatEvent::AttachFailed { path, message } => f
                 .debug_struct("AttachFailed")
@@ -440,21 +435,21 @@ impl App {
                 self.generating = false;
                 self.active_writer = None;
             }
-            ChatEvent::AttachLoaded {
-                name,
-                mime,
-                size,
-                bytes,
-                protocol,
-                ..
-            } => {
+            ChatEvent::AttachLoaded(payload) => {
+                let AttachLoadedPayload {
+                    path: _,
+                    name,
+                    mime,
+                    size,
+                    bytes,
+                    protocol,
+                } = *payload;
                 let label = format!("📎 attached: {name} ({mime}, {})", human_size_short(size));
                 self.output.push_info(&label);
                 self.set_notice(&format!("📎 {name} attached"));
                 self.pending_attachments.push(PendingAttachment {
                     name,
                     mime,
-                    size,
                     bytes,
                     protocol,
                 });
@@ -756,14 +751,14 @@ impl App {
                         }
                     });
                     let _ = tx
-                        .send(ChatEvent::AttachLoaded {
+                        .send(ChatEvent::AttachLoaded(Box::new(AttachLoadedPayload {
                             path: path_for_load,
                             name,
                             mime,
                             size,
                             bytes,
                             protocol,
-                        })
+                        })))
                         .await;
                 }
                 Err(e) => {

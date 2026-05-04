@@ -62,9 +62,17 @@ pub struct PresenceManager {
     // future clients). Updated after each successful transition, inside the
     // transition lock so ordering is preserved.
     state_tx: watch::Sender<PresenceState>,
-    // Holds the daemon shutdown receiver alive so the forwarder task
-    // keeps a valid subscription.
-    _daemon_shutdown: watch::Receiver<bool>,
+    // Keepalive subscription for the daemon shutdown watch. The
+    // forwarder task spawned in `new_active` clones its own receiver
+    // for the wait-for-shutdown loop, but if every receiver from this
+    // manager were to drop the watch could close before the forwarder
+    // observes the signal. Holding a never-read receiver here keeps
+    // the channel open for the forwarder's lifetime — same lifetime
+    // as the manager itself. **Do not delete just because it's
+    // unread**: removing this field is what causes the forwarder to
+    // miss the shutdown signal in some edge-case orderings.
+    #[allow(dead_code)]
+    daemon_shutdown_keepalive: watch::Receiver<bool>,
     // Monotonic timestamp of the last user-initiated interaction
     // (query, manual presence command, hotkey, cycle). The idle monitor
     // reads this to decide when to drowse or sleep; automatic monitors
@@ -173,9 +181,9 @@ impl PresenceManager {
         // paths — `wait_for` returns `Ok` once shutdown fires (the normal
         // case), or `Err` if every `watch::Sender` clone for daemon
         // shutdown is dropped (which implies the daemon is already tearing
-        // down). `PresenceManager` also holds `_daemon_shutdown:
-        // watch::Receiver` below to keep the subscription valid for the
-        // manager's lifetime.
+        // down). `PresenceManager` also holds
+        // `daemon_shutdown_keepalive: watch::Receiver` below to keep
+        // the subscription valid for the manager's lifetime.
         {
             let mut daemon_rx = daemon_shutdown.clone();
             let current = Arc::clone(&current_inner_shutdown);
@@ -202,7 +210,7 @@ impl PresenceManager {
             llama: AsyncMutex::new(None),
             current_inner_shutdown,
             state_tx,
-            _daemon_shutdown: daemon_shutdown,
+            daemon_shutdown_keepalive: daemon_shutdown,
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: Arc::new(StdMutex::new(None)),
@@ -691,7 +699,7 @@ impl PresenceManager {
             llama: AsyncMutex::new(None),
             current_inner_shutdown: Arc::new(StdMutex::new(None)),
             state_tx,
-            _daemon_shutdown: rx,
+            daemon_shutdown_keepalive: rx,
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: Arc::new(StdMutex::new(None)),

@@ -24,12 +24,46 @@ pub use llama_server::{
     detect_vision_support, probe_capabilities,
 };
 
-use anyhow::Result;
 use assistd_tools::Attachment;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
+
+/// Errors surfaced by the [`LlmBackend`] trait.
+///
+/// The trait was previously returning `anyhow::Result<...>` everywhere,
+/// which made it impossible for callers (the agent loop in particular)
+/// to distinguish a transient HTTP hiccup from a backend that's
+/// permanently unavailable. The variants below correspond to the
+/// failure categories the daemon actually wants to react to:
+///
+/// - [`Self::Chat`] wraps a real chat-client failure (HTTP, SSE parse,
+///   timeout, JSON error). Source chain preserved through `#[from]`.
+/// - [`Self::ToolCallParse`] is a structural failure inside the
+///   backend when finalising a streamed tool call — the model emitted
+///   something we can't reassemble. Surfaced to the agent loop so it
+///   can report a synthetic error and self-correct on the next step.
+/// - [`Self::Unavailable`] is the `FailedBackend` shape: the daemon
+///   started but llama-server never came up. Distinguished from
+///   transient `Chat` errors so future code can choose to bail out
+///   rather than retry.
+#[derive(Debug, Error)]
+pub enum LlmError {
+    #[error(transparent)]
+    Chat(#[from] ChatClientError),
+
+    #[error("tool-call parse error: {0}")]
+    ToolCallParse(String),
+
+    #[error("LLM backend unavailable: {0}")]
+    Unavailable(String),
+}
+
+/// Convenience result alias. Library code should prefer `LlmError`
+/// over `anyhow::Error` so callers can pattern-match.
+pub type LlmResult<T> = std::result::Result<T, LlmError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LlmEvent {
@@ -108,7 +142,7 @@ pub trait LlmBackend: Send + Sync + 'static {
     ///
     /// This is the legacy single-turn API used by code paths that don't
     /// want the agent loop's tool-dispatch machinery.
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> Result<()>;
+    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()>;
 
     /// Append a user message to the conversation. Does not invoke the
     /// model. Used by the agent loop at the start of each turn.
@@ -117,13 +151,13 @@ pub trait LlmBackend: Send + Sync + 'static {
     /// on its next turn. Pass an empty `Vec` for plain-text turns.
     /// Backends without vision support are expected to ignore the
     /// attachments rather than error.
-    async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> Result<()>;
+    async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()>;
 
     /// Append the results of the most recent `tool_calls` request. The
     /// backend should commit these as messages the model will see on its
     /// next `step` (our implementation renders them as synthetic user
     /// messages with a `[tool:<name>]\n` prefix, plus attachments).
-    async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> Result<()>;
+    async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> LlmResult<()>;
 
     /// Run one model invocation with the current conversation + the given
     /// tool schemas. Streams any text deltas through `tx`. Returns
@@ -132,7 +166,7 @@ pub trait LlmBackend: Send + Sync + 'static {
     ///
     /// Implementations that do not support tool use may return
     /// `StepOutcome::Final` and ignore `tools`.
-    async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> Result<StepOutcome>;
+    async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome>;
 
     /// Stash a one-shot system message that the next [`Self::step`] (or
     /// [`Self::generate`]) renders alongside the static system prompt.
@@ -143,7 +177,7 @@ pub trait LlmBackend: Send + Sync + 'static {
     ///
     /// Default implementation is a no-op so existing test backends and
     /// future stubs don't need to track per-turn context.
-    async fn set_transient_context(&self, _text: String) -> Result<()> {
+    async fn set_transient_context(&self, _text: String) -> LlmResult<()> {
         Ok(())
     }
 }
@@ -170,22 +204,26 @@ impl EchoBackend {
 
 #[async_trait]
 impl LlmBackend for EchoBackend {
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> Result<()> {
+    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
         let _ = tx.send(LlmEvent::Delta { text: prompt }).await;
         let _ = tx.send(LlmEvent::Done).await;
         Ok(())
     }
 
-    async fn push_user(&self, text: String, _attachments: Vec<Attachment>) -> Result<()> {
+    async fn push_user(&self, text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         *self.last_user.lock().await = text;
         Ok(())
     }
 
-    async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> Result<()> {
+    async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> LlmResult<()> {
         Ok(())
     }
 
-    async fn step(&self, _tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> Result<StepOutcome> {
+    async fn step(
+        &self,
+        _tools: Vec<Value>,
+        tx: mpsc::Sender<LlmEvent>,
+    ) -> LlmResult<StepOutcome> {
         let text = std::mem::take(&mut *self.last_user.lock().await);
         if !text.is_empty() {
             let _ = tx.send(LlmEvent::Delta { text }).await;
@@ -210,20 +248,24 @@ impl FailedBackend {
 
 #[async_trait]
 impl LlmBackend for FailedBackend {
-    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> Result<()> {
-        anyhow::bail!("{}", self.reason)
+    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
+        Err(LlmError::Unavailable(self.reason.clone()))
     }
 
-    async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> Result<()> {
-        anyhow::bail!("{}", self.reason)
+    async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
+        Err(LlmError::Unavailable(self.reason.clone()))
     }
 
-    async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> Result<()> {
-        anyhow::bail!("{}", self.reason)
+    async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> LlmResult<()> {
+        Err(LlmError::Unavailable(self.reason.clone()))
     }
 
-    async fn step(&self, _tools: Vec<Value>, _tx: mpsc::Sender<LlmEvent>) -> Result<StepOutcome> {
-        anyhow::bail!("{}", self.reason)
+    async fn step(
+        &self,
+        _tools: Vec<Value>,
+        _tx: mpsc::Sender<LlmEvent>,
+    ) -> LlmResult<StepOutcome> {
+        Err(LlmError::Unavailable(self.reason.clone()))
     }
 }
 

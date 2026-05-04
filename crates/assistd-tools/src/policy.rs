@@ -89,6 +89,15 @@ impl ConfirmationGate for AlwaysAllowGate {
     }
 }
 
+/// Cap on the number of concurrently-pending confirmation prompts on
+/// a single connection. A misbehaving client could repeatedly call a
+/// destructive command without ever responding to the prompts; without
+/// a bound, every `ask` would leak a `oneshot::Sender` into
+/// `ConfirmRouter::pending`. The cap is generous (a real interactive
+/// user is never going to have 32 confirmation prompts queued in
+/// parallel) so it doesn't trip on normal use.
+pub const MAX_PENDING_CONFIRMS: usize = 32;
+
 /// Per-connection routing table for in-flight confirmation prompts.
 ///
 /// One [`ConfirmRouter`] is created per IPC connection. The connection
@@ -103,6 +112,12 @@ impl ConfirmationGate for AlwaysAllowGate {
 /// call, so two concurrent connections each get their own pending
 /// table, and a single connection that asks multiple confirms
 /// in sequence routes responses correctly.
+///
+/// Bounded: at most [`MAX_PENDING_CONFIRMS`] prompts may be in flight
+/// at once. Beyond that, [`ConfirmRouter::ask`] denies immediately and
+/// logs a `warn!` — the gate contract is "never hang the agent," and
+/// silently denying a few prompts is preferable to unbounded memory
+/// growth from a hostile or stuck client.
 pub struct ConfirmRouter {
     /// Originating IPC request id — used as `Event::ConfirmRequest::id`
     /// for trace correlation. Set once per connection.
@@ -141,6 +156,16 @@ impl ConfirmRouter {
             // dropped sender just denies the affected confirm — the
             // agent loop continues correctly.
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if pending.len() >= MAX_PENDING_CONFIRMS {
+                warn!(
+                    target: "assistd::policy",
+                    tool = %req.tool,
+                    in_flight = pending.len(),
+                    cap = MAX_PENDING_CONFIRMS,
+                    "destructive command denied: pending-confirm cap reached"
+                );
+                return false;
+            }
             pending.insert(confirm_id.clone(), tx);
         }
 
@@ -464,6 +489,41 @@ mod tests {
             matched_pattern: "rm -rf".into(),
         };
         assert!(gate.confirm(req).await);
+    }
+
+    #[tokio::test]
+    async fn confirm_router_denies_when_pending_cap_reached() {
+        // Drive `MAX_PENDING_CONFIRMS` into the pending map without
+        // letting them resolve. The next `ask` must deny immediately
+        // rather than insert and leak. Using a wide channel so the
+        // wire send doesn't block (the cap path triggers before send).
+        let (wire_tx, _wire_rx) = mpsc::channel::<Event>(MAX_PENDING_CONFIRMS * 2);
+        let router = ConfirmRouter::new("req-cap-test".into(), wire_tx);
+
+        // Pre-load the pending map up to the cap. Bypass `ask` so we
+        // don't have to keep the wire sender alive — we just want the
+        // router to think it's full.
+        {
+            let mut pending = router.pending.lock().unwrap();
+            for i in 0..MAX_PENDING_CONFIRMS {
+                let (tx, _rx) = oneshot::channel();
+                pending.insert(format!("preloaded-{i}"), tx);
+            }
+        }
+
+        let req = ConfirmationRequest {
+            tool: "bash".into(),
+            script: "rm -rf foo".into(),
+            matched_pattern: "rm -rf".into(),
+        };
+        let result = router.ask(req).await;
+        assert!(!result, "ask must deny when pending cap is reached");
+        // The cap path returns before insert, so the map size is unchanged.
+        let pending_len = router.pending.lock().unwrap().len();
+        assert_eq!(
+            pending_len, MAX_PENDING_CONFIRMS,
+            "denied ask must not insert into pending"
+        );
     }
 
     #[test]

@@ -2025,24 +2025,27 @@ mod tests {
             &self,
             _prompt: String,
             _tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             unimplemented!("uses step path")
         }
         async fn push_user(
             &self,
             _text: String,
             _attachments: Vec<assistd_tools::Attachment>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
-        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+        async fn push_tool_results(
+            &self,
+            _results: Vec<ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
         async fn step(
             &self,
             _tools: Vec<serde_json::Value>,
             _tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<StepOutcome> {
+        ) -> assistd_llm::LlmResult<StepOutcome> {
             let outcome = {
                 let mut q = self.outcomes.lock().unwrap();
                 if q.is_empty() {
@@ -2647,24 +2650,27 @@ mod tests {
             &self,
             _prompt: String,
             _tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             unimplemented!("uses step path")
         }
         async fn push_user(
             &self,
             _text: String,
             _attachments: Vec<assistd_tools::Attachment>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
-        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+        async fn push_tool_results(
+            &self,
+            _results: Vec<ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
         async fn step(
             &self,
             _tools: Vec<serde_json::Value>,
             tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<StepOutcome> {
+        ) -> assistd_llm::LlmResult<StepOutcome> {
             let script = self.script.lock().unwrap().take();
             if let Some(actions) = script {
                 for action in actions {
@@ -2791,24 +2797,27 @@ mod tests {
             &self,
             _prompt: String,
             _tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             unimplemented!("uses step path")
         }
         async fn push_user(
             &self,
             _text: String,
             _attachments: Vec<assistd_tools::Attachment>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
-        async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+        async fn push_tool_results(
+            &self,
+            _results: Vec<ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
         async fn step(
             &self,
             _tools: Vec<serde_json::Value>,
             tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<StepOutcome> {
+        ) -> assistd_llm::LlmResult<StepOutcome> {
             let outcome = {
                 let mut q = self.outcomes.lock().unwrap();
                 if q.is_empty() {

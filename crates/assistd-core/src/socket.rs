@@ -573,7 +573,7 @@ mod tests {
             &self,
             _prompt: String,
             tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             for i in 0..self.deltas {
                 let _ = tx
                     .send(assistd_llm::LlmEvent::Delta {
@@ -590,14 +590,14 @@ mod tests {
             &self,
             _text: String,
             _attachments: Vec<assistd_tools::Attachment>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
 
         async fn push_tool_results(
             &self,
             _results: Vec<assistd_llm::ToolResultPayload>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
 
@@ -605,7 +605,7 @@ mod tests {
             &self,
             _tools: Vec<serde_json::Value>,
             tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
-        ) -> anyhow::Result<assistd_llm::StepOutcome> {
+        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
             for i in 0..self.deltas {
                 let _ = tx
                     .send(assistd_llm::LlmEvent::Delta {
@@ -628,7 +628,7 @@ mod tests {
             &self,
             _prompt: String,
             tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             let _ = tx
                 .send(assistd_llm::LlmEvent::Delta {
                     text: "stuck".into(),
@@ -644,14 +644,14 @@ mod tests {
             &self,
             _text: String,
             _attachments: Vec<assistd_tools::Attachment>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
 
         async fn push_tool_results(
             &self,
             _results: Vec<assistd_llm::ToolResultPayload>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
 
@@ -659,7 +659,7 @@ mod tests {
             &self,
             _tools: Vec<serde_json::Value>,
             tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
-        ) -> anyhow::Result<assistd_llm::StepOutcome> {
+        ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
             let _ = tx
                 .send(assistd_llm::LlmEvent::Delta {
                     text: "stuck".into(),

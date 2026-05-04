@@ -18,7 +18,6 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use anyhow::Result;
 use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_tools::Attachment;
 use async_trait::async_trait;
@@ -31,7 +30,7 @@ use super::conversation::{Conversation, Summarizer, ToolCallRecord};
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
 use super::wire;
-use crate::{LlmBackend, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
+use crate::{LlmBackend, LlmError, LlmEvent, LlmResult, StepOutcome, ToolCall, ToolResultPayload};
 
 const ERROR_BODY_CAP: usize = 1024;
 const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce a concise \
@@ -202,7 +201,7 @@ impl LlamaChatClient {
 
 #[async_trait]
 impl LlmBackend for LlamaChatClient {
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> Result<()> {
+    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
         // Phase 1: build the wire body under the lock. ensure_budget
         // may run a summarization HTTP round-trip; that's still on the
         // locked path because it mutates `Conversation` (drops summarized
@@ -246,7 +245,7 @@ impl LlmBackend for LlamaChatClient {
                     // Roll back the user push so the caller can retry
                     // without observing the half-committed message.
                     conv.rollback_last_user();
-                    return Err(anyhow::Error::new(ChatClientError::Json(e)));
+                    return Err(LlmError::Chat(ChatClientError::Json(e)));
                 }
             }
         };
@@ -273,12 +272,12 @@ impl LlmBackend for LlamaChatClient {
             }
             StreamOutcome::PreEmitError(e) => {
                 conv.rollback_last_user();
-                Err(anyhow::Error::new(e))
+                Err(LlmError::Chat(e))
             }
         }
     }
 
-    async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> Result<()> {
+    async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         if attachments.is_empty() {
             conv.push_user(text);
@@ -288,7 +287,7 @@ impl LlmBackend for LlamaChatClient {
         Ok(())
     }
 
-    async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> Result<()> {
+    async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         for r in results {
             // `[tool:<name>]\n<body>` — the prefix is the truncator's
@@ -306,7 +305,11 @@ impl LlmBackend for LlamaChatClient {
         Ok(())
     }
 
-    async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> Result<StepOutcome> {
+    async fn step(
+        &self,
+        tools: Vec<Value>,
+        tx: mpsc::Sender<LlmEvent>,
+    ) -> LlmResult<StepOutcome> {
         // Phase 1: build the wire body under the lock.
         let body_bytes = {
             let mut conv = self.conv.lock().await;
@@ -335,7 +338,7 @@ impl LlmBackend for LlamaChatClient {
             match serde_json::to_vec(&payload) {
                 Ok(b) => b,
                 Err(e) => {
-                    return Err(anyhow::Error::new(ChatClientError::Json(e)));
+                    return Err(LlmError::Chat(ChatClientError::Json(e)));
                 }
             }
         };
@@ -358,11 +361,11 @@ impl LlmBackend for LlamaChatClient {
                 let _ = conv.consume_transient_context();
                 result
             }
-            StreamOutcome::PreEmitError(e) => Err(anyhow::Error::new(e)),
+            StreamOutcome::PreEmitError(e) => Err(LlmError::Chat(e)),
         }
     }
 
-    async fn set_transient_context(&self, text: String) -> Result<()> {
+    async fn set_transient_context(&self, text: String) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         conv.set_transient_context(text);
         Ok(())
@@ -376,7 +379,7 @@ impl LlmBackend for LlamaChatClient {
 /// accumulated narrative text. Qwen3 and similar reasoning models
 /// sometimes prefix tool calls with `<think>...</think>` content that
 /// would poison the assistant-with-tool_calls message on replay.
-fn commit_step(conv: &mut Conversation, accum: StreamAccum) -> Result<StepOutcome> {
+fn commit_step(conv: &mut Conversation, accum: StreamAccum) -> LlmResult<StepOutcome> {
     let wants_tool_calls =
         accum.finish_reason.as_deref() == Some("tool_calls") && !accum.tool_calls.is_empty();
     if wants_tool_calls || (!accum.tool_calls.is_empty() && accum.finish_reason.is_none()) {
@@ -480,12 +483,14 @@ impl StreamAccum {
     ///   `Value`). We parse arguments here so a malformed call surfaces
     ///   as an `Err` from `step` rather than propagating garbage into
     ///   tool dispatch.
-    fn finalize_tool_calls(self) -> Result<(Vec<ToolCallRecord>, Vec<ToolCall>)> {
+    fn finalize_tool_calls(self) -> LlmResult<(Vec<ToolCallRecord>, Vec<ToolCall>)> {
         let mut records = Vec::with_capacity(self.tool_calls.len());
         let mut parsed = Vec::with_capacity(self.tool_calls.len());
         for (index, b) in self.tool_calls {
             if b.name.is_empty() {
-                anyhow::bail!("tool call at index {index} has no name");
+                return Err(LlmError::ToolCallParse(format!(
+                    "tool call at index {index} has no name"
+                )));
             }
             let id = if b.id.is_empty() {
                 format!("call-{index}")
@@ -497,8 +502,9 @@ impl StreamAccum {
             } else {
                 b.arguments.clone()
             };
-            let arguments_value = serde_json::from_str::<Value>(&arguments_json)
-                .map_err(|e| anyhow::anyhow!("tool call {id}: malformed arguments JSON: {e}"))?;
+            let arguments_value = serde_json::from_str::<Value>(&arguments_json).map_err(|e| {
+                LlmError::ToolCallParse(format!("tool call {id}: malformed arguments JSON: {e}"))
+            })?;
             records.push(ToolCallRecord {
                 id: id.clone(),
                 name: b.name.clone(),

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use assistd_llm::{LlmBackend, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
+use assistd_llm::{LlmBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 use assistd_tools::{Attachment, ToolRegistry};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -59,7 +59,10 @@ pub async fn run_agent_turn(
     tx: mpsc::Sender<LlmEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    backend.push_user(user_text, user_attachments).await?;
+    backend
+        .push_user(user_text, user_attachments)
+        .await
+        .map_err(anyhow::Error::new)?;
     let schemas = tools.openai_schemas();
 
     for iteration in 0..max_iterations {
@@ -86,13 +89,23 @@ pub async fn run_agent_turn(
             r = backend.step(schemas.clone(), tx.clone()) => match r {
                 Ok(o) => o,
                 Err(e) => {
+                    // Surface the typed error category to the model so
+                    // a transient HTTP hiccup doesn't read the same as
+                    // a persistent backend-unavailable state. The
+                    // human-readable Display is still the primary
+                    // signal in the user-facing delta.
+                    let label = match &e {
+                        LlmError::Chat(_) => "chat backend",
+                        LlmError::ToolCallParse(_) => "tool-call parse",
+                        LlmError::Unavailable(_) => "backend unavailable",
+                    };
                     let _ = tx
                         .send(LlmEvent::Delta {
-                            text: format!("\n[agent error: {e}]\n"),
+                            text: format!("\n[agent error: {label}: {e}]\n"),
                         })
                         .await;
                     let _ = tx.send(LlmEvent::Done).await;
-                    return Err(e);
+                    return Err(anyhow::Error::new(e));
                 }
             },
         };
@@ -151,7 +164,10 @@ pub async fn run_agent_turn(
 
                     results.push(payload);
                 }
-                backend.push_tool_results(results).await?;
+                backend
+                    .push_tool_results(results)
+                    .await
+                    .map_err(anyhow::Error::new)?;
             }
         }
     }
@@ -363,7 +379,7 @@ mod tests {
             &self,
             _prompt: String,
             _tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             unimplemented!("mock uses step path only")
         }
 
@@ -371,13 +387,16 @@ mod tests {
             &self,
             text: String,
             attachments: Vec<Attachment>,
-        ) -> anyhow::Result<()> {
+        ) -> assistd_llm::LlmResult<()> {
             self.pushed_users.lock().unwrap().push(text);
             self.pushed_attachments.lock().unwrap().push(attachments);
             Ok(())
         }
 
-        async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> anyhow::Result<()> {
+        async fn push_tool_results(
+            &self,
+            results: Vec<ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
             self.pushed_results.lock().unwrap().push(results);
             Ok(())
         }
@@ -386,7 +405,7 @@ mod tests {
             &self,
             _tools: Vec<Value>,
             tx: mpsc::Sender<LlmEvent>,
-        ) -> anyhow::Result<StepOutcome> {
+        ) -> assistd_llm::LlmResult<StepOutcome> {
             self.step_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // Honour any configured slow-step delay BEFORE consuming

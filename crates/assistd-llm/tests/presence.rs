@@ -390,7 +390,11 @@ struct DelayBackend {
 
 #[async_trait]
 impl LlmBackend for DelayBackend {
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> anyhow::Result<()> {
+    async fn generate(
+        &self,
+        prompt: String,
+        tx: mpsc::Sender<LlmEvent>,
+    ) -> assistd_llm::LlmResult<()> {
         let _ = tx.send(LlmEvent::Delta { text: prompt }).await;
         tokio::time::sleep(self.delay).await;
         let _ = tx.send(LlmEvent::Done).await;
@@ -401,7 +405,7 @@ impl LlmBackend for DelayBackend {
         &self,
         text: String,
         _attachments: Vec<assistd_tools::Attachment>,
-    ) -> anyhow::Result<()> {
+    ) -> assistd_llm::LlmResult<()> {
         *self.last_user.lock().await = text;
         Ok(())
     }
@@ -409,7 +413,7 @@ impl LlmBackend for DelayBackend {
     async fn push_tool_results(
         &self,
         _results: Vec<assistd_llm::ToolResultPayload>,
-    ) -> anyhow::Result<()> {
+    ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
 
@@ -417,7 +421,7 @@ impl LlmBackend for DelayBackend {
         &self,
         _tools: Vec<serde_json::Value>,
         tx: mpsc::Sender<LlmEvent>,
-    ) -> anyhow::Result<assistd_llm::StepOutcome> {
+    ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
         let text = self.last_user.lock().await.clone();
         let _ = tx.send(LlmEvent::Delta { text }).await;
         tokio::time::sleep(self.delay).await;
