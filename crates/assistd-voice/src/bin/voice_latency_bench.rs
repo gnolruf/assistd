@@ -94,6 +94,24 @@ struct Args {
     /// (e.g. the Arch AUR `piper-tts-bin` package).
     #[arg(long, default_value = "piper")]
     piper_binary: String,
+    /// Pass `--cuda` to piper to route ONNX inference through the
+    /// CUDA execution provider. Requires a piper binary built against
+    /// `onnxruntime-gpu`. Most distro-packaged binaries (including
+    /// the Arch `piper-tts-bin`) ship CPU-only onnxruntime — you'll
+    /// see "CUDA execution provider not available" in piper's stderr
+    /// and the synth will fail. Build piper from source against
+    /// onnxruntime-gpu, or grab a GPU release from
+    /// `https://github.com/rhasspy/piper/releases` (look for
+    /// `piper_linux_x86_64_gpu.tar.gz`-style assets).
+    #[arg(long)]
+    piper_cuda: bool,
+    /// Prepend `/no_think ` to the transcribed prompt. Qwen3-family
+    /// models (and other reasoning models that honor this token) will
+    /// skip the `<think>` block and start emitting visible content
+    /// immediately. Drops `llm_first_token` from multi-second
+    /// reasoning latency to ~prefill+1-token decode.
+    #[arg(long)]
+    no_think: bool,
     /// Emit results as JSON instead of a human-readable table.
     #[arg(long)]
     json: bool,
@@ -162,9 +180,13 @@ async fn main() -> Result<()> {
         eprintln!("Piper disabled (--no-piper); end-to-end timing will be omitted");
         Arc::new(NoVoiceOutput)
     } else {
-        eprintln!("building Piper TTS (binary='{}')...", args.piper_binary);
+        eprintln!(
+            "building Piper TTS (binary='{}', cuda={})...",
+            args.piper_binary, args.piper_cuda
+        );
         let synth_cfg = SynthesisConfig {
             binary_path: args.piper_binary.clone(),
+            use_cuda: args.piper_cuda,
             ..SynthesisConfig::default()
         };
         match PiperVoiceOutput::start(synth_cfg).await {
@@ -195,7 +217,7 @@ async fn main() -> Result<()> {
         let corr = format!("bench-{i}");
         let span = tracing::info_span!("voice_turn", correlation_id = %corr);
         let t0 = Instant::now();
-        let outcome = run_one(whisper.clone(), llm, piper.clone(), &pcm)
+        let outcome = run_one(whisper.clone(), llm, piper.clone(), &pcm, args.no_think)
             .instrument(span)
             .await;
         let stages = collector.take(&corr);
@@ -239,6 +261,7 @@ async fn run_one(
     llm: Arc<dyn LlmBackend>,
     piper: Arc<dyn VoiceOutput>,
     pcm: &[i16],
+    no_think: bool,
 ) -> Result<()> {
     tracing::debug!(
         target: "assistd::voice::latency",
@@ -246,13 +269,22 @@ async fn run_one(
         "voice latency stage"
     );
 
-    let text = whisper
+    let transcript = whisper
         .transcribe(pcm)
         .await
         .map_err(|e| anyhow::anyhow!("whisper failed: {e}"))?;
-    if text.trim().is_empty() {
+    if transcript.trim().is_empty() {
         bail!("whisper returned empty transcript");
     }
+    // Qwen3 honors `/no_think` as the first token of the user message
+    // by suppressing the `<think>` block. Other reasoning models that
+    // recognize the same convention (DeepSeek-R1 distills, etc.)
+    // benefit too; non-reasoning models ignore the prefix harmlessly.
+    let text = if no_think {
+        format!("/no_think {transcript}")
+    } else {
+        transcript
+    };
 
     // Skip the warmup join — the bench's LLM client is fresh each iter,
     // there's no PresenceManager, and ensure_active() is therefore a

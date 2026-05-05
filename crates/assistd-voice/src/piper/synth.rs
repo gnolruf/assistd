@@ -59,6 +59,9 @@ impl OneShotSynth {
             .arg(format!("{}", cfg.noise_w))
             .arg("--sentence-silence")
             .arg(format!("{}", cfg.sentence_silence_secs));
+        if cfg.use_cuda {
+            cmd.arg("--cuda");
+        }
         if let Some(ref dir) = cfg.espeak_data_dir {
             cmd.arg("--espeak-data").arg(dir);
         }

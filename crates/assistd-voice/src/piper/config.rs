@@ -19,4 +19,10 @@ pub struct PiperRuntimeConfig {
     pub sentence_silence_secs: f32,
     pub espeak_data_dir: Option<PathBuf>,
     pub deadline: Duration,
+    /// When true, `OneShotSynth::synthesize` adds `--cuda` to the
+    /// piper invocation. Requires a piper binary built against
+    /// onnxruntime-gpu — falls back gracefully (piper exits non-zero)
+    /// if the binary is CPU-only, surfaced via the synth circuit
+    /// breaker after 3 failures in 60s.
+    pub use_cuda: bool,
 }

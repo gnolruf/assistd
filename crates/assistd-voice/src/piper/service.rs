@@ -90,6 +90,7 @@ impl PiperVoiceOutput {
             sentence_silence_secs: cfg.sentence_silence_secs,
             espeak_data_dir: cfg.espeak_data_dir.clone(),
             deadline: Duration::from_secs(cfg.deadline_secs as u64),
+            use_cuda: cfg.use_cuda,
         });
 
         let synth = Arc::new(OneShotSynth::new(runtime.clone()));
