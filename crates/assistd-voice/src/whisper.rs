@@ -66,7 +66,8 @@ impl Transcriber for WhisperTranscriber {
             .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
         let ctx = self.ctx.clone();
         let cfg = self.cfg.clone();
-        let result = tokio::task::spawn_blocking(move || run_inference(ctx, cfg, audio_f32)).await?;
+        let result =
+            tokio::task::spawn_blocking(move || run_inference(ctx, cfg, audio_f32)).await?;
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "whisper_done",

@@ -169,7 +169,10 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
                 let transcriber: Arc<dyn Transcriber> = if is_gpu
                     && config.voice.transcription.cpu_fallback_enabled
                 {
-                    let probe = Arc::new(PresenceGpuProbe::new(presence.clone()));
+                    let probe = Arc::new(PresenceGpuProbe::new(
+                        presence.clone(),
+                        config.sleep.gpu_allowlist.clone(),
+                    ));
                     let queue_cfg = QueueConfig {
                         gpu_busy_timeout_ms: config.voice.transcription.gpu_busy_timeout_ms,
                         cpu_fallback_enabled: config.voice.transcription.cpu_fallback_enabled,

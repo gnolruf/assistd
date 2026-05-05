@@ -91,10 +91,11 @@ impl PiperVoiceOutput {
             espeak_data_dir: cfg.espeak_data_dir.clone(),
             deadline: Duration::from_secs(cfg.deadline_secs as u64),
             use_cuda: cfg.use_cuda,
+            output_device: cfg.output_device.clone(),
         });
 
         let synth = Arc::new(OneShotSynth::new(runtime.clone()));
-        let playback = Arc::new(RodioPlaybackWorker::start()?);
+        let playback = Arc::new(RodioPlaybackWorker::start(cfg.output_device.as_deref())?);
 
         // Health-check + pre-warm: the synth call exercises the full
         // spawn → ONNX → drain → exit path, warming OS file cache for

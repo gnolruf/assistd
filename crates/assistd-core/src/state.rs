@@ -1565,9 +1565,8 @@ impl AppState {
                 // the second call from `handle_query::acquire_request_guard`
                 // short-circuits to a single RwLock read.
                 let presence = self.presence.clone();
-                let warm = tokio::spawn(
-                    async move { presence.ensure_active().await }.in_current_span(),
-                );
+                let warm =
+                    tokio::spawn(async move { presence.ensure_active().await }.in_current_span());
                 *self.warmup_handle.lock().await = Some(warm);
                 let _ = tx
                     .send(Event::VoiceState {
@@ -1805,15 +1804,12 @@ impl AppState {
         // logged but not fatal — the request guard inside `handle_query`
         // will retry the wake itself.
         let warmup = self.warmup_handle.lock().await.take();
-        let (text_res, warm_res) = tokio::join!(
-            self.voice.stop_and_transcribe(),
-            async {
-                match warmup {
-                    Some(h) => h.await.unwrap_or_else(|e| Err(anyhow::anyhow!(e))),
-                    None => Ok(()),
-                }
-            },
-        );
+        let (text_res, warm_res) = tokio::join!(self.voice.stop_and_transcribe(), async {
+            match warmup {
+                Some(h) => h.await.unwrap_or_else(|e| Err(anyhow::anyhow!(e))),
+                None => Ok(()),
+            }
+        },);
         if let Err(e) = &warm_res {
             tracing::warn!(
                 target: "assistd::state",

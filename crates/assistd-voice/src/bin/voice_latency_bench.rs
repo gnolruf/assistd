@@ -432,8 +432,7 @@ async fn ensure_wav_cached(url: &str) -> Result<PathBuf> {
         .bytes()
         .await
         .context("reading WAV bytes")?;
-    std::fs::write(&path, &bytes)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
 

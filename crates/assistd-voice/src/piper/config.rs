@@ -25,4 +25,7 @@ pub struct PiperRuntimeConfig {
     /// if the binary is CPU-only, surfaced via the synth circuit
     /// breaker after 3 failures in 60s.
     pub use_cuda: bool,
+    /// Optional cpal output-device name (matches `aplay -L`). `None`
+    /// uses `cpal::default_host().default_output_device()`.
+    pub output_device: Option<String>,
 }
