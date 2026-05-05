@@ -75,6 +75,11 @@ impl OneShotSynth {
             binary: cfg.binary_path.clone(),
             source,
         })?;
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "piper_spawn",
+            "voice latency stage"
+        );
 
         let mut stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
@@ -162,6 +167,11 @@ impl OneShotSynth {
             .chunks_exact(2)
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "piper_synth_done",
+            "voice latency stage"
+        );
 
         Ok(SynthOutput {
             samples,
@@ -186,14 +196,33 @@ impl OneShotSynth {
 }
 
 async fn drain_stdout(mut stdout: ChildStdout) -> Result<Vec<u8>, PiperError> {
+    // Chunked read so we can timestamp the first PCM byte (the practical
+    // proxy for "audio is now flowing"). 8 KiB matches piper's typical
+    // pipe block size; total bytes copied is unchanged from `read_to_end`.
     let mut buf = Vec::with_capacity(64 * 1024);
-    stdout
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|source| PiperError::Io {
-            path: std::path::PathBuf::from("<piper stdout>"),
-            source,
-        })?;
+    let mut chunk = [0u8; 8192];
+    let mut first = true;
+    loop {
+        let n = stdout
+            .read(&mut chunk)
+            .await
+            .map_err(|source| PiperError::Io {
+                path: std::path::PathBuf::from("<piper stdout>"),
+                source,
+            })?;
+        if n == 0 {
+            break;
+        }
+        if first {
+            tracing::debug!(
+                target: "assistd::voice::latency",
+                stage = "piper_first_byte",
+                "voice latency stage"
+            );
+            first = false;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
     Ok(buf)
 }
 

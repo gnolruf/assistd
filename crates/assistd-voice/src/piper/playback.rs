@@ -99,6 +99,11 @@ impl RodioPlaybackWorker {
             .collect();
         let buffer = SamplesBuffer::new(channels, sample_rate, samples_f32);
         self.player.append(buffer);
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "playback_enqueued",
+            "voice latency stage"
+        );
         Ok(())
     }
 

@@ -31,8 +31,23 @@ tts = [
     "dep:which",
 ]
 cuda = ["whisper-rs/cuda"]
-# Gates the integration test that downloads a small model from HuggingFace.
-test-support = ["whisper", "mic", "listen", "tts", "dep:hound"]
+# Gates the integration test that downloads a small model from HuggingFace,
+# plus the `voice_latency_bench` binary that drives the full Whisper → LLM
+# → Piper pipeline against a running llama-server.
+test-support = [
+    "whisper",
+    "mic",
+    "listen",
+    "tts",
+    "dep:hound",
+    "dep:assistd-llm",
+    "dep:clap",
+    "dep:tracing-subscriber",
+]
+
+[[bin]]
+name = "voice_latency_bench"
+required-features = ["test-support"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -44,6 +59,11 @@ assistd-ipc = { workspace = true }
 # `assistd-config` is required unconditionally because `sentence` (built
 # in every feature combination) consumes the `CodeBlockMode` enum.
 assistd-config = { workspace = true }
+# Bench-only — used by `voice_latency_bench` to drive the LLM stage of
+# the pipeline and to parse CLI args / install a tracing layer.
+assistd-llm = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 # Whisper backend
 whisper-rs = { version = "0.16", optional = true, default-features = false, features = ["tracing_backend"] }
