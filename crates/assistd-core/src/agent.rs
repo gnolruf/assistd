@@ -12,15 +12,25 @@
 //! conversation state. `AppState::handle_query` owns that lock.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use assistd_llm::{LlmBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
+use assistd_llm::{
+    HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
+    ToolResultPayload,
+};
 use assistd_tools::{Attachment, ToolRegistry};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
+
+/// Wall-clock budget for waiting on an LLM restart before falling
+/// through to a terminal error. The supervisor's worst-case backoff
+/// sum is 1+2+4+8+16+32 = 63s; 75s gives headroom for spawn + health
+/// probe latency. Longer than this and we treat the restart as
+/// hopeless and surface to the user.
+const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 
 /// Run one agent turn end-to-end.
 ///
@@ -49,6 +59,13 @@ use tracing::{debug, info, instrument, warn};
 /// Pass [`CancellationToken::new`] (a fresh, never-cancelled token) if
 /// the caller doesn't need explicit cancellation — the
 /// `tx.is_closed()` path keeps existing behaviour for that case.
+///
+/// `health` is the optional restart probe used to recover from
+/// llama-server crashes mid-turn. When `Some`, the loop reacts to
+/// [`LlmError::ServerRestarting`] by emitting a `Status` event,
+/// waiting for `ReadyState::Ready`, and re-running the same step
+/// once. Pass `None` for tests / mock backends that never crash.
+#[allow(clippy::too_many_arguments)]
 #[instrument(skip_all, name = "agent_turn")]
 pub async fn run_agent_turn(
     backend: Arc<dyn LlmBackend>,
@@ -58,6 +75,7 @@ pub async fn run_agent_turn(
     user_attachments: Vec<Attachment>,
     tx: mpsc::Sender<LlmEvent>,
     cancel: CancellationToken,
+    health: Option<Arc<dyn LlmHealthProbe>>,
 ) -> Result<()> {
     backend
         .push_user(user_text, user_attachments)
@@ -76,18 +94,124 @@ pub async fn run_agent_turn(
             return Ok(());
         }
 
-        let outcome = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                debug!(
-                    target: "assistd::agent",
-                    iteration,
-                    "cancellation fired during LLM step; stopping"
-                );
-                return Ok(());
-            }
-            r = backend.step(schemas.clone(), tx.clone()) => match r {
-                Ok(o) => o,
+        // Per-iteration replay budget: at most one restart-driven
+        // retry. The supervisor's own consecutive-failure cap (5) is
+        // the daemon-level circuit breaker; this keeps the user-visible
+        // latency bounded if the supervisor recovers but the model
+        // still crashes on the same prompt.
+        let mut restart_attempted = false;
+
+        let outcome = loop {
+            let step_result = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    debug!(
+                        target: "assistd::agent",
+                        iteration,
+                        "cancellation fired during LLM step; stopping"
+                    );
+                    return Ok(());
+                }
+                r = backend.step(schemas.clone(), tx.clone()) => r,
+            };
+
+            match step_result {
+                Ok(o) => break o,
+                Err(LlmError::ServerRestarting(reason))
+                    if !restart_attempted && health.is_some() =>
+                {
+                    restart_attempted = true;
+                    crate::recovery_event!(
+                        crate::RecoverySeverity::Warning,
+                        crate::Component::Llm,
+                        "crash_detected",
+                        iteration = iteration,
+                        reason = %reason,
+                        "llama-server died mid-step; waiting for supervisor restart and replaying"
+                    );
+                    let _ = tx
+                        .send(LlmEvent::Status {
+                            severity: crate::RecoverySeverity::Warning.as_str().to_string(),
+                            component: crate::Component::Llm.as_str().to_string(),
+                            event: "restarting".to_string(),
+                            message: "LLM crashed — restarting and replaying your query"
+                                .to_string(),
+                        })
+                        .await;
+
+                    // Probe is guaranteed Some by the match guard.
+                    let probe = health.as_ref().expect("health Some by guard");
+                    let wait_result = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {
+                            debug!(
+                                target: "assistd::agent",
+                                iteration,
+                                "cancellation fired while waiting for LLM restart"
+                            );
+                            return Ok(());
+                        }
+                        res = probe.wait_for_ready(REPLAY_WAIT_BUDGET) => res,
+                    };
+
+                    match wait_result {
+                        Ok(()) => {
+                            crate::recovery_event!(
+                                crate::RecoverySeverity::Info,
+                                crate::Component::Llm,
+                                "replay_ready",
+                                iteration = iteration,
+                                "supervisor reported Ready; replaying user query"
+                            );
+                            let _ = tx
+                                .send(LlmEvent::Status {
+                                    severity: crate::RecoverySeverity::Info.as_str().to_string(),
+                                    component: crate::Component::Llm.as_str().to_string(),
+                                    event: "replaying".to_string(),
+                                    message: "LLM restored — replaying your query".to_string(),
+                                })
+                                .await;
+                            // Retry the same iteration.
+                            continue;
+                        }
+                        Err(wait_err) => {
+                            crate::recovery_event!(
+                                crate::RecoverySeverity::Error,
+                                crate::Component::Llm,
+                                "replay_abandoned",
+                                iteration = iteration,
+                                wait_error = %wait_err,
+                                "supervisor did not return to Ready; abandoning replay"
+                            );
+                            let final_msg = match wait_err {
+                                HealthWaitError::Timeout => "LLM did not recover before timeout",
+                                HealthWaitError::Degraded => {
+                                    "LLM supervisor entered degraded state; restart abandoned"
+                                }
+                                HealthWaitError::NoService => {
+                                    "LLM service is not currently attached"
+                                }
+                            };
+                            let _ = tx
+                                .send(LlmEvent::Status {
+                                    severity: crate::RecoverySeverity::Error.as_str().to_string(),
+                                    component: crate::Component::Llm.as_str().to_string(),
+                                    event: "degraded".to_string(),
+                                    message: final_msg.to_string(),
+                                })
+                                .await;
+                            let _ = tx
+                                .send(LlmEvent::Delta {
+                                    text: format!("\n[agent error: {final_msg}]\n"),
+                                })
+                                .await;
+                            let _ = tx.send(LlmEvent::Done).await;
+                            return Err(anyhow::Error::new(LlmError::ServerRestarting(
+                                final_msg.to_string(),
+                            )));
+                        }
+                    }
+                }
                 Err(e) => {
                     // Surface the typed error category to the model so
                     // a transient HTTP hiccup doesn't read the same as
@@ -98,6 +222,9 @@ pub async fn run_agent_turn(
                         LlmError::Chat(_) => "chat backend",
                         LlmError::ToolCallParse(_) => "tool-call parse",
                         LlmError::Unavailable(_) => "backend unavailable",
+                        // Already-attempted restart, or no probe wired.
+                        // Fall through as a terminal failure.
+                        LlmError::ServerRestarting(_) => "llm restarting",
                     };
                     let _ = tx
                         .send(LlmEvent::Delta {
@@ -107,7 +234,7 @@ pub async fn run_agent_turn(
                     let _ = tx.send(LlmEvent::Done).await;
                     return Err(anyhow::Error::new(e));
                 }
-            },
+            }
         };
 
         match outcome {
@@ -474,6 +601,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -500,6 +628,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -563,6 +692,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -606,6 +736,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -647,6 +778,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -700,6 +832,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -735,6 +868,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -768,6 +902,7 @@ mod tests {
             Vec::new(),
             tx,
             token,
+            None,
         )
         .await
         .unwrap();
@@ -849,6 +984,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -978,6 +1114,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1053,6 +1190,7 @@ mod tests {
             Vec::new(),
             tx,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1105,6 +1243,7 @@ mod tests {
             Vec::new(),
             tx,
             token,
+            None,
         )
         .await
         .unwrap();
@@ -1115,6 +1254,267 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(500),
             "cancellation did not preempt slow step (elapsed: {elapsed:?})"
+        );
+    }
+
+    /// Mock probe that lets a test script the wait_for_ready outcome.
+    /// Used to drive the replay-on-ServerRestarting path without
+    /// standing up a real PresenceManager.
+    struct MockProbe {
+        pid: StdMutex<Option<u32>>,
+        state: StdMutex<assistd_llm::ReadyState>,
+        wait_result: StdMutex<Option<Result<(), assistd_llm::HealthWaitError>>>,
+        wait_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockProbe {
+        fn ready_with_wait_ok(pid: u32) -> Arc<Self> {
+            Arc::new(Self {
+                pid: StdMutex::new(Some(pid)),
+                state: StdMutex::new(assistd_llm::ReadyState::Ready),
+                wait_result: StdMutex::new(Some(Ok(()))),
+                wait_calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+
+        fn ready_with_wait_err(err: assistd_llm::HealthWaitError) -> Arc<Self> {
+            Arc::new(Self {
+                pid: StdMutex::new(Some(99)),
+                state: StdMutex::new(assistd_llm::ReadyState::Degraded),
+                wait_result: StdMutex::new(Some(Err(err))),
+                wait_calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmHealthProbe for MockProbe {
+        fn pid(&self) -> Option<u32> {
+            *self.pid.lock().unwrap()
+        }
+
+        fn state(&self) -> Option<assistd_llm::ReadyState> {
+            Some(*self.state.lock().unwrap())
+        }
+
+        async fn wait_for_ready(
+            &self,
+            _budget: std::time::Duration,
+        ) -> Result<(), assistd_llm::HealthWaitError> {
+            self.wait_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.wait_result.lock().unwrap().clone().unwrap_or(Ok(()))
+        }
+    }
+
+    /// Mock backend that injects errors before falling through to the
+    /// existing outcome queue. Used to exercise error-handling paths
+    /// (server-restart replay, terminal failures) without needing a
+    /// real LlamaChatClient.
+    struct ErrorInjectingBackend {
+        errors: StdMutex<Vec<LlmError>>,
+        outcomes: StdMutex<Vec<StepOutcome>>,
+        step_calls: std::sync::atomic::AtomicUsize,
+        pushed_users: StdMutex<Vec<String>>,
+    }
+
+    impl ErrorInjectingBackend {
+        fn new(errors: Vec<LlmError>, outcomes: Vec<StepOutcome>) -> Arc<Self> {
+            Arc::new(Self {
+                errors: StdMutex::new(errors),
+                outcomes: StdMutex::new(outcomes),
+                step_calls: std::sync::atomic::AtomicUsize::new(0),
+                pushed_users: StdMutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for ErrorInjectingBackend {
+        async fn generate(
+            &self,
+            _prompt: String,
+            _tx: mpsc::Sender<LlmEvent>,
+        ) -> assistd_llm::LlmResult<()> {
+            unimplemented!("mock uses step path only")
+        }
+
+        async fn push_user(
+            &self,
+            text: String,
+            _attachments: Vec<Attachment>,
+        ) -> assistd_llm::LlmResult<()> {
+            self.pushed_users.lock().unwrap().push(text);
+            Ok(())
+        }
+
+        async fn push_tool_results(
+            &self,
+            _results: Vec<ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+
+        async fn step(
+            &self,
+            _tools: Vec<Value>,
+            tx: mpsc::Sender<LlmEvent>,
+        ) -> assistd_llm::LlmResult<StepOutcome> {
+            self.step_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Errors first; once they're exhausted, fall through to
+            // outcomes. Lets a single test script "first attempt
+            // crashes, second attempt succeeds".
+            let next_err = self.errors.lock().unwrap().pop();
+            if let Some(e) = next_err {
+                return Err(e);
+            }
+            let outcome = self
+                .outcomes
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or(StepOutcome::Final);
+            if matches!(outcome, StepOutcome::Final) {
+                let _ = tx.send(LlmEvent::Delta { text: "ok".into() }).await;
+            }
+            Ok(outcome)
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_once_on_server_restarting() {
+        // First attempt: ServerRestarting. Probe says Ready returns Ok.
+        // Second attempt: Final.
+        // Expected: exactly one step retry; Status events for restarting
+        // and replaying; final Done; no terminal Error.
+        let backend = ErrorInjectingBackend::new(
+            vec![LlmError::ServerRestarting("boom".into())],
+            vec![StepOutcome::Final],
+        );
+        let probe = MockProbe::ready_with_wait_ok(123);
+        let tools = tools_with_echo();
+        let (tx, mut rx) = mpsc::channel(32);
+        run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "hello".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+            Some(probe.clone()),
+        )
+        .await
+        .expect("replay should succeed");
+
+        let events = collect(&mut rx).await;
+        let restart_count = events
+            .iter()
+            .filter(|e| matches!(e, LlmEvent::Status { event, .. } if event == "restarting"))
+            .count();
+        let replaying_count = events
+            .iter()
+            .filter(|e| matches!(e, LlmEvent::Status { event, .. } if event == "replaying"))
+            .count();
+        assert_eq!(restart_count, 1, "expected one restarting Status event");
+        assert_eq!(replaying_count, 1, "expected one replaying Status event");
+        assert!(matches!(events.last(), Some(LlmEvent::Done)));
+        assert_eq!(
+            probe.wait_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "wait_for_ready should be called exactly once"
+        );
+        // Two step calls: the failing one and the successful retry.
+        assert_eq!(
+            backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_does_not_loop_on_repeated_server_restarting() {
+        // Two ServerRestarting in a row: the loop should retry once,
+        // see the second crash, and surface a terminal error rather
+        // than continue replaying. The supervisor's circuit-breaker
+        // (Degraded after 5 consecutive failures) is the daemon-level
+        // backstop; this test asserts the per-iteration cap.
+        let backend = ErrorInjectingBackend::new(
+            vec![
+                LlmError::ServerRestarting("second".into()),
+                LlmError::ServerRestarting("first".into()),
+            ],
+            vec![],
+        );
+        let probe = MockProbe::ready_with_wait_ok(123);
+        let tools = tools_with_echo();
+        let (tx, mut rx) = mpsc::channel(32);
+        let result = run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "hello".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+            Some(probe),
+        )
+        .await;
+        assert!(result.is_err(), "second ServerRestarting must be terminal");
+
+        let events = collect(&mut rx).await;
+        let restart_count = events
+            .iter()
+            .filter(|e| matches!(e, LlmEvent::Status { event, .. } if event == "restarting"))
+            .count();
+        assert_eq!(
+            restart_count, 1,
+            "should attempt replay only once, then surface error"
+        );
+        assert!(matches!(events.last(), Some(LlmEvent::Done)));
+        // Two step calls: original + one replay attempt.
+        assert_eq!(
+            backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_abandons_on_degraded_supervisor() {
+        // ServerRestarting once, but the probe reports Degraded.
+        // Expected: a `degraded` Status event followed by a terminal
+        // error. No second step call.
+        let backend =
+            ErrorInjectingBackend::new(vec![LlmError::ServerRestarting("dead".into())], vec![]);
+        let probe = MockProbe::ready_with_wait_err(assistd_llm::HealthWaitError::Degraded);
+        let tools = tools_with_echo();
+        let (tx, mut rx) = mpsc::channel(32);
+        let result = run_agent_turn(
+            backend.clone(),
+            tools,
+            10,
+            "hello".into(),
+            Vec::new(),
+            tx,
+            CancellationToken::new(),
+            Some(probe),
+        )
+        .await;
+        assert!(result.is_err(), "Degraded probe must surface as error");
+
+        let events = collect(&mut rx).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::Status { event, .. } if event == "degraded")),
+            "expected a degraded Status event"
+        );
+        assert!(matches!(events.last(), Some(LlmEvent::Done)));
+        // Only one step call — wait_for_ready returned Err, so no
+        // replay step was attempted.
+        assert_eq!(
+            backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
         );
     }
 }

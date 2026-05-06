@@ -88,6 +88,28 @@ impl ChildProcess {
             cmd.process_group(0);
         }
 
+        // Orphan prevention: when the daemon dies (including the SIGKILL
+        // path that bypasses Drop and `kill_on_drop`), the kernel
+        // delivers SIGTERM to this child. `pre_exec` runs in the forked
+        // child between fork() and exec(); `prctl(PR_SET_PDEATHSIG)` is
+        // async-signal-safe.
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: prctl is async-signal-safe; the closure captures
+            // nothing that could be in an inconsistent state across
+            // fork(). On error we surface the libc errno so the caller
+            // sees the spawn failure rather than a silently-orphaned
+            // child.
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+
         let mut child = cmd.spawn().map_err(|source| LlamaServerError::Spawn {
             path: cfg.binary_path.clone(),
             source,

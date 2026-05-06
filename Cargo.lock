@@ -194,6 +194,7 @@ dependencies = [
  "assistd-wm",
  "async-trait",
  "base64",
+ "libc",
  "serde",
  "serde_json",
  "shlex",

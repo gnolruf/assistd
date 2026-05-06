@@ -97,6 +97,13 @@ impl LlamaService {
         *self.ready_rx.borrow()
     }
 
+    /// Subscribe to the supervisor's readiness watch. Used by callers
+    /// that need to await a transition (e.g. crash → restart → Ready)
+    /// rather than just snapshot the current state.
+    pub fn subscribe_ready(&self) -> watch::Receiver<ReadyState> {
+        self.ready_rx.clone()
+    }
+
     /// PID of the currently-running child, or `None` if no child is alive.
     /// The value changes as the supervisor restarts the child.
     pub fn pid(&self) -> Option<u32> {

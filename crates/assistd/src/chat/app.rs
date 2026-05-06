@@ -545,6 +545,21 @@ impl App {
                     self.model_name = model_name;
                 }
             }
+            Event::Status {
+                severity,
+                component,
+                event,
+                message,
+                ..
+            } => {
+                self.set_notice(&message);
+                if event == "restarting" {
+                    self.output.finish_assistant();
+                    self.output.push_info(&format!("[{component} restarting…]"));
+                } else if severity == "error" {
+                    self.output.push_info(&format!("[{component}: {message}]"));
+                }
+            }
             Event::Done { .. } => {
                 self.throughput.on_done(now);
                 self.output.finish_assistant();
