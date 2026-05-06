@@ -377,9 +377,7 @@ async fn run_one(
             // events never appear. Status events likewise only fire on
             // a managed-server crash, which the bench's stub backend
             // can't trigger. Ignore for completeness.
-            LlmEvent::ToolCall { .. }
-            | LlmEvent::ToolResult { .. }
-            | LlmEvent::Status { .. } => {}
+            LlmEvent::ToolCall { .. } | LlmEvent::ToolResult { .. } | LlmEvent::Status { .. } => {}
         }
     }
     drop(speech_tx);
