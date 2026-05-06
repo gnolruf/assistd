@@ -210,7 +210,7 @@ async fn main() -> Result<()> {
         // Fresh LlamaChatClient per iter so accumulated history doesn't
         // skew results across runs. New reqwest::Client costs <1 ms.
         let llm: Arc<dyn LlmBackend> = Arc::new(
-            LlamaChatClient::new(&chat_cfg, &server_cfg, &model_cfg, &timeouts)
+            LlamaChatClient::new(&chat_cfg, &server_cfg, &model_cfg, &timeouts, None)
                 .context("building LLM client")?,
         );
 
@@ -374,8 +374,12 @@ async fn run_one(
             }
             // The bench's prompt is a single user message and the LLM
             // is invoked via generate() (not the agent loop), so tool
-            // events never appear. Ignore for completeness.
-            LlmEvent::ToolCall { .. } | LlmEvent::ToolResult { .. } => {}
+            // events never appear. Status events likewise only fire on
+            // a managed-server crash, which the bench's stub backend
+            // can't trigger. Ignore for completeness.
+            LlmEvent::ToolCall { .. }
+            | LlmEvent::ToolResult { .. }
+            | LlmEvent::Status { .. } => {}
         }
     }
     drop(speech_tx);

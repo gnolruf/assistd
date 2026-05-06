@@ -1303,7 +1303,7 @@ mod tests {
         ) -> Result<(), assistd_llm::HealthWaitError> {
             self.wait_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.wait_result.lock().unwrap().clone().unwrap_or(Ok(()))
+            (*self.wait_result.lock().unwrap()).unwrap_or(Ok(()))
         }
     }
 
