@@ -1143,6 +1143,13 @@ impl AppState {
         let llm = self.llm.clone();
         let tools = self.tools.clone();
         let max_iterations = self.config.agent.max_iterations;
+        // Build the LLM health probe from the presence manager so the
+        // agent loop can wait for restart and replay on
+        // `LlmError::ServerRestarting`.
+        let health: Option<std::sync::Arc<dyn assistd_llm::LlmHealthProbe>> =
+            Some(std::sync::Arc::new(
+                crate::presence::PresenceLlmHealthProbe::new(self.presence.clone()),
+            ));
         // Cancellation token: wired to the agent loop so a slow LLM
         // step or tool dispatch can be preempted promptly. Today we
         // only fire it when this function returns (drop) — that
@@ -1166,6 +1173,7 @@ impl AppState {
                     attachments,
                     llm_tx,
                     cancel_for_agent,
+                    health,
                 )
                 .await
             }
@@ -1356,6 +1364,32 @@ impl AppState {
                             id: id.clone(),
                             name,
                             result,
+                        },
+                        Vec::new(),
+                    )
+                }
+                LlmEvent::Status {
+                    severity,
+                    component,
+                    event,
+                    message,
+                } => {
+                    // On a recoverable restart, drop any partial
+                    // accumulator state so a successful replay isn't
+                    // persisted as `<partial><replay>` concatenated.
+                    // The chat client likewise rolls back partial
+                    // assistant content on its side.
+                    if event == "restarting" {
+                        assistant_accum.clear();
+                        let _ = sentence_buf.finish();
+                    }
+                    (
+                        Event::Status {
+                            id: id.clone(),
+                            severity,
+                            component,
+                            event,
+                            message,
                         },
                         Vec::new(),
                     )

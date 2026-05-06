@@ -37,10 +37,12 @@
 
 pub mod agent;
 pub mod presence;
+pub mod recovery;
 pub mod socket;
 pub mod state;
 
 pub use agent::run_agent_turn;
+pub use recovery::{Component, RecoverySeverity, install_panic_hook, spawn_supervised};
 
 // Re-exports from `assistd-config`. Config types are the boundary
 // between user-supplied TOML and subsystem constructors; the daemon

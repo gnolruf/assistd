@@ -374,7 +374,7 @@ fn chat_spec(port: u16) -> ClientCfg {
 }
 
 fn build_client(cfg: &ClientCfg) -> LlamaChatClient {
-    LlamaChatClient::new(&cfg.chat, &cfg.server, &cfg.model, &cfg.timeouts).unwrap()
+    LlamaChatClient::new(&cfg.chat, &cfg.server, &cfg.model, &cfg.timeouts, None).unwrap()
 }
 
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
@@ -581,7 +581,7 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
     let mut spec = chat_spec(port);
     spec.timeouts.stream_inactivity_secs = 1;
     let client =
-        LlamaChatClient::new(&spec.chat, &spec.server, &spec.model, &spec.timeouts).unwrap();
+        LlamaChatClient::new(&spec.chat, &spec.server, &spec.model, &spec.timeouts, None).unwrap();
 
     let (tx, mut rx) = mpsc::channel(32);
     let started = std::time::Instant::now();

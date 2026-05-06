@@ -461,6 +461,24 @@ pub enum Event {
         vision: bool,
         model_name: String,
     },
+    /// Non-terminal recovery / status update. Emitted mid-stream when
+    /// the daemon hits a recoverable condition (e.g. llama-server
+    /// restarting, MCP server bouncing). Clients should render but not
+    /// treat as a terminal event — a `Done` or `Error` still follows.
+    ///
+    /// `severity` is one of `info`, `warning`, `error` (matching
+    /// `RecoverySeverity::as_str`). `component` is the canonical
+    /// component name (matching `Component::as_str`). `event` is a
+    /// short machine-readable identifier (`restarting`, `replaying`,
+    /// `degraded`, ...) that clients can branch on if they need
+    /// behavior beyond rendering the message.
+    Status {
+        id: String,
+        severity: String,
+        component: String,
+        event: String,
+        message: String,
+    },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -492,6 +510,7 @@ impl Event {
             | Event::ReindexProgress { id, .. }
             | Event::ConfirmRequest { id, .. }
             | Event::Capabilities { id, .. }
+            | Event::Status { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }

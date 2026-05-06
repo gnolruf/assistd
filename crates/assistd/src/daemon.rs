@@ -80,20 +80,24 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     {
         let signal_tx = shutdown_tx.clone();
-        tokio::spawn(async move {
-            let mut term = match signal(SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("failed to install SIGTERM handler: {e}");
-                    return;
+        assistd_core::spawn_supervised(
+            "signal_handler",
+            assistd_core::Component::Daemon,
+            async move {
+                let mut term = match signal(SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("failed to install SIGTERM handler: {e}");
+                        return;
+                    }
+                };
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => info!("received SIGINT"),
+                    _ = term.recv() => info!("received SIGTERM"),
                 }
-            };
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => info!("received SIGINT"),
-                _ = term.recv() => info!("received SIGTERM"),
-            }
-            let _ = signal_tx.send(true);
-        });
+                let _ = signal_tx.send(true);
+            },
+        );
     }
 
     // Bring the daemon up in Active: PresenceManager cold-starts llama-server
@@ -110,6 +114,15 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         "presence: Active (llama-server ready on {}:{})",
         config.llama_server.host, config.llama_server.port
     );
+
+    // Install the recovery panic hook now that we have a presence
+    // handle. Any panic from this point forward (including in detached
+    // tasks via the default panic hook chain) will SIGTERM the running
+    // llama-server before propagating, and emit a structured recovery
+    // event with the panic location and message. The hook holds a
+    // `Weak<PresenceManager>` so it cannot keep the manager alive past
+    // daemon shutdown.
+    assistd_core::install_panic_hook(Arc::downgrade(&presence));
 
     // Capability probe: ask the now-ready llama-server for the loaded
     // model id and whether it has a vision encoder. The shared
@@ -131,11 +144,18 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         config.llama_server.port,
     );
 
+    // Build the health probe over the presence manager so the chat
+    // client can detect mid-stream llama-server crashes and the agent
+    // loop can wait for the supervisor to recover before replaying.
+    let health_probe: std::sync::Arc<dyn assistd_llm::LlmHealthProbe> = std::sync::Arc::new(
+        assistd_core::presence::PresenceLlmHealthProbe::new(presence.clone()),
+    );
     let chat = LlamaChatClient::new(
         &config.chat,
         &config.llama_server,
         &config.model,
         &config.timeouts,
+        Some(health_probe.clone()),
     )?;
 
     // Voice input: build the mic-backed implementation when the user

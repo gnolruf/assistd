@@ -28,8 +28,65 @@ use assistd_tools::Attachment;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
+
+/// Reason an [`LlmHealthProbe::wait_for_ready`] call ended without
+/// observing `ReadyState::Ready`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthWaitError {
+    /// The wait budget elapsed before the supervisor reported Ready.
+    Timeout,
+    /// The supervisor entered `Degraded` (gave up after consecutive
+    /// failures); waiting longer will not help.
+    Degraded,
+    /// No managed service is currently attached. The daemon is
+    /// `Sleeping`, or the probe was constructed against a presence
+    /// manager that hasn't woken yet.
+    NoService,
+}
+
+impl std::fmt::Display for HealthWaitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HealthWaitError::Timeout => f.write_str("LLM did not become ready before timeout"),
+            HealthWaitError::Degraded => {
+                f.write_str("LLM supervisor entered Degraded; restart abandoned")
+            }
+            HealthWaitError::NoService => {
+                f.write_str("no llama-server is currently managed (presence asleep?)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HealthWaitError {}
+
+/// Health/restart probe used by the chat client to classify HTTP
+/// failures as crash-induced (worth replaying) vs. transport-level
+/// (propagate as error).
+///
+/// Implemented in `assistd-core` over `Arc<PresenceManager>`. The
+/// trait lives in this crate so [`LlamaChatClient`] can depend on it
+/// without taking a circular dep on `assistd-core`.
+#[async_trait]
+pub trait LlmHealthProbe: Send + Sync {
+    /// Current PID of the managed llama-server child, or `None` if
+    /// none is alive (sleeping, or in mid-restart with the child not
+    /// yet spawned).
+    fn pid(&self) -> Option<u32>;
+
+    /// Snapshot of the supervisor's readiness state. Returns `None`
+    /// when no service is attached (presence asleep / not yet woken).
+    fn state(&self) -> Option<ReadyState>;
+
+    /// Block until the supervisor reports `ReadyState::Ready` or
+    /// `timeout` elapses. Maps `Degraded` to `HealthWaitError::Degraded`
+    /// immediately so the caller can give up rather than wait the full
+    /// budget on a hopeless restart.
+    async fn wait_for_ready(&self, timeout: Duration) -> Result<(), HealthWaitError>;
+}
 
 /// Errors surfaced by the [`LlmBackend`] trait.
 ///
@@ -59,6 +116,13 @@ pub enum LlmError {
 
     #[error("LLM backend unavailable: {0}")]
     Unavailable(String),
+
+    /// The llama-server child crashed mid-request and the chat client
+    /// detected the supervisor is restarting it. The agent loop sees
+    /// this and handles replay (emit a Status event, wait for ready,
+    /// retry once) — it never reaches the IPC layer as an error.
+    #[error("llama-server is restarting: {0}")]
+    ServerRestarting(String),
 }
 
 /// Convenience result alias. Library code should prefer `LlmError`
@@ -84,6 +148,15 @@ pub enum LlmEvent {
         id: String,
         name: String,
         result: Value,
+    },
+    /// Non-terminal recovery / status update emitted by the agent loop
+    /// or chat backend. Mirrors the wire `Event::Status` shape so the
+    /// state-layer translator can map 1:1 without re-deriving fields.
+    Status {
+        severity: String,
+        component: String,
+        event: String,
+        message: String,
     },
     /// The model has finished generating.
     Done,

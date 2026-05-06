@@ -33,7 +33,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::PresenceState;
-use assistd_llm::{LlamaServerControl, LlamaService};
+use assistd_llm::{HealthWaitError, LlamaServerControl, LlamaService, LlmHealthProbe, ReadyState};
+use async_trait::async_trait;
 use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, watch};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -115,6 +116,35 @@ pub struct RequestGuard {
     _guard: OwnedRwLockReadGuard<()>,
 }
 
+/// Wraps an `Arc<PresenceManager>` so the chat client can probe
+/// llama-server health (PID, state, wait-for-ready) without taking a
+/// circular dependency on `assistd-core`. The chat client only sees
+/// the [`LlmHealthProbe`] trait from `assistd-llm`.
+pub struct PresenceLlmHealthProbe {
+    presence: Arc<PresenceManager>,
+}
+
+impl PresenceLlmHealthProbe {
+    pub fn new(presence: Arc<PresenceManager>) -> Self {
+        Self { presence }
+    }
+}
+
+#[async_trait]
+impl LlmHealthProbe for PresenceLlmHealthProbe {
+    fn pid(&self) -> Option<u32> {
+        self.presence.llama_pid_blocking()
+    }
+
+    fn state(&self) -> Option<ReadyState> {
+        self.presence.llama_state_blocking()
+    }
+
+    async fn wait_for_ready(&self, budget: Duration) -> Result<(), HealthWaitError> {
+        self.presence.wait_llama_ready(budget).await
+    }
+}
+
 /// RAII counter for "an LLM stream is currently running". Bumps the
 /// shared count on construction and decrements on drop. Held by LLM
 /// query handlers for the duration of their streaming lifetime so the
@@ -184,18 +214,27 @@ impl PresenceManager {
         // down). `PresenceManager` also holds
         // `daemon_shutdown_keepalive: watch::Receiver` below to keep
         // the subscription valid for the manager's lifetime.
+        //
+        // Wrapped in `spawn_supervised` so a panic here (which would
+        // strand the daemon — every inner shutdown lives off this
+        // forwarder) emits a structured recovery event instead of
+        // dying silently.
         {
             let mut daemon_rx = daemon_shutdown.clone();
             let current = Arc::clone(&current_inner_shutdown);
-            tokio::spawn(async move {
-                if daemon_rx.wait_for(|v| *v).await.is_err() {
-                    return;
-                }
-                let tx = current.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Some(tx) = tx {
-                    let _ = tx.send(true);
-                }
-            });
+            crate::recovery::spawn_supervised(
+                "presence_shutdown_forwarder",
+                crate::recovery::Component::Daemon,
+                async move {
+                    if daemon_rx.wait_for(|v| *v).await.is_err() {
+                        return;
+                    }
+                    let tx = current.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(tx) = tx {
+                        let _ = tx.send(true);
+                    }
+                },
+            );
         }
 
         let (state_tx, _) = watch::channel(PresenceState::Sleeping);
@@ -297,6 +336,66 @@ impl PresenceManager {
             .try_lock()
             .ok()
             .and_then(|svc| svc.as_ref().and_then(|s| s.pid()))
+    }
+
+    /// Snapshot of the llama-server supervisor's [`ReadyState`].
+    /// `None` when no service is attached (presence asleep, or
+    /// transitioning). Non-blocking — uses `try_lock` and returns
+    /// `None` if a transition holds the slot.
+    pub fn llama_state_blocking(&self) -> Option<ReadyState> {
+        self.llama
+            .try_lock()
+            .ok()
+            .and_then(|svc| svc.as_ref().map(|s| s.state()))
+    }
+
+    /// Block until the llama-server reports `ReadyState::Ready` or
+    /// `budget` elapses. Subscribes to the supervisor's ready watch and
+    /// awaits transitions; returns `Err(Degraded)` immediately if the
+    /// supervisor has already given up (waiting longer is futile), and
+    /// `Err(NoService)` if no service is currently attached.
+    ///
+    /// Used by the agent loop's replay path on `LlmError::ServerRestarting`
+    /// to wait for the supervisor to bring the server back before
+    /// re-running the LLM step.
+    pub async fn wait_llama_ready(&self, budget: Duration) -> Result<(), HealthWaitError> {
+        // Snapshot the watch receiver under the async-mutex; we hold
+        // the lock only long enough to clone, then release so concurrent
+        // sleep/drowse can still take it.
+        let mut rx = {
+            let guard = self.llama.lock().await;
+            match guard.as_ref() {
+                Some(svc) => svc.subscribe_ready(),
+                None => return Err(HealthWaitError::NoService),
+            }
+        };
+
+        // Fast path: already Ready.
+        if matches!(*rx.borrow(), ReadyState::Ready) {
+            return Ok(());
+        }
+        if matches!(*rx.borrow(), ReadyState::Degraded) {
+            return Err(HealthWaitError::Degraded);
+        }
+
+        let res = timeout(budget, async {
+            loop {
+                match rx.changed().await {
+                    Ok(()) => match *rx.borrow() {
+                        ReadyState::Ready => return Ok::<(), HealthWaitError>(()),
+                        ReadyState::Degraded => return Err(HealthWaitError::Degraded),
+                        ReadyState::Starting | ReadyState::BackingOff { .. } => continue,
+                    },
+                    Err(_) => return Err(HealthWaitError::NoService),
+                }
+            }
+        })
+        .await;
+
+        match res {
+            Ok(inner) => inner,
+            Err(_) => Err(HealthWaitError::Timeout),
+        }
     }
 
     /// Fast path for query handlers: if already `Active`, returns

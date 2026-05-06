@@ -16,6 +16,7 @@
 //! `step` again, until `StepOutcome::Final`.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
@@ -30,7 +31,10 @@ use super::conversation::{Conversation, Summarizer, ToolCallRecord};
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
 use super::wire;
-use crate::{LlmBackend, LlmError, LlmEvent, LlmResult, StepOutcome, ToolCall, ToolResultPayload};
+use crate::{
+    LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult, ReadyState, StepOutcome, ToolCall,
+    ToolResultPayload,
+};
 
 const ERROR_BODY_CAP: usize = 1024;
 const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce a concise \
@@ -44,6 +48,11 @@ pub struct LlamaChatClient {
     model: ModelConfig,
     timeouts: TimeoutsConfig,
     conv: Mutex<Conversation>,
+    /// Optional handle into the supervisor so we can classify HTTP
+    /// errors as crash-induced (server died → reply `ServerRestarting`
+    /// so the agent loop can replay) vs. genuine transport faults.
+    /// `None` in tests that drive the client without a real supervisor.
+    health: Option<Arc<dyn LlmHealthProbe>>,
 }
 
 impl LlamaChatClient {
@@ -51,11 +60,18 @@ impl LlamaChatClient {
     /// the host:port the request is sent to, and `model` is the identifier
     /// llama-server has loaded (plus its context length for budget math).
     /// All three are cloned; the caller keeps ownership.
+    ///
+    /// `health` is the optional probe used to detect mid-stream
+    /// llama-server crashes. Pass `None` when there is no supervisor
+    /// (test backends, fake-server harnesses); production callers wire
+    /// the `PresenceManager`-backed probe so crash → restart → replay
+    /// works end-to-end.
     pub fn new(
         chat: &ChatConfig,
         server: &LlamaServerConfig,
         model: &ModelConfig,
         timeouts: &TimeoutsConfig,
+        health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Result<Self, ChatClientError> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -71,11 +87,44 @@ impl LlamaChatClient {
             model: model.clone(),
             timeouts: timeouts.clone(),
             conv: Mutex::new(conv),
+            health,
         })
+    }
+
+    /// Snapshot the probe state at the moment of an HTTP failure.
+    /// Returns `Some((pid_at_request, current_state))` when a probe is
+    /// attached, allowing the caller to decide whether the failure
+    /// looks like a server crash (pid changed or state != Ready). The
+    /// outer `Option` is `None` when the client was built without a
+    /// probe — in that case the caller treats every error as a
+    /// transport fault (no replay).
+    fn classify_failure(&self, pid_at_request: Option<u32>) -> bool {
+        let Some(probe) = self.health.as_ref() else {
+            return false;
+        };
+        let current_pid = probe.pid();
+        let current_state = probe.state();
+        // Crash-induced when:
+        // - we had a pid before the request and either the pid has
+        //   changed (supervisor already respawned) or it's now None
+        //   (child died, supervisor not yet respawned), OR
+        // - the state went non-Ready (Starting / BackingOff / Degraded).
+        let pid_changed = match (pid_at_request, current_pid) {
+            (Some(_), None) => true,
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        };
+        let state_unhealthy = !matches!(current_state, Some(ReadyState::Ready) | None);
+        pid_changed || state_unhealthy
     }
 
     async fn stream_openai(&self, body: Vec<u8>, tx: &mpsc::Sender<LlmEvent>) -> StreamOutcome {
         let url = format!("{}/v1/chat/completions", self.base_url);
+        // Snapshot the supervisor's PID at request time so we can
+        // distinguish a crash-induced HTTP failure (pid changed or
+        // disappeared, state went non-Ready) from a transport-level
+        // hiccup (network, timeout) when classifying errors below.
+        let pid_at_request = self.health.as_ref().and_then(|h| h.pid());
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "llm_request_sent",
@@ -90,13 +139,38 @@ impl LlamaChatClient {
             .send()
             .await
         {
-            Ok(r) => r,
-            Err(e) => return StreamOutcome::PreEmitError(ChatClientError::Http(e)),
+            Ok(r) => {
+                if self.classify_failure(pid_at_request) {
+                    // Server crashed between snapshot and response; the
+                    // 200 we just received was racing the supervisor's
+                    // teardown. Treat as restart so the agent replays.
+                    return StreamOutcome::ServerRestart {
+                        accum: StreamAccum::default(),
+                        pre_emit: true,
+                    };
+                }
+                r
+            }
+            Err(e) => {
+                if self.classify_failure(pid_at_request) {
+                    return StreamOutcome::ServerRestart {
+                        accum: StreamAccum::default(),
+                        pre_emit: true,
+                    };
+                }
+                return StreamOutcome::PreEmitError(ChatClientError::Http(e));
+            }
         };
 
         let status = response.status();
         if !status.is_success() {
             let body = read_body_capped(&mut response, ERROR_BODY_CAP).await;
+            if self.classify_failure(pid_at_request) {
+                return StreamOutcome::ServerRestart {
+                    accum: StreamAccum::default(),
+                    pre_emit: true,
+                };
+            }
             return StreamOutcome::PreEmitError(ChatClientError::Server {
                 status: status.as_u16(),
                 body,
@@ -113,6 +187,10 @@ impl LlamaChatClient {
                 Ok(Ok(Some(c))) => c,
                 Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
+                    if self.classify_failure(pid_at_request) {
+                        let pre_emit = !accum_was_emitted(&accum);
+                        return StreamOutcome::ServerRestart { accum, pre_emit };
+                    }
                     return fold_mid_stream_error(accum, ChatClientError::Http(e));
                 }
                 Err(_) => {
@@ -123,6 +201,10 @@ impl LlamaChatClient {
                         tool_call_builders = accum.tool_calls.len(),
                         "SSE stream inactive past deadline; aborting read"
                     );
+                    if self.classify_failure(pid_at_request) {
+                        let pre_emit = !accum_was_emitted(&accum);
+                        return StreamOutcome::ServerRestart { accum, pre_emit };
+                    }
                     return fold_mid_stream_error(
                         accum,
                         ChatClientError::Sse(format!(
@@ -139,6 +221,10 @@ impl LlamaChatClient {
                     Ok(Some(e)) => e,
                     Ok(None) => break,
                     Err(e) => {
+                        if self.classify_failure(pid_at_request) {
+                            let pre_emit = !accum_was_emitted(&accum);
+                            return StreamOutcome::ServerRestart { accum, pre_emit };
+                        }
                         return fold_mid_stream_error(accum, e);
                     }
                 };
@@ -148,6 +234,10 @@ impl LlamaChatClient {
                         {
                             Ok(p) => p,
                             Err(e) => {
+                                if self.classify_failure(pid_at_request) {
+                                    let pre_emit = !accum_was_emitted(&accum);
+                                    return StreamOutcome::ServerRestart { accum, pre_emit };
+                                }
                                 return fold_mid_stream_error(accum, ChatClientError::Json(e));
                             }
                         };
@@ -282,6 +372,18 @@ impl LlmBackend for LlamaChatClient {
                 conv.rollback_last_user();
                 Err(LlmError::Chat(e))
             }
+            StreamOutcome::ServerRestart { .. } => {
+                // Generate is the legacy single-turn API used by code
+                // paths that don't run the agent loop, so they cannot
+                // replay. Surface the restart as a typed error and
+                // leave the user message in place — the caller can
+                // re-issue if they choose. Unlike PreEmitError, we do
+                // NOT roll back the user message: a follow-up call
+                // would re-push, and double-pushing would duplicate.
+                Err(LlmError::ServerRestarting(
+                    "llama-server crashed during generate".into(),
+                ))
+            }
         }
     }
 
@@ -366,6 +468,34 @@ impl LlmBackend for LlamaChatClient {
                 result
             }
             StreamOutcome::PreEmitError(e) => Err(LlmError::Chat(e)),
+            StreamOutcome::ServerRestart { accum, pre_emit } => {
+                // Crash detected. The conversation state on this side
+                // is already clean (we never reached `commit_step`),
+                // but we may have streamed partial bytes to the client
+                // — the agent loop's Status emission tells the client
+                // to bracket those before the replay's deltas arrive.
+                //
+                // Important: we do NOT roll back the user message on
+                // pre_emit, even though `PreEmitError` does. The user
+                // push happens once before the agent loop iterates;
+                // rolling it back here would mean the replay's
+                // re-rendered wire payload has no user prompt at the
+                // tail and the model would see an empty turn.
+                //
+                // We also preserve the transient context (skip
+                // `consume_transient_context`) so the replay sees the
+                // same retrieval block it would have seen on the
+                // original attempt.
+                let bytes_so_far = accum.text.len();
+                let tool_builders = accum.tool_calls.len();
+                drop(accum);
+                Err(LlmError::ServerRestarting(format!(
+                    "llama-server died mid-{} ({} bytes / {} tool-call builders streamed)",
+                    if pre_emit { "request" } else { "response" },
+                    bytes_so_far,
+                    tool_builders,
+                )))
+            }
         }
     }
 
@@ -540,6 +670,15 @@ enum StreamOutcome {
     ClientDisconnected(StreamAccum),
     /// Stream errored before any deltas were forwarded — propagate as `Err`.
     PreEmitError(ChatClientError),
+    /// The HTTP failure looks crash-induced: the supervisor's PID
+    /// changed under us or the readiness state went non-Ready. The
+    /// agent loop will see [`LlmError::ServerRestarting`] and replay
+    /// the same payload once after waiting for the supervisor to
+    /// restore Ready. `pre_emit` distinguishes "no deltas streamed
+    /// yet" (so the caller can clean up an unstreamed response) from
+    /// "had partial output" (caller must consider what the user has
+    /// already seen on the wire).
+    ServerRestart { accum: StreamAccum, pre_emit: bool },
 }
 
 fn fold_mid_stream_error(accum: StreamAccum, err: ChatClientError) -> StreamOutcome {
@@ -554,6 +693,10 @@ fn fold_mid_stream_error(accum: StreamAccum, err: ChatClientError) -> StreamOutc
     } else {
         StreamOutcome::PreEmitError(err)
     }
+}
+
+fn accum_was_emitted(accum: &StreamAccum) -> bool {
+    accum.has_emitted || !accum.tool_calls.is_empty()
 }
 
 async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> String {

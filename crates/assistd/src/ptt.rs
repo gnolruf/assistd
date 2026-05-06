@@ -82,6 +82,14 @@ pub async fn run(action: PttAction) -> Result<()> {
             Event::Presence { .. } => {}
             Event::ListenState { .. } => {}
             Event::VoiceOutputState { .. } => {}
+            Event::Status {
+                severity,
+                component,
+                message,
+                ..
+            } => {
+                eprintln!("[{severity} {component}: {message}]");
+            }
             Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }
