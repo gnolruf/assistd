@@ -430,9 +430,13 @@ hotkey = "Super+Escape"
 # and the retrieval-touching tools register but no-op silently.
 # enabled = true
 # HuggingFace id passed verbatim to the embed server's --hf-repo.
-# Format: <owner>/<repo>:<file>. The default is a small (~140 MB Q4),
-# 768-dim model with strong retrieval quality on conversational text.
-# model = "nomic-ai/nomic-embed-text-v1.5-GGUF:nomic-embed-text-v1.5.Q4_K_M.gguf"
+# Format: <owner>/<repo>:<quant-tag> (e.g. `Q4_K_M`), NOT a full
+# filename — llama-server parses the `:` suffix as a quant tag against
+# its preset manifest. Passing a `.gguf` filename makes preset
+# resolution fail with a misleading "no GGUF files found" error.
+# The default is a small (~140 MB Q4), 768-dim model with strong
+# retrieval quality on conversational text.
+# model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"
 # Bind host. Should be loopback.
 # host = "127.0.0.1"
 # Bind port. MUST differ from llama_server.port and remote.port.

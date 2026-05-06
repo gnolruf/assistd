@@ -27,6 +27,14 @@ pub struct PresenceGpuProbe {
     presence: Arc<PresenceManager>,
     nvml: Option<Arc<Nvml>>,
     self_pid: u32,
+    /// Process names allowed to hold VRAM without counting as
+    /// "foreign". Mirrors `sleep.gpu_allowlist`. In particular this
+    /// must include `llama-server`: in router mode the daemon's
+    /// `llama_pid` points at the router process, but the actual
+    /// model-running child (a separate PID) is the one holding VRAM,
+    /// and the per-PID `self_pid`/`llama_pid` filter doesn't catch it.
+    /// Without this, every transcription would fall back to CPU.
+    allowlist: Vec<String>,
 }
 
 impl PresenceGpuProbe {
@@ -35,7 +43,7 @@ impl PresenceGpuProbe {
     /// and the probe reports "no foreign contention" from then on,
     /// preserving the acceptance criterion on machines without
     /// NVIDIA GPUs.
-    pub fn new(presence: Arc<PresenceManager>) -> Self {
+    pub fn new(presence: Arc<PresenceManager>, allowlist: Vec<String>) -> Self {
         let nvml = match Nvml::init() {
             Ok(n) => Some(Arc::new(n)),
             Err(err) => {
@@ -51,6 +59,7 @@ impl PresenceGpuProbe {
             presence,
             nvml,
             self_pid,
+            allowlist,
         }
     }
 }
@@ -67,9 +76,16 @@ impl BusyProbe for PresenceGpuProbe {
         };
         let llama_pid = self.presence.llama_pid_blocking();
         match gpu_monitor::collect_foreign_usage(nvml.as_ref(), self.self_pid, llama_pid) {
-            Ok(samples) => samples
-                .iter()
-                .any(|p| p.used_mb >= FOREIGN_VRAM_THRESHOLD_MB),
+            Ok(samples) => samples.iter().any(|p| {
+                // Skip allowlisted process names so the daemon's own
+                // llama-server inference children (router mode spawns
+                // separate PIDs not covered by `llama_pid`) don't
+                // count as foreign. Same allowlist `gpu_monitor` uses.
+                if self.allowlist.iter().any(|n| n == &p.name) {
+                    return false;
+                }
+                p.used_mb >= FOREIGN_VRAM_THRESHOLD_MB
+            }),
             Err(err) => {
                 tracing::debug!(
                     target: "assistd::voice::probe",

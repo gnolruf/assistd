@@ -90,14 +90,26 @@ impl PiperVoiceOutput {
             sentence_silence_secs: cfg.sentence_silence_secs,
             espeak_data_dir: cfg.espeak_data_dir.clone(),
             deadline: Duration::from_secs(cfg.deadline_secs as u64),
+            use_cuda: cfg.use_cuda,
+            output_device: cfg.output_device.clone(),
         });
 
         let synth = Arc::new(OneShotSynth::new(runtime.clone()));
-        let playback = Arc::new(RodioPlaybackWorker::start()?);
+        let playback = Arc::new(RodioPlaybackWorker::start(cfg.output_device.as_deref())?);
 
-        // Health-check: a tiny synth surfaces missing-model and
-        // device-format errors at startup rather than on the first
-        // user-facing utterance.
+        // Health-check + pre-warm: the synth call exercises the full
+        // spawn → ONNX → drain → exit path, warming OS file cache for
+        // the binary, .onnx, .onnx.json, and espeak data. Per-process
+        // ONNX session warmth can't be shared (each synthesize() spawns
+        // a fresh subprocess), so this is the practical ceiling on
+        // pre-warm. Surfaces missing-model / corrupt-binary errors at
+        // startup rather than on the first user-facing utterance.
+        //
+        // We deliberately don't enqueue a silent buffer through rodio
+        // here as an additional warm: rodio 0.22's `Player::clear()`
+        // can stall under some cpal backends when called immediately
+        // after a very short buffer hasn't been picked up yet, and the
+        // playback warmth amortises on the first real utterance anyway.
         synth.health_check().await?;
         tracing::info!(
             target: "assistd::voice::piper",

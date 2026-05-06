@@ -333,6 +333,23 @@ pub struct SynthesisConfig {
     /// in-flight query, but does not start recording. Empty disables.
     #[serde(default = "default_piper_skip_hotkey")]
     pub skip_hotkey: String,
+    /// Pass `--cuda` to piper, routing ONNX inference through the
+    /// CUDA execution provider. Requires a piper binary linked
+    /// against `onnxruntime-gpu`; CPU-only builds will exit with
+    /// "CUDA execution provider not available". Default false to
+    /// preserve the existing CPU behaviour.
+    #[serde(default)]
+    pub use_cuda: bool,
+    /// Override cpal's default output device by name. When `None`,
+    /// rodio opens whatever `cpal::default_host().default_output_device()`
+    /// returns — usually the right thing, but on Sway+PipeWire systems
+    /// where the user's default sink is a Bluetooth or other virtual
+    /// PipeWire sink, cpal's default may pick a raw ALSA hardware card
+    /// (HDMI, an unused analog port) and the audio goes nowhere.
+    /// Common values to try: `"pipewire"`, `"pulse"`, or `"default"`
+    /// — match a name from `aplay -L`.
+    #[serde(default)]
+    pub output_device: Option<String>,
 }
 
 /// How the sentence buffer treats fenced code blocks in the LLM response.
@@ -371,6 +388,8 @@ impl Default for SynthesisConfig {
             code_block_mode: CodeBlockMode::Skip,
             toggle_hotkey: DEFAULT_PIPER_TOGGLE_HOTKEY.to_string(),
             skip_hotkey: DEFAULT_PIPER_SKIP_HOTKEY.to_string(),
+            use_cuda: false,
+            output_device: None,
         }
     }
 }

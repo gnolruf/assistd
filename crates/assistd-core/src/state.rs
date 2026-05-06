@@ -143,6 +143,16 @@ pub struct AppState {
     /// shutdown drain in [`assistd_memory::sqlite::writer::spawn_writer`]
     /// and is silently dropped.
     persistence_tracker: TaskTracker,
+    /// Handle to the `presence.ensure_active()` task spawned at
+    /// `handle_ptt_start`. `handle_ptt_stop` joins it in parallel with
+    /// Whisper inference so a Drowsy → Active model load runs *during*
+    /// transcription instead of serially after it. PTT-start and
+    /// PTT-stop arrive on separate IPC connections, so this lives on
+    /// shared `AppState` rather than per-connection state. Idempotent
+    /// across re-entries: a second `PttStart` overwrites the option
+    /// via `Mutex::take`, leaking the prior handle which finishes on
+    /// its own (`ensure_active` already short-circuits when Active).
+    warmup_handle: Arc<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>>,
 }
 
 impl AppState {
@@ -186,6 +196,7 @@ impl AppState {
             window_manager: Arc::new(NoWindowManager),
             agent_turn_lock: Arc::new(Mutex::new(())),
             persistence_tracker: TaskTracker::new(),
+            warmup_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1241,6 +1252,7 @@ impl AppState {
         let mut assistant_accum = String::new();
 
         let mut client_alive = true;
+        let mut first_sentence_emitted = false;
 
         loop {
             let llm_event = match (partial_flush, awaiting_tool_result) {
@@ -1373,6 +1385,14 @@ impl AppState {
             // failure means the worker died — log and continue; we
             // still want to forward remaining wire events.
             for s in sentences_to_speak {
+                if !first_sentence_emitted {
+                    tracing::debug!(
+                        target: "assistd::voice::latency",
+                        stage = "first_sentence_emitted",
+                        "voice latency stage"
+                    );
+                    first_sentence_emitted = true;
+                }
                 if speech_tx.send(s).await.is_err() {
                     tracing::debug!(
                         target: "assistd::voice",
@@ -1537,6 +1557,17 @@ impl AppState {
         }
         match self.voice.start_recording().await {
             Ok(()) => {
+                // Kick off the LLM presence wake in parallel with the
+                // user's capture. `handle_ptt_stop` joins this handle
+                // alongside `stop_and_transcribe`, so a Drowsy → Active
+                // model load runs *during* whisper inference instead of
+                // serially after it. `ensure_active` is idempotent, so
+                // the second call from `handle_query::acquire_request_guard`
+                // short-circuits to a single RwLock read.
+                let presence = self.presence.clone();
+                let warm =
+                    tokio::spawn(async move { presence.ensure_active().await }.in_current_span());
+                *self.warmup_handle.lock().await = Some(warm);
                 let _ = tx
                     .send(Event::VoiceState {
                         id: id.clone(),
@@ -1752,7 +1783,13 @@ impl AppState {
     /// transcription has content — dispatch it internally as a Query
     /// so the streaming LLM response flows back on the same
     /// connection before the terminal `Done`.
+    #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     async fn handle_ptt_stop(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "audio_capture_stop",
+            "voice latency stage"
+        );
         let _ = tx
             .send(Event::VoiceState {
                 id: id.clone(),
@@ -1760,7 +1797,32 @@ impl AppState {
             })
             .await;
 
-        let text = match self.voice.stop_and_transcribe().await {
+        // Run Whisper inference and the presence-warmup join concurrently.
+        // The warmup was spawned at PTT-start; on a cold (Drowsy → Active)
+        // wake it would otherwise serialize behind transcription before
+        // `handle_query`'s `acquire_request_guard`. A failed warmup is
+        // logged but not fatal — the request guard inside `handle_query`
+        // will retry the wake itself.
+        let warmup = self.warmup_handle.lock().await.take();
+        let (text_res, warm_res) = tokio::join!(self.voice.stop_and_transcribe(), async {
+            match warmup {
+                Some(h) => h.await.unwrap_or_else(|e| Err(anyhow::anyhow!(e))),
+                None => Ok(()),
+            }
+        },);
+        if let Err(e) = &warm_res {
+            tracing::warn!(
+                target: "assistd::state",
+                error = %e,
+                "presence warmup failed; query path will retry"
+            );
+        }
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "ensure_active_done",
+            "voice latency stage"
+        );
+        let text = match text_res {
             Ok(t) => t,
             Err(e) => {
                 let _ = tx

@@ -12,8 +12,9 @@ use std::sync::Arc;
 use std::thread;
 
 use rodio::buffer::SamplesBuffer;
+use rodio::cpal::traits::HostTrait;
 use rodio::stream::DeviceSinkBuilder;
-use rodio::{ChannelCount, Player, SampleRate};
+use rodio::{ChannelCount, DeviceTrait, Player, SampleRate, cpal};
 use tokio::sync::oneshot;
 
 use crate::piper::error::PiperError;
@@ -30,10 +31,109 @@ pub struct RodioPlaybackWorker {
 }
 
 impl RodioPlaybackWorker {
-    /// Open the default audio device and return a worker. Errors when
-    /// no device is available, the device rejects the requested format,
+    /// Open the audio device and return a worker. Errors when no
+    /// device is available, the device rejects the requested format,
     /// or the audio init thread panics before we get the Player.
-    pub fn start() -> Result<Self, PiperError> {
+    ///
+    /// `device_name`:
+    /// - `None`: use cpal's default output device. On most desktops
+    ///   that's the PipeWire-bridged `default` ALSA PCM, which routes
+    ///   wherever PipeWire's default sink points — including Bluetooth.
+    /// - `Some(name)`: open the named cpal output device. `name` matches
+    ///   the strings cpal returns from `Host::output_devices()`, which
+    ///   on Linux are the same as `aplay -L` PCM names (`pipewire`,
+    ///   `pulse`, `default`, hardware names like `front:CARD=...`).
+    pub fn start(device_name: Option<&str>) -> Result<Self, PiperError> {
+        // Always log what cpal sees so silent-synthesis bug reports
+        // include the smoking-gun line right next to the synth events.
+        let host = cpal::default_host();
+        // Enumerate all output devices once so a misconfigured
+        // `output_device` value can be diagnosed without external
+        // tools (`aplay -L`, etc.).
+        match host.output_devices() {
+            Ok(devs) => {
+                let names: Vec<String> = devs
+                    .map(|d| {
+                        d.description()
+                            .map(|x| x.to_string())
+                            .unwrap_or_else(|_| "<no-description>".into())
+                    })
+                    .collect();
+                tracing::info!(
+                    target: "assistd::voice::piper",
+                    available = ?names,
+                    "cpal output devices (set `voice.synthesis.output_device` to one of these)"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "assistd::voice::piper",
+                    error = %e,
+                    "could not enumerate cpal output devices"
+                );
+            }
+        }
+        let selected = match device_name {
+            Some(name) => match host.output_devices() {
+                Ok(devs) => {
+                    let mut found = None;
+                    for d in devs {
+                        let dn = d.description().map(|x| x.to_string()).unwrap_or_default();
+                        if dn == name {
+                            found = Some(d);
+                            break;
+                        }
+                    }
+                    match found {
+                        Some(d) => {
+                            tracing::info!(
+                                target: "assistd::voice::piper",
+                                device = name,
+                                "cpal output device (configured)"
+                            );
+                            Some(d)
+                        }
+                        None => {
+                            tracing::warn!(
+                                target: "assistd::voice::piper",
+                                requested = name,
+                                "cpal output device not found by name; falling back to default"
+                            );
+                            host.default_output_device()
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "assistd::voice::piper",
+                        error = %e,
+                        "could not enumerate cpal output devices; falling back to default"
+                    );
+                    host.default_output_device()
+                }
+            },
+            None => {
+                let dev = host.default_output_device();
+                if let Some(d) = &dev {
+                    let desc = d
+                        .description()
+                        .map(|x| x.to_string())
+                        .unwrap_or_else(|_| "<no-description>".into());
+                    tracing::info!(
+                        target: "assistd::voice::piper",
+                        device = %desc,
+                        "cpal default output device"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "assistd::voice::piper",
+                        "cpal reports no default output device"
+                    );
+                }
+                dev
+            }
+        };
+
         let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<Player, String>>();
         let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
@@ -43,10 +143,17 @@ impl RodioPlaybackWorker {
                 // Hold the MixerDeviceSink on this thread for the
                 // worker's whole lifetime. Dropping it releases the
                 // audio device.
-                let mut device_sink = match DeviceSinkBuilder::open_default_sink() {
+                let opened = match selected {
+                    Some(dev) => DeviceSinkBuilder::from_device(dev)
+                        .and_then(|b| b.open_stream())
+                        .map_err(|e| format!("open configured device: {e}")),
+                    None => DeviceSinkBuilder::open_default_sink()
+                        .map_err(|e| format!("open default sink: {e}")),
+                };
+                let mut device_sink = match opened {
                     Ok(d) => d,
-                    Err(e) => {
-                        let _ = init_tx.send(Err(format!("open default sink: {e}")));
+                    Err(msg) => {
+                        let _ = init_tx.send(Err(msg));
                         return;
                     }
                 };
@@ -99,6 +206,11 @@ impl RodioPlaybackWorker {
             .collect();
         let buffer = SamplesBuffer::new(channels, sample_rate, samples_f32);
         self.player.append(buffer);
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "playback_enqueued",
+            "voice latency stage"
+        );
         Ok(())
     }
 
@@ -120,8 +232,17 @@ impl RodioPlaybackWorker {
 
     /// Drop pending audio — used to interrupt mid-utterance via
     /// `VoiceOutput::cancel`.
+    ///
+    /// rodio's `Player::clear` not only empties the queue but also
+    /// pauses the player (see rodio 0.22 `player.rs:279-284`). Without
+    /// the explicit `play()` after, the next `append()` queues samples
+    /// onto a paused player and produces no audio. This bit the PTT
+    /// barge-in path: `interrupt()` → `clear()` → user speaks →
+    /// `handle_query` → `speak()` → silent, while typed-message TTS
+    /// (which never invokes `clear`) worked fine.
     pub fn clear(&self) {
         self.player.clear();
+        self.player.play();
     }
 
     /// True when the queue has completely drained.

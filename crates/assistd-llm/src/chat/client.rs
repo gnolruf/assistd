@@ -76,6 +76,11 @@ impl LlamaChatClient {
 
     async fn stream_openai(&self, body: Vec<u8>, tx: &mpsc::Sender<LlmEvent>) -> StreamOutcome {
         let url = format!("{}/v1/chat/completions", self.base_url);
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "llm_request_sent",
+            "voice latency stage"
+        );
         let mut response = match self
             .client
             .post(&url)
@@ -160,6 +165,13 @@ impl LlamaChatClient {
                         if let Some(text) = choice.delta.content
                             && !text.is_empty()
                         {
+                            if !accum.has_emitted {
+                                tracing::debug!(
+                                    target: "assistd::voice::latency",
+                                    stage = "llm_first_token",
+                                    "voice latency stage"
+                                );
+                            }
                             accum.text.push_str(&text);
                             accum.has_emitted = true;
                             if tx.send(LlmEvent::Delta { text }).await.is_err() {

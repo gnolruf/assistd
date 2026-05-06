@@ -527,22 +527,30 @@ fn strip_emphasis(s: &str) -> String {
 
 fn replace_urls(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut i = 0;
     let bytes = s.as_bytes();
+    let mut i = 0;
     while i < bytes.len() {
-        let rest = &s[i..];
-        let scheme = if rest.starts_with("https://") {
+        // `i` is always at a UTF-8 char boundary on entry: 0 on the
+        // first iteration, advanced by `ch.len_utf8()` in the default
+        // branch, or set to `j` in the URL branch (which only stops on
+        // ASCII whitespace — guaranteed to land on a char boundary
+        // because continuation bytes have the high bit set and so
+        // can't compare equal to an ASCII whitespace byte).
+        let scheme = if s[i..].starts_with("https://") {
             Some(8)
-        } else if rest.starts_with("http://") {
+        } else if s[i..].starts_with("http://") {
             Some(7)
         } else {
             None
         };
         if let Some(skip) = scheme {
-            // Word-boundary check: must be at start or preceded by ws/punct.
+            // Word-boundary check: must be at start or preceded by a
+            // non-alphanumeric ASCII byte. Multi-byte UTF-8 lead bytes
+            // (≥ 0xC0) report `is_ascii_alphanumeric() == false`, which
+            // is the behaviour we want — a Unicode letter shouldn't
+            // glue onto an English-only `https://` either way.
             let prev_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
             if prev_ok {
-                // Consume until whitespace or end.
                 let mut j = i + skip;
                 while j < bytes.len() && !bytes[j].is_ascii_whitespace() {
                     j += 1;
@@ -552,8 +560,16 @@ fn replace_urls(s: &str) -> String {
                 continue;
             }
         }
-        out.push(s.as_bytes()[i] as char);
-        i += 1;
+        // Default: copy one char and advance by its UTF-8 length. The
+        // previous version did `s.as_bytes()[i] as char` + `i += 1`,
+        // which corrupted multi-byte characters and panicked on the
+        // next slice when `i` landed inside a continuation sequence.
+        let ch = s[i..]
+            .chars()
+            .next()
+            .expect("non-empty since i < bytes.len()");
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -678,6 +694,34 @@ mod tests {
         assert!(s.is_empty() || s.iter().any(|t| t.contains("link")));
         let tail = b.finish().unwrap_or_default();
         let joined = format!("{} {}", s.join(" "), tail);
+        assert!(!joined.contains("example.com"), "got {joined:?}");
+    }
+
+    /// Regression: `replace_urls` previously walked the input
+    /// byte-by-byte and panicked when the cursor landed inside a
+    /// multi-byte UTF-8 character (e.g. the curly apostrophe `’`,
+    /// 3 bytes). Common in real LLM output (`That’s`, `it’s`, …).
+    #[test]
+    fn handles_multibyte_chars_around_no_url() {
+        let mut b = SentenceBuffer::new(400);
+        let mut all = b.push("That’s a famous line from John F. Kennedy. ");
+        if let Some(t) = b.finish() {
+            all.push(t);
+        }
+        let joined = all.join(" ");
+        assert!(joined.contains("That’s"), "got {joined:?}");
+        assert!(joined.contains("Kennedy"), "got {joined:?}");
+    }
+
+    #[test]
+    fn handles_multibyte_chars_with_url() {
+        let mut b = SentenceBuffer::new(400);
+        let mut all = b.push("It’s at https://example.com — really. ");
+        if let Some(t) = b.finish() {
+            all.push(t);
+        }
+        let joined = all.join(" ");
+        assert!(joined.contains("It’s"), "got {joined:?}");
         assert!(!joined.contains("example.com"), "got {joined:?}");
     }
 

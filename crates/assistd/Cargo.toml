@@ -24,6 +24,12 @@ daemon = [
     "dep:global-hotkey",
     "dep:nvml-wrapper",
 ]
+# Compile whisper-rs with CUDA support so the daemon's whisper
+# transcription runs on GPU when `voice.transcription.prefer_gpu`
+# is true (the default). Requires the CUDA toolkit at build time
+# (`nvcc` on PATH); first build is slow because whisper.cpp is
+# recompiled with `-DGGML_CUDA=ON`.
+cuda = ["assistd-voice/cuda"]
 client = ["dep:uuid"]
 chat = [
     "daemon",

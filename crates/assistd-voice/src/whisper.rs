@@ -56,12 +56,24 @@ impl Transcriber for WhisperTranscriber {
         if pcm_i16_16k_mono.is_empty() {
             return Err(TranscriptionError::EmptyAudio);
         }
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "whisper_start",
+            "voice latency stage"
+        );
         let mut audio_f32 = vec![0.0f32; pcm_i16_16k_mono.len()];
         convert_integer_to_float_audio(pcm_i16_16k_mono, &mut audio_f32)
             .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
         let ctx = self.ctx.clone();
         let cfg = self.cfg.clone();
-        tokio::task::spawn_blocking(move || run_inference(ctx, cfg, audio_f32)).await?
+        let result =
+            tokio::task::spawn_blocking(move || run_inference(ctx, cfg, audio_f32)).await?;
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "whisper_done",
+            "voice latency stage"
+        );
+        result
     }
 }
 
