@@ -48,9 +48,7 @@ pub async fn run(action: ListenAction) -> Result<()> {
                 eprintln!("daemon error: {message}");
                 std::process::exit(1);
             }
-            // Other event types are not expected for listen commands —
-            // ignore defensively so a future event addition doesn't
-            // break the client.
+            // Other event types are not expected for listen commands
             _ => {}
         }
     }

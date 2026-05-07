@@ -100,9 +100,6 @@ async fn run_monitor(
                 apply(action, &presence).await;
             }
             _ = sub.changed() => {
-                // External transition (hotkey, query auto-wake, CLI
-                // command, GPU monitor). Drop the old reading; the next
-                // tick will re-evaluate against the new state.
                 let _ = *sub.borrow_and_update();
             }
             _ = shutdown.changed() => {
@@ -138,16 +135,11 @@ fn decide(state: PresenceState, idle: Duration, cfg: &SleepConfig) -> Action {
     match state {
         PresenceState::Active => {
             if cfg.idle_to_drowsy_mins > 0 && idle >= drowsy_threshold {
-                // Cascade: even if idle already exceeds the sleep
-                // threshold, step through Drowsy on this tick so the
-                // model weights are unloaded cleanly before the server
-                // is torn down on the next tick.
                 Action::Drowse
             } else if cfg.idle_to_drowsy_mins == 0
                 && cfg.idle_to_sleep_mins > 0
                 && idle >= sleep_threshold
             {
-                // Drowsy step explicitly disabled — skip directly to Sleep.
                 Action::Sleep
             } else {
                 Action::None
@@ -239,10 +231,6 @@ mod tests {
 
     #[test]
     fn active_past_sleep_threshold_still_drowses_first_cascade() {
-        // Cascade semantics: emit Drowse here, next tick will see
-        // Drowsy + idle >= sleep and emit Sleep. This preserves the
-        // ordered teardown (weights unload → server stop) even when
-        // idle had already exceeded both thresholds at startup.
         let a = decide(
             PresenceState::Active,
             Duration::from_secs(200 * 60),

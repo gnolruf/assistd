@@ -58,8 +58,7 @@ pub async fn run(action: PresenceAction) -> Result<()> {
                 std::process::exit(1);
             }
             // Any other event types (Delta, ToolCall, …) shouldn't appear on a
-            // presence request — ignore so a future protocol addition doesn't
-            // break this CLI.
+            // presence request
             _ => {}
         }
     }

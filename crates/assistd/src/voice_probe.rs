@@ -4,7 +4,7 @@
 //! (for LLM-stream awareness) and an optional NVML handle (for
 //! foreign-process detection, reusing the same per-PID VRAM scan
 //! [`crate::gpu_monitor`] uses to drive auto-sleep). When NVML init
-//! fails the probe collapses to "no foreign busy" — matching the
+//! fails the probe collapses to "no foreign busy", matching the
 //! graceful-degradation idiom in `gpu_monitor::spawn_monitor`.
 
 use std::sync::Arc;
@@ -77,10 +77,6 @@ impl BusyProbe for PresenceGpuProbe {
         let llama_pid = self.presence.llama_pid_blocking();
         match gpu_monitor::collect_foreign_usage(nvml.as_ref(), self.self_pid, llama_pid) {
             Ok(samples) => samples.iter().any(|p| {
-                // Skip allowlisted process names so the daemon's own
-                // llama-server inference children (router mode spawns
-                // separate PIDs not covered by `llama_pid`) don't
-                // count as foreign. Same allowlist `gpu_monitor` uses.
                 if self.allowlist.iter().any(|n| n == &p.name) {
                     return false;
                 }

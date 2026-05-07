@@ -185,10 +185,6 @@ async fn run_monitor(
                 apply(action, &presence, &mut cause).await;
             }
             _ = sub.changed() => {
-                // External actor (user hotkey, `assistd wake`, IPC) changed
-                // presence. If we thought we owned a contention sleep and the
-                // state is now Active, release ownership so we don't later
-                // "auto-wake" something we didn't actually sleep.
                 let now = *sub.borrow_and_update();
                 if now == PresenceState::Active
                     && matches!(cause, SleepCause::Contention { .. })
@@ -269,10 +265,6 @@ pub(crate) fn collect_foreign_usage(
     llama_pid: Option<u32>,
 ) -> Result<Vec<ProcSample>> {
     let device_count = nvml.device_count()?;
-    // Per-PID total VRAM summed across devices. Within a single device,
-    // a PID with both a compute and a graphics context may appear twice
-    // reporting the same allocation — take the max on that device to
-    // avoid double-counting, then sum those per-device maxes.
     let mut total_by_pid: HashMap<u32, u64> = HashMap::new();
     for idx in 0..device_count {
         let device = nvml.device_by_index(idx)?;
@@ -449,9 +441,6 @@ mod tests {
 
     #[test]
     fn sleeping_from_user_with_contender_no_action() {
-        // User-initiated sleep while a contender happens to be running.
-        // We never re-sleep something that's already Sleeping, and we
-        // never auto-wake because we don't own the sleep.
         let s = [sample(42, 4096, "game")];
         let a = decide(&s, PresenceState::Sleeping, &cfg(), SleepCause::None);
         assert_eq!(a, Action::None);
@@ -503,7 +492,6 @@ mod tests {
 
     #[test]
     fn multi_sample_picks_a_triggering_entry() {
-        // Mix of allowed, below-threshold, and triggering — trigger wins.
         let s = [
             sample(1, 100, "idle"),
             sample(2, 8000, "firefox"), // allowlisted, not a trigger
@@ -518,8 +506,6 @@ mod tests {
 
     #[test]
     fn read_comm_unknown_pid_does_not_panic() {
-        // An implausibly-large PID that cannot exist should fall back to
-        // the placeholder form, not panic.
         let name = read_comm(u32::MAX);
         assert!(name.contains(&u32::MAX.to_string()));
     }

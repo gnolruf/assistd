@@ -73,7 +73,7 @@ pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
 /// hotkeys and routes events to the right subsystem.
 ///
 /// The presence hotkey fires on press (cycles presence state). The
-/// voice hotkey fires on **both** press (starts PTT recording) and
+/// voice hotkey fires on both press (starts PTT recording) and
 /// release (stops recording + transcribes). Returns `None` when no
 /// hotkeys are active or when registration failed — the daemon's
 /// socket-based fallback always works regardless.
@@ -86,9 +86,6 @@ pub fn spawn_listener(
     voice_output: Option<Arc<VoiceOutputController>>,
     shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
-    // Only bind the presence hotkey when the caller actually passed
-    // a presence manager — chat TUI mode passes None, so we skip
-    // even if the config is non-empty.
     let presence_hotkey = if presence_cfg.hotkey.is_empty() || presence.is_none() {
         None
     } else {
@@ -99,8 +96,6 @@ pub fn spawn_listener(
     } else {
         None
     };
-    // Continuous-listen hotkey needs the listener arc as well — chat
-    // TUI mode may not supply one.
     let listen_hotkey = if voice_cfg.enabled
         && voice_cfg.continuous.enabled
         && !voice_cfg.continuous.hotkey.is_empty()
@@ -110,9 +105,6 @@ pub fn spawn_listener(
     } else {
         None
     };
-    // TTS toggle/skip hotkeys are only registered when the daemon
-    // actually owns a VoiceOutputController (chat-TUI mode passes
-    // None — those clients control TTS via IPC instead).
     let toggle_hotkey = if voice_cfg.enabled
         && voice_cfg.synthesis.enabled
         && !voice_cfg.synthesis.toggle_hotkey.is_empty()
@@ -321,8 +313,6 @@ async fn run_listener(
                         let v = voice.clone();
                         match event.state {
                             HotKeyState::Pressed => {
-                                // PTT barge-in: stop any in-flight TTS
-                                // playback before opening the mic.
                                 let vo = voice_output.clone();
                                 tokio::spawn(async move {
                                     if let Some(ctrl) = vo {

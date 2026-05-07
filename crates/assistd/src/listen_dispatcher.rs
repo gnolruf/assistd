@@ -4,13 +4,13 @@
 //! Spawns two background tasks that share a shutdown channel with the
 //! rest of the daemon:
 //!
-//! 1. **Utterance forwarder** — subscribes to the listener's
+//! 1. Utterance forwarder - subscribes to the listener's
 //!    broadcast, and for each completed transcript runs
 //!    `AppState::handle_query` (the same entry point that socket-side
 //!    queries use). Events from that turn are written to a throwaway
 //!    mpsc that we drain to `/dev/null` — no IPC client is attached.
 //!
-//! 2. **Presence-gated toggler** — watches presence transitions and
+//! 2. Presence-gated toggler - watches presence transitions and
 //!    pauses the listener when the daemon goes `Sleeping`, resumes
 //!    when it goes `Active`. Prevents stray room speech from
 //!    repeatedly warming up llama-server.
@@ -68,9 +68,6 @@ async fn run_utterance_forwarder(
 ) {
     let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
     let mut utterances = listener.subscribe_utterances();
-    // Track in-flight listen-triggered queries so a hanging handle_query
-    // (e.g. wedged MCP call in a future milestone) can't outlive daemon
-    // shutdown. Mirrors the socket accept loop's JoinSet pattern.
     let mut handlers: JoinSet<()> = JoinSet::new();
     loop {
         tokio::select! {
@@ -84,9 +81,6 @@ async fn run_utterance_forwarder(
                         let id = format!("listen-{}", short_id());
                         let state = state.clone();
                         let text = trimmed.to_string();
-                        // Root span for listen-triggered queries so
-                        // their log lines correlate the same way
-                        // socket-side `ipc{id,req}` spans do.
                         let span = tracing::info_span!(
                             "listen",
                             id = %id,
@@ -94,13 +88,6 @@ async fn run_utterance_forwarder(
                         );
                         handlers.spawn(
                             async move {
-                                // `handle_query` wants a per-request event
-                                // channel. There is no IPC client here, so
-                                // drain the receiver into /dev/null inline
-                                // via `tokio::join!`. Doing the drain on
-                                // the same task means we don't have to
-                                // track a second spawn; when handle_query
-                                // returns, `tx` drops and the drain ends.
                                 let (tx, mut rx) = mpsc::channel::<Event>(32);
                                 let drain = async {
                                     while rx.recv().await.is_some() {}
@@ -136,8 +123,6 @@ async fn run_utterance_forwarder(
                     }
                 }
             }
-            // Reap completed handlers eagerly so the set doesn't grow
-            // unbounded during long-running listen sessions.
             Some(res) = handlers.join_next(), if !handlers.is_empty() => {
                 if let Err(e) = res
                     && e.is_panic()
@@ -156,9 +141,6 @@ async fn run_utterance_forwarder(
         }
     }
 
-    // Drain in-flight handlers with bounded grace, mirroring the socket
-    // accept loop. Past the grace window, abort whatever's left so the
-    // daemon doesn't block its own shutdown on a wedged query.
     let in_flight = handlers.len();
     if in_flight == 0 {
         return;
@@ -201,7 +183,6 @@ async fn run_presence_gate(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut rx = presence.subscribe();
-    // Initial state: either auto-start, or leave off.
     if start_on_launch {
         let initial = *rx.borrow();
         let should_start = !pause_when_sleeping || initial != PresenceState::Sleeping;
@@ -219,10 +200,6 @@ async fn run_presence_gate(
         }
     }
 
-    // Set to true when the presence gate itself paused the listener
-    // on a Sleeping transition. Used to decide whether the matching
-    // wake should auto-resume — we never clobber an explicit
-    // user-driven stop.
     let mut paused_by_gate = false;
 
     loop {

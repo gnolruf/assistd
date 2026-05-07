@@ -1,7 +1,7 @@
 //! Client for the push-to-talk CLI subcommands: `ptt-start`,
 //! `ptt-stop`. Each sends exactly one IPC request over the daemon's
 //! Unix socket, prints event lines as they arrive (voice state, the
-//! final transcription, and — for `ptt-stop` — the streaming LLM
+//! final transcription, and for `ptt-stop' the streaming LLM
 //! response), and exits on `Event::Done` or `Event::Error`.
 //!
 //! Typical i3 binding:
@@ -101,9 +101,6 @@ pub async fn run(action: PttAction) -> Result<()> {
             | Event::BranchSwitched { .. }
             | Event::HistoryEntry { .. }
             | Event::UndoApplied { .. } => {}
-            // `assistd ptt-stop` is one-shot non-interactive — same
-            // story as `assistd query`. Daemon's gate denies on
-            // disconnect; we just note and keep reading.
             Event::ConfirmRequest { .. } => {
                 eprintln!(
                     "[daemon asked for destructive-command confirmation; denying \

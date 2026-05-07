@@ -35,8 +35,6 @@ pub struct QueryArgs {
 pub async fn run(args: QueryArgs) -> Result<()> {
     let mut wire_attachments = Vec::with_capacity(args.images.len());
     for path in &args.images {
-        // Reject the bad path before opening the daemon socket so the
-        // user sees the error in their shell, not as a daemon Event.
         match assistd_tools::load_image_attachment(path).await {
             Ok((assistd_tools::Attachment::Image { mime, bytes }, _)) => {
                 wire_attachments.push(ImageAttachment::from_bytes(mime, &bytes));
@@ -84,10 +82,6 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                 wrote_anything = wrote_anything || !text.is_empty();
             }
             Event::ToolCall { name, args, .. } => {
-                // Prefix tool calls with a line separator so the stream
-                // remains readable when they land mid-response. Extract
-                // the command preview so the user sees what the model
-                // is running, not just the tool name.
                 let preview = args
                     .get("command")
                     .and_then(|v| v.as_str())
@@ -127,9 +121,6 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                     if enabled { "on" } else { "off" }
                 )?;
             }
-            // Memory* events shouldn't appear on a Query stream — the
-            // daemon only emits them on `Request::Memory*`. Tolerate
-            // them silently in case a future feature reuses the wire.
             Event::Status {
                 severity,
                 component,
@@ -149,11 +140,6 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             | Event::BranchSwitched { .. }
             | Event::HistoryEntry { .. }
             | Event::UndoApplied { .. } => {}
-            // `assistd query` is one-shot non-interactive: it can't
-            // answer a confirm prompt. The daemon-side gate denies
-            // when the connection drops, so we just note the event
-            // and keep reading until the agent emits its denial Done.
-            // The interactive flow lives in the TUI via DialogConnection.
             Event::ConfirmRequest { .. } => {
                 eprintln!(
                     "[daemon asked for destructive-command confirmation; denying \
