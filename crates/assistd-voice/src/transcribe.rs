@@ -256,40 +256,46 @@ impl Transcriber for QueuedTranscriber {
     }
 }
 
+/// Test-only transcriber returning a fixed string regardless of input.
+/// Tracks call count for assertion. Public under `cfg(test)` or the
+/// `test-support` feature so cross-crate tests can use it without
+/// reaching into the whisper backend.
+#[cfg(any(test, feature = "test-support"))]
+pub struct StubTranscriber {
+    text: String,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl StubTranscriber {
+    /// Build a stub returning the given text on every call.
+    pub fn with_text(text: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            text: text.into(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    /// Number of times `transcribe()` has been invoked.
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait]
+impl Transcriber for StubTranscriber {
+    async fn transcribe(&self, _pcm: &[i16]) -> Result<String, TranscriptionError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.text.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    /// Test-only transcriber that records how many times it was
-    /// invoked and returns a configurable string. Mock primary or CPU
-    /// context depending on label.
-    struct StubTranscriber {
-        label: &'static str,
-        calls: AtomicUsize,
-    }
-
-    impl StubTranscriber {
-        fn new(label: &'static str) -> Arc<Self> {
-            Arc::new(Self {
-                label,
-                calls: AtomicUsize::new(0),
-            })
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait]
-    impl Transcriber for StubTranscriber {
-        async fn transcribe(&self, _pcm: &[i16]) -> Result<String, TranscriptionError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.label.to_string())
-        }
-    }
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct ScriptedProbe {
         idle: AtomicBool,
@@ -345,8 +351,8 @@ mod tests {
 
     #[tokio::test]
     async fn queued_uses_primary_when_busy_probe_idle() {
-        let primary = StubTranscriber::new("GPU");
-        let cpu = StubTranscriber::new("CPU");
+        let primary = StubTranscriber::with_text("GPU");
+        let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         let q = QueuedTranscriber::new(
             primary.clone() as Arc<dyn Transcriber>,
@@ -363,8 +369,8 @@ mod tests {
 
     #[tokio::test]
     async fn queued_falls_back_to_cpu_on_timeout() {
-        let primary = StubTranscriber::new("GPU");
-        let cpu = StubTranscriber::new("CPU");
+        let primary = StubTranscriber::with_text("GPU");
+        let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         probe.set_idle(false);
         let q = QueuedTranscriber::new(
@@ -382,8 +388,8 @@ mod tests {
 
     #[tokio::test]
     async fn queued_falls_back_to_cpu_on_foreign_gpu() {
-        let primary = StubTranscriber::new("GPU");
-        let cpu = StubTranscriber::new("CPU");
+        let primary = StubTranscriber::with_text("GPU");
+        let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         probe.set_foreign(true);
         let q = QueuedTranscriber::new(
@@ -400,8 +406,8 @@ mod tests {
 
     #[tokio::test]
     async fn queued_falls_back_to_cpu_when_presence_not_active() {
-        let primary = StubTranscriber::new("GPU");
-        let cpu = StubTranscriber::new("CPU");
+        let primary = StubTranscriber::with_text("GPU");
+        let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         probe.set_active(false);
         let q = QueuedTranscriber::new(
@@ -418,8 +424,8 @@ mod tests {
 
     #[tokio::test]
     async fn queued_skips_queue_when_primary_is_cpu() {
-        let primary = StubTranscriber::new("CPU-primary");
-        let cpu = StubTranscriber::new("CPU-fallback");
+        let primary = StubTranscriber::with_text("CPU-primary");
+        let cpu = StubTranscriber::with_text("CPU-fallback");
         let probe = ScriptedProbe::new();
         probe.set_idle(false); // would normally force fallback
         let q = QueuedTranscriber::new(
@@ -436,8 +442,8 @@ mod tests {
 
     #[tokio::test]
     async fn queued_skips_queue_when_fallback_disabled() {
-        let primary = StubTranscriber::new("GPU");
-        let cpu = StubTranscriber::new("CPU");
+        let primary = StubTranscriber::with_text("GPU");
+        let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         probe.set_idle(false);
         let q = QueuedTranscriber::new(
@@ -483,7 +489,7 @@ mod tests {
         // transcriber finishes the state returns to Idle. That's the
         // invariant the TUI relies on for its indicator — a fast
         // cold-path flash of Queued is acceptable.
-        let primary = StubTranscriber::new("GPU");
+        let primary = StubTranscriber::with_text("GPU");
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let cpu: Arc<GatedTranscriber> = Arc::new(GatedTranscriber {

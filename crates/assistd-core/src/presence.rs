@@ -1142,14 +1142,15 @@ mod tests {
         // acquire_request_guard make progress. The point of the test
         // is to confirm no deadlock or state corruption under churn —
         // not to measure throughput. A generous wall-clock timeout
-        // wraps the whole workload.
+        // wraps the whole workload. AC pin: 100 writer cycles complete
+        // without crash or deadlock.
         let m = PresenceManager::stub(PresenceState::Active);
 
         let mut readers = Vec::new();
         for _ in 0..4 {
             let m = Arc::clone(&m);
             readers.push(tokio::spawn(async move {
-                for _ in 0..20 {
+                for _ in 0..50 {
                     match m.acquire_request_guard().await {
                         Ok(g) => {
                             tokio::task::yield_now().await;
@@ -1168,7 +1169,7 @@ mod tests {
 
         let m2 = Arc::clone(&m);
         let writer = tokio::spawn(async move {
-            for _ in 0..10 {
+            for _ in 0..100 {
                 m2.sleep().await.expect("sleep errored");
                 m2.set_state_for_test(PresenceState::Active);
                 tokio::task::yield_now().await;

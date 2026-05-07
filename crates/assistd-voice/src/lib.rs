@@ -54,6 +54,8 @@ pub use mic::{MicVoiceInput, VoiceInputError, capture::validate as mic_validate}
 #[cfg(feature = "tts")]
 pub use piper::{PiperError, PiperVoiceOutput};
 pub use sentence::SentenceBuffer;
+#[cfg(all(feature = "whisper", any(test, feature = "test-support")))]
+pub use transcribe::StubTranscriber;
 #[cfg(feature = "whisper")]
 pub use transcribe::{
     BusyProbe, CpuFallbackFactory, NullBusyProbe, QueueConfig, QueuedTranscriber, Transcriber,

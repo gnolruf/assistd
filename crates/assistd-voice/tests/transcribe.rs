@@ -102,6 +102,7 @@ async fn setup() -> Fixture {
 }
 
 #[tokio::test]
+#[ignore = "downloads ~80MB Whisper model + JFK clip; run with --ignored for real-fidelity coverage"]
 async fn transcribes_clear_english_speech() {
     init_tracing();
     let fx = setup().await;
@@ -130,6 +131,7 @@ async fn transcribes_clear_english_speech() {
 }
 
 #[tokio::test]
+#[ignore = "downloads Whisper + Silero VAD models; run with --ignored for real-fidelity coverage"]
 async fn vad_trims_silence_padding() {
     init_tracing();
     let fx = setup().await;
@@ -169,6 +171,7 @@ async fn vad_trims_silence_padding() {
 }
 
 #[tokio::test]
+#[ignore = "shares the heavyweight setup() that downloads the Whisper model"]
 async fn empty_audio_is_rejected() {
     init_tracing();
     let fx = setup().await;
