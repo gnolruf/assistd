@@ -60,7 +60,7 @@ jobs:
       - name: Test
         run: |
           cargo test --workspace --locked \
-            --features assistd-llm/test-support
+            --features assistd-llm/test-support,assistd-voice/test-support
 
       - name: cargo-deny (advisories, licenses, bans)
         uses: EmbarkStudios/cargo-deny-action@v2

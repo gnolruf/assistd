@@ -1132,4 +1132,177 @@ mod tests {
         })
         .await;
     }
+
+    // ---------------------------------------------------------------
+    // Concurrent IPC sessions: state isolation, protocol-version
+    // tolerance, mixed read/write traffic. Complements the existing
+    // `handles_concurrent_connections` (which is 16-way EchoBackend
+    // basic concurrency) by stressing presence transitions and
+    // protocol-evolution paths.
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn concurrent_set_presence_to_sleeping_is_idempotent_under_fanout() {
+        // 32 connections each ask the daemon to enter Sleeping. The
+        // first one transitions Active → Sleeping; the rest hit the
+        // idempotency fast path and still receive Presence{Sleeping}
+        // + Done. Pins the invariant that the transition mutex
+        // serializes correctly under a connection storm.
+        with_server(test_state(), |path| async move {
+            let mut handles = Vec::new();
+            for i in 0..32 {
+                let p = path.clone();
+                handles.push(tokio::spawn(async move {
+                    let id = format!("sp-{i}");
+                    let body = format!(
+                        r#"{{"type":"set_presence","id":"{id}","target":"sleeping"}}"#
+                    );
+                    let events = send_request_collect_events(&p, &body).await;
+                    assert!(
+                        matches!(
+                            events.first(),
+                            Some(Event::Presence { id: pid, state }) if pid == &id && *state == PresenceState::Sleeping
+                        ),
+                        "conn {i}: missing initial Presence{{Sleeping}}: {events:?}"
+                    );
+                    assert!(
+                        matches!(events.last(), Some(Event::Done { id: did }) if did == &id),
+                        "conn {i}: missing terminal Done: {events:?}"
+                    );
+                    assert!(
+                        !events.iter().any(|e| matches!(e, Event::Error { .. })),
+                        "conn {i}: unexpected Error event in {events:?}"
+                    );
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mixed_query_and_set_presence_does_not_drop_events() {
+        // Half the connections issue Queries against SlowBackend (3
+        // deltas × 50ms ≈ 150ms); the other half issue idempotent
+        // SetPresence{Active} calls. Queries hold the inflight RwLock
+        // as readers; SetPresence takes the transition mutex. The
+        // target is Active (the stub's starting state) so auto-wake
+        // doesn't fire (the stub can't cold-start a llama-server).
+        // No connection should see an Error or miss its terminal Done.
+        let state = state_with_backend_and_grace(
+            Arc::new(SlowBackend {
+                deltas: 3,
+                pause: std::time::Duration::from_millis(50),
+            }),
+            5,
+        );
+        with_server(state, |path| async move {
+            let mut handles = Vec::new();
+            for i in 0..16 {
+                let p = path.clone();
+                handles.push(tokio::spawn(async move {
+                    let id = format!("mix-{i}");
+                    let body = if i % 2 == 0 {
+                        format!(r#"{{"type":"query","id":"{id}","text":"q{i}"}}"#)
+                    } else {
+                        format!(r#"{{"type":"set_presence","id":"{id}","target":"active"}}"#)
+                    };
+                    let events = send_request_collect_events(&p, &body).await;
+                    assert!(
+                        matches!(events.last(), Some(Event::Done { id: did }) if did == &id),
+                        "conn {i}: expected Done, got {events:?}"
+                    );
+                    assert!(
+                        !events.iter().any(|e| matches!(e, Event::Error { .. })),
+                        "conn {i}: unexpected Error in {events:?}"
+                    );
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_request_id_across_connections_does_not_leak_events() {
+        // Four connections each fire a Query with the literal id
+        // "shared". Per-connection event isolation means each socket
+        // sees Delta + Done with id="shared" — no extras from
+        // sibling connections. EchoBackend echoes text as one delta.
+        with_server(test_state(), |path| async move {
+            let mut handles = Vec::new();
+            for i in 0..4 {
+                let p = path.clone();
+                let text = format!("t{i}");
+                handles.push(tokio::spawn(async move {
+                    let body = format!(r#"{{"type":"query","id":"shared","text":"{text}"}}"#);
+                    let events = send_request_collect_events(&p, &body).await;
+                    assert_eq!(
+                        events.len(),
+                        2,
+                        "conn {i}: expected 2 events, got {events:?}"
+                    );
+                    match &events[0] {
+                        Event::Delta { id, text: t } => {
+                            assert_eq!(id, "shared");
+                            assert_eq!(t, &text);
+                        }
+                        other => panic!("conn {i}: expected Delta, got {other:?}"),
+                    }
+                    match &events[1] {
+                        Event::Done { id } => assert_eq!(id, "shared"),
+                        other => panic!("conn {i}: expected Done, got {other:?}"),
+                    }
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn query_without_version_field_is_treated_as_legacy_v1() {
+        // Pre-versioning clients send Query without the optional
+        // `version` field. The daemon must accept it and stream a
+        // normal Delta + Done. This pins the additive-evolution
+        // contract for the protocol.
+        with_server(test_state(), |path| async move {
+            let events =
+                send_request_collect_events(&path, r#"{"type":"query","id":"legacy","text":"hi"}"#)
+                    .await;
+            assert!(
+                matches!(events.first(), Some(Event::Delta { id, .. }) if id == "legacy"),
+                "expected Delta, got {events:?}"
+            );
+            assert!(matches!(events.last(), Some(Event::Done { id }) if id == "legacy"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn query_with_future_protocol_version_is_warned_but_accepted() {
+        // A client claiming a higher protocol version than the daemon
+        // knows about must still get a normal stream — additive
+        // evolution invariant. The daemon logs a warn (not asserted
+        // here) and proceeds.
+        with_server(test_state(), |path| async move {
+            let events = send_request_collect_events(
+                &path,
+                r#"{"type":"query","id":"future","text":"hi","version":99}"#,
+            )
+            .await;
+            assert!(
+                matches!(events.first(), Some(Event::Delta { id, .. }) if id == "future"),
+                "expected Delta, got {events:?}"
+            );
+            assert!(matches!(events.last(), Some(Event::Done { id }) if id == "future"));
+        })
+        .await;
+    }
 }

@@ -110,6 +110,30 @@ impl MicVoiceInput {
         }
     }
 
+    /// Bypass cpal capture and feed pre-recorded PCM directly to the
+    /// transcriber, exercising the published state sequence
+    /// (`Recording → Transcribing → Idle`) without opening an audio
+    /// device. Test-support only — real PTT goes through
+    /// [`VoiceInput::start_recording`] / [`VoiceInput::stop_and_transcribe`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn transcribe_pcm_for_test(
+        &self,
+        pcm_i16_16k_mono: &[i16],
+    ) -> Result<String, VoiceInputError> {
+        // Real PTT yields between Recording and Transcribing across the
+        // mic-capture boundary; here we yield manually so watch
+        // subscribers can observe each transition rather than collapsing
+        // them to the latest value.
+        let _ = self.state_tx.send(VoiceCaptureState::Recording);
+        tokio::task::yield_now().await;
+        let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
+        tokio::task::yield_now().await;
+        let result = self.transcriber.transcribe(pcm_i16_16k_mono).await;
+        tokio::task::yield_now().await;
+        let _ = self.state_tx.send(VoiceCaptureState::Idle);
+        Ok(result?)
+    }
+
     /// Send a terminal `Idle` and join the state-forwarder from the
     /// current session so a stale Queued/Transcribing publish from a
     /// still-running transcription (e.g. on a VoiceInputError that
