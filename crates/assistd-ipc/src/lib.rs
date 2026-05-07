@@ -243,6 +243,26 @@ pub enum Request {
     /// Called by clients (TUI, CLI) at startup to render UI state that
     /// otherwise required them to reach into llama-server directly.
     GetCapabilities { id: String },
+    /// Snapshot the current conversation state into a new branch named
+    /// `name` and switch to it. Emits a single [`Event::BranchSwitched`]
+    /// describing the new branch, then `Done`. Errors when the name is
+    /// already taken or empty.
+    Fork { id: String, name: String },
+    /// Enumerate every branch across every session. Emits zero or more
+    /// [`Event::BranchInfo`] events (active session first), then `Done`.
+    Branches { id: String },
+    /// Switch the active conversation to a different branch.
+    /// `target` is either a bare branch name (resolved to the current
+    /// session's branch first, then most-recent session on collision)
+    /// or `<session_prefix>/<name>` for an explicit cross-session jump.
+    /// Emits a [`Event::BranchSwitched`] followed by one
+    /// [`Event::HistoryEntry`] per loaded message, then `Done`.
+    Switch { id: String, target: String },
+    /// Drop the most recent user message and the entire assistant
+    /// reply that followed it (including any tool-call/result rounds)
+    /// from the current branch. Emits a single [`Event::UndoApplied`]
+    /// reporting how many messages were removed, then `Done`.
+    Undo { id: String },
 }
 
 impl Request {
@@ -299,7 +319,11 @@ impl Request {
             | Request::MemorySemanticSearch { id, .. }
             | Request::MemoryReindex { id, .. }
             | Request::ConfirmResponse { id, .. }
-            | Request::GetCapabilities { id, .. } => id,
+            | Request::GetCapabilities { id, .. }
+            | Request::Fork { id, .. }
+            | Request::Branches { id }
+            | Request::Switch { id, .. }
+            | Request::Undo { id } => id,
         }
     }
 
@@ -330,6 +354,10 @@ impl Request {
             Request::MemoryReindex { .. } => "memory_reindex",
             Request::ConfirmResponse { .. } => "confirm_response",
             Request::GetCapabilities { .. } => "get_capabilities",
+            Request::Fork { .. } => "fork",
+            Request::Branches { .. } => "branches",
+            Request::Switch { .. } => "switch",
+            Request::Undo { .. } => "undo",
         }
     }
 }
@@ -479,6 +507,57 @@ pub enum Event {
         event: String,
         message: String,
     },
+    /// One branch entry emitted by [`Request::Branches`]. Multiple
+    /// events stream out (one per branch) in active-session-first
+    /// order, terminated by `Done`. `is_active_session` is true when
+    /// `session_id` matches the daemon's currently-active session.
+    BranchInfo {
+        id: String,
+        branch_id: i64,
+        session_id: String,
+        session_started_at: String,
+        session_ended_at: Option<String>,
+        name: String,
+        parent_branch_name: Option<String>,
+        fork_point_seq: Option<i64>,
+        created_at: String,
+        message_count: i64,
+        is_current_in_session: bool,
+        is_active_session: bool,
+    },
+    /// Emitted by [`Request::Fork`] and [`Request::Switch`] to confirm
+    /// the active branch changed. For `/switch` cross-session moves,
+    /// `session_id` is the session the daemon is now active in.
+    BranchSwitched {
+        id: String,
+        branch_id: i64,
+        session_id: String,
+        name: String,
+        parent_branch_name: Option<String>,
+        fork_point_seq: Option<i64>,
+    },
+    /// One message of branch history emitted during [`Request::Switch`]
+    /// so the TUI can repaint the chat pane with the loaded branch's
+    /// turns. `role` is `system|user|assistant|tool`. Tool-result rows
+    /// arrive as `role=tool` (TUI may render them as a dim "tool: …"
+    /// line); plain user/assistant rows render as the corresponding
+    /// chat bubbles.
+    HistoryEntry {
+        id: String,
+        seq: i64,
+        role: String,
+        content: String,
+        tool_name: Option<String>,
+    },
+    /// Emitted by [`Request::Undo`]. `removed_messages` is the count of
+    /// rows dropped from the current branch; 0 means "nothing to undo"
+    /// (the branch had no real user turn). `last_user_text` echoes the
+    /// undone prompt for the TUI to surface (e.g. "undone: hello world").
+    UndoApplied {
+        id: String,
+        removed_messages: u32,
+        last_user_text: Option<String>,
+    },
     /// Terminal error event — the stream is over.
     Error { id: String, message: String },
     /// Terminal success event — the stream is over.
@@ -511,6 +590,10 @@ impl Event {
             | Event::ConfirmRequest { id, .. }
             | Event::Capabilities { id, .. }
             | Event::Status { id, .. }
+            | Event::BranchInfo { id, .. }
+            | Event::BranchSwitched { id, .. }
+            | Event::HistoryEntry { id, .. }
+            | Event::UndoApplied { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id } => id,
         }
@@ -593,6 +676,112 @@ mod tests {
             }
             _ => panic!("expected Query"),
         }
+    }
+
+    #[test]
+    fn fork_request_round_trips() {
+        let req = Request::Fork {
+            id: "r-1".into(),
+            name: "experiment".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.kind(), "fork");
+        assert_eq!(req.id(), "r-1");
+    }
+
+    #[test]
+    fn branches_request_round_trips() {
+        let req = Request::Branches { id: "r-2".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.kind(), "branches");
+    }
+
+    #[test]
+    fn switch_request_round_trips() {
+        let req = Request::Switch {
+            id: "r-3".into(),
+            target: "abc12345/main".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.kind(), "switch");
+    }
+
+    #[test]
+    fn undo_request_round_trips() {
+        let req = Request::Undo { id: "r-4".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.kind(), "undo");
+    }
+
+    #[test]
+    fn branch_info_event_round_trips() {
+        let ev = Event::BranchInfo {
+            id: "r-1".into(),
+            branch_id: 7,
+            session_id: "abc12345-...".into(),
+            session_started_at: "2026-01-01T00:00:00Z".into(),
+            session_ended_at: None,
+            name: "main".into(),
+            parent_branch_name: None,
+            fork_point_seq: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            message_count: 4,
+            is_current_in_session: true,
+            is_active_session: true,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ev);
+        assert_eq!(ev.id(), "r-1");
+    }
+
+    #[test]
+    fn branch_switched_event_round_trips() {
+        let ev = Event::BranchSwitched {
+            id: "r-2".into(),
+            branch_id: 9,
+            session_id: "sess".into(),
+            name: "experiment".into(),
+            parent_branch_name: Some("main".into()),
+            fork_point_seq: Some(5),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ev);
+    }
+
+    #[test]
+    fn history_entry_event_round_trips() {
+        let ev = Event::HistoryEntry {
+            id: "r-3".into(),
+            seq: 3,
+            role: "assistant".into(),
+            content: "hello".into(),
+            tool_name: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ev);
+    }
+
+    #[test]
+    fn undo_applied_event_round_trips() {
+        let ev = Event::UndoApplied {
+            id: "r-4".into(),
+            removed_messages: 2,
+            last_user_text: Some("hi".into()),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ev);
     }
 
     #[test]

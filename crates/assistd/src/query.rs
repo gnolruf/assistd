@@ -144,7 +144,11 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             | Event::MemoryRow { .. }
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. }
-            | Event::Capabilities { .. } => {}
+            | Event::Capabilities { .. }
+            | Event::BranchInfo { .. }
+            | Event::BranchSwitched { .. }
+            | Event::HistoryEntry { .. }
+            | Event::UndoApplied { .. } => {}
             // `assistd query` is one-shot non-interactive: it can't
             // answer a confirm prompt. The daemon-side gate denies
             // when the connection drops, so we just note the event

@@ -108,6 +108,59 @@ CREATE TABLE embeddings (
 CREATE INDEX idx_embeddings_model ON embeddings(model);
 "#;
 
+/// V3: conversation branching.
+///
+/// Adds named branches per session plus a `branch_messages` join table
+/// that maps `(branch_id, branch-local seq) -> conversation_id`. We
+/// deliberately do NOT duplicate `conversations` rows on fork — a single
+/// conversation row can be reachable from multiple branches at
+/// different (or the same) seq via separate `branch_messages` entries.
+/// This avoids FTS5 trigger-driven duplication and keeps
+/// `conversation_chunks` / `embeddings` referentially clean.
+///
+/// `sessions` gains `current_branch_id` (NULL on legacy rows; backfilled
+/// to the freshly-inserted "main" branch in this migration). The
+/// existing `conversations.seq` column stays as the session-wide insert
+/// order used by FTS5 ranking; branch-local order lives in
+/// `branch_messages.seq`.
+const V3_SQL: &str = r#"
+CREATE TABLE branches (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    name              TEXT NOT NULL,
+    parent_branch_id  INTEGER REFERENCES branches(id) ON DELETE SET NULL,
+    fork_point_seq    INTEGER,
+    created_at        TEXT NOT NULL,
+    UNIQUE(session_id, name)
+);
+CREATE INDEX idx_branches_session ON branches(session_id);
+
+CREATE TABLE branch_messages (
+    branch_id       INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+    seq             INTEGER NOT NULL,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    PRIMARY KEY (branch_id, seq)
+);
+CREATE INDEX idx_branch_messages_branch_seq ON branch_messages(branch_id, seq);
+CREATE INDEX idx_branch_messages_conv ON branch_messages(conversation_id);
+
+ALTER TABLE sessions ADD COLUMN current_branch_id INTEGER REFERENCES branches(id);
+
+INSERT INTO branches (session_id, name, parent_branch_id, fork_point_seq, created_at)
+    SELECT id, 'main', NULL, NULL, started_at FROM sessions;
+
+INSERT INTO branch_messages (branch_id, seq, conversation_id)
+    SELECT b.id, c.seq, c.id
+    FROM conversations c
+    JOIN branches b ON b.session_id = c.session_id AND b.name = 'main';
+
+UPDATE sessions
+    SET current_branch_id = (
+        SELECT id FROM branches
+        WHERE branches.session_id = sessions.id AND name = 'main'
+    );
+"#;
+
 /// V2: per-memory embeddings.
 ///
 /// Adds a sibling table to `embeddings` that indexes the `memories` KV
@@ -136,7 +189,7 @@ CREATE INDEX idx_memory_embeddings_model ON memory_embeddings(model);
 /// Build the full migration set. `'static` because the SQL is embedded
 /// in the binary; rusqlite_migration just needs read access.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1_SQL), M::up(V2_SQL)])
+    Migrations::new(vec![M::up(V1_SQL), M::up(V2_SQL), M::up(V3_SQL)])
 }
 
 /// Apply all pending migrations to `conn`. Idempotent: re-running on an
@@ -177,6 +230,8 @@ mod tests {
             .collect();
 
         for expected in [
+            "branch_messages",
+            "branches",
             "conv_fts_ad",
             "conv_fts_ai",
             "conv_fts_au",
@@ -184,6 +239,9 @@ mod tests {
             "conversations",
             "conversations_fts",
             "embeddings",
+            "idx_branch_messages_branch_seq",
+            "idx_branch_messages_conv",
+            "idx_branches_session",
             "idx_chunks_conv",
             "idx_conversations_session_seq",
             "idx_conversations_turn",

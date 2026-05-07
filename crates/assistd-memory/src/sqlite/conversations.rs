@@ -49,6 +49,10 @@ impl std::fmt::Display for SessionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TurnId(pub i64);
 
+/// Opaque branch identifier (rowid in `branches`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BranchId(pub i64);
+
 /// Role of a persisted message. Mirrors `assistd_llm::chat::conversation::Role`
 /// plus a `Tool` variant for tool-result rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -168,6 +172,54 @@ pub struct TurnSummary {
     pub message_count: i64,
 }
 
+/// Per-branch metadata returned by [`ConversationStore::list_branches`].
+/// `is_current_in_session` flags the branch that `sessions.current_branch_id`
+/// points at; the active session can be cross-referenced via the
+/// daemon-held [`SessionId`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BranchInfo {
+    pub branch_id: BranchId,
+    pub session_id: String,
+    pub session_started_at: String,
+    pub session_ended_at: Option<String>,
+    pub name: String,
+    pub parent_branch_id: Option<BranchId>,
+    pub parent_branch_name: Option<String>,
+    pub fork_point_seq: Option<i64>,
+    pub created_at: String,
+    pub message_count: i64,
+    pub is_current_in_session: bool,
+}
+
+/// One persisted message reconstructed from the DB for replay into the
+/// LLM backend's in-memory conversation. Carries enough fields to
+/// faithfully reproduce both plain user/assistant rows AND
+/// assistant-with-tool-calls / tool-result rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRow {
+    pub conversation_id: i64,
+    pub seq: i64,
+    pub role: PersistedRole,
+    pub content: String,
+    /// JSON array of `{id, name, arguments}` when the row is an
+    /// assistant-with-tool-calls; `None` for plain rows.
+    pub tool_calls: Option<serde_json::Value>,
+    pub tool_call_id: Option<String>,
+    pub tool_name: Option<String>,
+}
+
+/// Result of [`ConversationStore::undo_last_turn`]. `removed_messages`
+/// is the count of `branch_messages` rows dropped from the branch (so
+/// the TUI can render "removed N entries" feedback). `last_user_text`
+/// echoes back the user prompt that was undone, used by callers that
+/// want to surface "undone: <text>".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UndoOutcome {
+    pub removed_messages: u32,
+    pub last_user_text: Option<String>,
+    pub removed_turn_id: Option<i64>,
+}
+
 /// Conversation persistence trait. Sibling to [`crate::MemoryStore`];
 /// implementations may share underlying storage (the SQLite impls
 /// below do — both hold an `Arc<SqliteHandle>`).
@@ -185,6 +237,101 @@ pub trait ConversationStore: Send + Sync + 'static {
     ) -> Result<i64>;
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
     async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>>;
+
+    // --- Branch operations -------------------------------------------
+
+    /// Atomically begin a session and create its default `main` branch.
+    /// Returns both ids; the caller stores them in `AppState`. Replaces
+    /// the [`Self::begin_session`] call at daemon startup so a crash
+    /// between the two writes can't orphan a session without a branch.
+    async fn begin_session_with_main_branch(
+        &self,
+        daemon_pid: u32,
+    ) -> Result<(SessionId, BranchId)>;
+
+    /// Create a new branch in `session` with the given name. Used by
+    /// `begin_session_with_main_branch` internally and by direct
+    /// branch-creation paths during recovery / tests.
+    async fn create_branch(
+        &self,
+        session: &SessionId,
+        name: &str,
+        parent: Option<BranchId>,
+        fork_point_seq: Option<i64>,
+    ) -> Result<BranchId>;
+
+    /// Update `sessions.current_branch_id` to point at `branch`.
+    async fn set_current_branch(&self, session: &SessionId, branch: BranchId) -> Result<()>;
+
+    /// Read the current branch pointer for `session`, if any.
+    async fn get_current_branch(&self, session: &SessionId) -> Result<Option<BranchId>>;
+
+    /// Append `msg` to the conversations table AND to the
+    /// `branch_messages` join under `branch`. Atomic via a single
+    /// transaction. Returns the conversations.id rowid.
+    async fn append_message_to_branch(
+        &self,
+        session: &SessionId,
+        branch: BranchId,
+        turn: Option<TurnId>,
+        msg: PersistedMessage,
+    ) -> Result<i64>;
+
+    /// Enumerate every branch across every session. Sorted by
+    /// session.started_at DESC, then branches.id ASC. The caller
+    /// (handle_branches) re-orders so the active session shows first.
+    async fn list_branches(&self) -> Result<Vec<BranchInfo>>;
+
+    /// Look up a branch by name, optionally qualified by an 8-char
+    /// session id prefix. Returns the matching `(SessionId, BranchId)`
+    /// pair or `None` when no match exists. Ambiguous matches
+    /// (multiple branches with the same name across sessions) return
+    /// the first hit ordered by session.started_at DESC; callers can
+    /// detect ambiguity by passing the qualified form.
+    async fn resolve_branch(
+        &self,
+        target: &str,
+        prefer_session: Option<&SessionId>,
+    ) -> Result<Option<(SessionId, BranchId)>>;
+
+    /// Snapshot a branch by copying every `branch_messages` row from
+    /// `src` into a freshly-created branch named `new_name` with
+    /// `parent = src` and `fork_point_seq = max seq on src`. Returns
+    /// the new BranchId. Atomic in a single transaction.
+    async fn fork_branch(&self, src: BranchId, new_name: &str) -> Result<BranchId>;
+
+    /// Load every message row referenced by `branch`, ordered by
+    /// `branch_messages.seq`. Used by `/switch` and by daemon-startup
+    /// resume to repopulate the in-memory `Conversation`.
+    async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>>;
+
+    /// Drop the latest turn from `branch`. Implementation:
+    /// 1. find max(turn_id) for messages reachable from `branch`,
+    /// 2. delete the matching `branch_messages` rows for `branch`,
+    /// 3. orphan-sweep `conversations` rows now unreferenced by ANY
+    ///    `branch_messages`,
+    /// 4. delete the matching `turns` row when no other branch still
+    ///    references it.
+    /// Returns count + last user_text + the dropped turn id (when any).
+    async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome>;
+
+    /// Find the most recent session with `ended_at IS NULL` whose
+    /// `daemon_pid` is no longer alive. The caller then resumes by
+    /// loading `current_branch_id`'s messages back into memory. Returns
+    /// `None` when nothing is resumable (first-ever startup, or the
+    /// only candidate is owned by a still-running daemon).
+    async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>>;
+}
+
+/// Candidate session returned by [`ConversationStore::find_resumable_session`].
+/// `daemon_pid` lets the caller decide whether the prior owner is still
+/// alive (`kill -0`) before claiming the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeCandidate {
+    pub session_id: SessionId,
+    pub current_branch_id: BranchId,
+    pub daemon_pid: u32,
+    pub started_at: String,
 }
 
 /// No-op fallback used when memory is disabled in config or in tests
@@ -218,6 +365,66 @@ impl ConversationStore for NoConversationStore {
     }
     async fn recent_turns(&self, _l: usize) -> Result<Vec<TurnSummary>> {
         Ok(Vec::new())
+    }
+
+    async fn begin_session_with_main_branch(&self, _pid: u32) -> Result<(SessionId, BranchId)> {
+        Ok((SessionId::new(), BranchId(0)))
+    }
+
+    async fn create_branch(
+        &self,
+        _s: &SessionId,
+        _name: &str,
+        _parent: Option<BranchId>,
+        _fp: Option<i64>,
+    ) -> Result<BranchId> {
+        Ok(BranchId(0))
+    }
+
+    async fn set_current_branch(&self, _s: &SessionId, _b: BranchId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_current_branch(&self, _s: &SessionId) -> Result<Option<BranchId>> {
+        Ok(None)
+    }
+
+    async fn append_message_to_branch(
+        &self,
+        _s: &SessionId,
+        _b: BranchId,
+        _t: Option<TurnId>,
+        _m: PersistedMessage,
+    ) -> Result<i64> {
+        Ok(0)
+    }
+
+    async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve_branch(
+        &self,
+        _t: &str,
+        _p: Option<&SessionId>,
+    ) -> Result<Option<(SessionId, BranchId)>> {
+        Ok(None)
+    }
+
+    async fn fork_branch(&self, _src: BranchId, _name: &str) -> Result<BranchId> {
+        Ok(BranchId(0))
+    }
+
+    async fn load_branch_history(&self, _b: BranchId) -> Result<Vec<HistoryRow>> {
+        Ok(Vec::new())
+    }
+
+    async fn undo_last_turn(&self, _b: BranchId) -> Result<UndoOutcome> {
+        Ok(UndoOutcome::default())
+    }
+
+    async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>> {
+        Ok(None)
     }
 }
 
@@ -385,6 +592,302 @@ impl ConversationStore for SqliteConversationStore {
             .await
             .context("recent_turns")
     }
+
+    async fn begin_session_with_main_branch(
+        &self,
+        daemon_pid: u32,
+    ) -> Result<(SessionId, BranchId)> {
+        let id = SessionId::new();
+        let session_id = id.0.clone();
+        let branch = WriteCall::run(self.handle.writer(), |ack| {
+            WriteOp::BeginSessionWithMainBranch {
+                session_id,
+                daemon_pid,
+                ack,
+            }
+        })
+        .await?;
+        Ok((id, branch))
+    }
+
+    async fn create_branch(
+        &self,
+        session: &SessionId,
+        name: &str,
+        parent: Option<BranchId>,
+        fork_point_seq: Option<i64>,
+    ) -> Result<BranchId> {
+        let session_id = session.0.clone();
+        let name = name.to_string();
+        WriteCall::run(self.handle.writer(), |ack| WriteOp::CreateBranch {
+            session_id,
+            name,
+            parent_branch_id: parent,
+            fork_point_seq,
+            ack,
+        })
+        .await
+    }
+
+    async fn set_current_branch(&self, session: &SessionId, branch: BranchId) -> Result<()> {
+        let session_id = session.0.clone();
+        WriteCall::run(self.handle.writer(), |ack| WriteOp::SetCurrentBranch {
+            session_id,
+            branch_id: branch,
+            ack,
+        })
+        .await
+    }
+
+    async fn get_current_branch(&self, session: &SessionId) -> Result<Option<BranchId>> {
+        let session_id = session.0.clone();
+        let id: Option<i64> = self
+            .handle
+            .conn()
+            .call(move |c| {
+                Ok(c.query_row(
+                    "SELECT current_branch_id FROM sessions WHERE id = ?1",
+                    rusqlite::params![session_id],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .ok()
+                .flatten())
+            })
+            .await
+            .context("get_current_branch")?;
+        Ok(id.map(BranchId))
+    }
+
+    async fn append_message_to_branch(
+        &self,
+        session: &SessionId,
+        branch: BranchId,
+        turn: Option<TurnId>,
+        msg: PersistedMessage,
+    ) -> Result<i64> {
+        let session_id = session.0.clone();
+        WriteCall::run(self.handle.writer(), |ack| WriteOp::AppendMessageToBranch {
+            session_id,
+            branch_id: branch,
+            turn_id: turn,
+            msg,
+            ack,
+        })
+        .await
+    }
+
+    async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
+        self.handle
+            .conn()
+            .call(|c| {
+                let sql = "
+                    SELECT  b.id,
+                            b.session_id,
+                            s.started_at,
+                            s.ended_at,
+                            b.name,
+                            b.parent_branch_id,
+                            (SELECT name FROM branches p WHERE p.id = b.parent_branch_id),
+                            b.fork_point_seq,
+                            b.created_at,
+                            (SELECT COUNT(*) FROM branch_messages bm WHERE bm.branch_id = b.id),
+                            (b.id = s.current_branch_id) AS is_current
+                    FROM branches b JOIN sessions s ON s.id = b.session_id
+                    ORDER BY s.started_at DESC, b.id ASC
+                ";
+                let mut stmt = c.prepare(sql)?;
+                let rows: Vec<BranchInfo> = stmt
+                    .query_map([], |row| {
+                        let parent_id: Option<i64> = row.get(5)?;
+                        let is_current: i64 = row.get(10)?;
+                        Ok(BranchInfo {
+                            branch_id: BranchId(row.get(0)?),
+                            session_id: row.get(1)?,
+                            session_started_at: row.get(2)?,
+                            session_ended_at: row.get(3)?,
+                            name: row.get(4)?,
+                            parent_branch_id: parent_id.map(BranchId),
+                            parent_branch_name: row.get(6)?,
+                            fork_point_seq: row.get(7)?,
+                            created_at: row.get(8)?,
+                            message_count: row.get(9)?,
+                            is_current_in_session: is_current != 0,
+                        })
+                    })?
+                    .collect::<std::result::Result<_, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .context("list_branches")
+    }
+
+    async fn resolve_branch(
+        &self,
+        target: &str,
+        prefer_session: Option<&SessionId>,
+    ) -> Result<Option<(SessionId, BranchId)>> {
+        // Accept "session_prefix/name" (8-char hex prefix) or just
+        // "name". Bare name disambiguates by preferring the active
+        // session, then by most-recent session.
+        let (session_prefix, name) = match target.split_once('/') {
+            Some((p, n)) => (Some(p.to_string()), n.to_string()),
+            None => (None, target.to_string()),
+        };
+        let prefer_session = prefer_session.map(|s| s.0.clone());
+        let row: Option<(String, i64)> = self
+            .handle
+            .conn()
+            .call(move |c| {
+                if let Some(prefix) = session_prefix {
+                    let pattern = format!("{prefix}%");
+                    let row = c
+                        .query_row(
+                            "SELECT b.session_id, b.id
+                             FROM branches b JOIN sessions s ON s.id = b.session_id
+                             WHERE b.name = ?1 AND b.session_id LIKE ?2
+                             ORDER BY s.started_at DESC LIMIT 1",
+                            rusqlite::params![name, pattern],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                        )
+                        .ok();
+                    Ok(row)
+                } else if let Some(pref) = prefer_session {
+                    // Look first inside the preferred session, then fall
+                    // back to "any session, most-recent first".
+                    if let Ok(row) = c.query_row(
+                        "SELECT session_id, id FROM branches WHERE name = ?1 AND session_id = ?2",
+                        rusqlite::params![name, pref],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                    ) {
+                        return Ok(Some(row));
+                    }
+                    Ok(c.query_row(
+                        "SELECT b.session_id, b.id
+                         FROM branches b JOIN sessions s ON s.id = b.session_id
+                         WHERE b.name = ?1
+                         ORDER BY s.started_at DESC LIMIT 1",
+                        rusqlite::params![name],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                    )
+                    .ok())
+                } else {
+                    Ok(c.query_row(
+                        "SELECT b.session_id, b.id
+                         FROM branches b JOIN sessions s ON s.id = b.session_id
+                         WHERE b.name = ?1
+                         ORDER BY s.started_at DESC LIMIT 1",
+                        rusqlite::params![name],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                    )
+                    .ok())
+                }
+            })
+            .await
+            .context("resolve_branch")?;
+        Ok(row.map(|(s, b)| (SessionId(s), BranchId(b))))
+    }
+
+    async fn fork_branch(&self, src: BranchId, new_name: &str) -> Result<BranchId> {
+        let new_name = new_name.to_string();
+        WriteCall::run(self.handle.writer(), |ack| WriteOp::ForkBranch {
+            src_branch_id: src,
+            new_name,
+            ack,
+        })
+        .await
+    }
+
+    async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>> {
+        self.handle
+            .conn()
+            .call(move |c| {
+                let sql = "
+                    SELECT  c.id,
+                            bm.seq,
+                            c.role,
+                            c.content,
+                            c.tool_calls,
+                            c.tool_call_id,
+                            c.tool_name
+                    FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
+                    WHERE bm.branch_id = ?1
+                    ORDER BY bm.seq ASC
+                ";
+                let mut stmt = c.prepare(sql)?;
+                let rows = stmt
+                    .query_map(rusqlite::params![branch.0], |row| {
+                        let role_str: String = row.get(2)?;
+                        let tool_calls_str: Option<String> = row.get(4)?;
+                        let role = PersistedRole::parse(&role_str).ok_or_else(|| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(std::io::Error::other(format!(
+                                    "unknown role in DB: {role_str}"
+                                ))),
+                            )
+                        })?;
+                        Ok(HistoryRow {
+                            conversation_id: row.get(0)?,
+                            seq: row.get(1)?,
+                            role,
+                            content: row.get(3)?,
+                            tool_calls: tool_calls_str.map(|s| {
+                                serde_json::from_str(&s).unwrap_or(serde_json::Value::Null)
+                            }),
+                            tool_call_id: row.get(5)?,
+                            tool_name: row.get(6)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .context("load_branch_history")
+    }
+
+    async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome> {
+        WriteCall::run(self.handle.writer(), |ack| WriteOp::UndoLastTurn {
+            branch_id: branch,
+            ack,
+        })
+        .await
+    }
+
+    async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>> {
+        self.handle
+            .conn()
+            .call(|c| {
+                let row = c
+                    .query_row(
+                        "SELECT id, current_branch_id, daemon_pid, started_at
+                         FROM sessions
+                         WHERE ended_at IS NULL AND current_branch_id IS NOT NULL
+                         ORDER BY started_at DESC LIMIT 1",
+                        [],
+                        |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, u32>(2)?,
+                                r.get::<_, String>(3)?,
+                            ))
+                        },
+                    )
+                    .ok();
+                Ok(row)
+            })
+            .await
+            .context("find_resumable_session")
+            .map(|row| {
+                row.map(|(id, branch, pid, started)| ResumeCandidate {
+                    session_id: SessionId(id),
+                    current_branch_id: BranchId(branch),
+                    daemon_pid: pid,
+                    started_at: started,
+                })
+            })
+    }
 }
 
 // `WriteCall::run` returns an `oneshot::Receiver<Result<T>>` style
@@ -547,5 +1050,169 @@ mod tests {
         assert_eq!(fts5_literal("foo"), "\"foo\"");
         assert_eq!(fts5_literal("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(fts5_literal(""), "\"\"");
+    }
+
+    #[tokio::test]
+    async fn begin_session_with_main_branch_inserts_session_and_main_branch() {
+        let (store, _w) = fresh_store().await;
+        let (session, branch) = store.begin_session_with_main_branch(123).await.unwrap();
+        let current = store.get_current_branch(&session).await.unwrap();
+        assert_eq!(current, Some(branch));
+        let branches = store.list_branches().await.unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].name, "main");
+        assert!(branches[0].is_current_in_session);
+        assert_eq!(branches[0].parent_branch_id, None);
+        assert_eq!(branches[0].message_count, 0);
+    }
+
+    #[tokio::test]
+    async fn fork_creates_independent_branch_sharing_history() {
+        let (store, _w) = fresh_store().await;
+        let (session, main) = store.begin_session_with_main_branch(1).await.unwrap();
+        let turn = store.begin_turn(&session, "hello").await.unwrap();
+        store
+            .append_message_to_branch(&session, main, Some(turn), PersistedMessage::user("hello"))
+            .await
+            .unwrap();
+        store
+            .append_message_to_branch(
+                &session,
+                main,
+                Some(turn),
+                PersistedMessage::assistant_text("hi"),
+            )
+            .await
+            .unwrap();
+        store.end_turn(turn).await.unwrap();
+
+        let fork = store.fork_branch(main, "experiment").await.unwrap();
+        let main_history = store.load_branch_history(main).await.unwrap();
+        let fork_history = store.load_branch_history(fork).await.unwrap();
+        assert_eq!(main_history.len(), 2);
+        assert_eq!(fork_history.len(), 2);
+        // Same conversation rows are referenced — no row duplication.
+        assert_eq!(
+            main_history
+                .iter()
+                .map(|r| r.conversation_id)
+                .collect::<Vec<_>>(),
+            fork_history
+                .iter()
+                .map(|r| r.conversation_id)
+                .collect::<Vec<_>>()
+        );
+        let branches = store.list_branches().await.unwrap();
+        let fork_info = branches.iter().find(|b| b.name == "experiment").unwrap();
+        assert_eq!(fork_info.parent_branch_name.as_deref(), Some("main"));
+        assert_eq!(fork_info.fork_point_seq, Some(1));
+        assert_eq!(fork_info.message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn append_to_one_branch_does_not_show_on_the_other() {
+        let (store, _w) = fresh_store().await;
+        let (session, main) = store.begin_session_with_main_branch(1).await.unwrap();
+        let turn = store.begin_turn(&session, "q").await.unwrap();
+        store
+            .append_message_to_branch(&session, main, Some(turn), PersistedMessage::user("q"))
+            .await
+            .unwrap();
+        let fork = store.fork_branch(main, "alt").await.unwrap();
+        // Append to fork only.
+        let alt_turn = store.begin_turn(&session, "alt q").await.unwrap();
+        store
+            .append_message_to_branch(
+                &session,
+                fork,
+                Some(alt_turn),
+                PersistedMessage::user("alt q"),
+            )
+            .await
+            .unwrap();
+        let main_history = store.load_branch_history(main).await.unwrap();
+        let fork_history = store.load_branch_history(fork).await.unwrap();
+        assert_eq!(main_history.len(), 1);
+        assert_eq!(fork_history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn undo_removes_last_turn_from_branch_only() {
+        let (store, _w) = fresh_store().await;
+        let (session, main) = store.begin_session_with_main_branch(1).await.unwrap();
+        // Two turns: "first", "second".
+        let t1 = store.begin_turn(&session, "first").await.unwrap();
+        store
+            .append_message_to_branch(&session, main, Some(t1), PersistedMessage::user("first"))
+            .await
+            .unwrap();
+        store
+            .append_message_to_branch(
+                &session,
+                main,
+                Some(t1),
+                PersistedMessage::assistant_text("a"),
+            )
+            .await
+            .unwrap();
+        store.end_turn(t1).await.unwrap();
+
+        let t2 = store.begin_turn(&session, "second").await.unwrap();
+        store
+            .append_message_to_branch(&session, main, Some(t2), PersistedMessage::user("second"))
+            .await
+            .unwrap();
+        store
+            .append_message_to_branch(
+                &session,
+                main,
+                Some(t2),
+                PersistedMessage::assistant_text("b"),
+            )
+            .await
+            .unwrap();
+        store.end_turn(t2).await.unwrap();
+
+        let outcome = store.undo_last_turn(main).await.unwrap();
+        assert_eq!(outcome.removed_messages, 2);
+        assert_eq!(outcome.last_user_text.as_deref(), Some("second"));
+
+        let history = store.load_branch_history(main).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "first");
+        assert_eq!(history[1].content, "a");
+    }
+
+    #[tokio::test]
+    async fn resolve_branch_qualified_form() {
+        let (store, _w) = fresh_store().await;
+        let (s1, _) = store.begin_session_with_main_branch(1).await.unwrap();
+        let (s2, _) = store.begin_session_with_main_branch(2).await.unwrap();
+        // Two sessions, both with a "main" branch.
+        let bare = store.resolve_branch("main", Some(&s1)).await.unwrap();
+        assert!(bare.is_some());
+        assert_eq!(bare.unwrap().0, s1);
+        let prefix = &s2.0[..8];
+        let qualified = store
+            .resolve_branch(&format!("{prefix}/main"), None)
+            .await
+            .unwrap();
+        assert!(qualified.is_some());
+        assert_eq!(qualified.unwrap().0, s2);
+    }
+
+    #[tokio::test]
+    async fn find_resumable_session_returns_unended() {
+        let (store, _w) = fresh_store().await;
+        let (s, _) = store.begin_session_with_main_branch(99).await.unwrap();
+        let resume = store.find_resumable_session().await.unwrap();
+        assert!(resume.is_some());
+        let cand = resume.unwrap();
+        assert_eq!(cand.session_id, s);
+        assert_eq!(cand.daemon_pid, 99);
+        store.end_session(&s).await.unwrap();
+        // Once ended, no longer resumable.
+        let resume2 = store.find_resumable_session().await.unwrap();
+        assert!(resume2.is_none());
     }
 }

@@ -335,6 +335,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         conversation_store,
         memory_writer_handle,
         session_id_for_state,
+        branch_id_for_state,
+        resumed_history,
         sqlite_handle,
     ) = if config.memory.enabled {
         let db_path = std::path::PathBuf::from(&config.memory.db_path);
@@ -343,25 +345,83 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
                 let handle = Arc::new(handle);
                 let conv_store = Arc::new(SqliteConversationStore::new(handle.clone()));
                 let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
-                let session = match conv_store.begin_session(std::process::id()).await {
-                    Ok(s) => Arc::new(s),
+                // Try to resume the most recent unended session whose
+                // prior daemon is no longer alive (`kill -0` returns
+                // ESRCH). On success we reuse session_id + branch_id
+                // and replay the active branch's messages back into
+                // the chat backend; on miss / liveness conflict we
+                // start fresh.
+                let mut resumed_history: Vec<assistd_memory::HistoryRow> = Vec::new();
+                let (session, branch) = match conv_store.find_resumable_session().await {
+                    Ok(Some(cand)) if !pid_is_alive(cand.daemon_pid) => {
+                        info!(
+                            "memory: resuming prior session {} (branch={})",
+                            cand.session_id, cand.current_branch_id.0
+                        );
+                        match conv_store.load_branch_history(cand.current_branch_id).await {
+                            Ok(rows) => {
+                                resumed_history = rows;
+                            }
+                            Err(e) => tracing::warn!(
+                                "memory: load_branch_history failed for resume ({e:#})"
+                            ),
+                        }
+                        (Arc::new(cand.session_id), cand.current_branch_id)
+                    }
+                    Ok(_) => {
+                        match conv_store
+                            .begin_session_with_main_branch(std::process::id())
+                            .await
+                        {
+                            Ok((s, b)) => {
+                                info!(
+                                    "memory: SQLite ready at {} (session={}, branch={})",
+                                    db_path.display(),
+                                    s,
+                                    b.0
+                                );
+                                (Arc::new(s), b)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "memory: begin_session_with_main_branch failed: {e:#}; \
+                                     continuing without session row"
+                                );
+                                (
+                                    Arc::new(assistd_memory::SessionId::new()),
+                                    assistd_memory::BranchId(0),
+                                )
+                            }
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!(
-                            "memory: begin_session failed: {e:#}; continuing without session row"
+                            "memory: find_resumable_session failed: {e:#}; starting fresh"
                         );
-                        Arc::new(assistd_memory::SessionId::new())
+                        match conv_store
+                            .begin_session_with_main_branch(std::process::id())
+                            .await
+                        {
+                            Ok((s, b)) => (Arc::new(s), b),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "memory: begin_session_with_main_branch failed: {e:#}"
+                                );
+                                (
+                                    Arc::new(assistd_memory::SessionId::new()),
+                                    assistd_memory::BranchId(0),
+                                )
+                            }
+                        }
                     }
                 };
-                info!(
-                    "memory: SQLite ready at {} (session={})",
-                    db_path.display(),
-                    session
-                );
                 (
                     mem_store as Arc<dyn MemoryStore>,
                     conv_store as Arc<dyn ConversationStore>,
                     Some(writer_handle),
                     session,
+                    branch,
+                    resumed_history,
                     Some(handle),
                 )
             }
@@ -375,6 +435,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
                     Arc::new(NoConversationStore) as Arc<dyn ConversationStore>,
                     None,
                     Arc::new(assistd_memory::SessionId::new()),
+                    assistd_memory::BranchId(0),
+                    Vec::new(),
                     None,
                 )
             }
@@ -386,6 +448,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             Arc::new(NoConversationStore) as Arc<dyn ConversationStore>,
             None,
             Arc::new(assistd_memory::SessionId::new()),
+            assistd_memory::BranchId(0),
+            Vec::new(),
             None,
         )
     };
@@ -692,9 +756,36 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let continuous_start_on_launch = config.voice.continuous.start_on_launch;
 
     let embedding_cfg_for_state = config.embedding.clone();
+    let conversation_ctx = Arc::new(assistd_core::ConversationContext::from_arc(
+        session_id_for_state.clone(),
+        branch_id_for_state,
+    ));
+    let chat: Arc<dyn assistd_llm::LlmBackend> = Arc::new(chat);
+    // Replay resumed history into the chat backend BEFORE the socket
+    // starts serving so the first incoming query sees a populated
+    // conversation. Failures are logged but never block startup —
+    // worst case the user gets a pristine context window.
+    if !resumed_history.is_empty() {
+        let entries: Vec<assistd_llm::HistoryEntry> = resumed_history
+            .into_iter()
+            .map(|r| assistd_llm::HistoryEntry {
+                role: persisted_role_to_history_role(r.role),
+                content: r.content,
+                tool_calls_json: r.tool_calls,
+                tool_call_id: r.tool_call_id,
+                tool_name: r.tool_name,
+            })
+            .collect();
+        let count = entries.len();
+        if let Err(e) = chat.replace_history(entries).await {
+            tracing::warn!("memory: resume replay failed: {e:#}");
+        } else {
+            info!("memory: resumed {count} message(s) from prior branch");
+        }
+    }
     let mut state_builder = AppState::new(
         config,
-        Arc::new(chat),
+        chat,
         presence.clone(),
         tools,
         voice.clone(),
@@ -704,7 +795,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     .with_vision_revalidator(vision_revalidator)
     .with_memory(memory_store)
     .with_conversations(conversation_store)
-    .with_session(session_id_for_state)
+    .with_conversation_ctx(conversation_ctx)
     .with_embedder(embedder)
     .with_semantic(semantic_store)
     .with_embed_tx(embed_tx)
@@ -819,6 +910,43 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     serve_result?;
     info!("assistd stopped");
     Ok(())
+}
+
+/// `kill -0 <pid>`: succeeds when the process exists (regardless of
+/// whether we have permission to signal it), fails with ESRCH when no
+/// such pid is alive. We use it as the daemon-liveness check before
+/// claiming a "resumable" session — if the prior daemon is still
+/// running, two daemons trampling on the same `current_branch_id`
+/// would race on every `/switch`.
+#[allow(unsafe_code)] // libc::kill probe — see SAFETY comment below
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: `kill(pid, 0)` reads no memory and writes no signal; it
+    // only probes for the pid's existence. The libc binding is safe
+    // to call from any thread.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    // EPERM: process exists but we lack permission. EINVAL: bad sig
+    // (won't happen with 0). ESRCH: no such process.
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    errno == libc::EPERM
+}
+
+/// Bridge `assistd_memory::PersistedRole` to `assistd_llm::HistoryRole`
+/// for resume-time history replay. Same identity mapping the daemon's
+/// branch-switch handler does, kept here so daemon startup doesn't
+/// reach into `assistd-core` internals.
+fn persisted_role_to_history_role(role: assistd_memory::PersistedRole) -> assistd_llm::HistoryRole {
+    match role {
+        assistd_memory::PersistedRole::System => assistd_llm::HistoryRole::System,
+        assistd_memory::PersistedRole::User => assistd_llm::HistoryRole::User,
+        assistd_memory::PersistedRole::Assistant => assistd_llm::HistoryRole::Assistant,
+        assistd_memory::PersistedRole::Tool => assistd_llm::HistoryRole::Tool,
+    }
 }
 
 fn build_transport_config(s: &McpServerConfig) -> TransportConfig {

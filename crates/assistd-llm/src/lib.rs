@@ -18,6 +18,7 @@
 pub mod chat;
 pub mod llama_server;
 
+pub use chat::conversation::ToolCallRecord;
 pub use chat::{ChatClientError, LlamaChatClient};
 pub use llama_server::{
     LlamaServerControl, LlamaServerError, LlamaService, ReadyState, VisionState,
@@ -204,6 +205,31 @@ pub enum StepOutcome {
     ToolCalls(Vec<ToolCall>),
 }
 
+/// Persistence-shaped role for [`HistoryEntry`]. Mirrors
+/// `assistd_memory::PersistedRole` so the daemon can translate row →
+/// entry without pulling `assistd-memory` into this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HistoryRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+/// One persisted message reconstructed for replay into a backend's
+/// in-memory conversation (used by branch /switch and daemon-startup
+/// resume). `tool_calls_json` is verbatim JSON straight from the DB —
+/// the concrete backend parses it back into its native shape so the
+/// trait stays free of `ToolCallRecord` references.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    pub role: HistoryRole,
+    pub content: String,
+    pub tool_calls_json: Option<Value>,
+    pub tool_call_id: Option<String>,
+    pub tool_name: Option<String>,
+}
+
 #[async_trait]
 pub trait LlmBackend: Send + Sync + 'static {
     /// Generate a response to `prompt`, streaming tokens through `tx`.
@@ -252,6 +278,26 @@ pub trait LlmBackend: Send + Sync + 'static {
     /// future stubs don't need to track per-turn context.
     async fn set_transient_context(&self, _text: String) -> LlmResult<()> {
         Ok(())
+    }
+
+    /// Replace the backend's in-memory conversation with `entries`,
+    /// preserving the static system prompt. Used by `/switch` and by
+    /// daemon-startup resume to align the LLM's view of history with
+    /// the persisted DB state of a different branch.
+    ///
+    /// Default no-op so test/echo backends don't need to track history.
+    async fn replace_history(&self, _entries: Vec<HistoryEntry>) -> LlmResult<()> {
+        Ok(())
+    }
+
+    /// Drop the most recent "real" user message and everything after
+    /// it from the in-memory conversation. A "real" user message is
+    /// `Role::User` whose content does NOT start with the
+    /// tool-result prefix. Returns the count of messages removed.
+    ///
+    /// Default no-op so test/echo backends are unaffected.
+    async fn truncate_to_last_real_user(&self) -> LlmResult<usize> {
+        Ok(0)
     }
 }
 
