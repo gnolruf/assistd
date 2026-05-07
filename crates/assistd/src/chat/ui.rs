@@ -98,25 +98,15 @@ fn render_output(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    // Snapshot the wrapped layout (thumbnails reserve THUMBNAIL_ROWS
-    // blank lines under their captions). Computed once so the same
-    // start/scroll values feed both the text Paragraph and the
-    // thumbnail overlay below.
+
     let slots = app.output.thumbnail_layout(area.width);
     let (lines, start) = app.output.render_view(area.width, area.height);
     let text = Text::from(lines.to_vec());
     let para = Paragraph::new(text).scroll((start, 0));
     frame.render_widget(para, area);
 
-    // Overlay one `StatefulImage` per fully-visible thumbnail slot.
-    // Skip thumbnails whose reserved rows are partially or fully
-    // scrolled out — the underlying placeholder line keeps the
-    // filename visible in those cases.
     let viewport_top = start as usize;
     let viewport_bottom = viewport_top.saturating_add(area.height as usize);
-    // The placeholder caption ("📎 name") sits on the first reserved
-    // row. Push the image down by one row so the caption stays legible
-    // and we don't overdraw it.
     const CAPTION_ROWS: u16 = 1;
     let image_height = THUMBNAIL_ROWS.saturating_sub(CAPTION_ROWS);
     if image_height == 0 {
@@ -137,9 +127,6 @@ fn render_output(frame: &mut Frame, area: Rect, app: &mut App) {
         if h == 0 {
             continue;
         }
-        // Cap thumbnail width so a wide terminal doesn't render a
-        // billboard-sized image. 32 cells × image_height is roughly
-        // square-ish on typical font aspect ratios.
         let w = area.width.min(32);
         let rect = Rect {
             x: area.x,
@@ -188,9 +175,6 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ),
     };
 
-    // Reversed fg/bg for the whole bar (like before), applied per-span so we
-    // can drop the modifier for the presence dot — a REVERSED colored fg
-    // becomes a large colored background block, which reads as noise.
     let reversed = Style::default().add_modifier(Modifier::REVERSED);
     let mut left_spans: Vec<Span> = Vec::new();
     left_spans.push(Span::styled(format!("model: {}", app.model_name), reversed));
@@ -208,10 +192,6 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             reversed,
         ));
     }
-    // Voice PTT indicator: a pulsing dot + short label between the
-    // presence segment and the generation state. Idle is invisible;
-    // Recording renders red, Transcribing yellow, both with the
-    // shared status-bar spinner so users see the state isn't stuck.
     if let Some((color, label)) = voice_indicator(app.listening) {
         left_spans.push(Span::raw(" "));
         left_spans.push(Span::styled(
@@ -220,10 +200,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ));
         left_spans.push(Span::styled(format!(" {label}"), reversed));
     }
-    // Vision capability indicator. Detected once at startup from the
-    // running llama-server's `/props` and never changes thereafter, so
-    // we render it unconditionally — the user can see at a glance
-    // whether the model can accept the next `screenshot` / `/attach`.
+
     let (vision_label, vision_color) = if app.vision_enabled {
         ("vision: on", Color::Green)
     } else {
@@ -235,9 +212,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             .fg(vision_color)
             .add_modifier(Modifier::REVERSED),
     ));
-    // Persistent staged-attachment indicator. The 3-second `notice`
-    // pop is too ephemeral for state that gates the next submission —
-    // this stays visible until `submit` drains `pending_attachments`.
+
     let pending_count = app.pending_attachments.len();
     if pending_count > 0 {
         left_spans.push(Span::raw(" "));

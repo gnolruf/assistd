@@ -257,8 +257,6 @@ impl App {
         matched_pattern: String,
     ) {
         if self.modal.is_some() {
-            // Already prompting; auto-deny the second prompt so the
-            // agent loop doesn't hang.
             self.send_confirm_response(&confirm_id, false);
             return;
         }
@@ -327,15 +325,7 @@ impl App {
     }
 
     pub fn on_key(&mut self, ev: KeyEvent) {
-        // Any key counts as user activity — even a Page Up scroll
-        // means the user is at the keyboard. The daemon's idle
-        // monitor does its own tracking based on Query traffic; this
-        // local clock just keeps the status-bar countdown live.
         self.touch_activity();
-        // Modal takes precedence over every other keybinding: when the
-        // agent is blocked on a confirmation prompt, the only meaningful
-        // input is Y / N / Esc. Scrolling and input-line edits stay
-        // inert until the user decides.
         if self.modal.is_some() {
             self.handle_modal_key(ev);
             return;
@@ -368,9 +358,6 @@ impl App {
                 self.submit_typed(text);
             }
             InputAction::Quit => {
-                // Closing during a pending modal isn't currently
-                // reachable — modal intercepts input — but guard anyway
-                // so the daemon's gate always gets a decision.
                 self.resolve_modal(false);
                 self.quitting = true;
             }
@@ -386,9 +373,7 @@ impl App {
                 self.resolve_modal(false);
             }
             _ => {
-                // Swallow every other key while the modal is open — the
-                // agent is blocked, so keystrokes meant for the input
-                // line would be confusing.
+                // Swallow every other key while the modal is open
             }
         }
     }
@@ -552,11 +537,6 @@ impl App {
                 if text.trim().is_empty() {
                     self.set_notice("no speech detected");
                 } else {
-                    // The daemon auto-dispatches the transcription as
-                    // a Query on the same connection, so the next
-                    // events on this stream will be Deltas. We still
-                    // render the user-prompt locally so the
-                    // conversation reads naturally.
                     self.output.push_user(&text);
                     self.output.reset_scroll();
                     self.output.begin_assistant();
@@ -621,9 +601,6 @@ impl App {
                 ..
             } => match self.in_flight_branch_op {
                 Some(BranchOp::Switch) => {
-                    // Wipe the chat pane; HistoryEntry events follow,
-                    // each pushed into the now-empty pane to repaint
-                    // the loaded branch.
                     self.output.clear();
                     self.output
                         .push_info(&format!("[switched to branch '{name}']"));
@@ -643,39 +620,26 @@ impl App {
                 content,
                 tool_name,
                 ..
-            } => {
-                // Render replayed history into the output pane. We
-                // intentionally re-use push_user / append_assistant so
-                // styling matches a live conversation. System messages
-                // (e.g. summarized history) render as info lines so
-                // they're visually distinct from the prompt/reply pair.
-                match role.as_str() {
-                    "user" => {
-                        // Tool-result rows are persisted as role=tool,
-                        // not role=user, so anything we see here is a
-                        // genuine user prompt.
-                        self.output.push_user(&content);
-                    }
-                    "assistant" => {
-                        if !content.is_empty() {
-                            self.output.begin_assistant();
-                            self.output.append_assistant(&content);
-                            self.output.finish_assistant();
-                        }
-                    }
-                    "tool" => {
-                        let name = tool_name.unwrap_or_default();
-                        // Render tool-result rows as a collapsed tool
-                        // block with placeholder timing — we don't have
-                        // the original duration on replay.
-                        self.output.push_tool_block(name, content, 0, 0);
-                    }
-                    "system" => {
-                        self.output.push_info(&content);
-                    }
-                    _ => self.output.push_info(&content),
+            } => match role.as_str() {
+                "user" => {
+                    self.output.push_user(&content);
                 }
-            }
+                "assistant" => {
+                    if !content.is_empty() {
+                        self.output.begin_assistant();
+                        self.output.append_assistant(&content);
+                        self.output.finish_assistant();
+                    }
+                }
+                "tool" => {
+                    let name = tool_name.unwrap_or_default();
+                    self.output.push_tool_block(name, content, 0, 0);
+                }
+                "system" => {
+                    self.output.push_info(&content);
+                }
+                _ => self.output.push_info(&content),
+            },
             Event::UndoApplied {
                 removed_messages,
                 last_user_text,
@@ -715,8 +679,6 @@ impl App {
                 self.in_flight_branch_op = None;
                 self.branches_buffer.clear();
             }
-            // Memory* events shouldn't appear on a query/PTT stream —
-            // the daemon only emits them on `Request::Memory*`.
             Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }
@@ -1092,9 +1054,6 @@ impl App {
         let ipc = self.ipc.clone();
         let chat_tx = self.chat_tx.clone();
 
-        // Channel for outgoing requests from the main thread (modal Y/N
-        // → ConfirmResponse). Capacity 8 is generous; one in-flight
-        // confirm at a time is the only realistic shape.
         let (writer_tx, mut writer_rx) = mpsc::channel::<Request>(8);
         self.active_writer = Some(writer_tx);
 
@@ -1134,9 +1093,6 @@ impl App {
                 }
             };
 
-            // Drive the connection: read events from the daemon AND
-            // forward outgoing requests from the modal. Both halves
-            // share the same `DialogConnection`, so we tokio::select.
             loop {
                 tokio::select! {
                     maybe = conn.next_event() => {
@@ -1175,10 +1131,6 @@ impl App {
                                 }
                             }
                             None => {
-                                // Sender dropped. Don't close the read
-                                // half — the daemon may still emit
-                                // events. Replace the branch with
-                                // `pending` so it never fires again.
                                 std::future::pending::<()>().await;
                             }
                         }

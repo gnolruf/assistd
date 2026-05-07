@@ -61,10 +61,6 @@ pub async fn spawn(
         config.voice.hotkey
     );
 
-    // The hotkey listener was originally written to call into a local
-    // `Arc<dyn VoiceInput>`. The daemon-window edition keeps the
-    // public surface unchanged but routes both lifecycle methods over
-    // the wire.
     let proxy: Arc<dyn assistd_voice::VoiceInput> = Arc::new(IpcVoiceProxy::new(ipc, chat_tx));
     let hotkey_handle = hotkey::spawn_listener(
         &config.presence,
@@ -118,8 +114,7 @@ impl assistd_voice::VoiceInput for IpcVoiceProxy {
             id: Uuid::new_v4().to_string(),
         };
         let mut stream = self.ipc.one_shot(req).await.map_err(anyhow::Error::from)?;
-        // PttStart streams VoiceState transitions, then Done. Forward
-        // them onto the wire channel so the indicator updates.
+
         while let Some(ev) = stream.next_event().await? {
             let terminal = ev.is_terminal();
             let _ = self.chat_tx.send(ChatEvent::Wire(ev)).await;
@@ -138,9 +133,6 @@ impl assistd_voice::VoiceInput for IpcVoiceProxy {
         let mut stream = self.ipc.one_shot(req).await.map_err(anyhow::Error::from)?;
         let mut transcript = String::new();
         while let Some(ev) = stream.next_event().await? {
-            // Capture the transcription text for the listener's
-            // return value; it also flows out as a wire event so the
-            // App reducer can render it.
             if let assistd_ipc::Event::Transcription { text, .. } = &ev {
                 transcript = text.clone();
             }

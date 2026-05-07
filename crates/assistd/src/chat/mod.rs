@@ -76,11 +76,6 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let (shutdown_tx, _) = watch::channel(false);
     install_signal_handler(shutdown_tx.clone());
 
-    // Probe the daemon socket; auto-spawn a detached daemon when
-    // nothing is listening. The spawned daemon survives this TUI
-    // session — booting llama-server is expensive and other clients
-    // (`assistd query`, scheduled tasks, future TUIs) will want it
-    // up between sessions.
     let ipc = Arc::new(IpcClient::new());
     let mut startup_error: Option<String> = None;
     if UnixStream::connect(ipc.socket_path()).await.is_err() {
@@ -103,9 +98,6 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         }
     }
 
-    // Capabilities probe — single one-shot at startup so the status
-    // bar can render `vision: on/off` and the model name without
-    // hammering the wire each tick. Failures fall back to defaults.
     let (vision_enabled, daemon_model_name) = if startup_error.is_none() {
         match get_capabilities(&ipc).await {
             Ok((vision, name)) => (vision, name),
@@ -130,10 +122,6 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     let mut resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
-    // Voice pipeline: the hotkey listener stays in this TUI process
-    // (PTT keystrokes need the foreground X11/Wayland focus), but
-    // press/release dispatch over IPC instead of touching mics in
-    // this process. The daemon owns Whisper.
     let (chat_tx, mut chat_rx) = mpsc::channel::<ChatEvent>(64);
     let _voice_pipeline = voice::spawn(
         &config,
@@ -143,12 +131,6 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     )
     .await;
 
-    // Status polling: every 2 s, fan out three Get* requests in
-    // parallel and forward their states as wire events into chat_tx.
-    // Cadence is conservative — presence transitions take many
-    // seconds and the daemon is the source of truth. A future PR can
-    // replace this with `Request::Subscribe` once the daemon exposes
-    // its watch channels.
     let _polling_handle =
         spawn_status_polling(ipc.clone(), chat_tx.clone(), shutdown_tx.subscribe());
 
@@ -298,9 +280,7 @@ fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
     if let Some(p) = config {
         cmd.arg("--config").arg(p);
     }
-    // Logs already go to chat-stderr.log via the daemon's tracing setup;
-    // a /dev/null here keeps any unbuffered C-library prints from
-    // backing up into a never-read pipe.
+
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -319,8 +299,6 @@ fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
         .spawn()
         .with_context(|| format!("could not spawn daemon binary at {}", exe.display()))?;
     info!("spawned daemon pid {}", child.id());
-    // Drop the handle: don't wait, don't kill. The daemon is now its
-    // own process group leader and outlives this TUI session.
     drop(child);
     Ok(())
 }

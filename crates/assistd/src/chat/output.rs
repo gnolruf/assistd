@@ -125,9 +125,6 @@ impl OutputPane {
     }
 
     pub fn append_assistant(&mut self, delta: &str) {
-        // Resolve the open-assistant index through `begin_assistant` once
-        // so the subsequent loop can assume a non-empty assistant line
-        // without an Option unwrap surviving into the hot path.
         let mut idx = match self.open_assistant {
             Some(i) => i,
             None => {
@@ -269,8 +266,6 @@ impl OutputPane {
     /// to render at the top of the viewport. The scroll offset is clamped
     /// in place so it never exceeds the wrapped total.
     pub fn render_view(&mut self, width: u16, height: u16) -> (&[Line<'static>], u16) {
-        // Force cache population + grab the length without holding the
-        // borrow, so the subsequent scroll-offset clamp is legal.
         let wrapped_len = self.wrapped(width).len();
         let max_offset = wrapped_len.saturating_sub(height as usize) as u16;
         if self.scroll_offset > max_offset {
@@ -279,8 +274,6 @@ impl OutputPane {
         let start = wrapped_len
             .saturating_sub(height as usize)
             .saturating_sub(self.scroll_offset as usize) as u16;
-        // wrap_cache is guaranteed Some — self.wrapped() above
-        // unconditionally populates it.
         let lines = &self
             .wrap_cache
             .as_ref()
@@ -301,11 +294,6 @@ impl OutputPane {
             self.wrap_cache = Some((width, wrapped));
             self.dirty = false;
         }
-        // Invariant: wrap_cache is Some after the branch above; the only
-        // way to reach here is either needs_rewrap was true (so we just
-        // assigned Some) or needs_rewrap was false (which requires
-        // wrap_cache.as_ref().map(...) to have returned Some, proving it's
-        // Some here).
         &self
             .wrap_cache
             .as_ref()
@@ -315,10 +303,6 @@ impl OutputPane {
 
     fn rewrap(&self, width: u16) -> Vec<Line<'static>> {
         if width == 0 {
-            // Degraded path: render text items raw, tool blocks as a
-            // single unwrapped header line, thumbnails as a one-line
-            // placeholder. Keeps the zero-width test green and avoids
-            // `textwrap` calls with width 0.
             return self
                 .items
                 .iter()
@@ -373,10 +357,6 @@ impl OutputPane {
     /// renderer uses this layout map to overlay
     /// `ratatui_image::StatefulImage` widgets on the reserved rows.
     pub fn thumbnail_layout(&mut self, width: u16) -> Vec<ThumbnailSlot> {
-        // Force the wrapped cache so `wrap_cache` reflects the current
-        // items; we walk items in their original order and accumulate
-        // the same per-item row counts that `rewrap` produced, so the
-        // returned `start_row` lines up with the wrapped output.
         let _ = self.wrapped(width);
         let mut slots = Vec::new();
         let mut row: usize = 0;
@@ -530,9 +510,6 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16) {
         inner_w,
     );
 
-    // Slice the Layer-2 body: drop the [exit:...] footer (we re-render it
-    // ourselves so we can right-align timing and color the exit code) and
-    // remember which lines start with [stderr] for pinning when collapsed.
     let body_lines = split_body(&b.output);
     let stderr_idxs: Vec<usize> = body_lines
         .iter()
