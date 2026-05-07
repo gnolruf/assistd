@@ -85,7 +85,7 @@ pub use assistd_wm::{NoWindowManager, WindowManager};
 // `PresenceManager` owns the presence machine and llama-server lifecycle;
 // `RequestGuard` is the RAII handle held for the duration of a request.
 pub use presence::{PresenceManager, RequestGuard};
-pub use state::AppState;
+pub use state::{AppState, ConversationContext};
 
 use anyhow::{Context, Result};
 use assistd_embed::{EmbedJob, Embedder};

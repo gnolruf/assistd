@@ -172,7 +172,38 @@ pub struct App {
     /// `Request::ConfirmResponse` for the writer task to forward.
     /// `None` between queries.
     active_writer: Option<mpsc::Sender<Request>>,
+    /// Tracks an in-flight branch command so [`Self::on_wire_event`]
+    /// can route `BranchInfo` / `BranchSwitched` / `HistoryEntry` /
+    /// `UndoApplied` events into the right rendering path. Cleared on
+    /// terminal `Done` / `Error`.
+    in_flight_branch_op: Option<BranchOp>,
+    /// Buffer for `/branches` rows accumulated until the terminal
+    /// `Done` so the table renders as one cohesive block.
+    branches_buffer: Vec<BranchListEntry>,
     chat_tx: mpsc::Sender<ChatEvent>,
+}
+
+/// Which branch slash-command is currently in flight, if any. Used to
+/// distinguish `Event::BranchSwitched` arriving from `/fork` (no chat
+/// repaint) from one arriving from `/switch` (clear + replay).
+#[derive(Debug, Clone, Copy)]
+enum BranchOp {
+    Fork,
+    Branches,
+    Switch,
+    Undo,
+}
+
+/// One row buffered during a `/branches` listing.
+#[derive(Debug, Clone)]
+struct BranchListEntry {
+    name: String,
+    parent_branch_name: Option<String>,
+    fork_point_seq: Option<i64>,
+    message_count: i64,
+    is_current_in_session: bool,
+    is_active_session: bool,
+    session_short: String,
 }
 
 impl App {
@@ -208,6 +239,8 @@ impl App {
             picker,
             ipc,
             active_writer: None,
+            in_flight_branch_op: None,
+            branches_buffer: Vec::new(),
             chat_tx,
         }
     }
@@ -560,11 +593,118 @@ impl App {
                     self.output.push_info(&format!("[{component}: {message}]"));
                 }
             }
+            Event::BranchInfo {
+                name,
+                parent_branch_name,
+                fork_point_seq,
+                message_count,
+                is_current_in_session,
+                is_active_session,
+                session_id,
+                ..
+            } => {
+                let session_short = session_id.chars().take(8).collect::<String>();
+                self.branches_buffer.push(BranchListEntry {
+                    name,
+                    parent_branch_name,
+                    fork_point_seq,
+                    message_count,
+                    is_current_in_session,
+                    is_active_session,
+                    session_short,
+                });
+            }
+            Event::BranchSwitched {
+                name,
+                parent_branch_name,
+                fork_point_seq,
+                ..
+            } => match self.in_flight_branch_op {
+                Some(BranchOp::Switch) => {
+                    // Wipe the chat pane; HistoryEntry events follow,
+                    // each pushed into the now-empty pane to repaint
+                    // the loaded branch.
+                    self.output.clear();
+                    self.output
+                        .push_info(&format!("[switched to branch '{name}']"));
+                }
+                _ => {
+                    let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
+                        (Some(p), Some(seq)) => {
+                            format!("[forked from '{p}'@seq{seq} into '{name}']")
+                        }
+                        _ => format!("[branch '{name}' is now active]"),
+                    };
+                    self.output.push_info(&detail);
+                }
+            },
+            Event::HistoryEntry {
+                role,
+                content,
+                tool_name,
+                ..
+            } => {
+                // Render replayed history into the output pane. We
+                // intentionally re-use push_user / append_assistant so
+                // styling matches a live conversation. System messages
+                // (e.g. summarized history) render as info lines so
+                // they're visually distinct from the prompt/reply pair.
+                match role.as_str() {
+                    "user" => {
+                        // Tool-result rows are persisted as role=tool,
+                        // not role=user, so anything we see here is a
+                        // genuine user prompt.
+                        self.output.push_user(&content);
+                    }
+                    "assistant" => {
+                        if !content.is_empty() {
+                            self.output.begin_assistant();
+                            self.output.append_assistant(&content);
+                            self.output.finish_assistant();
+                        }
+                    }
+                    "tool" => {
+                        let name = tool_name.unwrap_or_default();
+                        // Render tool-result rows as a collapsed tool
+                        // block with placeholder timing — we don't have
+                        // the original duration on replay.
+                        self.output.push_tool_block(name, content, 0, 0);
+                    }
+                    "system" => {
+                        self.output.push_info(&content);
+                    }
+                    _ => self.output.push_info(&content),
+                }
+            }
+            Event::UndoApplied {
+                removed_messages,
+                last_user_text,
+                ..
+            } => {
+                if removed_messages == 0 {
+                    self.set_notice("nothing to undo");
+                } else {
+                    self.output.pop_last_user_exchange();
+                    let preview = last_user_text
+                        .as_deref()
+                        .map(|t| t.chars().take(48).collect::<String>())
+                        .unwrap_or_default();
+                    if preview.is_empty() {
+                        self.set_notice(&format!("undid {removed_messages} message(s)"));
+                    } else {
+                        self.set_notice(&format!("undid: {preview}"));
+                    }
+                }
+            }
             Event::Done { .. } => {
                 self.throughput.on_done(now);
                 self.output.finish_assistant();
                 self.generating = false;
                 self.active_writer = None;
+                if matches!(self.in_flight_branch_op, Some(BranchOp::Branches)) {
+                    self.render_branches_buffer();
+                }
+                self.in_flight_branch_op = None;
             }
             Event::Error { message, .. } => {
                 self.throughput.on_done(now);
@@ -572,6 +712,8 @@ impl App {
                 self.output.push_error(&message);
                 self.generating = false;
                 self.active_writer = None;
+                self.in_flight_branch_op = None;
+                self.branches_buffer.clear();
             }
             // Memory* events shouldn't appear on a query/PTT stream —
             // the daemon only emits them on `Request::Memory*`.
@@ -581,6 +723,45 @@ impl App {
             | Event::MemoryRow { .. }
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. } => {}
+        }
+    }
+
+    /// Flush the buffered `/branches` listing into the chat pane as a
+    /// table-ish block. Active session branches render first (already
+    /// sorted by the daemon), each line shows current marker + name +
+    /// parent + msg count.
+    fn render_branches_buffer(&mut self) {
+        if self.branches_buffer.is_empty() {
+            self.output.push_info("[no branches]");
+            return;
+        }
+        let entries = std::mem::take(&mut self.branches_buffer);
+        let mut last_session: Option<String> = None;
+        for entry in entries {
+            if last_session.as_deref() != Some(entry.session_short.as_str()) {
+                let header = if entry.is_active_session {
+                    format!("[session {} (active)]", entry.session_short)
+                } else {
+                    format!("[session {}]", entry.session_short)
+                };
+                self.output.push_info(&header);
+                last_session = Some(entry.session_short.clone());
+            }
+            let star = if entry.is_current_in_session {
+                "* "
+            } else {
+                "  "
+            };
+            let parent = match (entry.parent_branch_name.as_deref(), entry.fork_point_seq) {
+                (Some(p), Some(seq)) => format!(" (from '{p}'@seq{seq})"),
+                (Some(p), None) => format!(" (from '{p}')"),
+                _ => String::new(),
+            };
+            let msgs = entry.message_count;
+            self.output.push_info(&format!(
+                "  {star}{name}{parent}  [{msgs} msg]",
+                name = entry.name
+            ));
         }
     }
 
@@ -691,6 +872,22 @@ impl App {
             self.set_notice("/attach: missing path");
             return;
         }
+        if let Some(name) = parse_slash_arg(&text, "/fork") {
+            self.handle_fork_cmd(name.to_string());
+            return;
+        }
+        if text.trim() == "/branches" {
+            self.handle_branches_cmd();
+            return;
+        }
+        if let Some(target) = parse_slash_arg(&text, "/switch") {
+            self.handle_switch_cmd(target.to_string());
+            return;
+        }
+        if text.trim() == "/undo" {
+            self.handle_undo_cmd();
+            return;
+        }
         if self.generating {
             self.set_notice("still generating — please wait");
             return;
@@ -786,6 +983,104 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Spawn a one-shot daemon connection for a branch command and
+    /// pump its streaming events onto `chat_tx::Wire`. The TUI's
+    /// `on_wire_event` then routes by `in_flight_branch_op` to the
+    /// right rendering path. Single-flight: rejects when one branch
+    /// command (or a generation) is already in flight.
+    fn spawn_branch_command(&mut self, op: BranchOp, req: Request) {
+        if self.in_flight_branch_op.is_some() {
+            self.set_notice("branch command in flight — please wait");
+            return;
+        }
+        if self.generating {
+            self.set_notice("still generating — please wait");
+            return;
+        }
+        self.in_flight_branch_op = Some(op);
+        self.branches_buffer.clear();
+        let ipc = self.ipc.clone();
+        let chat_tx = self.chat_tx.clone();
+        tokio::spawn(async move {
+            let mut stream = match ipc.one_shot(req).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = chat_tx
+                        .send(ChatEvent::WireError(format!("branch connect: {e}")))
+                        .await;
+                    return;
+                }
+            };
+            loop {
+                match stream.next_event().await {
+                    Ok(Some(ev)) => {
+                        let terminal = ev.is_terminal();
+                        let _ = chat_tx.send(ChatEvent::Wire(ev)).await;
+                        if terminal {
+                            return;
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = chat_tx
+                            .send(ChatEvent::WireError(
+                                "daemon closed branch stream mid-flight".into(),
+                            ))
+                            .await;
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = chat_tx
+                            .send(ChatEvent::WireError(format!("branch read: {e}")))
+                            .await;
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    fn handle_fork_cmd(&mut self, name: String) {
+        if name.trim().is_empty() {
+            self.output
+                .push_error("/fork: expected a name. Usage: /fork <name>");
+            self.set_notice("/fork: missing name");
+            return;
+        }
+        let req = Request::Fork {
+            id: Uuid::new_v4().to_string(),
+            name,
+        };
+        self.spawn_branch_command(BranchOp::Fork, req);
+    }
+
+    fn handle_branches_cmd(&mut self) {
+        let req = Request::Branches {
+            id: Uuid::new_v4().to_string(),
+        };
+        self.spawn_branch_command(BranchOp::Branches, req);
+    }
+
+    fn handle_switch_cmd(&mut self, target: String) {
+        if target.trim().is_empty() {
+            self.output
+                .push_error("/switch: expected a target. Usage: /switch <name>");
+            self.set_notice("/switch: missing target");
+            return;
+        }
+        let req = Request::Switch {
+            id: Uuid::new_v4().to_string(),
+            target,
+        };
+        self.spawn_branch_command(BranchOp::Switch, req);
+    }
+
+    fn handle_undo_cmd(&mut self) {
+        let req = Request::Undo {
+            id: Uuid::new_v4().to_string(),
+        };
+        self.spawn_branch_command(BranchOp::Undo, req);
     }
 
     /// Open a daemon dialog connection for a Query and pump its
@@ -892,6 +1187,20 @@ impl App {
             }
         });
     }
+}
+
+/// Parse a slash command of the shape `/<verb> <arg…>`. Returns
+/// `Some(arg)` when `text` starts with `<verb> ` (note the trailing
+/// space), `None` otherwise. Trailing whitespace is trimmed; the
+/// `text == verb` form returns `Some("")` so callers can distinguish
+/// "no argument" from "not this verb".
+fn parse_slash_arg<'a>(text: &'a str, verb: &str) -> Option<&'a str> {
+    let trimmed = text.trim_end();
+    if trimmed == verb {
+        return Some("");
+    }
+    let prefix = format!("{verb} ");
+    trimmed.strip_prefix(&prefix).map(|rest| rest.trim())
 }
 
 fn expand_tilde(p: &str) -> PathBuf {

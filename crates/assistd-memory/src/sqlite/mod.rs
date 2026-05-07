@@ -22,8 +22,9 @@ pub mod writer;
 
 pub use connection::SqliteHandle;
 pub use conversations::{
-    ConversationStore, NoConversationStore, PersistedMessage, PersistedRole, SearchHit, SessionId,
-    SqliteConversationStore, TurnId, TurnSummary,
+    BranchId, BranchInfo, ConversationStore, HistoryRow, NoConversationStore, PersistedMessage,
+    PersistedRole, ResumeCandidate, SearchHit, SessionId, SqliteConversationStore, TurnId,
+    TurnSummary, UndoOutcome,
 };
 pub use embeddings::{
     EmbeddingHit, MemoryHit, NoSemanticStore, SemanticStore, SqliteSemanticStore, vector_to_blob,

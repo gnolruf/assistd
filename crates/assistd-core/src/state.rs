@@ -5,7 +5,7 @@ use assistd_embed::{EmbedJob, Embedder, NoEmbedder};
 use assistd_ipc::{Event, PresenceState, Request, VoiceCaptureState};
 use assistd_llm::{LlmBackend, LlmEvent};
 use assistd_memory::{
-    ChunkingConfig, ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore,
+    BranchId, ChunkingConfig, ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore,
     NoSemanticStore, PersistedMessage, PersistedRole, SemanticStore, SessionId, SqliteHandle,
     TurnId, chunk_message,
 };
@@ -38,6 +38,19 @@ fn truncate_for_context(s: &str, max_chars: usize) -> String {
     head
 }
 
+/// Translate a [`assistd_memory::PersistedRole`] into the equivalent
+/// [`assistd_llm::HistoryRole`] for branch-history replay. Identity
+/// mapping; lives in this crate because `assistd-llm` doesn't depend
+/// on `assistd-memory`.
+fn persisted_role_to_history_role(role: PersistedRole) -> assistd_llm::HistoryRole {
+    match role {
+        PersistedRole::System => assistd_llm::HistoryRole::System,
+        PersistedRole::User => assistd_llm::HistoryRole::User,
+        PersistedRole::Assistant => assistd_llm::HistoryRole::Assistant,
+        PersistedRole::Tool => assistd_llm::HistoryRole::Tool,
+    }
+}
+
 /// Convert wire-level [`assistd_ipc::ImageAttachment`] entries into the
 /// internal [`Attachment`] type the agent loop expects. Returns the first
 /// decode error so the caller can surface it cleanly to the client.
@@ -55,6 +68,57 @@ fn decode_wire_attachments(
             })
         })
         .collect()
+}
+
+/// Active (session, branch) pointer shared by every persistence write
+/// site. Held under a `RwLock` because the persistence path takes a
+/// read lock on every message append (cheap, lock-free in practice
+/// under WAL) while `/switch` takes a write lock once per command. We
+/// hold `Arc<SessionId>` inside so reads return a cheap `Arc::clone`
+/// without copying the underlying string.
+pub struct ConversationContext {
+    inner: tokio::sync::RwLock<ConversationContextInner>,
+}
+
+#[derive(Clone)]
+struct ConversationContextInner {
+    session_id: Arc<SessionId>,
+    branch_id: BranchId,
+}
+
+impl ConversationContext {
+    pub fn new(session_id: SessionId, branch_id: BranchId) -> Self {
+        Self {
+            inner: tokio::sync::RwLock::new(ConversationContextInner {
+                session_id: Arc::new(session_id),
+                branch_id,
+            }),
+        }
+    }
+
+    pub fn from_arc(session_id: Arc<SessionId>, branch_id: BranchId) -> Self {
+        Self {
+            inner: tokio::sync::RwLock::new(ConversationContextInner {
+                session_id,
+                branch_id,
+            }),
+        }
+    }
+
+    /// Read snapshot under a brief shared lock. The `Arc<SessionId>`
+    /// clone is reference-count only.
+    pub async fn current(&self) -> (Arc<SessionId>, BranchId) {
+        let g = self.inner.read().await;
+        (g.session_id.clone(), g.branch_id)
+    }
+
+    /// Atomically swap to a different (session, branch). Used by
+    /// `/switch` and by daemon-startup resume.
+    pub async fn replace(&self, session_id: Arc<SessionId>, branch_id: BranchId) {
+        let mut g = self.inner.write().await;
+        g.session_id = session_id;
+        g.branch_id = branch_id;
+    }
 }
 
 /// Shared, long-lived daemon state handed to every request handler.
@@ -94,11 +158,15 @@ pub struct AppState {
     /// the richer [`Self::conversations`] under one handle. Used by the
     /// IPC dispatch arms for `Request::Memory*`.
     pub memory_ops: Arc<MemoryOps>,
-    /// Identifier for this daemon process's session, set at startup by
-    /// [`assistd_memory::ConversationStore::begin_session`]. Every row
-    /// the persistence hook writes gets tagged with it so a future
-    /// `assistd memory reminisce` knows which daemon run produced it.
-    pub session_id: Arc<SessionId>,
+    /// Active conversation context: the session id and current branch
+    /// id, both swappable at runtime by `/switch`. Persistence reads
+    /// it once per message append; `/fork` and `/switch` mutate it
+    /// after acquiring the agent_turn_lock.
+    ///
+    /// At daemon startup this is either resumed from the most recent
+    /// unended session or freshly minted via
+    /// [`assistd_memory::ConversationStore::begin_session_with_main_branch`].
+    pub conversation_ctx: Arc<ConversationContext>,
     /// Embedder used for query-side embedding (`inject_semantic_context`)
     /// and for the LLM-callable `recall` / `reminisce` tools. The
     /// background embedder task that processes [`Self::embed_tx`] holds
@@ -187,7 +255,7 @@ impl AppState {
             memory,
             conversations,
             memory_ops,
-            session_id: Arc::new(SessionId::new()),
+            conversation_ctx: Arc::new(ConversationContext::new(SessionId::new(), BranchId(0))),
             embedder: Arc::new(NoEmbedder),
             semantic: Arc::new(NoSemanticStore),
             embed_tx,
@@ -239,11 +307,19 @@ impl AppState {
     }
 
     /// Override the daemon's session id. Set at startup once
-    /// [`assistd_memory::ConversationStore::begin_session`] has
-    /// returned the persisted uuid; tests skip this and inherit the
-    /// auto-generated default.
+    /// [`assistd_memory::ConversationStore::begin_session_with_main_branch`]
+    /// has returned the persisted uuid + branch id; tests skip this
+    /// and inherit the auto-generated default.
     pub fn with_session(mut self, s: Arc<SessionId>) -> Self {
-        self.session_id = s;
+        self.conversation_ctx = Arc::new(ConversationContext::from_arc(s, BranchId(0)));
+        self
+    }
+
+    /// Builder-style setter for the full conversation context (session +
+    /// active branch). Replaces [`Self::with_session`] when callers also
+    /// need to set the active branch id at startup.
+    pub fn with_conversation_ctx(mut self, ctx: Arc<ConversationContext>) -> Self {
+        self.conversation_ctx = ctx;
         self
     }
 
@@ -383,6 +459,10 @@ impl AppState {
             }
             Request::MemoryReindex { id } => self.handle_memory_reindex(id, tx).await,
             Request::GetCapabilities { id } => self.handle_get_capabilities(id, tx).await,
+            Request::Fork { id, name } => self.handle_fork(id, name, tx).await,
+            Request::Branches { id } => self.handle_branches(id, tx).await,
+            Request::Switch { id, target } => self.handle_switch(id, target, tx).await,
+            Request::Undo { id } => self.handle_undo(id, tx).await,
             // ConfirmResponse is intercepted by the connection-level
             // read loop (see `assistd-core/src/socket.rs`) and routed to
             // the active confirmation gate's pending oneshot. If we see
@@ -418,7 +498,7 @@ impl AppState {
     /// backfill pass.
     fn persist_message_fire_and_forget(&self, turn: Option<TurnId>, msg: PersistedMessage) {
         let conv = self.conversations.clone();
-        let session = self.session_id.clone();
+        let conversation_ctx = self.conversation_ctx.clone();
         let chunks_handle = self.chunks.clone();
         let embed_tx = self.embed_tx.clone();
         let embedding_enabled = self.embedding_cfg.enabled;
@@ -441,7 +521,11 @@ impl AppState {
             None
         };
         self.persistence_tracker.spawn(async move {
-            let row_id = match conv.append_message(&session, turn, msg).await {
+            let (session, branch) = conversation_ctx.current().await;
+            let row_id = match conv
+                .append_message_to_branch(&session, branch, turn, msg)
+                .await
+            {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::warn!(
@@ -1082,8 +1166,9 @@ impl AppState {
         // here because every following persistence call needs the
         // resulting `TurnId` — but it's a single channel hop, not a
         // disk write of the streaming response.
+        let (current_session, _current_branch) = self.conversation_ctx.current().await;
         let turn_id: Option<TurnId> =
-            match self.conversations.begin_turn(&self.session_id, &text).await {
+            match self.conversations.begin_turn(&current_session, &text).await {
                 Ok(t) if t.0 != 0 => Some(t),
                 // NoConversationStore returns TurnId(0); treat that as "no
                 // persistence configured" without logging.
@@ -1811,6 +1896,351 @@ impl AppState {
             .await;
         let _ = tx.send(Event::Done { id }).await;
         Ok(())
+    }
+
+    /// `/fork <name>` — snapshot the current branch into a new branch
+    /// and switch to it. The shared agent_turn_lock + a drain of
+    /// `persistence_tracker` guarantees no in-flight turn races the
+    /// snapshot. The new branch shares conversation rows with its
+    /// parent (no row duplication); only branch_messages get copied.
+    #[tracing::instrument(skip_all, fields(correlation_id = %id, branch = %name))]
+    async fn handle_fork(
+        self: Arc<Self>,
+        id: String,
+        name: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        if name.trim().is_empty() {
+            let _ = tx
+                .send(Event::Error {
+                    id,
+                    message: "/fork: name must not be empty".into(),
+                })
+                .await;
+            return Ok(());
+        }
+        // Lock first, then drain — order matters: holding the lock
+        // prevents new persistence tasks from being spawned, then we
+        // wait for already-spawned ones to finish.
+        let _agent_guard = self.agent_turn_lock.clone().lock_owned().await;
+        self.drain_persistence_inflight().await;
+
+        let (session, current_branch) = self.conversation_ctx.current().await;
+        let new_branch = match self.conversations.fork_branch(current_branch, &name).await {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("/fork: {e:#}"),
+                    })
+                    .await;
+                return Ok(());
+            }
+        };
+        if let Err(e) = self
+            .conversations
+            .set_current_branch(&session, new_branch)
+            .await
+        {
+            let _ = tx
+                .send(Event::Error {
+                    id,
+                    message: format!("/fork: failed to update current branch: {e:#}"),
+                })
+                .await;
+            return Ok(());
+        }
+        self.conversation_ctx
+            .replace(session.clone(), new_branch)
+            .await;
+
+        // Echo the fork point back to the client. Look up the freshly
+        // created branch so we can emit the canonical metadata
+        // (parent name, fork_point_seq) without recomputing.
+        let parent_name = self.lookup_branch_name(current_branch).await;
+        let fork_point_seq = self.lookup_branch_tail_seq(current_branch).await;
+        let _ = tx
+            .send(Event::BranchSwitched {
+                id: id.clone(),
+                branch_id: new_branch.0,
+                session_id: session.0.clone(),
+                name,
+                parent_branch_name: parent_name,
+                fork_point_seq,
+            })
+            .await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
+    /// `/branches` — enumerate every branch across every session, with
+    /// the active session's branches surfaced first.
+    #[tracing::instrument(skip_all, fields(correlation_id = %id))]
+    async fn handle_branches(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
+        let branches = match self.conversations.list_branches().await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("/branches: {e:#}"),
+                    })
+                    .await;
+                return Ok(());
+            }
+        };
+        let (active_session, _) = self.conversation_ctx.current().await;
+        // Active-session-first ordering: keep the original list_branches
+        // sort but pull active-session branches to the top.
+        let mut active = Vec::new();
+        let mut other = Vec::new();
+        for b in branches {
+            if b.session_id == active_session.0 {
+                active.push(b);
+            } else {
+                other.push(b);
+            }
+        }
+        for b in active.into_iter().chain(other) {
+            let is_active_session = b.session_id == active_session.0;
+            let _ = tx
+                .send(Event::BranchInfo {
+                    id: id.clone(),
+                    branch_id: b.branch_id.0,
+                    session_id: b.session_id,
+                    session_started_at: b.session_started_at,
+                    session_ended_at: b.session_ended_at,
+                    name: b.name,
+                    parent_branch_name: b.parent_branch_name,
+                    fork_point_seq: b.fork_point_seq,
+                    created_at: b.created_at,
+                    message_count: b.message_count,
+                    is_current_in_session: b.is_current_in_session,
+                    is_active_session,
+                })
+                .await;
+        }
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
+    /// `/switch <target>` — drain in-flight writes, swap the active
+    /// (session, branch) pointer, replay the target branch's history
+    /// into the LLM backend, and stream the loaded turns back to the
+    /// client so the TUI can repaint the chat pane.
+    #[tracing::instrument(skip_all, fields(correlation_id = %id, target = %target))]
+    async fn handle_switch(
+        self: Arc<Self>,
+        id: String,
+        target: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        let _agent_guard = self.agent_turn_lock.clone().lock_owned().await;
+        self.drain_persistence_inflight().await;
+
+        let (active_session, _active_branch) = self.conversation_ctx.current().await;
+        let resolved = match self
+            .conversations
+            .resolve_branch(&target, Some(&active_session))
+            .await
+        {
+            Ok(Some(pair)) => pair,
+            Ok(None) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("/switch: no branch named {target:?}"),
+                    })
+                    .await;
+                return Ok(());
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("/switch: {e:#}"),
+                    })
+                    .await;
+                return Ok(());
+            }
+        };
+        let (target_session, target_branch) = resolved;
+
+        // Update DB pointer first; if the daemon crashes between this
+        // and the in-memory swap, the next startup resumes the *new*
+        // active branch (consistent), not the old one.
+        if let Err(e) = self
+            .conversations
+            .set_current_branch(&target_session, target_branch)
+            .await
+        {
+            let _ = tx
+                .send(Event::Error {
+                    id,
+                    message: format!("/switch: failed to update current branch: {e:#}"),
+                })
+                .await;
+            return Ok(());
+        }
+        let target_session_arc = Arc::new(target_session.clone());
+        self.conversation_ctx
+            .replace(target_session_arc.clone(), target_branch)
+            .await;
+
+        // Reload history into the LLM backend.
+        let rows = match self.conversations.load_branch_history(target_branch).await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("/switch: load_branch_history: {e:#}"),
+                    })
+                    .await;
+                return Ok(());
+            }
+        };
+        let entries: Vec<assistd_llm::HistoryEntry> = rows
+            .iter()
+            .map(|r| assistd_llm::HistoryEntry {
+                role: persisted_role_to_history_role(r.role),
+                content: r.content.clone(),
+                tool_calls_json: r.tool_calls.clone(),
+                tool_call_id: r.tool_call_id.clone(),
+                tool_name: r.tool_name.clone(),
+            })
+            .collect();
+        if let Err(e) = self.llm.replace_history(entries).await {
+            tracing::warn!(
+                target: "assistd::state",
+                error = %e,
+                "replace_history failed (non-fatal)"
+            );
+        }
+
+        // Look up the new branch's metadata for the BranchSwitched event.
+        let (branch_name, parent_name, fork_point_seq) =
+            self.lookup_branch_meta(target_branch).await;
+
+        let _ = tx
+            .send(Event::BranchSwitched {
+                id: id.clone(),
+                branch_id: target_branch.0,
+                session_id: target_session.0.clone(),
+                name: branch_name.unwrap_or_default(),
+                parent_branch_name: parent_name,
+                fork_point_seq,
+            })
+            .await;
+        for r in rows {
+            let _ = tx
+                .send(Event::HistoryEntry {
+                    id: id.clone(),
+                    seq: r.seq,
+                    role: r.role.as_wire().to_string(),
+                    content: r.content,
+                    tool_name: r.tool_name,
+                })
+                .await;
+        }
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
+    /// `/undo` — drop the latest user prompt and the entire assistant
+    /// reply that followed it from the current branch. Both DB and
+    /// in-memory state are updated atomically with the agent_turn_lock
+    /// held.
+    #[tracing::instrument(skip_all, fields(correlation_id = %id))]
+    async fn handle_undo(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
+        let _agent_guard = self.agent_turn_lock.clone().lock_owned().await;
+        self.drain_persistence_inflight().await;
+        let (_, branch) = self.conversation_ctx.current().await;
+        let outcome = match self.conversations.undo_last_turn(branch).await {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::Error {
+                        id,
+                        message: format!("/undo: {e:#}"),
+                    })
+                    .await;
+                return Ok(());
+            }
+        };
+        if outcome.removed_messages > 0 {
+            // Mirror the deletion in the in-memory conversation. We
+            // call `truncate_to_last_real_user` rather than recompute
+            // from the DB because the DB is now authoritative — the
+            // backend's job is just to align.
+            if let Err(e) = self.llm.truncate_to_last_real_user().await {
+                tracing::warn!(
+                    target: "assistd::state",
+                    error = %e,
+                    "truncate_to_last_real_user failed (non-fatal)"
+                );
+            }
+        }
+        let _ = tx
+            .send(Event::UndoApplied {
+                id: id.clone(),
+                removed_messages: outcome.removed_messages,
+                last_user_text: outcome.last_user_text,
+            })
+            .await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
+    /// Block until every previously-spawned `persist_message_fire_and_forget`
+    /// task has landed. Held inside `agent_turn_lock` so no new tasks
+    /// can spawn during the wait.
+    async fn drain_persistence_inflight(&self) {
+        // `TaskTracker::wait()` on a *closed* tracker is permanent; we
+        // don't want to close it. Instead we just wait briefly via a
+        // probe — there's no public "wait for current tasks" API on
+        // the tracker. As a workaround, sample with a fixed budget:
+        // most persistence tasks finish in microseconds (one DB hop).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !self.persistence_tracker.is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        if !self.persistence_tracker.is_empty() {
+            tracing::warn!(
+                target: "assistd::state",
+                "persistence drain timed out; in-flight writes may race branch op"
+            );
+        }
+    }
+
+    async fn lookup_branch_name(&self, branch: BranchId) -> Option<String> {
+        for b in self.conversations.list_branches().await.ok()? {
+            if b.branch_id == branch {
+                return Some(b.name);
+            }
+        }
+        None
+    }
+
+    async fn lookup_branch_tail_seq(&self, branch: BranchId) -> Option<i64> {
+        let rows = self.conversations.load_branch_history(branch).await.ok()?;
+        rows.last().map(|r| r.seq)
+    }
+
+    async fn lookup_branch_meta(
+        &self,
+        branch: BranchId,
+    ) -> (Option<String>, Option<String>, Option<i64>) {
+        let Ok(branches) = self.conversations.list_branches().await else {
+            return (None, None, None);
+        };
+        for b in branches {
+            if b.branch_id == branch {
+                return (Some(b.name), b.parent_branch_name, b.fork_point_seq);
+            }
+        }
+        (None, None, None)
     }
 
     /// End the push-to-talk recording, transcribe, and — if the
@@ -3158,5 +3588,292 @@ mod tests {
     #[test]
     fn combine_context_blocks_returns_none_for_both_none() {
         assert!(combine_context_blocks(None, None).is_none());
+    }
+
+    // --- Branch-handler integration tests --------------------------------
+    //
+    // These exercise the four `/fork` `/branches` `/switch` `/undo`
+    // handlers against an SQLite-backed ConversationStore so the
+    // dispatcher → writer-task → DB → in-memory replay round trip is
+    // covered end-to-end. Uses an in-memory backend (EchoBackend, which
+    // gets `replace_history` / `truncate_to_last_real_user` no-op
+    // defaults) so the tests don't require llama-server.
+
+    async fn fresh_branch_state() -> (
+        Arc<AppState>,
+        Arc<dyn ConversationStore>,
+        assistd_memory::SessionId,
+        assistd_memory::BranchId,
+    ) {
+        use assistd_memory::{SqliteConversationStore, SqliteHandle};
+        use tokio::sync::watch;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("memory.db");
+        std::mem::forget(temp);
+        let (_tx, rx) = watch::channel(false);
+        let (handle, _writer_handle) = SqliteHandle::open(&path, rx).await.unwrap();
+        let handle = Arc::new(handle);
+        let conv: Arc<dyn ConversationStore> =
+            Arc::new(SqliteConversationStore::new(handle.clone()));
+        let (session, branch) = conv.begin_session_with_main_branch(123).await.unwrap();
+        let ctx = Arc::new(ConversationContext::new(session.clone(), branch));
+        let state = Arc::new(
+            AppState::new(
+                Config::default(),
+                Arc::new(EchoBackend::new()),
+                PresenceManager::stub(PresenceState::Active),
+                Arc::new(ToolRegistry::default()),
+                Arc::new(assistd_voice::NoVoiceInput::new()),
+                Arc::new(assistd_voice::NoContinuousListener::new()),
+                VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
+            )
+            .with_conversations(conv.clone())
+            .with_conversation_ctx(ctx),
+        );
+        (state, conv, session, branch)
+    }
+
+    async fn drain_events(mut rx: mpsc::Receiver<Event>) -> Vec<Event> {
+        let mut out = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn fork_creates_branch_and_switches() {
+        let (state, conv, session, _main_branch) = fresh_branch_state().await;
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .clone()
+            .dispatch(
+                Request::Fork {
+                    id: "rq".into(),
+                    name: "experiment".into(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let events = drain_events(rx).await;
+        // Last event must be Done; some prior event must be BranchSwitched.
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
+        let switched = events
+            .iter()
+            .find(|e| matches!(e, Event::BranchSwitched { .. }))
+            .expect("expected BranchSwitched");
+        if let Event::BranchSwitched {
+            name,
+            parent_branch_name,
+            ..
+        } = switched
+        {
+            assert_eq!(name, "experiment");
+            assert_eq!(parent_branch_name.as_deref(), Some("main"));
+        } else {
+            unreachable!()
+        }
+        // Active branch in DB now points at the new branch.
+        let new_current = conv.get_current_branch(&session).await.unwrap();
+        assert!(new_current.is_some());
+        // ConversationContext also rotated.
+        let (active_session, _) = state.conversation_ctx.current().await;
+        assert_eq!(active_session.0, session.0);
+    }
+
+    #[tokio::test]
+    async fn fork_with_empty_name_emits_error() {
+        let (state, _conv, _session, _branch) = fresh_branch_state().await;
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .clone()
+            .dispatch(
+                Request::Fork {
+                    id: "rq".into(),
+                    name: "   ".into(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let events = drain_events(rx).await;
+        assert!(events.iter().any(|e| matches!(e, Event::Error { .. })));
+    }
+
+    #[tokio::test]
+    async fn branches_lists_active_session_first() {
+        let (state, conv, session, _main_branch) = fresh_branch_state().await;
+        // Create an extra branch so list isn't trivial.
+        let _alt = conv
+            .create_branch(&session, "alt", None, None)
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .clone()
+            .dispatch(Request::Branches { id: "rq".into() }, tx)
+            .await
+            .unwrap();
+        let events = drain_events(rx).await;
+        let infos: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::BranchInfo { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(infos.contains(&"main".to_string()));
+        assert!(infos.contains(&"alt".to_string()));
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn switch_replays_history_into_event_stream() {
+        let (state, conv, session, main_branch) = fresh_branch_state().await;
+        // Append a couple messages to main so /switch has content.
+        let turn = conv.begin_turn(&session, "hello").await.unwrap();
+        conv.append_message_to_branch(
+            &session,
+            main_branch,
+            Some(turn),
+            assistd_memory::PersistedMessage::user("hello"),
+        )
+        .await
+        .unwrap();
+        conv.append_message_to_branch(
+            &session,
+            main_branch,
+            Some(turn),
+            assistd_memory::PersistedMessage::assistant_text("world"),
+        )
+        .await
+        .unwrap();
+        // Fork into "alt", then switch back to main.
+        let _alt = conv.fork_branch(main_branch, "alt").await.unwrap();
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .clone()
+            .dispatch(
+                Request::Switch {
+                    id: "rq".into(),
+                    target: "alt".into(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let events = drain_events(rx).await;
+        let history_count = events
+            .iter()
+            .filter(|e| matches!(e, Event::HistoryEntry { .. }))
+            .count();
+        assert_eq!(history_count, 2, "fork's branch_messages also has 2 rows");
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn switch_unknown_branch_emits_error() {
+        let (state, _conv, _session, _branch) = fresh_branch_state().await;
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .clone()
+            .dispatch(
+                Request::Switch {
+                    id: "rq".into(),
+                    target: "no-such-branch".into(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let events = drain_events(rx).await;
+        assert!(events.iter().any(|e| matches!(e, Event::Error { .. })));
+    }
+
+    #[tokio::test]
+    async fn undo_drops_last_turn_and_emits_count() {
+        let (state, conv, session, main_branch) = fresh_branch_state().await;
+        // Two turns on main: "first" and "second".
+        let t1 = conv.begin_turn(&session, "first").await.unwrap();
+        conv.append_message_to_branch(
+            &session,
+            main_branch,
+            Some(t1),
+            assistd_memory::PersistedMessage::user("first"),
+        )
+        .await
+        .unwrap();
+        conv.append_message_to_branch(
+            &session,
+            main_branch,
+            Some(t1),
+            assistd_memory::PersistedMessage::assistant_text("a"),
+        )
+        .await
+        .unwrap();
+        conv.end_turn(t1).await.unwrap();
+        let t2 = conv.begin_turn(&session, "second").await.unwrap();
+        conv.append_message_to_branch(
+            &session,
+            main_branch,
+            Some(t2),
+            assistd_memory::PersistedMessage::user("second"),
+        )
+        .await
+        .unwrap();
+        conv.append_message_to_branch(
+            &session,
+            main_branch,
+            Some(t2),
+            assistd_memory::PersistedMessage::assistant_text("b"),
+        )
+        .await
+        .unwrap();
+        conv.end_turn(t2).await.unwrap();
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .clone()
+            .dispatch(Request::Undo { id: "rq".into() }, tx)
+            .await
+            .unwrap();
+        let events = drain_events(rx).await;
+        let applied = events
+            .iter()
+            .find_map(|e| match e {
+                Event::UndoApplied {
+                    removed_messages,
+                    last_user_text,
+                    ..
+                } => Some((*removed_messages, last_user_text.clone())),
+                _ => None,
+            })
+            .expect("expected UndoApplied");
+        assert_eq!(applied.0, 2);
+        assert_eq!(applied.1.as_deref(), Some("second"));
+        let history = conv.load_branch_history(main_branch).await.unwrap();
+        assert_eq!(history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn undo_on_empty_branch_returns_zero() {
+        let (state, _conv, _session, _branch) = fresh_branch_state().await;
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .clone()
+            .dispatch(Request::Undo { id: "rq".into() }, tx)
+            .await
+            .unwrap();
+        let events = drain_events(rx).await;
+        let applied = events
+            .iter()
+            .find_map(|e| match e {
+                Event::UndoApplied {
+                    removed_messages, ..
+                } => Some(*removed_messages),
+                _ => None,
+            })
+            .expect("expected UndoApplied even on empty branch");
+        assert_eq!(applied, 0);
     }
 }

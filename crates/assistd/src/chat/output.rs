@@ -210,6 +210,43 @@ impl OutputPane {
         false
     }
 
+    /// Wipe every visible item. Used by `/switch` before replaying the
+    /// target branch's history and by `/clear`-style commands. Resets
+    /// the scroll offset so the next content lands at the top.
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.open_assistant = None;
+        self.scroll_offset = 0;
+        self.dirty = true;
+    }
+
+    /// Drop the trailing items belonging to the last user-prompt-and-reply
+    /// exchange. Walks backward through `items`, dropping the trailing
+    /// blank-separator line and every item until (and including) the
+    /// most recent user prompt (a `Text(Line)` whose first span content
+    /// starts with `"> "`). Returns the count of items removed; 0 when
+    /// there is no user prompt to undo.
+    pub fn pop_last_user_exchange(&mut self) -> usize {
+        let mut idx = self.items.len();
+        while idx > 0 {
+            idx -= 1;
+            if let OutputItem::Text(line) = &self.items[idx]
+                && line
+                    .spans
+                    .first()
+                    .map(|s| s.content.starts_with("> "))
+                    .unwrap_or(false)
+            {
+                let removed = self.items.len() - idx;
+                self.items.truncate(idx);
+                self.open_assistant = None;
+                self.dirty = true;
+                return removed;
+            }
+        }
+        0
+    }
+
     pub fn scroll_page_up(&mut self, viewport_height: u16) {
         let step = (viewport_height / 2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_add(step);

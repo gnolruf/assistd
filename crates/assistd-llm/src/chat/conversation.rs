@@ -198,6 +198,38 @@ impl Conversation {
         }
     }
 
+    /// Replace the running message list wholesale and clear any pending
+    /// transient context. Used by branch /switch and daemon-startup
+    /// resume to repopulate the conversation from persisted history.
+    pub fn replace_messages(&mut self, msgs: Vec<Message>) {
+        self.messages = msgs;
+        self.transient_context = None;
+    }
+
+    /// Drop everything after — and including — the latest "real" user
+    /// message. A "real" user message is [`Role::User`] whose content
+    /// does NOT start with [`TOOL_RESULT_PREFIX`]; tool-result rows
+    /// share the User role but are part of the assistant's reply, so
+    /// they get dropped alongside it. Also clears `transient_context`
+    /// (we are at a turn boundary). Returns the count of removed
+    /// entries; 0 when no real user message exists.
+    pub fn truncate_to_last_real_user(&mut self) -> usize {
+        let mut last_real_user = None;
+        for (i, m) in self.messages.iter().enumerate().rev() {
+            if matches!(m.role, Role::User) && !m.content.starts_with(TOOL_RESULT_PREFIX) {
+                last_real_user = Some(i);
+                break;
+            }
+        }
+        let Some(idx) = last_real_user else {
+            return 0;
+        };
+        let removed = self.messages.len() - idx;
+        self.messages.truncate(idx);
+        self.transient_context = None;
+        removed
+    }
+
     pub fn approx_total_tokens(&self) -> u32 {
         let mut total = 0u32;
         if !self.system_prompt.is_empty() {
@@ -678,6 +710,78 @@ mod tests {
             with_ctx > baseline,
             "transient context must contribute to budget math: {baseline} → {with_ctx}"
         );
+    }
+
+    #[test]
+    fn replace_messages_swaps_history_and_clears_transient() {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("first".into());
+        c.set_transient_context("ctx".into());
+        c.replace_messages(vec![
+            Message {
+                role: Role::User,
+                content: "loaded user".into(),
+                attachments: Vec::new(),
+                tool_calls: Vec::new(),
+            },
+            Message {
+                role: Role::Assistant,
+                content: "loaded assistant".into(),
+                attachments: Vec::new(),
+                tool_calls: Vec::new(),
+            },
+        ]);
+        let wire = c.as_wire_messages();
+        // [system=sys, user=loaded user, assistant=loaded assistant] — transient gone.
+        assert_eq!(wire.len(), 3);
+        assert_eq!(wire[0].role, "system");
+        assert_eq!(wire[1].role, "user");
+        match &wire[1].content {
+            Some(wire::ContentBody::Text(t)) => assert_eq!(*t, "loaded user"),
+            _ => panic!("expected text body"),
+        }
+        assert!(c.transient_context().is_none());
+    }
+
+    #[test]
+    fn truncate_to_last_real_user_drops_through_assistant_chain() {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("first".into());
+        c.push_assistant("a1".into());
+        c.push_user("second".into());
+        c.push_assistant("a2".into());
+        let removed = c.truncate_to_last_real_user();
+        assert_eq!(removed, 2, "drops 'second' user + 'a2' assistant");
+        assert_eq!(c.messages.len(), 2);
+        assert_eq!(c.messages[0].content, "first");
+        assert_eq!(c.messages[1].content, "a1");
+    }
+
+    #[test]
+    fn truncate_to_last_real_user_skips_tool_results_to_real_user() {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("real q".into());
+        // Tool-call pair, ending with a tool-result user message.
+        c.push_assistant_with_tool_calls(
+            None,
+            vec![ToolCallRecord {
+                id: "c-1".into(),
+                name: "run".into(),
+                arguments: "{}".into(),
+            }],
+        );
+        c.push_user("[tool:run]\noutput".into());
+        c.push_assistant("final".into());
+        let removed = c.truncate_to_last_real_user();
+        assert_eq!(removed, 4);
+        assert!(c.messages.is_empty());
+    }
+
+    #[test]
+    fn truncate_to_last_real_user_returns_zero_when_no_user_present() {
+        let mut c = Conversation::new("sys".into());
+        let removed = c.truncate_to_last_real_user();
+        assert_eq!(removed, 0);
     }
 
     #[test]

@@ -28,12 +28,13 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use super::conversation::{Conversation, Summarizer, ToolCallRecord};
+use super::conversation::{Message, Role};
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
 use super::wire;
 use crate::{
-    LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult, ReadyState, StepOutcome, ToolCall,
-    ToolResultPayload,
+    HistoryEntry, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult,
+    ReadyState, StepOutcome, ToolCall, ToolResultPayload,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -504,6 +505,93 @@ impl LlmBackend for LlamaChatClient {
         conv.set_transient_context(text);
         Ok(())
     }
+
+    async fn replace_history(&self, entries: Vec<HistoryEntry>) -> LlmResult<()> {
+        let mut msgs = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match entry.role {
+                HistoryRole::System => msgs.push(Message {
+                    role: Role::System,
+                    content: entry.content,
+                    attachments: Vec::new(),
+                    tool_calls: Vec::new(),
+                }),
+                HistoryRole::User => msgs.push(Message {
+                    role: Role::User,
+                    content: entry.content,
+                    attachments: Vec::new(),
+                    tool_calls: Vec::new(),
+                }),
+                HistoryRole::Assistant => {
+                    let calls = parse_tool_calls(&entry.tool_calls_json)?;
+                    msgs.push(Message {
+                        role: Role::Assistant,
+                        content: entry.content,
+                        attachments: Vec::new(),
+                        tool_calls: calls,
+                    });
+                }
+                HistoryRole::Tool => {
+                    // Tool results round-trip as Role::User with the
+                    // [tool:<name>]\n prefix the truncator depends on
+                    // for tool-call/result pair detection.
+                    let name = entry.tool_name.unwrap_or_default();
+                    let tagged = format!("[tool:{name}]\n{}", entry.content);
+                    msgs.push(Message {
+                        role: Role::User,
+                        content: tagged,
+                        attachments: Vec::new(),
+                        tool_calls: Vec::new(),
+                    });
+                }
+            }
+        }
+        let mut conv = self.conv.lock().await;
+        conv.replace_messages(msgs);
+        Ok(())
+    }
+
+    async fn truncate_to_last_real_user(&self) -> LlmResult<usize> {
+        let mut conv = self.conv.lock().await;
+        Ok(conv.truncate_to_last_real_user())
+    }
+}
+
+fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::ToolCallRecord>> {
+    use super::conversation::ToolCallRecord;
+    let Some(value) = json else {
+        return Ok(Vec::new());
+    };
+    let Some(arr) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let id = entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| LlmError::ToolCallParse("history tool_call missing name".into()))?
+            .to_string();
+        // arguments is stored verbatim as JSON. It may be either a
+        // JSON-encoded string or an object — store the literal string
+        // so the wire payload matches what the model originally emitted.
+        let arguments = match entry.get("arguments") {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => "{}".to_string(),
+        };
+        out.push(ToolCallRecord {
+            id,
+            name,
+            arguments,
+        });
+    }
+    Ok(out)
 }
 
 /// Translate a completed stream into conversation commits + [`StepOutcome`].

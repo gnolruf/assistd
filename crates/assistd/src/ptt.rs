@@ -96,7 +96,11 @@ pub async fn run(action: PttAction) -> Result<()> {
             | Event::MemoryRow { .. }
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. }
-            | Event::Capabilities { .. } => {}
+            | Event::Capabilities { .. }
+            | Event::BranchInfo { .. }
+            | Event::BranchSwitched { .. }
+            | Event::HistoryEntry { .. }
+            | Event::UndoApplied { .. } => {}
             // `assistd ptt-stop` is one-shot non-interactive — same
             // story as `assistd query`. Daemon's gate denies on
             // disconnect; we just note and keep reading.
