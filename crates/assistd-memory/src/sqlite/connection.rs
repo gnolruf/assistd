@@ -58,7 +58,7 @@ impl SqliteHandle {
         // Pragmas first, then migrations. WAL gives us concurrent reads
         // alongside the single writer; foreign_keys must be ON before
         // any FK is exercised by migrations.
-        conn.call(|c| {
+        conn.call(|c| -> rusqlite::Result<_> {
             c.pragma_update(None, "journal_mode", "WAL")?;
             c.pragma_update(None, "synchronous", "NORMAL")?;
             c.pragma_update(None, "foreign_keys", "ON")?;
@@ -67,16 +67,9 @@ impl SqliteHandle {
         .await
         .context("apply SQLite pragmas")?;
 
-        conn.call(|c| {
-            migrations::run(c).map_err(|e| {
-                tokio_rusqlite::Error::Other(Box::new(std::io::Error::other(format!(
-                    "migration failed: {e}"
-                ))))
-            })?;
-            Ok(())
-        })
-        .await
-        .context("run migrations")?;
+        conn.call(|c| migrations::run(c))
+            .await
+            .context("run migrations")?;
 
         let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_DEPTH);
         let writer_handle = spawn_writer(conn.clone(), writer_rx, shutdown);
@@ -155,12 +148,12 @@ mod tests {
         // Migrations applied: schema_migrations has a row.
         let n: i64 = handle
             .conn()
-            .call(|c| {
-                Ok(c.query_row(
+            .call(|c| -> rusqlite::Result<_> {
+                c.query_row(
                     "SELECT count(*) FROM sqlite_master WHERE name='conversations'",
                     [],
                     |r| r.get(0),
-                )?)
+                )
             })
             .await
             .unwrap();

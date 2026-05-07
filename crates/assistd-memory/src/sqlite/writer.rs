@@ -367,7 +367,7 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
 
 async fn begin_session(conn: &Connection, id: String, pid: u32) -> Result<()> {
     let started = Utc::now().to_rfc3339();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
             "INSERT INTO sessions (id, started_at, daemon_pid) VALUES (?1, ?2, ?3)",
             rusqlite::params![id, started, pid],
@@ -380,7 +380,7 @@ async fn begin_session(conn: &Connection, id: String, pid: u32) -> Result<()> {
 
 async fn end_session(conn: &Connection, id: String) -> Result<()> {
     let ended = Utc::now().to_rfc3339();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
             "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
             rusqlite::params![ended, id],
@@ -394,7 +394,7 @@ async fn end_session(conn: &Connection, id: String) -> Result<()> {
 async fn begin_turn(conn: &Connection, session: String, user_text: String) -> Result<TurnId> {
     let started = Utc::now().to_rfc3339();
     let id = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<_> {
             c.execute(
                 "INSERT INTO turns (session_id, started_at, user_text) VALUES (?1, ?2, ?3)",
                 rusqlite::params![session, started, user_text],
@@ -408,7 +408,7 @@ async fn begin_turn(conn: &Connection, session: String, user_text: String) -> Re
 
 async fn end_turn(conn: &Connection, turn: TurnId) -> Result<()> {
     let ended = Utc::now().to_rfc3339();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
             "UPDATE turns SET ended_at = ?1 WHERE id = ?2",
             rusqlite::params![ended, turn.0],
@@ -433,7 +433,7 @@ async fn append_message(
     };
     let turn_id = turn.map(|t| t.0);
     let id = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<_> {
             // seq is per-session monotonic. Wrap the SELECT + INSERT in
             // an explicit transaction so the two statements observe a
             // consistent snapshot of `conversations` and so a SELECT
@@ -483,7 +483,7 @@ async fn save_memory(
     // extra `SELECT id FROM memories WHERE key = ?` round-trip — and the
     // caller (`RememberTool`) needs the id to FK an embedding row.
     let id = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<_> {
             let id: i64 = c.query_row(
                 "INSERT INTO memories (key, value, source_conversation_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?4)
@@ -503,7 +503,7 @@ async fn save_memory(
 }
 
 async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
             "DELETE FROM memories WHERE key = ?1",
             rusqlite::params![key],
@@ -520,7 +520,7 @@ async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String
     // didn't exist. The `memory_embeddings.memory_id` FK has
     // `ON DELETE CASCADE`, so the embedding row drops with the memory
     // — no second statement needed.
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         let result = c
             .query_row(
                 "DELETE FROM memories WHERE id = ?1 RETURNING key",
@@ -549,7 +549,7 @@ async fn store_chunk(
     token_count: Option<i64>,
 ) -> Result<i64> {
     let id = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<_> {
             // Idempotent on (conversation_id, chunk_index): re-running
             // chunking for the same row replaces in place.
             let id: i64 = c.query_row(
@@ -577,7 +577,7 @@ async fn store_chunk_embedding(
     vector: Vec<u8>,
 ) -> Result<()> {
     let now = Utc::now().to_rfc3339();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
             "INSERT INTO embeddings (conversation_chunk_id, model, dim, vector, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -602,7 +602,7 @@ async fn store_memory_embedding(
     vector: Vec<u8>,
 ) -> Result<()> {
     let now = Utc::now().to_rfc3339();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
             "INSERT INTO memory_embeddings (memory_id, model, dim, vector, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -620,7 +620,7 @@ async fn store_memory_embedding(
 }
 
 async fn delete_chunks_for_conversation(conn: &Connection, conversation_id: i64) -> Result<()> {
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         // ON DELETE CASCADE on the embeddings FK takes care of dropping
         // any matching `embeddings` rows.
         c.execute(
@@ -641,7 +641,7 @@ async fn begin_session_with_main_branch(
     let started = Utc::now().to_rfc3339();
     let created = started.clone();
     let branch_rowid = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<_> {
             // One transaction so a crash midway can't leave a session
             // without its main branch (the daemon-startup code reads
             // current_branch_id and panics on NULL otherwise).
@@ -678,7 +678,7 @@ async fn create_branch(
     let created = Utc::now().to_rfc3339();
     let parent_id = parent.map(|b| b.0);
     let id = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<_> {
             c.execute(
                 "INSERT INTO branches (session_id, name, parent_branch_id, fork_point_seq, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -696,7 +696,7 @@ async fn set_current_branch(
     session_id: String,
     branch_id: BranchId,
 ) -> Result<()> {
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
             "UPDATE sessions SET current_branch_id = ?1 WHERE id = ?2",
             rusqlite::params![branch_id.0, session_id],
@@ -722,7 +722,7 @@ async fn append_message_to_branch(
     };
     let turn_id = turn.map(|t| t.0);
     let id = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<_> {
             // Insert the conversations row, the branch_messages row,
             // and assign a branch-local seq atomically. The session-wide
             // `conversations.seq` keeps its previous "max+1 over the
@@ -770,7 +770,7 @@ async fn append_message_to_branch(
 async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Result<BranchId> {
     let created = Utc::now().to_rfc3339();
     let id = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<_> {
             let tx = c.transaction()?;
             // Pull the source branch's session id and its tail seq —
             // both go onto the new branches row.
@@ -810,7 +810,7 @@ async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Resu
 }
 
 async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutcome> {
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<_> {
         let tx = c.transaction()?;
         // Find the latest turn_id reachable through this branch. If
         // every reachable message has NULL turn_id (e.g. system-only

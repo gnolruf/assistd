@@ -40,32 +40,33 @@ serde_json = "1"
 # Workspace base for tokio: no features. Each crate opts into the
 # minimum it needs via per-manifest `features = [...]`. The binary
 # (`assistd-cli`) is the only crate that takes `["full"]`.
-tokio = { version = "1", default-features = false }
+tokio = { version = "1.52.2", default-features = false }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
-thiserror = "1"
-toml = "0.8"
-clap = { version = "4", features = ["derive"] }
-uuid = { version = "1", features = ["v4"] }
+thiserror = "2.0.18"
+toml = "1.1.2"
+clap = { version = "4.6.1", features = ["derive"] }
+uuid = { version = "1.23.1", features = ["v4"] }
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-libc = "0.2"
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "json"] }
+libc = "0.2.186"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
-tracing-appender = "0.2"
+tracing-appender = "0.2.5"
 textwrap = "0.16"
 nvml-wrapper = "0.12"
+global-hotkey = "0.8"
 regex = "1"
 tempfile = "3"
 base64 = "0.22"
 infer = "0.19"
 shlex = "1"
-which = "7"
+which = "8.0.2"
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
-ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "10.0.8", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Persistent memory store. `rusqlite` ships with `bundled` so we don't depend
 # on a system libsqlite3 — keeps `cargo build` reproducible across distros.
@@ -73,9 +74,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # `tokio-rusqlite` runs the connection on a dedicated thread and serves
 # `conn.call(|c| ...)` closures over a channel — exactly the writer-task
 # pattern Milestone 4 needs (see crates/assistd-memory/src/sqlite/writer.rs).
-rusqlite = { version = "0.31", features = ["bundled", "blob"] }
-tokio-rusqlite = "0.5"
-rusqlite_migration = "1"
+rusqlite = { version = "0.37", features = ["bundled", "blob"] }
+tokio-rusqlite = "0.7"
+rusqlite_migration = "2.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 # i3 IPC client for the WindowManager backend in assistd-wm. Async, built
 # on tokio's UnixStream — fails cleanly on non-i3 systems with a connect

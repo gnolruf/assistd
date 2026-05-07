@@ -514,7 +514,7 @@ impl ConversationStore for SqliteConversationStore {
         let limit = limit as i64;
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let sql = "
                     SELECT  conv.id,
                             conv.session_id,
@@ -562,7 +562,7 @@ impl ConversationStore for SqliteConversationStore {
         let limit = limit as i64;
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let sql = "
                     SELECT  t.id,
                             t.session_id,
@@ -644,7 +644,7 @@ impl ConversationStore for SqliteConversationStore {
         let id: Option<i64> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 Ok(c.query_row(
                     "SELECT current_branch_id FROM sessions WHERE id = ?1",
                     rusqlite::params![session_id],
@@ -679,7 +679,7 @@ impl ConversationStore for SqliteConversationStore {
     async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
         self.handle
             .conn()
-            .call(|c| {
+            .call(|c| -> rusqlite::Result<_> {
                 let sql = "
                     SELECT  b.id,
                             b.session_id,
@@ -737,7 +737,7 @@ impl ConversationStore for SqliteConversationStore {
         let row: Option<(String, i64)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 if let Some(prefix) = session_prefix {
                     let pattern = format!("{prefix}%");
                     let row = c
@@ -800,7 +800,7 @@ impl ConversationStore for SqliteConversationStore {
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>> {
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let sql = "
                     SELECT  c.id,
                             bm.seq,
@@ -857,7 +857,7 @@ impl ConversationStore for SqliteConversationStore {
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>> {
         self.handle
             .conn()
-            .call(|c| {
+            .call(|c| -> rusqlite::Result<_> {
                 let row = c
                     .query_row(
                         "SELECT id, current_branch_id, daemon_pid, started_at
@@ -999,7 +999,7 @@ mod tests {
             Option<String>,
             Option<String>,
         ) = conn
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 Ok(c.query_row(
                     "SELECT (SELECT tool_calls FROM conversations WHERE id = ?1),
                             (SELECT tool_call_id FROM conversations WHERE id = ?2),

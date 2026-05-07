@@ -53,7 +53,7 @@ impl MemoryStore for SqliteMemoryStore {
         let key = key.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let result = c
                     .query_row(
                         "SELECT value FROM memories WHERE key = ?1",
@@ -102,7 +102,7 @@ impl MemoryStore for SqliteMemoryStore {
         let pattern = format!("{escaped}%");
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT key FROM memories WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key",
                 )?;
@@ -123,7 +123,7 @@ impl MemoryStore for SqliteMemoryStore {
         let pattern = format!("{escaped}%");
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT id, key, value FROM memories \
                      WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key",

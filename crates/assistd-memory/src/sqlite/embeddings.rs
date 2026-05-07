@@ -214,7 +214,7 @@ impl SemanticStore for SqliteSemanticStore {
         let ranked: Vec<(i64, f32)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT conversation_chunk_id, vector FROM embeddings WHERE model = ?1",
                 )?;
@@ -250,7 +250,7 @@ impl SemanticStore for SqliteSemanticStore {
         let raw: Vec<(i64, i64, String, String, String, String)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(&sql)?;
                 let params: Vec<&dyn rusqlite::ToSql> = chunk_ids_for_query
                     .iter()
@@ -312,7 +312,7 @@ impl SemanticStore for SqliteSemanticStore {
         let ranked: Vec<(i64, f32)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt =
                     c.prepare("SELECT memory_id, vector FROM memory_embeddings WHERE model = ?1")?;
                 let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(top_k + 1);
@@ -340,7 +340,7 @@ impl SemanticStore for SqliteSemanticStore {
         let raw: Vec<(i64, String, String)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(&sql)?;
                 let params: Vec<&dyn rusqlite::ToSql> = memory_ids_for_query
                     .iter()
@@ -382,7 +382,7 @@ impl SemanticStore for SqliteSemanticStore {
         let model = model.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let chunks: i64 = c.query_row(
                     "SELECT count(*) FROM embeddings WHERE model = ?1",
                     rusqlite::params![model],
@@ -403,7 +403,7 @@ impl SemanticStore for SqliteSemanticStore {
         let current = current.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut total: i64 = 0;
                 let mut models: std::collections::BTreeSet<String> =
                     std::collections::BTreeSet::new();
@@ -431,7 +431,7 @@ impl SemanticStore for SqliteSemanticStore {
         let current = current.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT m.id, m.value
                      FROM memories m
@@ -455,7 +455,7 @@ impl SemanticStore for SqliteSemanticStore {
         let current = current.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT cc.id, cc.content
                      FROM conversation_chunks cc
