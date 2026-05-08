@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use ringbuf::HeapCons;
 use ringbuf::traits::{Consumer, Observer};
-use rubato::{FastFixedIn, PolynomialDegree, Resampler};
+use rubato::audioadapter_buffers::direct::SequentialSlice;
+use rubato::{Async, FixedAsync, PolynomialDegree, Resampler};
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -44,11 +45,18 @@ pub fn stream_frames(
 ) -> Result<(), AudioCaptureError> {
     let needs_resample = native_rate != TARGET_SAMPLE_RATE;
 
-    let mut resampler: Option<FastFixedIn<f32>> = if needs_resample {
+    let mut resampler: Option<Async<f32>> = if needs_resample {
         let ratio = TARGET_SAMPLE_RATE as f64 / native_rate as f64;
         Some(
-            FastFixedIn::<f32>::new(ratio, 1.0, PolynomialDegree::Linear, DRAIN_CHUNK_SIZE, 1)
-                .map_err(|e| AudioCaptureError::BuildStream(format!("rubato init: {e}")))?,
+            Async::<f32>::new_poly(
+                ratio,
+                1.0,
+                PolynomialDegree::Linear,
+                DRAIN_CHUNK_SIZE,
+                1,
+                FixedAsync::Input,
+            )
+            .map_err(|e| AudioCaptureError::BuildStream(format!("rubato init: {e}")))?,
         )
     } else {
         None
@@ -59,7 +67,7 @@ pub fn stream_frames(
         .as_ref()
         .map(|r| r.output_frames_max())
         .unwrap_or(DRAIN_CHUNK_SIZE);
-    let mut out_buf = vec![vec![0.0f32; out_cap]; 1];
+    let mut out_buf = vec![0.0f32; out_cap];
 
     // Rolling pending buffer — accumulates 16 kHz i16 samples until
     // we have at least FRAME_SAMPLES (320) to emit a 20 ms frame.
@@ -78,10 +86,19 @@ pub fn stream_frames(
             }
 
             if let Some(r) = &mut resampler {
+                let input_adapter =
+                    SequentialSlice::new(&in_buf[..], 1, in_buf.len()).map_err(|e| {
+                        AudioCaptureError::DeviceError(format!("rubato input adapter: {e}"))
+                    })?;
+                let out_buf_len = out_buf.len();
+                let mut output_adapter = SequentialSlice::new_mut(&mut out_buf[..], 1, out_buf_len)
+                    .map_err(|e| {
+                        AudioCaptureError::DeviceError(format!("rubato output adapter: {e}"))
+                    })?;
                 let (_read, written) = r
-                    .process_into_buffer(&[&in_buf[..]], &mut out_buf, None)
+                    .process_into_buffer(&input_adapter, &mut output_adapter, None)
                     .map_err(|e| AudioCaptureError::DeviceError(format!("rubato process: {e}")))?;
-                for &s in &out_buf[0][..written] {
+                for &s in &out_buf[..written] {
                     pending.push(f32_to_i16(s));
                 }
             } else {

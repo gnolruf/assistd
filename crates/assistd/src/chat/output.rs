@@ -404,10 +404,6 @@ pub struct ThumbnailSlot {
     pub height: usize,
 }
 
-/// Reserve [`THUMBNAIL_ROWS`] blank lines so layout math stays correct.
-/// The first row carries a "📎 name" caption so non-graphics terminals
-/// (and the placeholder rows that show through if rendering is skipped)
-/// still tell the user what they're looking at.
 fn render_thumbnail_placeholder(out: &mut Vec<Line<'static>>, t: &ThumbnailItem) {
     out.push(single_span_line(format!("📎 {}", t.name), info_style()));
     for _ in 1..THUMBNAIL_ROWS {
@@ -592,8 +588,6 @@ fn push_barred(
     }
 }
 
-/// Strip the `[exit:N | Xms]` footer (always the last line of a Layer-2
-/// `output`) and return the remaining body lines.
 fn split_body(output: &str) -> Vec<String> {
     let mut lines: Vec<String> = output.lines().map(str::to_string).collect();
     if lines
@@ -606,8 +600,6 @@ fn split_body(output: &str) -> Vec<String> {
     lines
 }
 
-/// Count body lines (everything except the Layer-2 footer) to decide
-/// whether a new block should start collapsed.
 fn body_line_count(output: &str) -> usize {
     let n = output.lines().count();
     if output.contains("[exit:") {

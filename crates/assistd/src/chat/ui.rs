@@ -34,16 +34,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_status(frame, status_area, app);
     render_input(frame, input_area, app);
 
-    // Modal overlay on top of the whole frame. Only drawn when a
-    // destructive-command prompt is pending.
     if let Some(modal) = &app.modal {
         render_confirmation_modal(frame, frame.area(), modal);
     }
 }
 
-/// Centered Y/N prompt showing the pending destructive command. The agent
-/// loop is blocked on the gate's oneshot until the user decides, so the
-/// overlay is the only thing that matters.
 fn render_confirmation_modal(frame: &mut Frame, area: Rect, modal: &ConfirmationModal) {
     let width = area.width.saturating_mul(3) / 5; // 60%
     let width = width.clamp(40, 100);

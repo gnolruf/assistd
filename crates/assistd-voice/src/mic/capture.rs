@@ -81,12 +81,12 @@ pub fn open_producer_stream(
 ) -> Result<ProducerStream, AudioCaptureError> {
     let host = cpal::default_host();
     let device = select_device(&host, device_hint)?;
-    let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+    let device_name = name_of(&device).unwrap_or_else(|_| "<unknown>".to_string());
 
     let supported = device
         .default_input_config()
         .map_err(|e| AudioCaptureError::DefaultConfig(e.to_string()))?;
-    let sample_rate = supported.sample_rate().0;
+    let sample_rate = supported.sample_rate();
     let channels = supported.channels() as usize;
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
@@ -195,10 +195,10 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     let host = cpal::default_host();
     let default_name = host
         .default_input_device()
-        .and_then(|d| d.name().ok())
+        .and_then(|d| name_of(&d).ok())
         .unwrap_or_else(|| "<none>".to_string());
     if let Ok(devices) = host.input_devices() {
-        let names: Vec<String> = devices.filter_map(|d| d.name().ok()).collect();
+        let names: Vec<String> = devices.filter_map(|d| name_of(&d).ok()).collect();
         tracing::info!(
             target: "assistd::voice::mic",
             default = %default_name,
@@ -223,7 +223,7 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     let mut names: Vec<String> = Vec::new();
     let mut matched = false;
     for d in devices {
-        let name = d.name().unwrap_or_else(|_| "<unknown>".to_string());
+        let name = name_of(&d).unwrap_or_else(|_| "<unknown>".to_string());
         if name == requested {
             matched = true;
         }
@@ -248,6 +248,10 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     );
 }
 
+fn name_of(device: &Device) -> Result<String, cpal::DeviceNameError> {
+    device.description().map(|d| d.name().to_string())
+}
+
 pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, AudioCaptureError> {
     match hint {
         None => host
@@ -258,7 +262,7 @@ pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, Au
                 .input_devices()
                 .map_err(|e| AudioCaptureError::DefaultConfig(e.to_string()))?;
             for d in devices {
-                if d.name().map(|n| n == name).unwrap_or(false) {
+                if name_of(&d).map(|n| n == name).unwrap_or(false) {
                     return Ok(d);
                 }
             }
