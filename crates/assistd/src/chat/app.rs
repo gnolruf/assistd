@@ -270,19 +270,12 @@ impl App {
         });
     }
 
-    /// Consume the modal (if any) and send the user's Y/N decision
-    /// back to the daemon as a `Request::ConfirmResponse`. Used by
-    /// both the Y/N key handlers and the quit path.
     fn resolve_modal(&mut self, decision: bool) {
         if let Some(modal) = self.modal.take() {
             self.send_confirm_response(&modal.confirm_id, decision);
         }
     }
 
-    /// Enqueue a `ConfirmResponse` onto the active query's writer
-    /// channel. No-op if no query is in flight (shouldn't happen — a
-    /// modal can only have come from an active query — but handle
-    /// defensively rather than panic).
     fn send_confirm_response(&self, confirm_id: &str, allow: bool) {
         let Some(writer) = self.active_writer.clone() else {
             tracing::warn!(
@@ -688,10 +681,6 @@ impl App {
         }
     }
 
-    /// Flush the buffered `/branches` listing into the chat pane as a
-    /// table-ish block. Active session branches render first (already
-    /// sorted by the daemon), each line shows current marker + name +
-    /// parent + msg count.
     fn render_branches_buffer(&mut self) {
         if self.branches_buffer.is_empty() {
             self.output.push_info("[no branches]");
@@ -740,10 +729,6 @@ impl App {
         self.notice = Some((text.to_string(), Instant::now()));
     }
 
-    /// Tab completion for `/attach <partial-path>`. Returns `true` if
-    /// completion fired (so the caller skips its fallback action), or
-    /// `false` when the input isn't an attach line and the caller's
-    /// default Tab behavior should run.
     fn try_complete_attach_path(&mut self) -> bool {
         let buffer = self.input.buffer();
         let partial = if let Some(rest) = buffer.strip_prefix("/attach ") {
@@ -810,10 +795,6 @@ impl App {
         true
     }
 
-    /// Submit text typed at the input line. Slash-command parsing
-    /// only happens here — a voice transcription that contains
-    /// "/attach foo" is dispatched as plain text by the daemon's
-    /// auto-Query path, which never lands here.
     fn submit_typed(&mut self, text: String) {
         let is_attach = text.starts_with("/attach ") || text.trim() == "/attach";
         if is_attach && !self.vision_enabled {
@@ -947,11 +928,6 @@ impl App {
         });
     }
 
-    /// Spawn a one-shot daemon connection for a branch command and
-    /// pump its streaming events onto `chat_tx::Wire`. The TUI's
-    /// `on_wire_event` then routes by `in_flight_branch_op` to the
-    /// right rendering path. Single-flight: rejects when one branch
-    /// command (or a generation) is already in flight.
     fn spawn_branch_command(&mut self, op: BranchOp, req: Request) {
         if self.in_flight_branch_op.is_some() {
             self.set_notice("branch command in flight — please wait");
@@ -1141,11 +1117,6 @@ impl App {
     }
 }
 
-/// Parse a slash command of the shape `/<verb> <arg…>`. Returns
-/// `Some(arg)` when `text` starts with `<verb> ` (note the trailing
-/// space), `None` otherwise. Trailing whitespace is trimmed; the
-/// `text == verb` form returns `Some("")` so callers can distinguish
-/// "no argument" from "not this verb".
 fn parse_slash_arg<'a>(text: &'a str, verb: &str) -> Option<&'a str> {
     let trimmed = text.trim_end();
     if trimmed == verb {

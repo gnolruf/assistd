@@ -68,7 +68,7 @@ pub async fn spawn(
         hotkey::Subsystems {
             presence: None, // chat TUI doesn't own a PresenceManager
             voice: proxy,
-            listener: None, // continuous-listen runs in the daemon
+            listener: None,     // continuous-listen runs in the daemon
             voice_output: None, // VoiceOutputController also lives in the daemon
         },
         shutdown_rx,

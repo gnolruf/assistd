@@ -54,11 +54,6 @@ pub struct ChatArgs {
 }
 
 pub async fn run(args: ChatArgs) -> Result<()> {
-    // Redirect process-level stderr to a sibling log file BEFORE any
-    // subsystem initialization runs. C libraries (ratatui-image's
-    // graphics-protocol probes, future TTS backends, …) write
-    // diagnostics straight to fd 2; without this they leak into the
-    // ratatui draw surface and glitch the TUI.
     let _stderr_redirect = redirect_stderr_to_log()?;
 
     let config_path = match args.config.clone() {
@@ -303,10 +298,6 @@ fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// Poll-connect the socket until it accepts or `deadline` passes.
-/// 100 ms cadence: fast enough that a snappy daemon (already running
-/// with weights loaded) feels instant, slow enough not to spin the
-/// CPU during a cold start.
 async fn wait_for_socket(path: &Path, deadline: Duration) -> Result<()> {
     let start = std::time::Instant::now();
     loop {
@@ -324,9 +315,6 @@ async fn wait_for_socket(path: &Path, deadline: Duration) -> Result<()> {
     }
 }
 
-/// Probe the daemon's runtime capabilities. Returns
-/// `(vision_enabled, model_name)`. Errors are non-fatal — the caller
-/// falls back to config-derived defaults.
 async fn get_capabilities(ipc: &IpcClient) -> Result<(bool, String)> {
     let req = Request::GetCapabilities {
         id: Uuid::new_v4().to_string(),
@@ -352,10 +340,6 @@ async fn get_capabilities(ipc: &IpcClient) -> Result<(bool, String)> {
     }
 }
 
-/// Background task that polls daemon state every 2 s. Each tick
-/// fans out three concurrent one-shot requests and forwards their
-/// terminal events as `ChatEvent::Wire` so the App reducer can
-/// update the status bar uniformly.
 fn spawn_status_polling(
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,
@@ -437,14 +421,8 @@ fn init_file_tracing() -> Result<tracing_appender::non_blocking::WorkerGuard> {
     Ok(guard)
 }
 
-/// Redirect the process's stderr (fd 2) to a dedicated log file next to
-/// `chat.log`. Returns the owning `File` — keep it alive for the TUI
-/// lifetime; dropping it doesn't close fd 2 because `dup2` has already
-/// linked the kernel descriptor. Panics and C-library stderr writes all
-/// land in `chat-stderr.log` instead of the ratatui draw surface.
 fn redirect_stderr_to_log() -> Result<std::fs::File> {
     use std::fs::OpenOptions;
-    use std::os::fd::AsRawFd;
 
     let path = log_dir()?.join("chat-stderr.log");
     let file = OpenOptions::new()
@@ -452,14 +430,8 @@ fn redirect_stderr_to_log() -> Result<std::fs::File> {
         .append(true)
         .open(&path)
         .with_context(|| format!("opening stderr log {}", path.display()))?;
-    // SAFETY: dup2 on fd 2 is a standard POSIX operation; the target fd
-    // is a valid, owned descriptor from `OpenOptions::open`. On failure
-    // we surface the errno and leave stderr untouched.
-    let rc = unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
-    if rc < 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("dup2 stderr → {}", path.display()));
-    }
+    rustix::stdio::dup2_stderr(&file)
+        .with_context(|| format!("dup2 stderr → {}", path.display()))?;
     Ok(file)
 }
 

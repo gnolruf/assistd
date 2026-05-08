@@ -164,7 +164,12 @@ pub fn spawn_listener(
     };
 
     let hotkeys = Hotkeys {
-        presence: register(&manager, presence_hotkey, "presence.hotkey", "press to cycle"),
+        presence: register(
+            &manager,
+            presence_hotkey,
+            "presence.hotkey",
+            "press to cycle",
+        ),
         voice: register(&manager, voice_hotkey, "voice.hotkey", "hold to talk"),
         listen: register(
             &manager,

@@ -146,6 +146,7 @@ dependencies = [
  "nvml-wrapper",
  "ratatui",
  "ratatui-image",
+ "rustix 1.1.4",
  "serde_json",
  "shlex",
  "tempfile",
