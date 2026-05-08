@@ -65,10 +65,12 @@ pub async fn spawn(
     let hotkey_handle = hotkey::spawn_listener(
         &config.presence,
         &config.voice,
-        None, // chat TUI doesn't own a PresenceManager
-        proxy,
-        None, // continuous-listen runs in the daemon
-        None, // VoiceOutputController also lives in the daemon
+        hotkey::Subsystems {
+            presence: None, // chat TUI doesn't own a PresenceManager
+            voice: proxy,
+            listener: None, // continuous-listen runs in the daemon
+            voice_output: None, // VoiceOutputController also lives in the daemon
+        },
         shutdown_rx,
     );
 

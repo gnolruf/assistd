@@ -119,10 +119,12 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         hotkey::spawn_listener(
             &config.presence,
             &config.voice,
-            Some(presence.clone()),
-            voice.input.clone(),
-            Some(voice.listener.clone()),
-            Some(voice.output.clone()),
+            hotkey::Subsystems {
+                presence: Some(presence.clone()),
+                voice: voice.input.clone(),
+                listener: Some(voice.listener.clone()),
+                voice_output: Some(voice.output.clone()),
+            },
             shutdown_tx.subscribe(),
         )
     };
@@ -246,6 +248,14 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn init_config() -> Result<()> {
+    init_tracing();
+    let path = Config::default_path()?;
+    Config::write_default(&path)?;
+    info!("wrote default config to {}", path.display());
+    Ok(())
+}
+
 fn spawn_signal_handler(shutdown_tx: &watch::Sender<bool>) {
     let signal_tx = shutdown_tx.clone();
     assistd_core::spawn_supervised(
@@ -348,14 +358,6 @@ async fn shutdown_subsystems(s: DaemonShutdown) {
     s.window.shutdown().await;
     s.mcp.shutdown().await;
     s.embed.shutdown().await;
-}
-
-pub fn init_config() -> Result<()> {
-    init_tracing();
-    let path = Config::default_path()?;
-    Config::write_default(&path)?;
-    info!("wrote default config to {}", path.display());
-    Ok(())
 }
 
 fn init_tracing() {
