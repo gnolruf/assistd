@@ -1,4 +1,4 @@
-use crate::{Config, PresenceManager, run_agent_turn};
+use crate::{Agent, Config, PresenceManager};
 use anyhow::Result;
 use assistd_config::EmbeddingConfig;
 use assistd_embed::{EmbedJob, Embedder, NoEmbedder};
@@ -198,7 +198,7 @@ pub struct AppState {
     /// the compositor's IPC protocol.
     pub window_manager: Arc<dyn WindowManager>,
     /// Serializes entire agent turns. Concurrent queries each grab this
-    /// lock before running `run_agent_turn`, so one query's tool-call /
+    /// lock before running `Agent::run_turn`, so one query's tool-call /
     /// tool-result cycle never interleaves with another's — which would
     /// otherwise leave the backend's conversation state with dangling
     /// `tool_calls` messages.
@@ -1248,19 +1248,12 @@ impl AppState {
         // guard cancels the token, ensuring the agent task wakes up
         // and exits even if it's parked in `backend.step`.
         let _cancel_on_return = cancel.clone().drop_guard();
+        let agent = Agent::new(llm, tools, max_iterations, health);
         let generator = tokio::spawn(
             async move {
-                run_agent_turn(
-                    llm,
-                    tools,
-                    max_iterations,
-                    text,
-                    attachments,
-                    llm_tx,
-                    cancel_for_agent,
-                    health,
-                )
-                .await
+                agent
+                    .run_turn(text, attachments, llm_tx, cancel_for_agent)
+                    .await
             }
             .in_current_span(),
         );
