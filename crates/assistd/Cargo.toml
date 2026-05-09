@@ -23,6 +23,7 @@ daemon = [
     "dep:tracing-subscriber",
     "dep:global-hotkey",
     "dep:nvml-wrapper",
+    "dep:rustix",
 ]
 # Compile whisper-rs with CUDA support so the daemon's whisper
 # transcription runs on GPU when `voice.transcription.prefer_gpu`

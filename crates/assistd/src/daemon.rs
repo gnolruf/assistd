@@ -43,6 +43,13 @@ pub struct DaemonArgs {
 pub async fn run(args: DaemonArgs) -> Result<()> {
     init_tracing();
 
+    if args.client_mode {
+        match rustix::process::setsid() {
+            Ok(_) => info!("detached: became session leader"),
+            Err(e) => tracing::warn!("setsid() failed (continuing): {e}"),
+        }
+    }
+
     let config_path = match args.config {
         Some(p) => p,
         None => Config::default_path()?,

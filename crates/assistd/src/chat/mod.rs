@@ -1,5 +1,3 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
-
 //! Interactive ratatui-based chat TUI.
 //!
 //! `assistd chat` is a thin window onto the running daemon. It loads
@@ -23,7 +21,6 @@ mod ui;
 mod voice;
 mod vram;
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,6 +48,18 @@ pub struct ChatArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
     #[arg(long, short)]
     pub config: Option<PathBuf>,
+}
+
+struct TuiContext {
+    ipc: Arc<IpcClient>,
+    chat_tx: mpsc::Sender<ChatEvent>,
+    chat_rx: mpsc::Receiver<ChatEvent>,
+    resource_rx: watch::Receiver<vram::ResourceState>,
+    shutdown_rx: watch::Receiver<bool>,
+    model_name: String,
+    sleep_cfg: SleepConfig,
+    vision_enabled: bool,
+    startup_error: Option<String>,
 }
 
 pub async fn run(args: ChatArgs) -> Result<()> {
@@ -115,9 +124,9 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         daemon_model_name
     };
 
-    let mut resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
+    let resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
-    let (chat_tx, mut chat_rx) = mpsc::channel::<ChatEvent>(64);
+    let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(64);
     let _voice_pipeline = voice::spawn(
         &config,
         ipc.clone(),
@@ -129,17 +138,17 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let _polling_handle =
         spawn_status_polling(ipc.clone(), chat_tx.clone(), shutdown_tx.subscribe());
 
-    let run_result = run_tui(
-        ipc.clone(),
+    let run_result = run_tui(TuiContext {
+        ipc: ipc.clone(),
         chat_tx,
-        &mut chat_rx,
+        chat_rx,
+        resource_rx,
+        shutdown_rx: shutdown_tx.subscribe(),
         model_name,
-        config.sleep.clone(),
+        sleep_cfg: config.sleep.clone(),
         vision_enabled,
-        &mut resource_rx,
-        shutdown_tx.clone(),
         startup_error,
-    )
+    })
     .await;
 
     let _ = shutdown_tx.send(true);
@@ -147,18 +156,19 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     run_result
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_tui(
-    ipc: Arc<IpcClient>,
-    chat_tx: mpsc::Sender<ChatEvent>,
-    chat_rx: &mut mpsc::Receiver<ChatEvent>,
-    model_name: String,
-    sleep_cfg: SleepConfig,
-    vision_enabled: bool,
-    resource_rx: &mut watch::Receiver<vram::ResourceState>,
-    shutdown_tx: watch::Sender<bool>,
-    startup_error: Option<String>,
-) -> Result<()> {
+async fn run_tui(ctx: TuiContext) -> Result<()> {
+    let TuiContext {
+        ipc,
+        chat_tx,
+        mut chat_rx,
+        mut resource_rx,
+        mut shutdown_rx,
+        model_name,
+        sleep_cfg,
+        vision_enabled,
+        startup_error,
+    } = ctx;
+
     terminal::enable_raw_mode().context("enable_raw_mode")?;
     if let Err(e) = execute!(
         std::io::stdout(),
@@ -218,7 +228,6 @@ async fn run_tui(
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
-    let mut shutdown_rx = shutdown_tx.subscribe();
 
     terminal.draw(|f| ui::render(f, &mut app))?;
 
@@ -262,10 +271,11 @@ async fn run_tui(
 
 /// Auto-spawn a detached daemon child. We exec the same binary
 /// (`current_exe`) so a `cargo run` build doesn't accidentally fork
-/// off a stale system install. `setsid` makes the daemon its own
-/// session leader so it survives the TUI's controlling-terminal
-/// closing; we drop the `Child` handle without reaping, which is
-/// fine because the daemon already self-handles SIGTERM.
+/// off a stale system install. The child calls `setsid()` itself on
+/// startup (gated on `--client-mode`) so it becomes its own session
+/// leader and survives the TUI's controlling-terminal closing; we
+/// drop the `Child` handle without reaping, which is fine because
+/// the daemon already self-handles SIGTERM.
 fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
     use std::process::{Command, Stdio};
 
@@ -279,17 +289,6 @@ fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // SAFETY: pre_exec runs in the forked child after fork() and before
-    // exec(). `libc::setsid` is async-signal-safe per POSIX, which
-    // is the bar tokio's std::process docs require here.
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let child = cmd
         .spawn()
         .with_context(|| format!("could not spawn daemon binary at {}", exe.display()))?;

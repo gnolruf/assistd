@@ -52,10 +52,11 @@ uuid = { version = "1.23.1", features = ["v4"] }
 async-trait = "0.1"
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "json"] }
 libc = "0.2.186"
-# Safe wrappers around POSIX syscalls. We use it specifically for
-# `rustix::stdio::dup2_stderr` to redirect fd 2 into the chat-stderr log
-# without an `unsafe { libc::dup2 }` block.
-rustix = { version = "1", features = ["stdio"] }
+# Safe wrappers around POSIX syscalls. We use `rustix::stdio::dup2_stderr`
+# to redirect fd 2 into the chat-stderr log, and `rustix::process::setsid`
+# so the auto-spawned daemon can become its own session leader without
+# an `unsafe { Command::pre_exec }` dance.
+rustix = { version = "1", features = ["stdio", "process"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
