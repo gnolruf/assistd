@@ -162,19 +162,19 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let mut mcp = mcp_init::init(&config, &shutdown_tx).await;
     let mcp_tools = std::mem::take(&mut mcp.tools);
 
-    let tools = assistd_core::build_tools(
-        &config,
-        overflow_dir.clone(),
-        Arc::new(IpcConfirmationGate),
-        vision_gate.clone(),
+    let tools = assistd_core::build_tools(assistd_core::BuildToolsDeps {
+        config: &config,
+        overflow_dir: overflow_dir.clone(),
+        confirmation_gate: Arc::new(IpcConfirmationGate),
+        vision_gate: vision_gate.clone(),
         memory_ops,
-        embedder.clone(),
-        semantic_store.clone(),
-        embed_tx.clone(),
-        embedding_model_name,
-        window_manager.clone(),
+        embedder: embedder.clone(),
+        semantic: semantic_store.clone(),
+        embed_tx: embed_tx.clone(),
+        embedding_model: embedding_model_name,
+        window_manager: window_manager.clone(),
         mcp_tools,
-    )?;
+    })?;
     info!(
         "tools: registered {} (overflow dir {})",
         tools.len(),

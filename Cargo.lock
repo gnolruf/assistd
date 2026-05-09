@@ -171,7 +171,7 @@ dependencies = [
  "assistd-wm",
  "async-trait",
  "base64",
- "libc",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "shlex",

@@ -14,8 +14,6 @@
 //!    llama-server process group before propagating, keeping a child
 //!    from being orphaned when the daemon goes down via panic.
 
-#![allow(unsafe_code)] // libc::kill in the panic hook — locally justified
-
 use std::any::Any;
 use std::future::Future;
 use std::sync::{Mutex, Weak};
@@ -253,20 +251,21 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
             .and_then(|guard| guard.as_ref().and_then(|w| w.upgrade()))
             .and_then(|p| p.llama_pid_blocking());
         if let Some(pid) = pid_opt {
-            let gid: i32 = -(pid as i32);
-            // SAFETY: libc::kill is safe with any pid/signal; failure
-            // is observable only via the return code we deliberately
-            // ignore (the child may have exited between read and kill).
-            unsafe {
-                libc::kill(gid, libc::SIGTERM);
+            // The child was started in its own session via `setsid`, so its
+            // pgid equals its pid. `kill_process_group` is the safe rustix
+            // wrapper around `killpg(2)`. We ignore the result: the child
+            // may have already exited between read and kill, and there is
+            // nothing actionable to do from a panic hook regardless.
+            if let Some(pgid) = rustix::process::Pid::from_raw(pid as i32) {
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+                recovery_event!(
+                    RecoverySeverity::Warning,
+                    Component::Llm,
+                    "panic_kill",
+                    pid = pid,
+                    "sent SIGTERM to llama-server process group from panic hook"
+                );
             }
-            recovery_event!(
-                RecoverySeverity::Warning,
-                Component::Llm,
-                "panic_kill",
-                pid = pid,
-                "sent SIGTERM to llama-server process group from panic hook"
-            );
         }
 
         previous(info);

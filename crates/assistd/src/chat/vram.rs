@@ -152,7 +152,6 @@ fn parse_meminfo_kb(value: &str) -> Option<u64> {
     value.trim().strip_suffix("kB")?.trim().parse().ok()
 }
 
-/// Parse `memory.used,memory.total` CSV from nvidia-smi. Multiple GPUs sum.
 fn parse_output(stdout: &[u8]) -> Result<VramInfo, String> {
     let text = std::str::from_utf8(stdout).map_err(|e| format!("invalid utf8: {e}"))?;
     let mut used = 0u64;

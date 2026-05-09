@@ -105,57 +105,71 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+/// Subsystem handles the daemon injects into [`build_tools`]. Bundled
+/// into one struct so the call site is a flat field initialiser rather
+/// than a dozen positional arguments.
+///
+/// Field notes:
+///
+/// - `overflow_dir` is owned so the caller chooses the path — kept as a
+///   distinct field for future call sites that need a different spill
+///   directory.
+/// - `confirmation_gate` is consulted by destructive bash commands. The
+///   daemon passes an `IpcConfirmationGate` that forwards prompts to the
+///   active IPC client (the TUI is one such client) and falls through to
+///   deny when no router is in scope.
+/// - `vision_gate` is a shared, runtime-mutable flag (see
+///   [`assistd_tools::VisionGate`]) initialised from a `/props` probe of
+///   the running llama-server. When the gate reports `supported = false`,
+///   the image-producing commands (`see`, `screenshot`) still register
+///   but their `run()` short-circuits with the
+///   `[error] …: vision not available …` line and their `summary()` flips
+///   so the LLM sees the unavailability in its tool schema. The gate is
+///   re-evaluated on every command invocation, so a daemon-side
+///   revalidation that flips it after a model swap takes effect without
+///   rebuilding the registry.
+/// - `memory_ops` is the combined CRUD façade backing the LLM-callable
+///   `remember` and `recall` tools. The daemon passes a SQLite-backed
+///   handle.
+/// - `window_manager` backs the LLM-callable `wm` command. The daemon
+///   passes either a connected `I3Backend` (when `[compositor].type =
+///   "i3"` and the i3 socket is reachable) or [`NoWindowManager`] when
+///   the configured backend is unavailable; the latter makes every `wm`
+///   subcommand short-circuit with a uniform "compositor not connected"
+///   error rather than failing per-subcommand.
+pub struct BuildToolsDeps<'a> {
+    pub config: &'a Config,
+    pub overflow_dir: PathBuf,
+    pub confirmation_gate: Arc<dyn ConfirmationGate>,
+    pub vision_gate: Arc<assistd_tools::VisionGate>,
+    pub memory_ops: Arc<MemoryOps>,
+    pub embedder: Arc<dyn Embedder>,
+    pub semantic: Arc<dyn SemanticStore>,
+    pub embed_tx: mpsc::Sender<EmbedJob>,
+    pub embedding_model: String,
+    pub window_manager: Arc<dyn WindowManager>,
+    pub mcp_tools: Vec<Box<dyn assistd_tools::Tool>>,
+}
+
 /// Build the tool registry consumed by the daemon. Clears and recreates
-/// `overflow_dir` so per-process spill files land in a known-empty
-/// location at every startup.
-///
-/// `overflow_dir` is taken as an owned parameter so the caller chooses
-/// the path — kept for future call sites that need a different spill
-/// directory.
-///
-/// `gate` is consulted by destructive bash commands. The daemon passes
-/// an `IpcConfirmationGate` that forwards prompts to the active IPC
-/// client (the TUI is one such client) and falls through to deny when
-/// no router is in scope.
-///
-/// `vision_gate` is a shared, runtime-mutable flag (see
-/// [`assistd_tools::VisionGate`]) initialised from a `/props` probe of
-/// the running llama-server. When the gate reports `supported = false`,
-/// the image-producing commands (`see`, `screenshot`) still register
-/// but their `run()` short-circuits with the
-/// `[error] …: vision not available …` line and their `summary()` flips
-/// so the LLM sees the unavailability in its tool schema. The gate is
-/// re-evaluated on every command invocation, so a daemon-side
-/// revalidation that flips it after a model swap takes effect without
-/// rebuilding the registry.
-///
-/// `memory_ops` is the combined CRUD façade backing the LLM-callable
-/// `remember` and `recall` tools. The daemon passes a SQLite-backed
-/// handle.
-///
-/// `window_manager` backs the LLM-callable `wm` command. The daemon
-/// passes either a connected `I3Backend` (when `[compositor].type =
-/// "i3"` and the i3 socket is reachable) or [`NoWindowManager`] when
-/// the configured backend is unavailable; the latter makes every `wm`
-/// subcommand short-circuit with a uniform "compositor not connected"
-/// error rather than failing per-subcommand.
-// Subsystem injection point — the daemon wires the cross-cutting
-// handles into the registered tools. The alternative shape (a builder
-// struct) saves nothing here because there's only one real call site.
-#[allow(clippy::too_many_arguments)]
-pub fn build_tools(
-    config: &Config,
-    overflow_dir: PathBuf,
-    gate: Arc<dyn ConfirmationGate>,
-    vision_gate: Arc<assistd_tools::VisionGate>,
-    memory_ops: Arc<MemoryOps>,
-    embedder: Arc<dyn Embedder>,
-    semantic: Arc<dyn SemanticStore>,
-    embed_tx: mpsc::Sender<EmbedJob>,
-    embedding_model: String,
-    window_manager: Arc<dyn WindowManager>,
-    mcp_tools: Vec<Box<dyn assistd_tools::Tool>>,
-) -> Result<Arc<ToolRegistry>> {
+/// [`BuildToolsDeps::overflow_dir`] so per-process spill files land in a
+/// known-empty location at every startup. See [`BuildToolsDeps`] for the
+/// role of each injected handle.
+pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
+    let BuildToolsDeps {
+        config,
+        overflow_dir,
+        confirmation_gate,
+        vision_gate,
+        memory_ops,
+        embedder,
+        semantic,
+        embed_tx,
+        embedding_model,
+        window_manager,
+        mcp_tools,
+    } = deps;
+
     if overflow_dir.exists() {
         std::fs::remove_dir_all(&overflow_dir).with_context(|| {
             format!(
@@ -242,7 +256,7 @@ pub fn build_tools(
     commands.register(SeeCommand::new(vision_gate.clone()));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
     commands.register(WebCommand::new());
-    commands.register(BashCommand::new(bash_cfg, sandbox, gate));
+    commands.register(BashCommand::new(bash_cfg, sandbox, confirmation_gate));
     commands.register(WmCommand::new(window_manager));
 
     let mut tools = ToolRegistry::new();
