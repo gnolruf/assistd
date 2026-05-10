@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn handles_multibyte_chars_with_url() {
         let mut b = SentenceBuffer::new(400);
-        let mut all = b.push("It’s at https://example.com — really. ");
+        let mut all = b.push("It’s at https://example.com, really. ");
         if let Some(t) = b.finish() {
             all.push(t);
         }
