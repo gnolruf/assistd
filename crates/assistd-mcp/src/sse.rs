@@ -121,17 +121,18 @@ impl SseMcpClient {
         });
 
         // Reader task. Holds the long-lived SSE connection.
-        let stream_task = tokio::spawn(read_loop(
-            http.clone(),
-            base_url.clone(),
-            headers.clone(),
-            correlator.clone(),
-            post_url.clone(),
-            cfg.label.clone(),
-            cancel_rx.clone(),
-            Some(endpoint_ready_tx),
+        let reader = ReadLoop {
+            http: http.clone(),
+            base_url: base_url.clone(),
+            headers: headers.clone(),
+            correlator: correlator.clone(),
+            post_url: post_url.clone(),
+            label: cfg.label.clone(),
+            cancel_rx: cancel_rx.clone(),
+            endpoint_ready_tx: Some(endpoint_ready_tx),
             done_tx,
-        ));
+        };
+        let stream_task = tokio::spawn(reader.run());
 
         // Wait briefly for the optional `endpoint` discovery event. If
         // we don't get one in 5s, fall back to assuming POSTs go to the
@@ -369,96 +370,111 @@ impl SseLifeline {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn read_loop(
+struct ReadLoop {
     http: reqwest::Client,
     base_url: Url,
     headers: HeaderMap,
     correlator: Arc<Correlator>,
     post_url: Arc<RwLock<Option<Url>>>,
     label: String,
-    mut cancel_rx: watch::Receiver<bool>,
-    mut endpoint_ready_tx: Option<oneshot::Sender<()>>,
+    cancel_rx: watch::Receiver<bool>,
+    endpoint_ready_tx: Option<oneshot::Sender<()>>,
     done_tx: oneshot::Sender<()>,
-) {
-    let resp = match http
-        .get(base_url.clone())
-        .headers(headers)
-        .header("Accept", "text/event-stream")
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
+}
+
+impl ReadLoop {
+    async fn run(self) {
+        let Self {
+            http,
+            base_url,
+            headers,
+            correlator,
+            post_url,
+            label,
+            mut cancel_rx,
+            mut endpoint_ready_tx,
+            done_tx,
+        } = self;
+
+        let resp = match http
+            .get(base_url.clone())
+            .headers(headers)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    target: "assistd::mcp",
+                    server = %label,
+                    "SSE connect failed: {e}",
+                );
+                correlator.fail_all(closed_err);
+                let _ = done_tx.send(());
+                return;
+            }
+        };
+        if !resp.status().is_success() {
             warn!(
                 target: "assistd::mcp",
                 server = %label,
-                "SSE connect failed: {e}",
+                status = %resp.status(),
+                "SSE GET returned non-success status",
             );
             correlator.fail_all(closed_err);
             let _ = done_tx.send(());
             return;
         }
-    };
-    if !resp.status().is_success() {
-        warn!(
-            target: "assistd::mcp",
-            server = %label,
-            status = %resp.status(),
-            "SSE GET returned non-success status",
-        );
-        correlator.fail_all(closed_err);
-        let _ = done_tx.send(());
-        return;
-    }
 
-    let mut stream = resp.bytes_stream();
-    let mut parser = EventParser::new();
+        let mut stream = resp.bytes_stream();
+        let mut parser = EventParser::new();
 
-    loop {
-        // Race the next chunk read against shutdown / ping-failure cancel.
-        let chunk = tokio::select! {
-            _ = cancel_rx.changed() => {
-                if *cancel_rx.borrow() {
-                    debug!(target: "assistd::mcp", server = %label, "SSE read cancelled");
+        loop {
+            // Race the next chunk read against shutdown / ping-failure cancel.
+            let chunk = tokio::select! {
+                _ = cancel_rx.changed() => {
+                    if *cancel_rx.borrow() {
+                        debug!(target: "assistd::mcp", server = %label, "SSE read cancelled");
+                        break;
+                    }
+                    continue;
+                }
+                chunk = stream.next() => chunk,
+            };
+
+            match chunk {
+                Some(Ok(bytes)) => {
+                    parser.push(&bytes);
+                    while let Some(event) = parser.next_event() {
+                        handle_event(
+                            event,
+                            &correlator,
+                            &post_url,
+                            &mut endpoint_ready_tx,
+                            &label,
+                        )
+                        .await;
+                    }
+                }
+                Some(Err(e)) => {
+                    warn!(
+                        target: "assistd::mcp",
+                        server = %label,
+                        "SSE stream error: {e}",
+                    );
                     break;
                 }
-                continue;
-            }
-            chunk = stream.next() => chunk,
-        };
-
-        match chunk {
-            Some(Ok(bytes)) => {
-                parser.push(&bytes);
-                while let Some(event) = parser.next_event() {
-                    handle_event(
-                        event,
-                        &correlator,
-                        &post_url,
-                        &mut endpoint_ready_tx,
-                        &label,
-                    )
-                    .await;
+                None => {
+                    debug!(target: "assistd::mcp", server = %label, "SSE stream ended");
+                    break;
                 }
             }
-            Some(Err(e)) => {
-                warn!(
-                    target: "assistd::mcp",
-                    server = %label,
-                    "SSE stream error: {e}",
-                );
-                break;
-            }
-            None => {
-                debug!(target: "assistd::mcp", server = %label, "SSE stream ended");
-                break;
-            }
         }
-    }
 
-    correlator.fail_all(closed_err);
-    let _ = done_tx.send(());
+        correlator.fail_all(closed_err);
+        let _ = done_tx.send(());
+    }
 }
 
 fn closed_err() -> RpcError {

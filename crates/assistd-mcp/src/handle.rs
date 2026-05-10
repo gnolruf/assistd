@@ -87,15 +87,16 @@ impl McpServerHandle {
 
         let (supervisor_shutdown_tx, supervisor_shutdown_rx) = watch::channel(false);
 
-        let supervisor_task = tokio::spawn(supervisor_loop(
-            name.clone(),
+        let supervisor = Supervisor {
+            name: name.clone(),
             transport_cfg,
-            initial.lifeline,
-            switch.clone(),
+            initial_lifeline: initial.lifeline,
+            switch: switch.clone(),
             health_tx,
             supervisor_shutdown_rx,
             external_shutdown_rx,
-        ));
+        };
+        let supervisor_task = tokio::spawn(supervisor.run());
 
         Ok(Self {
             name,
@@ -230,126 +231,139 @@ async fn spawn_transport(cfg: &TransportConfig) -> Result<TransportInstance, Mcp
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn supervisor_loop(
+struct Supervisor {
     name: String,
     transport_cfg: TransportConfig,
     initial_lifeline: Lifeline,
     switch: Arc<SwitchingClient>,
     health_tx: watch::Sender<HealthState>,
-    mut supervisor_shutdown_rx: watch::Receiver<bool>,
-    mut external_shutdown_rx: watch::Receiver<bool>,
-) {
-    info!(
-        target: "assistd::mcp",
-        server = %name,
-        transport = %transport_label(&transport_cfg),
-        "MCP supervisor running",
-    );
+    supervisor_shutdown_rx: watch::Receiver<bool>,
+    external_shutdown_rx: watch::Receiver<bool>,
+}
 
-    let mut consecutive_failures: u32 = 0;
-    let mut current_lifeline: Option<Lifeline> = Some(initial_lifeline);
-    let mut session_start = Instant::now();
+impl Supervisor {
+    async fn run(self) {
+        let Self {
+            name,
+            transport_cfg,
+            initial_lifeline,
+            switch,
+            health_tx,
+            mut supervisor_shutdown_rx,
+            mut external_shutdown_rx,
+        } = self;
 
-    loop {
-        // 1) Wait for the current transport to die or shutdown to fire.
-        match current_lifeline.take() {
-            Some(mut lifeline) => {
-                tokio::select! {
-                    _ = lifeline.wait() => {
-                        let ran_for = session_start.elapsed();
-                        warn!(
-                            target: "assistd::mcp",
-                            server = %name,
-                            ran_for_secs = ran_for.as_secs(),
-                            "MCP server transport died",
-                        );
-                        // Free the dead transport and any background tasks.
-                        lifeline.shutdown().await;
-                        if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
-                            consecutive_failures = 0;
-                        }
-                        // fall through to restart logic
-                    }
-                    _ = supervisor_shutdown_rx.changed() => {
-                        if *supervisor_shutdown_rx.borrow() {
-                            info!(target: "assistd::mcp", server = %name, "supervisor shutdown (handle.shutdown)");
-                            switch.swap(None).await;
+        info!(
+            target: "assistd::mcp",
+            server = %name,
+            transport = %transport_label(&transport_cfg),
+            "MCP supervisor running",
+        );
+
+        let mut consecutive_failures: u32 = 0;
+        let mut current_lifeline: Option<Lifeline> = Some(initial_lifeline);
+        let mut session_start = Instant::now();
+
+        loop {
+            // 1) Wait for the current transport to die or shutdown to fire.
+            match current_lifeline.take() {
+                Some(mut lifeline) => {
+                    tokio::select! {
+                        _ = lifeline.wait() => {
+                            let ran_for = session_start.elapsed();
+                            warn!(
+                                target: "assistd::mcp",
+                                server = %name,
+                                ran_for_secs = ran_for.as_secs(),
+                                "MCP server transport died",
+                            );
+                            // Free the dead transport and any background tasks.
                             lifeline.shutdown().await;
-                            return;
+                            if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
+                                consecutive_failures = 0;
+                            }
+                            // fall through to restart logic
                         }
-                    }
-                    _ = external_shutdown_rx.changed() => {
-                        if *external_shutdown_rx.borrow() {
-                            info!(target: "assistd::mcp", server = %name, "supervisor shutdown (daemon-wide)");
-                            switch.swap(None).await;
-                            lifeline.shutdown().await;
-                            return;
+                        _ = supervisor_shutdown_rx.changed() => {
+                            if *supervisor_shutdown_rx.borrow() {
+                                info!(target: "assistd::mcp", server = %name, "supervisor shutdown (handle.shutdown)");
+                                switch.swap(None).await;
+                                lifeline.shutdown().await;
+                                return;
+                            }
+                        }
+                        _ = external_shutdown_rx.changed() => {
+                            if *external_shutdown_rx.borrow() {
+                                info!(target: "assistd::mcp", server = %name, "supervisor shutdown (daemon-wide)");
+                                switch.swap(None).await;
+                                lifeline.shutdown().await;
+                                return;
+                            }
                         }
                     }
                 }
+                None => {
+                    // First iteration with no lifeline (after a failed restart).
+                }
             }
-            None => {
-                // First iteration with no lifeline (after a failed restart).
-            }
-        }
 
-        // 2) Mark unhealthy, swap the switching client to None so direct
-        //    consumers see ServerDown rather than calling a dead transport.
-        let _ = health_tx.send(HealthState::Restarting);
-        switch.swap(None).await;
+            // 2) Mark unhealthy, swap the switching client to None so direct
+            //    consumers see ServerDown rather than calling a dead transport.
+            let _ = health_tx.send(HealthState::Restarting);
+            switch.swap(None).await;
 
-        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-            error!(
-                target: "assistd::mcp",
-                server = %name,
-                attempts = consecutive_failures,
-                "MCP server reached {MAX_CONSECUTIVE_FAILURES} consecutive failures; marking permanently unhealthy",
-            );
-            let _ = health_tx.send(HealthState::Unhealthy);
-            // Park awaiting any shutdown signal.
-            tokio::select! {
-                _ = supervisor_shutdown_rx.changed() => {}
-                _ = external_shutdown_rx.changed() => {}
-            }
-            return;
-        }
-
-        // 3) Backoff before retry.
-        let delay = backoff_delay(consecutive_failures);
-        warn!(
-            target: "assistd::mcp",
-            server = %name,
-            attempt = consecutive_failures + 1,
-            cap = MAX_CONSECUTIVE_FAILURES,
-            "restarting MCP server in {delay:?}",
-        );
-        tokio::select! {
-            _ = tokio::time::sleep(delay) => {}
-            _ = supervisor_shutdown_rx.changed() => return,
-            _ = external_shutdown_rx.changed() => return,
-        }
-
-        // 4) Try to bring up a new transport.
-        match spawn_transport(&transport_cfg).await {
-            Ok(instance) => {
-                consecutive_failures = 0;
-                session_start = Instant::now();
-                switch.swap(Some(instance.client)).await;
-                let _ = health_tx.send(HealthState::Healthy);
-                info!(target: "assistd::mcp", server = %name, "MCP server restarted");
-                current_lifeline = Some(instance.lifeline);
-            }
-            Err(e) => {
-                consecutive_failures += 1;
-                warn!(
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                error!(
                     target: "assistd::mcp",
                     server = %name,
-                    attempt = consecutive_failures,
-                    error = %e,
-                    "MCP server restart failed",
+                    attempts = consecutive_failures,
+                    "MCP server reached {MAX_CONSECUTIVE_FAILURES} consecutive failures; marking permanently unhealthy",
                 );
-                // current_lifeline stays None; loop will retry with backoff.
+                let _ = health_tx.send(HealthState::Unhealthy);
+                // Park awaiting any shutdown signal.
+                tokio::select! {
+                    _ = supervisor_shutdown_rx.changed() => {}
+                    _ = external_shutdown_rx.changed() => {}
+                }
+                return;
+            }
+
+            // 3) Backoff before retry.
+            let delay = backoff_delay(consecutive_failures);
+            warn!(
+                target: "assistd::mcp",
+                server = %name,
+                attempt = consecutive_failures + 1,
+                cap = MAX_CONSECUTIVE_FAILURES,
+                "restarting MCP server in {delay:?}",
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = supervisor_shutdown_rx.changed() => return,
+                _ = external_shutdown_rx.changed() => return,
+            }
+
+            // 4) Try to bring up a new transport.
+            match spawn_transport(&transport_cfg).await {
+                Ok(instance) => {
+                    consecutive_failures = 0;
+                    session_start = Instant::now();
+                    switch.swap(Some(instance.client)).await;
+                    let _ = health_tx.send(HealthState::Healthy);
+                    info!(target: "assistd::mcp", server = %name, "MCP server restarted");
+                    current_lifeline = Some(instance.lifeline);
+                }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    warn!(
+                        target: "assistd::mcp",
+                        server = %name,
+                        attempt = consecutive_failures,
+                        error = %e,
+                        "MCP server restart failed",
+                    );
+                    // current_lifeline stays None; loop will retry with backoff.
+                }
             }
         }
     }
