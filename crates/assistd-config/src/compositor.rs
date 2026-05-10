@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Supported tiling compositors.
 ///
-/// `Auto` (the default) defers the choice to runtime detection — see
+/// `Auto` (the default) defers the choice to runtime detection; see
 /// [`detect_from_env`]. Existing configs with an explicit
 /// `type = "i3"` / `"sway"` / `"hyprland"` continue to override.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -37,7 +37,7 @@ impl Default for CompositorConfig {
 /// 2. `$I3SOCK` set → i3
 /// 3. `$HYPRLAND_INSTANCE_SIGNATURE` set → Hyprland
 /// 4. `$XDG_CURRENT_DESKTOP` matched case-insensitively
-/// 5. otherwise `None` — caller falls back to `NoWindowManager`
+/// 5. otherwise `None` (caller falls back to `NoWindowManager`)
 ///
 /// Pure / arg-driven so it's testable without mutating the process
 /// environment. Mirrors the style of `detect_wayland_compositor_from_env`

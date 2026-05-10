@@ -20,7 +20,7 @@
 //!
 //! [`MemoryStore`] is a small key/value surface scoped to **string
 //! values keyed by string keys**. Richer types (e.g. embeddings,
-//! conversation snapshots) are intentionally *not* on this trait —
+//! conversation snapshots) are intentionally *not* on this trait;
 //! they will live in higher-level adapters that serialize to/from this
 //! flat surface so the storage backend can stay simple. The methods
 //! mirror the four operations the agent loop will need at minimum:
@@ -35,7 +35,7 @@
 //! `MemoryStore` unconditionally and degrade gracefully on a build or
 //! environment where persistent storage isn't configured. `load`
 //! returns `Ok(None)`, `list` returns `Ok(vec![])`, and `save` /
-//! `delete` succeed silently — so an agent calling them in this
+//! `delete` succeed silently, so an agent calling them in this
 //! configuration just behaves as if it has no long-term memory.
 
 pub mod chunking;
@@ -71,7 +71,7 @@ pub struct MemoryRecord {
 pub trait MemoryStore: Send + Sync + 'static {
     /// Persist `value` under `key`. Overwrites any existing value at
     /// the same key. Concrete implementations decide their own
-    /// durability semantics (write-through vs. periodic flush) — the
+    /// durability semantics (write-through vs. periodic flush); the
     /// trait makes no guarantees beyond "the next `load(key)` from
     /// this process should observe the write".
     ///
@@ -87,14 +87,14 @@ pub trait MemoryStore: Send + Sync + 'static {
     /// reserved for backend failures).
     async fn load(&self, key: &str) -> Result<Option<String>>;
 
-    /// Remove `key`. No-op when the key is already absent — this
+    /// Remove `key`. No-op when the key is already absent; this
     /// matches the agent-loop usage pattern of "forget X if you
     /// remember it" and saves a probe-then-delete round trip.
     async fn delete(&self, key: &str) -> Result<()>;
 
     /// Remove the row with `id`. Returns `Ok(Some(key))` with the key
-    /// of the deleted row on hit, `Ok(None)` when no row matched —
-    /// callers that need to distinguish hit/miss (the `assistd memory
+    /// of the deleted row on hit, `Ok(None)` when no row matched.
+    /// Callers that need to distinguish hit/miss (the `assistd memory
     /// forget <id>` CLI) use the option, callers that don't can ignore
     /// it. Errs only on backend failure.
     async fn delete_by_id(&self, id: i64) -> Result<Option<String>>;
@@ -107,7 +107,7 @@ pub trait MemoryStore: Send + Sync + 'static {
 
     /// Enumerate full rows whose key starts with `prefix`. Like
     /// [`MemoryStore::list`] but returns `(id, key, value)` triples in
-    /// one round trip — used by the `assistd memory list` CLI which
+    /// one round trip; used by the `assistd memory list` CLI which
     /// prints all three fields. Order is unspecified at the trait
     /// level (the SQLite impl yields lexicographic by key).
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>>;
@@ -146,6 +146,7 @@ impl MemoryStore for NoMemoryStore {
     }
 }
 
+/// Returns the crate version string from `CARGO_PKG_VERSION`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

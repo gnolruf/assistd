@@ -36,7 +36,7 @@ pub struct PendingAttachment {
     pub mime: String,
     pub bytes: Vec<u8>,
     /// Pre-built terminal-graphics protocol for inline thumbnail
-    /// rendering. `None` on terminals without graphics support — the
+    /// rendering. `None` on terminals without graphics support; the
     /// `📎 attached: ...` info line still appears either way.
     pub protocol: Option<StatefulProtocol>,
 }
@@ -57,7 +57,7 @@ impl PendingAttachment {
 /// Payload for [`ChatEvent::AttachLoaded`]. Boxed inside the enum so a
 /// `Vec<u8>` of image bytes plus a `StatefulProtocol` (which holds its
 /// own pre-built per-cell terminal-graphics buffers) doesn't bloat the
-/// other variants — `Wire(Event)` and `WireError(String)` were paying
+/// other variants; `Wire(Event)` and `WireError(String)` were paying
 /// the maximum-variant size on every send before the box.
 pub struct AttachLoadedPayload {
     #[allow(dead_code)]
@@ -107,7 +107,7 @@ impl std::fmt::Debug for ChatEvent {
 }
 
 /// Pending destructive-command prompt displayed as an overlay. Only one
-/// is ever active at a time — the agent loop on the daemon side blocks
+/// is ever active at a time; the agent loop on the daemon side blocks
 /// on the gate until we send the `ConfirmResponse`.
 pub struct ConfirmationModal {
     /// Renders as the modal body (script + matched_pattern). Reuses the
@@ -119,18 +119,35 @@ pub struct ConfirmationModal {
     confirm_id: String,
 }
 
+/// Top-level TUI application state.
+///
+/// Owns the output pane, input line, throughput meter, resource stats, and
+/// the IPC connection to the daemon. The `on_*` methods are pure reducers;
+/// I/O is confined to [`App::spawn_query`] and the attach handler.
 pub struct App {
+    /// Scrollable output region.
     pub output: OutputPane,
+    /// Single-line input with readline keybindings and history.
     pub input: InputLine,
+    /// Token-rate meter for the status bar.
     pub throughput: ThroughputMeter,
+    /// Live VRAM / RAM readings.
     pub resources: ResourceState,
+    /// Display name of the loaded model.
     pub model_name: String,
+    /// `true` while a query stream is open.
     pub generating: bool,
+    /// Set to `true` to exit the event loop.
     pub quitting: bool,
+    /// Index into [`SPINNER_CHARS`], incremented on each tick.
     pub spinner: usize,
+    /// Transient status-bar message with its display timestamp. Cleared by [`App::on_tick`] after [`NOTICE_HOLD`].
     pub notice: Option<(String, Instant)>,
+    /// Height of the output area as of the last render, used for scrolling math.
     pub last_output_height: u16,
+    /// Last-known daemon presence state; `None` until the first poll response.
     pub presence_state: Option<PresenceState>,
+    /// Idle-sleep thresholds copied from config for the local countdown display.
     pub sleep_cfg: SleepConfig,
     /// Local wallclock for the most recent user activity (typing /
     /// submitting / answering a modal). Used to compute the
@@ -139,10 +156,11 @@ pub struct App {
     /// display approximation that drifts at most a couple seconds.
     last_activity_at: Instant,
     /// Set at chat startup from a daemon `GetCapabilities` probe.
-    /// `false` means the loaded model has no mmproj — `/attach`
+    /// `false` means the loaded model has no mmproj; `/attach`
     /// rejects with the AC `vision not available` error and the
     /// status bar renders `vision: off`.
     pub vision_enabled: bool,
+    /// Active confirmation modal, if any. Only one can be open at a time.
     pub modal: Option<ConfirmationModal>,
     /// Push-to-talk capture state. Updated by `Event::VoiceState`
     /// flowing in over the wire. Rendered as an indicator in
@@ -156,7 +174,7 @@ pub struct App {
     /// Command of the in-flight tool call, captured on `Event::ToolCall`
     /// and consumed on the matching `Event::ToolResult` so the
     /// call+result pair becomes one `ToolBlock`. The agent loop is
-    /// strictly serial — only one tool runs at a time — so a single
+    /// strictly serial (only one tool runs at a time), so a single
     /// slot suffices.
     pending_tool_call: Option<(String, String)>,
     /// Images staged by `/attach`, drained into the user's next
@@ -207,6 +225,7 @@ struct BranchListEntry {
 }
 
 impl App {
+    /// Construct a new `App` with the given IPC handle and configuration.
     pub fn new(
         ipc: Arc<IpcClient>,
         chat_tx: mpsc::Sender<ChatEvent>,
@@ -257,8 +276,6 @@ impl App {
         matched_pattern: String,
     ) {
         if self.modal.is_some() {
-            // Already prompting; auto-deny the second prompt so the
-            // agent loop doesn't hang.
             self.send_confirm_response(&confirm_id, false);
             return;
         }
@@ -272,19 +289,12 @@ impl App {
         });
     }
 
-    /// Consume the modal (if any) and send the user's Y/N decision
-    /// back to the daemon as a `Request::ConfirmResponse`. Used by
-    /// both the Y/N key handlers and the quit path.
     fn resolve_modal(&mut self, decision: bool) {
         if let Some(modal) = self.modal.take() {
             self.send_confirm_response(&modal.confirm_id, decision);
         }
     }
 
-    /// Enqueue a `ConfirmResponse` onto the active query's writer
-    /// channel. No-op if no query is in flight (shouldn't happen — a
-    /// modal can only have come from an active query — but handle
-    /// defensively rather than panic).
     fn send_confirm_response(&self, confirm_id: &str, allow: bool) {
         let Some(writer) = self.active_writer.clone() else {
             tracing::warn!(
@@ -310,32 +320,29 @@ impl App {
         self.modal.is_some()
     }
 
+    /// Returns `true` when the event loop should exit.
     pub fn should_quit(&self) -> bool {
         self.quitting
     }
 
+    /// Current spinner character for the status bar.
     pub fn spinner_char(&self) -> char {
         SPINNER_CHARS[self.spinner % SPINNER_CHARS.len()]
     }
 
+    /// Active notice text, if one is currently being displayed.
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_ref().map(|(s, _)| s.as_str())
     }
 
+    /// Record the output pane's rendered height so scrolling math stays correct.
     pub fn set_output_height(&mut self, h: u16) {
         self.last_output_height = h;
     }
 
+    /// Handle a terminal key event, routing to the modal or the input line.
     pub fn on_key(&mut self, ev: KeyEvent) {
-        // Any key counts as user activity — even a Page Up scroll
-        // means the user is at the keyboard. The daemon's idle
-        // monitor does its own tracking based on Query traffic; this
-        // local clock just keeps the status-bar countdown live.
         self.touch_activity();
-        // Modal takes precedence over every other keybinding: when the
-        // agent is blocked on a confirmation prompt, the only meaningful
-        // input is Y / N / Esc. Scrolling and input-line edits stay
-        // inert until the user decides.
         if self.modal.is_some() {
             self.handle_modal_key(ev);
             return;
@@ -368,9 +375,6 @@ impl App {
                 self.submit_typed(text);
             }
             InputAction::Quit => {
-                // Closing during a pending modal isn't currently
-                // reachable — modal intercepts input — but guard anyway
-                // so the daemon's gate always gets a decision.
                 self.resolve_modal(false);
                 self.quitting = true;
             }
@@ -386,13 +390,12 @@ impl App {
                 self.resolve_modal(false);
             }
             _ => {
-                // Swallow every other key while the modal is open — the
-                // agent is blocked, so keystrokes meant for the input
-                // line would be confusing.
+                // Swallow every other key while the modal is open
             }
         }
     }
 
+    /// Update live resource (VRAM / RAM) readings from the probe background task.
     pub fn on_resources(&mut self, v: ResourceState) {
         self.resources = v;
     }
@@ -552,11 +555,6 @@ impl App {
                 if text.trim().is_empty() {
                     self.set_notice("no speech detected");
                 } else {
-                    // The daemon auto-dispatches the transcription as
-                    // a Query on the same connection, so the next
-                    // events on this stream will be Deltas. We still
-                    // render the user-prompt locally so the
-                    // conversation reads naturally.
                     self.output.push_user(&text);
                     self.output.reset_scroll();
                     self.output.begin_assistant();
@@ -621,9 +619,6 @@ impl App {
                 ..
             } => match self.in_flight_branch_op {
                 Some(BranchOp::Switch) => {
-                    // Wipe the chat pane; HistoryEntry events follow,
-                    // each pushed into the now-empty pane to repaint
-                    // the loaded branch.
                     self.output.clear();
                     self.output
                         .push_info(&format!("[switched to branch '{name}']"));
@@ -643,39 +638,26 @@ impl App {
                 content,
                 tool_name,
                 ..
-            } => {
-                // Render replayed history into the output pane. We
-                // intentionally re-use push_user / append_assistant so
-                // styling matches a live conversation. System messages
-                // (e.g. summarized history) render as info lines so
-                // they're visually distinct from the prompt/reply pair.
-                match role.as_str() {
-                    "user" => {
-                        // Tool-result rows are persisted as role=tool,
-                        // not role=user, so anything we see here is a
-                        // genuine user prompt.
-                        self.output.push_user(&content);
-                    }
-                    "assistant" => {
-                        if !content.is_empty() {
-                            self.output.begin_assistant();
-                            self.output.append_assistant(&content);
-                            self.output.finish_assistant();
-                        }
-                    }
-                    "tool" => {
-                        let name = tool_name.unwrap_or_default();
-                        // Render tool-result rows as a collapsed tool
-                        // block with placeholder timing — we don't have
-                        // the original duration on replay.
-                        self.output.push_tool_block(name, content, 0, 0);
-                    }
-                    "system" => {
-                        self.output.push_info(&content);
-                    }
-                    _ => self.output.push_info(&content),
+            } => match role.as_str() {
+                "user" => {
+                    self.output.push_user(&content);
                 }
-            }
+                "assistant" => {
+                    if !content.is_empty() {
+                        self.output.begin_assistant();
+                        self.output.append_assistant(&content);
+                        self.output.finish_assistant();
+                    }
+                }
+                "tool" => {
+                    let name = tool_name.unwrap_or_default();
+                    self.output.push_tool_block(name, content, 0, 0);
+                }
+                "system" => {
+                    self.output.push_info(&content);
+                }
+                _ => self.output.push_info(&content),
+            },
             Event::UndoApplied {
                 removed_messages,
                 last_user_text,
@@ -715,8 +697,6 @@ impl App {
                 self.in_flight_branch_op = None;
                 self.branches_buffer.clear();
             }
-            // Memory* events shouldn't appear on a query/PTT stream —
-            // the daemon only emits them on `Request::Memory*`.
             Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }
@@ -726,10 +706,6 @@ impl App {
         }
     }
 
-    /// Flush the buffered `/branches` listing into the chat pane as a
-    /// table-ish block. Active session branches render first (already
-    /// sorted by the daemon), each line shows current marker + name +
-    /// parent + msg count.
     fn render_branches_buffer(&mut self) {
         if self.branches_buffer.is_empty() {
             self.output.push_info("[no branches]");
@@ -765,6 +741,7 @@ impl App {
         }
     }
 
+    /// Advance the spinner and expire stale notices.
     pub fn on_tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
         if let Some((_, at)) = &self.notice {
@@ -778,10 +755,6 @@ impl App {
         self.notice = Some((text.to_string(), Instant::now()));
     }
 
-    /// Tab completion for `/attach <partial-path>`. Returns `true` if
-    /// completion fired (so the caller skips its fallback action), or
-    /// `false` when the input isn't an attach line and the caller's
-    /// default Tab behavior should run.
     fn try_complete_attach_path(&mut self) -> bool {
         let buffer = self.input.buffer();
         let partial = if let Some(rest) = buffer.strip_prefix("/attach ") {
@@ -848,10 +821,6 @@ impl App {
         true
     }
 
-    /// Submit text typed at the input line. Slash-command parsing
-    /// only happens here — a voice transcription that contains
-    /// "/attach foo" is dispatched as plain text by the daemon's
-    /// auto-Query path, which never lands here.
     fn submit_typed(&mut self, text: String) {
         let is_attach = text.starts_with("/attach ") || text.trim() == "/attach";
         if is_attach && !self.vision_enabled {
@@ -889,7 +858,7 @@ impl App {
             return;
         }
         if self.generating {
-            self.set_notice("still generating — please wait");
+            self.set_notice("still generating, please wait");
             return;
         }
         let pending = std::mem::take(&mut self.pending_attachments);
@@ -985,18 +954,13 @@ impl App {
         });
     }
 
-    /// Spawn a one-shot daemon connection for a branch command and
-    /// pump its streaming events onto `chat_tx::Wire`. The TUI's
-    /// `on_wire_event` then routes by `in_flight_branch_op` to the
-    /// right rendering path. Single-flight: rejects when one branch
-    /// command (or a generation) is already in flight.
     fn spawn_branch_command(&mut self, op: BranchOp, req: Request) {
         if self.in_flight_branch_op.is_some() {
-            self.set_notice("branch command in flight — please wait");
+            self.set_notice("branch command in flight, please wait");
             return;
         }
         if self.generating {
-            self.set_notice("still generating — please wait");
+            self.set_notice("still generating, please wait");
             return;
         }
         self.in_flight_branch_op = Some(op);
@@ -1092,9 +1056,6 @@ impl App {
         let ipc = self.ipc.clone();
         let chat_tx = self.chat_tx.clone();
 
-        // Channel for outgoing requests from the main thread (modal Y/N
-        // → ConfirmResponse). Capacity 8 is generous; one in-flight
-        // confirm at a time is the only realistic shape.
         let (writer_tx, mut writer_rx) = mpsc::channel::<Request>(8);
         self.active_writer = Some(writer_tx);
 
@@ -1134,9 +1095,6 @@ impl App {
                 }
             };
 
-            // Drive the connection: read events from the daemon AND
-            // forward outgoing requests from the modal. Both halves
-            // share the same `DialogConnection`, so we tokio::select.
             loop {
                 tokio::select! {
                     maybe = conn.next_event() => {
@@ -1175,10 +1133,6 @@ impl App {
                                 }
                             }
                             None => {
-                                // Sender dropped. Don't close the read
-                                // half — the daemon may still emit
-                                // events. Replace the branch with
-                                // `pending` so it never fires again.
                                 std::future::pending::<()>().await;
                             }
                         }
@@ -1189,11 +1143,6 @@ impl App {
     }
 }
 
-/// Parse a slash command of the shape `/<verb> <arg…>`. Returns
-/// `Some(arg)` when `text` starts with `<verb> ` (note the trailing
-/// space), `None` otherwise. Trailing whitespace is trimmed; the
-/// `text == verb` form returns `Some("")` so callers can distinguish
-/// "no argument" from "not this verb".
 fn parse_slash_arg<'a>(text: &'a str, verb: &str) -> Option<&'a str> {
     let trimmed = text.trim_end();
     if trimmed == verb {
@@ -1273,7 +1222,7 @@ mod tests {
 
     fn test_app_with(vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
         let (tx, rx) = mpsc::channel::<ChatEvent>(16);
-        // Bogus socket path — these tests never open a real connection.
+        // Bogus socket path; these tests never open a real connection.
         let ipc = Arc::new(IpcClient::with_path(std::path::PathBuf::from(
             "/tmp/assistd-test-nonexistent.sock",
         )));

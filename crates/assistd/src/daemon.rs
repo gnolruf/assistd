@@ -1,36 +1,34 @@
+//! Daemon entrypoint: parses args, loads/validates config, brings up
+//! every subsystem (each via its own `*_init` sibling module), assembles
+//! [`AppState`], serves the IPC socket, and orchestrates an ordered
+//! shutdown when the run loop exits.
+//!
+//! Each subsystem (voice, wm, mcp, memory, embed) lives in its own
+//! `<name>_init.rs` module and exposes a composite "Subsystem" struct
+//! plus an `init(...)` async constructor. The daemon is a thin
+//! orchestrator: it composes the subsystems' Arc'd trait handles into
+//! [`AppState`] and retains the shutdown-relevant pieces in
+//! [`DaemonShutdown`] for ordered teardown.
+
 use anyhow::Result;
-use assistd_core::{
-    AppState, CompositorType, Config, ContinuousListener, NoContinuousListener, NoVoiceInput,
-    NoVoiceOutput, NoWindowManager, PresenceManager, VoiceInput, VoiceOutput, WindowManager,
-};
-use assistd_embed::{EmbedService, Embedder, LlamaEmbedder, NoEmbedder, spawn_embedder_task};
+use assistd_core::{AppState, Config, PresenceManager};
 use assistd_llm::LlamaChatClient;
-use assistd_memory::{
-    ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, NoSemanticStore,
-    SemanticStore, SqliteConversationStore, SqliteHandle, SqliteMemoryStore, SqliteSemanticStore,
-};
 use assistd_tools::{IpcConfirmationGate, MemoryOps};
-use assistd_voice::{
-    MicContinuousListener, MicVoiceInput, QueueConfig, QueuedTranscriber, Transcriber,
-    WhisperTranscriberBuilder, build_cpu_fallback,
-};
-use assistd_wm::{I3Backend, SwayBackend, WmHandle};
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tracing::info;
 
-use assistd_core::{McpServerConfig, McpTransport};
-use assistd_mcp::{
-    McpServerHandle, SseConfig, StdioConfig, TransportConfig, adapt_handle_as_tools,
+use crate::{
+    embed_init, gpu_monitor, hotkey, idle_monitor, listen_dispatcher, mcp_init, memory_init,
+    voice_init, wm_init,
 };
 
-use crate::voice_probe::PresenceGpuProbe;
-use crate::{gpu_monitor, hotkey, idle_monitor, listen_dispatcher};
-
+/// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
 pub struct DaemonArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
@@ -38,16 +36,25 @@ pub struct DaemonArgs {
     pub config: Option<PathBuf>,
     /// Defer the global PTT hotkey to a connected client (e.g. the
     /// chat TUI). Set automatically when the daemon is auto-spawned by
-    /// `assistd chat`. With this flag the daemon does not register a
-    /// global hotkey itself; voice capture is driven exclusively by
-    /// IPC `PttStart`/`PttStop` requests. Useful when the operator
-    /// wants the TUI's hotkey grab to win without a key-binding race.
+    /// `assistd chat`.
     #[arg(long, default_value_t = false)]
     pub client_mode: bool,
 }
 
+/// Start the assistd daemon: load config, init subsystems, serve the IPC socket.
+///
+/// # Errors
+///
+/// Returns an error if config loading, validation, or the IPC socket fails.
 pub async fn run(args: DaemonArgs) -> Result<()> {
     init_tracing();
+
+    if args.client_mode {
+        match rustix::process::setsid() {
+            Ok(_) => info!("detached: became session leader"),
+            Err(e) => tracing::warn!("setsid() failed (continuing): {e}"),
+        }
+    }
 
     let config_path = match args.config {
         Some(p) => p,
@@ -63,7 +70,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
 
     info!(
-        "assistd v{} — local model agent OS assistant daemon",
+        "assistd v{}: local model agent OS assistant daemon",
         assistd_core::version()
     );
     info!("  core  v{}", assistd_core::version());
@@ -73,36 +80,9 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     info!("  wm    v{}", assistd_wm::version());
     info!("loaded config from {}", config_path.display());
 
-    // One watch channel is the single source of truth for "shutdown requested":
-    // the signal task flips it, the supervisor and the socket listener both
-    // subscribe.
     let (shutdown_tx, _) = watch::channel(false);
+    spawn_signal_handler(&shutdown_tx);
 
-    {
-        let signal_tx = shutdown_tx.clone();
-        assistd_core::spawn_supervised(
-            "signal_handler",
-            assistd_core::Component::Daemon,
-            async move {
-                let mut term = match signal(SignalKind::terminate()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("failed to install SIGTERM handler: {e}");
-                        return;
-                    }
-                };
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => info!("received SIGINT"),
-                    _ = term.recv() => info!("received SIGTERM"),
-                }
-                let _ = signal_tx.send(true);
-            },
-        );
-    }
-
-    // Bring the daemon up in Active: PresenceManager cold-starts llama-server
-    // (supervisor spawns, /health = 200, /models/load completes) before it
-    // returns. Socket serving starts only after this succeeds.
     let presence = PresenceManager::new_active(
         config.llama_server.clone(),
         config.model.clone(),
@@ -115,20 +95,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         config.llama_server.host, config.llama_server.port
     );
 
-    // Install the recovery panic hook now that we have a presence
-    // handle. Any panic from this point forward (including in detached
-    // tasks via the default panic hook chain) will SIGTERM the running
-    // llama-server before propagating, and emit a structured recovery
-    // event with the panic location and message. The hook holds a
-    // `Weak<PresenceManager>` so it cannot keep the manager alive past
-    // daemon shutdown.
     assistd_core::install_panic_hook(Arc::downgrade(&presence));
 
-    // Capability probe: ask the now-ready llama-server for the loaded
-    // model id and whether it has a vision encoder. The shared
-    // VisionGate drives see/screenshot/attach_image; the
-    // VisionRevalidator re-probes at the top of each query so a model
-    // swap on the running llama-server flips the gate transparently.
     let initial_vision_state =
         assistd_llm::probe_capabilities(&config.llama_server.host, config.llama_server.port).await;
     if initial_vision_state.vision_supported {
@@ -144,9 +112,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         config.llama_server.port,
     );
 
-    // Build the health probe over the presence manager so the chat
-    // client can detect mid-stream llama-server crashes and the agent
-    // loop can wait for the supervisor to recover before replaying.
     let health_probe: std::sync::Arc<dyn assistd_llm::LlmHealthProbe> = std::sync::Arc::new(
         assistd_core::presence::PresenceLlmHealthProbe::new(presence.clone()),
     );
@@ -158,148 +123,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         Some(health_probe.clone()),
     )?;
 
-    // Voice input: build the mic-backed implementation when the user
-    // has enabled it. The whisper transcriber is built once and shared
-    // between the PTT `MicVoiceInput` and the continuous
-    // `MicContinuousListener` so only one whisper/VAD model is loaded.
-    // Eager download + GPU probe happens here; failures surface at
-    // startup rather than on the first mic press.
-    let (voice, listener): (Arc<dyn VoiceInput>, Arc<dyn ContinuousListener>) = if config
-        .voice
-        .enabled
-    {
-        info!(
-            "voice: building mic input ({})",
-            config.voice.transcription.model
-        );
-        match WhisperTranscriberBuilder::from_config(&config.voice.transcription)
-            .build()
-            .await
-        {
-            Ok(primary) => {
-                let is_gpu = primary.is_gpu();
-                let primary: Arc<dyn Transcriber> = Arc::new(primary);
+    let voice = voice_init::init(&config, &presence).await;
 
-                // When the primary context runs on the GPU and CPU
-                // fallback is enabled, wrap it in a QueuedTranscriber
-                // that consults PresenceManager + NVML before each
-                // transcription. In the CPU-only case we hand the
-                // primary directly to the PTT and listen pipelines
-                // (no contention window, no Queued state flash).
-                let transcriber: Arc<dyn Transcriber> = if is_gpu
-                    && config.voice.transcription.cpu_fallback_enabled
-                {
-                    let probe = Arc::new(PresenceGpuProbe::new(
-                        presence.clone(),
-                        config.sleep.gpu_allowlist.clone(),
-                    ));
-                    let queue_cfg = QueueConfig {
-                        gpu_busy_timeout_ms: config.voice.transcription.gpu_busy_timeout_ms,
-                        cpu_fallback_enabled: config.voice.transcription.cpu_fallback_enabled,
-                    };
-                    let cpu_cfg = config.voice.transcription.clone();
-                    let cpu_factory: assistd_voice::CpuFallbackFactory = Arc::new(move || {
-                        let cfg = cpu_cfg.clone();
-                        Box::pin(async move {
-                            let t = build_cpu_fallback(&cfg, None).await?;
-                            Ok(Arc::new(t) as Arc<dyn Transcriber>)
-                        })
-                    });
-                    info!(
-                        "voice: GPU transcription active; CPU fallback armed \
-                         (gpu_busy_timeout_ms={})",
-                        queue_cfg.gpu_busy_timeout_ms
-                    );
-                    Arc::new(QueuedTranscriber::new(
-                        primary.clone(),
-                        true,
-                        cpu_factory,
-                        probe,
-                        queue_cfg,
-                    ))
-                } else {
-                    if is_gpu {
-                        info!("voice: GPU transcription active; CPU fallback disabled by config");
-                    } else {
-                        info!("voice: CPU transcription active");
-                    }
-                    primary.clone()
-                };
-
-                let mic = MicVoiceInput::new(
-                    transcriber.clone(),
-                    config.voice.mic_device.clone(),
-                    config.voice.max_recording_secs.max(1),
-                );
-                let listener_impl: Arc<dyn ContinuousListener> = if config.voice.continuous.enabled
-                {
-                    info!(
-                        "voice.continuous: enabled (hotkey={:?}, start_on_launch={})",
-                        config.voice.continuous.hotkey, config.voice.continuous.start_on_launch
-                    );
-                    Arc::new(MicContinuousListener::new(transcriber, &config.voice))
-                } else {
-                    info!("voice.continuous: disabled in config");
-                    Arc::new(NoContinuousListener::new())
-                };
-                (Arc::new(mic), listener_impl)
-            }
-            Err(e) => {
-                tracing::warn!("voice input failed to initialize: {e:#}; PTT commands will error");
-                (
-                    Arc::new(NoVoiceInput::new()),
-                    Arc::new(NoContinuousListener::new()),
-                )
-            }
-        }
-    } else {
-        info!("voice: disabled in config (voice.enabled = false)");
-        (
-            Arc::new(NoVoiceInput::new()),
-            Arc::new(NoContinuousListener::new()),
-        )
-    };
-
-    // Voice output (Piper TTS): try-warn-fallback, identical pattern
-    // to voice input above. On any error — missing binary, voice
-    // download fails, audio device unavailable, health-check synth
-    // fails — log a warning and substitute `NoVoiceOutput` so LLM
-    // streaming continues silently.
-    let voice_output_inner: Arc<dyn VoiceOutput> = if config.voice.synthesis.enabled {
-        info!(
-            "voice.synthesis: starting Piper ({})",
-            config.voice.synthesis.voice
-        );
-        match assistd_voice::PiperVoiceOutput::start(config.voice.synthesis.clone()).await {
-            Ok(p) => {
-                info!("voice.synthesis: Piper ready");
-                Arc::new(p)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "voice.synthesis failed to initialize: {e:#}; speech output disabled"
-                );
-                Arc::new(NoVoiceOutput)
-            }
-        }
-    } else {
-        info!("voice.synthesis: disabled in config (voice.synthesis.enabled = false)");
-        Arc::new(NoVoiceOutput)
-    };
-    // Wrap in a runtime controller so the toggle/skip/PTT-interrupt
-    // controls all flow through one shared object. Initial enabled
-    // state mirrors config; runtime changes do not persist.
-    let voice_output = assistd_voice::VoiceOutputController::new(
-        voice_output_inner,
-        config.voice.synthesis.enabled,
-    );
-
-    // In `--client-mode` the daemon defers the global hotkey to the
-    // attached client (the chat TUI grabs it instead). Two processes
-    // can't both grab the same X11/Wayland key, and the TUI is what
-    // the user is looking at, so it wins. Daemon-internal voice
-    // capture in this mode flows exclusively through IPC PttStart /
-    // PttStop requests.
     let hotkey_handle = if args.client_mode {
         info!("hotkey: deferred to client (--client-mode)");
         None
@@ -307,10 +132,12 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         hotkey::spawn_listener(
             &config.presence,
             &config.voice,
-            Some(presence.clone()),
-            voice.clone(),
-            Some(listener.clone()),
-            Some(voice_output.clone()),
+            hotkey::Subsystems {
+                presence: Some(presence.clone()),
+                voice: voice.input.clone(),
+                listener: Some(voice.listener.clone()),
+                voice_output: Some(voice.output.clone()),
+            },
             shutdown_tx.subscribe(),
         )
     };
@@ -319,489 +146,77 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
 
-    // Persistent memory: open the SQLite store if enabled. The
-    // `try-warn-fallback` shape mirrors voice input/output above —
-    // any failure (bad path, FS readonly, etc.) downgrades to the
-    // `NoMemoryStore` placeholder so the daemon still starts and the
-    // user gets a startup warning instead of a hard error.
-    //
-    // Opened BEFORE `build_tools` because the LLM-callable `remember`
-    // and `recall` tools need an `Arc<MemoryOps>` to register against;
-    // the placeholder fallback keeps the registration unconditional so
-    // a startup error doesn't change the tool surface visible to the
-    // model.
-    let (
-        memory_store,
-        conversation_store,
-        memory_writer_handle,
-        session_id_for_state,
-        branch_id_for_state,
-        resumed_history,
-        sqlite_handle,
-    ) = if config.memory.enabled {
-        let db_path = std::path::PathBuf::from(&config.memory.db_path);
-        match SqliteHandle::open(&db_path, shutdown_tx.subscribe()).await {
-            Ok((handle, writer_handle)) => {
-                let handle = Arc::new(handle);
-                let conv_store = Arc::new(SqliteConversationStore::new(handle.clone()));
-                let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
-                // Try to resume the most recent unended session whose
-                // prior daemon is no longer alive (`kill -0` returns
-                // ESRCH). On success we reuse session_id + branch_id
-                // and replay the active branch's messages back into
-                // the chat backend; on miss / liveness conflict we
-                // start fresh.
-                let mut resumed_history: Vec<assistd_memory::HistoryRow> = Vec::new();
-                let (session, branch) = match conv_store.find_resumable_session().await {
-                    Ok(Some(cand)) if !pid_is_alive(cand.daemon_pid) => {
-                        info!(
-                            "memory: resuming prior session {} (branch={})",
-                            cand.session_id, cand.current_branch_id.0
-                        );
-                        match conv_store.load_branch_history(cand.current_branch_id).await {
-                            Ok(rows) => {
-                                resumed_history = rows;
-                            }
-                            Err(e) => tracing::warn!(
-                                "memory: load_branch_history failed for resume ({e:#})"
-                            ),
-                        }
-                        (Arc::new(cand.session_id), cand.current_branch_id)
-                    }
-                    Ok(_) => {
-                        match conv_store
-                            .begin_session_with_main_branch(std::process::id())
-                            .await
-                        {
-                            Ok((s, b)) => {
-                                info!(
-                                    "memory: SQLite ready at {} (session={}, branch={})",
-                                    db_path.display(),
-                                    s,
-                                    b.0
-                                );
-                                (Arc::new(s), b)
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "memory: begin_session_with_main_branch failed: {e:#}; \
-                                     continuing without session row"
-                                );
-                                (
-                                    Arc::new(assistd_memory::SessionId::new()),
-                                    assistd_memory::BranchId(0),
-                                )
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "memory: find_resumable_session failed: {e:#}; starting fresh"
-                        );
-                        match conv_store
-                            .begin_session_with_main_branch(std::process::id())
-                            .await
-                        {
-                            Ok((s, b)) => (Arc::new(s), b),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "memory: begin_session_with_main_branch failed: {e:#}"
-                                );
-                                (
-                                    Arc::new(assistd_memory::SessionId::new()),
-                                    assistd_memory::BranchId(0),
-                                )
-                            }
-                        }
-                    }
-                };
-                (
-                    mem_store as Arc<dyn MemoryStore>,
-                    conv_store as Arc<dyn ConversationStore>,
-                    Some(writer_handle),
-                    session,
-                    branch,
-                    resumed_history,
-                    Some(handle),
-                )
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "memory: failed to open {} ({e:#}); persistence disabled this run",
-                    db_path.display()
-                );
-                (
-                    Arc::new(NoMemoryStore) as Arc<dyn MemoryStore>,
-                    Arc::new(NoConversationStore) as Arc<dyn ConversationStore>,
-                    None,
-                    Arc::new(assistd_memory::SessionId::new()),
-                    assistd_memory::BranchId(0),
-                    Vec::new(),
-                    None,
-                )
-            }
-        }
-    } else {
-        info!("memory: disabled in config (memory.enabled = false)");
-        (
-            Arc::new(NoMemoryStore) as Arc<dyn MemoryStore>,
-            Arc::new(NoConversationStore) as Arc<dyn ConversationStore>,
-            None,
-            Arc::new(assistd_memory::SessionId::new()),
-            assistd_memory::BranchId(0),
-            Vec::new(),
-            None,
-        )
-    };
-    // Keep a clone of the conversation store for the shutdown path
-    // below — `state` will own the canonical handle, but we want to
-    // call `end_session` after the socket has drained without
-    // reaching back through `Arc<AppState>`.
-    let conv_store_for_shutdown = conversation_store.clone();
-    let session_for_shutdown = session_id_for_state.clone();
-    // Combined façade handed to `build_tools` so the LLM-callable
-    // `remember` / `recall` tools can read & write through the same
-    // single SQLite writer used by chat-turn persistence.
-    let memory_ops = Arc::new(MemoryOps::new(
-        memory_store.clone(),
-        conversation_store.clone(),
-    ));
+    let mut memory = memory_init::init(&config, &shutdown_tx).await;
+    let memory_store = memory.memory_store.clone();
+    let conversation_store = memory.conversation_store.clone();
+    let session_id_for_state = memory.session_id.clone();
+    let branch_id_for_state = memory.branch_id;
+    let resumed_history = std::mem::take(&mut memory.resumed_history);
+    let sqlite_handle = memory.sqlite_handle.clone();
 
-    // Embedding subsystem: try-warn-fallback like memory and voice. A
-    // failed start downgrades to NoEmbedder + NoSemanticStore + closed
-    // channel, so retrieval-touching tools register but no-op rather
-    // than crashing the daemon. Independent of memory.enabled — but if
-    // memory is off, we wire NoSemanticStore even on success since
-    // there's no DB to read embeddings from.
-    let (
-        embedder,
-        semantic_store,
-        embed_tx,
-        embed_service_handle,
-        embedder_task_handle,
-        embedding_model_name,
-    ) = if config.embedding.enabled {
-        match EmbedService::start(config.embedding.clone(), shutdown_tx.subscribe()).await {
-            Ok(svc) => {
-                // Build the HTTP client; probe dim. Failure here downgrades
-                // the whole subsystem to fallback so tools still register.
-                match LlamaEmbedder::new(
-                    &config.embedding.host,
-                    config.embedding.port,
-                    config.embedding.model.clone(),
-                    std::time::Duration::from_secs(config.embedding.request_timeout_secs),
-                )
-                .await
-                {
-                    Ok(client) => {
-                        let model_name = config.embedding.model.clone();
-                        let embedder_arc: Arc<dyn Embedder> = Arc::new(client);
-                        let semantic: Arc<dyn SemanticStore> = match sqlite_handle.as_ref() {
-                            Some(h) => Arc::new(SqliteSemanticStore::new(h.clone())),
-                            None => Arc::new(NoSemanticStore),
-                        };
-                        let writer_tx = sqlite_handle
-                            .as_ref()
-                            .map(|h| h.writer_tx())
-                            .unwrap_or_else(|| {
-                                // No DB — embedder task has nowhere to ack
-                                // back to. Build a closed sender so any
-                                // try_send still no-ops and the worker
-                                // exits cleanly on shutdown.
-                                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                                drop(rx);
-                                Arc::new(tx)
-                            });
-                        let (etx, erx) = tokio::sync::mpsc::channel(256);
-                        let task = spawn_embedder_task(
-                            embedder_arc.clone(),
-                            writer_tx,
-                            erx,
-                            shutdown_tx.subscribe(),
-                        );
-                        info!(
-                            "embedding: ready (model={}, dim={}, port={})",
-                            embedder_arc.model(),
-                            embedder_arc.dim(),
-                            config.embedding.port,
-                        );
-                        // Surface stranded embeddings (rows under a
-                        // different model than the current config) at
-                        // startup so a model swap is visible instead of
-                        // silently producing `(no memories)` from
-                        // `recall` / `reminisce`. Failures are best-effort
-                        // — a warning here must not gate daemon startup.
-                        match semantic.count_stale(&model_name).await {
-                            Ok((n, models)) if n > 0 => {
-                                tracing::warn!(
-                                    "embedding: {n} rows exist under non-current model(s) {models:?}; \
-                                     run `assistd memory reindex` to rebuild against {model_name}"
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::debug!(
-                                    "embedding: count_stale check failed ({e:#}); skipping diagnostic"
-                                );
-                            }
-                        }
-                        (
-                            embedder_arc,
-                            semantic,
-                            etx,
-                            Some(svc),
-                            Some(task),
-                            model_name,
-                        )
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "embedding: client probe failed ({e:#}); semantic search disabled this run"
-                        );
-                        // Still hold svc so its supervisor task gets
-                        // awaited on shutdown — abandoning it would leak
-                        // the child until the daemon exits.
-                        let (tx, rx) = tokio::sync::mpsc::channel(1);
-                        drop(rx);
-                        (
-                            Arc::new(NoEmbedder) as Arc<dyn Embedder>,
-                            Arc::new(NoSemanticStore) as Arc<dyn SemanticStore>,
-                            tx,
-                            Some(svc),
-                            None,
-                            String::new(),
-                        )
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "embedding: failed to start ({e:#}); semantic search disabled this run"
-                );
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                drop(rx);
-                (
-                    Arc::new(NoEmbedder) as Arc<dyn Embedder>,
-                    Arc::new(NoSemanticStore) as Arc<dyn SemanticStore>,
-                    tx,
-                    None,
-                    None,
-                    String::new(),
-                )
-            }
-        }
-    } else {
-        info!("embedding: disabled in config (embedding.enabled = false)");
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        drop(rx);
-        (
-            Arc::new(NoEmbedder) as Arc<dyn Embedder>,
-            Arc::new(NoSemanticStore) as Arc<dyn SemanticStore>,
-            tx,
-            None,
-            None,
-            String::new(),
-        )
-    };
+    let memory_ops = Arc::new(MemoryOps::new(memory_store.clone(), conversation_store));
 
-    // Window-manager backend: try-warn-fallback like memory/embedding
-    // above. Each backend opens two Unix sockets (one for commands,
-    // one for the event stream) — connect failure (e.g. macOS dev box,
-    // non-matching session) degrades to `NoWindowManager` so the
-    // daemon still starts and `wm.focus(...)` simply errors at call
-    // time. Auto resolves the configured `auto` to a concrete
-    // compositor via $SWAYSOCK / $I3SOCK / $HYPRLAND_INSTANCE_SIGNATURE
-    // / $XDG_CURRENT_DESKTOP — see assistd_config::compositor::detect_from_env.
-    let resolved_compositor = match config.compositor.compositor_type {
-        CompositorType::Auto => {
-            let detected = assistd_core::config::compositor::detect_from_env(
-                std::env::var_os("SWAYSOCK").is_some(),
-                std::env::var_os("I3SOCK").is_some(),
-                std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
-                std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-            );
-            match detected {
-                Some(c) => {
-                    info!("wm: auto-detected compositor = {:?}", c);
-                    c
-                }
-                None => {
-                    info!(
-                        "wm: auto-detect found no supported compositor (no $SWAYSOCK/$I3SOCK/$HYPRLAND_INSTANCE_SIGNATURE/$XDG_CURRENT_DESKTOP); window ops disabled"
-                    );
-                    CompositorType::Auto
-                }
-            }
-        }
-        explicit => explicit,
-    };
-    let (window_manager, wm_handle): (Arc<dyn WindowManager>, Option<WmHandle>) =
-        match resolved_compositor {
-            CompositorType::I3 => match I3Backend::start(shutdown_tx.subscribe()).await {
-                Ok(handle) => {
-                    info!("wm: i3 backend connected");
-                    (
-                        handle.backend.clone() as Arc<dyn WindowManager>,
-                        Some(WmHandle::I3(handle)),
-                    )
-                }
-                Err(e) => {
-                    tracing::warn!("wm: i3 backend unavailable ({e:#}); window ops disabled");
-                    (Arc::new(NoWindowManager), None)
-                }
-            },
-            CompositorType::Sway => match SwayBackend::start(shutdown_tx.subscribe()).await {
-                Ok(handle) => {
-                    info!("wm: sway backend connected");
-                    (
-                        handle.backend.clone() as Arc<dyn WindowManager>,
-                        Some(WmHandle::Sway(handle)),
-                    )
-                }
-                Err(e) => {
-                    tracing::warn!("wm: sway backend unavailable ({e:#}); window ops disabled");
-                    (Arc::new(NoWindowManager), None)
-                }
-            },
-            CompositorType::Hyprland => {
-                info!("wm: hyprland backend not yet implemented; window ops disabled");
-                (Arc::new(NoWindowManager), None)
-            }
-            CompositorType::Auto => {
-                // Auto-detection failed above — fall through silently.
-                (Arc::new(NoWindowManager), None)
-            }
-        };
+    let embed = embed_init::init(&config, sqlite_handle.as_ref(), &shutdown_tx).await;
+    let embedder = embed.embedder.clone();
+    let semantic_store = embed.semantic_store.clone();
+    let embed_tx = embed.embed_tx.clone();
+    let embedding_model_name = embed.model_name.clone();
 
-    // MCP servers: one supervisor per `[[mcp.servers]]`. Try-warn-fallback
-    // per server — a server that fails to spawn or fails initial
-    // discovery is logged and skipped; one bad server doesn't cascade
-    // into a daemon-startup failure. The handles park here for the
-    // daemon's lifetime; their supervisors observe the shared shutdown
-    // watch and tear down cleanly when it flips.
-    let (mcp_handles, mcp_tools): (Vec<McpServerHandle>, Vec<Box<dyn assistd_tools::Tool>>) =
-        if config.mcp.enabled {
-            let mut handles: Vec<McpServerHandle> = Vec::new();
-            let mut tools_acc: Vec<Box<dyn assistd_tools::Tool>> = Vec::new();
-            for s_cfg in &config.mcp.servers {
-                let transport_cfg = build_transport_config(s_cfg);
-                let label = s_cfg.name.clone();
-                match McpServerHandle::start(label.clone(), transport_cfg, shutdown_tx.subscribe())
-                    .await
-                {
-                    Ok(handle) => {
-                        let prefix = format!("mcp__{}", handle.name);
-                        match adapt_handle_as_tools(&handle, &prefix).await {
-                            Ok(t) => {
-                                info!(
-                                    "mcp: {} ready ({} tools, transport={:?})",
-                                    handle.name,
-                                    t.len(),
-                                    s_cfg.transport
-                                );
-                                tools_acc.extend(t);
-                                handles.push(handle);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "mcp: {} discovery failed ({e:#}); shutting down server",
-                                    handle.name
-                                );
-                                handle.shutdown().await;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("mcp: {label} failed to start ({e:#}); skipping");
-                    }
-                }
-            }
-            (handles, tools_acc)
-        } else {
-            info!("mcp: disabled in config (mcp.enabled = false)");
-            (Vec::new(), Vec::new())
-        };
+    let window = wm_init::init(&config, &shutdown_tx).await;
+    let window_manager = window.manager.clone();
 
-    // Destructive bash commands prompt the active IPC client through
-    // `IpcConfirmationGate`: the per-connection `ConfirmRouter`
-    // (installed by `assistd-core::socket::handle_connection` into the
-    // CONFIRM_ROUTER task-local) emits `Event::ConfirmRequest` and
-    // awaits a `Request::ConfirmResponse` on the same connection.
-    // Connections with no router in scope (autonomous daemon-internal
-    // dispatch — e.g. continuous-listener-driven queries with no TUI
-    // attached) fall through to deny, mirroring the previous
-    // `DenyAllGate` behavior.
-    let tools = assistd_core::build_tools(
-        &config,
-        overflow_dir.clone(),
-        Arc::new(IpcConfirmationGate),
-        vision_gate.clone(),
+    let mut mcp = mcp_init::init(&config, &shutdown_tx).await;
+    let mcp_tools = std::mem::take(&mut mcp.tools);
+
+    let tools = assistd_core::build_tools(assistd_core::BuildToolsDeps {
+        config: &config,
+        overflow_dir: overflow_dir.clone(),
+        confirmation_gate: Arc::new(IpcConfirmationGate),
+        vision_gate: vision_gate.clone(),
         memory_ops,
-        embedder.clone(),
-        semantic_store.clone(),
-        embed_tx.clone(),
-        embedding_model_name.clone(),
-        window_manager.clone(),
+        embedder: embedder.clone(),
+        semantic: semantic_store.clone(),
+        embed_tx: embed_tx.clone(),
+        embedding_model: embedding_model_name,
+        window_manager: window_manager.clone(),
         mcp_tools,
-    )?;
+    })?;
     info!(
         "tools: registered {} (overflow dir {})",
         tools.len(),
         overflow_dir.display()
     );
 
-    // Snapshot the continuous listen config before `config` is moved
-    // into `AppState`. Controls start_on_launch and pause semantics.
     let continuous_enabled = config.voice.enabled && config.voice.continuous.enabled;
     let continuous_start_on_launch = config.voice.continuous.start_on_launch;
 
     let embedding_cfg_for_state = config.embedding.clone();
     let conversation_ctx = Arc::new(assistd_core::ConversationContext::from_arc(
-        session_id_for_state.clone(),
+        session_id_for_state,
         branch_id_for_state,
     ));
     let chat: Arc<dyn assistd_llm::LlmBackend> = Arc::new(chat);
-    // Replay resumed history into the chat backend BEFORE the socket
-    // starts serving so the first incoming query sees a populated
-    // conversation. Failures are logged but never block startup —
-    // worst case the user gets a pristine context window.
-    if !resumed_history.is_empty() {
-        let entries: Vec<assistd_llm::HistoryEntry> = resumed_history
-            .into_iter()
-            .map(|r| assistd_llm::HistoryEntry {
-                role: persisted_role_to_history_role(r.role),
-                content: r.content,
-                tool_calls_json: r.tool_calls,
-                tool_call_id: r.tool_call_id,
-                tool_name: r.tool_name,
-            })
-            .collect();
-        let count = entries.len();
-        if let Err(e) = chat.replace_history(entries).await {
-            tracing::warn!("memory: resume replay failed: {e:#}");
-        } else {
-            info!("memory: resumed {count} message(s) from prior branch");
-        }
-    }
+
+    replay_history(chat.as_ref(), resumed_history).await;
     let mut state_builder = AppState::new(
         config,
         chat,
         presence.clone(),
         tools,
-        voice.clone(),
-        listener.clone(),
-        voice_output,
+        voice.input.clone(),
+        voice.listener.clone(),
+        voice.output,
     )
     .with_vision_revalidator(vision_revalidator)
     .with_memory(memory_store)
-    .with_conversations(conversation_store)
+    .with_conversations(memory.conversation_store.clone())
     .with_conversation_ctx(conversation_ctx)
     .with_embedder(embedder)
     .with_semantic(semantic_store)
     .with_embed_tx(embed_tx)
     .with_embedding_cfg(embedding_cfg_for_state)
     .with_window_manager(window_manager);
-    if let Some(handle) = sqlite_handle.clone() {
+    if let Some(handle) = sqlite_handle {
         state_builder = state_builder.with_chunks(handle);
     }
     let state = Arc::new(state_builder);
@@ -810,7 +225,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let listen_handles = if continuous_enabled {
         Some(listen_dispatcher::spawn(
             state.clone(),
-            listener.clone(),
+            voice.listener.clone(),
             presence.clone(),
             continuous_start_on_launch,
             /* pause_when_sleeping = */ true,
@@ -827,119 +242,82 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     let serve_result = assistd_core::socket::serve(state, socket_shutdown).await;
 
-    // Drain in-flight persistence tasks before the writer task channel
-    // sender drops with AppState — without this, a `tokio::spawn`'d
-    // append_message that lost the race against the shutdown signal
-    // never lands. Bounded timeout: a degenerate task that hangs (e.g.
-    // a stuck SQLite write) cannot block daemon exit forever.
-    persistence_tracker.close();
-    let drain_budget = Duration::from_secs(5);
-    if tokio::time::timeout(drain_budget, persistence_tracker.wait())
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            target: "assistd::memory",
-            in_flight = persistence_tracker.len(),
-            "persistence task drain timed out at shutdown; abandoning remaining tasks"
-        );
-    }
-
-    // Drop to Sleeping on shutdown: tears down the supervisor and the child.
-    if let Err(e) = presence.sleep().await {
-        tracing::error!("presence shutdown error: {e:#}");
-    }
-
-    // Mark the persisted session as ended before draining the writer
-    // so the row's `ended_at` is set in the same final flush. Failures
-    // are logged but never block shutdown — the session row simply
-    // stays open and a future pass can heuristically close it.
-    if let Err(e) = conv_store_for_shutdown
-        .end_session(&session_for_shutdown)
-        .await
-    {
-        tracing::warn!("memory: end_session failed at shutdown: {e:#}");
-    }
-
-    if let Some(h) = hotkey_handle {
-        let _ = h.await;
-    }
-    if let Some(h) = gpu_monitor_handle {
-        let _ = h.await;
-    }
-    if let Some(h) = idle_monitor_handle {
-        let _ = h.await;
-    }
-    if let Some(handles) = listen_handles {
-        let _ = handles.forwarder.await;
-        let _ = handles.presence_gate.await;
-    }
-    if let Some(h) = wm_handle {
-        h.shutdown().await;
-    }
-    // MCP supervisors observe the shared shutdown_tx (already flipped
-    // by the signal task before serve() returned) and exit on their
-    // own; awaiting their per-server shutdown lets them flush any
-    // in-flight calls and SIGTERM their children before the daemon
-    // process exits. Done before the embedder shutdown so MCP-driven
-    // EmbedJobs (if any future MCP tool funnels into embeddings) land
-    // in the writer queue first.
-    for handle in mcp_handles {
-        handle.shutdown().await;
-    }
-    // Embedder task runs BEFORE the memory writer drains so any
-    // in-flight EmbedJob lands as a StoreChunkEmbedding/StoreMemoryEmbedding
-    // op in the writer queue, which then drains.
-    if let Some(h) = embedder_task_handle {
-        let _ = h.await;
-    }
-    // Then tear down the embed-server process. The supervisor task
-    // observes the shared shutdown watch (already flipped) and exits.
-    if let Some(svc) = embed_service_handle {
-        if let Err(e) = svc.shutdown().await {
-            tracing::warn!("embed-server shutdown error: {e:#}");
-        }
-    }
-    if let Some(h) = memory_writer_handle {
-        // Awaiting the writer ensures the in-flight queue is drained
-        // before the daemon process exits — otherwise a SIGTERM could
-        // truncate the last few `append_message` writes.
-        let _ = h.await;
-    }
+    shutdown_subsystems(DaemonShutdown {
+        persistence_tracker,
+        presence: presence.clone(),
+        memory,
+        embed,
+        window,
+        mcp,
+        hotkey_handle,
+        gpu_monitor_handle,
+        idle_monitor_handle,
+        listen_handles,
+    })
+    .await;
 
     serve_result?;
     info!("assistd stopped");
     Ok(())
 }
 
-/// `kill -0 <pid>`: succeeds when the process exists (regardless of
-/// whether we have permission to signal it), fails with ESRCH when no
-/// such pid is alive. We use it as the daemon-liveness check before
-/// claiming a "resumable" session — if the prior daemon is still
-/// running, two daemons trampling on the same `current_branch_id`
-/// would race on every `/switch`.
-#[allow(unsafe_code)] // libc::kill probe — see SAFETY comment below
-fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    // SAFETY: `kill(pid, 0)` reads no memory and writes no signal; it
-    // only probes for the pid's existence. The libc binding is safe
-    // to call from any thread.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
-    }
-    // EPERM: process exists but we lack permission. EINVAL: bad sig
-    // (won't happen with 0). ESRCH: no such process.
-    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    errno == libc::EPERM
+/// Write a default config file to the platform config directory.
+///
+/// # Errors
+///
+/// Returns an error if the config path cannot be determined or the file cannot be written.
+pub fn init_config() -> Result<()> {
+    init_tracing();
+    let path = Config::default_path()?;
+    Config::write_default(&path)?;
+    info!("wrote default config to {}", path.display());
+    Ok(())
 }
 
-/// Bridge `assistd_memory::PersistedRole` to `assistd_llm::HistoryRole`
-/// for resume-time history replay. Same identity mapping the daemon's
-/// branch-switch handler does, kept here so daemon startup doesn't
-/// reach into `assistd-core` internals.
+fn spawn_signal_handler(shutdown_tx: &watch::Sender<bool>) {
+    let signal_tx = shutdown_tx.clone();
+    assistd_core::spawn_supervised(
+        "signal_handler",
+        assistd_core::Component::Daemon,
+        async move {
+            let mut term = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("failed to install SIGTERM handler: {e}");
+                    return;
+                }
+            };
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => info!("received SIGINT"),
+                _ = term.recv() => info!("received SIGTERM"),
+            }
+            let _ = signal_tx.send(true);
+        },
+    );
+}
+
+async fn replay_history(chat: &dyn assistd_llm::LlmBackend, rows: Vec<assistd_memory::HistoryRow>) {
+    if rows.is_empty() {
+        return;
+    }
+    let entries: Vec<assistd_llm::HistoryEntry> = rows
+        .into_iter()
+        .map(|r| assistd_llm::HistoryEntry {
+            role: persisted_role_to_history_role(r.role),
+            content: r.content,
+            tool_calls_json: r.tool_calls,
+            tool_call_id: r.tool_call_id,
+            tool_name: r.tool_name,
+        })
+        .collect();
+    let count = entries.len();
+    if let Err(e) = chat.replace_history(entries).await {
+        tracing::warn!("memory: resume replay failed: {e:#}");
+    } else {
+        info!("memory: resumed {count} message(s) from prior branch");
+    }
+}
+
 fn persisted_role_to_history_role(role: assistd_memory::PersistedRole) -> assistd_llm::HistoryRole {
     match role {
         assistd_memory::PersistedRole::System => assistd_llm::HistoryRole::System,
@@ -949,32 +327,55 @@ fn persisted_role_to_history_role(role: assistd_memory::PersistedRole) -> assist
     }
 }
 
-fn build_transport_config(s: &McpServerConfig) -> TransportConfig {
-    match s.transport {
-        McpTransport::Stdio => {
-            let mut cfg = StdioConfig::new(s.name.clone(), s.command.clone().unwrap_or_default());
-            cfg.args = s.args.clone();
-            cfg.env = s.env.clone();
-            cfg.request_timeout = Duration::from_secs(s.request_timeout_secs);
-            TransportConfig::Stdio(cfg)
-        }
-        McpTransport::Sse => {
-            let mut cfg = SseConfig::new(s.name.clone(), s.url.clone().unwrap_or_default());
-            cfg.headers = s.headers.clone();
-            cfg.request_timeout = Duration::from_secs(s.request_timeout_secs);
-            cfg.read_timeout = Duration::from_secs(s.sse_read_timeout_secs);
-            cfg.ping_interval = Duration::from_secs(s.sse_ping_interval_secs);
-            TransportConfig::Sse(cfg)
-        }
-    }
+struct DaemonShutdown {
+    persistence_tracker: tokio_util::task::TaskTracker,
+    presence: Arc<PresenceManager>,
+    memory: memory_init::MemorySubsystem,
+    embed: embed_init::EmbeddingSubsystem,
+    window: wm_init::WindowSubsystem,
+    mcp: mcp_init::McpSubsystem,
+    hotkey_handle: Option<JoinHandle<()>>,
+    gpu_monitor_handle: Option<JoinHandle<()>>,
+    idle_monitor_handle: Option<JoinHandle<()>>,
+    listen_handles: Option<listen_dispatcher::ListenDispatcherHandles>,
 }
 
-pub fn init_config() -> Result<()> {
-    init_tracing();
-    let path = Config::default_path()?;
-    Config::write_default(&path)?;
-    info!("wrote default config to {}", path.display());
-    Ok(())
+async fn shutdown_subsystems(s: DaemonShutdown) {
+    s.persistence_tracker.close();
+    let drain_budget = Duration::from_secs(5);
+    if tokio::time::timeout(drain_budget, s.persistence_tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            target: "assistd::memory",
+            in_flight = s.persistence_tracker.len(),
+            "persistence task drain timed out at shutdown; abandoning remaining tasks"
+        );
+    }
+
+    if let Err(e) = s.presence.sleep().await {
+        tracing::error!("presence shutdown error: {e:#}");
+    }
+
+    s.memory.shutdown().await;
+
+    if let Some(h) = s.hotkey_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = s.gpu_monitor_handle {
+        let _ = h.await;
+    }
+    if let Some(h) = s.idle_monitor_handle {
+        let _ = h.await;
+    }
+    if let Some(handles) = s.listen_handles {
+        let _ = handles.forwarder.await;
+        let _ = handles.presence_gate.await;
+    }
+    s.window.shutdown().await;
+    s.mcp.shutdown().await;
+    s.embed.shutdown().await;
 }
 
 fn init_tracing() {

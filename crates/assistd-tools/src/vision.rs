@@ -9,23 +9,30 @@
 //! command registry.
 //!
 //! The flag is a plain `AtomicBool`. Revalidation is the daemon's
-//! concern — this crate intentionally does not depend on `assistd-llm`
+//! concern; this crate intentionally does not depend on `assistd-llm`
 //! or do any HTTP itself.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Shared, runtime-mutable vision-capability flag.
+///
+/// Clone the `Arc<VisionGate>` into commands that require vision; call
+/// [`VisionGate::supported`] on each invocation. [`VisionGate::set`] is
+/// called by the daemon's revalidation path when the model changes.
 pub struct VisionGate {
     supported: AtomicBool,
 }
 
 impl VisionGate {
+    /// Create a new gate with the given initial value, wrapped in an [`Arc`].
     pub fn new(initially_supported: bool) -> Arc<Self> {
         Arc::new(Self {
             supported: AtomicBool::new(initially_supported),
         })
     }
 
+    /// Returns `true` if the current model supports vision inputs.
     pub fn supported(&self) -> bool {
         self.supported.load(Ordering::Acquire)
     }

@@ -4,7 +4,7 @@
 //! (`/health` = 200), call [`detect_vision_support`] to decide whether
 //! the loaded model has a multimodal projector (mmproj) bundled.
 //! llama.cpp auto-loads the projector when the HF repo carries one
-//! alongside the text weights — there is no separate config flag to
+//! alongside the text weights; there is no separate config flag to
 //! opt in. The only way to know is to ask the server.
 //!
 //! The probe intentionally fails-closed: any HTTP error, parse
@@ -29,7 +29,7 @@ use tracing::{debug, warn};
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Snapshot of a single `/props` probe. `model_id` is whatever
-/// llama-server reports as the loaded model — used by callers to
+/// llama-server reports as the loaded model, used by callers to
 /// detect a model swap between probes and trigger a re-probe rather
 /// than trusting a stale `vision_supported` value.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

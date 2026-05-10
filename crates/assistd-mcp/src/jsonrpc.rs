@@ -51,6 +51,7 @@ pub struct Response {
     pub error: Option<RpcError>,
 }
 
+/// JSON-RPC 2.0 error object carried in a [`Response`] when the server reports failure.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RpcError {
     pub code: i64,
@@ -63,14 +64,17 @@ pub struct RpcError {
 /// from leaking memory by never replying.
 pub const MAX_IN_FLIGHT: usize = 256;
 
+/// Result type for a completed JSON-RPC round-trip: `Ok(Value)` on success, `Err(RpcError)` on server error.
 pub type Reply = Result<Value, RpcError>;
 
+/// Matches outbound JSON-RPC request ids to their waiting [`oneshot`] receivers.
 pub struct Correlator {
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Reply>>>,
 }
 
 impl Correlator {
+    /// Create a new, empty correlator with the request id counter starting at 1.
     pub fn new() -> Self {
         Self {
             next_id: AtomicU64::new(1),
@@ -102,7 +106,7 @@ impl Correlator {
     }
 
     /// Match a response to its waiting caller. Stale ids are dropped
-    /// silently (a `warn!` is emitted) — they happen during reconnect
+    /// silently (a `warn!` is emitted); they happen during reconnect
     /// when an in-flight reply arrives just after the supervisor swap.
     pub fn deliver(&self, response: Response) {
         let Some(id) = response.id else {
@@ -140,6 +144,7 @@ impl Correlator {
         }
     }
 
+    /// Returns the number of requests currently awaiting a response.
     pub fn in_flight(&self) -> usize {
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
@@ -172,6 +177,7 @@ impl Pending {
         Ok(bytes)
     }
 
+    /// Encode the request as compact JSON bytes without a trailing newline.
     pub fn frame_json(&self) -> Result<Vec<u8>, McpError> {
         let req = Request {
             jsonrpc: "2.0",
@@ -252,7 +258,7 @@ mod tests {
             result: Some(Value::Null),
             error: None,
         });
-        // No panic, no waiter — pending stays empty.
+        // No panic, no waiter; pending stays empty.
         assert_eq!(c.in_flight(), 0);
     }
 

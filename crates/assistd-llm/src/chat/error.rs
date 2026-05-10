@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+/// Errors produced by [`crate::LlamaChatClient`] during HTTP streaming or summarization.
 #[derive(Debug, Error)]
 pub enum ChatClientError {
     #[error("HTTP transport error: {0}")]

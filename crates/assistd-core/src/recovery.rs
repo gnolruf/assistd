@@ -3,18 +3,16 @@
 //!
 //! Three responsibilities:
 //!
-//! 1. **Vocabulary** — [`Component`] and [`RecoverySeverity`] give every
+//! 1. **Vocabulary**: [`Component`] and [`RecoverySeverity`] give every
 //!    recovery event a canonical `severity`/`component` field pair.
 //!    Filterable with `RUST_LOG=assistd::recovery=info`.
-//! 2. **Panic isolation** — [`spawn_supervised`] wraps a `tokio::spawn`
+//! 2. **Panic isolation**: [`spawn_supervised`] wraps a `tokio::spawn`
 //!    so panics in detached tasks emit a recovery event instead of
 //!    silently disappearing into a never-joined `JoinHandle`.
-//! 3. **Daemon panic hook** — [`install_panic_hook`] replaces the global
+//! 3. **Daemon panic hook**: [`install_panic_hook`] replaces the global
 //!    panic hook so that any panic also tries to SIGTERM the running
 //!    llama-server process group before propagating, keeping a child
 //!    from being orphaned when the daemon goes down via panic.
-
-#![allow(unsafe_code)] // libc::kill in the panic hook — locally justified
 
 use std::any::Any;
 use std::future::Future;
@@ -39,6 +37,7 @@ pub enum RecoverySeverity {
 }
 
 impl RecoverySeverity {
+    /// Returns the canonical lowercase wire string for this severity level.
     pub fn as_str(self) -> &'static str {
         match self {
             RecoverySeverity::Info => "info",
@@ -80,6 +79,7 @@ pub enum Component {
 }
 
 impl Component {
+    /// Returns the canonical lowercase wire string for this component identifier.
     pub fn as_str(self) -> &'static str {
         match self {
             Component::Llm => "llm",
@@ -221,7 +221,7 @@ where
 /// `presence` is a `Weak` so the hook does not keep the manager alive
 /// past daemon shutdown. Pass `Arc::downgrade(&presence_arc)`.
 ///
-/// Idempotent: installing twice replaces the previous chain — tests can
+/// Idempotent: installing twice replaces the previous chain, so tests can
 /// safely re-install in setup.
 pub fn install_panic_hook(presence: Weak<PresenceManager>) {
     static PRESENCE: Mutex<Option<Weak<PresenceManager>>> = Mutex::new(None);
@@ -253,20 +253,21 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
             .and_then(|guard| guard.as_ref().and_then(|w| w.upgrade()))
             .and_then(|p| p.llama_pid_blocking());
         if let Some(pid) = pid_opt {
-            let gid: i32 = -(pid as i32);
-            // SAFETY: libc::kill is safe with any pid/signal; failure
-            // is observable only via the return code we deliberately
-            // ignore (the child may have exited between read and kill).
-            unsafe {
-                libc::kill(gid, libc::SIGTERM);
+            // The child was started in its own session via `setsid`, so its
+            // pgid equals its pid. `kill_process_group` is the safe rustix
+            // wrapper around `killpg(2)`. We ignore the result: the child
+            // may have already exited between read and kill, and there is
+            // nothing actionable to do from a panic hook regardless.
+            if let Some(pgid) = rustix::process::Pid::from_raw(pid as i32) {
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+                recovery_event!(
+                    RecoverySeverity::Warning,
+                    Component::Llm,
+                    "panic_kill",
+                    pid = pid,
+                    "sent SIGTERM to llama-server process group from panic hook"
+                );
             }
-            recovery_event!(
-                RecoverySeverity::Warning,
-                Component::Llm,
-                "panic_kill",
-                pid = pid,
-                "sent SIGTERM to llama-server process group from panic hook"
-            );
         }
 
         previous(info);
@@ -307,7 +308,7 @@ mod tests {
             tokio::task::yield_now().await;
         });
         // The sentinel handle resolves once the inner task finishes.
-        // We don't assert any panic logging here — the absence of a
+        // We don't assert any panic logging here; the absence of a
         // panic event is the whole point.
         handle.await.expect("sentinel join");
     }

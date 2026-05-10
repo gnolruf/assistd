@@ -2,7 +2,7 @@
 //!
 //! Sway implements the i3 IPC protocol with Wayland-specific extensions
 //! (the `app_id` field on views, and a richer output reply). This
-//! backend mirrors [`crate::i3`] in shape — two IPC connections (one
+//! backend mirrors [`crate::i3`] in shape: two IPC connections (one
 //! held under a `Mutex` for commands, one consumed by `subscribe()` to
 //! drive the event stream), a snapshot updated on every `Window` and
 //! `Workspace::Focus` event so synchronous reads from the daemon's
@@ -10,7 +10,7 @@
 //!
 //! The IPC client is `swayipc-async`, which is built on `async-io`
 //! rather than `tokio`. Its futures coexist with the workspace tokio
-//! runtime — the cost is one extra reactor thread per process, which
+//! runtime; the cost is one extra reactor thread per process, which
 //! is acceptable since the WM event path is not on the LLM hot loop.
 //!
 //! Wayland-native vs XWayland identifiers: every Sway view has either
@@ -20,7 +20,7 @@
 //! [`SwayBackend::focus`] / [`SwayBackend::move_to_workspace`] with a
 //! composite criteria string so the caller doesn't have to know which
 //! kind a given window uses. Sway treats a 0-match criteria as a
-//! silent success — same as i3 — so `wm focus X` is best-effort: the
+//! silent success (same as i3), so `wm focus X` is best-effort: the
 //! caller verifies via `wm active` if it cares.
 
 use std::sync::Arc;
@@ -44,16 +44,9 @@ use crate::{
     WmResult, WorkspaceId, WorkspaceInfo,
 };
 
-// PR 4: the Snapshot struct + apply-event race rules now live in
-// `crate::snapshot` so the i3 and Sway backends share them. Sway's
-// `focused_class` semantics (prefer `app_id` for Wayland-native
-// windows, fall back to the X11 class for XWayland views) live in
-// `handle_window_event` below, where we project the native event into
-// the shared `(id, class, title)` tuple.
-
 /// Cast a sway `Node.id` (`i64`) to a [`WindowId`]. Sway never emits
 /// non-positive ids in practice, but the bounds check keeps the
-/// conversion total — non-positive ids are silently dropped (the
+/// conversion total; non-positive ids are silently dropped (the
 /// caller treats them as "no id available").
 fn sway_id(raw: i64) -> Option<WindowId> {
     if raw <= 0 {
@@ -77,16 +70,16 @@ pub struct SwayBackend {
 
 /// Returned by [`SwayBackend::start`] alongside the backend itself. The
 /// daemon awaits [`SwayHandle::shutdown`] in its graceful-shutdown
-/// block — same pattern as `I3Handle`.
+/// block, the same pattern as `I3Handle`.
 pub struct SwayHandle {
     pub backend: Arc<SwayBackend>,
     supervisor_task: JoinHandle<()>,
 }
 
 impl SwayHandle {
+    /// Awaits the supervisor task. The daemon should flip `shutdown_tx` before
+    /// calling this so the supervisor exits cleanly rather than blocking.
     pub async fn shutdown(self) {
-        // The daemon flips `shutdown_tx` first; the supervisor task
-        // selects on `shutdown.changed()` and exits.
         let _ = self.supervisor_task.await;
     }
 }
@@ -389,7 +382,7 @@ async fn supervisor_loop(
 }
 
 /// Format the Sway RUN_COMMAND payload for `resize_width`. PR 3b
-/// drops the `app_id|class` composite — Sway accepts `[con_id=N]`
+/// drops the `app_id|class` composite; Sway accepts `[con_id=N]`
 /// criteria for any window regardless of XWayland-vs-Wayland origin.
 fn sway_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
     format!(
@@ -401,7 +394,7 @@ fn sway_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> 
 }
 
 /// Format the Sway RUN_COMMAND payload for `set_layout`. Acts on the
-/// focused container — same form i3 uses, since Sway speaks the i3
+/// focused container, the same form i3 uses, since Sway speaks the i3
 /// IPC dialect for `layout`.
 fn sway_layout_payload(layout: Layout) -> String {
     format!("layout {}", layout.as_str())
@@ -426,7 +419,7 @@ fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>)
     {
         // Prefer Wayland-native app_id; fall back to the X11 class for
         // XWayland views. A leaf with neither falls through with
-        // app: None — the LLM can still target it by con_id.
+        // app: None; the LLM can still target it by con_id.
         let class = node
             .window_properties
             .as_ref()
@@ -488,8 +481,8 @@ async fn seed_snapshot(cmd: &mut Connection) -> Result<Snapshot> {
 
 /// Project a Sway `WindowEvent` into the shared snapshot's
 /// `(id, class, title, kind)` tuple and dispatch to
-/// [`apply_window_event`]. The Sway-specific bits — `app_id` lookup,
-/// XWayland fallback, name-vs-window_properties.title preference —
+/// [`apply_window_event`]. The Sway-specific bits (`app_id` lookup,
+/// XWayland fallback, name-vs-window_properties.title preference)
 /// live here; the race rules live in `crate::snapshot`.
 async fn handle_window_event(w: &swayipc_async::WindowEvent, snap: &Arc<RwLock<Snapshot>>) {
     let kind = match w.change {
@@ -536,7 +529,7 @@ mod tests {
 
     #[test]
     fn resize_payload_uses_con_id_criteria() {
-        // PR 3b: Sway's `[con_id=N]` is a single-clause match — no
+        // PR 3b: Sway's `[con_id=N]` is a single-clause match; no
         // more `app_id|class` composite, since con_id covers Wayland-
         // native and XWayland views uniformly.
         let p = sway_resize_payload(&id(42), ResizeDir::Grow, 50);
@@ -562,7 +555,7 @@ mod tests {
 
     #[test]
     fn layout_payload_emits_bare_form() {
-        // No criteria prefix — Sway speaks the i3 dialect for layout
+        // No criteria prefix; Sway speaks the i3 dialect for layout
         // and acts on the focused container.
         for (l, expected) in [
             (Layout::Default, "layout default"),

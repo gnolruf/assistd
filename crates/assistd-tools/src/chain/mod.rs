@@ -1,7 +1,7 @@
 //! Parsed-command AST (`Chain`), the parser that builds it, and the
 //! executor that walks it. The parser and executor are kept as separate
-//! modules so the AST is the single shared contract between them —
-//! makes it easy to unit-test either side in isolation.
+//! modules so the AST is the single shared contract between them;
+//! that makes it easy to unit-test either side in isolation.
 
 pub mod executor;
 pub mod parser;

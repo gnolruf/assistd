@@ -4,8 +4,8 @@
 //! This is the continuous-listen counterpart to
 //! [`crate::mic::capture::capture_worker`]. They both use the shared
 //! [`open_producer_stream`] helper to get a cpal `Stream` + ring
-//! consumer; what differs is the drain strategy — PTT accumulates
-//! into one `Vec<i16>`, this worker streams frame-sized chunks.
+//! consumer; what differs is the drain strategy. PTT accumulates
+//! into one `Vec<i16>`; this worker streams frame-sized chunks.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,7 +20,7 @@ use crate::mic::capture::{AudioCaptureError, ProducerStream, open_producer_strea
 
 /// Ring capacity in mono native-rate samples. Continuous listening
 /// only needs enough headroom for the VAD task to catch up during a
-/// scheduling hiccup — ~5 s at 48 kHz is plenty and small enough to
+/// scheduling hiccup; ~5 s at 48 kHz is plenty and small enough to
 /// avoid ballooning memory.
 const LISTEN_RING_SECONDS: usize = 5;
 const LISTEN_RING_NATIVE_RATE_ASSUMED: usize = 48_000;
@@ -88,7 +88,7 @@ fn listen_worker(
         warn!(
             target: "assistd::voice::listen",
             overrun_samples = total_overrun,
-            "ring buffer overrun during continuous listening — audio was truncated"
+            "ring buffer overrun during continuous listening; audio was truncated"
         );
     }
 

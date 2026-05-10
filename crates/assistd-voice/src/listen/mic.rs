@@ -1,4 +1,4 @@
-//! `MicContinuousListener` — cpal + webrtc-vad + whisper-rs driven
+//! `MicContinuousListener`: cpal + webrtc-vad + whisper-rs driven
 //! hands-free utterance transcriber.
 //!
 //! Architecturally mirrors [`crate::MicVoiceInput`]:
@@ -33,11 +33,14 @@ type CaptureJoin = JoinHandle<Result<(), crate::mic::capture::AudioCaptureError>
 const UTTERANCE_CHANNEL_DEPTH: usize = 16;
 
 /// Depth of the VAD frame channel. Large enough to buffer a few
-/// scheduling hiccups without dropping frames — at 20 ms per frame,
+/// scheduling hiccups without dropping frames; at 20 ms per frame,
 /// 128 slots is ~2.5 s of audio.
 const FRAME_CHANNEL_DEPTH: usize = 128;
 
-/// Cpal + VAD + whisper implementation of [`ContinuousListener`].
+/// Cpal + webrtc-vad + whisper implementation of [`ContinuousListener`].
+///
+/// Owns a cpal input stream while active, segments audio into utterances via
+/// [`UtteranceVad`], and transcribes each via the shared [`Transcriber`].
 pub struct MicContinuousListener {
     transcriber: Arc<dyn Transcriber>,
     mic_device: Option<String>,
@@ -62,7 +65,7 @@ impl MicContinuousListener {
     /// Build from config, sharing a transcriber with the PTT pipeline
     /// (typically the same [`crate::QueuedTranscriber`] so continuous
     /// listening benefits from the same queue-and-fallback policy).
-    /// Does not open the audio device — that happens on [`Self::start`].
+    /// Does not open the audio device; that happens on [`Self::start`].
     pub fn new(transcriber: Arc<dyn Transcriber>, cfg: &VoiceConfig) -> Self {
         let tuning = tuning_from_config(&cfg.continuous);
         let (state_tx, _) = watch::channel(false);
@@ -144,7 +147,7 @@ impl ContinuousListener for MicContinuousListener {
             inner.session.take()
         };
         let Some(session) = session else {
-            // Not active — reset the flag defensively and exit.
+            // Not active; reset the flag defensively and exit.
             self.active.store(false, Ordering::SeqCst);
             return Ok(());
         };
@@ -204,7 +207,7 @@ fn run_vad_blocking(
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
                         // Whisper's Silero VAD trimmed the segment to
-                        // silence — drop without dispatching.
+                        // silence; drop without dispatching.
                         return;
                     }
                     if utterances.send(trimmed.to_string()).is_err() {

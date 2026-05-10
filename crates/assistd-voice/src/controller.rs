@@ -1,7 +1,7 @@
 //! Runtime control over a [`VoiceOutput`] backend: toggle on/off, skip
 //! the current response, interrupt for push-to-talk barge-in.
 //!
-//! The controller composes with — rather than replacing — the existing
+//! The controller composes with (rather than replacing) the existing
 //! `Arc<dyn VoiceOutput>`. It owns two pieces of mutable runtime state:
 //!
 //! - `enabled`: a runtime mute switch. Off means the speech worker
@@ -21,7 +21,7 @@
 //! audio that's already in the playback queue stops within milliseconds
 //! (`PiperVoiceOutput::cancel` clears rodio's FIFO).
 //!
-//! `set_enabled(true)` does *not* advance the epoch — re-enabling
+//! `set_enabled(true)` does *not* advance the epoch; re-enabling
 //! resumes speaking later sentences for the same query (those that
 //! arrive after the toggle-back-on; sentences enqueued during the off
 //! window are dropped at dequeue and not buffered).
@@ -42,9 +42,9 @@ pub struct VoiceOutputController {
 pub enum SpeakDecision {
     /// Pass the sentence to `inner.speak()`.
     Speak,
-    /// TTS is disabled — drain the channel without speaking.
+    /// TTS is disabled; drain the channel without speaking.
     DropSilent,
-    /// Skip was triggered since the worker started — drain without speaking.
+    /// Skip was triggered since the worker started; drain without speaking.
     DropForSkip,
 }
 
@@ -59,10 +59,12 @@ impl VoiceOutputController {
         })
     }
 
+    /// Returns `true` if TTS is currently enabled.
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
     }
 
+    /// Returns the current skip epoch counter.
     pub fn current_epoch(&self) -> u64 {
         self.skip_epoch.load(Ordering::SeqCst)
     }
@@ -78,7 +80,7 @@ impl VoiceOutputController {
 
     /// Abort the current response: advance the epoch (so active speech
     /// workers drop the rest of their queued sentences) and clear the
-    /// audio playback queue. Does not change the enabled flag — TTS
+    /// audio playback queue. Does not change the enabled flag; TTS
     /// stays armed for the next query.
     pub async fn skip(&self) {
         self.skip_epoch.fetch_add(1, Ordering::SeqCst);

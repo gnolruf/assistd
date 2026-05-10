@@ -24,14 +24,22 @@ enum CycleResult {
     },
 }
 
+/// Drives the embed-server process lifecycle: spawn, health-check, restart on crash,
+/// and graceful shutdown.
 pub struct Supervisor {
+    /// Embedding server configuration (host, port, model, timeouts).
     pub cfg: EmbeddingConfig,
+    /// Daemon-wide shutdown signal; `true` means stop.
     pub shutdown_rx: watch::Receiver<bool>,
+    /// Channel used to publish the current [`ReadyState`] to [`EmbedService`].
     pub ready_tx: watch::Sender<ReadyState>,
+    /// Shared slot for the child's OS PID, cleared when the child exits.
     pub pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl Supervisor {
+    /// Run the supervision loop until shutdown is requested or the child enters
+    /// [`ReadyState::Degraded`] after too many consecutive failures.
     pub async fn run(mut self) {
         let mut consecutive_failures: u32 = 0;
 

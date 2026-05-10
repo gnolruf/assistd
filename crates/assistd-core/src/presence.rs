@@ -7,18 +7,18 @@
 //!
 //! State transitions:
 //!
-//! - **`sleep()`** — stop llama-server and release all VRAM. Idempotent from
+//! - **`sleep()`**: stop llama-server and release all VRAM. Idempotent from
 //!   `Sleeping`. Active → Sleeping and Drowsy → Sleeping both run the same
 //!   teardown path (flip an inner shutdown watch, wait for the supervisor
 //!   task to join). llama-server's VRAM is freed when the child process
 //!   exits.
 //!
-//! - **`drowse()`** — keep the llama-server process alive but unload its
+//! - **`drowse()`**: keep the llama-server process alive but unload its
 //!   model weights via `POST /models/unload`, dropping VRAM to roughly the
 //!   server's own runtime overhead. Only valid from `Active`; idempotent
 //!   from `Drowsy`; errors from `Sleeping` (caller must `wake` first).
 //!
-//! - **`wake()`** — reverse of sleep/drowse. From `Sleeping`, cold-starts
+//! - **`wake()`**: reverse of sleep/drowse. From `Sleeping`, cold-starts
 //!   llama-server via [`LlamaService::start`] which blocks until `/health`
 //!   returns 200, then loads the model. From `Drowsy`, just reloads the
 //!   model. Idempotent from `Active`.
@@ -68,7 +68,7 @@ pub struct PresenceManager {
     // for the wait-for-shutdown loop, but if every receiver from this
     // manager were to drop the watch could close before the forwarder
     // observes the signal. Holding a never-read receiver here keeps
-    // the channel open for the forwarder's lifetime — same lifetime
+    // the channel open for the forwarder's lifetime, the same lifetime
     // as the manager itself. **Do not delete just because it's
     // unread**: removing this field is what causes the forwarder to
     // miss the shutdown signal in some edge-case orderings.
@@ -88,7 +88,7 @@ pub struct PresenceManager {
     // transition wait for that transition plus the subsequent wake
     // rather than starving the writer.
     inflight: Arc<RwLock<()>>,
-    // `Some(started_at)` while a `wake` transition is executing — set
+    // `Some(started_at)` while a `wake` transition is executing: set
     // after the transition mutex is taken and the short-circuit check
     // passes, cleared by RAII when `wake` returns (success or error).
     // The TUI polls this each render tick to drive the "waking up"
@@ -107,7 +107,7 @@ pub struct PresenceManager {
 
 /// Held by request handlers for the duration of a query (or other
 /// in-flight work). While any guard is alive, [`PresenceManager::sleep`]
-/// and [`PresenceManager::drowse`] block — sleep cannot tear down the
+/// and [`PresenceManager::drowse`] block: sleep cannot tear down the
 /// llama-server while a response is still streaming.
 ///
 /// Created via [`PresenceManager::acquire_request_guard`]; released on
@@ -125,6 +125,7 @@ pub struct PresenceLlmHealthProbe {
 }
 
 impl PresenceLlmHealthProbe {
+    /// Wrap a [`PresenceManager`] in a health-probe adapter.
     pub fn new(presence: Arc<PresenceManager>) -> Self {
         Self { presence }
     }
@@ -149,7 +150,7 @@ impl LlmHealthProbe for PresenceLlmHealthProbe {
 /// shared count on construction and decrements on drop. Held by LLM
 /// query handlers for the duration of their streaming lifetime so the
 /// voice transcriber can decide whether to queue briefly or fall back
-/// to CPU. Does not block sleep/drowse — unlike [`RequestGuard`], which
+/// to CPU. Does not block sleep/drowse, unlike [`RequestGuard`]; that
 /// is how the two signals differ.
 pub struct LlmStreamGuard {
     tx: watch::Sender<usize>,
@@ -163,8 +164,8 @@ impl Drop for LlmStreamGuard {
 
 /// RAII marker for "a wake transition is in progress". Constructed at
 /// the top of [`PresenceManager::wake`] after the short-circuit check;
-/// cleared on drop so every return path — `?`-propagated error, panic,
-/// success — leaves `wake_started` back at `None`.
+/// cleared on drop so every return path (`?`-propagated error, panic,
+/// success) leaves `wake_started` back at `None`.
 struct WakeMarker {
     slot: Arc<StdMutex<Option<Instant>>>,
 }
@@ -208,7 +209,7 @@ impl PresenceManager {
         //
         // The `JoinHandle` is intentionally discarded: the task is bounded
         // by the daemon-shutdown watch channel. It exits via one of two
-        // paths — `wait_for` returns `Ok` once shutdown fires (the normal
+        // paths: `wait_for` returns `Ok` once shutdown fires (the normal
         // case), or `Err` if every `watch::Sender` clone for daemon
         // shutdown is dropped (which implies the daemon is already tearing
         // down). `PresenceManager` also holds
@@ -216,7 +217,7 @@ impl PresenceManager {
         // the subscription valid for the manager's lifetime.
         //
         // Wrapped in `spawn_supervised` so a panic here (which would
-        // strand the daemon — every inner shutdown lives off this
+        // strand the daemon, since every inner shutdown lives off this
         // forwarder) emits a structured recovery event instead of
         // dying silently.
         {
@@ -329,8 +330,8 @@ impl PresenceManager {
     /// Non-blocking llama-server PID lookup for fast-path callers that
     /// can't await (e.g. the voice crate's GPU-contention probe running
     /// inside a sync context). Returns `None` when the llama mutex is
-    /// currently held by a transition — acceptable for a periodic probe
-    /// since it will retry on the next call.
+    /// currently held by a transition (acceptable for a periodic probe
+    /// since it will retry on the next call).
     pub fn llama_pid_blocking(&self) -> Option<u32> {
         self.llama
             .try_lock()
@@ -340,7 +341,7 @@ impl PresenceManager {
 
     /// Snapshot of the llama-server supervisor's [`ReadyState`].
     /// `None` when no service is attached (presence asleep, or
-    /// transitioning). Non-blocking — uses `try_lock` and returns
+    /// transitioning). Non-blocking: uses `try_lock` and returns
     /// `None` if a transition holds the slot.
     pub fn llama_state_blocking(&self) -> Option<ReadyState> {
         self.llama
@@ -400,7 +401,7 @@ impl PresenceManager {
 
     /// Fast path for query handlers: if already `Active`, returns
     /// immediately; otherwise calls [`Self::wake`]. Safe to call under
-    /// concurrent queries — racing callers serialise on the transition
+    /// concurrent queries; racing callers serialise on the transition
     /// lock and only one wake actually runs.
     #[tracing::instrument(skip(self), fields(from = ?self.state()))]
     pub async fn ensure_active(&self) -> Result<()> {
@@ -413,7 +414,7 @@ impl PresenceManager {
 
     /// Request a guard that keeps the daemon `Active` for as long as
     /// the returned [`RequestGuard`] is alive. While any guard exists,
-    /// [`Self::sleep`] and [`Self::drowse`] block — this is the
+    /// [`Self::sleep`] and [`Self::drowse`] block; this is the
     /// mechanism that prevents a concurrent sleep from tearing down
     /// llama-server mid-generation.
     ///
@@ -504,7 +505,7 @@ impl PresenceManager {
     ///
     /// Not strictly atomic against concurrent callers: two racing `cycle`s
     /// could both observe the same `current` and both attempt the same
-    /// target, in which case the loser is a no-op. That's acceptable — the
+    /// target, in which case the loser is a no-op. That's acceptable; the
     /// transition mutex still serialises the actual state change, so we
     /// never skip or split a step.
     pub async fn cycle(&self) -> Result<PresenceState> {
@@ -757,7 +758,7 @@ impl PresenceManager {
     /// Test-only constructor: fabricates a manager in a specific state with
     /// dummy server/model specs and no real llama child. Methods that would
     /// hit the network (`drowse`, cold-start `wake`) will error on dummy
-    /// connections — use only for unit tests that exercise guards,
+    /// connections; use only for unit tests that exercise guards,
     /// idempotency, and state transitions that don't require a live server.
     #[cfg(test)]
     pub(crate) fn stub(state: PresenceState) -> Arc<Self> {
@@ -883,8 +884,8 @@ mod tests {
     async fn cycle_from_sleeping_goes_to_active_logically() {
         // `cycle` from Sleeping computes target=Active, then set_presence(Active)
         // drives `wake`. With the stub, wake from Sleeping attempts a real
-        // cold-start and fails — we just assert the target selection by
-        // reading the next() helper directly here; full cycle paths are
+        // cold-start and fails; we just assert the target selection by
+        // reading the next() helper directly here. Full cycle paths are
         // exercised by integration with a live daemon.
         let start = PresenceState::Sleeping;
         assert_eq!(start.next(), PresenceState::Active);
@@ -1013,7 +1014,7 @@ mod tests {
             "sleep completed while request guard held"
         );
 
-        // Drop guard — sleep should now proceed.
+        // Drop guard; sleep should now proceed.
         drop(guard);
         let res = tokio::time::timeout(Duration::from_secs(2), sleep_task)
             .await
@@ -1140,7 +1141,7 @@ mod tests {
         // can't cold-start wake, so the writer forces state back to
         // Active after each sleep, which lets the retry loop in
         // acquire_request_guard make progress. The point of the test
-        // is to confirm no deadlock or state corruption under churn —
+        // is to confirm no deadlock or state corruption under churn,
         // not to measure throughput. A generous wall-clock timeout
         // wraps the whole workload. AC pin: 100 writer cycles complete
         // without crash or deadlock.
@@ -1159,7 +1160,7 @@ mod tests {
                         // Reader may observe Sleeping between writer's
                         // sleep() completing and set_state_for_test(Active)
                         // running; ensure_active() then fails in the
-                        // stub. Retry exhaustion is fine — just keep
+                        // stub. Retry exhaustion is fine; just keep
                         // going.
                         Err(_) => tokio::task::yield_now().await,
                     }

@@ -18,17 +18,17 @@
 //! [error] <cmd>: <what-went-wrong>. <Hint>: <recovery>\n
 //! ```
 //!
-//! - `<cmd>` — the command name (`cat`, `see`, `bash`, …) or a pseudo-tag
+//! - `<cmd>`: the command name (`cat`, `see`, `bash`, …) or a pseudo-tag
 //!   for pre-dispatch failures (`parse`, `pipe`, `unknown command`).
-//! - `<Hint>` — one of `Use:`, `Try:`, `Check:`, `Available:` — the first
+//! - `<Hint>`: one of `Use:`, `Try:`, `Check:`, `Available:`. The first
 //!   two phrase actionable alternatives; the latter two phrase diagnostics.
-//! - `<recovery>` — either a concrete `run`-executable command the LLM can
+//! - `<recovery>`: either a concrete `run`-executable command the LLM can
 //!   issue verbatim (e.g. `see photo.png`, `ls /dir`, `cat -b file.bin`)
 //!   or a short check instruction (`ls -l <path>`).
 //!
 //! Use [`error_line`] to build a line, or [`io_error_nav`] to classify a
 //! `std::io::Error` against the path that produced it. Never return a bare
-//! non-zero `exit_code` without context — if a subprocess or downstream
+//! non-zero `exit_code` without context; if a subprocess or downstream
 //! library emitted stderr, forward it so the LLM can see *why*.
 
 use anyhow::Result;
@@ -38,7 +38,7 @@ use async_trait::async_trait;
 /// convention. Emits exactly `[error] <cmd>: <what>. <hint>: <recovery>\n`.
 ///
 /// `hint` is the label without the trailing colon (e.g. `"Use"`, `"Try"`,
-/// `"Check"`, `"Available"`) — the colon and space are added for you.
+/// `"Check"`, `"Available"`); the colon and space are added for you.
 pub fn error_line(
     cmd: &str,
     what: impl std::fmt::Display,
@@ -78,7 +78,7 @@ pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
 /// Input to a single chain stage.
 pub struct CommandInput {
     /// Positional arguments **after** argv[0]. The command's own name
-    /// is not included here — the registry has already resolved it.
+    /// is not included here; the registry has already resolved it.
     pub args: Vec<String>,
     /// Bytes piped in from the previous chain stage (or empty for the
     /// first command in a pipeline).
@@ -113,6 +113,7 @@ pub struct CommandOutput {
 }
 
 impl CommandOutput {
+    /// Construct a successful output with the given stdout bytes.
     pub fn ok(stdout: Vec<u8>) -> Self {
         Self {
             stdout,
@@ -122,6 +123,7 @@ impl CommandOutput {
         }
     }
 
+    /// Construct a failed output with the given exit code and stderr bytes.
     pub fn failed(exit_code: i32, stderr: impl Into<Vec<u8>>) -> Self {
         Self {
             stdout: Vec::new(),
@@ -143,6 +145,7 @@ impl CommandOutput {
 /// own `run` body (Level-2).
 #[async_trait]
 pub trait Command: Send + Sync + 'static {
+    /// Machine-readable name used to dispatch the command (e.g. `"cat"`, `"grep"`).
     fn name(&self) -> &str;
     /// One-line advertisement (≤80 chars, no trailing newline). Used to
     /// build the `run` tool's Level-0 description. Convention: terse verb
@@ -153,6 +156,7 @@ pub trait Command: Send + Sync + 'static {
     /// with `usage: <name> …` so the LLM can visually disambiguate help
     /// output from a real `[<name>]\terror: …` failure.
     fn help(&self) -> String;
+    /// Execute the command with the given input and return its output.
     async fn run(&self, input: CommandInput) -> Result<CommandOutput>;
 }
 
@@ -163,14 +167,17 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
+    /// Create an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Register a command by value.
     pub fn register<C: Command>(&mut self, cmd: C) {
         self.commands.push(Box::new(cmd));
     }
 
+    /// Look up a registered command by its `name()`.
     pub fn get(&self, name: &str) -> Option<&dyn Command> {
         self.commands
             .iter()
@@ -178,10 +185,12 @@ impl CommandRegistry {
             .map(|c| c.as_ref())
     }
 
+    /// Number of registered commands.
     pub fn len(&self) -> usize {
         self.commands.len()
     }
 
+    /// Returns `true` when no commands have been registered.
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
@@ -365,7 +374,7 @@ mod tests {
                 )),
             ),
             // wm against the disconnected NoWindowManager exercises the
-            // mock-mode short-circuit — every subcommand returns the
+            // mock-mode short-circuit; every subcommand returns the
             // same `[error] wm: compositor not connected. Check: …`
             // line, so any subcommand argv works as the failure driver.
             (
@@ -385,15 +394,15 @@ mod tests {
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(
                 stderr.contains("[error] "),
-                "{name}: stderr missing `[error] ` tag — got {stderr:?}"
+                "{name}: stderr missing `[error] ` tag, got {stderr:?}"
             );
             assert!(
                 stderr.contains(&format!("[error] {name}: ")),
-                "{name}: stderr should say `[error] {name}: ` — got {stderr:?}"
+                "{name}: stderr should say `[error] {name}: `, got {stderr:?}"
             );
             assert!(
                 contains_hint(&stderr),
-                "{name}: stderr missing recovery hint (Use:/Try:/Check:/Available:) — got {stderr:?}"
+                "{name}: stderr missing recovery hint (Use:/Try:/Check:/Available:), got {stderr:?}"
             );
         }
     }
@@ -434,7 +443,7 @@ mod tests {
             assert!(!help.is_empty(), "{name} has empty help");
             assert!(
                 help.contains("usage:"),
-                "{name} help should contain `usage:` line — got {help:?}"
+                "{name} help should contain `usage:` line, got {help:?}"
             );
         }
     }

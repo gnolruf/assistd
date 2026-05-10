@@ -18,6 +18,11 @@ pub struct HealthChecker {
 }
 
 impl HealthChecker {
+    /// Construct a new `HealthChecker` that polls `http://{host}:{port}/health`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmbedServerError::Http`] if the underlying HTTP client cannot be built.
     pub fn new(host: &str, port: u16, ready_timeout: Duration) -> Result<Self, EmbedServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -32,10 +37,17 @@ impl HealthChecker {
         })
     }
 
+    /// Returns the maximum duration this checker will wait before declaring a timeout.
     pub fn ready_timeout(&self) -> Duration {
         self.ready_timeout
     }
 
+    /// Poll `/health` until it returns 200, the deadline elapses, or shutdown is signalled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmbedServerError::HealthTimeout`] if the ready deadline is exceeded,
+    /// or [`EmbedServerError::ShutdownDuringHealth`] if the shutdown watch fires.
     pub async fn wait_ready(
         &self,
         shutdown_rx: &mut watch::Receiver<bool>,

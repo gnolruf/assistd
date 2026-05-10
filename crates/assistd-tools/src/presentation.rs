@@ -1,4 +1,4 @@
-//! Layer 2 — the LLM presentation layer. Runs once on the final
+//! Layer 2: the LLM presentation layer. Runs once on the final
 //! [`CommandOutput`] of a completed chain (Layer 1's output). Responsible for:
 //!
 //! - Binary guarding: refuses to surface null-byte / non-UTF-8 / control-heavy
@@ -13,7 +13,7 @@
 //! This layer is deliberately kept out of the chain executor: Layer 1 (pipes,
 //! sequencing, and-or) threads raw bytes between stages without any of these
 //! transforms, so `cat bigfile | grep foo | wc -l` sees the full cat output
-//! flow into grep — truncation only kicks in on the final `wc -l` result.
+//! flow into grep; truncation only kicks in on the final `wc -l` result.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +39,8 @@ pub struct PresentSpec {
 }
 
 impl Default for PresentSpec {
+    /// Returns a spec with 200 max lines, 50 KiB max bytes, and
+    /// `/tmp/assistd-output` as the overflow directory.
     fn default() -> Self {
         Self {
             max_lines: 200,
@@ -75,7 +77,7 @@ pub struct PresentResult {
 }
 
 /// Render a completed chain's `CommandOutput` into an LLM-facing
-/// `PresentResult`. Measures nothing itself — `duration` is whatever the
+/// `PresentResult`. Measures nothing itself; `duration` is whatever the
 /// caller timed around their `execute()` call.
 pub fn present(
     out: CommandOutput,
@@ -87,8 +89,6 @@ pub fn present(
     let footer = format!("[exit:{} | {}ms]", out.exit_code, duration_ms);
     let stderr_raw = String::from_utf8_lossy(&out.stderr).into_owned();
 
-    // 1. Binary guard — stdout might be an image dump, a stray `/dev/urandom`
-    //    read, or Latin-1 text. Refuse to splat it into the model's context.
     if let Some(label) = binary_guard(&out.stdout) {
         let mut body = format!(
             "[error] binary output ({}, {}). Use: cat -b <path>",
@@ -114,12 +114,10 @@ pub fn present(
         };
     }
 
-    // 2. Decode stdout and measure.
     let stdout_str = String::from_utf8_lossy(&out.stdout).into_owned();
     let line_count = count_lines(&stdout_str);
     let byte_count = stdout_str.len();
 
-    // 3. Overflow spill.
     let overflow = line_count > spec.max_lines || byte_count > spec.max_bytes;
     let (visible_head, overflow_file) = if overflow {
         let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -140,7 +138,6 @@ pub fn present(
         (stdout_str.clone(), None)
     };
 
-    // 4. Assemble body: head (+ trailing newline) → banner (+ hints) → stderr → footer.
     let mut body = String::new();
     if !visible_head.is_empty() {
         body.push_str(&visible_head);
@@ -192,21 +189,16 @@ pub(crate) fn binary_guard(raw: &[u8]) -> Option<String> {
         return None;
     }
 
-    // Rule 1: any NUL byte → binary. `sniff_binary` gives a nicer MIME label
-    //  when the magic bytes are recognized (PNG, ZIP, …).
     if raw.contains(&0u8) {
         return Some(sniff_binary(raw).unwrap_or_else(|| "application/octet-stream".into()));
     }
 
-    // Rule 2: non-UTF-8 bytes (e.g. Latin-1 text with 0xE9) → binary.
     let s = match std::str::from_utf8(raw) {
         Ok(s) => s,
         Err(_) => return Some("invalid-utf8".into()),
     };
 
-    // Rule 3: more than 10% control chars (excluding \t, \n, \r) → binary.
-    //  Counting over chars (not bytes) so multibyte UTF-8 runes aren't
-    //  double-counted.
+    // Count over chars (not bytes) so multibyte UTF-8 runes aren't double-counted.
     let total = s.chars().count();
     if total == 0 {
         return None;
@@ -228,7 +220,7 @@ fn is_suspicious_control(c: char) -> bool {
 }
 
 /// Count lines in `s`. A trailing non-newline-terminated line counts as a
-/// line — `"a"` is 1 line, `"a\n"` is 1, `"a\nb"` is 2, `""` is 0.
+/// line: `"a"` is 1 line, `"a\n"` is 1, `"a\nb"` is 2, `""` is 0.
 pub(crate) fn count_lines(s: &str) -> usize {
     if s.is_empty() {
         return 0;
@@ -249,8 +241,6 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
         return String::new();
     }
 
-    // Line clamp: cut after the Nth '\n' (inclusive). If fewer than N
-    // newlines exist, keep everything through end-of-string.
     let mut cut = s.len();
     let mut seen = 0usize;
     for (i, b) in s.bytes().enumerate() {
@@ -263,8 +253,6 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
         }
     }
 
-    // Byte clamp (UTF-8 boundary safe). Walk backward if the clamp lands
-    // inside a multibyte codepoint.
     if cut > max_bytes {
         cut = max_bytes;
         while cut > 0 && !s.is_char_boundary(cut) {
@@ -276,7 +264,7 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
 }
 
 /// Write `raw` to `<dir>/cmd-<n>.txt`. Caller is responsible for ensuring
-/// `dir` exists — the daemon creates it at startup. Degraded-write failure
+/// `dir` exists; the daemon creates it at startup. Degraded-write failure
 /// (disk full, bad perms) is handled one level up in `present`.
 fn write_overflow_file(raw: &[u8], dir: &Path, n: u64) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("cmd-{n}.txt"));
@@ -290,7 +278,7 @@ mod tests {
     use crate::command::CommandOutput;
     use tempfile::tempdir;
 
-    // Minimal valid 1x1 PNG — contains NUL bytes in IHDR.
+    // Minimal valid 1x1 PNG; contains NUL bytes in IHDR.
     const PNG_BYTES: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
@@ -349,7 +337,7 @@ mod tests {
 
     #[test]
     fn binary_guard_accepts_tabs_and_newlines() {
-        // 50% whitespace-controls — none are "suspicious".
+        // 50% whitespace-controls; none are "suspicious".
         let bytes = b"a\tb\nc\td\ne\tf\n".to_vec();
         assert!(binary_guard(&bytes).is_none());
     }
@@ -419,7 +407,7 @@ mod tests {
         // "日" is 3 bytes: 0xE6 0x97 0xA5.
         let s = "日本"; // 6 bytes total
         let t = truncate_lines_bytes(s, 100, 4); // clamp inside 2nd rune
-        assert_eq!(t, "日"); // 3 bytes — must not return partial rune
+        assert_eq!(t, "日"); // 3 bytes; must not return partial rune
     }
 
     #[test]
@@ -572,7 +560,7 @@ mod tests {
     #[test]
     fn present_overflow_byte_threshold_trips_independently_of_lines() {
         let dir = tempdir().unwrap();
-        // One long line — no newline, so count_lines = 1 but bytes > max_bytes.
+        // One long line: no newline, so count_lines = 1 but bytes > max_bytes.
         let big = vec![b'x'; 10_000];
         let out = CommandOutput::ok(big);
         let counter = AtomicU64::new(0);
@@ -588,7 +576,7 @@ mod tests {
 
     #[test]
     fn present_overflow_write_failure_degrades() {
-        // overflow_dir points at a path that doesn't exist — write fails,
+        // overflow_dir points at a path that doesn't exist (write fails);
         // presentation still produces a body with the head + banner, but
         // NOT the "Full output:" / "Explore:" lines.
         let bad_dir = PathBuf::from("/nonexistent-assistd-test-dir/nope");

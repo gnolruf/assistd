@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Hard deadlines for operations that cross a process boundary
 /// (HTTP, child stdin/stdout, SSE chunk reads). Every value is a
-/// safety valve, not a normal-case latency budget — defaults are
+/// safety valve, not a normal-case latency budget; defaults are
 /// generous and a trip should always be logged at `warn!`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TimeoutsConfig {
@@ -26,7 +26,7 @@ pub struct TimeoutsConfig {
     #[serde(default = "default_presence_wake_load_secs")]
     pub presence_wake_load_secs: u64,
     /// Cap on `LlamaService::start` inside `PresenceManager::wake`
-    /// (Sleeping → Active) — covers spawn + first `/health = 200`.
+    /// (Sleeping → Active); covers spawn + first `/health = 200`.
     /// Cold starts download weights from HuggingFace on first run, so
     /// the budget is generous. Default: 60s.
     #[serde(default = "default_presence_wake_cold_start_secs")]

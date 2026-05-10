@@ -2,8 +2,8 @@ use thiserror::Error;
 
 /// Errors surfaced by the MCP transport layer and the per-server supervisor.
 ///
-/// `RpcError` carries the JSON-RPC server-side error verbatim — code,
-/// message, and optional data — so callers can distinguish "the server
+/// `RpcError` carries the JSON-RPC server-side error verbatim (code,
+/// message, and optional data) so callers can distinguish "the server
 /// processed our request and returned a structured error" from "the
 /// transport itself broke." `TransportClosed` and `RequestTimeout` are
 /// the two terminal failure modes the supervisor watches for.
@@ -14,7 +14,7 @@ use thiserror::Error;
 /// the LLM gets a one-step recovery path on every failure (the convention
 /// is documented in `assistd-tools/src/command.rs`). MCP tool failures must
 /// honor the same shape so the model treats them like any other tool error.
-/// [`mcp_error_line`] does that translation per variant — call it from any
+/// [`mcp_error_line`] does that translation per variant; call it from any
 /// site that surfaces an `McpError` to the model.
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -46,7 +46,7 @@ pub enum McpError {
     #[error("MCP protocol error: {0}")]
     Protocol(String),
 
-    /// User-config issue surfaced at connect time — bad URL, bad
+    /// User-config issue surfaced at connect time: bad URL, bad
     /// header name/value, etc. Carries a context string and the
     /// original parse error so `error.source()` walks the chain. Routed
     /// to a "Check: <config>" recovery hint by [`mcp_error_line`] so
@@ -98,13 +98,13 @@ impl McpError {
 /// the same recovery affordances as a native tool failure.
 ///
 /// `tool_name` is the registry-facing identifier (typically
-/// `mcp__<server>__<tool>`) — the LLM is already addressing the tool by
+/// `mcp__<server>__<tool>`); the LLM is already addressing the tool by
 /// that name, so echoing it back keeps the message anchored.
 ///
 /// The `<Hint>` keyword is one of `Use:` / `Try:` / `Check:` / `Available:`
 /// per the convention in `assistd-tools/src/command.rs:11-32`. The recovery
-/// clause is a concrete next step the model can take — retry, switch tools,
-/// or check daemon-side state — chosen to match each variant's failure mode.
+/// clause is a concrete next step the model can take (retry, switch tools,
+/// or check daemon-side state) chosen to match each variant's failure mode.
 pub fn mcp_error_line(tool_name: &str, e: &McpError) -> String {
     match e {
         McpError::Spawn { path, source } => format!(
@@ -166,7 +166,7 @@ mod tests {
         s.contains("Use:") || s.contains("Try:") || s.contains("Check:") || s.contains("Available:")
     }
 
-    /// Build a real `reqwest::Error` for the test — `reqwest` doesn't
+    /// Build a real `reqwest::Error` for the test; `reqwest` doesn't
     /// expose a public constructor, so we provoke one with a malformed
     /// URL request. Async because the only path that yields a
     /// `reqwest::Error` flows through `Client::execute`.
@@ -228,11 +228,11 @@ mod tests {
             let line = mcp_error_line("mcp__web__search", &e);
             assert!(
                 line.starts_with("[error] mcp__web__search: "),
-                "{label}: missing `[error] <tool>: ` prefix — got {line:?}"
+                "{label}: missing `[error] <tool>: ` prefix, got {line:?}"
             );
             assert!(
                 contains_hint(&line),
-                "{label}: missing recovery hint (Use/Try/Check/Available) — got {line:?}"
+                "{label}: missing recovery hint (Use/Try/Check/Available), got {line:?}"
             );
             assert!(line.ends_with('\n'), "{label}: missing trailing newline");
         }
@@ -254,7 +254,7 @@ mod tests {
         );
     }
 
-    /// Config variant carries actionable context and source — the
+    /// Config variant carries actionable context and source; the
     /// `mcp_error_line` rendering must include both.
     #[test]
     fn config_variant_renders_with_check_hint_and_context() {

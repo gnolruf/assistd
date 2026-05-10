@@ -3,7 +3,7 @@ use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
 
-/// `wc [-l]` — count lines (`-l`) or "lines words bytes" (default) from
+/// `wc [-l]`: count lines (`-l`) or "lines words bytes" (default) from
 /// stdin. Only `-l` is accepted in v1; other flags return exit 2.
 pub struct WcCommand;
 

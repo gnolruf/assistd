@@ -1,5 +1,3 @@
-#![allow(unsafe_code)] // libc / process-group primitives — each unsafe block is locally justified
-
 use super::error::EmbedServerError;
 use assistd_config::EmbeddingConfig;
 use std::process::{ExitStatus, Stdio};
@@ -18,10 +16,16 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
+    /// Spawn a `llama-server` child process configured for embedding and begin
+    /// forwarding its stdout/stderr to tracing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmbedServerError::Spawn`] if the process cannot be started.
     pub fn spawn(cfg: &EmbeddingConfig) -> Result<Self, EmbedServerError> {
         // The embedding server is NOT in router mode. We pass `--hf-repo`
         // directly so the model is downloaded once and held resident for
-        // the daemon's lifetime — embedding requests should be cheap.
+        // the daemon's lifetime, so embedding requests should be cheap.
         // `--embedding` enables the `/v1/embeddings` endpoint.
         //
         // We also pass `--pooling mean` to make the endpoint match the
@@ -80,10 +84,12 @@ impl ChildProcess {
         })
     }
 
+    /// Returns the OS PID of the child process, or `None` if it has already exited.
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }
 
+    /// Wait for the child process to exit and return its [`ExitStatus`].
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait().await
     }
@@ -93,11 +99,12 @@ impl ChildProcess {
     pub async fn shutdown(mut self, term_timeout: Duration) -> Result<(), EmbedServerError> {
         #[cfg(unix)]
         if let Some(pid) = self.child.id() {
-            let gid: i32 = -(pid as i32);
-            // SAFETY: libc::kill accepts any pid/signal pair; failures are
-            // returned via errno and we don't care if the child already exited.
-            unsafe {
-                libc::kill(gid, libc::SIGTERM);
+            // Child was spawned with `process_group(0)`, so its pgid equals
+            // its pid. `kill_process_group` is the safe rustix wrapper
+            // around `killpg(2)`; we ignore the result because the child
+            // may have already exited.
+            if let Some(pgid) = rustix::process::Pid::from_raw(pid as i32) {
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
             }
         }
 

@@ -9,7 +9,7 @@
 //! Like `gpu_monitor`, this module is a *driver* of `PresenceManager`.
 //! It calls `presence.drowse()` / `presence.sleep()` directly rather
 //! than going through `set_presence`, which means automatic transitions
-//! do not themselves reset the idle timer — a crucial invariant so that
+//! do not themselves reset the idle timer, a crucial invariant so that
 //! the monitor can make forward progress through Active → Drowsy →
 //! Sleeping.
 //!
@@ -28,11 +28,10 @@ use tracing::{info, warn};
 
 /// How often to re-check idle duration against thresholds. The
 /// thresholds themselves are in minutes, so sub-minute granularity is
-/// irrelevant — 10 s keeps the TUI countdown feeling live while
+/// irrelevant; 10 s keeps the TUI countdown feeling live while
 /// imposing near-zero cost at idle (one std-mutex read + compare).
 const POLL_INTERVAL_SECS: u64 = 10;
 
-/// Decision output for one poll cycle. Pure and trivially unit-testable.
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     None,
@@ -100,9 +99,6 @@ async fn run_monitor(
                 apply(action, &presence).await;
             }
             _ = sub.changed() => {
-                // External transition (hotkey, query auto-wake, CLI
-                // command, GPU monitor). Drop the old reading; the next
-                // tick will re-evaluate against the new state.
                 let _ = *sub.borrow_and_update();
             }
             _ = shutdown.changed() => {
@@ -138,16 +134,11 @@ fn decide(state: PresenceState, idle: Duration, cfg: &SleepConfig) -> Action {
     match state {
         PresenceState::Active => {
             if cfg.idle_to_drowsy_mins > 0 && idle >= drowsy_threshold {
-                // Cascade: even if idle already exceeds the sleep
-                // threshold, step through Drowsy on this tick so the
-                // model weights are unloaded cleanly before the server
-                // is torn down on the next tick.
                 Action::Drowse
             } else if cfg.idle_to_drowsy_mins == 0
                 && cfg.idle_to_sleep_mins > 0
                 && idle >= sleep_threshold
             {
-                // Drowsy step explicitly disabled — skip directly to Sleep.
                 Action::Sleep
             } else {
                 Action::None
@@ -239,10 +230,6 @@ mod tests {
 
     #[test]
     fn active_past_sleep_threshold_still_drowses_first_cascade() {
-        // Cascade semantics: emit Drowse here, next tick will see
-        // Drowsy + idle >= sleep and emit Sleep. This preserves the
-        // ordered teardown (weights unload → server stop) even when
-        // idle had already exceeded both thresholds at startup.
         let a = decide(
             PresenceState::Active,
             Duration::from_secs(200 * 60),

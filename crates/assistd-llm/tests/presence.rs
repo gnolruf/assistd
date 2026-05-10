@@ -1,4 +1,4 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
 
 //! End-to-end tests for the presence state machine.
 //!
@@ -101,8 +101,15 @@ async fn new_active_manager(port: u16) -> (Arc<PresenceManager>, watch::Sender<b
 }
 
 fn pid_alive(pid: u32) -> bool {
-    // `kill(pid, 0)` returns 0 if the process exists and we may signal it.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    // `test_kill_process` does `kill(pid, 0)`: existence probe with no
+    // signal sent. EPERM means the process exists but we can't signal it.
+    let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
+        return false;
+    };
+    matches!(
+        rustix::process::test_kill_process(pid),
+        Ok(()) | Err(rustix::io::Errno::PERM)
+    )
 }
 
 async fn wait_for_pid_gone(pid: u32, timeout: Duration) -> bool {
@@ -251,7 +258,7 @@ async fn wake_from_drowsy_reuses_process_and_only_loads_model() {
     m.wake().await.expect("wake from Drowsy should succeed");
     assert_eq!(m.state(), PresenceState::Active);
 
-    // Same PID — no respawn.
+    // Same PID, no respawn.
     let pid_after = m.llama_pid().await.expect("child still running");
     assert_eq!(
         pid_initial, pid_after,
@@ -301,7 +308,7 @@ async fn query_during_sleeping_triggers_auto_wake() {
     m.sleep().await.unwrap();
     assert_eq!(m.state(), PresenceState::Sleeping);
 
-    // AppState uses EchoBackend — we're testing the auto-wake hook in
+    // AppState uses EchoBackend; we're testing the auto-wake hook in
     // handle_query, not the llama chat path.
     let state = Arc::new(AppState::new(
         Config::default(),

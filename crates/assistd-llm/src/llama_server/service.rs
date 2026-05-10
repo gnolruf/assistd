@@ -58,7 +58,7 @@ impl LlamaService {
         loop {
             match ready_rx.changed().await {
                 Err(_) => {
-                    // Supervisor task dropped its sender — most likely the
+                    // Supervisor task dropped its sender; most likely the
                     // daemon signaled shutdown before the child reached Ready.
                     let _ = task.await;
                     return Err(LlamaServerError::ShutdownDuringHealth);
@@ -89,10 +89,12 @@ impl LlamaService {
         }
     }
 
+    /// Returns `true` iff the supervisor is currently in [`ReadyState::Ready`].
     pub fn is_ready(&self) -> bool {
         matches!(*self.ready_rx.borrow(), ReadyState::Ready)
     }
 
+    /// Snapshot of the current [`ReadyState`].
     pub fn state(&self) -> ReadyState {
         *self.ready_rx.borrow()
     }

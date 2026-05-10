@@ -1,3 +1,6 @@
+//! Client for the `query` subcommand: sends a one-shot text (with optional
+//! image attachments) to the running daemon and streams the response to stdout.
+
 use anyhow::Result;
 use assistd_ipc::{Event, ImageAttachment, IpcClient, IpcClientError, Request};
 use assistd_tools::attachment::{LoadImageError, MAX_IMAGE_BYTES};
@@ -6,8 +9,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// Tool-call preview cap: long commands are truncated to keep the status
-/// line readable while still showing the shape of the call.
+/// Maximum chars shown from a tool-call `command` argument in the status line.
 const PREVIEW_MAX_CHARS: usize = 80;
 
 fn truncate_preview(s: &str) -> String {
@@ -21,9 +23,10 @@ fn truncate_preview(s: &str) -> String {
     out
 }
 
+/// Arguments for the `query` subcommand.
 #[derive(Args)]
 pub struct QueryArgs {
-    /// Text to send to the daemon
+    /// Text to send to the daemon.
     pub text: String,
     /// Attach one or more images as vision inputs for this turn. Repeat
     /// the flag to attach multiple. Each path must point to a PNG, JPEG,
@@ -32,11 +35,15 @@ pub struct QueryArgs {
     pub images: Vec<PathBuf>,
 }
 
+/// Send a query to the daemon and stream the response to stdout.
+///
+/// # Errors
+///
+/// Returns an error if image loading fails, the IPC connection fails,
+/// or the daemon sends an unexpected terminal event.
 pub async fn run(args: QueryArgs) -> Result<()> {
     let mut wire_attachments = Vec::with_capacity(args.images.len());
     for path in &args.images {
-        // Reject the bad path before opening the daemon socket so the
-        // user sees the error in their shell, not as a daemon Event.
         match assistd_tools::load_image_attachment(path).await {
             Ok((assistd_tools::Attachment::Image { mime, bytes }, _)) => {
                 wire_attachments.push(ImageAttachment::from_bytes(mime, &bytes));
@@ -84,10 +91,6 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                 wrote_anything = wrote_anything || !text.is_empty();
             }
             Event::ToolCall { name, args, .. } => {
-                // Prefix tool calls with a line separator so the stream
-                // remains readable when they land mid-response. Extract
-                // the command preview so the user sees what the model
-                // is running, not just the tool name.
                 let preview = args
                     .get("command")
                     .and_then(|v| v.as_str())
@@ -127,9 +130,6 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                     if enabled { "on" } else { "off" }
                 )?;
             }
-            // Memory* events shouldn't appear on a Query stream — the
-            // daemon only emits them on `Request::Memory*`. Tolerate
-            // them silently in case a future feature reuses the wire.
             Event::Status {
                 severity,
                 component,
@@ -149,11 +149,6 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             | Event::BranchSwitched { .. }
             | Event::HistoryEntry { .. }
             | Event::UndoApplied { .. } => {}
-            // `assistd query` is one-shot non-interactive: it can't
-            // answer a confirm prompt. The daemon-side gate denies
-            // when the connection drops, so we just note the event
-            // and keep reading until the agent emits its denial Done.
-            // The interactive flow lives in the TUI via DialogConnection.
             Event::ConfirmRequest { .. } => {
                 eprintln!(
                     "[daemon asked for destructive-command confirmation; denying \

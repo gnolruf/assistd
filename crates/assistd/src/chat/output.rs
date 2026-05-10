@@ -21,7 +21,7 @@ pub const THUMBNAIL_ROWS: u16 = 8;
 /// block is visually distinct from prose.
 ///
 /// The Layer-2 truncation indicator is conveyed by the truncation banner
-/// already embedded in `output` — no separate flag is stored here.
+/// already embedded in `output`; no separate flag is stored here.
 #[derive(Debug, Clone)]
 pub struct ToolBlock {
     pub command: String,
@@ -34,7 +34,7 @@ pub struct ToolBlock {
 }
 
 /// Inline thumbnail rendered via `ratatui-image`. The protocol is the
-/// pre-built per-image graphics state — its lifetime is the OutputPane.
+/// pre-built per-image graphics state; its lifetime is the OutputPane.
 pub struct ThumbnailItem {
     /// Filename shown in the placeholder line if the thumbnail's row
     /// range is scrolled out of the viewport. Also used as the
@@ -46,9 +46,10 @@ pub struct ThumbnailItem {
 enum OutputItem {
     Text(Line<'static>),
     Tool(ToolBlock),
-    Thumbnail(ThumbnailItem),
+    Thumbnail(Box<ThumbnailItem>),
 }
 
+/// Scrollable output region holding the full chat history for the TUI session.
 pub struct OutputPane {
     items: Vec<OutputItem>,
     open_assistant: Option<usize>,
@@ -64,6 +65,7 @@ impl Default for OutputPane {
 }
 
 impl OutputPane {
+    /// Create an empty output pane.
     pub fn new() -> Self {
         Self {
             items: Vec::new(),
@@ -74,6 +76,7 @@ impl OutputPane {
         }
     }
 
+    /// Append a user prompt line prefixed with `"> "`.
     pub fn push_user(&mut self, text: &str) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
@@ -84,7 +87,7 @@ impl OutputPane {
     }
 
     /// Push the user's prompt line with a trailing 📎 tag listing every
-    /// attachment that rode along with the turn — so scrollback shows
+    /// attachment that rode along with the turn, so scrollback shows
     /// which turn carried the image even after `pending_attachments` is
     /// drained.
     pub fn push_user_with_attachments(&mut self, text: &str, names: &[String]) {
@@ -101,7 +104,7 @@ impl OutputPane {
         self.dirty = true;
     }
 
-    /// Push a styled informational line — used by `/attach` to confirm
+    /// Push a styled informational line, used by `/attach` to confirm
     /// "📎 attached: name.png (image/png, 12 KB)" without polluting the
     /// error stream. Distinct from `push_user` (no `> ` prefix) and
     /// `push_error` (no `!! ` prefix or red color).
@@ -114,6 +117,7 @@ impl OutputPane {
         self.dirty = true;
     }
 
+    /// Open a new streaming assistant block; subsequent [`append_assistant`](Self::append_assistant) calls extend it.
     pub fn begin_assistant(&mut self) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
@@ -124,10 +128,8 @@ impl OutputPane {
         self.dirty = true;
     }
 
+    /// Append a streaming delta to the open assistant block, splitting on embedded newlines.
     pub fn append_assistant(&mut self, delta: &str) {
-        // Resolve the open-assistant index through `begin_assistant` once
-        // so the subsequent loop can assume a non-empty assistant line
-        // without an Option unwrap surviving into the hot path.
         let mut idx = match self.open_assistant {
             Some(i) => i,
             None => {
@@ -152,6 +154,7 @@ impl OutputPane {
         self.dirty = true;
     }
 
+    /// Close the open assistant block and append a blank separator line.
     pub fn finish_assistant(&mut self) {
         if self.open_assistant.is_none() {
             return;
@@ -161,6 +164,7 @@ impl OutputPane {
         self.dirty = true;
     }
 
+    /// Append an error line prefixed with `"!! "` in red bold.
     pub fn push_error(&mut self, msg: &str) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
@@ -247,20 +251,24 @@ impl OutputPane {
         0
     }
 
+    /// Scroll up by half a viewport height.
     pub fn scroll_page_up(&mut self, viewport_height: u16) {
         let step = (viewport_height / 2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_add(step);
     }
 
+    /// Scroll down by half a viewport height.
     pub fn scroll_page_down(&mut self, viewport_height: u16) {
         let step = (viewport_height / 2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_sub(step);
     }
 
+    /// Reset the scroll offset to the bottom (most-recent content).
     pub fn reset_scroll(&mut self) {
         self.scroll_offset = 0;
     }
 
+    /// Current scroll offset in wrapped lines (0 = pinned to bottom).
     pub fn scroll_offset(&self) -> u16 {
         self.scroll_offset
     }
@@ -269,8 +277,6 @@ impl OutputPane {
     /// to render at the top of the viewport. The scroll offset is clamped
     /// in place so it never exceeds the wrapped total.
     pub fn render_view(&mut self, width: u16, height: u16) -> (&[Line<'static>], u16) {
-        // Force cache population + grab the length without holding the
-        // borrow, so the subsequent scroll-offset clamp is legal.
         let wrapped_len = self.wrapped(width).len();
         let max_offset = wrapped_len.saturating_sub(height as usize) as u16;
         if self.scroll_offset > max_offset {
@@ -279,8 +285,6 @@ impl OutputPane {
         let start = wrapped_len
             .saturating_sub(height as usize)
             .saturating_sub(self.scroll_offset as usize) as u16;
-        // wrap_cache is guaranteed Some — self.wrapped() above
-        // unconditionally populates it.
         let lines = &self
             .wrap_cache
             .as_ref()
@@ -301,11 +305,6 @@ impl OutputPane {
             self.wrap_cache = Some((width, wrapped));
             self.dirty = false;
         }
-        // Invariant: wrap_cache is Some after the branch above; the only
-        // way to reach here is either needs_rewrap was true (so we just
-        // assigned Some) or needs_rewrap was false (which requires
-        // wrap_cache.as_ref().map(...) to have returned Some, proving it's
-        // Some here).
         &self
             .wrap_cache
             .as_ref()
@@ -315,10 +314,6 @@ impl OutputPane {
 
     fn rewrap(&self, width: u16) -> Vec<Line<'static>> {
         if width == 0 {
-            // Degraded path: render text items raw, tool blocks as a
-            // single unwrapped header line, thumbnails as a one-line
-            // placeholder. Keeps the zero-width test green and avoids
-            // `textwrap` calls with width 0.
             return self
                 .items
                 .iter()
@@ -364,7 +359,10 @@ impl OutputPane {
     pub fn push_thumbnail(&mut self, name: String, protocol: StatefulProtocol) {
         self.close_open_assistant();
         self.items
-            .push(OutputItem::Thumbnail(ThumbnailItem { name, protocol }));
+            .push(OutputItem::Thumbnail(Box::new(ThumbnailItem {
+                name,
+                protocol,
+            })));
         self.dirty = true;
     }
 
@@ -373,10 +371,6 @@ impl OutputPane {
     /// renderer uses this layout map to overlay
     /// `ratatui_image::StatefulImage` widgets on the reserved rows.
     pub fn thumbnail_layout(&mut self, width: u16) -> Vec<ThumbnailSlot> {
-        // Force the wrapped cache so `wrap_cache` reflects the current
-        // items; we walk items in their original order and accumulate
-        // the same per-item row counts that `rewrap` produced, so the
-        // returned `start_row` lines up with the wrapped output.
         let _ = self.wrapped(width);
         let mut slots = Vec::new();
         let mut row: usize = 0;
@@ -424,10 +418,6 @@ pub struct ThumbnailSlot {
     pub height: usize,
 }
 
-/// Reserve [`THUMBNAIL_ROWS`] blank lines so layout math stays correct.
-/// The first row carries a "📎 name" caption so non-graphics terminals
-/// (and the placeholder rows that show through if rendering is skipped)
-/// still tell the user what they're looking at.
 fn render_thumbnail_placeholder(out: &mut Vec<Line<'static>>, t: &ThumbnailItem) {
     out.push(single_span_line(format!("📎 {}", t.name), info_style()));
     for _ in 1..THUMBNAIL_ROWS {
@@ -448,8 +438,6 @@ fn wrapped_text_rows(line: &Line<'static>, width: u16) -> usize {
 }
 
 fn wrapped_tool_rows(b: &ToolBlock, width: u16) -> usize {
-    // Mirrors `render_tool_block` row accounting: header + body + footer
-    // + trailing blank, all wrapped to `inner_w = width - 2` (bar prefix).
     if width == 0 {
         return 1;
     }
@@ -489,7 +477,6 @@ fn wrapped_tool_rows(b: &ToolBlock, width: u16) -> usize {
             rows += 1;
         }
     }
-    // Footer + trailing blank.
     rows + 2
 }
 
@@ -530,9 +517,6 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16) {
         inner_w,
     );
 
-    // Slice the Layer-2 body: drop the [exit:...] footer (we re-render it
-    // ourselves so we can right-align timing and color the exit code) and
-    // remember which lines start with [stderr] for pinning when collapsed.
     let body_lines = split_body(&b.output);
     let stderr_idxs: Vec<usize> = body_lines
         .iter()
@@ -579,7 +563,6 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16) {
         }
     }
 
-    // Footer: right-aligned [exit:N | Xms] in green/red bold.
     let footer = format!("[exit:{} | {}ms]", b.exit_code, b.duration_ms);
     let pad = (inner_w as usize).saturating_sub(footer.chars().count());
     out.push(Line::from(vec![
@@ -591,7 +574,6 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16) {
         ),
     ]));
 
-    // Trailing blank so two adjacent blocks don't merge visually.
     out.push(Line::from(""));
 }
 
@@ -615,8 +597,6 @@ fn push_barred(
     }
 }
 
-/// Strip the `[exit:N | Xms]` footer (always the last line of a Layer-2
-/// `output`) and return the remaining body lines.
 fn split_body(output: &str) -> Vec<String> {
     let mut lines: Vec<String> = output.lines().map(str::to_string).collect();
     if lines
@@ -629,8 +609,6 @@ fn split_body(output: &str) -> Vec<String> {
     lines
 }
 
-/// Count body lines (everything except the Layer-2 footer) to decide
-/// whether a new block should start collapsed.
 fn body_line_count(output: &str) -> usize {
     let n = output.lines().count();
     if output.contains("[exit:") {
@@ -698,7 +676,7 @@ fn stderr_style() -> Style {
 /// collapsed. Tab toggles the most recent block.
 const COLLAPSE_THRESHOLD: usize = 20;
 /// Number of leading body lines to keep visible while collapsed. Stderr
-/// lines past this index are still pinned visible — see `render_tool_block`.
+/// lines past this index are still pinned visible; see `render_tool_block`.
 const COLLAPSED_HEAD_LINES: usize = 10;
 
 #[cfg(test)]

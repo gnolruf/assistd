@@ -6,6 +6,7 @@ use tracing::debug;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Polls `/health` until llama-server reports ready or a timeout elapses.
 pub struct HealthChecker {
     client: reqwest::Client,
     url: String,
@@ -15,6 +16,11 @@ pub struct HealthChecker {
 }
 
 impl HealthChecker {
+    /// Constructs a checker that will poll `http://{host}:{port}/health` with
+    /// the given overall `ready_timeout`.
+    ///
+    /// # Errors
+    /// Returns [`LlamaServerError`] if the underlying HTTP client cannot be built.
     pub fn new(host: &str, port: u16, ready_timeout: Duration) -> Result<Self, LlamaServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -36,7 +42,7 @@ impl HealthChecker {
 
     /// Polls `/health` until it returns 200 OK, the overall deadline elapses,
     /// or shutdown is requested. Non-200 responses and connect/read errors
-    /// are treated as "keep polling" — we only care about the success signal.
+    /// are treated as "keep polling"; we only care about the success signal.
     pub async fn wait_ready(
         &self,
         shutdown_rx: &mut watch::Receiver<bool>,

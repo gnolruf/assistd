@@ -6,7 +6,7 @@
 //! for keeping the snapshot consistent under those events are
 //! identical (key on the unique con_id, drop title updates from
 //! background windows, etc.). Originally those rules lived in two
-//! near-identical `handle_window_event` copies — one per backend.
+//! near-identical `handle_window_event` copies, one per backend.
 //!
 //! Each backend now extracts the container's `(id, class, title)` from
 //! its native `WindowEvent` payload (the only piece that's compositor-
@@ -16,8 +16,8 @@
 //! one place; the "how do I parse the IPC frame" stays in the
 //! backend-specific module.
 //!
-//! No sealed `Compositor` trait yet — that was the more aggressive
-//! goal in the M9 plan; it requires an async-trait + associated-stream
+//! No sealed `Compositor` trait yet; that was the more aggressive
+//! goal in the M9 plan, and it requires an async-trait + associated-stream
 //! shape that risks GAT pitfalls and would force every backend to
 //! own-and-pin its event stream. The simpler share-the-rules form
 //! removes the bulk of the duplication without the lifetime gymnastics.
@@ -56,7 +56,7 @@ pub(crate) enum WindowChangeKind {
 
 /// Apply a `Window` event to the cached focus snapshot.
 ///
-/// Race rules (key on con_id rather than class — two windows of the
+/// Race rules (key on con_id rather than class, since two windows of the
 /// same app would otherwise alias each other in title/close updates):
 /// - `Focus` overwrites id + class + title from the new container.
 /// - `Title` only takes effect when the event's con_id matches the
@@ -112,7 +112,7 @@ pub(crate) async fn read_focused_id(snap: &Arc<RwLock<Snapshot>>) -> Option<Wind
 
 /// Build a [`FocusedWindowContext`] from the snapshot for the daemon's
 /// per-turn system-prompt injection. Returns `None` only when every
-/// field is empty — a partial snapshot still produces a context block.
+/// field is empty; a partial snapshot still produces a context block.
 pub(crate) async fn read_focused_context(
     snap: &Arc<RwLock<Snapshot>>,
 ) -> Option<FocusedWindowContext> {

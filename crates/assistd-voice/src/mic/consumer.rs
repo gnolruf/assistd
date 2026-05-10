@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use ringbuf::HeapCons;
 use ringbuf::traits::{Consumer, Observer};
-use rubato::{FastFixedIn, PolynomialDegree, Resampler};
+use rubato::audioadapter_buffers::direct::SequentialSlice;
+use rubato::{Async, FixedAsync, PolynomialDegree, Resampler};
 use tracing::debug;
 
 use super::capture::{AudioCaptureError, TARGET_SAMPLE_RATE};
@@ -28,6 +29,10 @@ const DRAIN_CHUNK_SIZE: usize = 1024;
 /// smaller value would burn CPU.
 const IDLE_PARK: Duration = Duration::from_millis(10);
 
+/// Drain the ring buffer, resample to 16 kHz, and return accumulated i16 PCM.
+///
+/// Blocks until `stop_flag` is set or `max_pcm_samples` is reached. Pads the
+/// final partial chunk with zeros so the tail of the utterance is not dropped.
 pub fn drain_loop(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
@@ -46,21 +51,22 @@ pub fn drain_loop(
         return Ok(pcm);
     }
 
-    // rubato's FastFixedIn wants a fixed input chunk size per call.
-    // We pad the last partial chunk with zeros on shutdown so the
-    // very end of the utterance isn't dropped.
+    // rubato's polynomial Async resampler wants a fixed input chunk
+    // size per call. We pad the last partial chunk with zeros on
+    // shutdown so the very end of the utterance isn't dropped.
     let ratio = TARGET_SAMPLE_RATE as f64 / native_rate as f64;
-    let mut resampler = FastFixedIn::<f32>::new(
+    let mut resampler = Async::<f32>::new_poly(
         ratio,
-        1.0, // fixed ratio — no runtime modulation
+        1.0, // fixed ratio; no runtime modulation
         PolynomialDegree::Linear,
         DRAIN_CHUNK_SIZE,
-        1, // mono
+        1,
+        FixedAsync::Input,
     )
     .map_err(|e| AudioCaptureError::BuildStream(format!("rubato init: {e}")))?;
 
     let mut in_buf = vec![0.0f32; DRAIN_CHUNK_SIZE];
-    let mut out_buf = vec![vec![0.0f32; resampler.output_frames_max()]; 1];
+    let mut out_buf = vec![0.0f32; resampler.output_frames_max()];
 
     loop {
         let available = consumer.occupied_len();
@@ -68,7 +74,7 @@ pub fn drain_loop(
             let got = consumer.pop_slice(&mut in_buf);
             if got < DRAIN_CHUNK_SIZE {
                 // Partial pop despite `occupied_len >= chunk`: race
-                // with producer drop on teardown — pad and finish.
+                // with producer drop on teardown; pad and finish.
                 for s in in_buf.iter_mut().skip(got) {
                     *s = 0.0;
                 }
@@ -141,18 +147,22 @@ fn drain_no_resample(
 }
 
 fn resample_and_append(
-    resampler: &mut FastFixedIn<f32>,
+    resampler: &mut Async<f32>,
     input: &[f32],
-    output: &mut [Vec<f32>],
+    output: &mut [f32],
     pcm: &mut Vec<i16>,
     max_pcm_samples: usize,
 ) -> Result<(), AudioCaptureError> {
-    let input_channels: [&[f32]; 1] = [input];
+    let input_adapter = SequentialSlice::new(input, 1, input.len())
+        .map_err(|e| AudioCaptureError::DeviceError(format!("rubato input adapter: {e}")))?;
+    let output_len = output.len();
+    let mut output_adapter = SequentialSlice::new_mut(output, 1, output_len)
+        .map_err(|e| AudioCaptureError::DeviceError(format!("rubato output adapter: {e}")))?;
     let (_read, written) = resampler
-        .process_into_buffer(&input_channels, output, None)
+        .process_into_buffer(&input_adapter, &mut output_adapter, None)
         .map_err(|e| AudioCaptureError::DeviceError(format!("rubato process: {e}")))?;
 
-    for &s in &output[0][..written] {
+    for &s in &output[..written] {
         if pcm.len() >= max_pcm_samples {
             return Ok(());
         }
@@ -163,7 +173,7 @@ fn resample_and_append(
 
 #[inline]
 pub(crate) fn f32_to_i16(s: f32) -> i16 {
-    // Clamp to avoid wrap on occasional out-of-range float noise.
+    // Clamp to avoid wrapping on occasional out-of-range float noise.
     let clamped = s.clamp(-1.0, 1.0);
     (clamped * i16::MAX as f32) as i16
 }

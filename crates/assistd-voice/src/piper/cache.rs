@@ -1,5 +1,3 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
-
 //! On-disk cache for Piper voices. Each voice is two files: a `.onnx`
 //! ONNX model and a matching `.onnx.json` config that carries the
 //! sample rate among other things. Both must sit side-by-side in the
@@ -14,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use crate::piper::error::PiperError;
 
 /// `<owner>/<repo>:<file>` parser. Identical contract to the whisper
-/// cache version — duplicated locally to keep error types crate-local.
+/// cache version, duplicated locally to keep error types crate-local.
 pub fn parse_hf_id(id: &str) -> Result<(String, String), PiperError> {
     let err = |reason: &str| PiperError::VoiceParse {
         id: id.to_string(),
@@ -35,9 +33,18 @@ pub fn parse_hf_id(id: &str) -> Result<(String, String), PiperError> {
 
 /// `$XDG_CACHE_HOME/assistd/piper/` or `$HOME/.cache/assistd/piper/`.
 pub fn default_cache_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
+    default_cache_dir_for(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
+}
+
+/// Pure resolver: env reads happen at the boundary so this can be tested
+/// without mutating process-global state.
+fn default_cache_dir_for(
+    xdg_cache_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    let base = xdg_cache_home
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     base.join("assistd").join("piper")
 }
@@ -295,13 +302,19 @@ mod tests {
 
     #[test]
     fn default_cache_dir_under_xdg() {
-        unsafe {
-            std::env::set_var("XDG_CACHE_HOME", "/tmp/xdg-test-piper");
-        }
-        let p = default_cache_dir();
+        let p = default_cache_dir_for(Some(std::ffi::OsString::from("/tmp/xdg-test-piper")), None);
         assert_eq!(p, Path::new("/tmp/xdg-test-piper/assistd/piper"));
-        unsafe {
-            std::env::remove_var("XDG_CACHE_HOME");
-        }
+    }
+
+    #[test]
+    fn default_cache_dir_falls_back_to_home_dot_cache() {
+        let p = default_cache_dir_for(None, Some(std::ffi::OsString::from("/home/alice")));
+        assert_eq!(p, Path::new("/home/alice/.cache/assistd/piper"));
+    }
+
+    #[test]
+    fn default_cache_dir_falls_back_to_tmp_without_env() {
+        let p = default_cache_dir_for(None, None);
+        assert_eq!(p, Path::new("/tmp/assistd/piper"));
     }
 }

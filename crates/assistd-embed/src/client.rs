@@ -2,7 +2,7 @@
 //!
 //! Holds a `reqwest::Client` (no proxy, short connect timeout, configurable
 //! per-request timeout). Vector dimensionality is **probed once at
-//! construction** by sending a one-token embed request — embedders don't
+//! construction** by sending a one-token embed request; embedders don't
 //! advertise their dim out-of-band, and exposing it on the trait lets
 //! callers size their `Vec<f32>` buffers without a downstream round-trip.
 //!
@@ -25,8 +25,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
-    /// Per OpenAI's API: an `input` array (or single string). We always
-    /// send a single string so the response shape is stable.
     input: &'a str,
     model: &'a str,
 }
@@ -54,7 +52,7 @@ impl LlamaEmbedder {
     /// Probe the server, latch the dim, and return a ready-to-use client.
     ///
     /// `request_timeout` applies per `embed()` call. The probe itself
-    /// uses the same budget — first-load may take longer, but
+    /// uses the same budget; first-load may take longer, but
     /// `EmbedService::start` already waited for `/health` so the model
     /// is loaded by the time we get here.
     pub async fn new(
@@ -153,9 +151,6 @@ async fn embed_raw(
     Ok(first.embedding)
 }
 
-/// Normalise `v` to unit L2 length in place. Returns the input vector
-/// untouched if its norm is non-finite or zero (degenerate cases that
-/// the caller must surface as a failed embed; we don't divide by zero).
 fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
     let mut sum_sq = 0.0f64;
     for &x in &v {

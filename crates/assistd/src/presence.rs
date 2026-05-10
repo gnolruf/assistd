@@ -36,6 +36,12 @@ impl PresenceAction {
     }
 }
 
+/// Send a presence-control command to the daemon and print the resulting state.
+///
+/// # Errors
+///
+/// Returns an error if the IPC connection fails or the daemon sends an
+/// unexpected terminal event.
 pub async fn run(action: PresenceAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     let mut stream = IpcClient::new()
@@ -57,9 +63,6 @@ pub async fn run(action: PresenceAction) -> Result<()> {
                 eprintln!("daemon error: {message}");
                 std::process::exit(1);
             }
-            // Any other event types (Delta, ToolCall, …) shouldn't appear on a
-            // presence request — ignore so a future protocol addition doesn't
-            // break this CLI.
             _ => {}
         }
     }

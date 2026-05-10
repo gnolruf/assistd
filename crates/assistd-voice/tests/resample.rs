@@ -38,7 +38,7 @@ fn run_drain(rate_hz: u32, seconds: f32) -> Vec<i16> {
     }
     drop(prod); // closes the producer side; consumer.occupied_len stays stable
     let stop = Arc::new(AtomicBool::new(true));
-    // max_pcm_samples is generous — enough for a few seconds at 16 kHz.
+    // max_pcm_samples is generous: enough for a few seconds at 16 kHz.
     drain_loop(cons, rate_hz, 16_000 * 4, stop).expect("drain_loop error")
 }
 
@@ -88,7 +88,7 @@ fn drain_loop_noop_when_rate_already_16k() {
 #[test]
 fn drain_loop_resamples_44100_to_16k() {
     // 44.1 kHz is the other common USB-class rate. Uses a
-    // non-integer ratio — a closer stress test of the resampler.
+    // non-integer ratio: a closer stress test of the resampler.
     let pcm = run_drain(44_100, 1.0);
     let expected = 16_000usize;
     assert!(

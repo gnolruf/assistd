@@ -12,7 +12,7 @@
 //!
 //! Trade-offs vs. sentence-aware chunking: this is a deliberately simple
 //! window-based split. The repo already has `assistd-voice/src/sentence.rs`
-//! but that's TTS-shaped (markdown stripping, code-fence handling) — it
+//! but that's TTS-shaped (markdown stripping, code-fence handling): it
 //! drops content semantic search needs and applies transforms search
 //! doesn't want. A char-window suffices for v1; if retrieval quality
 //! suffers we can revisit.
@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 /// strictly less than it (validated at config load time).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkingConfig {
+    /// Maximum number of Unicode characters per chunk.
     pub chunk_chars: usize,
+    /// Number of characters shared between consecutive chunks.
     pub overlap_chars: usize,
 }
 
@@ -48,9 +50,6 @@ pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
         return vec![content.to_string()];
     }
 
-    // Char-aware window. Collect a slice of (char_idx, byte_offset)
-    // pairs so we can grab UTF-8 substrings by byte range without
-    // re-walking the string for each window.
     let boundaries: Vec<usize> = content
         .char_indices()
         .map(|(byte_idx, _)| byte_idx)

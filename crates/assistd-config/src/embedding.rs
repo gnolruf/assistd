@@ -1,7 +1,7 @@
 //! Embedding-server and semantic-search configuration.
 //!
 //! `[embedding]` is a top-level config section parallel to
-//! `[llama_server]` — embeddings are produced by a separate, dedicated
+//! `[llama_server]`. Embeddings are produced by a separate, dedicated
 //! llama-server instance held resident on its own port. Keeping it
 //! independent of the chat server means semantic retrieval still works
 //! when the chat router is `Drowsy` or `Sleeping`. The embed model is

@@ -17,7 +17,7 @@ use super::writer::{WriteOp, spawn_writer};
 /// Bounded channel size for the writer queue. Big enough to absorb a
 /// bursty turn (a single agent step can fan out ~10 ToolCall/ToolResult
 /// pairs) without backpressuring the dispatch loop. If the queue ever
-/// fills, callers `await` on `tx.send()` — that briefly stalls the
+/// fills, callers `await` on `tx.send()`, which briefly stalls the
 /// caller (a `tokio::spawn` logger task in the chat-turn case, so the
 /// LLM stream itself never stalls).
 const WRITER_QUEUE_DEPTH: usize = 256;
@@ -33,7 +33,7 @@ pub struct SqliteHandle {
 
 impl SqliteHandle {
     /// Open `path`, apply pragmas, run migrations, and spawn the writer.
-    /// Returns the handle plus the writer's `JoinHandle` — the daemon
+    /// Returns the handle plus the writer's `JoinHandle`; the daemon
     /// keeps it so it can `.await` the writer on shutdown alongside the
     /// other background tasks at `crates/assistd/src/daemon.rs:321-333`.
     ///
@@ -58,7 +58,7 @@ impl SqliteHandle {
         // Pragmas first, then migrations. WAL gives us concurrent reads
         // alongside the single writer; foreign_keys must be ON before
         // any FK is exercised by migrations.
-        conn.call(|c| {
+        conn.call(|c| -> rusqlite::Result<_> {
             c.pragma_update(None, "journal_mode", "WAL")?;
             c.pragma_update(None, "synchronous", "NORMAL")?;
             c.pragma_update(None, "foreign_keys", "ON")?;
@@ -67,16 +67,7 @@ impl SqliteHandle {
         .await
         .context("apply SQLite pragmas")?;
 
-        conn.call(|c| {
-            migrations::run(c).map_err(|e| {
-                tokio_rusqlite::Error::Other(Box::new(std::io::Error::other(format!(
-                    "migration failed: {e}"
-                ))))
-            })?;
-            Ok(())
-        })
-        .await
-        .context("run migrations")?;
+        conn.call(migrations::run).await.context("run migrations")?;
 
         let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_DEPTH);
         let writer_handle = spawn_writer(conn.clone(), writer_rx, shutdown);
@@ -105,7 +96,7 @@ impl SqliteHandle {
     /// Cheap clone of the writer-task `Arc<Sender>`. Exposed for
     /// `assistd-core` (chunking on the persistence path) and
     /// `assistd-embed` (the embedder task ack'ing back into the same
-    /// writer queue) — both live outside this crate so the
+    /// writer queue); both live outside this crate so the
     /// `pub(super) fn writer(&self)` accessor isn't visible to them.
     pub fn writer_tx(&self) -> Arc<mpsc::Sender<WriteOp>> {
         self.writer_tx.clone()
@@ -143,7 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_creates_parent_dirs_and_runs_migrations() {
-        // Point at a path inside a non-existent directory — open() must
+        // Point at a path inside a non-existent directory; open() must
         // mkdir -p it. This is exactly what AC #1 ("created automatically
         // on first run") demands.
         let temp = tempfile::tempdir().unwrap();
@@ -155,19 +146,19 @@ mod tests {
         // Migrations applied: schema_migrations has a row.
         let n: i64 = handle
             .conn()
-            .call(|c| {
-                Ok(c.query_row(
+            .call(|c| -> rusqlite::Result<_> {
+                c.query_row(
                     "SELECT count(*) FROM sqlite_master WHERE name='conversations'",
                     [],
                     |r| r.get(0),
-                )?)
+                )
             })
             .await
             .unwrap();
         assert_eq!(n, 1);
 
         drop(handle);
-        // No graceful shutdown signal here — we just dropped the handle,
+        // No graceful shutdown signal here; we just dropped the handle,
         // so the writer's mpsc closes naturally and the worker exits.
         writer.await.unwrap();
     }
@@ -181,7 +172,7 @@ mod tests {
 
         // Send shutdown; the writer must observe it and exit promptly.
         tx.send(true).unwrap();
-        // Drop our handle so the channel closes too — writer should
+        // Drop our handle so the channel closes too; writer should
         // return either way.
         drop(handle);
         let res = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;

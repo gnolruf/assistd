@@ -2,6 +2,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 use thiserror::Error;
 
+/// Errors produced by the embed-server supervisor and its supporting components.
 #[derive(Debug, Error)]
 pub enum EmbedServerError {
     #[error("I/O error: {0}")]

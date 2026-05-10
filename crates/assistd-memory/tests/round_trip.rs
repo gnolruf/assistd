@@ -3,7 +3,7 @@
 //! *same* path, and prove the search returns a hit.
 //!
 //! Validates the daemon-restart scenario without spinning up a daemon
-//! or llama-server — the persistence layer alone has to satisfy the
+//! or llama-server; the persistence layer alone has to satisfy the
 //! contract.
 
 use assistd_memory::{
@@ -60,7 +60,7 @@ async fn turn_persists_across_store_reopen() {
         convs.end_turn(turn).await.unwrap();
         convs.end_session(&session).await.unwrap();
 
-        // Save a memory at the same time — the headline KV use case.
+        // Save a memory at the same time: the headline KV use case.
         mems.save("fact:lang", "rust".into()).await.unwrap();
 
         // Drop every reference so the writer's mpsc closes naturally,
@@ -74,7 +74,7 @@ async fn turn_persists_across_store_reopen() {
         writer.await.unwrap();
     }
 
-    // ─── Session 2 — simulates a daemon restart ──────────────────
+    // ─── Session 2 (simulates a daemon restart) ──────────────────
     {
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();

@@ -1,4 +1,4 @@
-//! SQLite-backed [`crate::MemoryStore`] — flat string KV over the
+//! SQLite-backed [`crate::MemoryStore`]: flat string KV over the
 //! `memories` table. Shares the [`super::SqliteHandle`] with
 //! [`super::SqliteConversationStore`] so both go through the same
 //! background writer.
@@ -13,17 +13,19 @@ use crate::{MemoryRecord, MemoryStore};
 use super::connection::SqliteHandle;
 use super::writer::{WriteCall, WriteOp};
 
+/// SQLite-backed [`crate::MemoryStore`] implementation.
 #[derive(Clone)]
 pub struct SqliteMemoryStore {
     handle: Arc<SqliteHandle>,
 }
 
 impl SqliteMemoryStore {
+    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
 
-    /// Save a memory with provenance — links the row back to the
+    /// Save a memory with provenance: links the row back to the
     /// conversation row that produced it. Returns the row id of the
     /// saved memory so callers can FK an embedding row.
     pub async fn save_with_source(
@@ -53,7 +55,7 @@ impl MemoryStore for SqliteMemoryStore {
         let key = key.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let result = c
                     .query_row(
                         "SELECT value FROM memories WHERE key = ?1",
@@ -92,7 +94,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        // SQLite `LIKE` with a literal terminator is the simple path —
+        // SQLite `LIKE` with a literal terminator is the simple path;
         // we escape `%` and `_` in the prefix so a key like `pref:%`
         // doesn't match every key starting with `pref:`.
         let escaped = prefix
@@ -102,7 +104,7 @@ impl MemoryStore for SqliteMemoryStore {
         let pattern = format!("{escaped}%");
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT key FROM memories WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key",
                 )?;
@@ -123,7 +125,7 @@ impl MemoryStore for SqliteMemoryStore {
         let pattern = format!("{escaped}%");
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT id, key, value FROM memories \
                      WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key",
@@ -247,7 +249,7 @@ mod tests {
         store.save("pref:a", "1".into()).await.unwrap();
         store.save("prefXa", "X".into()).await.unwrap(); // would match "pref_" without escape
         let keys = store.list("pref_").await.unwrap();
-        // Without escaping, SQLite `_` is a single-char wildcard — the
+        // Without escaping, SQLite `_` is a single-char wildcard; the
         // escape we add forces a literal underscore, so neither key
         // matches and we get an empty list.
         assert!(

@@ -4,7 +4,7 @@ use regex::RegexBuilder;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
 
-/// `grep [-i] [-v] [-c] PATTERN [FILE]` — print lines from FILE (or
+/// `grep [-i] [-v] [-c] PATTERN [FILE]`: print lines from FILE (or
 /// stdin) that match `PATTERN`.
 ///
 /// Flags:

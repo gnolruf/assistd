@@ -140,8 +140,6 @@ async fn run_command(
         })
         .await?;
 
-    // Prefix stderr with `[name]\t` so the caller can localize errors
-    // across a chain.
     let stderr = if out.stderr.is_empty() {
         Vec::new()
     } else {
@@ -156,8 +154,6 @@ async fn run_command(
 }
 
 fn prefix_stderr(name: &str, raw: &[u8]) -> Vec<u8> {
-    // One `[name]\t` prefix per newline-terminated chunk; if the final
-    // byte isn't a newline, still prefix the trailing remainder.
     let mut out = Vec::with_capacity(raw.len() + name.len() + 4);
     let mut line_start = true;
     for &b in raw {
@@ -199,8 +195,8 @@ mod tests {
     use std::sync::Mutex;
 
     /// Fake command: returns a fixed exit code and stdout; records that
-    /// it was invoked. `args[0]` (when present) overrides exit code —
-    /// lets a single stub model "this run fails" vs "this run succeeds"
+    /// it was invoked. `args[0]` (when present) overrides exit code,
+    /// letting a single stub model "this run fails" vs "this run succeeds"
     /// in the same test.
     struct Stub {
         name: &'static str,
@@ -282,7 +278,7 @@ mod tests {
         }
     }
 
-    /// Emits bytes of configurable length — exercises PIPE_BUF_MAX.
+    /// Emits bytes of configurable length; exercises PIPE_BUF_MAX.
     struct Flood(usize);
     #[async_trait]
     impl Command for Flood {

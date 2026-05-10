@@ -11,9 +11,16 @@ use tokio::task::JoinHandle;
 /// daemon's startup messages read consistently across both subsystems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadyState {
+    /// Child is spawning or waiting for its `/health` check to pass.
     Starting,
+    /// Child responded `200 OK` to `/health` and is accepting requests.
     Ready,
-    BackingOff { attempt: u32 },
+    /// Child failed and the supervisor is waiting before the next restart attempt.
+    BackingOff {
+        /// 1-based count of consecutive failures so far.
+        attempt: u32,
+    },
+    /// Too many consecutive failures; supervisor has parked and will not restart.
     Degraded,
 }
 
@@ -75,14 +82,17 @@ impl EmbedService {
         }
     }
 
+    /// Returns `true` if the supervised child is currently in the `Ready` state.
     pub fn is_ready(&self) -> bool {
         matches!(*self.ready_rx.borrow(), ReadyState::Ready)
     }
 
+    /// Returns the current lifecycle state of the supervised embed-server.
     pub fn state(&self) -> ReadyState {
         *self.ready_rx.borrow()
     }
 
+    /// Returns the OS PID of the running child process, or `None` if not currently running.
     pub fn pid(&self) -> Option<u32> {
         *self.pid.lock().unwrap_or_else(|e| e.into_inner())
     }

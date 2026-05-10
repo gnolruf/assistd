@@ -17,7 +17,7 @@ use crate::defaults::{
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryConfig {
     /// Master switch. When `false` the daemon binds the `NoMemoryStore`
-    /// placeholder and skips opening the SQLite file entirely — useful
+    /// placeholder and skips opening the SQLite file entirely; useful
     /// for ephemeral test daemons or read-only installs.
     #[serde(default = "default_memory_enabled")]
     pub enabled: bool,
@@ -29,7 +29,7 @@ pub struct MemoryConfig {
     #[serde(default = "default_memory_db_path")]
     pub db_path: String,
     /// Days to retain history. `0` means keep forever. The daemon does
-    /// not yet ship a sweeper that honours this — present so adding one
+    /// not yet ship a sweeper that honours this; present so adding one
     /// later doesn't need a schema-version bump.
     #[serde(default = "default_memory_retention_days")]
     pub retention_days: u32,

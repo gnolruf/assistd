@@ -53,6 +53,7 @@ pub struct SseConfig {
 }
 
 impl SseConfig {
+    /// Create a config with default timeouts (30s request/read, 15s ping interval).
     pub fn new(label: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
@@ -65,10 +66,8 @@ impl SseConfig {
     }
 }
 
+/// [`McpClient`] implementation that speaks JSON-RPC over HTTP+SSE.
 pub struct SseMcpClient {
-    /// Currently only read when constructing the lifeline; kept on the
-    /// client itself so future debug paths (e.g. logging from `call`
-    /// retry failures) don't have to thread it through again.
     #[allow(dead_code)]
     label: String,
     correlator: Arc<Correlator>,
@@ -120,18 +119,18 @@ impl SseMcpClient {
             request_timeout: cfg.request_timeout,
         });
 
-        // Reader task. Holds the long-lived SSE connection.
-        let stream_task = tokio::spawn(read_loop(
-            http.clone(),
-            base_url.clone(),
-            headers.clone(),
-            correlator.clone(),
-            post_url.clone(),
-            cfg.label.clone(),
-            cancel_rx.clone(),
-            Some(endpoint_ready_tx),
+        let reader = ReadLoop {
+            http: http.clone(),
+            base_url: base_url.clone(),
+            headers: headers.clone(),
+            correlator: correlator.clone(),
+            post_url: post_url.clone(),
+            label: cfg.label.clone(),
+            cancel_rx: cancel_rx.clone(),
+            endpoint_ready_tx: Some(endpoint_ready_tx),
             done_tx,
-        ));
+        };
+        let stream_task = tokio::spawn(reader.run());
 
         // Wait briefly for the optional `endpoint` discovery event. If
         // we don't get one in 5s, fall back to assuming POSTs go to the
@@ -146,7 +145,6 @@ impl SseMcpClient {
             );
         }
 
-        // Initialize handshake. Failure is fatal for this transport.
         if let Err(e) = client.initialize().await {
             warn!(
                 target: "assistd::mcp",
@@ -159,7 +157,7 @@ impl SseMcpClient {
             return Err(e);
         }
 
-        // Periodic ping task — separate from the SSE stream so a server
+        // Periodic ping task, separate from the SSE stream so a server
         // that holds the SSE connection open while wedged still gets
         // detected. On ping failure, we flip the cancel watch which the
         // read loop selects on; that closes the transport and trips the
@@ -197,9 +195,8 @@ impl SseMcpClient {
             "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION },
         });
         let _ = self.call("initialize", params).await?;
-        // Notification has no response; just POST it.
         let bytes = notification_line("notifications/initialized", json!({}))?;
-        // Strip the trailing newline — POST bodies don't need it.
+        // Strip the trailing newline; POST bodies don't need it.
         let body = &bytes[..bytes.len().saturating_sub(1)];
         let post = self
             .post_url
@@ -352,12 +349,14 @@ pub struct SseLifeline {
 }
 
 impl SseLifeline {
+    /// Await the SSE read loop's termination signal.
     pub async fn wait_for_disconnect(&mut self) {
         if let Some(rx) = self.done_rx.take() {
             let _ = rx.await;
         }
     }
 
+    /// Cancel the SSE and ping tasks and wait briefly for them to finish.
     pub async fn shutdown(mut self) {
         let _ = self.cancel_tx.send(true);
         if let Some(t) = self.stream_task.take() {
@@ -369,96 +368,110 @@ impl SseLifeline {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn read_loop(
+struct ReadLoop {
     http: reqwest::Client,
     base_url: Url,
     headers: HeaderMap,
     correlator: Arc<Correlator>,
     post_url: Arc<RwLock<Option<Url>>>,
     label: String,
-    mut cancel_rx: watch::Receiver<bool>,
-    mut endpoint_ready_tx: Option<oneshot::Sender<()>>,
+    cancel_rx: watch::Receiver<bool>,
+    endpoint_ready_tx: Option<oneshot::Sender<()>>,
     done_tx: oneshot::Sender<()>,
-) {
-    let resp = match http
-        .get(base_url.clone())
-        .headers(headers)
-        .header("Accept", "text/event-stream")
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
+}
+
+impl ReadLoop {
+    async fn run(self) {
+        let Self {
+            http,
+            base_url,
+            headers,
+            correlator,
+            post_url,
+            label,
+            mut cancel_rx,
+            mut endpoint_ready_tx,
+            done_tx,
+        } = self;
+
+        let resp = match http
+            .get(base_url.clone())
+            .headers(headers)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    target: "assistd::mcp",
+                    server = %label,
+                    "SSE connect failed: {e}",
+                );
+                correlator.fail_all(closed_err);
+                let _ = done_tx.send(());
+                return;
+            }
+        };
+        if !resp.status().is_success() {
             warn!(
                 target: "assistd::mcp",
                 server = %label,
-                "SSE connect failed: {e}",
+                status = %resp.status(),
+                "SSE GET returned non-success status",
             );
             correlator.fail_all(closed_err);
             let _ = done_tx.send(());
             return;
         }
-    };
-    if !resp.status().is_success() {
-        warn!(
-            target: "assistd::mcp",
-            server = %label,
-            status = %resp.status(),
-            "SSE GET returned non-success status",
-        );
-        correlator.fail_all(closed_err);
-        let _ = done_tx.send(());
-        return;
-    }
 
-    let mut stream = resp.bytes_stream();
-    let mut parser = EventParser::new();
+        let mut stream = resp.bytes_stream();
+        let mut parser = EventParser::new();
 
-    loop {
-        // Race the next chunk read against shutdown / ping-failure cancel.
-        let chunk = tokio::select! {
-            _ = cancel_rx.changed() => {
-                if *cancel_rx.borrow() {
-                    debug!(target: "assistd::mcp", server = %label, "SSE read cancelled");
+        loop {
+            let chunk = tokio::select! {
+                _ = cancel_rx.changed() => {
+                    if *cancel_rx.borrow() {
+                        debug!(target: "assistd::mcp", server = %label, "SSE read cancelled");
+                        break;
+                    }
+                    continue;
+                }
+                chunk = stream.next() => chunk,
+            };
+
+            match chunk {
+                Some(Ok(bytes)) => {
+                    parser.push(&bytes);
+                    while let Some(event) = parser.next_event() {
+                        handle_event(
+                            event,
+                            &correlator,
+                            &post_url,
+                            &mut endpoint_ready_tx,
+                            &label,
+                        )
+                        .await;
+                    }
+                }
+                Some(Err(e)) => {
+                    warn!(
+                        target: "assistd::mcp",
+                        server = %label,
+                        "SSE stream error: {e}",
+                    );
                     break;
                 }
-                continue;
-            }
-            chunk = stream.next() => chunk,
-        };
-
-        match chunk {
-            Some(Ok(bytes)) => {
-                parser.push(&bytes);
-                while let Some(event) = parser.next_event() {
-                    handle_event(
-                        event,
-                        &correlator,
-                        &post_url,
-                        &mut endpoint_ready_tx,
-                        &label,
-                    )
-                    .await;
+                None => {
+                    debug!(target: "assistd::mcp", server = %label, "SSE stream ended");
+                    break;
                 }
             }
-            Some(Err(e)) => {
-                warn!(
-                    target: "assistd::mcp",
-                    server = %label,
-                    "SSE stream error: {e}",
-                );
-                break;
-            }
-            None => {
-                debug!(target: "assistd::mcp", server = %label, "SSE stream ended");
-                break;
-            }
         }
-    }
 
-    correlator.fail_all(closed_err);
-    let _ = done_tx.send(());
+        correlator.fail_all(closed_err);
+        let _ = done_tx.send(());
+    }
 }
 
 fn closed_err() -> RpcError {
@@ -531,7 +544,6 @@ async fn ping_loop(
 ) {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Skip the immediate first tick.
     ticker.tick().await;
     loop {
         tokio::select! {
@@ -546,8 +558,8 @@ async fn ping_loop(
                         debug!(target: "assistd::mcp", server = %label, "ping ok");
                     }
                     Err(McpError::RpcError { code: -32601, message, .. }) => {
-                        // Server doesn't implement `ping`. Treat as healthy
-                        // — the SSE stream itself will tell us about death.
+                        // Server doesn't implement `ping`. Treat as healthy;
+                        // the SSE stream itself will tell us about death.
                         debug!(
                             target: "assistd::mcp",
                             server = %label,
@@ -570,10 +582,7 @@ async fn ping_loop(
     }
 }
 
-// ---------------------------------------------------------------------------
-// SSE event parser. Pure function on a buffer so it's exhaustively testable.
-// ---------------------------------------------------------------------------
-
+/// A single parsed Server-Sent Event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEvent {
     pub event_type: String,
@@ -597,10 +606,12 @@ struct PartialEvent {
 }
 
 impl EventParser {
+    /// Create a new, empty parser.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Feed the next chunk of bytes from the HTTP body into the parser.
     pub fn push(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
     }
@@ -609,16 +620,14 @@ impl EventParser {
     /// the buffer doesn't yet contain a blank-line terminator.
     pub fn next_event(&mut self) -> Option<SseEvent> {
         loop {
-            // Find the next \n. SSE allows \r\n or \n as line terminators.
+            // SSE allows \r\n or \n as line terminators.
             let nl = self.buf.iter().position(|&b| b == b'\n')?;
-            // Take the line (without the trailing \n; trim any trailing \r).
             let mut line: Vec<u8> = self.buf.drain(..=nl).collect();
-            line.pop(); // drop \n
+            line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
             if line.is_empty() {
-                // Blank line — dispatch the accumulated event, if any.
                 let cur = std::mem::take(&mut self.cur);
                 if cur.event_type.is_none() && cur.data_lines.is_empty() && cur.id.is_none() {
                     continue;
@@ -631,12 +640,10 @@ impl EventParser {
                     id: cur.id,
                 });
             }
-            // Comments start with ':'.
             if line.first() == Some(&b':') {
                 continue;
             }
-            // Field/value split on the first colon. A line with no colon
-            // is treated as a field name with empty value (per spec).
+            // A line with no colon is treated as a field name with empty value (per spec).
             let line_str = match std::str::from_utf8(&line) {
                 Ok(s) => s,
                 Err(_) => continue, // drop non-UTF-8 lines

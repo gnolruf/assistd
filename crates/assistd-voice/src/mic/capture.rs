@@ -3,7 +3,7 @@
 //! `cpal::Stream` is `!Send` on most platforms (the ALSA backend holds a
 //! raw ALSA handle whose safety invariants are tied to its creating
 //! thread). To avoid poisoning `MicVoiceInput: Send + Sync`, the stream
-//! lives entirely inside a single `spawn_blocking` worker — the outer
+//! lives entirely inside a single `spawn_blocking` worker; the outer
 //! `MicVoiceInput` only holds a `JoinHandle` plus shared atomics, all of
 //! which are trivially `Send`.
 
@@ -20,6 +20,7 @@ use tracing::warn;
 
 use super::consumer;
 
+/// Errors produced during cpal audio capture.
 #[derive(Debug, Error)]
 pub enum AudioCaptureError {
     #[error("no default input device available")]
@@ -43,7 +44,7 @@ pub enum AudioCaptureError {
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
 /// Handles to a running capture session. The cpal stream is owned by
-/// the consumer task — callers only see the atomics and the join
+/// the consumer task; callers only see the atomics and the join
 /// handle.
 pub struct CaptureSession {
     pub stop_flag: Arc<AtomicBool>,
@@ -64,7 +65,7 @@ pub struct ProducerStream {
 /// mono f32 samples at the native device rate into a ring buffer.
 ///
 /// Runs synchronously on the caller's thread because cpal's `Stream`
-/// is `!Send` on ALSA — both PTT and continuous-listen callers invoke
+/// is `!Send` on ALSA; both PTT and continuous-listen callers invoke
 /// this from inside a `tokio::task::spawn_blocking` worker.
 ///
 /// `ring_capacity_samples` sizes the SPSC ring (in mono samples at
@@ -81,12 +82,12 @@ pub fn open_producer_stream(
 ) -> Result<ProducerStream, AudioCaptureError> {
     let host = cpal::default_host();
     let device = select_device(&host, device_hint)?;
-    let device_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+    let device_name = name_of(&device).unwrap_or_else(|_| "<unknown>".to_string());
 
     let supported = device
         .default_input_config()
         .map_err(|e| AudioCaptureError::DefaultConfig(e.to_string()))?;
-    let sample_rate = supported.sample_rate().0;
+    let sample_rate = supported.sample_rate();
     let channels = supported.channels() as usize;
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
@@ -150,7 +151,7 @@ fn capture_worker(
 ) -> Result<Vec<i16>, AudioCaptureError> {
     // Ring capacity: 1 s per second of recording + 1 s headroom. Sized
     // in mono samples at native rate; we over-provision slightly using
-    // a conservative 48 kHz assumption — `open_producer_stream`
+    // a conservative 48 kHz assumption; `open_producer_stream`
     // enforces a per-open floor regardless.
     let conservative_rate = 48_000usize;
     let ring_cap = conservative_rate
@@ -175,7 +176,7 @@ fn capture_worker(
 /// [`crate::gpu`]'s graceful-degradation idiom. When
 /// [`assistd_config::VoiceConfig::enabled`] is false, succeeds
 /// unconditionally. When `mic_device` is `None`, the system default
-/// will be selected at PTT start — missing-default is intentionally a
+/// will be selected at PTT start; missing-default is intentionally a
 /// soft failure (we don't want a headless CI without ALSA to fail
 /// daemon startup). Only the `Some(name)` case where the configured
 /// name cannot be found is hard-rejected.
@@ -190,15 +191,15 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     }
 
     // Always enumerate input devices at startup so the log captures
-    // which cpal-visible devices exist — indispensable for diagnosing
+    // which cpal-visible devices exist; indispensable for diagnosing
     // "wrong mic picked" problems on systems with many PipeWire sinks.
     let host = cpal::default_host();
     let default_name = host
         .default_input_device()
-        .and_then(|d| d.name().ok())
+        .and_then(|d| name_of(&d).ok())
         .unwrap_or_else(|| "<none>".to_string());
     if let Ok(devices) = host.input_devices() {
-        let names: Vec<String> = devices.filter_map(|d| d.name().ok()).collect();
+        let names: Vec<String> = devices.filter_map(|d| name_of(&d).ok()).collect();
         tracing::info!(
             target: "assistd::voice::mic",
             default = %default_name,
@@ -223,7 +224,7 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     let mut names: Vec<String> = Vec::new();
     let mut matched = false;
     for d in devices {
-        let name = d.name().unwrap_or_else(|_| "<unknown>".to_string());
+        let name = name_of(&d).unwrap_or_else(|_| "<unknown>".to_string());
         if name == requested {
             matched = true;
         }
@@ -248,6 +249,11 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     );
 }
 
+fn name_of(device: &Device) -> Result<String, cpal::DeviceNameError> {
+    device.description().map(|d| d.name().to_string())
+}
+
+/// Select a cpal input device by optional name hint, or fall back to the system default.
 pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, AudioCaptureError> {
     match hint {
         None => host
@@ -258,7 +264,7 @@ pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, Au
                 .input_devices()
                 .map_err(|e| AudioCaptureError::DefaultConfig(e.to_string()))?;
             for d in devices {
-                if d.name().map(|n| n == name).unwrap_or(false) {
+                if name_of(&d).map(|n| n == name).unwrap_or(false) {
                     return Ok(d);
                 }
             }
@@ -380,7 +386,7 @@ impl CallbackState {
     fn push_u16(&self, data: &[u16]) {
         let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         scratch.clear();
-        // u16 is offset-binary — 32768 = silence.
+        // u16 is offset-binary: 32768 = silence.
         if self.channels <= 1 {
             for &s in data {
                 scratch.push((s as f32 - 32768.0) / 32768.0);

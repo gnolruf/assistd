@@ -8,7 +8,7 @@
     )
 )]
 
-//! Daemon orchestration crate — the glue that wires every subsystem
+//! Daemon orchestration crate: the glue that wires every subsystem
 //! into a running `assistd` process.
 //!
 //! # Not a stable public library
@@ -28,11 +28,11 @@
 //!
 //! # Modules
 //!
-//! - [`agent`] — per-turn LLM/tool loop driver.
-//! - [`presence`] — Active/Drowsy/Sleeping state machine and
+//! - [`agent`]: per-turn LLM/tool loop driver.
+//! - [`presence`]: Active/Drowsy/Sleeping state machine and
 //!   `LlamaService` lifecycle.
-//! - [`socket`] — Unix-socket IPC server (line-delimited JSON).
-//! - [`state`] — `AppState` request dispatcher; one handler per
+//! - [`socket`]: Unix-socket IPC server (line-delimited JSON).
+//! - [`state`]: `AppState` request dispatcher; one handler per
 //!   `assistd_ipc::Request` variant.
 
 pub mod agent;
@@ -41,12 +41,9 @@ pub mod recovery;
 pub mod socket;
 pub mod state;
 
-pub use agent::run_agent_turn;
+pub use agent::Agent;
 pub use recovery::{Component, RecoverySeverity, install_panic_hook, spawn_supervised};
 
-// Re-exports from `assistd-config`. Config types are the boundary
-// between user-supplied TOML and subsystem constructors; the daemon
-// passes them through unchanged.
 pub use assistd_config as config;
 pub use assistd_config::{
     AgentConfig, BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config,
@@ -56,34 +53,18 @@ pub use assistd_config::{
     ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig,
 };
 
-// Re-exports from `assistd-ipc`. Wire-protocol types crossing the
-// socket boundary. The daemon binary uses these to drive request
-// handlers and emit events.
 pub use assistd_ipc as ipc;
 pub use assistd_ipc::{PresenceState, VoiceCaptureState};
 
-// Re-exports from `assistd-tools`. The tool/command subsystem lives
-// in its own crate; these are the types the daemon constructs and
-// hands to `AppState`.
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
 
-// Re-exports from `assistd-voice`. Voice input/output traits plus
-// the `No*` placeholders used when the corresponding feature is
-// disabled at build time or in config.
 pub use assistd_voice::{
     ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput, SpeakDecision,
     VoiceInput, VoiceOutput, VoiceOutputController,
 };
 
-// Re-exports from `assistd-wm`. Window-manager trait + the `No*`
-// placeholder used when no compositor backend is configured. The
-// daemon imports concrete backends (`I3Backend`, `I3Handle`) directly
-// from `assistd_wm`.
 pub use assistd_wm::{NoWindowManager, WindowManager};
 
-// In-crate exports. `AppState` is the daemon's shared state container;
-// `PresenceManager` owns the presence machine and llama-server lifecycle;
-// `RequestGuard` is the RAII handle held for the duration of a request.
 pub use presence::{PresenceManager, RequestGuard};
 pub use state::{AppState, ConversationContext};
 
@@ -105,57 +86,71 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+/// Subsystem handles the daemon injects into [`build_tools`]. Bundled
+/// into one struct so the call site is a flat field initialiser rather
+/// than a dozen positional arguments.
+///
+/// Field notes:
+///
+/// - `overflow_dir` is owned so the caller chooses the path; kept as a
+///   distinct field for future call sites that need a different spill
+///   directory.
+/// - `confirmation_gate` is consulted by destructive bash commands. The
+///   daemon passes an `IpcConfirmationGate` that forwards prompts to the
+///   active IPC client (the TUI is one such client) and falls through to
+///   deny when no router is in scope.
+/// - `vision_gate` is a shared, runtime-mutable flag (see
+///   [`assistd_tools::VisionGate`]) initialised from a `/props` probe of
+///   the running llama-server. When the gate reports `supported = false`,
+///   the image-producing commands (`see`, `screenshot`) still register
+///   but their `run()` short-circuits with the
+///   `[error] …: vision not available …` line and their `summary()` flips
+///   so the LLM sees the unavailability in its tool schema. The gate is
+///   re-evaluated on every command invocation, so a daemon-side
+///   revalidation that flips it after a model swap takes effect without
+///   rebuilding the registry.
+/// - `memory_ops` is the combined CRUD façade backing the LLM-callable
+///   `remember` and `recall` tools. The daemon passes a SQLite-backed
+///   handle.
+/// - `window_manager` backs the LLM-callable `wm` command. The daemon
+///   passes either a connected `I3Backend` (when `[compositor].type =
+///   "i3"` and the i3 socket is reachable) or [`NoWindowManager`] when
+///   the configured backend is unavailable; the latter makes every `wm`
+///   subcommand short-circuit with a uniform "compositor not connected"
+///   error rather than failing per-subcommand.
+pub struct BuildToolsDeps<'a> {
+    pub config: &'a Config,
+    pub overflow_dir: PathBuf,
+    pub confirmation_gate: Arc<dyn ConfirmationGate>,
+    pub vision_gate: Arc<assistd_tools::VisionGate>,
+    pub memory_ops: Arc<MemoryOps>,
+    pub embedder: Arc<dyn Embedder>,
+    pub semantic: Arc<dyn SemanticStore>,
+    pub embed_tx: mpsc::Sender<EmbedJob>,
+    pub embedding_model: String,
+    pub window_manager: Arc<dyn WindowManager>,
+    pub mcp_tools: Vec<Box<dyn assistd_tools::Tool>>,
+}
+
 /// Build the tool registry consumed by the daemon. Clears and recreates
-/// `overflow_dir` so per-process spill files land in a known-empty
-/// location at every startup.
-///
-/// `overflow_dir` is taken as an owned parameter so the caller chooses
-/// the path — kept for future call sites that need a different spill
-/// directory.
-///
-/// `gate` is consulted by destructive bash commands. The daemon passes
-/// an `IpcConfirmationGate` that forwards prompts to the active IPC
-/// client (the TUI is one such client) and falls through to deny when
-/// no router is in scope.
-///
-/// `vision_gate` is a shared, runtime-mutable flag (see
-/// [`assistd_tools::VisionGate`]) initialised from a `/props` probe of
-/// the running llama-server. When the gate reports `supported = false`,
-/// the image-producing commands (`see`, `screenshot`) still register
-/// but their `run()` short-circuits with the
-/// `[error] …: vision not available …` line and their `summary()` flips
-/// so the LLM sees the unavailability in its tool schema. The gate is
-/// re-evaluated on every command invocation, so a daemon-side
-/// revalidation that flips it after a model swap takes effect without
-/// rebuilding the registry.
-///
-/// `memory_ops` is the combined CRUD façade backing the LLM-callable
-/// `remember` and `recall` tools. The daemon passes a SQLite-backed
-/// handle.
-///
-/// `window_manager` backs the LLM-callable `wm` command. The daemon
-/// passes either a connected `I3Backend` (when `[compositor].type =
-/// "i3"` and the i3 socket is reachable) or [`NoWindowManager`] when
-/// the configured backend is unavailable; the latter makes every `wm`
-/// subcommand short-circuit with a uniform "compositor not connected"
-/// error rather than failing per-subcommand.
-// Subsystem injection point — the daemon wires the cross-cutting
-// handles into the registered tools. The alternative shape (a builder
-// struct) saves nothing here because there's only one real call site.
-#[allow(clippy::too_many_arguments)]
-pub fn build_tools(
-    config: &Config,
-    overflow_dir: PathBuf,
-    gate: Arc<dyn ConfirmationGate>,
-    vision_gate: Arc<assistd_tools::VisionGate>,
-    memory_ops: Arc<MemoryOps>,
-    embedder: Arc<dyn Embedder>,
-    semantic: Arc<dyn SemanticStore>,
-    embed_tx: mpsc::Sender<EmbedJob>,
-    embedding_model: String,
-    window_manager: Arc<dyn WindowManager>,
-    mcp_tools: Vec<Box<dyn assistd_tools::Tool>>,
-) -> Result<Arc<ToolRegistry>> {
+/// [`BuildToolsDeps::overflow_dir`] so per-process spill files land in a
+/// known-empty location at every startup. See [`BuildToolsDeps`] for the
+/// role of each injected handle.
+pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
+    let BuildToolsDeps {
+        config,
+        overflow_dir,
+        confirmation_gate,
+        vision_gate,
+        memory_ops,
+        embedder,
+        semantic,
+        embed_tx,
+        embedding_model,
+        window_manager,
+        mcp_tools,
+    } = deps;
+
     if overflow_dir.exists() {
         std::fs::remove_dir_all(&overflow_dir).with_context(|| {
             format!(
@@ -171,9 +166,6 @@ pub fn build_tools(
         )
     })?;
 
-    // Resolve sandbox availability once at startup. `Auto` silently
-    // degrades to unsandboxed with a warn; `Bwrap` bails startup if bwrap
-    // is missing.
     let sandbox_request = match config.tools.bash.sandbox {
         BashSandboxMode::Auto => SandboxRequest::Auto,
         BashSandboxMode::Bwrap => SandboxRequest::Bwrap,
@@ -181,8 +173,8 @@ pub fn build_tools(
     };
     let sandbox = probe_sandbox(sandbox_request, config.tools.bash.bwrap_extra_args.clone())?;
 
-    // Build bash policy config: shlex-tokenize destructive patterns once
-    // so the hot path in `matches_destructive` doesn't re-parse them.
+    // Shlex-tokenize destructive patterns once so the hot path in
+    // `matches_destructive` doesn't re-parse them on every invocation.
     let destructive_patterns: Vec<Vec<String>> = config
         .tools
         .bash
@@ -197,7 +189,6 @@ pub fn build_tools(
         destructive_patterns,
     });
 
-    // Build write policy config: expand `~`, canonicalize each entry.
     // Non-existent entries are dropped with a warning so a fresh install
     // missing (say) `~/Documents` doesn't break the command entirely.
     let mut writable_paths: Vec<PathBuf> = Vec::new();
@@ -210,7 +201,7 @@ pub fn build_tools(
                     target: "assistd::policy",
                     path = %expanded.display(),
                     error = %e,
-                    "tools.write.writable_paths entry does not exist — dropping from allowlist"
+                    "tools.write.writable_paths entry does not exist; dropping from allowlist"
                 );
             }
         }
@@ -242,7 +233,7 @@ pub fn build_tools(
     commands.register(SeeCommand::new(vision_gate.clone()));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
     commands.register(WebCommand::new());
-    commands.register(BashCommand::new(bash_cfg, sandbox, gate));
+    commands.register(BashCommand::new(bash_cfg, sandbox, confirmation_gate));
     commands.register(WmCommand::new(window_manager));
 
     let mut tools = ToolRegistry::new();
@@ -251,12 +242,6 @@ pub fn build_tools(
         &config.tools.output,
         overflow_dir,
     ));
-    // LLM-callable cross-conversation memory. `RememberTool` queues an
-    // embed job for the saved value so semantic recall finds memories
-    // by paraphrase. `RecallTool` ranks saved facts by semantic
-    // similarity to the query (single-mode; the embedder is always
-    // co-resident). `ReminisceTool` is the sibling that searches *past
-    // conversation history* rather than saved facts.
     tools.register(RememberTool::new(memory_ops, embed_tx));
     tools.register(RecallTool::new(
         embedder.clone(),
@@ -265,9 +250,8 @@ pub fn build_tools(
     ));
     tools.register(ReminisceTool::new(embedder, semantic, embedding_model));
 
-    // MCP tools registered LAST so a malicious server cannot shadow the
-    // native tool names by claiming `run` / `remember` / etc. — the
-    // registry's linear lookup returns the first match.
+    // MCP tools are registered last so a malicious server cannot shadow
+    // native tool names; the registry's linear lookup returns the first match.
     for t in mcp_tools {
         tools.register_boxed(t);
     }
@@ -282,7 +266,7 @@ pub fn build_tools(
 /// to [`AppState`], and the per-query handler calls [`revalidate`] at
 /// the top of every turn. The probe is cheap (one local HTTP `GET
 /// /props` with a 2-second timeout), and we only mutate the gate when
-/// the cached model id actually changes — so a steady-state daemon
+/// the cached model id actually changes, so a steady-state daemon
 /// pays a single round-trip per turn and never thrashes the gate.
 ///
 /// [`revalidate`]: VisionRevalidator::revalidate
@@ -294,6 +278,10 @@ pub struct VisionRevalidator {
 }
 
 impl VisionRevalidator {
+    /// Construct a new revalidator and wrap it in an `Arc`.
+    ///
+    /// `initial_model_id` is the model id known at startup; `None` means the
+    /// first probe result will be accepted unconditionally as the baseline.
     pub fn new(
         gate: Arc<assistd_tools::VisionGate>,
         initial_model_id: Option<String>,
@@ -309,7 +297,7 @@ impl VisionRevalidator {
     }
 
     /// Re-probe `/props` and, if the model id changed, update the
-    /// gate. Tolerates probe failures silently — a transient HTTP
+    /// gate. Tolerates probe failures silently; a transient HTTP
     /// blip should not flip vision off mid-session.
     pub async fn revalidate(&self) {
         let probe = assistd_llm::probe_capabilities(&self.host, self.port).await;
@@ -338,6 +326,8 @@ impl VisionRevalidator {
         }
     }
 
+    /// Returns a reference to the shared [`assistd_tools::VisionGate`] this
+    /// revalidator manages.
     pub fn gate(&self) -> &Arc<assistd_tools::VisionGate> {
         &self.gate
     }
@@ -353,7 +343,7 @@ mod vision_revalidator_tests {
             assistd_tools::VisionGate::new(gate_initial),
             cached_model.map(str::to_string),
             "127.0.0.1".to_string(),
-            // Port is unused in the apply_probe path — set to 0 to
+            // Port is unused in the apply_probe path; set to 0 to
             // make a real revalidate() obviously fail loudly if anyone
             // accidentally points the test at it.
             0,
@@ -380,7 +370,7 @@ mod vision_revalidator_tests {
         rev.apply_probe(VisionState {
             model_id: Some("model-A".into()),
             // Even if the new probe says false, no model swap means we
-            // don't disturb the gate — same model can't lose vision.
+            // don't disturb the gate; the same model can't lose vision.
             vision_supported: false,
         })
         .await;
@@ -411,7 +401,7 @@ mod vision_revalidator_tests {
 
     #[tokio::test]
     async fn fresh_revalidator_with_no_cached_model_still_picks_up_first_probe() {
-        // Daemon starts before the probe completes — the initial cache
+        // Daemon starts before the probe completes; the initial cache
         // is None. When the first probe lands, we accept it as the
         // baseline (None != Some) and update the gate to match.
         let rev = make_revalidator(false, None);

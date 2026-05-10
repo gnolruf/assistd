@@ -32,285 +32,319 @@ use tracing::{debug, info, instrument, warn};
 /// hopeless and surface to the user.
 const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 
-/// Run one agent turn end-to-end.
-///
-/// Lifecycle:
-/// 1. Push `user_text` into conversation state.
-/// 2. Call `backend.step(tools_schemas, tx)`.
-/// 3. If the step returned text, send [`LlmEvent::Done`] and stop.
-/// 4. Otherwise: for each requested tool call, emit
-///    [`LlmEvent::ToolCall`], dispatch it via the registry, emit
-///    [`LlmEvent::ToolResult`], and collect a [`ToolResultPayload`].
-///    After the loop, push the collected results back with
-///    `backend.push_tool_results(...)` and go to step 2.
-/// 5. If `max_iterations` is exhausted, emit a user-visible error delta
-///    and [`LlmEvent::Done`].
-///
-/// Cancellation: if `tx` is closed (client disconnected) between
-/// iterations, the loop returns `Ok(())` without running further tool
-/// calls or LLM round trips. Callers can also explicitly cancel by
-/// signalling the [`CancellationToken`] — useful when the daemon needs
-/// to stop a long-running LLM step or tool call promptly (e.g. a slow
-/// MCP tool when the user disconnects). The token is checked between
-/// iterations and the LLM step / tool dispatch run inside a
-/// `select!` against it so cancellation propagates without waiting
-/// for the inner future to complete on its own.
-///
-/// Pass [`CancellationToken::new`] (a fresh, never-cancelled token) if
-/// the caller doesn't need explicit cancellation — the
-/// `tx.is_closed()` path keeps existing behaviour for that case.
+/// Long-lived agent dependencies. One `Agent` is constructed per
+/// daemon (or per test) and reused across many turns; only the
+/// per-turn input (user text, attachments, channels) varies between
+/// calls to [`Agent::run_turn`].
 ///
 /// `health` is the optional restart probe used to recover from
 /// llama-server crashes mid-turn. When `Some`, the loop reacts to
 /// [`LlmError::ServerRestarting`] by emitting a `Status` event,
 /// waiting for `ReadyState::Ready`, and re-running the same step
 /// once. Pass `None` for tests / mock backends that never crash.
-#[allow(clippy::too_many_arguments)]
-#[instrument(skip_all, name = "agent_turn")]
-pub async fn run_agent_turn(
+pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
     max_iterations: u32,
-    user_text: String,
-    user_attachments: Vec<Attachment>,
-    tx: mpsc::Sender<LlmEvent>,
-    cancel: CancellationToken,
     health: Option<Arc<dyn LlmHealthProbe>>,
-) -> Result<()> {
-    backend
-        .push_user(user_text, user_attachments)
-        .await
-        .map_err(anyhow::Error::new)?;
-    let schemas = tools.openai_schemas();
+}
 
-    for iteration in 0..max_iterations {
-        if tx.is_closed() || cancel.is_cancelled() {
-            debug!(
-                target: "assistd::agent",
-                iteration,
-                cancelled = cancel.is_cancelled(),
-                "stopping between iterations (client gone or explicit cancel)"
-            );
-            return Ok(());
-        }
-
-        // Per-iteration replay budget: at most one restart-driven
-        // retry. The supervisor's own consecutive-failure cap (5) is
-        // the daemon-level circuit breaker; this keeps the user-visible
-        // latency bounded if the supervisor recovers but the model
-        // still crashes on the same prompt.
-        let mut restart_attempted = false;
-
-        let outcome = loop {
-            let step_result = tokio::select! {
-                biased;
-                () = cancel.cancelled() => {
-                    debug!(
-                        target: "assistd::agent",
-                        iteration,
-                        "cancellation fired during LLM step; stopping"
-                    );
-                    return Ok(());
-                }
-                r = backend.step(schemas.clone(), tx.clone()) => r,
-            };
-
-            match step_result {
-                Ok(o) => break o,
-                Err(LlmError::ServerRestarting(reason))
-                    if !restart_attempted && health.is_some() =>
-                {
-                    restart_attempted = true;
-                    crate::recovery_event!(
-                        crate::RecoverySeverity::Warning,
-                        crate::Component::Llm,
-                        "crash_detected",
-                        iteration = iteration,
-                        reason = %reason,
-                        "llama-server died mid-step; waiting for supervisor restart and replaying"
-                    );
-                    let _ = tx
-                        .send(LlmEvent::Status {
-                            severity: crate::RecoverySeverity::Warning.as_str().to_string(),
-                            component: crate::Component::Llm.as_str().to_string(),
-                            event: "restarting".to_string(),
-                            message: "LLM crashed — restarting and replaying your query"
-                                .to_string(),
-                        })
-                        .await;
-
-                    // Probe is guaranteed Some by the match guard.
-                    let probe = health.as_ref().expect("health Some by guard");
-                    let wait_result = tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => {
-                            debug!(
-                                target: "assistd::agent",
-                                iteration,
-                                "cancellation fired while waiting for LLM restart"
-                            );
-                            return Ok(());
-                        }
-                        res = probe.wait_for_ready(REPLAY_WAIT_BUDGET) => res,
-                    };
-
-                    match wait_result {
-                        Ok(()) => {
-                            crate::recovery_event!(
-                                crate::RecoverySeverity::Info,
-                                crate::Component::Llm,
-                                "replay_ready",
-                                iteration = iteration,
-                                "supervisor reported Ready; replaying user query"
-                            );
-                            let _ = tx
-                                .send(LlmEvent::Status {
-                                    severity: crate::RecoverySeverity::Info.as_str().to_string(),
-                                    component: crate::Component::Llm.as_str().to_string(),
-                                    event: "replaying".to_string(),
-                                    message: "LLM restored — replaying your query".to_string(),
-                                })
-                                .await;
-                            // Retry the same iteration.
-                            continue;
-                        }
-                        Err(wait_err) => {
-                            crate::recovery_event!(
-                                crate::RecoverySeverity::Error,
-                                crate::Component::Llm,
-                                "replay_abandoned",
-                                iteration = iteration,
-                                wait_error = %wait_err,
-                                "supervisor did not return to Ready; abandoning replay"
-                            );
-                            let final_msg = match wait_err {
-                                HealthWaitError::Timeout => "LLM did not recover before timeout",
-                                HealthWaitError::Degraded => {
-                                    "LLM supervisor entered degraded state; restart abandoned"
-                                }
-                                HealthWaitError::NoService => {
-                                    "LLM service is not currently attached"
-                                }
-                            };
-                            let _ = tx
-                                .send(LlmEvent::Status {
-                                    severity: crate::RecoverySeverity::Error.as_str().to_string(),
-                                    component: crate::Component::Llm.as_str().to_string(),
-                                    event: "degraded".to_string(),
-                                    message: final_msg.to_string(),
-                                })
-                                .await;
-                            let _ = tx
-                                .send(LlmEvent::Delta {
-                                    text: format!("\n[agent error: {final_msg}]\n"),
-                                })
-                                .await;
-                            let _ = tx.send(LlmEvent::Done).await;
-                            return Err(anyhow::Error::new(LlmError::ServerRestarting(
-                                final_msg.to_string(),
-                            )));
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Surface the typed error category to the model so
-                    // a transient HTTP hiccup doesn't read the same as
-                    // a persistent backend-unavailable state. The
-                    // human-readable Display is still the primary
-                    // signal in the user-facing delta.
-                    let label = match &e {
-                        LlmError::Chat(_) => "chat backend",
-                        LlmError::ToolCallParse(_) => "tool-call parse",
-                        LlmError::Unavailable(_) => "backend unavailable",
-                        // Already-attempted restart, or no probe wired.
-                        // Fall through as a terminal failure.
-                        LlmError::ServerRestarting(_) => "llm restarting",
-                    };
-                    let _ = tx
-                        .send(LlmEvent::Delta {
-                            text: format!("\n[agent error: {label}: {e}]\n"),
-                        })
-                        .await;
-                    let _ = tx.send(LlmEvent::Done).await;
-                    return Err(anyhow::Error::new(e));
-                }
-            }
-        };
-
-        match outcome {
-            StepOutcome::Final => {
-                let _ = tx.send(LlmEvent::Done).await;
-                return Ok(());
-            }
-            StepOutcome::ToolCalls(calls) => {
-                let mut results = Vec::with_capacity(calls.len());
-                for call in calls {
-                    if tx.is_closed() || cancel.is_cancelled() {
-                        debug!(
-                            target: "assistd::agent",
-                            iteration,
-                            tool = %call.name,
-                            cancelled = cancel.is_cancelled(),
-                            "stopping mid-call (client gone or explicit cancel) without dispatch"
-                        );
-                        // Unwind: push synthetic errors for all pending calls
-                        // so conversation state isn't left with a dangling
-                        // assistant-with-tool_calls on the next turn.
-                        results.push(ToolResultPayload {
-                            call_id: call.id,
-                            name: call.name,
-                            content: "[error] run: agent turn cancelled before dispatch.\n\
-                                       [exit:-1 | 0ms]"
-                                .to_string(),
-                            attachments: Vec::new(),
-                        });
-                        break;
-                    }
-
-                    // Surface the in-flight call to clients before it runs.
-                    let _ = tx
-                        .send(LlmEvent::ToolCall {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            arguments: call.arguments.clone(),
-                        })
-                        .await;
-
-                    let (payload, raw_result) = dispatch_tool_call(&tools, &call, iteration).await;
-
-                    // Emit the result for downstream observers. Ignore
-                    // send errors — the next `tx.is_closed()` check will
-                    // catch the disconnect.
-                    let _ = tx
-                        .send(LlmEvent::ToolResult {
-                            id: payload.call_id.clone(),
-                            name: payload.name.clone(),
-                            result: raw_result,
-                        })
-                        .await;
-
-                    results.push(payload);
-                }
-                backend
-                    .push_tool_results(results)
-                    .await
-                    .map_err(anyhow::Error::new)?;
-            }
+impl Agent {
+    /// Construct a new `Agent` with the given backend, tool registry, and iteration cap.
+    pub fn new(
+        backend: Arc<dyn LlmBackend>,
+        tools: Arc<ToolRegistry>,
+        max_iterations: u32,
+        health: Option<Arc<dyn LlmHealthProbe>>,
+    ) -> Self {
+        Self {
+            backend,
+            tools,
+            max_iterations,
+            health,
         }
     }
 
-    warn!(
-        target: "assistd::agent",
-        max_iterations,
-        "agent turn exceeded max iterations; giving up"
-    );
-    let _ = tx
-        .send(LlmEvent::Delta {
-            text: format!("\n[agent exceeded max_iterations={max_iterations}; stopping]\n"),
-        })
-        .await;
-    let _ = tx.send(LlmEvent::Done).await;
-    Ok(())
+    /// Run one agent turn end-to-end.
+    ///
+    /// Lifecycle:
+    /// 1. Push `user_text` into conversation state.
+    /// 2. Call `backend.step(tools_schemas, tx)`.
+    /// 3. If the step returned text, send [`LlmEvent::Done`] and stop.
+    /// 4. Otherwise: for each requested tool call, emit
+    ///    [`LlmEvent::ToolCall`], dispatch it via the registry, emit
+    ///    [`LlmEvent::ToolResult`], and collect a [`ToolResultPayload`].
+    ///    After the loop, push the collected results back with
+    ///    `backend.push_tool_results(...)` and go to step 2.
+    /// 5. If `max_iterations` is exhausted, emit a user-visible error delta
+    ///    and [`LlmEvent::Done`].
+    ///
+    /// Cancellation: if `tx` is closed (client disconnected) between
+    /// iterations, the loop returns `Ok(())` without running further tool
+    /// calls or LLM round trips. Callers can also explicitly cancel by
+    /// signalling the [`CancellationToken`]; useful when the daemon needs
+    /// to stop a long-running LLM step or tool call promptly (e.g. a slow
+    /// MCP tool when the user disconnects). The token is checked between
+    /// iterations and the LLM step / tool dispatch run inside a
+    /// `select!` against it so cancellation propagates without waiting
+    /// for the inner future to complete on its own.
+    ///
+    /// Pass [`CancellationToken::new`] (a fresh, never-cancelled token) if
+    /// the caller doesn't need explicit cancellation; the
+    /// `tx.is_closed()` path keeps existing behaviour for that case.
+    #[instrument(skip_all, name = "agent_turn")]
+    pub async fn run_turn(
+        &self,
+        user_text: String,
+        user_attachments: Vec<Attachment>,
+        tx: mpsc::Sender<LlmEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        let backend = &self.backend;
+        let tools = &self.tools;
+        let max_iterations = self.max_iterations;
+        let health = self.health.as_ref();
+
+        backend
+            .push_user(user_text, user_attachments)
+            .await
+            .map_err(anyhow::Error::new)?;
+        let schemas = tools.openai_schemas();
+
+        for iteration in 0..max_iterations {
+            if tx.is_closed() || cancel.is_cancelled() {
+                debug!(
+                    target: "assistd::agent",
+                    iteration,
+                    cancelled = cancel.is_cancelled(),
+                    "stopping between iterations (client gone or explicit cancel)"
+                );
+                return Ok(());
+            }
+
+            // Per-iteration replay budget: at most one restart-driven
+            // retry. The supervisor's own consecutive-failure cap (5) is
+            // the daemon-level circuit breaker; this keeps the user-visible
+            // latency bounded if the supervisor recovers but the model
+            // still crashes on the same prompt.
+            let mut restart_attempted = false;
+
+            let outcome = loop {
+                let step_result = tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        debug!(
+                            target: "assistd::agent",
+                            iteration,
+                            "cancellation fired during LLM step; stopping"
+                        );
+                        return Ok(());
+                    }
+                    r = backend.step(schemas.clone(), tx.clone()) => r,
+                };
+
+                match step_result {
+                    Ok(o) => break o,
+                    Err(LlmError::ServerRestarting(reason))
+                        if !restart_attempted && health.is_some() =>
+                    {
+                        restart_attempted = true;
+                        crate::recovery_event!(
+                            crate::RecoverySeverity::Warning,
+                            crate::Component::Llm,
+                            "crash_detected",
+                            iteration = iteration,
+                            reason = %reason,
+                            "llama-server died mid-step; waiting for supervisor restart and replaying"
+                        );
+                        let _ = tx
+                            .send(LlmEvent::Status {
+                                severity: crate::RecoverySeverity::Warning.as_str().to_string(),
+                                component: crate::Component::Llm.as_str().to_string(),
+                                event: "restarting".to_string(),
+                                message: "LLM crashed: restarting and replaying your query"
+                                    .to_string(),
+                            })
+                            .await;
+
+                        // Probe is guaranteed Some by the match guard.
+                        let probe = health.expect("health Some by guard");
+                        let wait_result = tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => {
+                                debug!(
+                                    target: "assistd::agent",
+                                    iteration,
+                                    "cancellation fired while waiting for LLM restart"
+                                );
+                                return Ok(());
+                            }
+                            res = probe.wait_for_ready(REPLAY_WAIT_BUDGET) => res,
+                        };
+
+                        match wait_result {
+                            Ok(()) => {
+                                crate::recovery_event!(
+                                    crate::RecoverySeverity::Info,
+                                    crate::Component::Llm,
+                                    "replay_ready",
+                                    iteration = iteration,
+                                    "supervisor reported Ready; replaying user query"
+                                );
+                                let _ = tx
+                                    .send(LlmEvent::Status {
+                                        severity: crate::RecoverySeverity::Info
+                                            .as_str()
+                                            .to_string(),
+                                        component: crate::Component::Llm.as_str().to_string(),
+                                        event: "replaying".to_string(),
+                                        message: "LLM restored: replaying your query".to_string(),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            Err(wait_err) => {
+                                crate::recovery_event!(
+                                    crate::RecoverySeverity::Error,
+                                    crate::Component::Llm,
+                                    "replay_abandoned",
+                                    iteration = iteration,
+                                    wait_error = %wait_err,
+                                    "supervisor did not return to Ready; abandoning replay"
+                                );
+                                let final_msg = match wait_err {
+                                    HealthWaitError::Timeout => {
+                                        "LLM did not recover before timeout"
+                                    }
+                                    HealthWaitError::Degraded => {
+                                        "LLM supervisor entered degraded state; restart abandoned"
+                                    }
+                                    HealthWaitError::NoService => {
+                                        "LLM service is not currently attached"
+                                    }
+                                };
+                                let _ = tx
+                                    .send(LlmEvent::Status {
+                                        severity: crate::RecoverySeverity::Error
+                                            .as_str()
+                                            .to_string(),
+                                        component: crate::Component::Llm.as_str().to_string(),
+                                        event: "degraded".to_string(),
+                                        message: final_msg.to_string(),
+                                    })
+                                    .await;
+                                let _ = tx
+                                    .send(LlmEvent::Delta {
+                                        text: format!("\n[agent error: {final_msg}]\n"),
+                                    })
+                                    .await;
+                                let _ = tx.send(LlmEvent::Done).await;
+                                return Err(anyhow::Error::new(LlmError::ServerRestarting(
+                                    final_msg.to_string(),
+                                )));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Surface the typed error category to the model so
+                        // a transient HTTP hiccup doesn't read the same as
+                        // a persistent backend-unavailable state. The
+                        // human-readable Display is still the primary
+                        // signal in the user-facing delta.
+                        let label = match &e {
+                            LlmError::Chat(_) => "chat backend",
+                            LlmError::ToolCallParse(_) => "tool-call parse",
+                            LlmError::Unavailable(_) => "backend unavailable",
+                            // Already-attempted restart, or no probe wired.
+                            // Fall through as a terminal failure.
+                            LlmError::ServerRestarting(_) => "llm restarting",
+                        };
+                        let _ = tx
+                            .send(LlmEvent::Delta {
+                                text: format!("\n[agent error: {label}: {e}]\n"),
+                            })
+                            .await;
+                        let _ = tx.send(LlmEvent::Done).await;
+                        return Err(anyhow::Error::new(e));
+                    }
+                }
+            };
+
+            match outcome {
+                StepOutcome::Final => {
+                    let _ = tx.send(LlmEvent::Done).await;
+                    return Ok(());
+                }
+                StepOutcome::ToolCalls(calls) => {
+                    let mut results = Vec::with_capacity(calls.len());
+                    for call in calls {
+                        if tx.is_closed() || cancel.is_cancelled() {
+                            debug!(
+                                target: "assistd::agent",
+                                iteration,
+                                tool = %call.name,
+                                cancelled = cancel.is_cancelled(),
+                                "stopping mid-call (client gone or explicit cancel) without dispatch"
+                            );
+                            // Unwind: push synthetic errors for all pending calls
+                            // so conversation state isn't left with a dangling
+                            // assistant-with-tool_calls on the next turn.
+                            results.push(ToolResultPayload {
+                                call_id: call.id,
+                                name: call.name,
+                                content: "[error] run: agent turn cancelled before dispatch.\n\
+                                           [exit:-1 | 0ms]"
+                                    .to_string(),
+                                attachments: Vec::new(),
+                            });
+                            break;
+                        }
+
+                        let _ = tx
+                            .send(LlmEvent::ToolCall {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                                arguments: call.arguments.clone(),
+                            })
+                            .await;
+
+                        let (payload, raw_result) =
+                            dispatch_tool_call(tools, &call, iteration).await;
+
+                        // Emit the result for downstream observers. Ignore
+                        // send errors; the next `tx.is_closed()` check will
+                        // catch the disconnect.
+                        let _ = tx
+                            .send(LlmEvent::ToolResult {
+                                id: payload.call_id.clone(),
+                                name: payload.name.clone(),
+                                result: raw_result,
+                            })
+                            .await;
+
+                        results.push(payload);
+                    }
+                    backend
+                        .push_tool_results(results)
+                        .await
+                        .map_err(anyhow::Error::new)?;
+                }
+            }
+        }
+
+        warn!(
+            target: "assistd::agent",
+            max_iterations,
+            "agent turn exceeded max iterations; giving up"
+        );
+        let _ = tx
+            .send(LlmEvent::Delta {
+                text: format!("\n[agent exceeded max_iterations={max_iterations}; stopping]\n"),
+            })
+            .await;
+        let _ = tx.send(LlmEvent::Done).await;
+        Ok(())
+    }
 }
 
 /// Dispatch one tool call and produce both the LLM-facing payload and the
@@ -320,7 +354,7 @@ pub async fn run_agent_turn(
 /// formatted with the Layer 2 navigational-hint convention
 /// (`[error] <cmd>: <what>. <Hint>: <recovery>`) so the model can
 /// self-correct on the next step. Only fundamental errors (like a
-/// `send` failure on `tx`) bubble up to the loop — and even those
+/// `send` failure on `tx`) bubble up to the loop, and even those
 /// result in graceful shutdown, not a hung history.
 async fn dispatch_tool_call(
     tools: &ToolRegistry,
@@ -536,7 +570,7 @@ mod tests {
             self.step_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // Honour any configured slow-step delay BEFORE consuming
-            // an outcome — cancellation tests rely on this future
+            // an outcome; cancellation tests rely on this future
             // being long-lived so the cancel signal can race it.
             let delay = *self.slow_step.lock().unwrap();
             if let Some(d) = delay {
@@ -593,18 +627,15 @@ mod tests {
         let backend = MockBackend::with(vec![StepOutcome::Final]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "what is 2+2?".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn(
+                "what is 2+2?".into(),
+                Vec::new(),
+                tx,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         let events = collect(&mut rx).await;
         assert!(matches!(events.last(), Some(LlmEvent::Done)));
         assert_eq!(backend.pushed_users.lock().unwrap().len(), 1);
@@ -620,18 +651,10 @@ mod tests {
         ]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "say hello".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn("say hello".into(), Vec::new(), tx, CancellationToken::new())
+            .await
+            .unwrap();
         let events = collect(&mut rx).await;
 
         // Expected event sequence (intermixed with deltas):
@@ -662,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn piped_command_completes_in_one_iteration() {
-        // A single `run` call with pipes — no need for multiple iterations.
+        // A single `run` call with pipes; no need for multiple iterations.
         let backend = MockBackend::with(vec![
             StepOutcome::ToolCalls(vec![call(
                 "c-1",
@@ -684,18 +707,10 @@ mod tests {
         let tools = Arc::new(tools);
 
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "how many?".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn("how many?".into(), Vec::new(), tx, CancellationToken::new())
+            .await
+            .unwrap();
         let events = collect(&mut rx).await;
         // Exactly one ToolCall/ToolResult pair.
         let calls = events
@@ -708,7 +723,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         // `echo "alpha\nbeta\nalpha"` prints 1 line; grep alpha filters
         // the full body; wc -l counts it. The exact count depends on
-        // how echo interprets \n — but the content should start with an
+        // how echo interprets \n, but the content should start with an
         // integer and contain an [exit:0] footer.
         assert!(
             results[0][0].content.contains("[exit:0"),
@@ -728,18 +743,10 @@ mod tests {
         let backend = MockBackend::with(outcomes);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(64);
-        run_agent_turn(
-            backend,
-            tools,
-            3,
-            "loop it".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend, tools, 3, None)
+            .run_turn("loop it".into(), Vec::new(), tx, CancellationToken::new())
+            .await
+            .unwrap();
         let events = collect(&mut rx).await;
 
         let delta_text: String = events
@@ -770,18 +777,10 @@ mod tests {
         ]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "go".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
+            .await
+            .unwrap();
         drop(collect(&mut rx).await);
         let pushed = backend.pushed_results.lock().unwrap();
         assert_eq!(pushed.len(), 1);
@@ -824,18 +823,10 @@ mod tests {
             StepOutcome::Final,
         ]);
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(
-            backend.clone(),
-            reg,
-            10,
-            "go".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), reg, 10, None)
+            .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
+            .await
+            .unwrap();
         drop(collect(&mut rx).await);
         let pushed = backend.pushed_results.lock().unwrap();
         let payload = &pushed[0][0];
@@ -860,18 +851,10 @@ mod tests {
         drop(rx);
         // Channel is closed from the start, so the very first is_closed
         // check bails the loop before any step runs.
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "go".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
+            .await
+            .unwrap();
         // With the receiver already dropped, no step was called.
         let pushed = backend.pushed_results.lock().unwrap();
         assert!(
@@ -884,7 +867,7 @@ mod tests {
     async fn explicit_cancel_before_first_step_stops_loop_immediately() {
         // The token is cancelled before the loop starts. The very
         // first iteration's pre-step check sees `cancel.is_cancelled()`
-        // and bails — no step is ever called.
+        // and bails; no step is ever called.
         let backend = MockBackend::with(vec![
             StepOutcome::Final,
             // If we get here the cancellation didn't take effect.
@@ -894,18 +877,10 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<LlmEvent>(16);
         let token = CancellationToken::new();
         token.cancel();
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "go".into(),
-            Vec::new(),
-            tx,
-            token,
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn("go".into(), Vec::new(), tx, token)
+            .await
+            .unwrap();
         // user push happened (it's the first thing in the loop), but
         // no step ran.
         assert_eq!(backend.pushed_users.lock().unwrap().len(), 1);
@@ -923,7 +898,7 @@ mod tests {
         // on the second, then assert both calls were routed and that
         // the save landed in the underlying store. With the embedding
         // subsystem disabled (NoEmbedder/NoSemanticStore + empty model
-        // name), recall short-circuits to the `(no memories)` sentinel —
+        // name), recall short-circuits to the `(no memories)` sentinel;
         // the agent-loop wiring is what's under test here, not the
         // semantic round-trip (which is exercised in the embedder
         // integration tests).
@@ -936,7 +911,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        // Leak the tempdir for the test — `path` must outlive the
+        // Leak the tempdir for the test: `path` must outlive the
         // handle, and cleanup happens at process exit.
         std::mem::forget(temp);
         let (_tx, rx) = watch::channel(false);
@@ -956,8 +931,8 @@ mod tests {
         tools.register(RecallTool::new(no_embedder, no_semantic, String::new()));
         let tools = Arc::new(tools);
 
-        // Step 1: model calls remember(...) — Step 2: model calls
-        // recall(...) — Step 3: Final.
+        // Step 1: model calls remember(...). Step 2: model calls
+        // recall(...). Step 3: Final.
         let backend = MockBackend::with(vec![
             StepOutcome::ToolCalls(vec![ToolCall {
                 id: "c-1".into(),
@@ -976,18 +951,15 @@ mod tests {
         ]);
 
         let (tx, mut rx) = mpsc::channel(32);
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "I prefer vim over emacs".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn(
+                "I prefer vim over emacs".into(),
+                Vec::new(),
+                tx,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         let events = collect(&mut rx).await;
 
         // Two ToolCalls emitted, one for each step.
@@ -1008,7 +980,7 @@ mod tests {
         );
 
         // Recall's ToolResult and the second push_tool_results carry
-        // the no-memories sentinel — the embedder is disabled, so
+        // the no-memories sentinel; the embedder is disabled, so
         // semantic search has nothing to return. The point of this
         // assertion is that the recall result *was* round-tripped back
         // to the model on the next step (proving the loop wiring), not
@@ -1064,7 +1036,7 @@ mod tests {
     /// native `run` call drives both through `dispatch_tool_call`,
     /// emits a `ToolCall`/`ToolResult` pair for each, and pushes both
     /// results back to the backend in order. This is the wire-level
-    /// proof that the agent loop is tool-source-agnostic — MCP tools
+    /// proof that the agent loop is tool-source-agnostic: MCP tools
     /// and native tools share the same dispatch/result/feedback path.
     #[tokio::test]
     async fn agent_loop_mixes_native_and_mcp_calls() {
@@ -1098,7 +1070,7 @@ mod tests {
                 name: "mcp__google_calendar__list_events".into(),
                 arguments: serde_json::json!({"date": "tomorrow"}),
             }]),
-            // Step 2: model follows up with a native `run` call —
+            // Step 2: model follows up with a native `run` call,
             // proving the loop accepts a different tool on the next
             // step without state leaking from the prior MCP call.
             StepOutcome::ToolCalls(vec![call("c-run", "echo hello")]),
@@ -1106,18 +1078,15 @@ mod tests {
         ]);
 
         let (tx, mut rx) = mpsc::channel(32);
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "what's on my calendar tomorrow?".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn(
+                "what's on my calendar tomorrow?".into(),
+                Vec::new(),
+                tx,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         let events = collect(&mut rx).await;
 
         let names: Vec<String> = events
@@ -1158,7 +1127,7 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(FakeMcpTool {
             name: "mcp__google_calendar__list_events".into(),
-            // Mirrors `error_envelope` in `assistd-mcp/src/lib.rs` —
+            // Mirrors `error_envelope` in `assistd-mcp/src/lib.rs`;
             // the line carries `Check:` which the model needs to see
             // intact.
             result: serde_json::json!({
@@ -1182,18 +1151,15 @@ mod tests {
             StepOutcome::Final,
         ]);
         let (tx, mut rx) = mpsc::channel(16);
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "what's on my calendar?".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn(
+                "what's on my calendar?".into(),
+                Vec::new(),
+                tx,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         drop(collect(&mut rx).await);
 
         let pushed = backend.pushed_results.lock().unwrap();
@@ -1221,7 +1187,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_during_slow_step_preempts_loop() {
         // Fire a cancellation while the LLM step is still pending,
-        // and verify run_agent_turn returns promptly via the
+        // and verify Agent::run_turn returns promptly via the
         // tokio::select! against `cancel.cancelled()` rather than
         // waiting for the step future to complete on its own.
         let backend = MockBackend::with(vec![StepOutcome::Final]).slow_step_ms(2_000);
@@ -1235,18 +1201,10 @@ mod tests {
             token_for_kicker.cancel();
         });
         let started = std::time::Instant::now();
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "go".into(),
-            Vec::new(),
-            tx,
-            token,
-            None,
-        )
-        .await
-        .unwrap();
+        Agent::new(backend.clone(), tools, 10, None)
+            .run_turn("go".into(), Vec::new(), tx, token)
+            .await
+            .unwrap();
         let elapsed = started.elapsed();
         // The slow step is 2s; if cancellation didn't preempt we'd
         // be waiting that long. Allow a generous 500ms buffer for
@@ -1395,18 +1353,10 @@ mod tests {
         let probe = MockProbe::ready_with_wait_ok(123);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(32);
-        run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "hello".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            Some(probe.clone()),
-        )
-        .await
-        .expect("replay should succeed");
+        Agent::new(backend.clone(), tools, 10, Some(probe.clone()))
+            .run_turn("hello".into(), Vec::new(), tx, CancellationToken::new())
+            .await
+            .expect("replay should succeed");
 
         let events = collect(&mut rx).await;
         let restart_count = events
@@ -1449,17 +1399,9 @@ mod tests {
         let probe = MockProbe::ready_with_wait_ok(123);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(32);
-        let result = run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "hello".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            Some(probe),
-        )
-        .await;
+        let result = Agent::new(backend.clone(), tools, 10, Some(probe))
+            .run_turn("hello".into(), Vec::new(), tx, CancellationToken::new())
+            .await;
         assert!(result.is_err(), "second ServerRestarting must be terminal");
 
         let events = collect(&mut rx).await;
@@ -1489,17 +1431,9 @@ mod tests {
         let probe = MockProbe::ready_with_wait_err(assistd_llm::HealthWaitError::Degraded);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(32);
-        let result = run_agent_turn(
-            backend.clone(),
-            tools,
-            10,
-            "hello".into(),
-            Vec::new(),
-            tx,
-            CancellationToken::new(),
-            Some(probe),
-        )
-        .await;
+        let result = Agent::new(backend.clone(), tools, 10, Some(probe))
+            .run_turn("hello".into(), Vec::new(), tx, CancellationToken::new())
+            .await;
         assert!(result.is_err(), "Degraded probe must surface as error");
 
         let events = collect(&mut rx).await;
@@ -1510,7 +1444,7 @@ mod tests {
             "expected a degraded Status event"
         );
         assert!(matches!(events.last(), Some(LlmEvent::Done)));
-        // Only one step call — wait_for_ready returned Err, so no
+        // Only one step call: wait_for_ready returned Err, so no
         // replay step was attempted.
         assert_eq!(
             backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),

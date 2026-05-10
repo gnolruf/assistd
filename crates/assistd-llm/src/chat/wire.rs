@@ -9,7 +9,7 @@
 //!
 //! Tool-calling shape: when an assistant message carries `tool_calls`, the
 //! `content` field must be absent (`None`). Some llama.cpp Jinja templates
-//! reject `"content": null` but accept an omitted key — `skip_serializing_if`
+//! reject `"content": null` but accept an omitted key; `skip_serializing_if`
 //! takes care of that.
 
 use serde::{Deserialize, Serialize};
@@ -43,11 +43,12 @@ pub struct ChatRequest<'a> {
     pub tool_choice: Option<&'a str>,
 }
 
+/// One message in the outgoing `messages` array.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage<'a> {
     pub role: &'a str,
     /// Message text. `None` for assistant messages that carry only
-    /// `tool_calls` — the OpenAI spec allows (and many servers require)
+    /// `tool_calls`; the OpenAI spec allows (and many servers require)
     /// the field to be omitted entirely in that case.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentBody<'a>>,
@@ -57,7 +58,7 @@ pub struct ChatMessage<'a> {
     pub tool_calls: Option<Vec<ToolCallSpec<'a>>>,
     /// Only set on messages with `role: "tool"`. We currently route tool
     /// results back through synthetic user messages instead, so this is
-    /// usually absent — but keeping the field on the wire type lets the
+    /// usually absent, but keeping the field on the wire type lets the
     /// client interop if a future change flips back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<&'a str>,
@@ -66,7 +67,7 @@ pub struct ChatMessage<'a> {
 /// Wire shape of a message's `content` field.
 ///
 /// Untagged serde keeps the two shapes indistinguishable on the outgoing
-/// wire — `Text(s)` serializes as the bare string `"..."`, `Parts(v)`
+/// wire: `Text(s)` serializes as the bare string `"..."`, `Parts(v)`
 /// serializes as a JSON array `[{"type": "text", "text": "..."}, ...]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
@@ -107,12 +108,13 @@ pub struct FunctionCallSpec<'a> {
     pub arguments: &'a str,
 }
 
-/// Non-streaming response shape — used only for the summarization call.
+/// Non-streaming response body, used only for the summarization call.
 #[derive(Debug, Deserialize)]
 pub struct ChatResponse {
     pub choices: Vec<ChatChoice>,
 }
 
+/// One choice in a non-streaming [`ChatResponse`].
 #[derive(Debug, Deserialize)]
 pub struct ChatChoice {
     pub message: ChatChoiceMessage,
@@ -121,6 +123,7 @@ pub struct ChatChoice {
     pub finish_reason: Option<String>,
 }
 
+/// The assistant message inside a non-streaming choice.
 #[derive(Debug, Deserialize)]
 pub struct ChatChoiceMessage {
     #[allow(dead_code)]
@@ -134,6 +137,7 @@ pub struct ChatCompletionChunk {
     pub choices: Vec<ChatChunkChoice>,
 }
 
+/// One choice slot in a streaming [`ChatCompletionChunk`].
 #[derive(Debug, Deserialize)]
 pub struct ChatChunkChoice {
     pub delta: ChatChunkDelta,
@@ -141,6 +145,7 @@ pub struct ChatChunkChoice {
     pub finish_reason: Option<String>,
 }
 
+/// Incremental fields emitted in a single streaming chunk.
 #[derive(Debug, Deserialize, Default)]
 pub struct ChatChunkDelta {
     #[serde(default)]
@@ -148,13 +153,12 @@ pub struct ChatChunkDelta {
     pub role: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
-    /// When the model calls a tool, llama.cpp streams call fragments across
-    /// multiple chunks. Each fragment carries a stable `index` so the
-    /// receiver can accumulate by slot.
+    /// Tool-call fragments streamed across multiple chunks; accumulate by `index`.
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
+/// One tool-call slot streamed in a [`ChatChunkDelta`].
 #[derive(Debug, Deserialize, Default)]
 pub struct ToolCallDelta {
     /// Stable across chunks for the same call. Required to reassemble
@@ -170,6 +174,7 @@ pub struct ToolCallDelta {
     pub function: Option<FunctionCallDelta>,
 }
 
+/// Incremental function-call fields within a [`ToolCallDelta`].
 #[derive(Debug, Deserialize, Default)]
 pub struct FunctionCallDelta {
     #[serde(default)]
@@ -349,7 +354,7 @@ mod tests {
 
     #[test]
     fn deserializes_tool_call_delta_chunk() {
-        // llama.cpp's typical tool-call emission — id + name in one chunk,
+        // llama.cpp's typical tool-call emission: id + name in one chunk,
         // arguments streamed across subsequent chunks under the same index.
         let payload = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"run","arguments":"{\"com"}}]},"finish_reason":null}]}"#;
         let parsed: ChatCompletionChunk = serde_json::from_str(payload).unwrap();

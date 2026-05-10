@@ -8,14 +8,14 @@
 //! 1. Read every `(rowid, vector)` for the configured model. Reads
 //!    bypass the writer task via `conn.call(...)` directly; SQLite WAL
 //!    mode supports concurrent readers alongside a single writer.
-//! 2. Decode each BLOB with safe `chunks_exact(4)` arithmetic — no
+//! 2. Decode each BLOB with safe `chunks_exact(4)` arithmetic; no
 //!    `unsafe`, and the workspace lints deny it anyway.
 //! 3. Maintain a min-heap of size ≤ K so we don't sort the whole list.
 //! 4. Hydrate the K winners with one batched JOIN against the parent
 //!    table to surface the row's content / key / value.
 //!
 //! Linear scan is fine for the expected DB scale: even 50K chunks at
-//! 768-dim is ~150 MB of f32 — microseconds to dot-product on modern
+//! 768-dim is ~150 MB of f32, microseconds to dot-product on modern
 //! hardware. If/when a heavy user pushes beyond that, an HNSW / sqlite-vec
 //! extension can drop in behind this same trait without touching callers.
 
@@ -31,7 +31,7 @@ use super::connection::SqliteHandle;
 use super::conversations::PersistedRole;
 
 /// One conversation-chunk hit, hydrated with the *full* parent message
-/// content (chunks may cut mid-sentence — for the LLM-facing surface we
+/// content (chunks may cut mid-sentence; for the LLM-facing surface we
 /// surface the whole message so the model isn't reading a torso).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingHit {
@@ -191,6 +191,7 @@ pub struct SqliteSemanticStore {
 }
 
 impl SqliteSemanticStore {
+    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
@@ -209,12 +210,10 @@ impl SemanticStore for SqliteSemanticStore {
         }
         let model = model.to_string();
         let q = query_vector;
-        // Phase 1: scan + score. Returns Vec<(chunk_id, similarity)> for
-        // the top-K results, ordered descending by similarity.
         let ranked: Vec<(i64, f32)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT conversation_chunk_id, vector FROM embeddings WHERE model = ?1",
                 )?;
@@ -235,8 +234,7 @@ impl SemanticStore for SqliteSemanticStore {
         if ranked.is_empty() {
             return Ok(Vec::new());
         }
-        // Phase 2: hydrate winners with one batched JOIN. Batching keeps
-        // it O(1) round-trips regardless of K.
+        // Batched JOIN keeps hydration O(1) round-trips regardless of K.
         let chunk_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
         let sims: std::collections::HashMap<i64, f32> = ranked.iter().copied().collect();
         let placeholders = vec!["?"; chunk_ids.len()].join(",");
@@ -250,7 +248,7 @@ impl SemanticStore for SqliteSemanticStore {
         let raw: Vec<(i64, i64, String, String, String, String)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(&sql)?;
                 let params: Vec<&dyn rusqlite::ToSql> = chunk_ids_for_query
                     .iter()
@@ -272,8 +270,6 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .context("nearest_chunks: hydrate winners")?;
-        // Re-order to match the rank order (the IN-clause query may
-        // return rows in any order; we want best-first).
         let by_id: std::collections::HashMap<i64, (i64, String, String, String, String)> = raw
             .into_iter()
             .map(|(cc_id, c_id, sess, ts, role, content)| (cc_id, (c_id, sess, ts, role, content)))
@@ -312,7 +308,7 @@ impl SemanticStore for SqliteSemanticStore {
         let ranked: Vec<(i64, f32)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt =
                     c.prepare("SELECT memory_id, vector FROM memory_embeddings WHERE model = ?1")?;
                 let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(top_k + 1);
@@ -340,7 +336,7 @@ impl SemanticStore for SqliteSemanticStore {
         let raw: Vec<(i64, String, String)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(&sql)?;
                 let params: Vec<&dyn rusqlite::ToSql> = memory_ids_for_query
                     .iter()
@@ -382,7 +378,7 @@ impl SemanticStore for SqliteSemanticStore {
         let model = model.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let chunks: i64 = c.query_row(
                     "SELECT count(*) FROM embeddings WHERE model = ?1",
                     rusqlite::params![model],
@@ -403,7 +399,7 @@ impl SemanticStore for SqliteSemanticStore {
         let current = current.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut total: i64 = 0;
                 let mut models: std::collections::BTreeSet<String> =
                     std::collections::BTreeSet::new();
@@ -431,7 +427,7 @@ impl SemanticStore for SqliteSemanticStore {
         let current = current.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT m.id, m.value
                      FROM memories m
@@ -455,7 +451,7 @@ impl SemanticStore for SqliteSemanticStore {
         let current = current.to_string();
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
                     "SELECT cc.id, cc.content
                      FROM conversation_chunks cc
@@ -514,7 +510,7 @@ impl SemanticStore for SqliteSemanticStore {
 
 // Min-heap entry: smallest similarity at the top so we can pop it when
 // a better candidate arrives. `OrderedFloat` would do this with less
-// boilerplate, but we already avoid extra deps elsewhere — wrap by hand.
+// boilerplate, but we already avoid extra deps elsewhere, so wrap by hand.
 struct HeapEntry {
     sim: f32,
     rowid: i64,
@@ -556,7 +552,6 @@ fn push_top_k(heap: &mut BinaryHeap<HeapEntry>, k: usize, rowid: i64, sim: f32) 
 
 fn heap_to_sorted(heap: BinaryHeap<HeapEntry>) -> Vec<(i64, f32)> {
     let mut v: Vec<(i64, f32)> = heap.into_iter().map(|e| (e.rowid, e.sim)).collect();
-    // Best-first.
     v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
     v
 }
@@ -772,7 +767,7 @@ mod tests {
         let conv_id = rx.await.unwrap().unwrap();
         insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "old-model").await;
         let s = SqliteSemanticStore::new(handle);
-        // Query with the new model name — old-model rows must not appear.
+        // Query with the new model name; old-model rows must not appear.
         let hits = s
             .nearest_chunks(unit_vec(0.0), 5, "new-model")
             .await
@@ -835,7 +830,7 @@ mod tests {
             .await
             .unwrap();
         let mem_id_1 = rx.await.unwrap().unwrap();
-        // Re-save under same key — id should be stable.
+        // Re-save under same key; id should be stable.
         let (tx, rx) = oneshot::channel();
         handle
             .writer()

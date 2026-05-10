@@ -1,7 +1,7 @@
 # Getting Started with Sway
 
 This page mirrors the [i3 guide](./i3.md) for Sway. The IPC dialect is
-nearly identical — Sway implements the i3 protocol — but a few
+nearly identical (Sway implements the i3 protocol), but a few
 Wayland-specific details differ:
 
 - Sway prefers `app_id` over `WM_CLASS` for Wayland-native windows.
@@ -9,7 +9,7 @@ Wayland-specific details differ:
   fallbacks (`class="…"`) work too.
 - The in-daemon global hotkey listener uses `XGrabKey` and is silently
   inert under Sway. Set every `*_hotkey` field in `config.toml` to
-  `""` and bind via Sway instead — the only path that works.
+  `""` and bind via Sway instead. That is the only path that works.
 
 If you can copy a block into `~/.config/sway/config` and run `swaymsg
 reload`, you can finish this guide in under five minutes.
@@ -62,7 +62,7 @@ hotkey = ""
 ```
 
 The IPC commands (`assistd ptt-start`, `assistd cycle`, …) keep
-working — that is what Sway will call.
+working; that is what Sway will call.
 
 ## Auto-start the daemon
 
@@ -167,8 +167,8 @@ bindsym $mod+Shift+s exec assistd voice-skip
 
 These bindings only do something useful when the relevant subsystem is
 enabled in `config.toml` (`[voice.continuous] enabled = true`,
-`[voice.synthesis] enabled = true`). They are safe to bind regardless
-— disabled subsystems return a clear "not enabled" error rather than
+`[voice.synthesis] enabled = true`). They are safe to bind regardless;
+disabled subsystems return a clear "not enabled" error rather than
 crashing the daemon.
 
 ## Verifying the setup
@@ -193,7 +193,7 @@ assistd wake    # blocks until Active
 ```
 
 If a step hangs, run `assistd daemon` directly in a terminal so its
-tracing output is visible — the Sway `exec` line discards stdout/stderr
+tracing output is visible; the Sway `exec` line discards stdout/stderr
 to your session's default sink. The TUI keeps its own log at
 `~/.local/state/assistd/chat.log` regardless of how the daemon was
 launched.

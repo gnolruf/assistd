@@ -24,10 +24,12 @@ use super::writer::{WriteCall, WriteOp};
 pub struct SessionId(pub String);
 
 impl SessionId {
+    /// Generate a new random [`SessionId`] using UUIDv4.
     pub fn new() -> Self {
         Self(Uuid::new_v4().to_string())
     }
 
+    /// Borrow the inner UUID string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -65,6 +67,7 @@ pub enum PersistedRole {
 }
 
 impl PersistedRole {
+    /// Return the lowercase wire string stored in the `conversations.role` column.
     pub fn as_wire(self) -> &'static str {
         match self {
             PersistedRole::System => "system",
@@ -74,6 +77,8 @@ impl PersistedRole {
         }
     }
 
+    /// Parse a wire string from the `conversations.role` column, returning
+    /// `None` for unrecognised values.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "system" => Some(PersistedRole::System),
@@ -102,6 +107,7 @@ pub struct PersistedMessage {
 }
 
 impl PersistedMessage {
+    /// Build a user-role message with no tool fields set.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: PersistedRole::User,
@@ -112,6 +118,7 @@ impl PersistedMessage {
         }
     }
 
+    /// Build a plain assistant text message with no tool fields set.
     pub fn assistant_text(content: impl Into<String>) -> Self {
         Self {
             role: PersistedRole::Assistant,
@@ -122,6 +129,7 @@ impl PersistedMessage {
         }
     }
 
+    /// Build an assistant message that carries tool-call JSON but no text content.
     pub fn assistant_tool_calls(calls: serde_json::Value) -> Self {
         Self {
             role: PersistedRole::Assistant,
@@ -132,6 +140,7 @@ impl PersistedMessage {
         }
     }
 
+    /// Build a tool-result message with the given content, call id, and tool name.
     pub fn tool_result(
         content: impl Into<String>,
         call_id: impl Into<String>,
@@ -222,23 +231,28 @@ pub struct UndoOutcome {
 
 /// Conversation persistence trait. Sibling to [`crate::MemoryStore`];
 /// implementations may share underlying storage (the SQLite impls
-/// below do — both hold an `Arc<SqliteHandle>`).
+/// below do; both hold an `Arc<SqliteHandle>`).
 #[async_trait]
 pub trait ConversationStore: Send + Sync + 'static {
+    /// Open a new session row for the daemon process identified by `daemon_pid`.
     async fn begin_session(&self, daemon_pid: u32) -> Result<SessionId>;
+    /// Mark `id` as ended by stamping `ended_at`.
     async fn end_session(&self, id: &SessionId) -> Result<()>;
+    /// Open a new turn row inside `session` labelled with `user_text`.
     async fn begin_turn(&self, session: &SessionId, user_text: &str) -> Result<TurnId>;
+    /// Mark `turn` as ended by stamping `ended_at`.
     async fn end_turn(&self, turn: TurnId) -> Result<()>;
+    /// Append `msg` to the `conversations` table. Returns the new `conversations.id` rowid.
     async fn append_message(
         &self,
         session: &SessionId,
         turn: Option<TurnId>,
         msg: PersistedMessage,
     ) -> Result<i64>;
+    /// Full-text search via the FTS5 index. Returns up to `limit` hits ordered by relevance.
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
+    /// Return the `limit` most-recent turns ordered by turn id descending.
     async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>>;
-
-    // --- Branch operations -------------------------------------------
 
     /// Atomically begin a session and create its default `main` branch.
     /// Returns both ids; the caller stores them in `AppState`. Replaces
@@ -334,8 +348,8 @@ pub struct ResumeCandidate {
     pub started_at: String,
 }
 
-/// No-op fallback used when memory is disabled in config or in tests
-/// that don't exercise persistence.
+/// Successful-no-op fallback used when memory is disabled in config or in
+/// tests that don't exercise persistence.
 pub struct NoConversationStore;
 
 #[async_trait]
@@ -436,6 +450,7 @@ pub struct SqliteConversationStore {
 }
 
 impl SqliteConversationStore {
+    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
@@ -500,7 +515,7 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        // Reads bypass the writer channel — SQLite in WAL mode handles
+        // Reads bypass the writer channel; SQLite in WAL mode handles
         // concurrent readers fine, and routing them through the writer
         // would queue them behind any in-flight inserts.
         //
@@ -514,7 +529,7 @@ impl ConversationStore for SqliteConversationStore {
         let limit = limit as i64;
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let sql = "
                     SELECT  conv.id,
                             conv.session_id,
@@ -562,7 +577,7 @@ impl ConversationStore for SqliteConversationStore {
         let limit = limit as i64;
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let sql = "
                     SELECT  t.id,
                             t.session_id,
@@ -644,7 +659,7 @@ impl ConversationStore for SqliteConversationStore {
         let id: Option<i64> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 Ok(c.query_row(
                     "SELECT current_branch_id FROM sessions WHERE id = ?1",
                     rusqlite::params![session_id],
@@ -679,7 +694,7 @@ impl ConversationStore for SqliteConversationStore {
     async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
         self.handle
             .conn()
-            .call(|c| {
+            .call(|c| -> rusqlite::Result<_> {
                 let sql = "
                     SELECT  b.id,
                             b.session_id,
@@ -737,7 +752,7 @@ impl ConversationStore for SqliteConversationStore {
         let row: Option<(String, i64)> = self
             .handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 if let Some(prefix) = session_prefix {
                     let pattern = format!("{prefix}%");
                     let row = c
@@ -800,7 +815,7 @@ impl ConversationStore for SqliteConversationStore {
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>> {
         self.handle
             .conn()
-            .call(move |c| {
+            .call(move |c| -> rusqlite::Result<_> {
                 let sql = "
                     SELECT  c.id,
                             bm.seq,
@@ -857,7 +872,7 @@ impl ConversationStore for SqliteConversationStore {
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>> {
         self.handle
             .conn()
-            .call(|c| {
+            .call(|c| -> rusqlite::Result<_> {
                 let row = c
                     .query_row(
                         "SELECT id, current_branch_id, daemon_pid, started_at
@@ -924,7 +939,7 @@ mod tests {
     async fn fresh_store() -> (SqliteConversationStore, tokio::task::JoinHandle<()>) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        // Leak the tempdir for the duration of the test — `path` must
+        // Leak the tempdir for the duration of the test; `path` must
         // outlive the handle. Cleanup happens on test process exit.
         std::mem::forget(temp);
         let (_tx, rx) = watch::channel(false);
@@ -999,14 +1014,14 @@ mod tests {
             Option<String>,
             Option<String>,
         ) = conn
-            .call(move |c| {
-                Ok(c.query_row(
+            .call(move |c| -> rusqlite::Result<_> {
+                c.query_row(
                     "SELECT (SELECT tool_calls FROM conversations WHERE id = ?1),
                             (SELECT tool_call_id FROM conversations WHERE id = ?2),
                             (SELECT tool_name FROM conversations WHERE id = ?2)",
                     rusqlite::params![id, result_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )?)
+                )
             })
             .await
             .unwrap();
@@ -1026,7 +1041,7 @@ mod tests {
     async fn search_handles_fts5_grammar_safely() {
         // Inputs that would parse-error under raw FTS5 grammar must
         // round-trip through the literal-phrase escape without
-        // surfacing as Err. We don't assert on hits — the default
+        // surfacing as Err. We don't assert on hits; the default
         // tokenizer's behaviour on these inputs is implementation
         // detail; we only assert the call succeeds.
         let (store, _w) = fresh_store().await;
@@ -1037,11 +1052,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Unmatched quote — would be a parse error pre-escape.
+        // Unmatched quote: would be a parse error pre-escape.
         store.search("say \"hi", 10).await.unwrap();
-        // Operator-looking input — would be parsed as boolean OR.
+        // Operator-looking input: would be parsed as boolean OR.
         store.search("apple OR banana", 10).await.unwrap();
-        // Wildcard star — would be a prefix match pre-escape.
+        // Wildcard star: would be a prefix match pre-escape.
         store.search("foo*", 10).await.unwrap();
     }
 
@@ -1091,7 +1106,7 @@ mod tests {
         let fork_history = store.load_branch_history(fork).await.unwrap();
         assert_eq!(main_history.len(), 2);
         assert_eq!(fork_history.len(), 2);
-        // Same conversation rows are referenced — no row duplication.
+        // Same conversation rows are referenced; no row duplication.
         assert_eq!(
             main_history
                 .iter()

@@ -11,15 +11,12 @@ assistd-ipc = { workspace = true }
 assistd-llm = { workspace = true }
 assistd-memory = { workspace = true }
 assistd-tools = { workspace = true }
-# The default features (whisper + mic) bring in cpal; callers that
-# don't want mic support (e.g. a headless-minimal daemon build) can
-# override this elsewhere in their feature set.
 assistd-voice = { workspace = true }
 assistd-wm    = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
-libc = { workspace = true }
+rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shlex = { workspace = true }
@@ -30,8 +27,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-async-trait = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

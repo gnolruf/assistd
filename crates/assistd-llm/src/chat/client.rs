@@ -42,6 +42,11 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce 
     summary of the following dialogue that preserves all factual claims, user requests, and \
     assistant conclusions. Write in past tense. Do not add commentary.";
 
+/// HTTP streaming chat client backed by a locally-managed llama-server.
+///
+/// Implements [`crate::LlmBackend`]. A `tokio::sync::Mutex<Conversation>` guards
+/// the chat history; the HTTP streaming call itself runs lock-free so a slow
+/// server never blocks concurrent state mutations.
 pub struct LlamaChatClient {
     client: reqwest::Client,
     base_url: String,
@@ -97,7 +102,7 @@ impl LlamaChatClient {
     /// attached, allowing the caller to decide whether the failure
     /// looks like a server crash (pid changed or state != Ready). The
     /// outer `Option` is `None` when the client was built without a
-    /// probe — in that case the caller treats every error as a
+    /// probe; in that case the caller treats every error as a
     /// transport fault (no replay).
     fn classify_failure(&self, pid_at_request: Option<u32>) -> bool {
         let Some(probe) = self.health.as_ref() else {
@@ -301,11 +306,6 @@ impl LlamaChatClient {
 #[async_trait]
 impl LlmBackend for LlamaChatClient {
     async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        // Phase 1: build the wire body under the lock. ensure_budget
-        // may run a summarization HTTP round-trip; that's still on the
-        // locked path because it mutates `Conversation` (drops summarized
-        // turns and inserts a synthetic summary message). Locked phase
-        // is bounded — it does not include the streaming response read.
         let body_bytes = {
             let lock_start = std::time::Instant::now();
             let mut conv = self.conv.lock().await;
@@ -349,10 +349,8 @@ impl LlmBackend for LlamaChatClient {
             }
         };
 
-        // Phase 2: stream the response with no conv lock held.
         let outcome = self.stream_openai(body_bytes, &tx).await;
 
-        // Phase 3: re-acquire and apply the outcome.
         let mut conv = self.conv.lock().await;
         match outcome {
             StreamOutcome::Ok(accum) => {
@@ -374,12 +372,8 @@ impl LlmBackend for LlamaChatClient {
                 Err(LlmError::Chat(e))
             }
             StreamOutcome::ServerRestart { .. } => {
-                // Generate is the legacy single-turn API used by code
-                // paths that don't run the agent loop, so they cannot
-                // replay. Surface the restart as a typed error and
-                // leave the user message in place — the caller can
-                // re-issue if they choose. Unlike PreEmitError, we do
-                // NOT roll back the user message: a follow-up call
+                // `generate` is the legacy single-turn API; callers cannot
+                // replay. Leave the user message in place; a follow-up call
                 // would re-push, and double-pushing would duplicate.
                 Err(LlmError::ServerRestarting(
                     "llama-server crashed during generate".into(),
@@ -401,7 +395,7 @@ impl LlmBackend for LlamaChatClient {
     async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         for r in results {
-            // `[tool:<name>]\n<body>` — the prefix is the truncator's
+            // `[tool:<name>]\n<body>`: the prefix is the truncator's
             // pair-detection anchor (see TOOL_RESULT_PREFIX) and gives
             // the model a stable header it can visually spot in replayed
             // history. Attachments (if any) ride along as multimodal
@@ -417,7 +411,6 @@ impl LlmBackend for LlamaChatClient {
     }
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
-        // Phase 1: build the wire body under the lock.
         let body_bytes = {
             let mut conv = self.conv.lock().await;
             if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
@@ -450,21 +443,16 @@ impl LlmBackend for LlamaChatClient {
             }
         };
 
-        // Phase 2: stream the response lock-free.
         let outcome = self.stream_openai(body_bytes, &tx).await;
 
-        // Phase 3: re-acquire and commit the step outcome.
         let mut conv = self.conv.lock().await;
         match outcome {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)
             | StreamOutcome::ClientDisconnected(accum) => {
                 let result = commit_step(&mut conv, accum);
-                // Successful commit (Final or ToolCalls) consumes the
-                // transient context — the next turn must re-run
-                // retrieval rather than reuse stale hits. PreEmitError
-                // path leaves it in place so a retry sees the same
-                // injected block.
+                // Consume so the next turn re-runs retrieval; `PreEmitError`
+                // leaves it in place so a retry sees the same injected block.
                 let _ = conv.consume_transient_context();
                 result
             }
@@ -472,9 +460,9 @@ impl LlmBackend for LlamaChatClient {
             StreamOutcome::ServerRestart { accum, pre_emit } => {
                 // Crash detected. The conversation state on this side
                 // is already clean (we never reached `commit_step`),
-                // but we may have streamed partial bytes to the client
-                // — the agent loop's Status emission tells the client
-                // to bracket those before the replay's deltas arrive.
+                // but we may have streamed partial bytes to the client;
+                // the agent loop's Status emission tells the client to
+                // bracket those before the replay's deltas arrive.
                 //
                 // Important: we do NOT roll back the user message on
                 // pre_emit, even though `PreEmitError` does. The user
@@ -578,7 +566,7 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::
             .ok_or_else(|| LlmError::ToolCallParse("history tool_call missing name".into()))?
             .to_string();
         // arguments is stored verbatim as JSON. It may be either a
-        // JSON-encoded string or an object — store the literal string
+        // JSON-encoded string or an object; store the literal string
         // so the wire payload matches what the model originally emitted.
         let arguments = match entry.get("arguments") {
             Some(Value::String(s)) => s.clone(),
@@ -596,7 +584,7 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::
 
 /// Translate a completed stream into conversation commits + [`StepOutcome`].
 ///
-/// On `finish_reason: "tool_calls"` (or an inferred tool-call outcome —
+/// On `finish_reason: "tool_calls"` (or an inferred tool-call outcome,
 /// non-empty builders even without an explicit reason) we drop any
 /// accumulated narrative text. Qwen3 and similar reasoning models
 /// sometimes prefix tool calls with `<think>...</think>` content that
@@ -752,11 +740,11 @@ struct ToolCallBuilder {
 enum StreamOutcome {
     /// Stream completed cleanly with a `[DONE]` marker (or EOF after deltas).
     Ok(StreamAccum),
-    /// Stream errored after we'd already forwarded deltas — return what we have.
+    /// Stream errored after we'd already forwarded deltas; return what we have.
     PartialAfterEmit(StreamAccum),
     /// The consumer dropped the receiver mid-stream; stop quietly.
     ClientDisconnected(StreamAccum),
-    /// Stream errored before any deltas were forwarded — propagate as `Err`.
+    /// Stream errored before any deltas were forwarded; propagate as `Err`.
     PreEmitError(ChatClientError),
     /// The HTTP failure looks crash-induced: the supervisor's PID
     /// changed under us or the readiness state went non-Ready. The

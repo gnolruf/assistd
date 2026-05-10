@@ -3,7 +3,7 @@ use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
 
-/// `ls [PATH]` — list directory entries alphabetically, one per line,
+/// `ls [PATH]`: list directory entries alphabetically, one per line,
 /// formatted as `<type>\t<size>\t<name>`. Type is `dir`, `file`, or
 /// `symlink`; size is raw bytes from the entry's (symlink-preserving)
 /// metadata. Defaults to the daemon's CWD if no path given.
@@ -45,7 +45,6 @@ impl Command for LsCommand {
             match reader.next_entry().await {
                 Ok(Some(entry)) => {
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    // `symlink_metadata` so dangling symlinks don't error the whole listing.
                     let (kind, size) = match entry.path().symlink_metadata() {
                         Ok(md) => {
                             let ft = md.file_type();

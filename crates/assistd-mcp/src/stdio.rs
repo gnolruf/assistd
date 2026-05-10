@@ -4,10 +4,8 @@
 //! (outbound) and stdout (inbound). Stderr is forwarded to tracing.
 //!
 //! The transport core is split from process spawning so tests can run
-//! the full request/response loop against a `tokio::io::duplex` pair —
+//! the full request/response loop against a `tokio::io::duplex` pair;
 //! see [`StdioMcpClient::from_streams`].
-
-#![allow(unsafe_code)] // libc::kill for SIGTERM-then-SIGKILL on shutdown.
 
 use std::collections::HashMap;
 use std::process::{ExitStatus, Stdio};
@@ -46,6 +44,7 @@ pub struct StdioConfig {
 }
 
 impl StdioConfig {
+    /// Create a config with a 30-second default request timeout and no extra env vars.
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
@@ -70,7 +69,7 @@ impl StdioMcpClient {
     /// Spawn an MCP server child process and bring up the transport.
     /// Returns the client (an `Arc<dyn McpClient>` once cast) and a
     /// `ChildLifeline` whose `wait_for_exit()` future fires when the
-    /// child exits — used by the per-server supervisor.
+    /// child exits; used by the per-server supervisor.
     pub async fn spawn(cfg: StdioConfig) -> Result<(Arc<Self>, ChildLifeline), McpError> {
         let mut cmd = Command::new(&cfg.command);
         cmd.args(&cfg.args)
@@ -115,7 +114,6 @@ impl StdioMcpClient {
                 error = %e,
                 "MCP initialize failed; tearing down transport",
             );
-            // Kill child, await background tasks, propagate error.
             let _ = child.kill().await;
             let _ = transport_handles.shutdown_and_join().await;
             let _ = stderr_task.await;
@@ -141,7 +139,7 @@ impl StdioMcpClient {
     /// Wire the transport up over arbitrary `AsyncRead` / `AsyncWrite`.
     /// Used by [`Self::spawn`] (with the child's stdout/stdin) and by
     /// tests (with `tokio::io::duplex`). Does NOT perform the initialize
-    /// handshake — call [`Self::initialize`] separately.
+    /// handshake; call [`Self::initialize`] separately.
     pub async fn from_streams<R, W>(
         read: R,
         write: W,
@@ -359,6 +357,7 @@ pub struct ChildLifeline {
 }
 
 impl ChildLifeline {
+    /// Return the OS PID of the child process, if still running.
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().and_then(|c| c.id())
     }
@@ -375,19 +374,16 @@ impl ChildLifeline {
     }
 
     /// Send SIGTERM to the child's process group, wait `term_timeout`,
-    /// then SIGKILL if still alive. Always best-effort — we don't fail
+    /// then SIGKILL if still alive. Always best-effort; we don't fail
     /// daemon shutdown on a stuck child.
     pub async fn shutdown(mut self, term_timeout: Duration) {
         let label = self.label.clone();
         if let Some(mut child) = self.child.take() {
             #[cfg(unix)]
-            if let Some(pid) = child.id() {
-                let gid: i32 = -(pid as i32);
-                // SAFETY: libc::kill is thread-safe; failures (ESRCH for an
-                // already-exited process) are surfaced via errno and ignored.
-                unsafe {
-                    libc::kill(gid, libc::SIGTERM);
-                }
+            if let Some(pid) = child.id()
+                && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
+            {
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
             }
             match tokio::time::timeout(term_timeout, child.wait()).await {
                 Ok(Ok(status)) => {
@@ -436,6 +432,7 @@ pub struct TransportHandles {
 }
 
 impl TransportHandles {
+    /// Abort the read and write tasks and wait up to 500ms for each to finish.
     pub async fn shutdown_and_join(mut self) {
         if let Some(t) = self.read_task.take() {
             t.abort();

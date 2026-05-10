@@ -1,4 +1,3 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
 #![cfg_attr(
     test,
     allow(
@@ -27,6 +26,7 @@
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[cfg(feature = "client")]
@@ -94,7 +94,7 @@ impl PresenceState {
 /// four-state indicator. `Transcribing` is distinct from `Recording` because
 /// whisper inference takes 1–3 s on a few seconds of audio and users
 /// otherwise keep talking into dead air. `Queued` sits between them when the
-/// GPU is busy with an LLM stream — the transcriber is briefly waiting for
+/// GPU is busy with an LLM stream; the transcriber is briefly waiting for
 /// the GPU before starting inference (or deciding to fall back to CPU).
 ///
 /// `Idle` is pinned to discriminant 0; a unit test in
@@ -109,9 +109,16 @@ pub enum VoiceCaptureState {
     Transcribing,
 }
 
+/// Wire-protocol request sent by a client to the daemon over the Unix socket.
+///
+/// Serialized as a single JSON line with a `"type"` discriminant field.
+/// Every variant carries an `id` string that is echoed back on every
+/// [`Event`] the daemon emits in response, enabling correlation when a
+/// future multiplexing transport is added.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
+    /// Submit a text prompt (with optional image attachments) to the daemon.
     Query {
         id: String,
         text: String,
@@ -229,7 +236,7 @@ pub enum Request {
     MemoryReindex { id: String },
     /// Client's reply to a daemon-issued [`Event::ConfirmRequest`].
     /// Sent on the *same* socket connection as the originating request
-    /// (Query, PttStop, etc.) — see the protocol notes at the top of
+    /// (Query, PttStop, etc.); see the protocol notes at the top of
     /// this module. The daemon routes the response by `confirm_id`,
     /// not by `id`, so a single in-flight stream can ask multiple
     /// confirms without ambiguity.
@@ -327,7 +334,7 @@ impl Request {
         }
     }
 
-    /// Short, stable name for the variant — used as a span field so
+    /// Short, stable name for the variant, used as a span field so
     /// concurrent requests can be filtered by kind in trace output.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -362,11 +369,12 @@ impl Request {
     }
 }
 
-/// Note: `Eq` is intentionally not derived. `Event::SemanticHit`
-/// carries an `f32` similarity score and `f32: !Eq`. Tests compare
-/// events with `PartialEq` (sufficient for `assert_eq!`) — an `Eq`
-/// bound is only needed for hashing/Set membership, neither of which
-/// the IPC layer requires.
+/// Wire-protocol events streamed from the daemon to the client.
+///
+/// Serialized as line-delimited JSON with a `"type"` discriminant field.
+/// `Eq` is intentionally not derived: `SemanticHit` carries an `f32`
+/// similarity score and `f32: !Eq`. `PartialEq` is sufficient for
+/// `assert_eq!`; hashing and set membership are not needed at the IPC layer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -395,7 +403,7 @@ pub enum Event {
     },
     /// Final whisper transcription emitted once on `PttStop`, before the
     /// text is dispatched internally as a `Query`. Empty string means VAD
-    /// trimmed the audio down to silence — no `Query` follows in that
+    /// trimmed the audio down to silence; no `Query` follows in that
     /// case, only a terminal `Done`.
     Transcription { id: String, text: String },
     /// Current state of continuous listening. Emitted in response to
@@ -408,7 +416,7 @@ pub enum Event {
     /// One semantic-search hit emitted by `MemorySemanticSearch`. The
     /// daemon emits zero or more of these ranked by cosine similarity
     /// (best-first), then a terminal `Done`. `content` is the *full*
-    /// parent message text (not a snippet) — chunks may cut
+    /// parent message text (not a snippet); chunks may cut
     /// mid-sentence, so the surface message is the useful unit for the
     /// model. `similarity` is in `[0.0, 1.0]`.
     SemanticHit {
@@ -422,7 +430,7 @@ pub enum Event {
         similarity: f32,
     },
     /// Result of a `MemoryLoad`. `value` is `None` when the key was
-    /// absent — the daemon still emits the event so the client knows
+    /// absent; the daemon still emits the event so the client knows
     /// the lookup completed.
     MemoryValue {
         id: String,
@@ -435,7 +443,7 @@ pub enum Event {
     MemoryKeys { id: String, keys: Vec<String> },
     /// One `(id, key, value)` row emitted by `MemoryListAll`. The
     /// daemon streams these in lexicographic key order, then a
-    /// terminal `Done`. `memory_id` is the SQLite row id — the CLI
+    /// terminal `Done`. `memory_id` is the SQLite row id; the CLI
     /// uses it as the argument to `assistd memory forget <id>`.
     MemoryRow {
         id: String,
@@ -445,7 +453,7 @@ pub enum Event {
     },
     /// Result of a `MemoryForget`. Always emitted exactly once before
     /// the terminal `Done`. `deleted = false` (with `key = None`)
-    /// signals that no row with the given id existed — the CLI maps
+    /// signals that no row with the given id existed; the CLI maps
     /// this to a "no memory with id=N" stderr message and exit 2.
     /// `key = Some(k)` carries the deleted row's key so the CLI can
     /// echo `forgot id=N key=k`.
@@ -492,7 +500,7 @@ pub enum Event {
     /// Non-terminal recovery / status update. Emitted mid-stream when
     /// the daemon hits a recoverable condition (e.g. llama-server
     /// restarting, MCP server bouncing). Clients should render but not
-    /// treat as a terminal event — a `Done` or `Error` still follows.
+    /// treat as a terminal event; a `Done` or `Error` still follows.
     ///
     /// `severity` is one of `info`, `warning`, `error` (matching
     /// `RecoverySeverity::as_str`). `component` is the canonical
@@ -558,9 +566,9 @@ pub enum Event {
         removed_messages: u32,
         last_user_text: Option<String>,
     },
-    /// Terminal error event — the stream is over.
+    /// Terminal error event; the stream is over.
     Error { id: String, message: String },
-    /// Terminal success event — the stream is over.
+    /// Terminal success event; the stream is over.
     Done { id: String },
 }
 
@@ -600,13 +608,29 @@ impl Event {
     }
 }
 
+/// Return the assistd daemon socket path for the current user.
+///
+/// Prefers `$XDG_RUNTIME_DIR/assistd.sock`; falls back to
+/// `/tmp/assistd-$USER.sock` (or `/tmp/assistd-nobody.sock` when `$USER`
+/// is unset).
 pub fn socket_path() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+    socket_path_for(
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("USER"),
+    )
+}
+
+/// Pure resolver: env reads happen at the boundary so this can be tested
+/// without mutating process-global state.
+fn socket_path_for(xdg_runtime_dir: Option<OsString>, user: Option<OsString>) -> PathBuf {
+    if let Some(dir) = xdg_runtime_dir {
         let mut p = PathBuf::from(dir);
         p.push("assistd.sock");
         return p;
     }
-    let user = std::env::var("USER").unwrap_or_else(|_| "nobody".into());
+    let user = user
+        .and_then(|u| u.into_string().ok())
+        .unwrap_or_else(|| "nobody".into());
     PathBuf::from(format!("/tmp/assistd-{user}.sock"))
 }
 
@@ -1329,9 +1353,19 @@ mod tests {
 
     #[test]
     fn socket_path_uses_xdg_runtime_dir() {
-        // Safe to set env in this single-threaded test function.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1234") };
-        let path = socket_path();
+        let path = socket_path_for(Some(OsString::from("/run/user/1234")), None);
         assert_eq!(path, PathBuf::from("/run/user/1234/assistd.sock"));
+    }
+
+    #[test]
+    fn socket_path_falls_back_to_tmp_with_user() {
+        let path = socket_path_for(None, Some(OsString::from("alice")));
+        assert_eq!(path, PathBuf::from("/tmp/assistd-alice.sock"));
+    }
+
+    #[test]
+    fn socket_path_falls_back_to_nobody_without_user() {
+        let path = socket_path_for(None, None);
+        assert_eq!(path, PathBuf::from("/tmp/assistd-nobody.sock"));
     }
 }

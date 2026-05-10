@@ -6,6 +6,8 @@ mod chat;
 #[cfg(feature = "daemon")]
 mod daemon;
 #[cfg(feature = "daemon")]
+mod embed_init;
+#[cfg(feature = "daemon")]
 mod gpu_monitor;
 #[cfg(any(feature = "daemon", feature = "chat"))]
 mod hotkey;
@@ -17,8 +19,12 @@ mod ipc_helper;
 mod listen;
 #[cfg(feature = "daemon")]
 mod listen_dispatcher;
+#[cfg(feature = "daemon")]
+mod mcp_init;
 #[cfg(feature = "client")]
 mod memory_cli;
+#[cfg(feature = "daemon")]
+mod memory_init;
 #[cfg(feature = "client")]
 mod presence;
 #[cfg(feature = "client")]
@@ -28,7 +34,11 @@ mod query;
 #[cfg(feature = "client")]
 mod voice_ctl;
 #[cfg(feature = "daemon")]
+mod voice_init;
+#[cfg(feature = "daemon")]
 mod voice_probe;
+#[cfg(feature = "daemon")]
+mod wm_init;
 
 #[derive(Parser)]
 #[command(
@@ -72,7 +82,7 @@ enum Commands {
     Cycle,
 
     /// Begin a push-to-talk recording on the running daemon (for i3
-    /// `bindsym` — release handled by `ptt-stop` on the matching
+    /// `bindsym`; release handled by `ptt-stop` on the matching
     /// `bindsym --release` line).
     #[cfg(feature = "client")]
     PttStart,

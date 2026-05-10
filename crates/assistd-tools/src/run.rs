@@ -26,18 +26,22 @@ use crate::presentation::{PresentResult, PresentSpec, present};
 use assistd_config::ToolsOutputConfig;
 use std::path::PathBuf;
 
+/// The single LLM-facing `run` tool. Dispatches a command-line string
+/// through the chain parser and executor, then presents the result.
 pub struct RunTool {
     registry: Arc<CommandRegistry>,
     spec: PresentSpec,
     counter: Arc<AtomicU64>,
     /// Level-0 description, built once in `new` from
     /// `registry.sorted_summaries()`. Returned by reference from
-    /// [`Tool::description`] — owned here so the trait's `&str` signature
+    /// [`Tool::description`]; owned here so the trait's `&str` signature
     /// is honored without requiring a static string.
     description: String,
 }
 
 impl RunTool {
+    /// Construct a `RunTool` from a command registry, output limits, and overflow directory.
+    ///
     /// `output` provides the line/byte truncation caps; `overflow_dir` is
     /// the resolved on-disk location chosen by the caller (daemon and chat
     /// TUI use different dirs so their startup resets don't race).
@@ -72,7 +76,7 @@ fn build_description(registry: &CommandRegistry) -> String {
         "Execute a shell-style command in the daemon's working directory. \
          Supports pipelines (|), and/or (&&, ||), and sequencing (;). \
          Redirections (>, <), env expansion ($VAR), and backgrounding (&) \
-         are NOT supported — use `bash \"…\"` for a real shell when needed. \
+         are NOT supported; use `bash \"…\"` for a real shell when needed. \
          Large outputs are truncated; the truncation notice includes a \
          `Full output: /tmp/assistd-output/cmd-N.txt` path that subsequent \
          `run` calls can grep/cat to read the full content.\n\n\
@@ -86,17 +90,17 @@ fn build_description(registry: &CommandRegistry) -> String {
         for _ in name.len()..name_width {
             s.push(' ');
         }
-        s.push_str(" — ");
+        s.push_str(": ");
         s.push_str(summary);
         s.push('\n');
     }
     s.push_str(
         "\nCall a command with no (or insufficient) arguments to see its \
          usage (exit code 2, stdout). Errors in real calls exit with a \
-         `[<name>]\\t` stderr prefix — distinct from help on stdout. Each \
+         `[<name>]\\t` stderr prefix, distinct from help on stdout. Each \
          error line follows `[error] <cmd>: <what-went-wrong>. <Hint>: \
          <recovery>` where `<Hint>` is one of `Use:` / `Try:` / `Check:` / \
-         `Available:` — the recovery clause is a concrete command or check \
+         `Available:`; the recovery clause is a concrete command or check \
          you can run next.",
     );
     s
@@ -143,9 +147,6 @@ impl Tool for RunTool {
         let chain = match parse_chain(command) {
             Ok(c) => c,
             Err(e) => {
-                // Surface parse errors through `present()` like any other
-                // failure so the LLM gets the usual `[stderr] ... [exit:N | Xms]`
-                // shape instead of a raw anyhow at the tool boundary.
                 let stderr = parse_error_line(&e).into_bytes();
                 let failed = CommandOutput::failed(2, stderr);
                 let r = present(failed, &self.spec, &self.counter, start.elapsed());
@@ -334,7 +335,7 @@ mod tests {
 
     #[test]
     fn run_cat_rejects_binary_image() {
-        // `cat` rejects the binary file at Layer 1 — exit 1 with stderr.
+        // `cat` rejects the binary file at Layer 1 (exit 1 with stderr).
         // Layer 2 surfaces stderr inline via [stderr] marker.
         let dir = fresh_dir();
         let tmp = tempdir().unwrap();
@@ -917,13 +918,13 @@ mod tests {
 
     /// Help output on stdout is visually distinct from a real usage error
     /// on stderr. A real grep error (bad regex) still goes to stderr with
-    /// the `[grep]\t` executor prefix — exits 2 like help does, but the
+    /// the `[grep]\t` executor prefix; exits 2 like help does, but the
     /// transport is different. This test locks the distinction.
     #[test]
     fn run_grep_real_usage_error_still_on_stderr() {
         let dir = fresh_dir();
         let tool = tool_with_dir(dir.path());
-        // Unrecognized flag — triggers parse_flags error path, which
+        // Unrecognized flag; triggers parse_flags error path, which
         // remains on stderr (unlike the no-args path, which emits help).
         let result = invoke(&tool, "grep -x foo");
         assert_eq!(result["exit_code"], 2);
@@ -932,7 +933,7 @@ mod tests {
             stderr.contains("[grep]\t"),
             "real errors keep executor prefix: {stderr}"
         );
-        // Stdout stays empty — the usage error didn't go to stdout.
+        // Stdout stays empty; the usage error didn't go to stdout.
         assert_eq!(result["stdout"].as_str().unwrap(), "");
     }
 

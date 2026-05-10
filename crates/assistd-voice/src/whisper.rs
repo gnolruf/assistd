@@ -37,13 +37,14 @@ pub struct WhisperTranscriber {
 }
 
 impl WhisperTranscriber {
+    /// Returns a builder for constructing a [`WhisperTranscriber`].
     pub fn builder() -> WhisperTranscriberBuilder {
         WhisperTranscriberBuilder::default()
     }
 
     /// Reports whether this transcriber was built against a GPU-backed
     /// whisper context. Voice orchestration uses this to decide whether
-    /// the queue-and-fallback flow is even needed — a CPU-only primary
+    /// the queue-and-fallback flow is even needed; a CPU-only primary
     /// never contends with the LLM on the same device.
     pub fn is_gpu(&self) -> bool {
         self.is_gpu
@@ -163,21 +164,25 @@ impl WhisperTranscriberBuilder {
         self
     }
 
+    /// Prefer GPU inference when CUDA is available.
     pub fn prefer_gpu(mut self, prefer: bool) -> Self {
         self.prefer_gpu = prefer;
         self
     }
 
+    /// Override the number of CPU inference threads. `None` lets whisper.cpp choose.
     pub fn threads(mut self, threads: Option<u32>) -> Self {
         self.threads = threads;
         self
     }
 
+    /// Number of beams for beam-search decoding; values ≤ 1 use greedy decoding.
     pub fn beams(mut self, beams: u32) -> Self {
         self.beams = beams.max(1);
         self
     }
 
+    /// Enable whisper.cpp's built-in Silero VAD for silence trimming.
     pub fn vad_enabled(mut self, enabled: bool) -> Self {
         self.vad_enabled = enabled;
         self
@@ -191,6 +196,7 @@ impl WhisperTranscriberBuilder {
         self
     }
 
+    /// Minimum silence duration (seconds) that Silero VAD uses to trim trailing silence.
     pub fn vad_silence_secs(mut self, secs: f32) -> Self {
         self.vad_silence_secs = secs;
         self
@@ -211,10 +217,14 @@ impl WhisperTranscriberBuilder {
         }
     }
 
+    /// Finalize the builder: download any missing model files, initialize the
+    /// whisper.cpp context, and return a ready-to-use [`WhisperTranscriber`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TranscriptionError`] if a required model identifier is missing,
+    /// the model download fails, or the whisper context cannot be initialized.
     pub async fn build(self) -> Result<WhisperTranscriber, TranscriptionError> {
-        // Route whisper.cpp / ggml C-level logs through `tracing` instead
-        // of raw stderr, which would otherwise corrupt TUI draws.
-        // Idempotent: safe to call on every build.
         whisper_rs::install_logging_hooks();
 
         let model = self.model.ok_or_else(|| TranscriptionError::ModelParse {

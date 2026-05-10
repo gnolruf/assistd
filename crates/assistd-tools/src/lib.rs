@@ -11,7 +11,7 @@
 //! Tool-use subsystem: the trait every invokable tool implements, plus
 //! the registry the LLM looks up tool calls in.
 //!
-//! The daemon exposes a single LLM-facing tool — `run` — whose argument is
+//! The daemon exposes a single LLM-facing tool (`run`) whose argument is
 //! a Unix-shell-style command line. `run` parses the line into a
 //! [`chain::Chain`] AST and dispatches each stage through a
 //! [`CommandRegistry`] of internal Rust handlers. Two-tier split: `Tool`
@@ -73,10 +73,12 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// Create an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Register a tool by value.
     pub fn register<T: Tool>(&mut self, tool: T) {
         self.tools.push(Box::new(tool));
     }
@@ -88,6 +90,7 @@ impl ToolRegistry {
         self.tools.push(tool);
     }
 
+    /// Look up a registered tool by its `name()`.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()
@@ -95,21 +98,24 @@ impl ToolRegistry {
             .map(|t| t.as_ref())
     }
 
+    /// Number of registered tools.
     pub fn len(&self) -> usize {
         self.tools.len()
     }
 
+    /// Returns `true` when no tools have been registered.
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
 
+    /// Iterator over every registered tool's name.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tools.iter().map(|t| t.name())
     }
 
     /// Render the registry as an OpenAI chat-completions `tools` array.
     /// Each entry is a `{"type": "function", "function": {...}}` object
-    /// with `strict: true` — guaranteeing the model's arguments conform
+    /// with `strict: true`, guaranteeing the model's arguments conform
     /// to `parameters_schema()`.
     pub fn openai_schemas(&self) -> Vec<Value> {
         self.tools
@@ -129,6 +135,7 @@ impl ToolRegistry {
     }
 }
 
+/// Crate version string from `Cargo.toml`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

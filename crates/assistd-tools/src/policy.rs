@@ -1,11 +1,11 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
 
 //! Command-execution policy: confirmation gates, pattern matchers, and
 //! sandbox probing.
 //!
 //! The types here are consumed by [`crate::commands::BashCommand`] (denylist
 //! check, destructive-pattern confirmation, bwrap wrapping) and
-//! [`crate::commands::WriteCommand`] (writable-path allowlist — resolved at
+//! [`crate::commands::WriteCommand`] (writable-path allowlist, resolved at
 //! build time by the caller, not by this module). They are deliberately
 //! decoupled from `assistd-core::config` to avoid a circular crate
 //! dependency: the caller in `assistd-core::build_tools` constructs the
@@ -15,7 +15,7 @@
 //! list are backstops for *obvious* dangerous invocations (`rm -rf /`,
 //! `mkfs`, …). They can be defeated by a sufficiently clever caller
 //! (variable expansion, here-docs, command substitution), so they are not
-//! the real defense — the bwrap sandbox is.
+//! the real defense; the bwrap sandbox is.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -115,18 +115,18 @@ pub const MAX_PENDING_CONFIRMS: usize = 32;
 ///
 /// Bounded: at most [`MAX_PENDING_CONFIRMS`] prompts may be in flight
 /// at once. Beyond that, [`ConfirmRouter::ask`] denies immediately and
-/// logs a `warn!` — the gate contract is "never hang the agent," and
+/// logs a `warn!`; the gate contract is "never hang the agent," and
 /// silently denying a few prompts is preferable to unbounded memory
 /// growth from a hostile or stuck client.
 pub struct ConfirmRouter {
-    /// Originating IPC request id — used as `Event::ConfirmRequest::id`
+    /// Originating IPC request id, used as `Event::ConfirmRequest::id`
     /// for trace correlation. Set once per connection.
     request_id: String,
     /// Wire channel back to the client. Cloned from the connection
     /// handler's main event sender.
     wire: mpsc::Sender<Event>,
     /// Pending confirmation prompts, keyed by `confirm_id`. The lock
-    /// is held only across HashMap insert/remove — no `.await` is
+    /// is held only across HashMap insert/remove; no `.await` is
     /// held under the guard, so std::sync::Mutex is sufficient.
     pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
 }
@@ -145,7 +145,7 @@ impl ConfirmRouter {
 
     /// Forward the daemon's prompt to the connected client and await
     /// the response. Returns `false` on any failure mode (channel
-    /// drop, dispatch shutdown, malformed response) — the gate
+    /// drop, dispatch shutdown, malformed response); the gate
     /// contract says never hang the agent.
     pub async fn ask(&self, req: ConfirmationRequest) -> bool {
         let confirm_id = uuid::Uuid::new_v4().to_string();
@@ -153,7 +153,7 @@ impl ConfirmRouter {
         {
             // SAFETY: poisoning would mean another task panicked while
             // holding the lock. Recover by taking the inner; one
-            // dropped sender just denies the affected confirm — the
+            // dropped sender just denies the affected confirm, and the
             // agent loop continues correctly.
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             if pending.len() >= MAX_PENDING_CONFIRMS {
@@ -177,7 +177,7 @@ impl ConfirmRouter {
             matched_pattern: req.matched_pattern.clone(),
         };
         if self.wire.send(event).await.is_err() {
-            // Wire dead — clean up and deny.
+            // Wire dead; clean up and deny.
             self.pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -193,7 +193,7 @@ impl ConfirmRouter {
         match rx.await {
             Ok(allow) => allow,
             Err(_) => {
-                // Pending sender dropped without responding — happens
+                // Pending sender dropped without responding; happens
                 // when the connection's read loop ends before a reply
                 // arrives. Deny.
                 self.pending
@@ -212,7 +212,7 @@ impl ConfirmRouter {
 
     /// Route an inbound `Request::ConfirmResponse` to its matching
     /// pending oneshot. Returns `Err` (logged by the caller) when the
-    /// response doesn't match any in-flight prompt — that signals
+    /// response doesn't match any in-flight prompt; that signals
     /// either a buggy client or a confirm whose deadline already
     /// expired.
     pub fn route_response(&self, confirm_id: &str, allow: bool) -> Result<(), &'static str> {
@@ -246,7 +246,7 @@ tokio::task_local! {
 /// by the socket handler) and asks it to round-trip the prompt.
 ///
 /// When called from a code path that has no [`ConfirmRouter`] in scope
-/// (daemon-internal dispatch with no client wire — e.g. an autonomous
+/// (daemon-internal dispatch with no client wire, e.g. an autonomous
 /// continuous-listener-driven query, or a unit test), falls back to
 /// deny so the agent loop never hangs.
 #[derive(Debug, Default)]
@@ -345,7 +345,7 @@ pub fn matches_destructive<'a>(script: &str, prefixes: &'a [Vec<String>]) -> Opt
 pub enum SandboxRequest {
     /// Use bwrap if found on `PATH`; fall back to unsandboxed with a warn.
     Auto,
-    /// Require bwrap — fail startup if missing.
+    /// Require bwrap; fail startup if missing.
     Bwrap,
     /// Never wrap; run bash under the daemon's own user.
     None,
@@ -501,7 +501,7 @@ mod tests {
         let router = ConfirmRouter::new("req-cap-test".into(), wire_tx);
 
         // Pre-load the pending map up to the cap. Bypass `ask` so we
-        // don't have to keep the wire sender alive — we just want the
+        // don't have to keep the wire sender alive; we just want the
         // router to think it's full.
         {
             let mut pending = router.pending.lock().unwrap();
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn destructive_ignores_quoted_literal() {
         // The bash script `echo "rm -rf"` tokenizes to three tokens:
-        // ["echo", "rm -rf"] — the second is a single quoted arg and must
+        // ["echo", "rm -rf"]; the second is a single quoted arg and must
         // not match the prefix ["rm", "-rf"].
         let prefixes = vec![vec!["rm".into(), "-rf".into()]];
         assert!(matches_destructive("echo \"rm -rf\"", &prefixes).is_none());
@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn destructive_matches_second_command_in_chain() {
         let prefixes = vec![vec!["rm".into(), "-rf".into()]];
-        // `touch foo && rm -rf bar` — the prefix should anchor at the
+        // `touch foo && rm -rf bar`: the prefix should anchor at the
         // start of the second command.
         let m = matches_destructive("touch foo && rm -rf bar", &prefixes).expect("match");
         assert_eq!(m, &["rm".to_string(), "-rf".to_string()]);
@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn destructive_unparseable_script_returns_none() {
-        // Unterminated quote — shlex returns None.
+        // Unterminated quote; shlex returns None.
         let prefixes = vec![vec!["rm".into(), "-rf".into()]];
         assert!(matches_destructive("rm -rf \"unterminated", &prefixes).is_none());
     }

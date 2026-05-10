@@ -37,7 +37,7 @@
 //! A single MCP server typically exposes many tools, with distinct
 //! schemas and dynamic discovery. Modeling each tool as its own
 //! `Tool` impl would either require generating a struct per tool at
-//! compile time (impossible — schemas come from the wire) or a giant
+//! compile time (impossible: schemas come from the wire) or a giant
 //! match. Instead we keep `McpClient` as a connection-level handle,
 //! and use the [`McpToolAdapter`] type to turn each
 //! `(client, tool_name, schema)` tuple into a `Tool` registry entry.
@@ -48,7 +48,7 @@
 //! `RunTool` already emits: a top-level `output`/`exit_code`/`truncated`
 //! envelope plus an `attachments` array carrying the image bytes as
 //! base64. The agent loop's existing `parse_attachment` helper lifts
-//! those into `Attachment::Image` for the next turn — same path as the
+//! those into `Attachment::Image` for the next turn, same path as the
 //! local `see` / `screenshot` commands.
 
 use std::sync::Arc;
@@ -77,7 +77,7 @@ pub use stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
 #[derive(Debug, Clone)]
 pub struct ToolSchema {
     /// Server-native tool name (no daemon-side prefix). The daemon
-    /// decorates this when registering — see [`adapt_client_as_tools`].
+    /// decorates this when registering; see [`adapt_client_as_tools`].
     pub name: String,
     /// Human-readable description the LLM sees.
     pub description: String,
@@ -124,6 +124,7 @@ pub struct McpToolAdapter {
 }
 
 impl McpToolAdapter {
+    /// Create an adapter for a single `(client, schema)` pair under the given registry name.
     pub fn new(client: Arc<dyn McpClient>, schema: ToolSchema, registry_name: String) -> Self {
         Self {
             client,
@@ -147,7 +148,7 @@ impl Tool for McpToolAdapter {
         self.schema.input_schema.clone()
     }
 
-    /// Always resolves to `Ok(json)` — failure is rendered into the
+    /// Always resolves to `Ok(json)`; failure is rendered into the
     /// envelope itself (with `exit_code: -1` and a convention-compliant
     /// `[error] …. <Hint>: <recovery>` line in `output`) instead of
     /// bubbling a Rust `Err` to the agent loop. That keeps the model on a
@@ -206,7 +207,7 @@ fn error_envelope(tool_name: &str, e: &anyhow::Error, duration_ms: u128) -> Valu
 /// ```
 ///
 /// `duration_ms` is supplied by the caller so it reflects the actual MCP
-/// RPC round-trip time — the TUI surfaces this in the `[exit:N | Xms]`
+/// RPC round-trip time; the TUI surfaces this in the `[exit:N | Xms]`
 /// footer alongside the colored bar.
 ///
 /// `attachments[].data` is the base64-encoded image bytes (NOT
@@ -247,7 +248,7 @@ fn tool_result_to_json(r: ToolResult, duration_ms: u128) -> Value {
 
 /// Build [`Tool`] registry entries for every tool an MCP client
 /// exposes. The daemon decorates the registry name with `name_prefix`
-/// (typically `mcp__<server>`) using `__` as a separator — `:` is
+/// (typically `mcp__<server>`) using `__` as a separator; `:` is
 /// illegal in OpenAI/Anthropic function names.
 ///
 /// This sibling does NOT wrap entries in [`HealthRoutedTool`]; use
@@ -313,6 +314,7 @@ mod base64_dep {
     pub use base64::*;
 }
 
+/// Returns the crate version string from `Cargo.toml`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -498,7 +500,7 @@ mod tests {
     }
 
     /// Acceptance: timeouts get a `Try:` recovery hint that suggests
-    /// retrying or shrinking the request — distinct from `RpcError`'s
+    /// retrying or shrinking the request, distinct from `RpcError`'s
     /// `Check:` (which says "the input is wrong"). The model needs the
     /// distinction to pick the right next step.
     #[tokio::test]

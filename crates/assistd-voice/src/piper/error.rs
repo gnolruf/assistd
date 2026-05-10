@@ -3,6 +3,7 @@ use std::process::ExitStatus;
 
 use thiserror::Error;
 
+/// Errors produced by the Piper TTS subsystem.
 #[derive(Debug, Error)]
 pub enum PiperError {
     #[error(

@@ -3,7 +3,7 @@
 //! Mirrors the shape of [`crate::presence::run`]: opens the daemon's
 //! Unix socket, sends one [`Request::Memory*`], prints incoming events
 //! to stdout, and exits on `Event::Done` / `Event::Error`. All routing
-//! goes through the daemon — there's no direct-SQLite fallback (the
+//! goes through the daemon; there's no direct-SQLite fallback (the
 //! daemon owns the writer, and a CLI grabbing the file lock while it's
 //! mid-write would risk corruption).
 
@@ -12,6 +12,7 @@ use assistd_ipc::{Event, IpcClient, Request};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
+/// Arguments for the `memory` subcommand.
 #[derive(Args)]
 pub struct MemoryArgs {
     #[command(subcommand)]
@@ -82,17 +83,17 @@ impl MemoryAction {
     }
 }
 
+/// Dispatch a `memory` subcommand to the daemon and print the response.
+///
+/// # Errors
+///
+/// Returns an error if the IPC connection fails or the daemon sends an
+/// unexpected terminal event.
 pub async fn run(args: MemoryArgs) -> Result<()> {
-    // Capture the forget target id before `into_request` consumes the
-    // action — needed so the `MemoryForgetResult` printer can echo it
-    // back on the miss path (`no memory with id=N`), where the daemon
-    // doesn't carry a key.
     let forget_target = match &args.action {
         MemoryAction::Forget { id } => Some(*id),
         _ => None,
     };
-    // Same idea for the reindex progress printer: capture `--quiet`
-    // before `into_request` moves the action.
     let reindex_quiet = matches!(&args.action, MemoryAction::Reindex { quiet: true });
 
     let req = args.action.into_request(Uuid::new_v4().to_string());
@@ -101,9 +102,6 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
         .await
         .map_err(crate::ipc_helper::map_not_reachable)?;
 
-    // Track the last reindex kind so a kind change emits a newline
-    // before the new kind's progress line — keeps the chunks → memories
-    // transition from clobbering the chunks total under `\r` rewrites.
     let mut last_reindex_kind: Option<String> = None;
     loop {
         let event = match stream.next_event().await? {
@@ -121,12 +119,6 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 similarity,
                 ..
             } => {
-                // One line per hit: timestamp, role, conversation row
-                // id, similarity score, full message content. Short
-                // session-id prefix gives users a stable handle for
-                // follow-up queries without wasting columns. `content`
-                // is the full message text (single line — collapse
-                // newlines so columns stay aligned).
                 let session_short = session_id.chars().take(8).collect::<String>();
                 let single_line = content.replace('\n', " ");
                 println!(
@@ -152,9 +144,6 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 value,
                 ..
             } => {
-                // Tab-separated id, key, value. Collapse newlines in
-                // value so a multi-line memory doesn't break the row
-                // boundary in shell pipelines.
                 let single_line = value.replace('\n', " ");
                 println!("{memory_id}\t{key}\t{single_line}");
             }
@@ -181,16 +170,9 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                     let _ = writeln!(err);
                 }
                 last_reindex_kind = Some(kind.clone());
-                // `\r` rewrites the same line for successive ticks
-                // within one kind; the newline above moves to a
-                // fresh line on transitions.
                 let _ = write!(err, "\rreindex {kind}: {done}/{total}");
                 let _ = err.flush();
             }
-            // `MemoryForgetResult { deleted: true, key: None }` is not
-            // produced by the daemon (a delete-by-id always has a key
-            // when it hits a row), but the type allows it; treat it as
-            // a successful no-op so we don't trip the missing-id exit.
             Event::MemoryForgetResult {
                 deleted: true,
                 key: None,
@@ -209,9 +191,6 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 eprintln!("daemon error: {message}");
                 std::process::exit(1);
             }
-            // Other event types are not expected for memory commands —
-            // ignore defensively in case a future protocol addition
-            // funnels them onto this stream.
             _ => {}
         }
     }

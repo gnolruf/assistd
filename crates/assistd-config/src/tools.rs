@@ -10,12 +10,16 @@ use serde::{Deserialize, Serialize};
 /// output-presentation limits.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ToolsConfig {
+    /// Output presentation limits applied before handing results to the LLM.
     #[serde(default)]
     pub output: ToolsOutputConfig,
+    /// Bash command execution policy (timeout, denylist, sandbox mode).
     #[serde(default)]
     pub bash: ToolsBashConfig,
+    /// File-write command policy (allowlist of writable path prefixes).
     #[serde(default)]
     pub write: ToolsWriteConfig,
+    /// Screenshot capture settings (backend selector, timeout).
     #[serde(default)]
     pub screenshot: ToolsScreenshotConfig,
 }
@@ -67,10 +71,10 @@ fn default_tools_overflow_dir() -> String {
 
 /// Sandbox mode for bash subprocess execution.
 ///
-/// * `Auto` — use bubblewrap if `bwrap` is found on `PATH` at daemon startup;
+/// * `Auto`: use bubblewrap if `bwrap` is found on `PATH` at daemon startup;
 ///   log a warn and run unsandboxed if not.
-/// * `Bwrap` — require bubblewrap; fail daemon startup if `bwrap` is missing.
-/// * `None` — never wrap; run bash directly under the daemon's own user.
+/// * `Bwrap`: require bubblewrap; fail daemon startup if `bwrap` is missing.
+/// * `None`: never wrap; run bash directly under the daemon's own user.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BashSandboxMode {
@@ -149,6 +153,7 @@ fn default_bash_destructive_patterns_fn() -> Vec<String> {
 /// allowlist entries are dropped with a warning at daemon startup.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolsWriteConfig {
+    /// Path prefixes (supporting `~` expansion) under which the `write` command may operate.
     #[serde(default = "default_writable_paths_fn")]
     pub writable_paths: Vec<String>,
 }
@@ -182,6 +187,7 @@ pub enum ScreenshotBackend {
 /// to disk by this command.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolsScreenshotConfig {
+    /// Which capture backend to use.
     #[serde(default)]
     pub backend: ScreenshotBackend,
     /// Capture subprocess timeout in seconds. Must be > 0. Exceeding the

@@ -20,9 +20,6 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-# Internal crates. `version` is declared alongside `path` so tooling that
-# inspects workspace manifests (e.g. cargo-deny) doesn't treat these as
-# wildcard deps. `path` still wins for local builds.
 assistd-config = { version = "0.1", path = "crates/assistd-config" }
 assistd-core   = { version = "0.1", path = "crates/assistd-core" }
 assistd-embed  = { version = "0.1", path = "crates/assistd-embed" }
@@ -34,97 +31,52 @@ assistd-voice  = { version = "0.1", path = "crates/assistd-voice" }
 assistd-tools  = { version = "0.1", path = "crates/assistd-tools" }
 assistd-wm     = { version = "0.1", path = "crates/assistd-wm" }
 
-# External crates
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Workspace base for tokio: no features. Each crate opts into the
-# minimum it needs via per-manifest `features = [...]`. The binary
-# (`assistd-cli`) is the only crate that takes `["full"]`.
-tokio = { version = "1", default-features = false }
+tokio = { version = "1.52.2", default-features = false }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
-thiserror = "1"
-toml = "0.8"
-clap = { version = "4", features = ["derive"] }
-uuid = { version = "1", features = ["v4"] }
+thiserror = "2.0.18"
+toml = "1.1.2"
+clap = { version = "4.6.1", features = ["derive"] }
+uuid = { version = "1.23.1", features = ["v4"] }
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-libc = "0.2"
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "json"] }
+libc = "0.2.186"
+rustix = { version = "1", features = ["stdio", "process"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
-tracing-appender = "0.2"
+tracing-appender = "0.2.5"
 textwrap = "0.16"
 nvml-wrapper = "0.12"
+global-hotkey = "0.8"
 regex = "1"
 tempfile = "3"
 base64 = "0.22"
 infer = "0.19"
 shlex = "1"
-which = "7"
+which = "8.0.2"
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
-ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "10.0.8", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-# Persistent memory store. `rusqlite` ships with `bundled` so we don't depend
-# on a system libsqlite3 — keeps `cargo build` reproducible across distros.
-# `blob` enables `Connection::blob_open` for the embeddings BLOB column.
-# `tokio-rusqlite` runs the connection on a dedicated thread and serves
-# `conn.call(|c| ...)` closures over a channel — exactly the writer-task
-# pattern Milestone 4 needs (see crates/assistd-memory/src/sqlite/writer.rs).
-rusqlite = { version = "0.31", features = ["bundled", "blob"] }
-tokio-rusqlite = "0.5"
-rusqlite_migration = "1"
+rusqlite = { version = "0.37", features = ["bundled", "blob"] }
+tokio-rusqlite = "0.7"
+rusqlite_migration = "2.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-# i3 IPC client for the WindowManager backend in assistd-wm. Async, built
-# on tokio's UnixStream — fails cleanly on non-i3 systems with a connect
-# error so the daemon can degrade to NoWindowManager.
 tokio-i3ipc = "0.16"
-# Sway IPC client (sibling backend to tokio-i3ipc). Built on async-io so
-# its futures live on a smol reactor; that reactor coexists with the
-# workspace tokio runtime at the cost of one background thread, which is
-# acceptable since the WM event path is not on the LLM hot loop.
 swayipc-async = "3"
-# URL parsing for the MCP SSE transport (POST endpoint resolution and
-# absolute/relative URL handling on the SSE `endpoint` event).
 url = "2"
 
-# Workspace-wide lint baseline. Each crate inherits via
-# `[lints] workspace = true` in its own Cargo.toml. Tightens defaults
-# without going to clippy::pedantic, which would surface hundreds of
-# stylistic warnings across the existing 100+ source files; pedantic
-# can be turned on incrementally per-crate later if there's appetite.
 [workspace.lints.rust]
-# `deny` (not `forbid`) so individual call sites that legitimately
-# need libc / process-group / kill semantics can opt in with a
-# scoped `#[allow(unsafe_code)]` and a comment explaining why.
 unsafe_code = "deny"
-# Lint groups must have priority -1 so individual lint overrides
-# (none below today, but future per-lint overrides) win over them.
 rust_2018_idioms = { level = "warn", priority = -1 }
-# `unused_qualifications` is intentionally NOT in the baseline. With
-# `-D warnings` in CI, it would error on perfectly readable test code
-# that uses `anyhow::Result<()>` / `std::time::Duration` for clarity
-# at the call site (where the import alone wouldn't disambiguate). If
-# we ever want this back, scope it as a per-crate opt-in rather than
-# a workspace blanket.
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-# Catch leftover dbg! before it ships. `print_stdout` / `print_stderr`
-# are intentionally NOT denied here — the CLI surface (`assistd send`
-# error reporting, fake-server diagnostics) writes to stdout/stderr
-# legitimately, and chasing those down with per-call allows is
-# higher-cost-than-value. Revisit when there's a clear "production"
-# vs "CLI surface" boundary worth enforcing.
 dbg_macro = "deny"
-# `unwrap_used` / `expect_used` likewise: tests already opt out via
-# `#![cfg_attr(test, allow(...))]` in each lib. The remaining
-# production sites are a backlog item — landing them as `warn` here
-# would surface 16 warnings we can't fix in this refinement pass.
-# Keep them off the workspace baseline for now so CI stays green;
-# tightening incrementally per-crate is the follow-up.
 
 [profile.release]
 lto = "thin"
