@@ -67,9 +67,7 @@ impl SqliteHandle {
         .await
         .context("apply SQLite pragmas")?;
 
-        conn.call(migrations::run)
-            .await
-            .context("run migrations")?;
+        conn.call(migrations::run).await.context("run migrations")?;
 
         let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_DEPTH);
         let writer_handle = spawn_writer(conn.clone(), writer_rx, shutdown);
