@@ -13,8 +13,8 @@
 //!   4. Length safety net at `max_len` chars (last whitespace before)
 //!
 //! Two flush modes are exposed alongside the streaming `push`:
-//!   - [`SentenceBuffer::finish`]: terminal flush on `LlmEvent::Done`.
-//!   - [`SentenceBuffer::flush_idle`]: mid-stream "the LLM has paused"
+//!   - [`SentenceBuffer::finish`][]: terminal flush on `LlmEvent::Done`.
+//!   - [`SentenceBuffer::flush_idle`][]: mid-stream "the LLM has paused"
 //!     flush, called on an idle timeout. Preserves fence/lang state so
 //!     the stream can resume cleanly.
 
