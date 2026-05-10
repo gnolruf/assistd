@@ -262,41 +262,38 @@ impl Supervisor {
         let mut session_start = Instant::now();
 
         loop {
-            match current_lifeline.take() {
-                Some(mut lifeline) => {
-                    tokio::select! {
-                        _ = lifeline.wait() => {
-                            let ran_for = session_start.elapsed();
-                            warn!(
-                                target: "assistd::mcp",
-                                server = %name,
-                                ran_for_secs = ran_for.as_secs(),
-                                "MCP server transport died",
-                            );
+            if let Some(mut lifeline) = current_lifeline.take() {
+                tokio::select! {
+                    _ = lifeline.wait() => {
+                        let ran_for = session_start.elapsed();
+                        warn!(
+                            target: "assistd::mcp",
+                            server = %name,
+                            ran_for_secs = ran_for.as_secs(),
+                            "MCP server transport died",
+                        );
+                        lifeline.shutdown().await;
+                        if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
+                            consecutive_failures = 0;
+                        }
+                    }
+                    _ = supervisor_shutdown_rx.changed() => {
+                        if *supervisor_shutdown_rx.borrow() {
+                            info!(target: "assistd::mcp", server = %name, "supervisor shutdown (handle.shutdown)");
+                            switch.swap(None).await;
                             lifeline.shutdown().await;
-                            if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
-                                consecutive_failures = 0;
-                            }
+                            return;
                         }
-                        _ = supervisor_shutdown_rx.changed() => {
-                            if *supervisor_shutdown_rx.borrow() {
-                                info!(target: "assistd::mcp", server = %name, "supervisor shutdown (handle.shutdown)");
-                                switch.swap(None).await;
-                                lifeline.shutdown().await;
-                                return;
-                            }
-                        }
-                        _ = external_shutdown_rx.changed() => {
-                            if *external_shutdown_rx.borrow() {
-                                info!(target: "assistd::mcp", server = %name, "supervisor shutdown (daemon-wide)");
-                                switch.swap(None).await;
-                                lifeline.shutdown().await;
-                                return;
-                            }
+                    }
+                    _ = external_shutdown_rx.changed() => {
+                        if *external_shutdown_rx.borrow() {
+                            info!(target: "assistd::mcp", server = %name, "supervisor shutdown (daemon-wide)");
+                            switch.swap(None).await;
+                            lifeline.shutdown().await;
+                            return;
                         }
                     }
                 }
-                None => {}
             }
 
             // Swap the switching client to None so direct consumers see
