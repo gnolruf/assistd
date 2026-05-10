@@ -94,7 +94,7 @@ impl PresenceState {
 /// four-state indicator. `Transcribing` is distinct from `Recording` because
 /// whisper inference takes 1–3 s on a few seconds of audio and users
 /// otherwise keep talking into dead air. `Queued` sits between them when the
-/// GPU is busy with an LLM stream — the transcriber is briefly waiting for
+/// GPU is busy with an LLM stream; the transcriber is briefly waiting for
 /// the GPU before starting inference (or deciding to fall back to CPU).
 ///
 /// `Idle` is pinned to discriminant 0; a unit test in
@@ -236,7 +236,7 @@ pub enum Request {
     MemoryReindex { id: String },
     /// Client's reply to a daemon-issued [`Event::ConfirmRequest`].
     /// Sent on the *same* socket connection as the originating request
-    /// (Query, PttStop, etc.) — see the protocol notes at the top of
+    /// (Query, PttStop, etc.); see the protocol notes at the top of
     /// this module. The daemon routes the response by `confirm_id`,
     /// not by `id`, so a single in-flight stream can ask multiple
     /// confirms without ambiguity.
@@ -334,7 +334,7 @@ impl Request {
         }
     }
 
-    /// Short, stable name for the variant — used as a span field so
+    /// Short, stable name for the variant, used as a span field so
     /// concurrent requests can be filtered by kind in trace output.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -403,7 +403,7 @@ pub enum Event {
     },
     /// Final whisper transcription emitted once on `PttStop`, before the
     /// text is dispatched internally as a `Query`. Empty string means VAD
-    /// trimmed the audio down to silence — no `Query` follows in that
+    /// trimmed the audio down to silence; no `Query` follows in that
     /// case, only a terminal `Done`.
     Transcription { id: String, text: String },
     /// Current state of continuous listening. Emitted in response to
@@ -416,7 +416,7 @@ pub enum Event {
     /// One semantic-search hit emitted by `MemorySemanticSearch`. The
     /// daemon emits zero or more of these ranked by cosine similarity
     /// (best-first), then a terminal `Done`. `content` is the *full*
-    /// parent message text (not a snippet) — chunks may cut
+    /// parent message text (not a snippet); chunks may cut
     /// mid-sentence, so the surface message is the useful unit for the
     /// model. `similarity` is in `[0.0, 1.0]`.
     SemanticHit {
@@ -430,7 +430,7 @@ pub enum Event {
         similarity: f32,
     },
     /// Result of a `MemoryLoad`. `value` is `None` when the key was
-    /// absent — the daemon still emits the event so the client knows
+    /// absent; the daemon still emits the event so the client knows
     /// the lookup completed.
     MemoryValue {
         id: String,
@@ -443,7 +443,7 @@ pub enum Event {
     MemoryKeys { id: String, keys: Vec<String> },
     /// One `(id, key, value)` row emitted by `MemoryListAll`. The
     /// daemon streams these in lexicographic key order, then a
-    /// terminal `Done`. `memory_id` is the SQLite row id — the CLI
+    /// terminal `Done`. `memory_id` is the SQLite row id; the CLI
     /// uses it as the argument to `assistd memory forget <id>`.
     MemoryRow {
         id: String,
@@ -453,7 +453,7 @@ pub enum Event {
     },
     /// Result of a `MemoryForget`. Always emitted exactly once before
     /// the terminal `Done`. `deleted = false` (with `key = None`)
-    /// signals that no row with the given id existed — the CLI maps
+    /// signals that no row with the given id existed; the CLI maps
     /// this to a "no memory with id=N" stderr message and exit 2.
     /// `key = Some(k)` carries the deleted row's key so the CLI can
     /// echo `forgot id=N key=k`.
@@ -500,7 +500,7 @@ pub enum Event {
     /// Non-terminal recovery / status update. Emitted mid-stream when
     /// the daemon hits a recoverable condition (e.g. llama-server
     /// restarting, MCP server bouncing). Clients should render but not
-    /// treat as a terminal event — a `Done` or `Error` still follows.
+    /// treat as a terminal event; a `Done` or `Error` still follows.
     ///
     /// `severity` is one of `info`, `warning`, `error` (matching
     /// `RecoverySeverity::as_str`). `component` is the canonical
@@ -566,9 +566,9 @@ pub enum Event {
         removed_messages: u32,
         last_user_text: Option<String>,
     },
-    /// Terminal error event — the stream is over.
+    /// Terminal error event; the stream is over.
     Error { id: String, message: String },
-    /// Terminal success event — the stream is over.
+    /// Terminal success event; the stream is over.
     Done { id: String },
 }
 

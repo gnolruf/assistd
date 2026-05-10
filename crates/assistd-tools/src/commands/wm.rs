@@ -1,19 +1,19 @@
-//! `wm <subcommand> [args]` — drive the active [`WindowManager`] backend
+//! `wm <subcommand> [args]`: drive the active [`WindowManager`] backend
 //! from the LLM's `run` tool.
 //!
 //! Subcommand surface:
 //!
-//! - `wm focus <class>` — focus the named window
-//! - `wm move <class> <workspace>` — move window to workspace
-//! - `wm open <app> [args...]` — launch a process (does not go through
-//!   the WindowManager — i3/sway/hyprland don't spawn processes, they
+//! - `wm focus <class>` - focus the named window
+//! - `wm move <class> <workspace>` - move window to workspace
+//! - `wm open <app> [args...]` - launch a process (does not go through
+//!   the WindowManager; i3/sway/hyprland don't spawn processes, they
 //!   only manage already-mapped windows)
-//! - `wm active` — class of the focused window
-//! - `wm resize <class> <grow|shrink> <px>` — width-only resize
-//! - `wm list` — TSV `<class>\t<workspace>\t<title>`
-//! - `wm workspaces` — TSV `<num>\t<name>\t<focused>\t<output>`
-//! - `wm outputs` — TSV `<name>\t<active>\t<primary>\t<mode>\t<scale>\t<focused_workspace>`
-//! - `wm layout <default|tabbed|stacking|splith|splitv>` — set the
+//! - `wm active` - class of the focused window
+//! - `wm resize <class> <grow|shrink> <px>` - width-only resize
+//! - `wm list` - TSV `<class>\t<workspace>\t<title>`
+//! - `wm workspaces` - TSV `<num>\t<name>\t<focused>\t<output>`
+//! - `wm outputs` - TSV `<name>\t<active>\t<primary>\t<mode>\t<scale>\t<focused_workspace>`
+//! - `wm layout <default|tabbed|stacking|splith|splitv>` - set the
 //!   focused container's layout
 //!
 //! Discovery: `wm` (no args) returns the help block on stdout (exit 2).
@@ -65,7 +65,7 @@ fn hint_for(err: &WmError) -> (&'static str, &'static str) {
 const NAME: &str = "wm";
 const SUMMARY: &str = "manage windows and workspaces (focus, move, open, list, workspaces, etc.)";
 
-/// `wm <subcommand> [args]` — drive the active window manager from the LLM's `run` tool.
+/// `wm <subcommand> [args]`: drive the active window manager from the LLM's `run` tool.
 pub struct WmCommand {
     wm: Arc<dyn WindowManager>,
 }
@@ -92,7 +92,7 @@ impl Command for WmCommand {
          \n\
          Manage windows and workspaces via the active compositor backend \
          (i3, sway, or hyprland). Window identifiers are decimal con_ids \
-         (e.g. \"94567128432192\") — run `wm list` first to find the id \
+         (e.g. \"94567128432192\"); run `wm list` first to find the id \
          for the window you want to act on; the second column is the \
          application label.\n\
          \n\
@@ -173,7 +173,7 @@ fn help_output(text: String) -> CommandOutput {
 const FOCUS_HELP: &str = "usage: wm focus <id>\n\
     \n\
     Focus the window with the given decimal con_id. Run `wm list` \
-    first to find ids — the first column is the id, the second is \
+    first to find ids; the first column is the id, the second is \
     the application label.\n";
 
 async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
@@ -213,7 +213,7 @@ fn parse_id_error(op: &'static str, raw: &str) -> CommandOutput {
             NAME,
             format_args!("{op}: '{raw}' is not a valid window id (positive decimal con_id)"),
             "Use",
-            "wm list to see ids — first TSV column",
+            "wm list to see ids (first TSV column)",
         )
         .into_bytes(),
     )
@@ -260,7 +260,7 @@ const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
     \n\
     Launch an application. <app> is resolved through PATH; remaining \
     arguments are forwarded to the spawned process. The child is \
-    detached — stdin/stdout/stderr are nulled and the daemon does not \
+    detached: stdin/stdout/stderr are nulled and the daemon does not \
     wait for it to exit.\n";
 
 async fn handle_open(args: &[String]) -> Result<CommandOutput> {
@@ -558,7 +558,7 @@ mod tests {
     };
     use std::sync::Mutex;
 
-    /// Test-only id constructor — every fixture id is non-zero by
+    /// Test-only id constructor; every fixture id is non-zero by
     /// construction, so this `expect` is unreachable at runtime.
     fn id(n: u64) -> WindowId {
         WindowId::new(n).expect("test ids are non-zero")
@@ -575,7 +575,7 @@ mod tests {
         workspaces: Vec<WorkspaceInfo>,
         outputs: Vec<OutputInfo>,
         focused: Option<WindowId>,
-        /// Human-readable label of the focused window — surfaced via
+        /// Human-readable label of the focused window, surfaced via
         /// `focused_context().class`. Independent of `focused` so tests
         /// can exercise "id present but app unknown" code paths.
         focused_app: Option<String>,
@@ -691,7 +691,7 @@ mod tests {
         }
         async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
             if self.list_outputs_unsupported {
-                // Mirror the trait default — backends that don't
+                // Mirror the trait default: backends that don't
                 // implement outputs return Unsupported so the wm tool
                 // can tell the LLM the difference between a connected
                 // machine with zero monitors and an i3-class backend.
@@ -755,7 +755,7 @@ mod tests {
     #[tokio::test]
     async fn no_window_manager_short_circuits_on_focus() {
         // Ensures the production `NoWindowManager` produces the same
-        // behavior as the StubWm disconnected path — this is the gate
+        // behavior as the StubWm disconnected path; this is the gate
         // for the "mock mode" acceptance criterion.
         let out = run_wm(Arc::new(NoWindowManager), &["focus", "42"]).await;
         assert_eq!(out.exit_code, 1);
@@ -808,7 +808,7 @@ mod tests {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("[error] wm: focus 42 failed"), "{stderr}");
         // Backend Ipc errors route through the "Check: compositor
-        // connection" hint — different from the static "Use: wm list"
+        // connection" hint, different from the static "Use: wm list"
         // hint that the pre-WmError handler emitted unconditionally.
         assert!(stderr.contains("Check:"), "{stderr}");
     }
@@ -999,7 +999,7 @@ mod tests {
     #[tokio::test]
     async fn list_emits_tsv_sorted_by_workspace_then_app() {
         // PR 3b list format: `<id>\t<app>\t<workspace>\t<title>`.
-        // Sorted by workspace, then app, then id — so two Firefox
+        // Sorted by workspace, then app, then id, so two Firefox
         // windows on the same workspace sit together.
         let stub = Arc::new(StubWm {
             connected: true,

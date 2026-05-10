@@ -33,7 +33,7 @@ use tracing::{debug, info, instrument, warn};
 const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 
 /// Long-lived agent dependencies. One `Agent` is constructed per
-/// daemon (or per test) and reused across many turns — only the
+/// daemon (or per test) and reused across many turns; only the
 /// per-turn input (user text, attachments, channels) varies between
 /// calls to [`Agent::run_turn`].
 ///
@@ -82,7 +82,7 @@ impl Agent {
     /// Cancellation: if `tx` is closed (client disconnected) between
     /// iterations, the loop returns `Ok(())` without running further tool
     /// calls or LLM round trips. Callers can also explicitly cancel by
-    /// signalling the [`CancellationToken`] — useful when the daemon needs
+    /// signalling the [`CancellationToken`]; useful when the daemon needs
     /// to stop a long-running LLM step or tool call promptly (e.g. a slow
     /// MCP tool when the user disconnects). The token is checked between
     /// iterations and the LLM step / tool dispatch run inside a
@@ -90,7 +90,7 @@ impl Agent {
     /// for the inner future to complete on its own.
     ///
     /// Pass [`CancellationToken::new`] (a fresh, never-cancelled token) if
-    /// the caller doesn't need explicit cancellation — the
+    /// the caller doesn't need explicit cancellation; the
     /// `tx.is_closed()` path keeps existing behaviour for that case.
     #[instrument(skip_all, name = "agent_turn")]
     pub async fn run_turn(
@@ -162,7 +162,7 @@ impl Agent {
                                 severity: crate::RecoverySeverity::Warning.as_str().to_string(),
                                 component: crate::Component::Llm.as_str().to_string(),
                                 event: "restarting".to_string(),
-                                message: "LLM crashed — restarting and replaying your query"
+                                message: "LLM crashed: restarting and replaying your query"
                                     .to_string(),
                             })
                             .await;
@@ -198,7 +198,7 @@ impl Agent {
                                             .to_string(),
                                         component: crate::Component::Llm.as_str().to_string(),
                                         event: "replaying".to_string(),
-                                        message: "LLM restored — replaying your query".to_string(),
+                                        message: "LLM restored: replaying your query".to_string(),
                                     })
                                     .await;
                                 continue;
@@ -312,7 +312,7 @@ impl Agent {
                             dispatch_tool_call(tools, &call, iteration).await;
 
                         // Emit the result for downstream observers. Ignore
-                        // send errors — the next `tx.is_closed()` check will
+                        // send errors; the next `tx.is_closed()` check will
                         // catch the disconnect.
                         let _ = tx
                             .send(LlmEvent::ToolResult {
@@ -354,7 +354,7 @@ impl Agent {
 /// formatted with the Layer 2 navigational-hint convention
 /// (`[error] <cmd>: <what>. <Hint>: <recovery>`) so the model can
 /// self-correct on the next step. Only fundamental errors (like a
-/// `send` failure on `tx`) bubble up to the loop — and even those
+/// `send` failure on `tx`) bubble up to the loop, and even those
 /// result in graceful shutdown, not a hung history.
 async fn dispatch_tool_call(
     tools: &ToolRegistry,
@@ -570,7 +570,7 @@ mod tests {
             self.step_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // Honour any configured slow-step delay BEFORE consuming
-            // an outcome — cancellation tests rely on this future
+            // an outcome; cancellation tests rely on this future
             // being long-lived so the cancel signal can race it.
             let delay = *self.slow_step.lock().unwrap();
             if let Some(d) = delay {
@@ -685,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn piped_command_completes_in_one_iteration() {
-        // A single `run` call with pipes — no need for multiple iterations.
+        // A single `run` call with pipes; no need for multiple iterations.
         let backend = MockBackend::with(vec![
             StepOutcome::ToolCalls(vec![call(
                 "c-1",
@@ -723,7 +723,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         // `echo "alpha\nbeta\nalpha"` prints 1 line; grep alpha filters
         // the full body; wc -l counts it. The exact count depends on
-        // how echo interprets \n — but the content should start with an
+        // how echo interprets \n, but the content should start with an
         // integer and contain an [exit:0] footer.
         assert!(
             results[0][0].content.contains("[exit:0"),
@@ -867,7 +867,7 @@ mod tests {
     async fn explicit_cancel_before_first_step_stops_loop_immediately() {
         // The token is cancelled before the loop starts. The very
         // first iteration's pre-step check sees `cancel.is_cancelled()`
-        // and bails — no step is ever called.
+        // and bails; no step is ever called.
         let backend = MockBackend::with(vec![
             StepOutcome::Final,
             // If we get here the cancellation didn't take effect.
@@ -898,7 +898,7 @@ mod tests {
         // on the second, then assert both calls were routed and that
         // the save landed in the underlying store. With the embedding
         // subsystem disabled (NoEmbedder/NoSemanticStore + empty model
-        // name), recall short-circuits to the `(no memories)` sentinel —
+        // name), recall short-circuits to the `(no memories)` sentinel;
         // the agent-loop wiring is what's under test here, not the
         // semantic round-trip (which is exercised in the embedder
         // integration tests).
@@ -911,7 +911,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        // Leak the tempdir for the test — `path` must outlive the
+        // Leak the tempdir for the test: `path` must outlive the
         // handle, and cleanup happens at process exit.
         std::mem::forget(temp);
         let (_tx, rx) = watch::channel(false);
@@ -931,8 +931,8 @@ mod tests {
         tools.register(RecallTool::new(no_embedder, no_semantic, String::new()));
         let tools = Arc::new(tools);
 
-        // Step 1: model calls remember(...) — Step 2: model calls
-        // recall(...) — Step 3: Final.
+        // Step 1: model calls remember(...). Step 2: model calls
+        // recall(...). Step 3: Final.
         let backend = MockBackend::with(vec![
             StepOutcome::ToolCalls(vec![ToolCall {
                 id: "c-1".into(),
@@ -980,7 +980,7 @@ mod tests {
         );
 
         // Recall's ToolResult and the second push_tool_results carry
-        // the no-memories sentinel — the embedder is disabled, so
+        // the no-memories sentinel; the embedder is disabled, so
         // semantic search has nothing to return. The point of this
         // assertion is that the recall result *was* round-tripped back
         // to the model on the next step (proving the loop wiring), not
@@ -1036,7 +1036,7 @@ mod tests {
     /// native `run` call drives both through `dispatch_tool_call`,
     /// emits a `ToolCall`/`ToolResult` pair for each, and pushes both
     /// results back to the backend in order. This is the wire-level
-    /// proof that the agent loop is tool-source-agnostic — MCP tools
+    /// proof that the agent loop is tool-source-agnostic: MCP tools
     /// and native tools share the same dispatch/result/feedback path.
     #[tokio::test]
     async fn agent_loop_mixes_native_and_mcp_calls() {
@@ -1070,7 +1070,7 @@ mod tests {
                 name: "mcp__google_calendar__list_events".into(),
                 arguments: serde_json::json!({"date": "tomorrow"}),
             }]),
-            // Step 2: model follows up with a native `run` call —
+            // Step 2: model follows up with a native `run` call,
             // proving the loop accepts a different tool on the next
             // step without state leaking from the prior MCP call.
             StepOutcome::ToolCalls(vec![call("c-run", "echo hello")]),
@@ -1127,7 +1127,7 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(FakeMcpTool {
             name: "mcp__google_calendar__list_events".into(),
-            // Mirrors `error_envelope` in `assistd-mcp/src/lib.rs` —
+            // Mirrors `error_envelope` in `assistd-mcp/src/lib.rs`;
             // the line carries `Check:` which the model needs to see
             // intact.
             result: serde_json::json!({
@@ -1444,7 +1444,7 @@ mod tests {
             "expected a degraded Status event"
         );
         assert!(matches!(events.last(), Some(LlmEvent::Done)));
-        // Only one step call — wait_for_ready returned Err, so no
+        // Only one step call: wait_for_ready returned Err, so no
         // replay step was attempted.
         assert_eq!(
             backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),

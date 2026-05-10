@@ -32,7 +32,7 @@ port = 8385
 # GPUs that support it.
 # flash_attn = true
 # KV-cache quantization. "q8_0" roughly halves KV memory for a negligible
-# quality loss — essential for long contexts on consumer GPUs.
+# quality loss, essential for long contexts on consumer GPUs.
 # cache_type_k = "q8_0"
 # cache_type_v = "q8_0"
 # CPU thread count (--threads). Omit to let llama.cpp auto-detect.
@@ -43,25 +43,25 @@ port = 8385
 # ubatch_size = 2048
 # --n-cpu-moe N: keep only the first N MoE layers' experts on CPU; the
 # remainder go to GPU. Preferred over override_tensor because it's
-# layer-granular — tune N down until VRAM is nearly full.
+# layer-granular, tune N down until VRAM is nearly full.
 # n_cpu_moe = 30
 # --cache-ram MiB: prompt-checkpoint cache size. Default is 8192. Raising
 # this speeds up re-prefill when a conversation grows, at the cost of RAM.
 # cache_ram_mib = 32768
 # --mlock: pin model pages in RAM so the OS can't page them out. Useful
 # when running memory-hungry workloads alongside the daemon. NOTE: your
-# system's RLIMIT_MEMLOCK must allow enough pinning — see
+# system's RLIMIT_MEMLOCK must allow enough pinning. See
 # /etc/security/limits.conf or LimitMEMLOCK= in a systemd unit.
 # mlock = true
 # --no-mmproj-offload: keep the vision encoder on CPU. Set false when
-# VRAM is fully consumed by the LLM — image preprocessing becomes
+# VRAM is fully consumed by the LLM, image preprocessing becomes
 # slightly slower but avoids CUDA OOM on image requests.
 # mmproj_offload = false
 
 [chat]
 # System prompt injected as the first message of every request. Leave empty
 # (system_prompt = "") to skip system-prompt injection entirely.
-system_prompt = "You are assistd, a concise local desktop assistant running on a Linux workstation. You have a `run` tool that executes shell-style commands (bash, cat, ls, grep, wc, echo, write, see, web) — prefer calling `run` over guessing when a question is about this machine or its files. Pipes (|), and/or (&&, ||), and sequencing (;) are supported inside a single `run` call, so a one-liner like `cat log.txt | grep ERROR | wc -l` is usually better than three separate tool calls. You also have `remember` and `recall` tools for cross-conversation memory: call `remember` when the user states a durable preference or fact about themselves (e.g. editor preference, timezone, name) and call `recall` (with `prefix=\"\"` to list all, or a key prefix like `\"user.\"` to filter) at the start of a turn when prior preferences might help personalize the response. Memories dedup by key — re-saving the same key updates its value. Answer precisely and in a conversational tone."
+system_prompt = "You are assistd, a concise local desktop assistant running on a Linux workstation. You have a `run` tool that executes shell-style commands (bash, cat, ls, grep, wc, echo, write, see, web); prefer calling `run` over guessing when a question is about this machine or its files. Pipes (|), and/or (&&, ||), and sequencing (;) are supported inside a single `run` call, so a one-liner like `cat log.txt | grep ERROR | wc -l` is usually better than three separate tool calls. You also have `remember` and `recall` tools for cross-conversation memory: call `remember` when the user states a durable preference or fact about themselves (e.g. editor preference, timezone, name) and call `recall` (with `prefix=\"\"` to list all, or a key prefix like `\"user.\"` to filter) at the start of a turn when prior preferences might help personalize the response. Memories dedup by key, so re-saving the same key updates its value. Answer precisely and in a conversational tone."
 # Approximate token budget for the full request (system + history). Must be
 # strictly less than model.context_length. When exceeded, older messages are
 # summarized and replaced by a single summary message.
@@ -126,7 +126,7 @@ hotkey = "Super+Space"
 # accuracy at roughly linear cost.
 # beams = 1
 # Silero VAD trims leading/trailing silence before decoding. Disabling
-# VAD is useful only for debugging — whisper.cpp hallucinates on
+# VAD is useful only for debugging whisper.cpp hallucinations on
 # prolonged silence.
 # vad_enabled = true
 # VAD GGML model (HF identifier).
@@ -183,7 +183,7 @@ enabled = false
 # stdin, reads raw PCM from stdout, and plays it through the default
 # audio device via rodio. Falls back silently with a warning log if the
 # piper binary is missing, the voice model fails to download, or no
-# audio device is available — the daemon stays up either way.
+# audio device is available; the daemon stays up either way.
 enabled = false
 # Path to (or name of) the piper binary. A bare command name is looked
 # up via $PATH.
@@ -204,7 +204,7 @@ enabled = false
 # Trailing silence (seconds) Piper inserts after each utterance.
 # sentence_silence_secs = 0.2
 # Optional override for Piper's espeak-ng data directory. Only set when
-# piper logs "Failed to load espeak-ng" — most distro packages handle
+# piper logs "Failed to load espeak-ng"; most distro packages handle
 # this themselves.
 # espeak_data_dir = "/usr/share/espeak-ng-data"
 # Per-utterance synthesis deadline in seconds. Piper is killed if it
@@ -230,8 +230,8 @@ enabled = false
 # `auto` (the default) inspects the running session at startup and picks
 # a backend. Detection priority: $SWAYSOCK → sway, $I3SOCK → i3,
 # $HYPRLAND_INSTANCE_SIGNATURE → hyprland, then $XDG_CURRENT_DESKTOP.
-# Set this explicitly only to override the detection — e.g. when you
-# want to run a sway session against the i3 backend, or vice versa.
+# Set this explicitly only to override the detection (e.g. when you
+# want to run a sway session against the i3 backend, or vice versa).
 type = "auto"
 
 [sleep]
@@ -263,8 +263,8 @@ suspend = false
 # false so the daemon stays out of the way while you are still gaming.
 # gpu_auto_wake = false
 # Process basenames that never trigger sleep, even above the threshold.
-# Matched against /proc/<pid>/comm, which the kernel truncates at 16 bytes —
-# e.g. "chromium_main" fits but "systemd-userdbd" becomes "systemd-userdb".
+# Matched against /proc/<pid>/comm, which the kernel truncates at 16 bytes
+# (e.g. "chromium_main" fits but "systemd-userdbd" becomes "systemd-userdb").
 # gpu_allowlist = ["Xorg", "Xwayland", "gnome-shell", "kwin_x11",
 #                  "kwin_wayland", "firefox", "chromium", "chrome"]
 # Process basenames that always trigger sleep regardless of VRAM usage.
@@ -298,7 +298,7 @@ hotkey = "Super+Escape"
 [agent]
 # Maximum number of LLM invocations per user turn. The agent loop sends
 # the `run` tool schema to the model, executes any requested commands,
-# and iterates until the model returns plain text — or until this cap
+# and iterates until the model returns plain text, or until this cap
 # is hit. 20 is deliberately generous: each `run` call is cheap and
 # pipelines reduce the number of round-trips needed for most queries.
 # max_iterations = 20
@@ -354,9 +354,9 @@ hotkey = "Super+Escape"
 # ]
 
 # Sandbox mode for bash subprocess execution. One of:
-#   auto  — use bubblewrap if found on PATH; log warn and run unsandboxed if not.
-#   bwrap — require bubblewrap; fail daemon startup if `bwrap` is missing.
-#   none  — never wrap; run bash directly under the daemon's user.
+#   auto:  use bubblewrap if found on PATH; log warn and run unsandboxed if not.
+#   bwrap: require bubblewrap; fail daemon startup if `bwrap` is missing.
+#   none:  never wrap; run bash directly under the daemon's user.
 # Default "auto" gives defense-in-depth on systems with bubblewrap without
 # breaking systems without it.
 # sandbox = "auto"
@@ -395,9 +395,9 @@ hotkey = "Super+Escape"
 # The default backend (`auto`) picks maim on X11 and grim on Wayland.
 #
 # Backend selector. One of:
-#   auto    — XDG_SESSION_TYPE / WAYLAND_DISPLAY / DISPLAY decide.
-#   x11     — always use maim (requires xdotool for --focused).
-#   wayland — always use grim (--focused requires sway or Hyprland).
+#   auto:    XDG_SESSION_TYPE / WAYLAND_DISPLAY / DISPLAY decide.
+#   x11:     always use maim (requires xdotool for --focused).
+#   wayland: always use grim (--focused requires sway or Hyprland).
 # backend = "auto"
 
 # Capture subprocess timeout in seconds. Must be > 0. A wedged compositor
@@ -406,7 +406,7 @@ hotkey = "Super+Escape"
 
 [memory]
 # Persistent memory: SQLite-backed conversation history + saved facts (the
-# `remember` / `recall` LLM tools). Master switch — when false the daemon
+# `remember` / `recall` LLM tools). Master switch: when false, the daemon
 # binds the no-op placeholder and skips opening the DB.
 # enabled = true
 # Path to the SQLite database file. Default resolves to
@@ -420,7 +420,7 @@ hotkey = "Super+Escape"
 [embedding]
 # Semantic memory search: a separate, dedicated llama-server instance
 # (port distinct from llama_server.port) that serves /v1/embeddings.
-# Independent of the chat router — embeddings keep working when chat
+# Independent of the chat router, so embeddings keep working when chat
 # is Drowsy/Sleeping. Each user query auto-injects the top-K most
 # similar past chunks as a "Relevant past context: …" system message,
 # and the LLM gets the `recall` (saved facts) and `reminisce` (past
@@ -431,7 +431,7 @@ hotkey = "Super+Escape"
 # enabled = true
 # HuggingFace id passed verbatim to the embed server's --hf-repo.
 # Format: <owner>/<repo>:<quant-tag> (e.g. `Q4_K_M`), NOT a full
-# filename — llama-server parses the `:` suffix as a quant tag against
+# filename: llama-server parses the `:` suffix as a quant tag against
 # its preset manifest. Passing a `.gguf` filename makes preset
 # resolution fail with a misleading "no GGUF files found" error.
 # The default is a small (~140 MB Q4), 768-dim model with strong
@@ -465,7 +465,7 @@ hotkey = "Super+Escape"
 # auto_inject = true
 
 # ----------------------------------------------------------------------
-# [mcp] — Model Context Protocol client
+# [mcp]: Model Context Protocol client
 # ----------------------------------------------------------------------
 # Connect to external MCP servers and surface their tools to the LLM
 # alongside the daemon's native tools (`run`, `remember`, etc.). Each
@@ -473,10 +473,10 @@ hotkey = "Super+Escape"
 # `mcp__<server-name>__<tool-name>`.
 #
 # Two transports:
-#   * "stdio" — daemon spawns a child process and speaks newline-delimited
+#   * "stdio": daemon spawns a child process and speaks newline-delimited
 #     JSON-RPC over its stdin/stdout. Required: `command` (and optional
 #     `args` / `env`).
-#   * "sse"  — daemon connects to an HTTP+SSE endpoint. Required: `url`
+#   * "sse":   daemon connects to an HTTP+SSE endpoint. Required: `url`
 #     (and optional `headers`). Read timeout + periodic ping detect a
 #     wedged remote server even when the SSE socket stays open.
 #
@@ -509,7 +509,7 @@ hotkey = "Super+Escape"
 # ---- Timeouts -----------------------------------------------------------
 # Hard deadlines on awaits that cross a process boundary (HTTP, SSE
 # chunk reads, llama-server subprocess shutdown). Defaults are generous
-# safety valves, not normal-case latency budgets — every trip is logged
+# safety valves, not normal-case latency budgets; every trip is logged
 # at warn so an operator on slow hardware can identify and tune the
 # offending value. Set fields here to override defaults.
 #

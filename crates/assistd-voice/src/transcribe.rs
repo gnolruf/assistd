@@ -18,14 +18,14 @@ pub trait Transcriber: Send + Sync + 'static {
     /// `pcm_i16_16k_mono` must be signed 16-bit samples at 16 kHz, single
     /// channel. Returns the transcribed text with leading/trailing
     /// whitespace trimmed. An empty string is returned when the input
-    /// contains only silence (per VAD) — it is not an error.
+    /// contains only silence (per VAD); it is not an error.
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError>;
 
     /// Optional stream of capture-state transitions driven by the
     /// transcriber itself. Implementations that internally move through
     /// `Queued`/`Transcribing` (e.g. [`crate::whisper::QueuedTranscriber`])
     /// override this so owners can surface those states without
-    /// polling. The default returns `None` — owners publish their own
+    /// polling. The default returns `None`; owners publish their own
     /// `Transcribing` → `Idle` transition around the call instead.
     fn subscribe_state(&self) -> Option<watch::Receiver<VoiceCaptureState>> {
         None
@@ -82,11 +82,11 @@ pub trait BusyProbe: Send + Sync + 'static {
 
     /// True if a non-assistd process is currently holding meaningful
     /// VRAM (e.g. a game or another local model runner). When true,
-    /// Whisper skips the GPU path entirely — waiting wouldn't help
+    /// Whisper skips the GPU path entirely; waiting wouldn't help
     /// because the contender isn't ours to schedule around.
     fn foreign_gpu_busy(&self) -> bool;
 
-    /// True when the daemon is confidently `Active` — i.e. llama-server
+    /// True when the daemon is confidently `Active`, i.e. llama-server
     /// is running and the GPU whisper context is safe to use. When
     /// false (Drowsy/Sleeping/mid-transition), Whisper must not touch
     /// the GPU because the context may be torn down concurrently.
@@ -119,7 +119,7 @@ pub struct QueueConfig {
     /// back to CPU. `0` forces CPU the moment a stream is inflight.
     pub gpu_busy_timeout_ms: u32,
     /// Whether a CPU fallback is permitted at all. When false, the
-    /// transcriber waits indefinitely (well — up to the timeout) and
+    /// transcriber waits indefinitely (well, up to the timeout) and
     /// then runs on the primary anyway.
     pub cpu_fallback_enabled: bool,
 }
@@ -486,7 +486,7 @@ mod tests {
         // CAN assert is: while the CPU stub is held inside transcribe,
         // the visible state is Transcribing (not Idle), and when the
         // transcriber finishes the state returns to Idle. That's the
-        // invariant the TUI relies on for its indicator — a fast
+        // invariant the TUI relies on for its indicator; a fast
         // cold-path flash of Queued is acceptable.
         let primary = StubTranscriber::with_text("GPU");
         let started = Arc::new(tokio::sync::Notify::new());
@@ -520,7 +520,7 @@ mod tests {
         let q2 = q.clone();
         let handle = tokio::spawn(async move { q2.transcribe(&[0i16; 16]).await });
 
-        // Wait for CPU stub to be inside transcribe — state must now be
+        // Wait for CPU stub to be inside transcribe; state must now be
         // Transcribing (never Idle while inference is running).
         started.notified().await;
         assert_eq!(*rx.borrow(), VoiceCaptureState::Transcribing);

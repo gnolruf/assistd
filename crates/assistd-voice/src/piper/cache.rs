@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use crate::piper::error::PiperError;
 
 /// `<owner>/<repo>:<file>` parser. Identical contract to the whisper
-/// cache version — duplicated locally to keep error types crate-local.
+/// cache version, duplicated locally to keep error types crate-local.
 pub fn parse_hf_id(id: &str) -> Result<(String, String), PiperError> {
     let err = |reason: &str| PiperError::VoiceParse {
         id: id.to_string(),

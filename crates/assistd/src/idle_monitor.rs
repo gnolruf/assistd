@@ -9,7 +9,7 @@
 //! Like `gpu_monitor`, this module is a *driver* of `PresenceManager`.
 //! It calls `presence.drowse()` / `presence.sleep()` directly rather
 //! than going through `set_presence`, which means automatic transitions
-//! do not themselves reset the idle timer — a crucial invariant so that
+//! do not themselves reset the idle timer, a crucial invariant so that
 //! the monitor can make forward progress through Active → Drowsy →
 //! Sleeping.
 //!
@@ -28,7 +28,7 @@ use tracing::{info, warn};
 
 /// How often to re-check idle duration against thresholds. The
 /// thresholds themselves are in minutes, so sub-minute granularity is
-/// irrelevant — 10 s keeps the TUI countdown feeling live while
+/// irrelevant; 10 s keeps the TUI countdown feeling live while
 /// imposing near-zero cost at idle (one std-mutex read + compare).
 const POLL_INTERVAL_SECS: u64 = 10;
 

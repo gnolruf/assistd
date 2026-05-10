@@ -226,7 +226,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
     // Dispatch and event-forwarding run concurrently on this task rather
     // than on a spawned child. If the task is cancelled (e.g. the outer
     // accept loop hits its shutdown grace and calls `JoinSet::shutdown`),
-    // both halves are torn down together — the dispatcher can't be
+    // both halves are torn down together; the dispatcher can't be
     // orphaned.
     let router_for_dispatch = router.clone();
     let dispatch_fut = async move {
@@ -247,8 +247,8 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
     // I/O error so the connection can finish even if the client
     // disconnects mid-stream. Every dispatched response routes
     // through the router; unknown additional Requests are logged
-    // and ignored — we don't surface them to the client because
-    // doing so would muddle the streaming Event protocol.
+    // and ignored (we don't surface them to the client because
+    // doing so would muddle the streaming Event protocol).
     let router_for_reader = router.clone();
     let read_fut = async move {
         let mut buf = String::new();
@@ -299,11 +299,11 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
     let (dispatch_res, forward_res, _) = async {
         let read_handle = tokio::spawn(read_fut);
         let (d, f) = tokio::join!(dispatch_fut, forward_fut);
-        // dispatch is done — drop the router clone we held outside
+        // dispatch is done; drop the router clone we held outside
         // the task so the read loop's clone is the only remaining
         // reference (we'll abort it next).
         drop(router);
-        // Stop reading more client input — dispatch is over.
+        // Stop reading more client input; dispatch is over.
         read_handle.abort();
         let _ = read_handle.await;
         (d, f, ())
@@ -522,7 +522,7 @@ mod tests {
     #[tokio::test]
     async fn listen_start_errors_with_no_continuous_listener_stub() {
         // The default `test_state` builds with a `NoContinuousListener`
-        // whose `start()` is a hard error — this asserts the error
+        // whose `start()` is a hard error; this asserts the error
         // propagation path. A real MicContinuousListener has different
         // semantics (it actually starts) but needs cpal + whisper to
         // exercise end-to-end.
@@ -812,7 +812,7 @@ mod tests {
 
         tx.send(()).unwrap();
 
-        // Server task must exit promptly — the grace is 0, so the
+        // Server task must exit promptly: the grace is 0, so the
         // connection is aborted as soon as shutdown fires. Bound with
         // a 2s timeout so a regression doesn't hang the test forever.
         tokio::time::timeout(std::time::Duration::from_secs(2), server)
@@ -968,7 +968,7 @@ mod tests {
 
     #[tokio::test]
     async fn listen_stop_when_inactive_returns_listenstate_then_done() {
-        // NoContinuousListener::stop is idempotent — the daemon
+        // NoContinuousListener::stop is idempotent: the daemon
         // emits ListenState{active:false} + Done even when nothing
         // was running.
         with_server(test_state(), |path| async move {
@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     /// Sending a `ConfirmResponse` as the *initial* request is a
-    /// protocol error — there's no in-flight prompt to satisfy. The
+    /// protocol error: there's no in-flight prompt to satisfy. The
     /// daemon surfaces it as `Event::Error` so a buggy client gets
     /// a clear signal instead of a hang.
     #[tokio::test]
@@ -1088,7 +1088,7 @@ mod tests {
 
         // Open a Query connection without shutting the write half;
         // the EchoBackend's stream is so fast that we may already see
-        // Done before our second write lands. That's fine — the test
+        // Done before our second write lands. That's fine; the test
         // is "doesn't crash."
         let stream = UnixStream::connect(&path).await.unwrap();
         let (read, mut write) = stream.into_split();
@@ -1097,7 +1097,7 @@ mod tests {
             .await
             .unwrap();
         write.write_all(b"\n").await.unwrap();
-        // Now send an unmatched ConfirmResponse — there is no
+        // Now send an unmatched ConfirmResponse: there is no
         // in-flight prompt because the EchoBackend doesn't trigger
         // tools.
         write
@@ -1251,7 +1251,7 @@ mod tests {
     async fn duplicate_request_id_across_connections_does_not_leak_events() {
         // Four connections each fire a Query with the literal id
         // "shared". Per-connection event isolation means each socket
-        // sees Delta + Done with id="shared" — no extras from
+        // sees Delta + Done with id="shared" and no extras from
         // sibling connections. EchoBackend echoes text as one delta.
         with_server(test_state(), |path| async move {
             let mut handles = Vec::new();
@@ -1308,8 +1308,8 @@ mod tests {
     #[tokio::test]
     async fn query_with_future_protocol_version_is_warned_but_accepted() {
         // A client claiming a higher protocol version than the daemon
-        // knows about must still get a normal stream — additive
-        // evolution invariant. The daemon logs a warn (not asserted
+        // knows about must still get a normal stream (additive
+        // evolution invariant). The daemon logs a warn (not asserted
         // here) and proceeds.
         with_server(test_state(), |path| async move {
             let events = send_request_collect_events(

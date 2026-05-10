@@ -2,7 +2,7 @@
 //!
 //! Holds a `reqwest::Client` (no proxy, short connect timeout, configurable
 //! per-request timeout). Vector dimensionality is **probed once at
-//! construction** by sending a one-token embed request — embedders don't
+//! construction** by sending a one-token embed request; embedders don't
 //! advertise their dim out-of-band, and exposing it on the trait lets
 //! callers size their `Vec<f32>` buffers without a downstream round-trip.
 //!
@@ -52,7 +52,7 @@ impl LlamaEmbedder {
     /// Probe the server, latch the dim, and return a ready-to-use client.
     ///
     /// `request_timeout` applies per `embed()` call. The probe itself
-    /// uses the same budget — first-load may take longer, but
+    /// uses the same budget; first-load may take longer, but
     /// `EmbedService::start` already waited for `/health` so the model
     /// is loaded by the time we get here.
     pub async fn new(

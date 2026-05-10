@@ -58,7 +58,7 @@ impl LlamaService {
         loop {
             match ready_rx.changed().await {
                 Err(_) => {
-                    // Supervisor task dropped its sender — most likely the
+                    // Supervisor task dropped its sender; most likely the
                     // daemon signaled shutdown before the child reached Ready.
                     let _ = task.await;
                     return Err(LlamaServerError::ShutdownDuringHealth);

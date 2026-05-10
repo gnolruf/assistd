@@ -5,7 +5,7 @@
 //! `remember`/`recall` operate on saved key/value facts via [`MemoryOps`],
 //! which writes through the same single SQLite writer the chat-turn
 //! persistence path uses (so saves never block the agent thread for
-//! disk). `reminisce` is the parallel verb for *past dialogue* — it
+//! disk). `reminisce` is the parallel verb for *past dialogue*: it
 //! runs semantic search over the chunked conversation history, not over
 //! saved facts.
 //!
@@ -13,7 +13,7 @@
 //! and `save_memory` does `ON CONFLICT(key) DO UPDATE`, so re-saving the
 //! same key overwrites the value rather than producing a second row.
 //! That is the AC #2 contract for "duplicate memories are not
-//! re-inserted" — the LLM is nudged toward stable snake_case keys via
+//! re-inserted"; the LLM is nudged toward stable snake_case keys via
 //! the [`RememberTool::description`] examples, and the
 //! `^[a-z0-9._]+$` validator below rejects whitespace/uppercase so two
 //! turns about the same concept don't drift onto different keys.
@@ -50,7 +50,7 @@ static KEY_RE: LazyLock<Regex> =
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
     /// Channel into the background embedder task. Closed-and-dropped
-    /// when the embedding subsystem is disabled — `try_send` then no-ops
+    /// when the embedding subsystem is disabled; `try_send` then no-ops
     /// silently and the memory still saves; only the index entry is
     /// missed (a future backfill can recover it).
     embed_tx: mpsc::Sender<EmbedJob>,
@@ -80,7 +80,7 @@ impl Tool for RememberTool {
          namespacing (e.g. user.name, editor_preference, project.assistd.dir). \
          Calling remember with an existing key overwrites the previous \
          value. Do NOT call this for ephemeral context within a single \
-         conversation — only durable user-facts."
+         conversation; only durable user-facts."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -129,7 +129,7 @@ impl Tool for RememberTool {
         let memory_id = self.ops.save(&key, value.clone()).await?;
         // Enqueue an embed job so semantic recall can find this memory
         // by paraphrase. `try_send` (not `send`) so a wedged embedder
-        // never backpressures the tool. Skip when the id is 0 — that's
+        // never backpressures the tool. Skip when the id is 0; that's
         // the `NoMemoryStore` sentinel, no row to FK.
         if memory_id != 0
             && self
@@ -307,7 +307,7 @@ fn format_pairs(pairs: &[(String, String)]) -> String {
 /// messages similar in meaning to the query. Complement to `recall`:
 /// `recall` looks up saved key/value facts, `reminisce` looks up past
 /// dialogue. Use this when the user references something they
-/// "discussed before" or "worked on last month" — paraphrase-tolerant
+/// "discussed before" or "worked on last month": paraphrase-tolerant
 /// semantic search over the chunked conversation log.
 pub struct ReminisceTool {
     embedder: Arc<dyn Embedder>,
@@ -340,7 +340,7 @@ impl Tool for ReminisceTool {
         "Search past conversation history (across sessions) for messages \
          similar in meaning to a query. Complement to `recall`: `recall` \
          looks up *saved facts* (key/value), `reminisce` searches *past \
-         dialogue text* — use it when the user references something they \
+         dialogue text*; use it when the user references something they \
          'discussed before' or 'worked on last month'. Robust to \
          paraphrase: a query like \"that rust project we discussed\" will \
          match a past message about \"the assistd embedding daemon in Rust\". \
@@ -462,7 +462,7 @@ mod tests {
     use tokio::sync::watch;
 
     /// Tests that don't exercise the embed channel use a 1-capacity
-    /// channel with the receiver dropped — `try_send` always fails, so
+    /// channel with the receiver dropped, so `try_send` always fails;
     /// the embed path is exercised but doesn't actually do anything.
     fn closed_embed_tx() -> mpsc::Sender<EmbedJob> {
         let (tx, rx) = mpsc::channel::<EmbedJob>(1);
@@ -491,7 +491,7 @@ mod tests {
     async fn fresh_ops() -> (Arc<MemoryOps>, tokio::task::JoinHandle<()>) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        // Leak the tempdir for the duration of the test — `path` must
+        // Leak the tempdir for the duration of the test; `path` must
         // outlive the handle. Cleanup happens on test process exit.
         std::mem::forget(temp);
         let (_tx, rx) = watch::channel(false);
@@ -535,7 +535,7 @@ mod tests {
     async fn remember_dedups_by_key() {
         // AC #2: re-saving the same key overwrites the value and
         // produces no second row. The schema's UNIQUE + ON CONFLICT
-        // guarantees this — the test pins the contract.
+        // guarantees this; the test pins the contract.
         let (ops, _w) = fresh_ops().await;
         let tool = RememberTool::new(ops.clone(), closed_embed_tx());
         tool.invoke(json!({"key": "editor_preference", "value": "vim"}))
@@ -616,7 +616,7 @@ mod tests {
 
     #[tokio::test]
     async fn recall_rejects_missing_query() {
-        // strict-mode schema requires `query` — a missing arg is a
+        // strict-mode schema requires `query`; a missing arg is a
         // protocol error from the model and surfaces as Err.
         let tool = RecallTool::new(no_embedder(), no_semantic(), String::new());
         let err = tool.invoke(json!({})).await.unwrap_err();
@@ -698,8 +698,8 @@ mod tests {
     async fn remember_then_recall_round_trip_no_embedder() {
         // Belt-and-suspenders: drive both tools end-to-end. With the
         // embedding subsystem disabled, recall reports the no-memories
-        // sentinel even though the save did land in SQLite — proves the
-        // wire-up is sane in the disabled-embedder configuration.
+        // sentinel even though the save did land in SQLite; this proves
+        // the wire-up is sane in the disabled-embedder configuration.
         // Semantic-on round-trip lives in the embedder integration test.
         let (ops, _w) = fresh_ops().await;
         let remember = RememberTool::new(ops.clone(), closed_embed_tx());
@@ -709,7 +709,7 @@ mod tests {
             .await
             .unwrap();
         // The save must hit the underlying store regardless of the
-        // embedder state — verify directly rather than through recall,
+        // embedder state; verify directly rather than through recall,
         // which would short-circuit on the empty model name.
         assert_eq!(
             ops.load("editor_preference").await.unwrap().as_deref(),

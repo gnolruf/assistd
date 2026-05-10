@@ -1,4 +1,4 @@
-//! `see PATH` — read an image file and attach it as an
+//! `see PATH`: read an image file and attach it as an
 //! [`crate::Attachment::Image`] on the command output. The chain
 //! executor threads the attachment through pipes, and `RunTool` surfaces
 //! it in the JSON tool result; the chat loop (separate ticket) is
@@ -16,7 +16,7 @@ use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_lin
 use crate::commands::cat::human_size;
 use crate::vision::VisionGate;
 
-/// `see PATH` — read an image file and attach it as a vision input.
+/// `see PATH`: read an image file and attach it as a vision input.
 pub struct SeeCommand {
     /// Shared, runtime-mutable vision flag. Read on every `run()` so a
     /// model swap on the running llama-server (revalidated by the

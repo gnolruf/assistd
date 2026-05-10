@@ -18,17 +18,17 @@
 //! [error] <cmd>: <what-went-wrong>. <Hint>: <recovery>\n
 //! ```
 //!
-//! - `<cmd>` — the command name (`cat`, `see`, `bash`, …) or a pseudo-tag
+//! - `<cmd>`: the command name (`cat`, `see`, `bash`, …) or a pseudo-tag
 //!   for pre-dispatch failures (`parse`, `pipe`, `unknown command`).
-//! - `<Hint>` — one of `Use:`, `Try:`, `Check:`, `Available:` — the first
+//! - `<Hint>`: one of `Use:`, `Try:`, `Check:`, `Available:`. The first
 //!   two phrase actionable alternatives; the latter two phrase diagnostics.
-//! - `<recovery>` — either a concrete `run`-executable command the LLM can
+//! - `<recovery>`: either a concrete `run`-executable command the LLM can
 //!   issue verbatim (e.g. `see photo.png`, `ls /dir`, `cat -b file.bin`)
 //!   or a short check instruction (`ls -l <path>`).
 //!
 //! Use [`error_line`] to build a line, or [`io_error_nav`] to classify a
 //! `std::io::Error` against the path that produced it. Never return a bare
-//! non-zero `exit_code` without context — if a subprocess or downstream
+//! non-zero `exit_code` without context; if a subprocess or downstream
 //! library emitted stderr, forward it so the LLM can see *why*.
 
 use anyhow::Result;
@@ -38,7 +38,7 @@ use async_trait::async_trait;
 /// convention. Emits exactly `[error] <cmd>: <what>. <hint>: <recovery>\n`.
 ///
 /// `hint` is the label without the trailing colon (e.g. `"Use"`, `"Try"`,
-/// `"Check"`, `"Available"`) — the colon and space are added for you.
+/// `"Check"`, `"Available"`); the colon and space are added for you.
 pub fn error_line(
     cmd: &str,
     what: impl std::fmt::Display,
@@ -78,7 +78,7 @@ pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
 /// Input to a single chain stage.
 pub struct CommandInput {
     /// Positional arguments **after** argv[0]. The command's own name
-    /// is not included here — the registry has already resolved it.
+    /// is not included here; the registry has already resolved it.
     pub args: Vec<String>,
     /// Bytes piped in from the previous chain stage (or empty for the
     /// first command in a pipeline).
@@ -374,7 +374,7 @@ mod tests {
                 )),
             ),
             // wm against the disconnected NoWindowManager exercises the
-            // mock-mode short-circuit — every subcommand returns the
+            // mock-mode short-circuit; every subcommand returns the
             // same `[error] wm: compositor not connected. Check: …`
             // line, so any subcommand argv works as the failure driver.
             (
@@ -394,15 +394,15 @@ mod tests {
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(
                 stderr.contains("[error] "),
-                "{name}: stderr missing `[error] ` tag — got {stderr:?}"
+                "{name}: stderr missing `[error] ` tag, got {stderr:?}"
             );
             assert!(
                 stderr.contains(&format!("[error] {name}: ")),
-                "{name}: stderr should say `[error] {name}: ` — got {stderr:?}"
+                "{name}: stderr should say `[error] {name}: `, got {stderr:?}"
             );
             assert!(
                 contains_hint(&stderr),
-                "{name}: stderr missing recovery hint (Use:/Try:/Check:/Available:) — got {stderr:?}"
+                "{name}: stderr missing recovery hint (Use:/Try:/Check:/Available:), got {stderr:?}"
             );
         }
     }
@@ -443,7 +443,7 @@ mod tests {
             assert!(!help.is_empty(), "{name} has empty help");
             assert!(
                 help.contains("usage:"),
-                "{name} help should contain `usage:` line — got {help:?}"
+                "{name} help should contain `usage:` line, got {help:?}"
             );
         }
     }

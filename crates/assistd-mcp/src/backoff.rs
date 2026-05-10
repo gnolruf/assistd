@@ -7,7 +7,7 @@ use std::time::Duration;
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 /// A transport that ran successfully for at least this many seconds
-/// before exiting resets the consecutive-failure counter — i.e. a
+/// before exiting resets the consecutive-failure counter; i.e. a
 /// long-lived server that occasionally crashes does not get parked.
 pub const MIN_HEALTHY_SECONDS: u64 = 30;
 

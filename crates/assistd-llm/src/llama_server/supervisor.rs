@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 /// flap (counter increment).
 const MIN_HEALTHY_SECONDS: u64 = 30;
 
-/// Graceful shutdown budget per child — fits under systemd's 15s stop budget.
+/// Graceful shutdown budget per child; fits under systemd's 15s stop budget.
 const TERM_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What happened during one supervisor cycle.

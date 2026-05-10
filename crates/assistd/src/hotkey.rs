@@ -5,7 +5,7 @@
 //! Linux. On pure Wayland sessions we skip registration entirely and point
 //! the user at the compositor-binding fallback (`assistd cycle` or
 //! `assistd ptt-start/stop`). On mixed sessions (XWayland sets `DISPLAY`)
-//! we attempt registration but warn if it fails — the daemon continues to
+//! we attempt registration but warn if it fails; the daemon continues to
 //! serve the socket regardless.
 
 use std::str::FromStr;
@@ -90,7 +90,7 @@ pub struct Subsystems {
 /// The presence hotkey fires on press (cycles presence state). The
 /// voice hotkey fires on both press (starts PTT recording) and
 /// release (stops recording + transcribes). Returns `None` when no
-/// hotkeys are active or when registration failed — the daemon's
+/// hotkeys are active or when registration failed; the daemon's
 /// socket-based fallback always works regardless.
 pub fn spawn_listener(
     presence_cfg: &PresenceConfig,
@@ -203,7 +203,7 @@ pub fn spawn_listener(
 }
 
 // Parse and register one configured hotkey string. Returns `None` on parse
-// or registration failure — the daemon stays up via IPC socket fallback.
+// or registration failure; the daemon stays up via IPC socket fallback.
 fn register(
     manager: &GlobalHotKeyManager,
     spec: Option<String>,

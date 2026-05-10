@@ -15,7 +15,7 @@
 //! and Sway ([`sway::SwayBackend`]) backends are landed; Hyprland
 //! follows in a later PR. The daemon picks one at startup based on
 //! `[compositor].type` in `config.toml` (or runtime detection when
-//! `type = "auto"` — see `assistd_config::compositor::detect_from_env`).
+//! `type = "auto"`; see `assistd_config::compositor::detect_from_env`).
 
 use async_trait::async_trait;
 
@@ -28,7 +28,7 @@ pub(crate) mod snapshot;
 #[cfg(feature = "sway")]
 pub mod sway;
 
-/// Per-call IPC timeout — `run_command`, `get_tree`, `get_workspaces`,
+/// Per-call IPC timeout for `run_command`, `get_tree`, `get_workspaces`,
 /// `get_outputs`. A wedged compositor must release within one user
 /// turn or the daemon's "every-turn-injects-window-context" path
 /// wedges with it.
@@ -44,7 +44,7 @@ pub use sway::{SwayBackend, SwayHandle};
 /// was started. Each variant wraps the per-backend supervisor task;
 /// [`WmHandle::shutdown`] dispatches.
 ///
-/// The variants are feature-gated to match the backend modules — a
+/// The variants are feature-gated to match the backend modules: a
 /// build with `--no-default-features --features i3` only sees
 /// `WmHandle::I3` and the daemon's match becomes exhaustive against
 /// the smaller enum.
@@ -70,8 +70,8 @@ impl WmHandle {
 
 /// Opaque identifier for a window in the compositor's namespace.
 ///
-/// Wraps the compositor's container id — i3 emits this as
-/// `reply::Node.id: usize`, Sway as `Node.id: i64` — so two windows of
+/// Wraps the compositor's container id (i3 emits this as
+/// `reply::Node.id: usize`, Sway as `Node.id: i64`) so two windows of
 /// the same X11 class (e.g. two Firefox windows) can be addressed
 /// independently. The criteria string for both compositors is
 /// `[con_id="N"]`.
@@ -83,8 +83,8 @@ impl WmHandle {
 pub struct WindowId(pub std::num::NonZeroU64);
 
 impl WindowId {
-    /// Construct a [`WindowId`] from a raw `u64`. Returns `None` for 0
-    /// — the compositor never emits zero, so the wrapper takes that as
+    /// Construct a [`WindowId`] from a raw `u64`. Returns `None` for 0;
+    /// the compositor never emits zero, so the wrapper takes that as
     /// a structural error signal rather than treating it as valid.
     pub fn new(raw: u64) -> Option<Self> {
         std::num::NonZeroU64::new(raw).map(WindowId)
@@ -120,7 +120,7 @@ impl std::error::Error for ParseWindowIdError {}
 impl std::str::FromStr for WindowId {
     type Err = ParseWindowIdError;
 
-    /// Parse a decimal con_id. Hex / leading-`0x` is rejected — Sway's
+    /// Parse a decimal con_id. Hex / leading-`0x` is rejected: Sway's
     /// id space is large enough that decimal is the only consistent
     /// rendering, and non-numeric ids would just be confusing for the
     /// LLM that's piping `wm list` output back into `wm focus`.
@@ -132,7 +132,7 @@ impl std::str::FromStr for WindowId {
     }
 }
 
-/// Workspace identifier — either a number (i3/sway's `workspace number
+/// Workspace identifier: either a number (i3/sway's `workspace number
 /// N` form, robust to renames) or a free-form name (`workspace
 /// "<name>"`).
 ///
@@ -155,7 +155,7 @@ impl WorkspaceId {
     }
 
     /// Construct a named workspace id. Use this for non-numeric
-    /// workspace names like `"scratch"` or `"1:web"` — note that
+    /// workspace names like `"scratch"` or `"1:web"`. Note that
     /// `"1:web"` is a *named* workspace because it does not parse as
     /// `u32` even though it visually starts with a digit.
     pub fn name(s: impl Into<String>) -> Self {
@@ -216,7 +216,7 @@ pub struct Window {
     /// [`WindowManager::move_to_workspace`]. Emitted as the leading
     /// `<id>` column in `wm list` so the LLM can pipe it back.
     pub id: WindowId,
-    /// Human-readable application label — X11 `WM_CLASS` on i3, or
+    /// Human-readable application label: X11 `WM_CLASS` on i3, or
     /// `app_id` (Wayland-native) / `class` (XWayland) on Sway. `None`
     /// when the window has neither set, which is rare. Surfaced as the
     /// second column of `wm list` so the LLM can disambiguate ids by
@@ -311,7 +311,7 @@ impl std::str::FromStr for ResizeDir {
 }
 
 /// Returned by [`ResizeDir::from_str`] when the input is neither
-/// `"grow"` nor `"shrink"`. Carries no data — the caller already has
+/// `"grow"` nor `"shrink"`. Carries no data; the caller already has
 /// the offending input and renders its own message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseResizeDirError;
@@ -372,8 +372,8 @@ pub struct ParseLayoutError;
 /// optional because compositors deliver focus / title / workspace
 /// state through separate events; a backend may have any subset.
 ///
-/// Built from the backend's cached event snapshot — no IPC round-trip
-/// — so callers can read it cheaply on every LLM query.
+/// Built from the backend's cached event snapshot (no IPC round-trip),
+/// so callers can read it cheaply on every LLM query.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FocusedWindowContext {
     /// Compositor con_id of the focused window. Surfaced for callers
@@ -471,7 +471,7 @@ pub trait WindowManager: Send + Sync + 'static {
     ) -> WmResult<()>;
 
     /// Set the layout of the currently-focused container. Acts on the
-    /// focus state — no window argument — because that's how
+    /// focus state (no window argument) because that's how
     /// `i3-msg layout …` and `swaymsg layout …` behave.
     async fn set_layout(&self, layout: Layout) -> WmResult<()>;
 
@@ -656,7 +656,7 @@ mod tests {
     async fn default_list_outputs_reports_unsupported() {
         // The default trait impl errors so backends that don't override
         // (i.e. I3Backend) propagate "not supported" rather than an
-        // empty Vec — see the OutputInfo doc-comment for the rationale.
+        // empty Vec; see the OutputInfo doc-comment for the rationale.
         struct MinimalWm;
 
         #[async_trait]

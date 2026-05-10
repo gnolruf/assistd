@@ -4,7 +4,7 @@
 //! `data: [DONE]\n\n`. We only care about `data:` lines; `event:`, `id:`,
 //! `retry:`, comments, and blank lines are ignored. The buffer is raw bytes
 //! so that chunk boundaries landing inside a multi-byte UTF-8 character are
-//! safe — decoding happens per completed line, not per chunk.
+//! safe; decoding happens per completed line, not per chunk.
 
 use super::error::ChatClientError;
 

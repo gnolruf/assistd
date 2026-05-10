@@ -195,8 +195,8 @@ mod tests {
     use std::sync::Mutex;
 
     /// Fake command: returns a fixed exit code and stdout; records that
-    /// it was invoked. `args[0]` (when present) overrides exit code —
-    /// lets a single stub model "this run fails" vs "this run succeeds"
+    /// it was invoked. `args[0]` (when present) overrides exit code,
+    /// letting a single stub model "this run fails" vs "this run succeeds"
     /// in the same test.
     struct Stub {
         name: &'static str,
@@ -278,7 +278,7 @@ mod tests {
         }
     }
 
-    /// Emits bytes of configurable length — exercises PIPE_BUF_MAX.
+    /// Emits bytes of configurable length; exercises PIPE_BUF_MAX.
     struct Flood(usize);
     #[async_trait]
     impl Command for Flood {

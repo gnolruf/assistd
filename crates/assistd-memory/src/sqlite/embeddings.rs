@@ -8,14 +8,14 @@
 //! 1. Read every `(rowid, vector)` for the configured model. Reads
 //!    bypass the writer task via `conn.call(...)` directly; SQLite WAL
 //!    mode supports concurrent readers alongside a single writer.
-//! 2. Decode each BLOB with safe `chunks_exact(4)` arithmetic — no
+//! 2. Decode each BLOB with safe `chunks_exact(4)` arithmetic; no
 //!    `unsafe`, and the workspace lints deny it anyway.
 //! 3. Maintain a min-heap of size ≤ K so we don't sort the whole list.
 //! 4. Hydrate the K winners with one batched JOIN against the parent
 //!    table to surface the row's content / key / value.
 //!
 //! Linear scan is fine for the expected DB scale: even 50K chunks at
-//! 768-dim is ~150 MB of f32 — microseconds to dot-product on modern
+//! 768-dim is ~150 MB of f32, microseconds to dot-product on modern
 //! hardware. If/when a heavy user pushes beyond that, an HNSW / sqlite-vec
 //! extension can drop in behind this same trait without touching callers.
 
@@ -31,7 +31,7 @@ use super::connection::SqliteHandle;
 use super::conversations::PersistedRole;
 
 /// One conversation-chunk hit, hydrated with the *full* parent message
-/// content (chunks may cut mid-sentence — for the LLM-facing surface we
+/// content (chunks may cut mid-sentence; for the LLM-facing surface we
 /// surface the whole message so the model isn't reading a torso).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingHit {
@@ -510,7 +510,7 @@ impl SemanticStore for SqliteSemanticStore {
 
 // Min-heap entry: smallest similarity at the top so we can pop it when
 // a better candidate arrives. `OrderedFloat` would do this with less
-// boilerplate, but we already avoid extra deps elsewhere — wrap by hand.
+// boilerplate, but we already avoid extra deps elsewhere, so wrap by hand.
 struct HeapEntry {
     sim: f32,
     rowid: i64,
@@ -767,7 +767,7 @@ mod tests {
         let conv_id = rx.await.unwrap().unwrap();
         insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "old-model").await;
         let s = SqliteSemanticStore::new(handle);
-        // Query with the new model name — old-model rows must not appear.
+        // Query with the new model name; old-model rows must not appear.
         let hits = s
             .nearest_chunks(unit_vec(0.0), 5, "new-model")
             .await
@@ -830,7 +830,7 @@ mod tests {
             .await
             .unwrap();
         let mem_id_1 = rx.await.unwrap().unwrap();
-        // Re-save under same key — id should be stable.
+        // Re-save under same key; id should be stable.
         let (tx, rx) = oneshot::channel();
         handle
             .writer()

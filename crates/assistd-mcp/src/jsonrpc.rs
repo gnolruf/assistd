@@ -106,7 +106,7 @@ impl Correlator {
     }
 
     /// Match a response to its waiting caller. Stale ids are dropped
-    /// silently (a `warn!` is emitted) — they happen during reconnect
+    /// silently (a `warn!` is emitted); they happen during reconnect
     /// when an in-flight reply arrives just after the supervisor swap.
     pub fn deliver(&self, response: Response) {
         let Some(id) = response.id else {
@@ -258,7 +258,7 @@ mod tests {
             result: Some(Value::Null),
             error: None,
         });
-        // No panic, no waiter — pending stays empty.
+        // No panic, no waiter; pending stays empty.
         assert_eq!(c.in_flight(), 0);
     }
 

@@ -1,4 +1,4 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
 
 //! End-to-end tests for the presence state machine.
 //!
@@ -258,7 +258,7 @@ async fn wake_from_drowsy_reuses_process_and_only_loads_model() {
     m.wake().await.expect("wake from Drowsy should succeed");
     assert_eq!(m.state(), PresenceState::Active);
 
-    // Same PID — no respawn.
+    // Same PID, no respawn.
     let pid_after = m.llama_pid().await.expect("child still running");
     assert_eq!(
         pid_initial, pid_after,
@@ -308,7 +308,7 @@ async fn query_during_sleeping_triggers_auto_wake() {
     m.sleep().await.unwrap();
     assert_eq!(m.state(), PresenceState::Sleeping);
 
-    // AppState uses EchoBackend — we're testing the auto-wake hook in
+    // AppState uses EchoBackend; we're testing the auto-wake hook in
     // handle_query, not the llama chat path.
     let state = Arc::new(AppState::new(
         Config::default(),

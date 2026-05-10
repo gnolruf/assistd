@@ -6,14 +6,14 @@
 //! so any in-flight jobs land before the daemon exits.
 //!
 //! Each job carries the rowid that the embedding will FK against. Two
-//! variants — chunks (FK to `conversation_chunks.id`) and memories (FK
-//! to `memories.id`) — share one queue, one worker, and one HTTP
+//! variants (chunks FK to `conversation_chunks.id`, memories FK to
+//! `memories.id`) share one queue, one worker, and one HTTP
 //! connection: there's no semantic value in segregating them and a
 //! single queue gives the writer cleaner backpressure shape.
 //!
 //! Failures are logged and dropped. The chunk / memory row stays
 //! without an embedding; a future `assistd memory backfill-embeddings`
-//! pass can pick it up. We deliberately avoid retries here — if the
+//! pass can pick it up. We deliberately avoid retries here; if the
 //! embed server is wedged, retrying just amplifies the wedge.
 
 use std::sync::Arc;

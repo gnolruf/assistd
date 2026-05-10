@@ -3,7 +3,7 @@
 //! `cpal::Stream` is `!Send` on most platforms (the ALSA backend holds a
 //! raw ALSA handle whose safety invariants are tied to its creating
 //! thread). To avoid poisoning `MicVoiceInput: Send + Sync`, the stream
-//! lives entirely inside a single `spawn_blocking` worker — the outer
+//! lives entirely inside a single `spawn_blocking` worker; the outer
 //! `MicVoiceInput` only holds a `JoinHandle` plus shared atomics, all of
 //! which are trivially `Send`.
 
@@ -44,7 +44,7 @@ pub enum AudioCaptureError {
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
 /// Handles to a running capture session. The cpal stream is owned by
-/// the consumer task — callers only see the atomics and the join
+/// the consumer task; callers only see the atomics and the join
 /// handle.
 pub struct CaptureSession {
     pub stop_flag: Arc<AtomicBool>,
@@ -65,7 +65,7 @@ pub struct ProducerStream {
 /// mono f32 samples at the native device rate into a ring buffer.
 ///
 /// Runs synchronously on the caller's thread because cpal's `Stream`
-/// is `!Send` on ALSA — both PTT and continuous-listen callers invoke
+/// is `!Send` on ALSA; both PTT and continuous-listen callers invoke
 /// this from inside a `tokio::task::spawn_blocking` worker.
 ///
 /// `ring_capacity_samples` sizes the SPSC ring (in mono samples at
@@ -151,7 +151,7 @@ fn capture_worker(
 ) -> Result<Vec<i16>, AudioCaptureError> {
     // Ring capacity: 1 s per second of recording + 1 s headroom. Sized
     // in mono samples at native rate; we over-provision slightly using
-    // a conservative 48 kHz assumption — `open_producer_stream`
+    // a conservative 48 kHz assumption; `open_producer_stream`
     // enforces a per-open floor regardless.
     let conservative_rate = 48_000usize;
     let ring_cap = conservative_rate
@@ -176,7 +176,7 @@ fn capture_worker(
 /// [`crate::gpu`]'s graceful-degradation idiom. When
 /// [`assistd_config::VoiceConfig::enabled`] is false, succeeds
 /// unconditionally. When `mic_device` is `None`, the system default
-/// will be selected at PTT start — missing-default is intentionally a
+/// will be selected at PTT start; missing-default is intentionally a
 /// soft failure (we don't want a headless CI without ALSA to fail
 /// daemon startup). Only the `Some(name)` case where the configured
 /// name cannot be found is hard-rejected.
@@ -191,7 +191,7 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     }
 
     // Always enumerate input devices at startup so the log captures
-    // which cpal-visible devices exist — indispensable for diagnosing
+    // which cpal-visible devices exist; indispensable for diagnosing
     // "wrong mic picked" problems on systems with many PipeWire sinks.
     let host = cpal::default_host();
     let default_name = host
@@ -386,7 +386,7 @@ impl CallbackState {
     fn push_u16(&self, data: &[u16]) {
         let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         scratch.clear();
-        // u16 is offset-binary — 32768 = silence.
+        // u16 is offset-binary: 32768 = silence.
         if self.channels <= 1 {
             for &s in data {
                 scratch.push((s as f32 - 32768.0) / 32768.0);

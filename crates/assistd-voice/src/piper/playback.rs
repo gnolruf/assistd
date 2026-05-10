@@ -1,6 +1,6 @@
 //! Audio playback via rodio. The cpal device backing
 //! [`rodio::stream::MixerDeviceSink`] runs its callback on its own
-//! audio thread, but the device sink itself is `!Send` on ALSA — so
+//! audio thread, but the device sink itself is `!Send` on ALSA, so
 //! we hold it on a dedicated `std::thread` (not `spawn_blocking`,
 //! whose pool may tear threads down after work completes). The
 //! `rodio::Player` wired to that mixer is `Send + Sync`, so the
@@ -21,7 +21,7 @@ use crate::piper::error::PiperError;
 use crate::piper::synth::SynthOutput;
 
 /// Owns the rodio playback path for the daemon. Cheap to clone via
-/// `Arc<RodioPlaybackWorker>` — internal state is `Arc`-shared.
+/// `Arc<RodioPlaybackWorker>`; internal state is `Arc`-shared.
 pub struct RodioPlaybackWorker {
     player: Arc<Player>,
     /// Sender used in `Drop` to wake the device thread so it releases
@@ -38,7 +38,7 @@ impl RodioPlaybackWorker {
     /// `device_name`:
     /// - `None`: use cpal's default output device. On most desktops
     ///   that's the PipeWire-bridged `default` ALSA PCM, which routes
-    ///   wherever PipeWire's default sink points — including Bluetooth.
+    ///   wherever PipeWire's default sink points, including Bluetooth.
     /// - `Some(name)`: open the named cpal output device. `name` matches
     ///   the strings cpal returns from `Host::output_devices()`, which
     ///   on Linux are the same as `aplay -L` PCM names (`pipewire`,
@@ -158,7 +158,7 @@ impl RodioPlaybackWorker {
                     }
                 };
                 // Suppress the "MixerDeviceSink dropped" log line on
-                // shutdown — we drop it intentionally.
+                // shutdown; we drop it intentionally.
                 device_sink.log_on_drop(false);
 
                 let player = Player::connect_new(device_sink.mixer());
@@ -230,7 +230,7 @@ impl RodioPlaybackWorker {
         rx.await.map_err(|_| PiperError::PlaybackClosed)
     }
 
-    /// Drop pending audio — used to interrupt mid-utterance via
+    /// Drop pending audio; used to interrupt mid-utterance via
     /// `VoiceOutput::cancel`.
     ///
     /// rodio's `Player::clear` not only empties the queue but also
@@ -254,7 +254,7 @@ impl RodioPlaybackWorker {
 
 /// Bounded wait used by the Drop watchdog. If the audio thread is
 /// wedged (rare on ALSA but possible), abandoning the join after this
-/// budget keeps daemon shutdown unblocked — the OS reclaims the
+/// budget keeps daemon shutdown unblocked; the OS reclaims the
 /// thread on process exit. Logged at `error!` so the operator sees
 /// it.
 const DROP_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -272,7 +272,7 @@ impl Drop for RodioPlaybackWorker {
         if let Some(handle) = self.device_thread.take() {
             let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
             // Spawn a watchdog thread that owns the join. The watchdog
-            // is leaked on timeout — it will clean itself up when the
+            // is leaked on timeout; it will clean itself up when the
             // audio thread does eventually exit (or when the process
             // does), neither of which blocks the caller.
             let spawned = thread::Builder::new()
@@ -292,7 +292,7 @@ impl Drop for RodioPlaybackWorker {
                     }
                 }
                 Err(e) => {
-                    // Couldn't spawn watchdog — fall back to direct
+                    // Couldn't spawn watchdog; fall back to direct
                     // join. The OS process tear-down still unblocks
                     // eventually if this hangs, but we lose
                     // bounded-shutdown guarantees.
@@ -304,7 +304,7 @@ impl Drop for RodioPlaybackWorker {
                     // We took `handle` already; can't reach it here.
                     // The watchdog thread that was supposed to own it
                     // dropped the variable, which transitively detached
-                    // the join — acceptable since process exit reaps
+                    // the join; acceptable since process exit reaps
                     // it.
                 }
             }

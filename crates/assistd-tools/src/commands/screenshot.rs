@@ -1,4 +1,4 @@
-//! `screenshot [--full|--focused]` — capture the screen as a PNG and
+//! `screenshot [--full|--focused]`: capture the screen as a PNG and
 //! attach it as a vision input for the next LLM turn.
 //!
 //! Mirrors `SeeCommand` in shape: returns a [`crate::Attachment::Image`]
@@ -79,7 +79,7 @@ enum WaylandCompositor {
     Unknown(String),
 }
 
-/// `screenshot [--full|--focused|--monitor=NAME]` — capture the screen as a PNG
+/// `screenshot [--full|--focused|--monitor=NAME]`: capture the screen as a PNG
 /// and attach it as a vision input for the next LLM turn.
 pub struct ScreenshotCommand {
     cfg: Arc<ScreenshotPolicyCfg>,
@@ -130,7 +130,7 @@ impl Command for ScreenshotCommand {
          LLM turn (kept in memory; never written to disk by default).\n\
          \n\
          Without arguments, captures the full screen (which on multi-head \
-         setups means the bounding box across all monitors — pass \
+         setups means the bounding box across all monitors; pass \
          --monitor=<name> to capture a single output). Pass --focused to \
          capture only the currently focused window.\n\
          \n\
@@ -147,7 +147,7 @@ impl Command for ScreenshotCommand {
          `swaymsg -t get_outputs` / `hyprctl monitors` (Wayland).\n\
          \n\
          Exit codes:\n  \
-           0   success — image attached\n  \
+           0   success (image attached)\n  \
            1   capture backend exited non-zero\n  \
            2   no display server, unsupported compositor, or bad args\n  \
            127 capture binary not found (Install: hint follows)\n  \
@@ -226,7 +226,7 @@ impl Command for ScreenshotCommand {
                     ));
                 }
                 let stdout = format!(
-                    "captured PNG ({}, {}, backend={}) — attached to next turn\n",
+                    "captured PNG ({}, {}, backend={}); attached to next turn\n",
                     human_size(png.len()),
                     target_label(&target),
                     backend_label(backend),
@@ -310,7 +310,7 @@ fn detect_backend_from_env(
         match s {
             "wayland" => return Ok(Backend::Wayland),
             "x11" => return Ok(Backend::X11),
-            _ => {} // unrecognised — fall through to env-var check
+            _ => {} // unrecognised; fall through to env-var check
         }
     }
     match (has_wayland, has_x) {
@@ -474,7 +474,7 @@ async fn capture_x11_monitor(monitor: &str, deadline: Duration) -> Result<Vec<u8
 /// Spawn `binary` with `args`, drain stdout to `Vec<u8>`, drain stderr to
 /// a tail, wait for exit (or timeout), and return the bytes. The subprocess
 /// pattern (`kill_on_drop` + `process_group(0)` on Unix) mirrors
-/// `assistd-voice/src/piper/synth.rs` — a timeout drops the `Child`,
+/// `assistd-voice/src/piper/synth.rs`: a timeout drops the `Child`,
 /// which sends SIGKILL to the process group via `kill_on_drop`.
 async fn spawn_subprocess(
     binary: &str,
@@ -1014,7 +1014,7 @@ mod tests {
     #[test]
     fn sway_focused_node_missing_rect_returns_none() {
         // A malformed tree (focused=true but no rect) should not
-        // panic — find_focused_sway_rect uses `?` to propagate None.
+        // panic; find_focused_sway_rect uses `?` to propagate None.
         let v = serde_json::json!({"focused": true});
         assert!(find_focused_sway_rect(&v).is_none());
     }

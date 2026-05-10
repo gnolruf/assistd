@@ -3,7 +3,7 @@
 //! Mirrors the shape of [`crate::presence::run`]: opens the daemon's
 //! Unix socket, sends one [`Request::Memory*`], prints incoming events
 //! to stdout, and exits on `Event::Done` / `Event::Error`. All routing
-//! goes through the daemon — there's no direct-SQLite fallback (the
+//! goes through the daemon; there's no direct-SQLite fallback (the
 //! daemon owns the writer, and a CLI grabbing the file lock while it's
 //! mid-write would risk corruption).
 

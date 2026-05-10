@@ -5,7 +5,7 @@
 //! daemon's IPC handlers and the `assistd memory ...` CLI hit one
 //! object instead of juggling two trait objects.
 //!
-//! No LLM-callable [`crate::Tool`] impls live here — the model gets
+//! No LLM-callable [`crate::Tool`] impls live here; the model gets
 //! access to memory only via the daemon's `run` chain or via `Tool`
 //! impls a future milestone might layer on top of this façade.
 
@@ -72,7 +72,7 @@ impl MemoryOps {
     }
 
     /// Like [`MemoryOps::list`] but returns full `(id, key, value)`
-    /// rows in one round trip — used by the `assistd memory list` CLI.
+    /// rows in one round trip; used by the `assistd memory list` CLI.
     /// Order is whatever the backend yields (lexicographic by key for
     /// the SQLite impl).
     pub async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {

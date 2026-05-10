@@ -12,7 +12,7 @@
 //!
 //! Trade-offs vs. sentence-aware chunking: this is a deliberately simple
 //! window-based split. The repo already has `assistd-voice/src/sentence.rs`
-//! but that's TTS-shaped (markdown stripping, code-fence handling) — it
+//! but that's TTS-shaped (markdown stripping, code-fence handling): it
 //! drops content semantic search needs and applies transforms search
 //! doesn't want. A char-window suffices for v1; if retrieval quality
 //! suffers we can revisit.

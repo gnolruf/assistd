@@ -70,7 +70,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
 
     info!(
-        "assistd v{} — local model agent OS assistant daemon",
+        "assistd v{}: local model agent OS assistant daemon",
         assistd_core::version()
     );
     info!("  core  v{}", assistd_core::version());

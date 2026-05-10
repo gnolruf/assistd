@@ -4,7 +4,7 @@
 //! (outbound) and stdout (inbound). Stderr is forwarded to tracing.
 //!
 //! The transport core is split from process spawning so tests can run
-//! the full request/response loop against a `tokio::io::duplex` pair —
+//! the full request/response loop against a `tokio::io::duplex` pair;
 //! see [`StdioMcpClient::from_streams`].
 
 use std::collections::HashMap;
@@ -69,7 +69,7 @@ impl StdioMcpClient {
     /// Spawn an MCP server child process and bring up the transport.
     /// Returns the client (an `Arc<dyn McpClient>` once cast) and a
     /// `ChildLifeline` whose `wait_for_exit()` future fires when the
-    /// child exits — used by the per-server supervisor.
+    /// child exits; used by the per-server supervisor.
     pub async fn spawn(cfg: StdioConfig) -> Result<(Arc<Self>, ChildLifeline), McpError> {
         let mut cmd = Command::new(&cfg.command);
         cmd.args(&cfg.args)
@@ -139,7 +139,7 @@ impl StdioMcpClient {
     /// Wire the transport up over arbitrary `AsyncRead` / `AsyncWrite`.
     /// Used by [`Self::spawn`] (with the child's stdout/stdin) and by
     /// tests (with `tokio::io::duplex`). Does NOT perform the initialize
-    /// handshake — call [`Self::initialize`] separately.
+    /// handshake; call [`Self::initialize`] separately.
     pub async fn from_streams<R, W>(
         read: R,
         write: W,
@@ -374,7 +374,7 @@ impl ChildLifeline {
     }
 
     /// Send SIGTERM to the child's process group, wait `term_timeout`,
-    /// then SIGKILL if still alive. Always best-effort — we don't fail
+    /// then SIGKILL if still alive. Always best-effort; we don't fail
     /// daemon shutdown on a stuck child.
     pub async fn shutdown(mut self, term_timeout: Duration) {
         let label = self.label.clone();

@@ -1,4 +1,4 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
 
 //! Integration tests for the llama-server supervisor.
 //!
@@ -69,13 +69,13 @@ fn model_spec() -> ModelConfig {
 }
 
 /// Appends `--mode <mode>` by wrapping the fake binary via a shell invocation.
-/// We need this because LlamaServerConfig doesn't expose extra args — but the fake
+/// We need this because LlamaServerConfig doesn't expose extra args, but the fake
 /// binary parses args itself. Instead we rely on the binary tolerating the
 /// llama-server arg shape and parsing its own mode flag out of env.
 ///
 /// Simpler: use an env var the fake binary reads.
 ///
-/// Even simpler: make the fake binary look at its own args — `--mode <m>` is
+/// Even simpler: make the fake binary look at its own args; `--mode <m>` is
 /// already parsed out of the command line. We put it at the end so the real
 /// llama-server-shaped args come first.
 ///
@@ -184,7 +184,7 @@ async fn respects_shutdown_during_backoff() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     set_mode("bind-fail");
 
-    // Flip the shutdown watch after ~3 seconds — enough time to hit the first
+    // Flip the shutdown watch after ~3 seconds: enough time to hit the first
     // backoff sleep but far short of the full 5-failure timeline.
     let flip_tx = shutdown_tx.clone();
     tokio::spawn(async move {

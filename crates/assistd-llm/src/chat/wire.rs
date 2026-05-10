@@ -9,7 +9,7 @@
 //!
 //! Tool-calling shape: when an assistant message carries `tool_calls`, the
 //! `content` field must be absent (`None`). Some llama.cpp Jinja templates
-//! reject `"content": null` but accept an omitted key — `skip_serializing_if`
+//! reject `"content": null` but accept an omitted key; `skip_serializing_if`
 //! takes care of that.
 
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,7 @@ pub struct ChatRequest<'a> {
 pub struct ChatMessage<'a> {
     pub role: &'a str,
     /// Message text. `None` for assistant messages that carry only
-    /// `tool_calls` — the OpenAI spec allows (and many servers require)
+    /// `tool_calls`; the OpenAI spec allows (and many servers require)
     /// the field to be omitted entirely in that case.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentBody<'a>>,
@@ -58,7 +58,7 @@ pub struct ChatMessage<'a> {
     pub tool_calls: Option<Vec<ToolCallSpec<'a>>>,
     /// Only set on messages with `role: "tool"`. We currently route tool
     /// results back through synthetic user messages instead, so this is
-    /// usually absent — but keeping the field on the wire type lets the
+    /// usually absent, but keeping the field on the wire type lets the
     /// client interop if a future change flips back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<&'a str>,
@@ -67,7 +67,7 @@ pub struct ChatMessage<'a> {
 /// Wire shape of a message's `content` field.
 ///
 /// Untagged serde keeps the two shapes indistinguishable on the outgoing
-/// wire — `Text(s)` serializes as the bare string `"..."`, `Parts(v)`
+/// wire: `Text(s)` serializes as the bare string `"..."`, `Parts(v)`
 /// serializes as a JSON array `[{"type": "text", "text": "..."}, ...]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
@@ -108,8 +108,7 @@ pub struct FunctionCallSpec<'a> {
     pub arguments: &'a str,
 }
 
-/// Non-streaming response shape — used only for the summarization call.
-/// Non-streaming response body — used only for the summarization call.
+/// Non-streaming response body, used only for the summarization call.
 #[derive(Debug, Deserialize)]
 pub struct ChatResponse {
     pub choices: Vec<ChatChoice>,
@@ -355,7 +354,7 @@ mod tests {
 
     #[test]
     fn deserializes_tool_call_delta_chunk() {
-        // llama.cpp's typical tool-call emission — id + name in one chunk,
+        // llama.cpp's typical tool-call emission: id + name in one chunk,
         // arguments streamed across subsequent chunks under the same index.
         let payload = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"run","arguments":"{\"com"}}]},"finish_reason":null}]}"#;
         let parsed: ChatCompletionChunk = serde_json::from_str(payload).unwrap();

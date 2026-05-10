@@ -24,7 +24,7 @@ pub struct VoiceConfig {
     #[serde(default)]
     pub mic_device: Option<String>,
     /// Hotkey to hold for push-to-talk recording (e.g. "Super+Space").
-    /// Empty disables the in-daemon/TUI global hotkey listener — the PTT
+    /// Empty disables the in-daemon/TUI global hotkey listener; the PTT
     /// IPC commands (`assistd ptt-start` / `ptt-stop`) still work.
     pub hotkey: String,
     /// Upper bound on a single PTT recording, in seconds. The ring
@@ -171,7 +171,7 @@ fn default_whisper_cpu_fallback_enabled() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContinuousListenConfig {
     /// Master switch for the feature. When false, no listener task is
-    /// built even if `voice.enabled` is true — the PTT pipeline is
+    /// built even if `voice.enabled` is true; the PTT pipeline is
     /// unaffected.
     #[serde(default = "default_listen_enabled")]
     pub enabled: bool,
@@ -189,7 +189,7 @@ pub struct ContinuousListenConfig {
     /// tolerate mid-sentence pauses.
     #[serde(default = "default_listen_silence_ms")]
     pub silence_ms: u32,
-    /// Utterances shorter than this are dropped without transcription —
+    /// Utterances shorter than this are dropped without transcription;
     /// filters clicks and single-phoneme bursts.
     #[serde(default = "default_listen_min_utterance_ms")]
     pub min_utterance_ms: u32,
@@ -314,7 +314,7 @@ pub struct SynthesisConfig {
     pub max_sentence_chars: u32,
     /// Idle gap (ms) between LLM deltas after which the sentence buffer
     /// is flushed even without a terminator. `0` disables the timeout
-    /// flush — only the terminal `Done`-based flush is used. Inhibited
+    /// flush; only the terminal `Done`-based flush is used. Inhibited
     /// while a tool call is in flight.
     #[serde(default = "default_piper_partial_flush_ms")]
     pub partial_flush_ms: u32,
@@ -342,12 +342,12 @@ pub struct SynthesisConfig {
     pub use_cuda: bool,
     /// Override cpal's default output device by name. When `None`,
     /// rodio opens whatever `cpal::default_host().default_output_device()`
-    /// returns — usually the right thing, but on Sway+PipeWire systems
+    /// returns (usually the right thing), but on Sway+PipeWire systems
     /// where the user's default sink is a Bluetooth or other virtual
     /// PipeWire sink, cpal's default may pick a raw ALSA hardware card
     /// (HDMI, an unused analog port) and the audio goes nowhere.
-    /// Common values to try: `"pipewire"`, `"pulse"`, or `"default"`
-    /// — match a name from `aplay -L`.
+    /// Common values to try: `"pipewire"`, `"pulse"`, or `"default"`;
+    /// match a name from `aplay -L`.
     #[serde(default)]
     pub output_device: Option<String>,
 }
@@ -359,7 +359,7 @@ pub struct SynthesisConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeBlockMode {
-    /// Drop fenced content silently. The default — code in a chat
+    /// Drop fenced content silently. The default: code in a chat
     /// response is rarely useful as speech.
     #[default]
     Skip,

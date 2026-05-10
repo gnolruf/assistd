@@ -51,7 +51,7 @@ impl Role {
 /// `{id, type: "function", function: {name, arguments}}`. `arguments` is the
 /// JSON-encoded argument string the model emitted, stored verbatim so the
 /// replayed wire payload preserves whatever whitespace/formatting the model
-/// used — some servers compare it against their own re-serialization.
+/// used; some servers compare it against their own re-serialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRecord {
     pub id: String,
@@ -133,7 +133,7 @@ impl Conversation {
     /// Take the pending transient context, leaving `None` behind. The
     /// chat client calls this from `commit_step` after a successful
     /// stream so the next turn starts clean. On `PreEmitError` the
-    /// transient is *not* consumed — a retry should see the same context.
+    /// transient is *not* consumed; a retry should see the same context.
     pub fn consume_transient_context(&mut self) -> Option<String> {
         self.transient_context.take()
     }
@@ -179,7 +179,7 @@ impl Conversation {
     }
 
     /// Append an assistant turn that requested tool calls. `content` is the
-    /// assistant's narration (typically empty — models usually emit tool
+    /// assistant's narration (typically empty; models usually emit tool
     /// calls without accompanying text when `finish_reason: "tool_calls"`).
     /// `calls` must be non-empty; on the wire the message will render with
     /// `content` omitted and `tool_calls: [...]` populated.
@@ -217,7 +217,7 @@ impl Conversation {
         self.transient_context = None;
     }
 
-    /// Drop everything after — and including — the latest "real" user
+    /// Drop everything after (and including) the latest "real" user
     /// message. A "real" user message is [`Role::User`] whose content
     /// does NOT start with [`TOOL_RESULT_PREFIX`]; tool-result rows
     /// share the User role but are part of the assistant's reply, so
@@ -412,7 +412,7 @@ impl Conversation {
     /// repeatedly until we fit in budget (or we've reduced history to just
     /// the latest user message). Tool-call/result pairs are dropped
     /// atomically so the wire payload never carries an assistant
-    /// `tool_calls` without a matching result (or vice versa) — most
+    /// `tool_calls` without a matching result (or vice versa); most
     /// server-side chat templates reject that.
     pub fn truncate_to_budget(&mut self, chat: &ChatConfig, model: &ModelConfig) {
         let budget = effective_budget(chat, model);
@@ -744,7 +744,7 @@ mod tests {
             },
         ]);
         let wire = c.as_wire_messages();
-        // [system=sys, user=loaded user, assistant=loaded assistant] — transient gone.
+        // [system=sys, user=loaded user, assistant=loaded assistant]; transient gone.
         assert_eq!(wire.len(), 3);
         assert_eq!(wire[0].role, "system");
         assert_eq!(wire[1].role, "user");

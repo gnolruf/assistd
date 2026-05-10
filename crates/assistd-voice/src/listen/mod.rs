@@ -7,7 +7,7 @@
 //! one-shot (open → buffer → close), continuous is a long-running
 //! stream of utterances. A single daemon build can own both, sharing
 //! the [`WhisperTranscriber`](crate::WhisperTranscriber) model
-//! context but using separate cpal streams — because the caller
+//! context but using separate cpal streams. Because the caller
 //! enforces mutual exclusion (only one can hold the mic at a time),
 //! having two objects is simpler than multiplexing state.
 
@@ -32,7 +32,7 @@ pub use mic::MicContinuousListener;
 pub trait ContinuousListener: Send + Sync + 'static {
     /// Begin listening. Opens the mic, starts the VAD loop, and
     /// returns once the cpal stream is playing. Repeated `start`
-    /// while already active is a no-op (returns `Ok`) — callers
+    /// while already active is a no-op (returns `Ok`); callers
     /// that need to error on double-start should check
     /// [`Self::is_active`] first.
     async fn start(&self) -> Result<()>;
@@ -48,7 +48,7 @@ pub trait ContinuousListener: Send + Sync + 'static {
     /// broadcast channel has a finite depth; slow consumers may miss
     /// older utterances but will see every new one after they catch
     /// up. Empty strings (whisper trimming to pure silence) are
-    /// filtered out upstream — receivers never see them.
+    /// filtered out upstream; receivers never see them.
     fn subscribe_utterances(&self) -> broadcast::Receiver<String>;
 
     /// Subscribe to on/off state transitions. The initial value is

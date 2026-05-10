@@ -67,7 +67,7 @@ pub struct LlamaServerConfig {
     pub mlock: Option<bool>,
     /// `--mmproj-offload` / `--no-mmproj-offload`: whether the multimodal
     /// projector (vision encoder) runs on GPU. Set `false` when VRAM is
-    /// fully consumed by the LLM — image preprocessing falls back to CPU.
+    /// fully consumed by the LLM; image preprocessing falls back to CPU.
     #[serde(default)]
     pub mmproj_offload: Option<bool>,
 }

@@ -4,7 +4,7 @@
 //! The handle is the sole boundary between the always-on registry and
 //! the ephemeral transport. Even when the underlying server is down or
 //! restarting, the registered `McpToolAdapter` still holds a live
-//! `Arc<dyn McpClient>` — the [`SwitchingClient`] — that returns
+//! `Arc<dyn McpClient>` (the [`SwitchingClient`]) that returns
 //! `McpError::ServerDown` until the supervisor reconnects.
 //!
 //! Note that the `HealthRoutedTool` short-circuits before the
@@ -71,7 +71,7 @@ impl McpServerHandle {
     /// discovery, then hand off to a supervisor task that handles all
     /// future crashes/restarts.
     ///
-    /// Returns `Err` only on the FIRST spawn attempt — once the handle
+    /// Returns `Err` only on the FIRST spawn attempt; once the handle
     /// is alive, the supervisor takes over and the daemon never sees
     /// transport-level failures again (they surface to the model via
     /// the health-routed adapter).
@@ -135,7 +135,7 @@ impl Drop for McpServerHandle {
         // Defense-in-depth for the no-shutdown() path (panics, tests,
         // future misuse). Graceful path is `shutdown()`; here we just
         // signal + abort. Stdio children still die because
-        // `Child::kill_on_drop(true)` is set in stdio.rs — aborting
+        // `Child::kill_on_drop(true)` is set in stdio.rs; aborting
         // the supervisor drops the Child future, which sends SIGKILL.
         let _ = self.supervisor_shutdown_tx.send(true);
         if let Some(task) = self.supervisor_task.take() {

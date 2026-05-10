@@ -11,7 +11,7 @@
 //! Tool-use subsystem: the trait every invokable tool implements, plus
 //! the registry the LLM looks up tool calls in.
 //!
-//! The daemon exposes a single LLM-facing tool — `run` — whose argument is
+//! The daemon exposes a single LLM-facing tool (`run`) whose argument is
 //! a Unix-shell-style command line. `run` parses the line into a
 //! [`chain::Chain`] AST and dispatches each stage through a
 //! [`CommandRegistry`] of internal Rust handlers. Two-tier split: `Tool`
@@ -115,7 +115,7 @@ impl ToolRegistry {
 
     /// Render the registry as an OpenAI chat-completions `tools` array.
     /// Each entry is a `{"type": "function", "function": {...}}` object
-    /// with `strict: true` — guaranteeing the model's arguments conform
+    /// with `strict: true`, guaranteeing the model's arguments conform
     /// to `parameters_schema()`.
     pub fn openai_schemas(&self) -> Vec<Value> {
         self.tools

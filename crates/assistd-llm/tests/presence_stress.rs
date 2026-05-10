@@ -1,4 +1,4 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
 
 //! Heavyweight stress tests for the presence state machine and the
 //! request-guard / chat-client interaction. Each test spawns a real
@@ -268,7 +268,7 @@ async fn sleep_defers_until_inflight_real_chat_stream_done() {
         events.push(e);
     }
 
-    // Stream is in flight. Trigger sleep concurrently — it must defer
+    // Stream is in flight. Trigger sleep concurrently; it must defer
     // until all 5 deltas + Done are forwarded.
     let m_for_sleep = m.clone();
     let sleep_started = Instant::now();

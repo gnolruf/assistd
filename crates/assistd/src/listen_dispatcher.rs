@@ -8,7 +8,7 @@
 //!    broadcast, and for each completed transcript runs
 //!    `AppState::handle_query` (the same entry point that socket-side
 //!    queries use). Events from that turn are written to a throwaway
-//!    mpsc that we drain to `/dev/null` — no IPC client is attached.
+//!    mpsc that we drain to `/dev/null`; no IPC client is attached.
 //!
 //! 2. Presence-gated toggler - watches presence transitions and
 //!    pauses the listener when the daemon goes `Sleeping`, resumes

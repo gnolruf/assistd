@@ -22,13 +22,13 @@
 //!   `Sleeping`, so semantic retrieval keeps working in low-power states.
 //!
 //! Public surface:
-//! - [`Embedder`] — trait `AppState`/tools hold as `Arc<dyn Embedder>`.
-//! - [`NoEmbedder`] — successful-no-op fallback used when the subsystem is
+//! - [`Embedder`] - trait `AppState`/tools hold as `Arc<dyn Embedder>`.
+//! - [`NoEmbedder`] - successful-no-op fallback used when the subsystem is
 //!   disabled in config or fails to start (mirrors `NoMemoryStore` /
 //!   `NoVoiceOutput`).
-//! - [`LlamaEmbedder`] — concrete HTTP client for an `/v1/embeddings`
+//! - [`LlamaEmbedder`] - concrete HTTP client for an `/v1/embeddings`
 //!   endpoint.
-//! - [`server::EmbedService`] — supervised process lifecycle.
+//! - [`server::EmbedService`] - supervised process lifecycle.
 //!
 //! The background [`spawn_embedder_task`] worker is added in a follow-up
 //! commit alongside the `assistd-memory` `WriteOp` variants it dispatches
@@ -51,7 +51,7 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait Embedder: Send + Sync + 'static {
     /// Produce an L2-normalised embedding vector for `text`. Normalisation
-    /// is the implementor's responsibility — callers compose retrieval as
+    /// is the implementor's responsibility; callers compose retrieval as
     /// dot products and assume both sides are unit-length.
     async fn embed(&self, text: String) -> Result<Vec<f32>>;
     /// Model id this embedder serves. Used to filter the SQLite

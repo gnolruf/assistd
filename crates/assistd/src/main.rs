@@ -82,7 +82,7 @@ enum Commands {
     Cycle,
 
     /// Begin a push-to-talk recording on the running daemon (for i3
-    /// `bindsym` — release handled by `ptt-stop` on the matching
+    /// `bindsym`; release handled by `ptt-stop` on the matching
     /// `bindsym --release` line).
     #[cfg(feature = "client")]
     PttStart,

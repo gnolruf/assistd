@@ -42,7 +42,7 @@ impl HealthChecker {
 
     /// Polls `/health` until it returns 200 OK, the overall deadline elapses,
     /// or shutdown is requested. Non-200 responses and connect/read errors
-    /// are treated as "keep polling" — we only care about the success signal.
+    /// are treated as "keep polling"; we only care about the success signal.
     pub async fn wait_ready(
         &self,
         shutdown_rx: &mut watch::Receiver<bool>,

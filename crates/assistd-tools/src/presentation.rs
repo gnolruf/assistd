@@ -1,4 +1,4 @@
-//! Layer 2 — the LLM presentation layer. Runs once on the final
+//! Layer 2: the LLM presentation layer. Runs once on the final
 //! [`CommandOutput`] of a completed chain (Layer 1's output). Responsible for:
 //!
 //! - Binary guarding: refuses to surface null-byte / non-UTF-8 / control-heavy
@@ -13,7 +13,7 @@
 //! This layer is deliberately kept out of the chain executor: Layer 1 (pipes,
 //! sequencing, and-or) threads raw bytes between stages without any of these
 //! transforms, so `cat bigfile | grep foo | wc -l` sees the full cat output
-//! flow into grep — truncation only kicks in on the final `wc -l` result.
+//! flow into grep; truncation only kicks in on the final `wc -l` result.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -77,7 +77,7 @@ pub struct PresentResult {
 }
 
 /// Render a completed chain's `CommandOutput` into an LLM-facing
-/// `PresentResult`. Measures nothing itself — `duration` is whatever the
+/// `PresentResult`. Measures nothing itself; `duration` is whatever the
 /// caller timed around their `execute()` call.
 pub fn present(
     out: CommandOutput,
@@ -220,7 +220,7 @@ fn is_suspicious_control(c: char) -> bool {
 }
 
 /// Count lines in `s`. A trailing non-newline-terminated line counts as a
-/// line — `"a"` is 1 line, `"a\n"` is 1, `"a\nb"` is 2, `""` is 0.
+/// line: `"a"` is 1 line, `"a\n"` is 1, `"a\nb"` is 2, `""` is 0.
 pub(crate) fn count_lines(s: &str) -> usize {
     if s.is_empty() {
         return 0;
@@ -264,7 +264,7 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
 }
 
 /// Write `raw` to `<dir>/cmd-<n>.txt`. Caller is responsible for ensuring
-/// `dir` exists — the daemon creates it at startup. Degraded-write failure
+/// `dir` exists; the daemon creates it at startup. Degraded-write failure
 /// (disk full, bad perms) is handled one level up in `present`.
 fn write_overflow_file(raw: &[u8], dir: &Path, n: u64) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("cmd-{n}.txt"));
@@ -278,7 +278,7 @@ mod tests {
     use crate::command::CommandOutput;
     use tempfile::tempdir;
 
-    // Minimal valid 1x1 PNG — contains NUL bytes in IHDR.
+    // Minimal valid 1x1 PNG; contains NUL bytes in IHDR.
     const PNG_BYTES: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn binary_guard_accepts_tabs_and_newlines() {
-        // 50% whitespace-controls — none are "suspicious".
+        // 50% whitespace-controls; none are "suspicious".
         let bytes = b"a\tb\nc\td\ne\tf\n".to_vec();
         assert!(binary_guard(&bytes).is_none());
     }
@@ -407,7 +407,7 @@ mod tests {
         // "日" is 3 bytes: 0xE6 0x97 0xA5.
         let s = "日本"; // 6 bytes total
         let t = truncate_lines_bytes(s, 100, 4); // clamp inside 2nd rune
-        assert_eq!(t, "日"); // 3 bytes — must not return partial rune
+        assert_eq!(t, "日"); // 3 bytes; must not return partial rune
     }
 
     #[test]
@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn present_overflow_byte_threshold_trips_independently_of_lines() {
         let dir = tempdir().unwrap();
-        // One long line — no newline, so count_lines = 1 but bytes > max_bytes.
+        // One long line: no newline, so count_lines = 1 but bytes > max_bytes.
         let big = vec![b'x'; 10_000];
         let out = CommandOutput::ok(big);
         let counter = AtomicU64::new(0);
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn present_overflow_write_failure_degrades() {
-        // overflow_dir points at a path that doesn't exist — write fails,
+        // overflow_dir points at a path that doesn't exist (write fails);
         // presentation still produces a body with the head + banner, but
         // NOT the "Full output:" / "Explore:" lines.
         let bad_dir = PathBuf::from("/nonexistent-assistd-test-dir/nope");

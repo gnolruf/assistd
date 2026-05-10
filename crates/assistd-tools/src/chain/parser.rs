@@ -1,8 +1,8 @@
 //! Command-line tokenizer and recursive-descent parser. Produces a
 //! [`super::Chain`] AST from a user-supplied string.
 //!
-//! Grammar (lowest precedence first; all operators left-associative —
-//! matches bash semantics):
+//! Grammar (lowest precedence first; all operators left-associative,
+//! matching bash semantics):
 //!
 //! ```text
 //! seq     := andor ( ';'            andor? )*     (trailing ';' allowed)

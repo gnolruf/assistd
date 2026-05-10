@@ -16,8 +16,8 @@ use assistd_voice::{
 };
 
 /// Build a 1-second 16 kHz mono i16 PCM buffer of a 440 Hz sine at half
-/// amplitude. The actual content doesn't matter — the StubTranscriber
-/// ignores it — but we want a non-trivial buffer so length-dependent
+/// amplitude. The actual content doesn't matter (the StubTranscriber
+/// ignores it), but we want a non-trivial buffer so length-dependent
 /// code paths (peak-dBfs logging, empty-buffer guard) are exercised.
 fn synth_sine_pcm(seconds: f32) -> Vec<i16> {
     let sample_rate = 16_000.0_f32;
@@ -141,7 +141,7 @@ async fn mic_voice_input_publishes_recording_transcribing_idle_sequence() {
 #[tokio::test]
 async fn mic_voice_input_round_trip_returns_stub_text_for_silent_pcm() {
     // VAD trimming would empty out silent input, but the stub transcriber
-    // doesn't run VAD — it returns its canned text regardless. This pins
+    // doesn't run VAD; it returns its canned text regardless. This pins
     // the contract that the test path is deterministic on any input.
     let stub = StubTranscriber::with_text("anything");
     let mic = MicVoiceInput::new(stub, None, 60);

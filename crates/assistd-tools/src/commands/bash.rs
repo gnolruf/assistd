@@ -3,7 +3,7 @@
 //! timeout) and optionally wrapped in a bubblewrap sandbox.
 //!
 //! The spawn pattern (`kill_on_drop(true)` + `process_group(0)` on Unix)
-//! mirrors `assistd-llm/src/llama_server/process.rs` — any mid-command
+//! mirrors `assistd-llm/src/llama_server/process.rs`: any mid-command
 //! daemon shutdown kills the whole process group, preventing grandchild
 //! leaks if the script itself forked.
 //!
@@ -12,7 +12,7 @@
 //! 1. **Denylist** (synchronous, before spawn): literal substring match.
 //!    On match, return `exit 126` with the matched pattern in the error
 //!    line so the LLM can pick a different approach. Never consults the
-//!    confirmation gate — these patterns are too dangerous to prompt for.
+//!    confirmation gate; these patterns are too dangerous to prompt for.
 //! 2. **Destructive patterns** (awaits `ConfirmationGate::confirm`):
 //!    shlex-tokenized word-prefix match against each command segment. On
 //!    match, the gate decides. If the gate returns `false`, return `exit
@@ -26,7 +26,7 @@
 //! ## Honest scope note
 //!
 //! Any syntactic check here (denylist / destructive patterns) can be
-//! defeated by a sufficiently clever caller — variable expansion,
+//! defeated by a sufficiently clever caller: variable expansion,
 //! `$(echo rm) -rf /`, here-docs, base64 decoding. The sandbox is the
 //! real defense; the pattern checks are a backstop that catches the
 //! *obvious* cases the user expects blocked.
@@ -79,7 +79,7 @@ impl Default for BashPolicyCfg {
     }
 }
 
-/// `bash SCRIPT` — spawn a real `bash -c <script>` subprocess, policy-gated.
+/// `bash SCRIPT`: spawn a real `bash -c <script>` subprocess, policy-gated.
 pub struct BashCommand {
     cfg: Arc<BashPolicyCfg>,
     sandbox: Arc<SandboxInfo>,
@@ -411,7 +411,7 @@ mod tests {
 
     /// Acceptance: `bash "<nonexistent-dep>"` must forward the subprocess's
     /// own stderr ("command not found") so the LLM sees *which* dependency
-    /// is missing — not a bare exit:127.
+    /// is missing, not a bare exit:127.
     #[tokio::test]
     async fn bash_missing_dependency_forwards_subprocess_stderr() {
         let out = BashCommand::default()
@@ -527,10 +527,10 @@ mod tests {
     }
 
     /// A destructive pattern substring inside a quoted literal must not
-    /// trigger the gate — `echo "rm -rf"` is harmless and legitimate.
+    /// trigger the gate; `echo "rm -rf"` is harmless and legitimate.
     #[tokio::test]
     async fn destructive_matcher_ignores_quoted_literals() {
-        // Counter-gate that panics if called — asserts the gate is NOT
+        // Counter-gate that panics if called; asserts the gate is NOT
         // invoked for this script.
         struct PanicGate;
         #[async_trait]

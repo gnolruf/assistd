@@ -52,7 +52,7 @@ pub enum IpcClientError {
 /// Convenience alias for `Result<T, `[`IpcClientError`]`>`.
 pub type Result<T> = std::result::Result<T, IpcClientError>;
 
-/// Connection factory. Construct once, reuse across calls — `Clone` is
+/// Connection factory. Construct once, reuse across calls; `Clone` is
 /// cheap (single `PathBuf`).
 #[derive(Debug, Clone)]
 pub struct IpcClient {
@@ -153,7 +153,7 @@ impl EventStream {
     }
 
     /// Read the next event. `Ok(None)` means the daemon closed the
-    /// stream without an explicit terminal event — callers should
+    /// stream without an explicit terminal event; callers should
     /// usually map this to [`IpcClientError::DaemonClosed`] when they
     /// haven't already seen `Done`/`Error`.
     pub async fn next_event(&mut self) -> Result<Option<Event>> {
@@ -234,7 +234,7 @@ mod tests {
     async fn mock_server(responses: Vec<Event>) -> (PathBuf, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
         // Leak the tempdir so the socket file survives until process
-        // exit — tests don't bother to clean up explicitly and this
+        // exit; tests don't bother to clean up explicitly and this
         // avoids the dir being dropped before the connection completes.
         let path = dir.path().join("mock.sock");
         std::mem::forget(dir);
@@ -302,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_errors_on_premature_close() {
-        // Server sends one delta and closes — no terminal event.
+        // Server sends one delta and closes; no terminal event.
         let (path, _h) = mock_server(vec![Event::Delta {
             id: "r".into(),
             text: "incomplete".into(),

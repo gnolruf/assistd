@@ -76,8 +76,8 @@ impl LoadImageError {
 pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), LoadImageError> {
     // Stat first so a multi-gigabyte file is rejected before we allocate
     // a buffer for it. `metadata` resolves symlinks, matching what `read`
-    // would do — no surprise where the size check disagrees with what we
-    // end up reading.
+    // would do, so the size check can't disagree with what we end up
+    // reading.
     let meta = tokio::fs::metadata(path)
         .await
         .map_err(|e| LoadImageError::Io {
@@ -204,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn oversize_file_is_rejected_before_read() {
         // Use a sparse file so the test doesn't actually allocate
-        // MAX_IMAGE_BYTES + 1 of disk. set_len + drop is enough — metadata()
+        // MAX_IMAGE_BYTES + 1 of disk. set_len + drop is enough; metadata()
         // reports the logical size and load_image_attachment rejects on
         // that, never reaching the read path.
         let dir = tempdir().unwrap();

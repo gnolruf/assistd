@@ -50,7 +50,7 @@ pub struct I3Backend {
 
 /// Returned by [`I3Backend::start`] alongside the backend itself. The
 /// daemon awaits [`I3Handle::shutdown`] in its graceful-shutdown block
-/// so the supervisor task drains before the process exits — matching
+/// so the supervisor task drains before the process exits, matching
 /// how other long-lived subsystems (`embedder_task_handle`,
 /// `hotkey_handle`, etc.) are awaited in `daemon.rs`.
 pub struct I3Handle {
@@ -75,7 +75,7 @@ impl I3Backend {
     /// (i3 not running, `I3SOCK` unset, non-Linux dev box, …). The
     /// daemon catches that and substitutes `NoWindowManager` so the
     /// rest of startup proceeds. After the initial connect, transient
-    /// socket failures are handled in-process by the supervisor —
+    /// socket failures are handled in-process by the supervisor;
     /// `i3-msg restart` no longer requires a daemon restart.
     pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<I3Handle> {
         let (mut cmd, events_conn) = connect_pair().await?;
@@ -114,7 +114,7 @@ impl I3Backend {
         let results =
             match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.run_command(payload)).await {
                 Err(_) => {
-                    // Wedged i3 — drop the conn so the supervisor reconnects
+                    // Wedged i3: drop the conn so the supervisor reconnects
                     // instead of holding the broken socket forever.
                     *guard = None;
                     self.reconnect.notify_one();
@@ -238,14 +238,14 @@ fn i3_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> St
 }
 
 /// Format the i3 RUN_COMMAND payload for `set_layout`. The bare
-/// `layout <name>` form acts on the focused container — the same shape
+/// `layout <name>` form acts on the focused container, the same shape
 /// `i3-msg layout …` produces.
 fn i3_layout_payload(layout: Layout) -> String {
     format!("layout {}", layout.as_str())
 }
 
 /// Walk the i3 tree recursively, emitting one [`Window`] per leaf node
-/// that has an X11 window backing (i.e. real, mapped clients — not
+/// that has an X11 window backing (i.e. real, mapped clients, not
 /// containers). Tracks the most recent `NodeType::Workspace` ancestor
 /// in `current_ws` so each window can be tagged with the workspace it
 /// lives on.
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn resize_payload_renders_id_in_decimal() {
-        // No need for escape — con_id is a decimal integer literal,
+        // No need for escape: con_id is a decimal integer literal,
         // never a free-form string.
         let p = i3_resize_payload(&id(1234567890), ResizeDir::Shrink, 5);
         assert_eq!(
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn layout_payload_emits_bare_form() {
         // i3 / sway treat `layout <name>` as acting on the focused
-        // container — no criteria prefix.
+        // container; no criteria prefix.
         for (l, expected) in [
             (Layout::Default, "layout default"),
             (Layout::Tabbed, "layout tabbed"),

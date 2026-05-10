@@ -48,7 +48,7 @@ enum StreamResponse {
     /// Serve a 200 OK chunked stream of the deltas, then drop the connection
     /// before emitting `[DONE]`.
     DropAfterDeltas(Vec<String>),
-    /// Serve a 200 OK chunked stream of the deltas, then go quiet — hold
+    /// Serve a 200 OK chunked stream of the deltas, then go quiet: hold
     /// the socket open without writing further bytes until the test drops
     /// the server. Used to exercise the per-chunk inactivity timeout in
     /// `LlamaChatClient::stream_openai`.
@@ -230,7 +230,7 @@ async fn handle_stream_response(
                 );
                 write_chunk(sock, frame.as_bytes()).await?;
             }
-            // Deliberately do not write [DONE] or a final chunk — just close.
+            // Deliberately do not write [DONE] or a final chunk; just close.
         }
         StreamResponse::StallAfterDeltas(deltas) => {
             write_sse_headers(sock).await?;
@@ -515,7 +515,7 @@ async fn conv_lock_does_not_block_during_streaming() {
     use std::time::Instant;
 
     let script = Script::new();
-    // One slow stream — large number of small frames separated by
+    // One slow stream: large number of small frames separated by
     // `[DONE]` arrival via DropAfterDeltas would only produce one
     // outgoing frame. Use the standard Deltas with many entries; the
     // fake server writes them as fast as it can but the client still
@@ -541,7 +541,7 @@ async fn conv_lock_does_not_block_during_streaming() {
     // Now: while the stream is still running, take the lock for a
     // separate operation. With the lock-scope fix, this completes in
     // milliseconds. Without it, this would block until the stream
-    // finishes — which we cap with an outer timeout.
+    // finishes, which we cap with an outer timeout.
     let started = Instant::now();
     tokio::time::timeout(
         Duration::from_secs(2),
@@ -835,7 +835,7 @@ async fn step_with_stop_finish_reason_returns_final() {
             text: "answer".into()
         }]
     );
-    // No tools were passed — request should omit the `tools` key entirely.
+    // No tools were passed; request should omit the `tools` key entirely.
     let captured = script.captured().await;
     assert_eq!(captured.len(), 1);
     assert!(
@@ -881,7 +881,7 @@ async fn step_parses_tool_call_across_argument_chunks() {
     assert_eq!(calls[0].name, "run");
     assert_eq!(calls[0].arguments["command"], "ls /tmp");
 
-    // No visible text deltas for a tool-calls-only step — Qwen3-style
+    // No visible text deltas for a tool-calls-only step; Qwen3-style
     // <think> blocks would have been emitted via `content`, but none
     // appeared in our scripted frames.
     let events = drain(&mut rx).await;
@@ -945,7 +945,7 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
     assert!(matches!(outcome2, StepOutcome::Final));
     drain(&mut rx2).await;
 
-    // Inspect the wire shape of the second request — it must carry the
+    // Inspect the wire shape of the second request: it must carry the
     // assistant tool_calls message AND the tool-result user message.
     let captured = script.captured().await;
     assert_eq!(captured.len(), 2);

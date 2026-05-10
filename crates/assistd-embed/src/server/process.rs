@@ -25,7 +25,7 @@ impl ChildProcess {
     pub fn spawn(cfg: &EmbeddingConfig) -> Result<Self, EmbedServerError> {
         // The embedding server is NOT in router mode. We pass `--hf-repo`
         // directly so the model is downloaded once and held resident for
-        // the daemon's lifetime — embedding requests should be cheap.
+        // the daemon's lifetime, so embedding requests should be cheap.
         // `--embedding` enables the `/v1/embeddings` endpoint.
         //
         // We also pass `--pooling mean` to make the endpoint match the

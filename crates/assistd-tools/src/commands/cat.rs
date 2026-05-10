@@ -3,7 +3,7 @@ use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
 
-/// `cat [FILE]...` — concatenate files, or echo stdin if no files given.
+/// `cat [FILE]...`: concatenate files, or echo stdin if no files given.
 /// Binary files are rejected so their raw bytes don't pollute the model's
 /// context window; pair with `see` (images) or `cat -b` (metadata-only)
 /// to inspect them safely.
@@ -26,7 +26,7 @@ impl Command for CatCommand {
          are rejected so their raw bytes don't pollute the model's context.\n\
          \n\
          Flags:\n  \
-           -b  print metadata (mime, size) instead of content — safe for binary files\n\
+           -b  print metadata (mime, size) instead of content (safe for binary files)\n\
          \n\
          For image files, use `see PATH` to attach them as a vision input.\n"
             .to_string()
@@ -102,7 +102,7 @@ fn partition_flags(argv: &[String]) -> (bool, Vec<String>) {
 
 /// `Some(mime)` if the bytes look binary, `None` if they're plausibly
 /// text. First asks the `infer` crate (magic-byte sniff); on unknown,
-/// falls back to a NUL-byte scan of the first 8 KB — the same heuristic
+/// falls back to a NUL-byte scan of the first 8 KB, the same heuristic
 /// GNU grep uses.
 pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
     if let Some(t) = infer::get(bytes) {
@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    // Minimal valid 1x1 PNG — `infer` recognizes this as `image/png`.
+    // Minimal valid 1x1 PNG; `infer` recognizes this as `image/png`.
     const PNG_BYTES: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,

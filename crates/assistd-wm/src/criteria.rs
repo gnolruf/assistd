@@ -16,7 +16,7 @@ pub fn escape_for_criteria(s: &str) -> String {
 
 /// Numeric workspace IDs become `workspace number N` (robust to renames);
 /// named workspaces become `workspace "<escaped name>"`. The enum
-/// variant carries the choice — no parse round-trip on every call.
+/// variant carries the choice; no parse round-trip on every call.
 pub fn format_workspace_target(ws: &WorkspaceId) -> String {
     match ws {
         WorkspaceId::Num(n) => format!("workspace number {n}"),

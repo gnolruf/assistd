@@ -58,7 +58,7 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
 
 #[tokio::test]
 async fn external_shutdown_then_handle_shutdown_completes_quickly() {
-    // Mirrors daemon.rs:748-750 — signal task flips the shared
+    // Mirrors daemon.rs:748-750: signal task flips the shared
     // shutdown_tx, then daemon awaits per-handle shutdown(). Both
     // should finish well inside the 15s shutdown() ceiling.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

@@ -21,7 +21,7 @@ pub const THUMBNAIL_ROWS: u16 = 8;
 /// block is visually distinct from prose.
 ///
 /// The Layer-2 truncation indicator is conveyed by the truncation banner
-/// already embedded in `output` — no separate flag is stored here.
+/// already embedded in `output`; no separate flag is stored here.
 #[derive(Debug, Clone)]
 pub struct ToolBlock {
     pub command: String,
@@ -34,7 +34,7 @@ pub struct ToolBlock {
 }
 
 /// Inline thumbnail rendered via `ratatui-image`. The protocol is the
-/// pre-built per-image graphics state — its lifetime is the OutputPane.
+/// pre-built per-image graphics state; its lifetime is the OutputPane.
 pub struct ThumbnailItem {
     /// Filename shown in the placeholder line if the thumbnail's row
     /// range is scrolled out of the viewport. Also used as the
@@ -87,7 +87,7 @@ impl OutputPane {
     }
 
     /// Push the user's prompt line with a trailing 📎 tag listing every
-    /// attachment that rode along with the turn — so scrollback shows
+    /// attachment that rode along with the turn, so scrollback shows
     /// which turn carried the image even after `pending_attachments` is
     /// drained.
     pub fn push_user_with_attachments(&mut self, text: &str, names: &[String]) {
@@ -104,7 +104,7 @@ impl OutputPane {
         self.dirty = true;
     }
 
-    /// Push a styled informational line — used by `/attach` to confirm
+    /// Push a styled informational line, used by `/attach` to confirm
     /// "📎 attached: name.png (image/png, 12 KB)" without polluting the
     /// error stream. Distinct from `push_user` (no `> ` prefix) and
     /// `push_error` (no `!! ` prefix or red color).
@@ -673,7 +673,7 @@ fn stderr_style() -> Style {
 /// collapsed. Tab toggles the most recent block.
 const COLLAPSE_THRESHOLD: usize = 20;
 /// Number of leading body lines to keep visible while collapsed. Stderr
-/// lines past this index are still pinned visible — see `render_tool_block`.
+/// lines past this index are still pinned visible; see `render_tool_block`.
 const COLLAPSED_HEAD_LINES: usize = 10;
 
 #[cfg(test)]

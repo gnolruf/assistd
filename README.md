@@ -34,7 +34,7 @@ The binary lands at `target/release/assistd`. Symlink it onto your
 `$PATH` or run via the absolute path; the snippets in the docs assume
 `assistd` is callable directly.
 
-You also need `llama-server` (from `llama.cpp`) on `$PATH` — the
+You also need `llama-server` (from `llama.cpp`) on `$PATH`. the
 daemon spawns it with the model identifier from your config. See the
 sample config for the exact field name.
 
@@ -44,8 +44,8 @@ sample config for the exact field name.
 # 1. Write a default config to ~/.config/assistd/config.toml.
 assistd init-config
 
-# 2. Edit the config — at minimum set [model] name to a HuggingFace
-#    GGUF id and double-check [llama_server] binary_path.
+# 2. Edit the config (at minimum set [model] name to a HuggingFace
+#    GGUF id and double-check [llama_server] binary_path.)
 $EDITOR ~/.config/assistd/config.toml
 
 # 3. Run the daemon. Cold-starts llama-server before accepting IPC.
@@ -64,8 +64,8 @@ explicitly just front-loads the cold-start cost.
 
 ## Window-manager integration
 
-The bindings that make `assistd` feel native — push-to-talk, presence
-toggling, the TUI scratchpad — live in your compositor config rather
+The bindings that make `assistd` feel native (push-to-talk, presence
+toggling, the TUI scratchpad) live in your compositor config rather
 than the daemon. Compositor-specific guides:
 
 - [i3](docs/wm/i3.md)
@@ -102,4 +102,4 @@ optional ones with sensible defaults the daemon falls back to).
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0 (see [LICENSE](LICENSE)).

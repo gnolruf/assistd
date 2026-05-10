@@ -44,7 +44,7 @@ impl WhisperTranscriber {
 
     /// Reports whether this transcriber was built against a GPU-backed
     /// whisper context. Voice orchestration uses this to decide whether
-    /// the queue-and-fallback flow is even needed — a CPU-only primary
+    /// the queue-and-fallback flow is even needed; a CPU-only primary
     /// never contends with the LLM on the same device.
     pub fn is_gpu(&self) -> bool {
         self.is_gpu

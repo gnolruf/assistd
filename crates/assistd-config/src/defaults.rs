@@ -24,7 +24,7 @@ pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local desktop assistant running on a Linux \
      workstation. You have a `run` tool that executes shell-style commands \
-     (bash, cat, ls, grep, wc, echo, write, see, web) — prefer calling `run` \
+     (bash, cat, ls, grep, wc, echo, write, see, web); prefer calling `run` \
      over guessing when a question is about this machine or its files. Pipes \
      (|), and/or (&&, ||), and sequencing (;) are supported inside a single \
      `run` call, so a one-liner like `cat log.txt | grep ERROR | wc -l` is \
@@ -34,7 +34,7 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local deskto
      editor preference, timezone, name) and call `recall` (with `prefix=\"\"` \
      to list all, or a key prefix like `\"user.\"` to filter) at the start of \
      a turn when prior preferences might help personalize the response. \
-     Memories dedup by key — re-saving the same key updates its value. \
+     Memories dedup by key; re-saving the same key updates its value. \
      Answer precisely and in a conversational tone.";
 
 pub const DEFAULT_VOICE_HOTKEY: &str = "Super+Space";
@@ -64,11 +64,11 @@ pub const DEFAULT_PIPER_SENTENCE_SILENCE_SECS: f32 = 0.2;
 pub const DEFAULT_PIPER_DEADLINE_SECS: u32 = 30;
 pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: u32 = 400;
 /// Idle gap (ms) between LLM deltas after which the sentence buffer is
-/// flushed even without a terminator. `0` disables the timeout flush —
+/// flushed even without a terminator. `0` disables the timeout flush;
 /// only the terminal `Done`-based flush is used. Inhibited while a tool
 /// call is in flight (the LLM is waiting on a tool, not stalled).
 pub const DEFAULT_PIPER_PARTIAL_FLUSH_MS: u32 = 750;
-/// Empty by default — opt-in like `DEFAULT_LISTEN_HOTKEY`. When non-empty
+/// Empty by default; opt-in like `DEFAULT_LISTEN_HOTKEY`. When non-empty
 /// and synthesis is enabled, pressing the hotkey flips TTS on/off at
 /// runtime (also silences current playback when turning off).
 pub const DEFAULT_PIPER_TOGGLE_HOTKEY: &str = "";
@@ -130,7 +130,7 @@ pub const DEFAULT_EMBEDDING_HOST: &str = "127.0.0.1";
 /// Distinct from `DEFAULT_LLAMA_PORT` (8385) and `DEFAULT_REMOTE_PORT`
 /// (8384). Validated for collisions in `Config::validate()`.
 pub const DEFAULT_EMBEDDING_PORT: u16 = 8386;
-/// CPU-only by default — small embedders are CPU-fast, and pinning them
+/// CPU-only by default: small embedders are CPU-fast, and pinning them
 /// off the GPU prevents VRAM contention with the chat model.
 pub const DEFAULT_EMBEDDING_GPU_LAYERS: u32 = 0;
 pub const DEFAULT_EMBEDDING_READY_TIMEOUT_SECS: u64 = 300;
@@ -140,7 +140,7 @@ pub const DEFAULT_EMBEDDING_CHUNK_CHARS: usize = 512;
 pub const DEFAULT_EMBEDDING_CHUNK_OVERLAP: usize = 64;
 pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 
-/// MCP (Model Context Protocol) — opt-in. Existing users on upgrade
+/// MCP (Model Context Protocol), opt-in. Existing users on upgrade
 /// haven't authored any servers; default-off keeps their startup
 /// noise-free. They flip `enabled = true` when they add their first
 /// `[[mcp.servers]]` block.

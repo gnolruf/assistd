@@ -157,7 +157,7 @@ impl SseMcpClient {
             return Err(e);
         }
 
-        // Periodic ping task — separate from the SSE stream so a server
+        // Periodic ping task, separate from the SSE stream so a server
         // that holds the SSE connection open while wedged still gets
         // detected. On ping failure, we flip the cancel watch which the
         // read loop selects on; that closes the transport and trips the
@@ -196,7 +196,7 @@ impl SseMcpClient {
         });
         let _ = self.call("initialize", params).await?;
         let bytes = notification_line("notifications/initialized", json!({}))?;
-        // Strip the trailing newline — POST bodies don't need it.
+        // Strip the trailing newline; POST bodies don't need it.
         let body = &bytes[..bytes.len().saturating_sub(1)];
         let post = self
             .post_url
@@ -558,8 +558,8 @@ async fn ping_loop(
                         debug!(target: "assistd::mcp", server = %label, "ping ok");
                     }
                     Err(McpError::RpcError { code: -32601, message, .. }) => {
-                        // Server doesn't implement `ping`. Treat as healthy
-                        // — the SSE stream itself will tell us about death.
+                        // Server doesn't implement `ping`. Treat as healthy;
+                        // the SSE stream itself will tell us about death.
                         debug!(
                             target: "assistd::mcp",
                             server = %label,

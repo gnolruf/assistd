@@ -2,15 +2,15 @@
 //!
 //! Every mutating operation is sent over `mpsc` to one task that owns the
 //! connection. SQLite serializes writes through its file lock anyway, so
-//! pretending to do them in parallel gains nothing — funneling them
+//! pretending to do them in parallel gains nothing. Funneling them
 //! through one place gives us a single tracing target, lets the dispatch
 //! loop fire-and-forget, and makes shutdown deterministic (we drain the
 //! channel before the task exits).
 //!
 //! All branches return their result through a per-op `oneshot::Sender`.
 //! Callers `await` that oneshot when they need the row id or to surface
-//! errors; the chat-turn dispatch loop does NOT await it on the hot path
-//! — it spawns a tiny logger task so DB latency never throttles token
+//! errors; the chat-turn dispatch loop does NOT await it on the hot path.
+//! It spawns a tiny logger task so DB latency never throttles token
 //! streaming.
 
 use std::sync::Arc;
@@ -86,7 +86,7 @@ pub enum WriteOp {
     },
     /// Store an embedding vector for a `conversation_chunks` row.
     /// Idempotent on `(chunk_id)` via `ON CONFLICT(conversation_chunk_id)
-    /// DO UPDATE` — the unique FK column lets a re-embed overwrite.
+    /// DO UPDATE`: the unique FK column lets a re-embed overwrite.
     StoreChunkEmbedding {
         chunk_id: i64,
         model: String,
@@ -95,7 +95,7 @@ pub enum WriteOp {
         ack: oneshot::Sender<Result<()>>,
     },
     /// Store an embedding vector for a `memories` row. Idempotent on
-    /// `(memory_id)` for the same reason as above — when a memory is
+    /// `(memory_id)` for the same reason as above: when a memory is
     /// re-saved (UPSERT keeps the row id), the embedding refreshes in
     /// place rather than accumulating duplicates.
     StoreMemoryEmbedding {
@@ -106,7 +106,7 @@ pub enum WriteOp {
         ack: oneshot::Sender<Result<()>>,
     },
     /// Drop every chunk (and cascade-drop its embedding) for one
-    /// conversation row. Currently unused — added for the future
+    /// conversation row. Currently unused; added for the future
     /// "re-chunk" workflow when a user edits or deletes a turn so the
     /// FK shape doesn't need a follow-up migration.
     DeleteChunksForConversation {
@@ -479,7 +479,7 @@ async fn save_memory(
     let now = Utc::now().to_rfc3339();
     // `RETURNING id` (SQLite >= 3.35) gives us the row id of either the
     // freshly-inserted row or the row updated via ON CONFLICT. Saves an
-    // extra `SELECT id FROM memories WHERE key = ?` round-trip — and the
+    // extra `SELECT id FROM memories WHERE key = ?` round-trip, and the
     // caller (`RememberTool`) needs the id to FK an embedding row.
     let id = conn
         .call(move |c| -> rusqlite::Result<_> {
@@ -517,8 +517,8 @@ async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String
     // `RETURNING key` (SQLite >= 3.35) gives us the deleted row's key
     // in the same round trip; `QueryReturnedNoRows` means the id
     // didn't exist. The `memory_embeddings.memory_id` FK has
-    // `ON DELETE CASCADE`, so the embedding row drops with the memory
-    // — no second statement needed.
+    // `ON DELETE CASCADE`, so the embedding row drops with the memory;
+    // no second statement needed.
     conn.call(move |c| -> rusqlite::Result<_> {
         let result = c
             .query_row(
@@ -790,7 +790,7 @@ async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Resu
             )?;
             let new_branch_id = tx.last_insert_rowid();
             // Copy every join-table row, preserving the branch-local seq.
-            // The `conversations` rows themselves are NOT duplicated — both
+            // The `conversations` rows themselves are NOT duplicated; both
             // branches reference the same row ids.
             tx.execute(
                 "INSERT INTO branch_messages (branch_id, seq, conversation_id)
@@ -880,7 +880,7 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
 
         // Drop the turns row when no surviving conversations row points
         // at it. Could happen if the user undid on a forked branch and
-        // the parent branch already preserved that turn — leave the
+        // the parent branch already preserved that turn; leave the
         // turns row in place in that case.
         let turn_still_used: i64 = tx.query_row(
             "SELECT COUNT(*) FROM conversations WHERE turn_id = ?1",

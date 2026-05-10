@@ -81,12 +81,12 @@ pub trait VoiceInput: Send + Sync + 'static {
     async fn start_recording(&self) -> Result<()>;
 
     /// Stop the capture, transcribe the buffered audio, and return the
-    /// text. Returns `Ok("")` when VAD trimmed the audio down to silence
-    /// — callers should treat empty strings as "no speech detected",
+    /// text. Returns `Ok("")` when VAD trimmed the audio down to silence;
+    /// callers should treat empty strings as "no speech detected",
     /// not as an error.
     async fn stop_and_transcribe(&self) -> Result<String>;
 
-    /// Current capture state — cheap synchronous snapshot.
+    /// Current capture state; cheap synchronous snapshot.
     fn state(&self) -> VoiceCaptureState;
 
     /// Subscribe to state transitions. The initial value is the current
@@ -104,7 +104,7 @@ pub trait VoiceInput: Send + Sync + 'static {
 #[async_trait]
 pub trait VoiceOutput: Send + Sync + 'static {
     /// Synthesize `text` and append the resulting audio to the playback
-    /// queue. Returns once the audio is enqueued — **not** once playback
+    /// queue. Returns once the audio is enqueued, **not** once playback
     /// finishes. Sequential calls produce back-to-back audio because the
     /// playback queue is FIFO. Use [`wait_idle`](Self::wait_idle) to await
     /// queue drain.
@@ -118,7 +118,7 @@ pub trait VoiceOutput: Send + Sync + 'static {
     }
 
     /// Drop pending audio (mid-utterance interrupt). Idempotent and
-    /// infallible — used by future "shut up" / barge-in handling.
+    /// infallible; used by future "shut up" / barge-in handling.
     /// Default impl is a no-op.
     async fn cancel(&self) {}
 }

@@ -1,5 +1,5 @@
 //! Live Sway integration test. `#[ignore]` so it never runs in CI or
-//! `cargo test` — opt in with:
+//! `cargo test`; opt in with:
 //!
 //! ```text
 //! cargo test -p assistd-wm --test sway_live -- --ignored --nocapture
@@ -25,7 +25,7 @@ async fn connects_and_passes_shared_assertions() {
 
     let handle = SwayBackend::start(shutdown_rx)
         .await
-        .expect("SwayBackend::start failed — is sway running and $SWAYSOCK set?");
+        .expect("SwayBackend::start failed; is sway running and $SWAYSOCK set?");
 
     let wm: Arc<dyn WindowManager> = handle.backend.clone();
 

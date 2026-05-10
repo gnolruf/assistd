@@ -6,10 +6,10 @@
 //! global `ToolRegistry` under the namespace `mcp__<server>__<tool>`.
 //!
 //! Two transports are supported via the `transport` field:
-//!   * `"stdio"` — daemon spawns a child process and speaks
+//!   * `"stdio"`: daemon spawns a child process and speaks
 //!     newline-delimited JSON-RPC over its stdin/stdout. Requires
 //!     `command` (and optional `args`/`env`).
-//!   * `"sse"` — daemon connects to a remote HTTP+SSE endpoint.
+//!   * `"sse"`: daemon connects to a remote HTTP+SSE endpoint.
 //!     Requires `url` (and optional `headers`).
 //!
 //! The transport-discriminated fields (`command`/`url`) are siblings

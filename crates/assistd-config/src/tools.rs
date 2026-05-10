@@ -71,10 +71,10 @@ fn default_tools_overflow_dir() -> String {
 
 /// Sandbox mode for bash subprocess execution.
 ///
-/// * `Auto` — use bubblewrap if `bwrap` is found on `PATH` at daemon startup;
+/// * `Auto`: use bubblewrap if `bwrap` is found on `PATH` at daemon startup;
 ///   log a warn and run unsandboxed if not.
-/// * `Bwrap` — require bubblewrap; fail daemon startup if `bwrap` is missing.
-/// * `None` — never wrap; run bash directly under the daemon's own user.
+/// * `Bwrap`: require bubblewrap; fail daemon startup if `bwrap` is missing.
+/// * `None`: never wrap; run bash directly under the daemon's own user.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BashSandboxMode {

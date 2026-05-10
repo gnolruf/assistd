@@ -143,7 +143,7 @@ pub struct AppState {
     pub voice_output: Arc<VoiceOutputController>,
     /// Re-probes `/props` at the top of each query so a model swap on
     /// the running llama-server flips the vision gate. `None` in tests
-    /// where there is no real llama-server to probe — `handle_query`
+    /// where there is no real llama-server to probe; `handle_query`
     /// then skips the revalidation step entirely.
     pub vision_revalidator: Option<Arc<crate::VisionRevalidator>>,
     /// Persistent key/value memory shared across sessions. Wired to
@@ -181,8 +181,8 @@ pub struct AppState {
     /// Bounded queue feeding the embedder task. `try_send` from the
     /// persistence hook so a wedged embedder never backpressures
     /// streaming. When the subsystem is disabled, the receiver is
-    /// dropped and `try_send` no-ops with a warn (acceptable — an
-    /// unindexed chunk can be picked up by a future backfill).
+    /// dropped and `try_send` no-ops with a warn (acceptable, since
+    /// an unindexed chunk can be picked up by a future backfill).
     pub embed_tx: mpsc::Sender<EmbedJob>,
     /// Direct handle to the SQLite store, used solely for
     /// [`SqliteHandle::store_chunk`] from the persistence hook.
@@ -201,7 +201,7 @@ pub struct AppState {
     pub window_manager: Arc<dyn WindowManager>,
     /// Serializes entire agent turns. Concurrent queries each grab this
     /// lock before running `Agent::run_turn`, so one query's tool-call /
-    /// tool-result cycle never interleaves with another's — which would
+    /// tool-result cycle never interleaves with another's, which would
     /// otherwise leave the backend's conversation state with dangling
     /// `tool_calls` messages.
     agent_turn_lock: Arc<Mutex<()>>,
@@ -297,7 +297,7 @@ impl AppState {
     pub fn with_memory(mut self, m: Arc<dyn MemoryStore>) -> Self {
         self.memory = m.clone();
         // Keep memory_ops in sync so downstream dispatch arms see the
-        // SQLite-backed store too. `MemoryOps` is just two `Arc`s — a
+        // SQLite-backed store too. `MemoryOps` is just two `Arc`s; a
         // cheap rebuild beats forcing every caller to remember to set
         // both fields.
         self.memory_ops = Arc::new(MemoryOps::new(m, self.conversations.clone()));
@@ -305,7 +305,7 @@ impl AppState {
     }
 
     /// Builder-style setter for the conversation store. Mirrors
-    /// [`Self::with_memory`] — required when wiring the SQLite backend
+    /// [`Self::with_memory`]; required when wiring the SQLite backend
     /// at daemon startup.
     pub fn with_conversations(mut self, c: Arc<dyn ConversationStore>) -> Self {
         self.conversations = c.clone();
@@ -474,7 +474,7 @@ impl AppState {
             // read loop (see `assistd-core/src/socket.rs`) and routed to
             // the active confirmation gate's pending oneshot. If we see
             // it as the *initial* request on a fresh connection there
-            // is no in-flight prompt to satisfy — surface as an error
+            // is no in-flight prompt to satisfy; surface as an error
             // so a buggy client gets a clear signal instead of timing out.
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 let _ = tx
@@ -500,7 +500,7 @@ impl AppState {
     ///
     /// The whole pipeline is on a `tokio::spawn`'d task so the dispatch
     /// loop never waits on disk or the embed queue. `try_send` (not
-    /// `send`) so a wedged embedder doesn't backpressure persistence —
+    /// `send`) so a wedged embedder doesn't backpressure persistence;
     /// dropped jobs just leave the chunk row unindexed for the next
     /// backfill pass.
     fn persist_message_fire_and_forget(&self, turn: Option<TurnId>, msg: PersistedMessage) {
@@ -543,7 +543,7 @@ impl AppState {
                     return;
                 }
             };
-            // NoConversationStore returns 0 — nothing to chunk.
+            // NoConversationStore returns 0: nothing to chunk.
             let Some(content) = content_for_chunks else {
                 return;
             };
@@ -596,7 +596,7 @@ impl AppState {
     /// Best-effort: errors propagate but the caller treats every failure
     /// (embedder down, dim mismatch, …) as "skip injection".
     async fn build_semantic_context(&self, query: &str) -> Result<Option<String>> {
-        // Skip very short queries — no useful semantic signal in 1-2
+        // Skip very short queries: no useful semantic signal in 1-2
         // chars, and the cost of a wasted embed call is non-zero.
         if query.trim().chars().count() < 3 {
             return Ok(None);
@@ -664,9 +664,9 @@ fn format_window_context_block(ctx: &assistd_wm::FocusedWindowContext) -> Option
     let title_for_line = ctx.title.as_deref();
     if class_for_line.is_some() || title_for_line.is_some() {
         match (class_for_line, title_for_line) {
-            (Some(c), Some(t)) => block.push_str(&format!("- Focused window: {c} — {t}\n")),
+            (Some(c), Some(t)) => block.push_str(&format!("- Focused window: {c} - {t}\n")),
             (Some(c), None) => block.push_str(&format!("- Focused window: {c}\n")),
-            (None, Some(t)) => block.push_str(&format!("- Focused window: (unknown) — {t}\n")),
+            (None, Some(t)) => block.push_str(&format!("- Focused window: (unknown) - {t}\n")),
             (None, None) => unreachable!(),
         }
     }
@@ -715,7 +715,7 @@ impl AppState {
     ) -> Result<()> {
         let model = self.embedder.model().to_string();
         if model.is_empty() {
-            // Embedding subsystem disabled — emit Done with no hits so
+            // Embedding subsystem disabled: emit Done with no hits so
             // the CLI sees a clean empty stream, not an error.
             let _ = tx.send(Event::Done { id }).await;
             return Ok(());
@@ -776,7 +776,7 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
         match self.memory_ops.save(&key, value).await {
-            // The IPC `MemorySave` handler doesn't surface the row id —
+            // The IPC `MemorySave` handler doesn't surface the row id;
             // its only callers are the `assistd memory save` CLI which
             // just wants confirmation. Discard the id; the LLM tool
             // (`RememberTool`) is the one that consumes it directly.
@@ -956,7 +956,7 @@ impl AppState {
     /// `ReindexProgress` events as items complete; finishes with `Done`
     /// (or `Error` if no embedder is configured). Per-item failures
     /// during embed/write are logged and counted as still-done so a
-    /// single bad row doesn't wedge the whole run — same log-and-drop
+    /// single bad row doesn't wedge the whole run; same log-and-drop
     /// posture as the background embedder task.
     async fn handle_memory_reindex(
         self: Arc<Self>,
@@ -1004,7 +1004,7 @@ impl AppState {
 
         // Always emit a kickoff progress for each kind so a client that
         // only sees `(0, 0)` still learns the totals before receiving
-        // `Done` — useful when the run has nothing to do.
+        // `Done`; useful when the run has nothing to do.
         let _ = tx
             .send(Event::ReindexProgress {
                 id: id.clone(),
@@ -1118,14 +1118,14 @@ impl AppState {
         // (e.g. a fresh `/models/load`) flips the vision gate before
         // either this turn's image attachments OR the agent's
         // see/screenshot tool calls run against a stale capability.
-        // Always called — the probe is a single local HTTP GET with a
+        // Always called: the probe is a single local HTTP GET with a
         // 2s timeout, and only mutates the gate on actual change.
         if let Some(rev) = self.vision_revalidator.as_ref() {
             rev.revalidate().await;
         }
         // Decode wire attachments into internal Attachment values up
         // front so a malformed base64 payload fails before we wake the
-        // model — saves the user the GPU round-trip on a bad request.
+        // model; saves the user the GPU round-trip on a bad request.
         let attachments: Vec<Attachment> = match decode_wire_attachments(&wire_attachments) {
             Ok(v) => v,
             Err(e) => {
@@ -1141,7 +1141,7 @@ impl AppState {
         // Auto-wake and take an in-flight guard: a query in any
         // non-Active state blocks here until the daemon is ready to
         // serve. The returned guard keeps the daemon `Active` for the
-        // lifetime of the generation — a concurrent `sleep()` will
+        // lifetime of the generation; a concurrent `sleep()` will
         // wait until this guard (and the generator that follows) has
         // finished. Failures surface to the client as an Error event
         // so the client doesn't hang.
@@ -1159,13 +1159,13 @@ impl AppState {
         };
         // Separately mark the LLM as streaming so voice transcription
         // can detect GPU contention and queue/fall back to CPU. This is
-        // a no-block counter — sleep/drowse still block on
+        // a no-block counter; sleep/drowse still block on
         // `_request_guard` via the inflight RwLock.
         let _stream_guard = self.presence.acquire_stream_guard();
 
         // Serialize agent turns. Concurrent queries each wait here so
         // one turn's assistant/tool_calls/tool_result triplet lands in
-        // conversation state atomically — otherwise a second query
+        // conversation state atomically; otherwise a second query
         // could push its own user message between this turn's steps.
         let _agent_guard = self.agent_turn_lock.clone().lock_owned().await;
 
@@ -1174,7 +1174,7 @@ impl AppState {
         // backend is `NoConversationStore` and we silently skip
         // persistence for the rest of the turn. We await the oneshot
         // here because every following persistence call needs the
-        // resulting `TurnId` — but it's a single channel hop, not a
+        // resulting `TurnId`, but it's a single channel hop, not a
         // disk write of the streaming response.
         let (current_session, _current_branch) = self.conversation_ctx.current().await;
         let turn_id: Option<TurnId> =
@@ -1193,7 +1193,7 @@ impl AppState {
                 }
             };
         // Mirror the user's prompt into the conversations table on the
-        // way to the LLM — fire-and-forget so the dispatch loop below
+        // way to the LLM; fire-and-forget so the dispatch loop below
         // never waits on disk.
         self.persist_message_fire_and_forget(turn_id, PersistedMessage::user(text.clone()));
 
@@ -1201,9 +1201,9 @@ impl AppState {
         // sources, composed at the call site because the conversation's
         // transient slot is a single `Option<String>` (a second
         // `set_transient_context` call would clobber the first):
-        //   1. Semantic recall — top-K conversation chunks (gated on
+        //   1. Semantic recall: top-K conversation chunks (gated on
         //      embedding config, like before).
-        //   2. Window context — focused class/title/workspace from the
+        //   2. Window context: focused class/title/workspace from the
         //      WM event task. Always-on; degrades to None when no
         //      compositor is connected. Carries a terminal-bias hint
         //      when the focused class is a known terminal emulator.
@@ -1244,7 +1244,7 @@ impl AppState {
             ));
         // Cancellation token: wired to the agent loop so a slow LLM
         // step or tool dispatch can be preempted promptly. Today we
-        // only fire it when this function returns (drop) — that
+        // only fire it when this function returns (drop); that
         // unblocks the agent task if the dispatch loop below bailed
         // mid-stream. Future MCP work will also fire it on explicit
         // shutdown signals.
@@ -1271,7 +1271,7 @@ impl AppState {
         // the worker keeps Piper's stdout pipeline ahead of the audio
         // queue and there's no audible gap between utterances.
         //
-        // Buffer = 32 ≈ 2 minutes of queued speech — absorbs Piper
+        // Buffer = 32 ≈ 2 minutes of queued speech; absorbs Piper
         // hiccups without backpressuring the IPC client wire forward.
         let synthesis = &self.config.voice.synthesis;
         let max_sentence_chars = synthesis.max_sentence_chars as usize;
@@ -1291,14 +1291,14 @@ impl AppState {
                 while let Some(sentence) = speech_rx.recv().await {
                     match ctrl.should_speak(start_epoch) {
                         SpeakDecision::Speak => {
-                            // Truncate the snippet for logging — a long
+                            // Truncate the snippet for logging; a long
                             // sentence in the log line clutters the journal.
                             let preview: String = sentence.chars().take(60).collect();
                             if let Err(e) = ctrl.inner().speak(sentence).await {
                                 // `warn` (not `debug`) so a one-off synth
                                 // failure surfaces in the journal even
                                 // before the 3-in-60s breaker trips. The
-                                // turn continues — playback failures are
+                                // turn continues; playback failures are
                                 // never fatal to the LLM stream.
                                 tracing::warn!(
                                     target: "assistd::voice",
@@ -1309,7 +1309,7 @@ impl AppState {
                             }
                         }
                         SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {
-                            // TTS toggled off, or skipped — drain the channel
+                            // TTS toggled off, or skipped: drain the channel
                             // without speaking. We still loop so the LLM can
                             // keep streaming through the bounded mpsc.
                         }
@@ -1329,7 +1329,7 @@ impl AppState {
             .in_current_span(),
         );
 
-        // Tool calls inhibit the idle-flush — the LLM is *waiting on a
+        // Tool calls inhibit the idle-flush: the LLM is *waiting on a
         // tool*, not stalled mid-prose. Without this, a long-running
         // bash command would trigger spurious mid-sentence flushes.
         let mut awaiting_tool_result = false;
@@ -1377,7 +1377,7 @@ impl AppState {
             let (wire_event, sentences_to_speak): (Event, Vec<String>) = match llm_event {
                 LlmEvent::Delta { text } => {
                     let sentences = sentence_buf.push(&text);
-                    // Persistence tee — accumulate the assistant's
+                    // Persistence tee: accumulate the assistant's
                     // full reply for one row at Done.
                     assistant_accum.push_str(&text);
                     (
@@ -1495,7 +1495,7 @@ impl AppState {
                 client_alive = false;
             }
 
-            // Channel send failure means the worker died — log and continue
+            // Channel send failure means the worker died; log and continue
             // so remaining wire events are still forwarded.
             for s in sentences_to_speak {
                 if !first_sentence_emitted {
@@ -1524,10 +1524,10 @@ impl AppState {
         }
 
         // Dropping speech_tx signals the worker to drain its queue and
-        // call wait_idle() before exiting — playback finishes naturally.
+        // call wait_idle() before exiting; playback finishes naturally.
         drop(speech_tx);
 
-        // The agent_turn_lock can be released as soon as the turn ends —
+        // The agent_turn_lock can be released as soon as the turn ends;
         // concurrent queries shouldn't wait for audio playback to finish.
         let gen_result = generator.await;
         drop(_agent_guard);
@@ -1642,13 +1642,13 @@ impl AppState {
     }
 
     /// Begin a push-to-talk recording. Returns immediately on success
-    /// so the CLI client exits cleanly — the daemon holds the capture
+    /// so the CLI client exits cleanly; the daemon holds the capture
     /// session open until a matching `PttStop` arrives on a separate
     /// connection. Rejects when continuous listening currently owns
     /// the mic; the two modes can't share one cpal stream.
     async fn handle_ptt_start(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
         // Barge-in: stop any in-flight TTS playback before opening the
-        // mic. Fire unconditionally — even if recording is rejected
+        // mic. Fire unconditionally; even if recording is rejected
         // below, the user signaled "shut up", which we should honor.
         self.voice_output.interrupt().await;
         if self.listener.is_active() {
@@ -1692,7 +1692,7 @@ impl AppState {
     }
 
     /// Enable continuous listening. Rejects if PTT currently holds the
-    /// mic — the two modes are mutually exclusive because cpal cannot
+    /// mic; the two modes are mutually exclusive because cpal cannot
     /// share one input stream.
     async fn handle_listen_start(
         self: Arc<Self>,
@@ -1845,7 +1845,7 @@ impl AppState {
     }
 
     /// Probe the running llama-server's capabilities and surface the
-    /// model name in one shot — lets clients render `vision: on/off`
+    /// model name in one shot, letting clients render `vision: on/off`
     /// without reaching into the HTTP API directly. Re-probes per
     /// request because a model swap on a long-lived daemon can flip
     /// the vision flag between calls.
@@ -1881,7 +1881,7 @@ impl AppState {
         Ok(())
     }
 
-    /// `/fork <name>` — snapshot the current branch into a new branch
+    /// `/fork <name>`: snapshot the current branch into a new branch
     /// and switch to it. The shared agent_turn_lock + a drain of
     /// `persistence_tracker` guarantees no in-flight turn races the
     /// snapshot. The new branch shares conversation rows with its
@@ -1902,7 +1902,7 @@ impl AppState {
                 .await;
             return Ok(());
         }
-        // Lock first, then drain — order matters: holding the lock
+        // Lock first, then drain; order matters: holding the lock
         // prevents new persistence tasks from being spawned, then we
         // wait for already-spawned ones to finish.
         let _agent_guard = self.agent_turn_lock.clone().lock_owned().await;
@@ -1954,7 +1954,7 @@ impl AppState {
         Ok(())
     }
 
-    /// `/branches` — enumerate every branch across every session, with
+    /// `/branches`: enumerate every branch across every session, with
     /// the active session's branches surfaced first.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     async fn handle_branches(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
@@ -2005,7 +2005,7 @@ impl AppState {
         Ok(())
     }
 
-    /// `/switch <target>` — drain in-flight writes, swap the active
+    /// `/switch <target>`: drain in-flight writes, swap the active
     /// (session, branch) pointer, replay the target branch's history
     /// into the LLM backend, and stream the loaded turns back to the
     /// client so the TUI can repaint the chat pane.
@@ -2126,7 +2126,7 @@ impl AppState {
         Ok(())
     }
 
-    /// `/undo` — drop the latest user prompt and the entire assistant
+    /// `/undo`: drop the latest user prompt and the entire assistant
     /// reply that followed it from the current branch. Both DB and
     /// in-memory state are updated atomically with the agent_turn_lock
     /// held.
@@ -2150,7 +2150,7 @@ impl AppState {
         if outcome.removed_messages > 0 {
             // Mirror the deletion in the in-memory conversation. We
             // call `truncate_to_last_real_user` rather than recompute
-            // from the DB because the DB is now authoritative — the
+            // from the DB because the DB is now authoritative; the
             // backend's job is just to align.
             if let Err(e) = self.llm.truncate_to_last_real_user().await {
                 tracing::warn!(
@@ -2177,7 +2177,7 @@ impl AppState {
     async fn drain_persistence_inflight(&self) {
         // `TaskTracker::wait()` on a *closed* tracker is permanent; we
         // don't want to close it. Instead we just wait briefly via a
-        // probe — there's no public "wait for current tasks" API on
+        // probe; there's no public "wait for current tasks" API on
         // the tracker. As a workaround, sample with a fixed budget:
         // most persistence tasks finish in microseconds (one DB hop).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -2221,8 +2221,8 @@ impl AppState {
         (None, None, None)
     }
 
-    /// End the push-to-talk recording, transcribe, and — if the
-    /// transcription has content — dispatch it internally as a Query
+    /// End the push-to-talk recording, transcribe, and (if the
+    /// transcription has content) dispatch it internally as a Query
     /// so the streaming LLM response flows back on the same
     /// connection before the terminal `Done`.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
@@ -2241,7 +2241,7 @@ impl AppState {
 
         // The warmup was spawned at PTT-start; joining it concurrently with
         // Whisper means a Drowsy → Active model load runs during transcription
-        // rather than serially after it. A failed warmup is non-fatal — the
+        // rather than serially after it. A failed warmup is non-fatal; the
         // request guard in `handle_query` will retry the wake.
         let warmup = self.warmup_handle.lock().await.take();
         let (text_res, warm_res) = tokio::join!(self.voice.stop_and_transcribe(), async {
@@ -2295,7 +2295,7 @@ impl AppState {
             .await;
 
         if text.trim().is_empty() {
-            // VAD trimmed to silence — don't dispatch an empty user message.
+            // VAD trimmed to silence; don't dispatch an empty user message.
             let _ = tx.send(Event::Done { id }).await;
             return Ok(());
         }
@@ -2449,7 +2449,7 @@ mod tests {
             Event::Presence { id, state: PresenceState::Drowsy } if id == "g1"
         ));
         assert!(matches!(&events[1], Event::Done { id } if id == "g1"));
-        // State must be unchanged — GetPresence is a read-only snapshot.
+        // State must be unchanged: GetPresence is a read-only snapshot.
         assert_eq!(state.presence.state(), PresenceState::Drowsy);
     }
 
@@ -2783,7 +2783,7 @@ mod tests {
             .unwrap();
         let events = collect_events(rx).await;
 
-        // No Delta event should appear — the query is skipped.
+        // No Delta event should appear: the query is skipped.
         assert!(
             !events.iter().any(|e| matches!(e, Event::Delta { .. })),
             "expected no Delta on empty transcription: {events:?}"
@@ -3080,7 +3080,7 @@ mod tests {
         // EchoBackend emits the input as a single Delta. SentenceBuffer
         // pushes that into 4 sentences (3 from push, 1 from finish).
         // The new per-query speech worker MUST consume them in arrival
-        // order — the previous fire-and-forget tokio::spawn pattern
+        // order; the previous fire-and-forget tokio::spawn pattern
         // could scramble them based on synthesis time.
         let recorder = MockSpeechRecorder::new();
         let state = state_with_speech_recorder(
@@ -3231,7 +3231,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_query_partial_flush_zero_disables() {
-        // Same backend, same stall — but partial_flush_ms = 0 means no
+        // Same backend, same stall, but partial_flush_ms = 0 means no
         // idle flush. Only the completed sentence and the final tail
         // are spoken.
         let recorder = MockSpeechRecorder::new();
@@ -3375,7 +3375,7 @@ mod tests {
     async fn dispatch_query_tool_call_inhibits_idle_flush() {
         // Stream: Delta("Half a ") → ToolCall(sleep 300ms) →
         //          ToolResult → Delta("done.") → Done.
-        // partial_flush_ms = 50 — would fire 6+ times during the
+        // partial_flush_ms = 50 would fire 6+ times during the
         // 300ms tool dispatch if not inhibited. With proper
         // `awaiting_tool_result` tracking, only the final tail is
         // spoken: "Half a done."
@@ -3423,7 +3423,7 @@ mod tests {
         let calls = recorder.calls();
         assert!(
             !calls.iter().any(|c| c == "Half a"),
-            "idle flush fired during tool dispatch — inhibition broken: {calls:?}"
+            "idle flush fired during tool dispatch; inhibition broken: {calls:?}"
         );
         assert_eq!(
             calls,
@@ -3435,7 +3435,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_query_speech_worker_drains_before_return() {
         // The worker's wait_idle() must be awaited before handle_query
-        // returns — otherwise daemon shutdown could cut off audio.
+        // returns; otherwise daemon shutdown could cut off audio.
         let recorder = MockSpeechRecorder::new();
         let state = state_with_speech_recorder(
             Arc::new(EchoBackend::new()),
@@ -3484,7 +3484,7 @@ mod tests {
         ))
         .expect("Some block expected for non-empty ctx");
         assert!(block.starts_with("Current desktop context:\n"));
-        assert!(block.contains("- Focused window: Alacritty — nvim ~ src/main.rs\n"));
+        assert!(block.contains("- Focused window: Alacritty - nvim ~ src/main.rs\n"));
         assert!(block.contains("- Workspace: 2\n"));
         assert!(block.contains("interacting with a terminal window."));
         // AC#3: hint references the actual `run` sub-command names.
@@ -3507,10 +3507,10 @@ mod tests {
 
     #[test]
     fn format_window_context_block_omits_missing_fields() {
-        // Class only — no title bar, no workspace line.
+        // Class only: no title bar, no workspace line.
         let block = format_window_context_block(&ctx(Some("Alacritty"), None, None)).expect("Some");
         assert!(block.contains("- Focused window: Alacritty\n"));
-        assert!(!block.contains(" — "));
+        assert!(!block.contains(" - "));
         assert!(!block.contains("- Workspace:"));
     }
 

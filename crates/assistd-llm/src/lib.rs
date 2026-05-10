@@ -100,7 +100,7 @@ pub trait LlmHealthProbe: Send + Sync {
 /// - [`Self::Chat`] wraps a real chat-client failure (HTTP, SSE parse,
 ///   timeout, JSON error). Source chain preserved through `#[from]`.
 /// - [`Self::ToolCallParse`] is a structural failure inside the
-///   backend when finalising a streamed tool call — the model emitted
+///   backend when finalising a streamed tool call: the model emitted
 ///   something we can't reassemble. Surfaced to the agent loop so it
 ///   can report a synthetic error and self-correct on the next step.
 /// - [`Self::Unavailable`] is the `FailedBackend` shape: the daemon
@@ -121,7 +121,7 @@ pub enum LlmError {
     /// The llama-server child crashed mid-request and the chat client
     /// detected the supervisor is restarting it. The agent loop sees
     /// this and handles replay (emit a Status event, wait for ready,
-    /// retry once) — it never reaches the IPC layer as an error.
+    /// retry once); it never reaches the IPC layer as an error.
     #[error("llama-server is restarting: {0}")]
     ServerRestarting(String),
 }
@@ -219,7 +219,7 @@ pub enum HistoryRole {
 
 /// One persisted message reconstructed for replay into a backend's
 /// in-memory conversation (used by branch /switch and daemon-startup
-/// resume). `tool_calls_json` is verbatim JSON straight from the DB —
+/// resume). `tool_calls_json` is verbatim JSON straight from the DB;
 /// the concrete backend parses it back into its native shape so the
 /// trait stays free of `ToolCallRecord` references.
 #[derive(Debug, Clone)]

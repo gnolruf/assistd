@@ -13,8 +13,8 @@
 //!   4. Length safety net at `max_len` chars (last whitespace before)
 //!
 //! Two flush modes are exposed alongside the streaming `push`:
-//!   - [`SentenceBuffer::finish`] — terminal flush on `LlmEvent::Done`.
-//!   - [`SentenceBuffer::flush_idle`] — mid-stream "the LLM has paused"
+//!   - [`SentenceBuffer::finish`]: terminal flush on `LlmEvent::Done`.
+//!   - [`SentenceBuffer::flush_idle`]: mid-stream "the LLM has paused"
 //!     flush, called on an idle timeout. Preserves fence/lang state so
 //!     the stream can resume cleanly.
 
@@ -23,7 +23,7 @@ use std::collections::VecDeque;
 pub use assistd_config::CodeBlockMode;
 
 /// Cap on captured fence-opener language tags. Defends against
-/// pathological input — a real lang is at most a few chars.
+/// pathological input; a real lang is at most a few chars.
 const MAX_LANG_LEN: usize = 32;
 
 /// Hard ceiling on `buf` size as a multiplier of `max_len`. The
@@ -58,7 +58,7 @@ pub struct SentenceBuffer {
 }
 
 impl SentenceBuffer {
-    /// Construct with the default [`CodeBlockMode::Skip`] — drop fenced
+    /// Construct with the default [`CodeBlockMode::Skip`], dropping fenced
     /// content silently. Equivalent to
     /// `new_with_mode(max_len, CodeBlockMode::Skip)`.
     pub fn new(max_len: usize) -> Self {
@@ -99,7 +99,7 @@ impl SentenceBuffer {
     /// If `buf` has crossed `HARD_CEILING_MULTIPLIER * max_len` without
     /// finding a natural boundary, drain it as one synthetic sentence
     /// and reset. Returns `None` when within budget. Logs at `warn` so
-    /// an operator can see when the safety net fires — it shouldn't,
+    /// an operator can see when the safety net fires; it shouldn't,
     /// but observability beats a silent buffer reset.
     fn force_flush_if_oversize(&mut self) -> Option<String> {
         let ceiling = self.max_len.saturating_mul(HARD_CEILING_MULTIPLIER);
@@ -122,7 +122,7 @@ impl SentenceBuffer {
     }
 
     /// Flush any remaining text on `LlmEvent::Done`. Returns at most
-    /// one final sentence — the leftover tail. Drops a dangling
+    /// one final sentence: the leftover tail. Drops a dangling
     /// unterminated code fence silently. The tail goes through the
     /// same postprocess pipeline as sentences emitted from `push`,
     /// so markdown / URLs / emphasis are stripped consistently.
@@ -149,14 +149,14 @@ impl SentenceBuffer {
     /// content up to the last whitespace boundary, leaving any
     /// trailing partial word in the buffer so it isn't double-spoken
     /// when the stream resumes. Preserves `pending`, `in_code_fence`,
-    /// `capturing_lang`, and `lang_buf` — call this freely without
+    /// `capturing_lang`, and `lang_buf`, so call this freely without
     /// disturbing in-flight fence detection.
     ///
     /// Returns `None` when:
     ///   - we're inside a code fence (stay quiet, the fence is the
     ///     authoritative boundary),
     ///   - the buffer has no whitespace to cut on (i.e. it's a single
-    ///     partial word — wait for more input),
+    ///     partial word; wait for more input),
     ///   - the cut prefix postprocesses to an empty string.
     pub fn flush_idle(&mut self) -> Option<String> {
         if self.in_code_fence {
@@ -187,7 +187,7 @@ impl SentenceBuffer {
                 self.pending.truncate(self.pending.len() - 3);
                 if opening {
                     // Treat the fence opener as a paragraph break so
-                    // anything in `buf` is flushed first — preserves
+                    // anything in `buf` is flushed first; preserves
                     // ordering between the prelude and any synthetic
                     // "Code block ..." phrase emitted on close.
                     self.flush_buf_to_out(out);
@@ -224,7 +224,7 @@ impl SentenceBuffer {
                 {
                     self.lang_buf.push(ch);
                 } else {
-                    // Reject this char (e.g. punctuation or oversize) —
+                    // Reject this char (e.g. punctuation or oversize);
                     // stop capturing but keep what we have.
                     self.capturing_lang = false;
                 }
@@ -291,7 +291,7 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
 
     // 2. Bullet markers (treat as paragraph-equivalent boundary). We
     //    flush *up to* the marker, leaving the marker as the start of
-    //    the next sentence — but we want to drop the marker from
+    //    the next sentence, but we want to drop the marker from
     //    speech, so include the leading "\n" + 1 marker char + space.
     if let Some(i) = find_bullet_marker(buf) {
         return Some(i);
@@ -412,7 +412,7 @@ fn is_abbreviation_at(buf: &str, i: usize) -> bool {
 }
 
 /// Strip markdown decorations from a chunk that's about to be spoken.
-/// Inline transformations only — no boundary detection.
+/// Inline transformations only; no boundary detection.
 fn postprocess_for_speech(s: &str) -> String {
     let s = strip_links(s);
     let s = strip_emphasis(&s);
@@ -455,7 +455,7 @@ fn strip_links(s: &str) -> String {
                     out.push_str(&text);
                     continue;
                 } else {
-                    // Malformed — emit literally.
+                    // Malformed; emit literally.
                     out.push('[');
                     out.push_str(&text);
                     out.push_str("](");
@@ -503,7 +503,7 @@ fn replace_urls(s: &str) -> String {
         // `i` is always at a UTF-8 char boundary on entry: 0 on the
         // first iteration, advanced by `ch.len_utf8()` in the default
         // branch, or set to `j` in the URL branch (which only stops on
-        // ASCII whitespace — guaranteed to land on a char boundary
+        // ASCII whitespace, guaranteed to land on a char boundary
         // because continuation bytes have the high bit set and so
         // can't compare equal to an ASCII whitespace byte).
         let scheme = if s[i..].starts_with("https://") {
@@ -517,7 +517,7 @@ fn replace_urls(s: &str) -> String {
             // Word-boundary check: must be at start or preceded by a
             // non-alphanumeric ASCII byte. Multi-byte UTF-8 lead bytes
             // (≥ 0xC0) report `is_ascii_alphanumeric() == false`, which
-            // is the behaviour we want — a Unicode letter shouldn't
+            // is the behaviour we want; a Unicode letter shouldn't
             // glue onto an English-only `https://` either way.
             let prev_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
             if prev_ok {
@@ -805,7 +805,7 @@ mod tests {
         // ". x" with lowercase: should NOT split (no uppercase/digit/EOF/newline).
         let s = b.push("End. then continue.");
         // The 'then' is lowercase, so the first '.' shouldn't split.
-        // The last '.' is at EOF before finish — but `push` doesn't see
+        // The last '.' is at EOF before finish, but `push` doesn't see
         // EOF, so no split happens. After finish: full buffer.
         assert!(s.is_empty(), "should not split on lowercase succ: {s:?}");
         let tail = b.finish().unwrap_or_default();
@@ -847,7 +847,7 @@ mod tests {
     fn flush_idle_returns_none_in_code_fence() {
         let mut b = SentenceBuffer::new(400);
         let _ = b.push("```rust\nfn main");
-        // Inside a fence — stay quiet, don't flush partial code.
+        // Inside a fence; stay quiet, don't flush partial code.
         assert!(b.flush_idle().is_none());
     }
 
@@ -866,7 +866,7 @@ mod tests {
         // First idle flush takes "Hello world".
         let first = b.flush_idle();
         assert_eq!(first.as_deref(), Some("Hello world"));
-        // Buffer empty now — nothing more to flush.
+        // Buffer empty now; nothing more to flush.
         assert!(b.flush_idle().is_none());
         // Stream resumes; subsequent push completes a sentence.
         let s = b.push("again. End.");

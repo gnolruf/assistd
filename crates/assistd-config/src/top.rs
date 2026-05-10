@@ -143,7 +143,7 @@ impl Config {
         }
 
         if self.voice.enabled {
-            // hotkey may be empty — the user might prefer the IPC-only
+            // hotkey may be empty; the user might prefer the IPC-only
             // PTT pathway (i3 bindsym → `assistd ptt-start/stop`).
             if self.voice.max_recording_secs == 0 {
                 errors.push(
@@ -219,7 +219,7 @@ impl Config {
             }
         }
 
-        // Synthesis (Piper TTS) is gated independently of voice.enabled —
+        // Synthesis (Piper TTS) is gated independently of voice.enabled:
         // a user might want LLM responses spoken aloud even with no
         // microphone available.
         if self.voice.synthesis.enabled {

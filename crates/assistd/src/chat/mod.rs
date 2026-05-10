@@ -7,7 +7,7 @@
 //! `Event`s back from the daemon over IPC.
 //!
 //! No LLM service, voice pipeline, presence manager, tool registry,
-//! or memory store is constructed in this process — all of that lives
+//! or memory store is constructed in this process: all of that lives
 //! in the daemon. The TUI only owns: ratatui rendering, key handling,
 //! the local hotkey grab (PTT keystrokes need to arrive at the
 //! foreground process), VRAM/throughput probes, and attachment

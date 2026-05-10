@@ -9,7 +9,7 @@
 //! command registry.
 //!
 //! The flag is a plain `AtomicBool`. Revalidation is the daemon's
-//! concern — this crate intentionally does not depend on `assistd-llm`
+//! concern; this crate intentionally does not depend on `assistd-llm`
 //! or do any HTTP itself.
 
 use std::sync::Arc;

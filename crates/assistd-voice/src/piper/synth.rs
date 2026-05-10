@@ -8,7 +8,7 @@
 //! detect utterance boundaries via stderr-log markers, which is
 //! version-fragile and races against the kernel pipe between FDs.
 //! Per-utterance trades 50–250 ms of CPU model-load latency for a
-//! deterministic protocol — that latency overlaps with LLM generation
+//! deterministic protocol; that latency overlaps with LLM generation
 //! of the next sentence, so users don't see it.
 
 use std::collections::VecDeque;
@@ -98,7 +98,7 @@ impl OneShotSynth {
         //
         // Everything (child + stdout + stderr) is `move`d into the
         // inner future. On timeout the future is dropped, which drops
-        // `child` — and `kill_on_drop(true)` ensures the OS process
+        // `child`, and `kill_on_drop(true)` ensures the OS process
         // dies. The drain tasks live for the duration of the future
         // via `tokio::join!`, so they're cancelled together.
         let deadline = cfg.deadline;

@@ -2,10 +2,10 @@
 //!
 //! Covers all four layers in the order they fire (per
 //! `crates/assistd-tools/src/commands/bash.rs`):
-//!   1. Denylist — literal substring match, gates skipped, exit 126.
-//!   2. Destructive patterns — shlex-tokenized prefix match, gate consulted.
-//!   3. Bwrap sandbox — process group + filesystem mount restrictions.
-//!   4. Timeout — covered in-crate; not duplicated here.
+//!   1. Denylist: literal substring match, gates skipped, exit 126.
+//!   2. Destructive patterns: shlex-tokenized prefix match, gate consulted.
+//!   3. Bwrap sandbox: process group + filesystem mount restrictions.
+//!   4. Timeout: covered in-crate; not duplicated here.
 //!
 //! Bwrap-dependent tests skip when `bwrap` is not on PATH (mirrors the
 //! `piper_missing_binary.rs` skip pattern); they pass silently rather
@@ -167,7 +167,7 @@ async fn destructive_pattern_after_double_amp_is_blocked_when_gate_denies() {
 async fn destructive_pattern_after_semicolon_is_blocked() {
     // Note: shlex tokenizes `hi;` as one word, so the separator must
     // be space-padded for the matcher to anchor. The glued form
-    // (`hi;rm`) is a documented limitation of the syntactic backstop —
+    // (`hi;rm`) is a documented limitation of the syntactic backstop;
     // see `command_substitution_evades_destructive_pattern` for the
     // analogous `$()` case.
     let cmd = bash_with(
@@ -260,7 +260,7 @@ async fn destructive_pattern_runs_when_gate_approves() {
 
 #[tokio::test]
 async fn quoted_literal_does_not_trigger_destructive_pattern() {
-    // `echo "rm -rf /"` tokenizes to ["echo", "rm -rf /"] — the second
+    // `echo "rm -rf /"` tokenizes to ["echo", "rm -rf /"]; the second
     // token is a single quoted string, so the prefix ["rm", "-rf"]
     // shouldn't anchor and the gate must not be invoked.
     struct PanicGate;
@@ -391,8 +391,8 @@ async fn bwrap_unshares_pid_namespace() {
     };
     // --unshare-pid creates a new PID namespace where bwrap itself runs
     // as PID 1; bash (its child) is PID 2. The actual value depends on
-    // the bwrap version but the host PID would be in the thousands+ —
-    // any single-digit value demonstrates the namespace was created.
+    // the bwrap version but the host PID would be in the thousands+,
+    // so any single-digit value demonstrates the namespace was created.
     let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd.run(input("echo $$")).await.unwrap();
     assert_eq!(out.exit_code, 0);

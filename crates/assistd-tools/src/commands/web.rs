@@ -1,4 +1,4 @@
-//! `web URL` — HTTP GET, return response body as stdout. http(s) only,
+//! `web URL`: HTTP GET, return response body as stdout. http(s) only,
 //! 30s default timeout, 10 MiB body cap. Non-2xx statuses exit 1 so
 //! `||` fallbacks fire; transport errors also exit 1.
 
@@ -14,7 +14,7 @@ use crate::command::{Command, CommandInput, CommandOutput, error_line};
 /// stage either.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
 
-/// `web URL` — HTTP GET a URL and return the response body as stdout.
+/// `web URL`: HTTP GET a URL and return the response body as stdout.
 pub struct WebCommand {
     client: reqwest::Client,
 }

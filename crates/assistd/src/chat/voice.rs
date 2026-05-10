@@ -1,6 +1,6 @@
 //! Chat-TUI voice glue, daemon-window edition.
 //!
-//! The TUI no longer owns a `MicVoiceInput` — the daemon does. We
+//! The TUI no longer owns a `MicVoiceInput`; the daemon does. We
 //! still spawn the global hotkey listener locally because PTT
 //! keystrokes need to arrive at the foreground process. The
 //! press/release callbacks dispatch `Request::PttStart` and
@@ -25,7 +25,7 @@ use crate::hotkey;
 
 /// Handles owned by the voice glue. Held by the caller for the
 /// lifetime of the TUI session so the hotkey listener doesn't drop
-/// its `Arc` references mid-run. Voice itself runs in the daemon —
+/// its `Arc` references mid-run. Voice itself runs in the daemon;
 /// this struct exists only to keep the local hotkey thread alive.
 #[allow(dead_code)]
 pub struct VoicePipeline {
@@ -35,7 +35,7 @@ pub struct VoicePipeline {
 /// Build the chat-TUI voice pipeline.
 ///
 /// - When `voice.enabled = false`, returns a placeholder with no
-///   hotkey bound — the daemon's voice IPC remains reachable for
+///   hotkey bound; the daemon's voice IPC remains reachable for
 ///   anything that wants to drive PTT manually (`assistd ptt-start`).
 /// - Otherwise spawns `crate::hotkey::spawn_listener` against an
 ///   IPC-shimmed [`assistd_voice::VoiceInput`] proxy whose
@@ -80,7 +80,7 @@ pub async fn spawn(
 /// `VoiceInput` adapter that forwards calls to the daemon's IPC
 /// surface. `start_recording` does a one-shot `PttStart`. The hotkey
 /// listener calls `stop_and_transcribe` when the user releases the
-/// PTT key — that goes through `PttStop`, whose response stream the
+/// PTT key; that goes through `PttStop`, whose response stream the
 /// daemon dispatches as a Query. We forward every event onto the
 /// app's `ChatEvent::Wire` channel and return the transcription text
 /// so the listener's existing log line doesn't go silent. Reducer

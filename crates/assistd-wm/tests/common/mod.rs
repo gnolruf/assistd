@@ -1,6 +1,6 @@
 //! Shared, read-only assertions exercised by both `i3_live.rs` and
 //! `sway_live.rs`. These are the "i3 test suite" that the Sway backend
-//! must also pass — every assertion reads cached or freshly-fetched
+//! must also pass: every assertion reads cached or freshly-fetched
 //! state and never issues a focus / move command, so they're safe to
 //! run against the developer's live session.
 //!
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use assistd_wm::WindowManager;
 
 /// `focused_window()` should return Some(class) for a session with at
-/// least one mapped, focused window — which is the common case on a
+/// least one mapped, focused window, which is the common case on a
 /// developer machine running the test.
 pub async fn assert_focused_window_present(wm: &Arc<dyn WindowManager>) {
     let focused = wm

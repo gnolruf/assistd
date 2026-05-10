@@ -231,7 +231,7 @@ pub struct UndoOutcome {
 
 /// Conversation persistence trait. Sibling to [`crate::MemoryStore`];
 /// implementations may share underlying storage (the SQLite impls
-/// below do — both hold an `Arc<SqliteHandle>`).
+/// below do; both hold an `Arc<SqliteHandle>`).
 #[async_trait]
 pub trait ConversationStore: Send + Sync + 'static {
     /// Open a new session row for the daemon process identified by `daemon_pid`.
@@ -515,7 +515,7 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        // Reads bypass the writer channel — SQLite in WAL mode handles
+        // Reads bypass the writer channel; SQLite in WAL mode handles
         // concurrent readers fine, and routing them through the writer
         // would queue them behind any in-flight inserts.
         //
@@ -939,7 +939,7 @@ mod tests {
     async fn fresh_store() -> (SqliteConversationStore, tokio::task::JoinHandle<()>) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        // Leak the tempdir for the duration of the test — `path` must
+        // Leak the tempdir for the duration of the test; `path` must
         // outlive the handle. Cleanup happens on test process exit.
         std::mem::forget(temp);
         let (_tx, rx) = watch::channel(false);
@@ -1041,7 +1041,7 @@ mod tests {
     async fn search_handles_fts5_grammar_safely() {
         // Inputs that would parse-error under raw FTS5 grammar must
         // round-trip through the literal-phrase escape without
-        // surfacing as Err. We don't assert on hits — the default
+        // surfacing as Err. We don't assert on hits; the default
         // tokenizer's behaviour on these inputs is implementation
         // detail; we only assert the call succeeds.
         let (store, _w) = fresh_store().await;
@@ -1052,11 +1052,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Unmatched quote — would be a parse error pre-escape.
+        // Unmatched quote: would be a parse error pre-escape.
         store.search("say \"hi", 10).await.unwrap();
-        // Operator-looking input — would be parsed as boolean OR.
+        // Operator-looking input: would be parsed as boolean OR.
         store.search("apple OR banana", 10).await.unwrap();
-        // Wildcard star — would be a prefix match pre-escape.
+        // Wildcard star: would be a prefix match pre-escape.
         store.search("foo*", 10).await.unwrap();
     }
 
@@ -1106,7 +1106,7 @@ mod tests {
         let fork_history = store.load_branch_history(fork).await.unwrap();
         assert_eq!(main_history.len(), 2);
         assert_eq!(fork_history.len(), 2);
-        // Same conversation rows are referenced — no row duplication.
+        // Same conversation rows are referenced; no row duplication.
         assert_eq!(
             main_history
                 .iter()

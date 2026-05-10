@@ -20,7 +20,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Small HTTP client for the model-management endpoints on llama-server.
 ///
-/// Stateless modulo the underlying `reqwest::Client`'s connection pool — safe
+/// Stateless modulo the underlying `reqwest::Client`'s connection pool, safe
 /// to reuse across many calls and across process restarts of the server
 /// (the base URL is fixed).
 pub struct LlamaServerControl {
@@ -60,7 +60,7 @@ impl LlamaServerControl {
     /// Best-effort check for whether `model` is currently loaded.
     ///
     /// Queries `GET /models` and looks for an entry matching `model` with
-    /// a loaded status marker. Resilient to different response shapes —
+    /// a loaded status marker. Resilient to different response shapes:
     /// tolerates either a top-level `data`/`models` array and either a
     /// `status: "loaded"` field or a boolean `loaded` field.
     pub async fn model_is_loaded(&self, model: &str) -> Result<bool, LlamaServerError> {

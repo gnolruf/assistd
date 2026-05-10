@@ -1,9 +1,9 @@
-//! `PiperVoiceOutput` — the assembled façade implementing
+//! `PiperVoiceOutput`: the assembled façade implementing
 //! [`crate::VoiceOutput`]. Owns one [`OneShotSynth`] and one
 //! [`RodioPlaybackWorker`] for the daemon's lifetime; speak() runs the
 //! per-utterance subprocess and appends PCM to the playback queue.
 //!
-//! `speak()` returns once PCM has been enqueued — *not* once playback
+//! `speak()` returns once PCM has been enqueued, *not* once playback
 //! finishes. Sequential calls produce back-to-back audio because
 //! `rodio::Player`'s queue is FIFO and drained continuously by the
 //! audio thread. Callers that need to await drain (e.g. on shutdown)
@@ -13,7 +13,7 @@
 //! ringbuffer. After 3 failures within 60 seconds the service flips
 //! to [`ReadyState::Degraded`] and subsequent speak() calls become
 //! no-ops (logged once). This is the practical interpretation of
-//! "restarted on crash" for the per-utterance design — a missing
+//! "restarted on crash" for the per-utterance design; a missing
 //! binary or broken audio device shouldn't spam the logs forever.
 
 use std::collections::VecDeque;
@@ -225,7 +225,7 @@ impl VoiceOutput for PiperVoiceOutput {
             return Err(anyhow::Error::new(e)).context("piper playback enqueue failed");
         }
 
-        // Don't drain here — that would force every utterance to wait
+        // Don't drain here; that would force every utterance to wait
         // for the previous one to finish playing before its synth
         // could start, opening a ~50–250 ms audible gap between
         // sentences. Sequential `speak` calls append to the same FIFO
@@ -235,7 +235,7 @@ impl VoiceOutput for PiperVoiceOutput {
     }
 
     async fn wait_idle(&self) -> Result<()> {
-        // Skip the drain entirely when degraded — there's nothing to
+        // Skip the drain entirely when degraded; there's nothing to
         // wait for and `playback.drain()` would still happily block
         // for any in-flight non-piper PCM, but in practice a degraded
         // service has no inflight work, so this is safe.
@@ -251,7 +251,7 @@ impl VoiceOutput for PiperVoiceOutput {
                 error = %e,
                 "piper playback drain failed"
             );
-            // Don't trip the breaker on a drain failure — drain is
+            // Don't trip the breaker on a drain failure; drain is
             // an end-of-stream best-effort, not synth.
             return Ok(());
         }
@@ -260,7 +260,7 @@ impl VoiceOutput for PiperVoiceOutput {
 
     async fn cancel(&self) {
         // Drop everything currently queued. Used for "shut up" /
-        // barge-in — the next speak() starts fresh.
+        // barge-in; the next speak() starts fresh.
         self.playback.clear();
     }
 }

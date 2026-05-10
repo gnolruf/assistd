@@ -1,5 +1,5 @@
 [Unit]
-Description=assistd — local model agent OS assistant daemon
+Description=assistd: local model agent OS assistant daemon
 Documentation=https://github.com/gnolruf/assistd
 After=graphical-session.target
 PartOf=graphical-session.target

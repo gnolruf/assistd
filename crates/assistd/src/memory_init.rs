@@ -157,7 +157,7 @@ fn pid_is_alive(pid: u32) -> bool {
         return false;
     };
     // `test_kill_process` issues `kill(pid, 0)`: no memory read, no signal
-    // sent — just an existence probe. EPERM means the process exists but
+    // sent, just an existence probe. EPERM means the process exists but
     // we can't signal it; ESRCH (and anything else) means it's gone.
     match rustix::process::test_kill_process(pid) {
         Ok(()) => true,

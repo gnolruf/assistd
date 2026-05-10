@@ -24,7 +24,7 @@ use crate::mic::capture::{AudioCaptureError, TARGET_SAMPLE_RATE};
 use crate::mic::consumer::f32_to_i16;
 
 /// Chunk size (native-rate samples) pulled from the ring before each
-/// resampler step. Matches the PTT pipeline — 1024 samples ~= 21 ms
+/// resampler step. Matches the PTT pipeline; 1024 samples ~= 21 ms
 /// at 48 kHz. Tuned to amortize resampler overhead without overshooting
 /// frame boundaries badly.
 const DRAIN_CHUNK_SIZE: usize = 1024;
@@ -69,7 +69,7 @@ pub fn stream_frames(
         .unwrap_or(DRAIN_CHUNK_SIZE);
     let mut out_buf = vec![0.0f32; out_cap];
 
-    // Rolling pending buffer — accumulates 16 kHz i16 samples until
+    // Rolling pending buffer: accumulates 16 kHz i16 samples until
     // we have at least FRAME_SAMPLES (320) to emit a 20 ms frame.
     let mut pending: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 2);
 

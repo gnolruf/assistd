@@ -93,7 +93,7 @@ pub enum VadEvent {
     UtteranceComplete(Vec<i16>),
     /// `max_utterance_frames` exceeded; flushing whatever was buffered.
     /// Caller may immediately continue recording into the next
-    /// utterance — internal state resets to `Silent` on emit.
+    /// utterance; internal state resets to `Silent` on emit.
     Truncated(Vec<i16>),
 }
 
@@ -139,7 +139,7 @@ impl UtteranceVad {
 
     /// Feed one 20-ms frame. Returns `Some(event)` when an utterance
     /// boundary is crossed, `None` otherwise. Uses webrtc-vad to
-    /// classify the frame — see [`Self::feed_decided`] for the
+    /// classify the frame; see [`Self::feed_decided`] for the
     /// state-machine-only variant used in tests.
     pub fn feed(&mut self, frame: &[i16; FRAME_SAMPLES]) -> Option<VadEvent> {
         let is_voiced = self.vad.is_voice_segment(frame).unwrap_or(false);
@@ -186,7 +186,7 @@ impl UtteranceVad {
                     }
                     None
                 } else {
-                    // Onset candidate fell through — drop back to silent.
+                    // Onset candidate fell through; drop back to silent.
                     self.push_preroll(frame);
                     self.state = State::Silent;
                     None

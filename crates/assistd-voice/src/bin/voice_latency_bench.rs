@@ -1,4 +1,4 @@
-//! `voice_latency_bench` — in-process driver for the
+//! `voice_latency_bench`: in-process driver for the
 //! end-of-speech → first-audio-frame voice loop, built so the project
 //! has a reproducible number to track against the <500 ms budget.
 //!
@@ -76,7 +76,7 @@ struct Args {
     /// Note: reasoning models (Qwen3, DeepSeek-R1, etc.) spend tokens
     /// in a `<think>` block before emitting visible content. With a
     /// budget below the thinking length, the iteration finishes with
-    /// zero content deltas — `llm_first_token` and everything
+    /// zero content deltas; `llm_first_token` and everything
     /// downstream of it won't fire. 1024 is a safe default for most
     /// reasoning models and short prompts.
     #[arg(long, default_value_t = 1024)]
@@ -97,7 +97,7 @@ struct Args {
     /// Pass `--cuda` to piper to route ONNX inference through the
     /// CUDA execution provider. Requires a piper binary built against
     /// `onnxruntime-gpu`. Most distro-packaged binaries (including
-    /// the Arch `piper-tts-bin`) ship CPU-only onnxruntime — you'll
+    /// the Arch `piper-tts-bin`) ship CPU-only onnxruntime; you'll
     /// see "CUDA execution provider not available" in piper's stderr
     /// and the synth will fail. Build piper from source against
     /// onnxruntime-gpu, or grab a GPU release from
@@ -193,7 +193,7 @@ async fn main() -> Result<()> {
             Ok(p) => Arc::new(p),
             Err(e) => {
                 // Mirror the daemon's try-warn-fallback pattern. The
-                // bench is still useful without piper — Whisper + LLM
+                // bench is still useful without piper; Whisper + LLM
                 // timings remain comparable across runs.
                 eprintln!(
                     "Piper unavailable ({e:#}); falling back to NoVoiceOutput. \
@@ -254,8 +254,8 @@ async fn main() -> Result<()> {
 }
 
 /// Drive the streaming pipeline for one iteration. Mirrors the
-/// daemon's `handle_query` dispatch loop but stripped to the voice path
-/// — no agent loop, no tools, no persistence.
+/// daemon's `handle_query` dispatch loop but stripped to the voice path:
+/// no agent loop, no tools, no persistence.
 async fn run_one(
     whisper: Arc<dyn Transcriber>,
     llm: Arc<dyn LlmBackend>,
@@ -286,7 +286,7 @@ async fn run_one(
         transcript
     };
 
-    // Skip the warmup join — the bench's LLM client is fresh each iter,
+    // Skip the warmup join: the bench's LLM client is fresh each iter,
     // there's no PresenceManager, and ensure_active() is therefore a
     // no-op. Emit the marker for parity with the daemon's event stream.
     tracing::debug!(
@@ -302,7 +302,7 @@ async fn run_one(
     let prompt = text.clone();
     let llm_task = tokio::spawn(
         async move {
-            // Surface generate errors via tracing — the bench's stage
+            // Surface generate errors via tracing; the bench's stage
             // table only shows what fired, so a silent failure looks
             // like "the LLM never replied" with no hint why.
             if let Err(e) = llm_clone.generate(prompt, llm_tx).await {
@@ -325,12 +325,12 @@ async fn run_one(
             // We deliberately don't call `wait_idle()` (which blocks on
             // rodio's `Player::sleep_until_end`). Two reasons:
             //   1. The bench records `playback_enqueued` per sentence,
-            //      not "audio finished playing" — we already have the
+            //      not "audio finished playing"; we already have the
             //      measurement we care about.
             //   2. `drain()` spawns a `std::thread` that runs the
             //      blocking `sleep_until_end`. If we time out the
             //      future, the thread leaks and keeps holding rodio
-            //      state — empirically this then blocks the *next*
+            //      state; empirically this then blocks the *next*
             //      iteration's `player.append` and the bench wedges.
             // Audio that's already queued continues to play (or not,
             // if the device is silent) in the background until the
@@ -366,7 +366,7 @@ async fn run_one(
                             stage = "first_sentence_emitted",
                             "voice latency stage"
                         );
-                        // first_emitted set is unused — we break next.
+                        // first_emitted set is unused; we break next.
                     }
                     let _ = speech_tx.send(tail).await;
                 }
@@ -555,7 +555,7 @@ impl RunMetrics {
     fn from_stages(t0: Instant, stages: StageLog) -> Self {
         let mut per_stage = HashMap::new();
         for (name, when) in &stages {
-            // First write wins — duplicate stage names keep the earliest
+            // First write wins: duplicate stage names keep the earliest
             // timestamp, which is the behaviour we want for first_byte etc.
             per_stage
                 .entry(name.clone())
@@ -660,7 +660,7 @@ fn summarize(requested: usize, runs: &[RunMetrics]) -> Summary {
 
 fn print_human(summary: &Summary) {
     println!(
-        "\nVoice latency benchmark — {} of {} iterations completed\n",
+        "\nVoice latency benchmark: {} of {} iterations completed\n",
         summary.successful_iterations, summary.requested_iterations,
     );
     println!(
@@ -690,7 +690,7 @@ fn print_human(summary: &Summary) {
                 if pass { "PASS" } else { "FAIL" }
             );
         }
-        None => println!("no playback_enqueued events captured — pipeline did not reach Piper"),
+        None => println!("no playback_enqueued events captured; pipeline did not reach Piper"),
     }
 }
 

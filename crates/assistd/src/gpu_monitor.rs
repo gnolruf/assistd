@@ -17,7 +17,7 @@
 //! Graceful degradation: if `Nvml::init` fails (no NVIDIA GPU, missing
 //! driver), [`spawn_monitor`] returns `None` with a warning log. The
 //! daemon continues to run without contention detection rather than
-//! crashing — the very machines that lack NVIDIA GPUs are also the ones
+//! crashing; the very machines that lack NVIDIA GPUs are also the ones
 //! least likely to have VRAM contention.
 
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
 /// Who owns the current Sleeping state, from the monitor's point of view.
 ///
-/// `None` means "we did not cause this" — either the daemon is not
+/// `None` means "we did not cause this": either the daemon is not
 /// Sleeping, or it was put to sleep externally (user hit the hotkey, ran
 /// `assistd sleep`, etc.). In that case we must never auto-wake, even if
 /// a contending process later disappears: the user asked for Sleeping.
@@ -68,7 +68,7 @@ pub(crate) struct ProcSample {
 }
 
 /// Pre-flight check called from daemon startup, mirroring
-/// [`crate::hotkey::validate`]. Does NOT probe NVML — hardware absence
+/// [`crate::hotkey::validate`]. Does NOT probe NVML; hardware absence
 /// is handled at spawn time, not treated as a config error.
 pub fn validate(cfg: &SleepConfig) -> Result<()> {
     if !cfg.gpu_monitor_enabled {
@@ -86,7 +86,7 @@ pub fn validate(cfg: &SleepConfig) -> Result<()> {
 }
 
 /// Spawn the GPU contention monitor. Returns `None` when the feature is
-/// disabled in config or when `Nvml::init()` fails — the same idiom as
+/// disabled in config or when `Nvml::init()` fails, the same idiom as
 /// [`crate::hotkey::spawn_listener`]. Logs once in either case.
 pub fn spawn_monitor(
     cfg: &SleepConfig,

@@ -36,7 +36,7 @@ pub struct PendingAttachment {
     pub mime: String,
     pub bytes: Vec<u8>,
     /// Pre-built terminal-graphics protocol for inline thumbnail
-    /// rendering. `None` on terminals without graphics support — the
+    /// rendering. `None` on terminals without graphics support; the
     /// `📎 attached: ...` info line still appears either way.
     pub protocol: Option<StatefulProtocol>,
 }
@@ -57,7 +57,7 @@ impl PendingAttachment {
 /// Payload for [`ChatEvent::AttachLoaded`]. Boxed inside the enum so a
 /// `Vec<u8>` of image bytes plus a `StatefulProtocol` (which holds its
 /// own pre-built per-cell terminal-graphics buffers) doesn't bloat the
-/// other variants — `Wire(Event)` and `WireError(String)` were paying
+/// other variants; `Wire(Event)` and `WireError(String)` were paying
 /// the maximum-variant size on every send before the box.
 pub struct AttachLoadedPayload {
     #[allow(dead_code)]
@@ -107,7 +107,7 @@ impl std::fmt::Debug for ChatEvent {
 }
 
 /// Pending destructive-command prompt displayed as an overlay. Only one
-/// is ever active at a time — the agent loop on the daemon side blocks
+/// is ever active at a time; the agent loop on the daemon side blocks
 /// on the gate until we send the `ConfirmResponse`.
 pub struct ConfirmationModal {
     /// Renders as the modal body (script + matched_pattern). Reuses the
@@ -156,7 +156,7 @@ pub struct App {
     /// display approximation that drifts at most a couple seconds.
     last_activity_at: Instant,
     /// Set at chat startup from a daemon `GetCapabilities` probe.
-    /// `false` means the loaded model has no mmproj — `/attach`
+    /// `false` means the loaded model has no mmproj; `/attach`
     /// rejects with the AC `vision not available` error and the
     /// status bar renders `vision: off`.
     pub vision_enabled: bool,
@@ -174,7 +174,7 @@ pub struct App {
     /// Command of the in-flight tool call, captured on `Event::ToolCall`
     /// and consumed on the matching `Event::ToolResult` so the
     /// call+result pair becomes one `ToolBlock`. The agent loop is
-    /// strictly serial — only one tool runs at a time — so a single
+    /// strictly serial (only one tool runs at a time), so a single
     /// slot suffices.
     pending_tool_call: Option<(String, String)>,
     /// Images staged by `/attach`, drained into the user's next
@@ -858,7 +858,7 @@ impl App {
             return;
         }
         if self.generating {
-            self.set_notice("still generating — please wait");
+            self.set_notice("still generating, please wait");
             return;
         }
         let pending = std::mem::take(&mut self.pending_attachments);
@@ -956,11 +956,11 @@ impl App {
 
     fn spawn_branch_command(&mut self, op: BranchOp, req: Request) {
         if self.in_flight_branch_op.is_some() {
-            self.set_notice("branch command in flight — please wait");
+            self.set_notice("branch command in flight, please wait");
             return;
         }
         if self.generating {
-            self.set_notice("still generating — please wait");
+            self.set_notice("still generating, please wait");
             return;
         }
         self.in_flight_branch_op = Some(op);
@@ -1222,7 +1222,7 @@ mod tests {
 
     fn test_app_with(vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
         let (tx, rx) = mpsc::channel::<ChatEvent>(16);
-        // Bogus socket path — these tests never open a real connection.
+        // Bogus socket path; these tests never open a real connection.
         let ipc = Arc::new(IpcClient::with_path(std::path::PathBuf::from(
             "/tmp/assistd-test-nonexistent.sock",
         )));

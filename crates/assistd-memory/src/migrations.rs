@@ -1,7 +1,7 @@
 //! Schema-evolution backbone for the SQLite memory store.
 //!
 //! A single `Migrations` value is built up from a static `Vec<M>`; each
-//! `M::up(SQL)` is one schema version and the runner is idempotent —
+//! `M::up(SQL)` is one schema version and the runner is idempotent;
 //! calling [`run`] against an already-migrated DB is a no-op. New
 //! milestones append a new `M::up(...)` entry to [`migrations`] and bump
 //! nothing else; the runner records progress in `schema_migrations`.
@@ -15,14 +15,14 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// V1: initial schema. Tables in order:
-/// - `schema_migrations` — version log for future upgrades.
-/// - `sessions` — one row per daemon process (uuid PK).
-/// - `turns` — logical user-prompt-to-final-assistant grouping inside a session.
-/// - `conversations` — one row per `Message`. Tool results are
+/// - `schema_migrations` - version log for future upgrades.
+/// - `sessions` - one row per daemon process (uuid PK).
+/// - `turns` - logical user-prompt-to-final-assistant grouping inside a session.
+/// - `conversations` - one row per `Message`. Tool results are
 ///   `role='tool'` rows with `tool_call_id` / `tool_name` set.
-/// - `conversations_fts` — FTS5 mirror, kept in sync via triggers.
-/// - `memories` — flat KV with provenance (source_conversation_id).
-/// - `conversation_chunks` + `embeddings` — schema only this milestone;
+/// - `conversations_fts` - FTS5 mirror, kept in sync via triggers.
+/// - `memories` - flat KV with provenance (source_conversation_id).
+/// - `conversation_chunks` + `embeddings` - schema only this milestone;
 ///   populated by a follow-up that wires the embedder.
 const V1_SQL: &str = r#"
 CREATE TABLE schema_migrations (
@@ -112,7 +112,7 @@ CREATE INDEX idx_embeddings_model ON embeddings(model);
 ///
 /// Adds named branches per session plus a `branch_messages` join table
 /// that maps `(branch_id, branch-local seq) -> conversation_id`. We
-/// deliberately do NOT duplicate `conversations` rows on fork — a single
+/// deliberately do NOT duplicate `conversations` rows on fork; a single
 /// conversation row can be reachable from multiple branches at
 /// different (or the same) seq via separate `branch_messages` entries.
 /// This avoids FTS5 trigger-driven duplication and keeps
@@ -165,13 +165,13 @@ UPDATE sessions
 ///
 /// Adds a sibling table to `embeddings` that indexes the `memories` KV
 /// rows for semantic recall. Kept separate from `embeddings` (which is
-/// chunk-keyed) because (a) the data sources are independent — chunks
-/// are unstructured conversation text, memories are key/value facts —
+/// chunk-keyed) because (a) the data sources are independent (chunks
+/// are unstructured conversation text, memories are key/value facts),
 /// and (b) `ON DELETE CASCADE` on each FK gives free cleanup when the
 /// parent row is deleted, with no nullable FKs or CHECK constraints.
 ///
 /// `UNIQUE(memory_id)` is what makes the
-/// `INSERT ... ON CONFLICT(memory_id) DO UPDATE` upsert work — re-saving
+/// `INSERT ... ON CONFLICT(memory_id) DO UPDATE` upsert work: re-saving
 /// the same memory key (which keeps its row id) overwrites the embedding
 /// in place, so a stale vector never survives a value change.
 const V2_SQL: &str = r#"
@@ -212,7 +212,7 @@ mod tests {
     fn migrations_validate() {
         // rusqlite_migration ships a `validate` that re-runs every
         // migration against an in-memory DB and fails loudly on bad
-        // SQL — catches schema typos before we ever ship a release.
+        // SQL; catches schema typos before we ever ship a release.
         migrations().validate().expect("V1 SQL is well-formed");
     }
 

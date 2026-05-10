@@ -8,7 +8,7 @@
     )
 )]
 
-//! Daemon orchestration crate — the glue that wires every subsystem
+//! Daemon orchestration crate: the glue that wires every subsystem
 //! into a running `assistd` process.
 //!
 //! # Not a stable public library
@@ -28,11 +28,11 @@
 //!
 //! # Modules
 //!
-//! - [`agent`] — per-turn LLM/tool loop driver.
-//! - [`presence`] — Active/Drowsy/Sleeping state machine and
+//! - [`agent`]: per-turn LLM/tool loop driver.
+//! - [`presence`]: Active/Drowsy/Sleeping state machine and
 //!   `LlamaService` lifecycle.
-//! - [`socket`] — Unix-socket IPC server (line-delimited JSON).
-//! - [`state`] — `AppState` request dispatcher; one handler per
+//! - [`socket`]: Unix-socket IPC server (line-delimited JSON).
+//! - [`state`]: `AppState` request dispatcher; one handler per
 //!   `assistd_ipc::Request` variant.
 
 pub mod agent;
@@ -92,7 +92,7 @@ use tracing::warn;
 ///
 /// Field notes:
 ///
-/// - `overflow_dir` is owned so the caller chooses the path — kept as a
+/// - `overflow_dir` is owned so the caller chooses the path; kept as a
 ///   distinct field for future call sites that need a different spill
 ///   directory.
 /// - `confirmation_gate` is consulted by destructive bash commands. The
@@ -201,7 +201,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
                     target: "assistd::policy",
                     path = %expanded.display(),
                     error = %e,
-                    "tools.write.writable_paths entry does not exist — dropping from allowlist"
+                    "tools.write.writable_paths entry does not exist; dropping from allowlist"
                 );
             }
         }
@@ -251,7 +251,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     tools.register(ReminisceTool::new(embedder, semantic, embedding_model));
 
     // MCP tools are registered last so a malicious server cannot shadow
-    // native tool names — the registry's linear lookup returns the first match.
+    // native tool names; the registry's linear lookup returns the first match.
     for t in mcp_tools {
         tools.register_boxed(t);
     }
@@ -266,7 +266,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
 /// to [`AppState`], and the per-query handler calls [`revalidate`] at
 /// the top of every turn. The probe is cheap (one local HTTP `GET
 /// /props` with a 2-second timeout), and we only mutate the gate when
-/// the cached model id actually changes — so a steady-state daemon
+/// the cached model id actually changes, so a steady-state daemon
 /// pays a single round-trip per turn and never thrashes the gate.
 ///
 /// [`revalidate`]: VisionRevalidator::revalidate
@@ -297,7 +297,7 @@ impl VisionRevalidator {
     }
 
     /// Re-probe `/props` and, if the model id changed, update the
-    /// gate. Tolerates probe failures silently — a transient HTTP
+    /// gate. Tolerates probe failures silently; a transient HTTP
     /// blip should not flip vision off mid-session.
     pub async fn revalidate(&self) {
         let probe = assistd_llm::probe_capabilities(&self.host, self.port).await;
@@ -343,7 +343,7 @@ mod vision_revalidator_tests {
             assistd_tools::VisionGate::new(gate_initial),
             cached_model.map(str::to_string),
             "127.0.0.1".to_string(),
-            // Port is unused in the apply_probe path — set to 0 to
+            // Port is unused in the apply_probe path; set to 0 to
             // make a real revalidate() obviously fail loudly if anyone
             // accidentally points the test at it.
             0,
@@ -370,7 +370,7 @@ mod vision_revalidator_tests {
         rev.apply_probe(VisionState {
             model_id: Some("model-A".into()),
             // Even if the new probe says false, no model swap means we
-            // don't disturb the gate — same model can't lose vision.
+            // don't disturb the gate; the same model can't lose vision.
             vision_supported: false,
         })
         .await;
@@ -401,7 +401,7 @@ mod vision_revalidator_tests {
 
     #[tokio::test]
     async fn fresh_revalidator_with_no_cached_model_still_picks_up_first_probe() {
-        // Daemon starts before the probe completes — the initial cache
+        // Daemon starts before the probe completes; the initial cache
         // is None. When the first probe lands, we accept it as the
         // baseline (None != Some) and update the gate to match.
         let rev = make_revalidator(false, None);

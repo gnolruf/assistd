@@ -3,7 +3,7 @@ use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};
 
-/// `echo [ARGS...]` — write args joined by spaces, followed by a newline.
+/// `echo [ARGS...]`: write args joined by spaces, followed by a newline.
 pub struct EchoCommand;
 
 #[async_trait]

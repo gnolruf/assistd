@@ -1,4 +1,4 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -31,17 +31,17 @@ impl WritePolicyCfg {
     }
 }
 
-/// `write PATH [CONTENT...]` — write to PATH, subject to the configured
+/// `write PATH [CONTENT...]`: write to PATH, subject to the configured
 /// writable-path allowlist.
 ///
 /// Two shapes:
-/// - `echo "hi" | write /tmp/x` — stdin is the content (pipeline form).
-/// - `write /tmp/x hello world` — args beyond the path are joined with
+/// - `echo "hi" | write /tmp/x`: stdin is the content (pipeline form).
+/// - `write /tmp/x hello world`: args beyond the path are joined with
 ///   single spaces and written (convenience form for when the model
 ///   already has the content inline).
 ///
 /// If both args and stdin are provided, args win and stdin is silently
-/// discarded — callers who want stdin should avoid passing extra argv.
+/// discarded; callers who want stdin should avoid passing extra argv.
 ///
 /// # Policy
 ///
@@ -60,7 +60,7 @@ impl WriteCommand {
     }
 
     /// Test-only constructor: permits writes anywhere. Never used in
-    /// production — `build_tools` always passes an allowlist.
+    /// production; `build_tools` always passes an allowlist.
     #[cfg(test)]
     pub fn permissive_for_tests() -> Self {
         Self {
@@ -83,8 +83,8 @@ impl Command for WriteCommand {
         "usage: write PATH [CONTENT...]\n\
          \n\
          Write bytes to PATH. Two shapes:\n  \
-           `echo \"hi\" | write /tmp/x`   — stdin is the file content (pipeline form)\n  \
-           `write /tmp/x hello world`   — args beyond PATH are joined by spaces and written\n\
+           `echo \"hi\" | write /tmp/x`   - stdin is the file content (pipeline form)\n  \
+           `write /tmp/x hello world`   - args beyond PATH are joined by spaces and written\n\
          \n\
          PATH must be absolute (relative paths are rejected) and must fall \
          under one of the prefixes in `[tools.write] writable_paths`. \
@@ -200,7 +200,7 @@ enum PathResolveError {
 ///
 /// Steps:
 /// 1. Expand leading `~` / `~/` via `$HOME`.
-/// 2. Reject relative paths — the daemon's cwd is not a meaningful anchor.
+/// 2. Reject relative paths; the daemon's cwd is not a meaningful anchor.
 /// 3. Lexically collapse `..` / `.` components so that a lexical path like
 ///    `/tmp/../etc/passwd` normalizes to `/etc/passwd` *before* touching
 ///    disk.
@@ -225,7 +225,7 @@ fn resolve_for_allowlist(raw: &str) -> Result<PathBuf, PathResolveError> {
 }
 
 /// Expand a leading `~` (with or without trailing slash) using `$HOME`.
-/// `~user` is not supported — expand to `$HOME` regardless of user, which
+/// `~user` is not supported; expand to `$HOME` regardless of user, which
 /// is fine since in single-user trust model the only `~` the LLM should
 /// emit is the running user's.
 fn expand_tilde(raw: &str) -> Result<PathBuf, PathResolveError> {
@@ -256,7 +256,7 @@ pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
                     // `/..` == `/`: don't pop past root.
                 }
                 _ => {
-                    // Leading `..` on a relative path — keep, since the
+                    // Leading `..` on a relative path: keep, since the
                     // caller (above) already rejects relatives. Still
                     // preserve for completeness.
                     out.push(comp);
@@ -541,7 +541,7 @@ mod tests {
             })
             .await
             .unwrap();
-        // Parent-missing is a policy success but an I/O failure — exit 1.
+        // Parent-missing is a policy success but an I/O failure; exit 1.
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("[error] write: "), "{stderr}");

@@ -1,6 +1,6 @@
 //! Exponential backoff for the WM-backend reconnection supervisor.
 //!
-//! The shape is `2^attempt` seconds, capped at 60s — same schedule as
+//! The shape is `2^attempt` seconds, capped at 60s, the same schedule as
 //! `assistd_embed::server::backoff` so both subsystems hit the same
 //! patience budget when their underlying daemon (llama-server / i3 /
 //! sway) churns. Duplicated here intentionally: pulling 12 lines into
@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 /// Exponential backoff schedule: `2^attempt` seconds, capped at 60s.
-/// `attempt = 0` is the first retry — i.e. 1s after the first failure.
+/// `attempt = 0` is the first retry, i.e. 1s after the first failure.
 pub fn backoff_delay(attempt: u32) -> Duration {
     const CAP_SECS: u64 = 60;
     let secs = 1u64.checked_shl(attempt).unwrap_or(CAP_SECS).min(CAP_SECS);

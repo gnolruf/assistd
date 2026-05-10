@@ -57,7 +57,7 @@ pub fn drain_loop(
     let ratio = TARGET_SAMPLE_RATE as f64 / native_rate as f64;
     let mut resampler = Async::<f32>::new_poly(
         ratio,
-        1.0, // fixed ratio — no runtime modulation
+        1.0, // fixed ratio; no runtime modulation
         PolynomialDegree::Linear,
         DRAIN_CHUNK_SIZE,
         1,
@@ -74,7 +74,7 @@ pub fn drain_loop(
             let got = consumer.pop_slice(&mut in_buf);
             if got < DRAIN_CHUNK_SIZE {
                 // Partial pop despite `occupied_len >= chunk`: race
-                // with producer drop on teardown — pad and finish.
+                // with producer drop on teardown; pad and finish.
                 for s in in_buf.iter_mut().skip(got) {
                     *s = 0.0;
                 }
