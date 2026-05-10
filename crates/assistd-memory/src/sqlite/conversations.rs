@@ -1015,13 +1015,13 @@ mod tests {
             Option<String>,
         ) = conn
             .call(move |c| -> rusqlite::Result<_> {
-                Ok(c.query_row(
+                c.query_row(
                     "SELECT (SELECT tool_calls FROM conversations WHERE id = ?1),
                             (SELECT tool_call_id FROM conversations WHERE id = ?2),
                             (SELECT tool_name FROM conversations WHERE id = ?2)",
                     rusqlite::params![id, result_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )?)
+                )
             })
             .await
             .unwrap();
