@@ -20,6 +20,7 @@ use tracing::warn;
 
 use super::consumer;
 
+/// Errors produced during cpal audio capture.
 #[derive(Debug, Error)]
 pub enum AudioCaptureError {
     #[error("no default input device available")]
@@ -252,6 +253,7 @@ fn name_of(device: &Device) -> Result<String, cpal::DeviceNameError> {
     device.description().map(|d| d.name().to_string())
 }
 
+/// Select a cpal input device by optional name hint, or fall back to the system default.
 pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, AudioCaptureError> {
     match hint {
         None => host

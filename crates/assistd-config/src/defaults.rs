@@ -95,10 +95,6 @@ pub const DEFAULT_PRESENCE_HOTKEY: &str = "Super+Escape";
 
 pub const DEFAULT_DAEMON_SHUTDOWN_GRACE_SECS: u64 = 5;
 
-// `[timeouts]` — hard deadlines on awaits that cross a process boundary.
-// All values are safety valves, not normal-case budgets. Every trip is
-// logged at `warn!` so an operator on slow hardware can tune the
-// offending value.
 pub const DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS: u64 = 30;
 pub const DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS: u64 = 10;
 pub const DEFAULT_TIMEOUT_PRESENCE_WAKE_LOAD_SECS: u64 = 10;
@@ -156,11 +152,11 @@ pub const DEFAULT_MCP_SSE_READ_TIMEOUT_SECS: u64 = 30;
 /// SSE-only. Period of the separate ping task that detects "socket
 /// open but server not processing requests".
 pub const DEFAULT_MCP_SSE_PING_INTERVAL_SECS: u64 = 15;
-/// Path under which the daemon's SQLite memory DB lives. Resolves to
-/// `$XDG_DATA_HOME/assistd/memory.db` when set, else
-/// `$HOME/.local/share/assistd/memory.db`. Mirrors the manual XDG
-/// lookup at `top.rs::Config::default_path()` so we don't pull in the
-/// `dirs` crate just for one path.
+
+/// Returns the default SQLite memory database path, honouring `$XDG_DATA_HOME`.
+///
+/// Resolves to `$XDG_DATA_HOME/assistd/memory.db` when set and non-empty,
+/// otherwise `$HOME/.local/share/assistd/memory.db`.
 pub fn default_memory_db_path() -> String {
     let data_dir = match std::env::var_os("XDG_DATA_HOME") {
         Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
@@ -176,6 +172,7 @@ pub fn default_memory_db_path() -> String {
         .into_owned()
 }
 
+/// Returns the default GPU contention allowlist of process basenames that never trigger sleep.
 pub fn default_gpu_allowlist() -> Vec<String> {
     vec![
         "Xorg".into(),
@@ -189,6 +186,7 @@ pub fn default_gpu_allowlist() -> Vec<String> {
     ]
 }
 
+/// Returns the default bash denylist of literal command strings that are rejected before spawn.
 pub fn default_bash_denylist() -> Vec<String> {
     vec![
         "rm -rf /".into(),
@@ -202,6 +200,7 @@ pub fn default_bash_denylist() -> Vec<String> {
     ]
 }
 
+/// Returns the default list of shell-command prefixes that require confirmation before execution.
 pub fn default_bash_destructive_patterns() -> Vec<String> {
     vec![
         "rm -rf".into(),
@@ -216,6 +215,7 @@ pub fn default_bash_destructive_patterns() -> Vec<String> {
     ]
 }
 
+/// Returns the default list of path prefixes under which the `write` command may create files.
 pub fn default_writable_paths() -> Vec<String> {
     vec!["~".into(), "/tmp".into()]
 }

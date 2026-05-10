@@ -181,7 +181,6 @@ pub fn spawn_writer(
                     match op {
                         Some(op) => handle_op(&conn, op).await,
                         None => {
-                            // Sender dropped: handle nothing else and exit.
                             tracing::debug!(
                                 target: "assistd::memory",
                                 "writer channel closed; worker exiting"
@@ -772,8 +771,6 @@ async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Resu
     let id = conn
         .call(move |c| -> rusqlite::Result<_> {
             let tx = c.transaction()?;
-            // Pull the source branch's session id and its tail seq —
-            // both go onto the new branches row.
             let session_id: String = tx.query_row(
                 "SELECT session_id FROM branches WHERE id = ?1",
                 rusqlite::params![src.0],
@@ -854,7 +851,6 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
             rows
         };
 
-        // Drop the join-table rows from this branch.
         let removed: usize = tx.execute(
             "DELETE FROM branch_messages
              WHERE branch_id = ?1
@@ -909,16 +905,11 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
     .context("undo_last_turn")
 }
 
-/// Re-export the role wire mapping used by [`append_message`] so callers
-/// that build [`PersistedMessage`] from a `Role` enum elsewhere can do
-/// the same translation in one place.
 #[allow(dead_code)]
 pub(super) fn role_wire(role: PersistedRole) -> &'static str {
     role.as_wire()
 }
 
-/// Helper used by other modules to send a [`WriteOp`] without unwrapping
-/// the `Result<oneshot::Receiver<...>>` boilerplate at every call site.
 pub(super) async fn dispatch<T>(
     tx: &mpsc::Sender<WriteOp>,
     op: WriteOp,
@@ -932,9 +923,6 @@ pub(super) async fn dispatch<T>(
         .map_err(|_| anyhow::anyhow!("memory writer task dropped ack channel"))?
 }
 
-/// Convenience: every public method on the stores follows the same
-/// shape — build oneshot, build op, call `dispatch`. Encoded once here
-/// to keep the call sites readable.
 pub(super) struct WriteCall;
 
 #[allow(dead_code)]
@@ -948,6 +936,5 @@ impl WriteCall {
     }
 }
 
-/// Cheap clone alias used by the stores so they can share one
-/// `mpsc::Sender<WriteOp>` without each owning a separate one.
+/// Shared sender type allowing multiple stores to enqueue writes through one channel.
 pub type WriterSender = Arc<mpsc::Sender<WriteOp>>;

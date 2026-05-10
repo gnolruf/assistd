@@ -49,6 +49,7 @@ pub enum IpcClientError {
     DaemonClosed,
 }
 
+/// Convenience alias for `Result<T, `[`IpcClientError`]`>`.
 pub type Result<T> = std::result::Result<T, IpcClientError>;
 
 /// Connection factory. Construct once, reuse across calls — `Clone` is

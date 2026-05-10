@@ -12,12 +12,16 @@ use assistd_wm::{I3Backend, SwayBackend, WmHandle};
 use tokio::sync::watch;
 use tracing::info;
 
+/// Live handles for the window-manager subsystem, returned by [`init`].
 pub struct WindowSubsystem {
+    /// Window-manager trait object (no-op when no backend is available).
     pub manager: Arc<dyn WindowManager>,
+    /// Backend handle used to shut down the WM connection at exit.
     pub handle: Option<WmHandle>,
 }
 
 impl WindowSubsystem {
+    /// Shut down the window-manager backend gracefully.
     pub async fn shutdown(self) {
         if let Some(h) = self.handle {
             h.shutdown().await;
@@ -25,6 +29,10 @@ impl WindowSubsystem {
     }
 }
 
+/// Detect and start the appropriate window-manager backend.
+///
+/// Falls back to a no-op [`NoWindowManager`] when auto-detection finds
+/// no supported compositor or when the backend fails to connect.
 pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> WindowSubsystem {
     let resolved = match config.compositor.compositor_type {
         CompositorType::Auto => match assistd_core::config::compositor::detect_from_env(

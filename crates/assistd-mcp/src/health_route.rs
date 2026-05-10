@@ -29,6 +29,7 @@ pub struct HealthRoutedTool {
 }
 
 impl HealthRoutedTool {
+    /// Wrap `inner` with a health gate keyed on `health_rx`.
     pub fn new(
         inner: McpToolAdapter,
         server_name: String,

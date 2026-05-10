@@ -9,9 +9,6 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "macros", "fs", "time"] }
 tracing = { workspace = true }
-# SQLite-backed implementation lives in the `sqlite` submodule. These
-# deps are pulled in unconditionally because the daemon always opts in —
-# tests still use `:memory:` so they don't need a feature gate.
 rusqlite = { workspace = true }
 tokio-rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }

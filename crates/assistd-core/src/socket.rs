@@ -38,6 +38,15 @@ pub enum SocketError {
     Json(#[from] serde_json::Error),
 }
 
+/// Serve the IPC socket at the default path from [`assistd_ipc::socket_path`].
+///
+/// Resolves the socket path and delegates to [`serve_at`]. Runs until `shutdown`
+/// resolves, then drains in-flight connections within the configured grace period.
+///
+/// # Errors
+///
+/// Returns [`SocketError`] if the stale socket file cannot be removed or the
+/// listener cannot bind.
 pub async fn serve<F>(state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
 where
     F: Future<Output = ()>,
@@ -46,6 +55,17 @@ where
     serve_at(&path, state, shutdown).await
 }
 
+/// Serve the IPC socket at `path`, using `state` to dispatch requests.
+///
+/// Removes any stale socket file at `path`, binds a new [`UnixListener`],
+/// and runs the accept loop until `shutdown` resolves. After shutdown, in-flight
+/// connections are drained for up to `config.daemon.shutdown_grace_secs` before
+/// the listener closes. Removes the socket file on exit.
+///
+/// # Errors
+///
+/// Returns [`SocketError`] if the stale file cannot be removed, the listener
+/// cannot bind, or the accept loop encounters an unrecoverable I/O error.
 pub async fn serve_at<F>(path: &Path, state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
 where
     F: Future<Output = ()>,

@@ -44,9 +44,6 @@ pub mod state;
 pub use agent::Agent;
 pub use recovery::{Component, RecoverySeverity, install_panic_hook, spawn_supervised};
 
-// Re-exports from `assistd-config`. Config types are the boundary
-// between user-supplied TOML and subsystem constructors; the daemon
-// passes them through unchanged.
 pub use assistd_config as config;
 pub use assistd_config::{
     AgentConfig, BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config,
@@ -56,34 +53,18 @@ pub use assistd_config::{
     ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig,
 };
 
-// Re-exports from `assistd-ipc`. Wire-protocol types crossing the
-// socket boundary. The daemon binary uses these to drive request
-// handlers and emit events.
 pub use assistd_ipc as ipc;
 pub use assistd_ipc::{PresenceState, VoiceCaptureState};
 
-// Re-exports from `assistd-tools`. The tool/command subsystem lives
-// in its own crate; these are the types the daemon constructs and
-// hands to `AppState`.
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
 
-// Re-exports from `assistd-voice`. Voice input/output traits plus
-// the `No*` placeholders used when the corresponding feature is
-// disabled at build time or in config.
 pub use assistd_voice::{
     ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput, SpeakDecision,
     VoiceInput, VoiceOutput, VoiceOutputController,
 };
 
-// Re-exports from `assistd-wm`. Window-manager trait + the `No*`
-// placeholder used when no compositor backend is configured. The
-// daemon imports concrete backends (`I3Backend`, `I3Handle`) directly
-// from `assistd_wm`.
 pub use assistd_wm::{NoWindowManager, WindowManager};
 
-// In-crate exports. `AppState` is the daemon's shared state container;
-// `PresenceManager` owns the presence machine and llama-server lifecycle;
-// `RequestGuard` is the RAII handle held for the duration of a request.
 pub use presence::{PresenceManager, RequestGuard};
 pub use state::{AppState, ConversationContext};
 
@@ -185,9 +166,6 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
         )
     })?;
 
-    // Resolve sandbox availability once at startup. `Auto` silently
-    // degrades to unsandboxed with a warn; `Bwrap` bails startup if bwrap
-    // is missing.
     let sandbox_request = match config.tools.bash.sandbox {
         BashSandboxMode::Auto => SandboxRequest::Auto,
         BashSandboxMode::Bwrap => SandboxRequest::Bwrap,
@@ -195,8 +173,8 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     };
     let sandbox = probe_sandbox(sandbox_request, config.tools.bash.bwrap_extra_args.clone())?;
 
-    // Build bash policy config: shlex-tokenize destructive patterns once
-    // so the hot path in `matches_destructive` doesn't re-parse them.
+    // Shlex-tokenize destructive patterns once so the hot path in
+    // `matches_destructive` doesn't re-parse them on every invocation.
     let destructive_patterns: Vec<Vec<String>> = config
         .tools
         .bash
@@ -211,7 +189,6 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
         destructive_patterns,
     });
 
-    // Build write policy config: expand `~`, canonicalize each entry.
     // Non-existent entries are dropped with a warning so a fresh install
     // missing (say) `~/Documents` doesn't break the command entirely.
     let mut writable_paths: Vec<PathBuf> = Vec::new();
@@ -265,12 +242,6 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
         &config.tools.output,
         overflow_dir,
     ));
-    // LLM-callable cross-conversation memory. `RememberTool` queues an
-    // embed job for the saved value so semantic recall finds memories
-    // by paraphrase. `RecallTool` ranks saved facts by semantic
-    // similarity to the query (single-mode; the embedder is always
-    // co-resident). `ReminisceTool` is the sibling that searches *past
-    // conversation history* rather than saved facts.
     tools.register(RememberTool::new(memory_ops, embed_tx));
     tools.register(RecallTool::new(
         embedder.clone(),
@@ -279,9 +250,8 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     ));
     tools.register(ReminisceTool::new(embedder, semantic, embedding_model));
 
-    // MCP tools registered LAST so a malicious server cannot shadow the
-    // native tool names by claiming `run` / `remember` / etc. — the
-    // registry's linear lookup returns the first match.
+    // MCP tools are registered last so a malicious server cannot shadow
+    // native tool names — the registry's linear lookup returns the first match.
     for t in mcp_tools {
         tools.register_boxed(t);
     }
@@ -308,6 +278,10 @@ pub struct VisionRevalidator {
 }
 
 impl VisionRevalidator {
+    /// Construct a new revalidator and wrap it in an `Arc`.
+    ///
+    /// `initial_model_id` is the model id known at startup; `None` means the
+    /// first probe result will be accepted unconditionally as the baseline.
     pub fn new(
         gate: Arc<assistd_tools::VisionGate>,
         initial_model_id: Option<String>,
@@ -352,6 +326,8 @@ impl VisionRevalidator {
         }
     }
 
+    /// Returns a reference to the shared [`assistd_tools::VisionGate`] this
+    /// revalidator manages.
     pub fn gate(&self) -> &Arc<assistd_tools::VisionGate> {
         &self.gate
     }

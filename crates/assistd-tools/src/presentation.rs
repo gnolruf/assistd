@@ -39,6 +39,8 @@ pub struct PresentSpec {
 }
 
 impl Default for PresentSpec {
+    /// Returns a spec with 200 max lines, 50 KiB max bytes, and
+    /// `/tmp/assistd-output` as the overflow directory.
     fn default() -> Self {
         Self {
             max_lines: 200,
@@ -87,8 +89,6 @@ pub fn present(
     let footer = format!("[exit:{} | {}ms]", out.exit_code, duration_ms);
     let stderr_raw = String::from_utf8_lossy(&out.stderr).into_owned();
 
-    // 1. Binary guard — stdout might be an image dump, a stray `/dev/urandom`
-    //    read, or Latin-1 text. Refuse to splat it into the model's context.
     if let Some(label) = binary_guard(&out.stdout) {
         let mut body = format!(
             "[error] binary output ({}, {}). Use: cat -b <path>",
@@ -114,12 +114,10 @@ pub fn present(
         };
     }
 
-    // 2. Decode stdout and measure.
     let stdout_str = String::from_utf8_lossy(&out.stdout).into_owned();
     let line_count = count_lines(&stdout_str);
     let byte_count = stdout_str.len();
 
-    // 3. Overflow spill.
     let overflow = line_count > spec.max_lines || byte_count > spec.max_bytes;
     let (visible_head, overflow_file) = if overflow {
         let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -140,7 +138,6 @@ pub fn present(
         (stdout_str.clone(), None)
     };
 
-    // 4. Assemble body: head (+ trailing newline) → banner (+ hints) → stderr → footer.
     let mut body = String::new();
     if !visible_head.is_empty() {
         body.push_str(&visible_head);
@@ -192,21 +189,16 @@ pub(crate) fn binary_guard(raw: &[u8]) -> Option<String> {
         return None;
     }
 
-    // Rule 1: any NUL byte → binary. `sniff_binary` gives a nicer MIME label
-    //  when the magic bytes are recognized (PNG, ZIP, …).
     if raw.contains(&0u8) {
         return Some(sniff_binary(raw).unwrap_or_else(|| "application/octet-stream".into()));
     }
 
-    // Rule 2: non-UTF-8 bytes (e.g. Latin-1 text with 0xE9) → binary.
     let s = match std::str::from_utf8(raw) {
         Ok(s) => s,
         Err(_) => return Some("invalid-utf8".into()),
     };
 
-    // Rule 3: more than 10% control chars (excluding \t, \n, \r) → binary.
-    //  Counting over chars (not bytes) so multibyte UTF-8 runes aren't
-    //  double-counted.
+    // Count over chars (not bytes) so multibyte UTF-8 runes aren't double-counted.
     let total = s.chars().count();
     if total == 0 {
         return None;
@@ -249,8 +241,6 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
         return String::new();
     }
 
-    // Line clamp: cut after the Nth '\n' (inclusive). If fewer than N
-    // newlines exist, keep everything through end-of-string.
     let mut cut = s.len();
     let mut seen = 0usize;
     for (i, b) in s.bytes().enumerate() {
@@ -263,8 +253,6 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
         }
     }
 
-    // Byte clamp (UTF-8 boundary safe). Walk backward if the clamp lands
-    // inside a multibyte codepoint.
     if cut > max_bytes {
         cut = max_bytes;
         while cut > 0 && !s.is_char_boundary(cut) {

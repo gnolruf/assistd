@@ -146,6 +146,7 @@ impl MemoryStore for NoMemoryStore {
     }
 }
 
+/// Returns the crate version string from `CARGO_PKG_VERSION`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

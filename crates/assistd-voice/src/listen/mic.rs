@@ -37,7 +37,10 @@ const UTTERANCE_CHANNEL_DEPTH: usize = 16;
 /// 128 slots is ~2.5 s of audio.
 const FRAME_CHANNEL_DEPTH: usize = 128;
 
-/// Cpal + VAD + whisper implementation of [`ContinuousListener`].
+/// Cpal + webrtc-vad + whisper implementation of [`ContinuousListener`].
+///
+/// Owns a cpal input stream while active, segments audio into utterances via
+/// [`UtteranceVad`], and transcribes each via the shared [`Transcriber`].
 pub struct MicContinuousListener {
     transcriber: Arc<dyn Transcriber>,
     mic_device: Option<String>,

@@ -24,10 +24,12 @@ use super::writer::{WriteCall, WriteOp};
 pub struct SessionId(pub String);
 
 impl SessionId {
+    /// Generate a new random [`SessionId`] using UUIDv4.
     pub fn new() -> Self {
         Self(Uuid::new_v4().to_string())
     }
 
+    /// Borrow the inner UUID string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -65,6 +67,7 @@ pub enum PersistedRole {
 }
 
 impl PersistedRole {
+    /// Return the lowercase wire string stored in the `conversations.role` column.
     pub fn as_wire(self) -> &'static str {
         match self {
             PersistedRole::System => "system",
@@ -74,6 +77,8 @@ impl PersistedRole {
         }
     }
 
+    /// Parse a wire string from the `conversations.role` column, returning
+    /// `None` for unrecognised values.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "system" => Some(PersistedRole::System),
@@ -102,6 +107,7 @@ pub struct PersistedMessage {
 }
 
 impl PersistedMessage {
+    /// Build a user-role message with no tool fields set.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: PersistedRole::User,
@@ -112,6 +118,7 @@ impl PersistedMessage {
         }
     }
 
+    /// Build a plain assistant text message with no tool fields set.
     pub fn assistant_text(content: impl Into<String>) -> Self {
         Self {
             role: PersistedRole::Assistant,
@@ -122,6 +129,7 @@ impl PersistedMessage {
         }
     }
 
+    /// Build an assistant message that carries tool-call JSON but no text content.
     pub fn assistant_tool_calls(calls: serde_json::Value) -> Self {
         Self {
             role: PersistedRole::Assistant,
@@ -132,6 +140,7 @@ impl PersistedMessage {
         }
     }
 
+    /// Build a tool-result message with the given content, call id, and tool name.
     pub fn tool_result(
         content: impl Into<String>,
         call_id: impl Into<String>,
@@ -225,20 +234,25 @@ pub struct UndoOutcome {
 /// below do — both hold an `Arc<SqliteHandle>`).
 #[async_trait]
 pub trait ConversationStore: Send + Sync + 'static {
+    /// Open a new session row for the daemon process identified by `daemon_pid`.
     async fn begin_session(&self, daemon_pid: u32) -> Result<SessionId>;
+    /// Mark `id` as ended by stamping `ended_at`.
     async fn end_session(&self, id: &SessionId) -> Result<()>;
+    /// Open a new turn row inside `session` labelled with `user_text`.
     async fn begin_turn(&self, session: &SessionId, user_text: &str) -> Result<TurnId>;
+    /// Mark `turn` as ended by stamping `ended_at`.
     async fn end_turn(&self, turn: TurnId) -> Result<()>;
+    /// Append `msg` to the `conversations` table. Returns the new `conversations.id` rowid.
     async fn append_message(
         &self,
         session: &SessionId,
         turn: Option<TurnId>,
         msg: PersistedMessage,
     ) -> Result<i64>;
+    /// Full-text search via the FTS5 index. Returns up to `limit` hits ordered by relevance.
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
+    /// Return the `limit` most-recent turns ordered by turn id descending.
     async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>>;
-
-    // --- Branch operations -------------------------------------------
 
     /// Atomically begin a session and create its default `main` branch.
     /// Returns both ids; the caller stores them in `AppState`. Replaces
@@ -334,8 +348,8 @@ pub struct ResumeCandidate {
     pub started_at: String,
 }
 
-/// No-op fallback used when memory is disabled in config or in tests
-/// that don't exercise persistence.
+/// Successful-no-op fallback used when memory is disabled in config or in
+/// tests that don't exercise persistence.
 pub struct NoConversationStore;
 
 #[async_trait]
@@ -436,6 +450,7 @@ pub struct SqliteConversationStore {
 }
 
 impl SqliteConversationStore {
+    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }

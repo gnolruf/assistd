@@ -28,6 +28,7 @@ use crate::{
     voice_init, wm_init,
 };
 
+/// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
 pub struct DaemonArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
@@ -40,6 +41,11 @@ pub struct DaemonArgs {
     pub client_mode: bool,
 }
 
+/// Start the assistd daemon: load config, init subsystems, serve the IPC socket.
+///
+/// # Errors
+///
+/// Returns an error if config loading, validation, or the IPC socket fails.
 pub async fn run(args: DaemonArgs) -> Result<()> {
     init_tracing();
 
@@ -255,6 +261,11 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
+/// Write a default config file to the platform config directory.
+///
+/// # Errors
+///
+/// Returns an error if the config path cannot be determined or the file cannot be written.
 pub fn init_config() -> Result<()> {
     init_tracing();
     let path = Config::default_path()?;

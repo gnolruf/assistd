@@ -125,6 +125,7 @@ pub struct PresenceLlmHealthProbe {
 }
 
 impl PresenceLlmHealthProbe {
+    /// Wrap a [`PresenceManager`] in a health-probe adapter.
     pub fn new(presence: Arc<PresenceManager>) -> Self {
         Self { presence }
     }

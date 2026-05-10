@@ -53,6 +53,7 @@ pub struct SseConfig {
 }
 
 impl SseConfig {
+    /// Create a config with default timeouts (30s request/read, 15s ping interval).
     pub fn new(label: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
@@ -65,10 +66,8 @@ impl SseConfig {
     }
 }
 
+/// [`McpClient`] implementation that speaks JSON-RPC over HTTP+SSE.
 pub struct SseMcpClient {
-    /// Currently only read when constructing the lifeline; kept on the
-    /// client itself so future debug paths (e.g. logging from `call`
-    /// retry failures) don't have to thread it through again.
     #[allow(dead_code)]
     label: String,
     correlator: Arc<Correlator>,
@@ -120,7 +119,6 @@ impl SseMcpClient {
             request_timeout: cfg.request_timeout,
         });
 
-        // Reader task. Holds the long-lived SSE connection.
         let reader = ReadLoop {
             http: http.clone(),
             base_url: base_url.clone(),
@@ -147,7 +145,6 @@ impl SseMcpClient {
             );
         }
 
-        // Initialize handshake. Failure is fatal for this transport.
         if let Err(e) = client.initialize().await {
             warn!(
                 target: "assistd::mcp",
@@ -198,7 +195,6 @@ impl SseMcpClient {
             "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION },
         });
         let _ = self.call("initialize", params).await?;
-        // Notification has no response; just POST it.
         let bytes = notification_line("notifications/initialized", json!({}))?;
         // Strip the trailing newline — POST bodies don't need it.
         let body = &bytes[..bytes.len().saturating_sub(1)];
@@ -353,12 +349,14 @@ pub struct SseLifeline {
 }
 
 impl SseLifeline {
+    /// Await the SSE read loop's termination signal.
     pub async fn wait_for_disconnect(&mut self) {
         if let Some(rx) = self.done_rx.take() {
             let _ = rx.await;
         }
     }
 
+    /// Cancel the SSE and ping tasks and wait briefly for them to finish.
     pub async fn shutdown(mut self) {
         let _ = self.cancel_tx.send(true);
         if let Some(t) = self.stream_task.take() {
@@ -431,7 +429,6 @@ impl ReadLoop {
         let mut parser = EventParser::new();
 
         loop {
-            // Race the next chunk read against shutdown / ping-failure cancel.
             let chunk = tokio::select! {
                 _ = cancel_rx.changed() => {
                     if *cancel_rx.borrow() {
@@ -547,7 +544,6 @@ async fn ping_loop(
 ) {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // Skip the immediate first tick.
     ticker.tick().await;
     loop {
         tokio::select! {
@@ -586,10 +582,7 @@ async fn ping_loop(
     }
 }
 
-// ---------------------------------------------------------------------------
-// SSE event parser. Pure function on a buffer so it's exhaustively testable.
-// ---------------------------------------------------------------------------
-
+/// A single parsed Server-Sent Event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEvent {
     pub event_type: String,
@@ -613,10 +606,12 @@ struct PartialEvent {
 }
 
 impl EventParser {
+    /// Create a new, empty parser.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Feed the next chunk of bytes from the HTTP body into the parser.
     pub fn push(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
     }
@@ -625,16 +620,14 @@ impl EventParser {
     /// the buffer doesn't yet contain a blank-line terminator.
     pub fn next_event(&mut self) -> Option<SseEvent> {
         loop {
-            // Find the next \n. SSE allows \r\n or \n as line terminators.
+            // SSE allows \r\n or \n as line terminators.
             let nl = self.buf.iter().position(|&b| b == b'\n')?;
-            // Take the line (without the trailing \n; trim any trailing \r).
             let mut line: Vec<u8> = self.buf.drain(..=nl).collect();
-            line.pop(); // drop \n
+            line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
             if line.is_empty() {
-                // Blank line — dispatch the accumulated event, if any.
                 let cur = std::mem::take(&mut self.cur);
                 if cur.event_type.is_none() && cur.data_lines.is_empty() && cur.id.is_none() {
                     continue;
@@ -647,12 +640,10 @@ impl EventParser {
                     id: cur.id,
                 });
             }
-            // Comments start with ':'.
             if line.first() == Some(&b':') {
                 continue;
             }
-            // Field/value split on the first colon. A line with no colon
-            // is treated as a field name with empty value (per spec).
+            // A line with no colon is treated as a field name with empty value (per spec).
             let line_str = match std::str::from_utf8(&line) {
                 Ok(s) => s,
                 Err(_) => continue, // drop non-UTF-8 lines

@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 /// completes.
 pub const FINAL_RATE_HOLD: Duration = Duration::from_secs(3);
 
+/// Token-rate meter for the status bar.
+///
+/// Counts delta events since the first delta and exposes a chunks-per-second
+/// rate that approximates tokens/sec for llama.cpp SSE streams.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ThroughputMeter {
     first_delta_at: Option<Instant>,
@@ -19,12 +23,15 @@ pub struct ThroughputMeter {
     final_rate: Option<f64>,
 }
 
+/// Point-in-time rate snapshot produced by [`ThroughputMeter::snapshot`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ThroughputSnapshot {
+    /// Chunks per second, or `None` when no data is available.
     pub rate: Option<f64>,
 }
 
 impl ThroughputMeter {
+    /// Create a new zeroed meter.
     pub const fn new() -> Self {
         Self {
             first_delta_at: None,
@@ -34,6 +41,7 @@ impl ThroughputMeter {
         }
     }
 
+    /// Record one delta event at `now`.
     pub fn on_delta(&mut self, now: Instant) {
         if self.first_delta_at.is_none() {
             self.first_delta_at = Some(now);
@@ -41,15 +49,18 @@ impl ThroughputMeter {
         self.chunk_count += 1;
     }
 
+    /// Mark generation complete, freezing the final rate for [`FINAL_RATE_HOLD`].
     pub fn on_done(&mut self, now: Instant) {
         self.finished_at = Some(now);
         self.final_rate = self.instant_rate(now);
     }
 
+    /// Reset to the zeroed state, ready for the next query.
     pub fn reset(&mut self) {
         *self = Self::new();
     }
 
+    /// Take a rate snapshot at `now`.
     pub fn snapshot(&self, now: Instant) -> ThroughputSnapshot {
         ThroughputSnapshot {
             rate: self.rate_at(now),

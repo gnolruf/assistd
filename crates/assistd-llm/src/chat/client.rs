@@ -42,6 +42,11 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce 
     summary of the following dialogue that preserves all factual claims, user requests, and \
     assistant conclusions. Write in past tense. Do not add commentary.";
 
+/// HTTP streaming chat client backed by a locally-managed llama-server.
+///
+/// Implements [`crate::LlmBackend`]. A `tokio::sync::Mutex<Conversation>` guards
+/// the chat history; the HTTP streaming call itself runs lock-free so a slow
+/// server never blocks concurrent state mutations.
 pub struct LlamaChatClient {
     client: reqwest::Client,
     base_url: String,
@@ -301,11 +306,6 @@ impl LlamaChatClient {
 #[async_trait]
 impl LlmBackend for LlamaChatClient {
     async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        // Phase 1: build the wire body under the lock. ensure_budget
-        // may run a summarization HTTP round-trip; that's still on the
-        // locked path because it mutates `Conversation` (drops summarized
-        // turns and inserts a synthetic summary message). Locked phase
-        // is bounded — it does not include the streaming response read.
         let body_bytes = {
             let lock_start = std::time::Instant::now();
             let mut conv = self.conv.lock().await;
@@ -349,10 +349,8 @@ impl LlmBackend for LlamaChatClient {
             }
         };
 
-        // Phase 2: stream the response with no conv lock held.
         let outcome = self.stream_openai(body_bytes, &tx).await;
 
-        // Phase 3: re-acquire and apply the outcome.
         let mut conv = self.conv.lock().await;
         match outcome {
             StreamOutcome::Ok(accum) => {
@@ -374,12 +372,8 @@ impl LlmBackend for LlamaChatClient {
                 Err(LlmError::Chat(e))
             }
             StreamOutcome::ServerRestart { .. } => {
-                // Generate is the legacy single-turn API used by code
-                // paths that don't run the agent loop, so they cannot
-                // replay. Surface the restart as a typed error and
-                // leave the user message in place — the caller can
-                // re-issue if they choose. Unlike PreEmitError, we do
-                // NOT roll back the user message: a follow-up call
+                // `generate` is the legacy single-turn API; callers cannot
+                // replay. Leave the user message in place — a follow-up call
                 // would re-push, and double-pushing would duplicate.
                 Err(LlmError::ServerRestarting(
                     "llama-server crashed during generate".into(),
@@ -417,7 +411,6 @@ impl LlmBackend for LlamaChatClient {
     }
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
-        // Phase 1: build the wire body under the lock.
         let body_bytes = {
             let mut conv = self.conv.lock().await;
             if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
@@ -450,21 +443,16 @@ impl LlmBackend for LlamaChatClient {
             }
         };
 
-        // Phase 2: stream the response lock-free.
         let outcome = self.stream_openai(body_bytes, &tx).await;
 
-        // Phase 3: re-acquire and commit the step outcome.
         let mut conv = self.conv.lock().await;
         match outcome {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)
             | StreamOutcome::ClientDisconnected(accum) => {
                 let result = commit_step(&mut conv, accum);
-                // Successful commit (Final or ToolCalls) consumes the
-                // transient context — the next turn must re-run
-                // retrieval rather than reuse stale hits. PreEmitError
-                // path leaves it in place so a retry sees the same
-                // injected block.
+                // Consume so the next turn re-runs retrieval; `PreEmitError`
+                // leaves it in place so a retry sees the same injected block.
                 let _ = conv.consume_transient_context();
                 result
             }

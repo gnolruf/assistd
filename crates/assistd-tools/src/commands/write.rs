@@ -25,6 +25,7 @@ pub struct WritePolicyCfg {
 }
 
 impl WritePolicyCfg {
+    /// Construct a policy with the given canonicalized writable path prefixes.
     pub fn new(writable_paths: Vec<PathBuf>) -> Self {
         Self { writable_paths }
     }
@@ -53,6 +54,7 @@ pub struct WriteCommand {
 }
 
 impl WriteCommand {
+    /// Construct a `WriteCommand` with the given policy configuration.
     pub fn new(cfg: Arc<WritePolicyCfg>) -> Self {
         Self { cfg }
     }
@@ -107,12 +109,9 @@ impl Command for WriteCommand {
             input.stdin
         };
 
-        // Policy: normalize, require absolute, check allowlist. The empty
-        // allowlist short-circuits to "write anywhere" *only* in the test
+        // Empty allowlist short-circuits to "write anywhere" only in the test
         // constructor; production always has at least one entry (config
-        // validation rejects empty lists). The resolved path is used for
-        // the actual write so that `~/foo` → `$HOME/foo` and dot-dot
-        // components are collapsed before touching disk.
+        // validation rejects empty lists).
         let write_target: PathBuf = if self.cfg.writable_paths.is_empty() {
             PathBuf::from(&raw_path)
         } else {
@@ -293,9 +292,8 @@ fn split_at_existing(path: &Path) -> (PathBuf, PathBuf) {
         let Some(file_name) = anchor.file_name() else {
             return (anchor, tail);
         };
-        // Prepend this component to `tail` without pushing onto an empty
-        // PathBuf (which inserts a stray separator, yielding trailing-slash
-        // paths that tokio::fs::write rejects with EISDIR).
+        // Avoid pushing onto an empty PathBuf, which inserts a stray separator
+        // and yields trailing-slash paths that tokio::fs::write rejects with EISDIR.
         let new_tail = if tail.as_os_str().is_empty() {
             PathBuf::from(file_name)
         } else {

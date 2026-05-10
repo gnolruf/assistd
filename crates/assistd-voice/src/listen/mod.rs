@@ -71,6 +71,7 @@ impl Default for NoContinuousListener {
 }
 
 impl NoContinuousListener {
+    /// Create a new `NoContinuousListener`.
     pub fn new() -> Self {
         let (state_tx, _) = watch::channel(false);
         let (utterances, _) = broadcast::channel(16);

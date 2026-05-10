@@ -49,6 +49,7 @@ enum OutputItem {
     Thumbnail(ThumbnailItem),
 }
 
+/// Scrollable output region holding the full chat history for the TUI session.
 pub struct OutputPane {
     items: Vec<OutputItem>,
     open_assistant: Option<usize>,
@@ -64,6 +65,7 @@ impl Default for OutputPane {
 }
 
 impl OutputPane {
+    /// Create an empty output pane.
     pub fn new() -> Self {
         Self {
             items: Vec::new(),
@@ -74,6 +76,7 @@ impl OutputPane {
         }
     }
 
+    /// Append a user prompt line prefixed with `"> "`.
     pub fn push_user(&mut self, text: &str) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
@@ -114,6 +117,7 @@ impl OutputPane {
         self.dirty = true;
     }
 
+    /// Open a new streaming assistant block; subsequent [`append_assistant`](Self::append_assistant) calls extend it.
     pub fn begin_assistant(&mut self) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
@@ -124,6 +128,7 @@ impl OutputPane {
         self.dirty = true;
     }
 
+    /// Append a streaming delta to the open assistant block, splitting on embedded newlines.
     pub fn append_assistant(&mut self, delta: &str) {
         let mut idx = match self.open_assistant {
             Some(i) => i,
@@ -149,6 +154,7 @@ impl OutputPane {
         self.dirty = true;
     }
 
+    /// Close the open assistant block and append a blank separator line.
     pub fn finish_assistant(&mut self) {
         if self.open_assistant.is_none() {
             return;
@@ -158,6 +164,7 @@ impl OutputPane {
         self.dirty = true;
     }
 
+    /// Append an error line prefixed with `"!! "` in red bold.
     pub fn push_error(&mut self, msg: &str) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
@@ -244,20 +251,24 @@ impl OutputPane {
         0
     }
 
+    /// Scroll up by half a viewport height.
     pub fn scroll_page_up(&mut self, viewport_height: u16) {
         let step = (viewport_height / 2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_add(step);
     }
 
+    /// Scroll down by half a viewport height.
     pub fn scroll_page_down(&mut self, viewport_height: u16) {
         let step = (viewport_height / 2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_sub(step);
     }
 
+    /// Reset the scroll offset to the bottom (most-recent content).
     pub fn reset_scroll(&mut self) {
         self.scroll_offset = 0;
     }
 
+    /// Current scroll offset in wrapped lines (0 = pinned to bottom).
     pub fn scroll_offset(&self) -> u16 {
         self.scroll_offset
     }
@@ -424,8 +435,6 @@ fn wrapped_text_rows(line: &Line<'static>, width: u16) -> usize {
 }
 
 fn wrapped_tool_rows(b: &ToolBlock, width: u16) -> usize {
-    // Mirrors `render_tool_block` row accounting: header + body + footer
-    // + trailing blank, all wrapped to `inner_w = width - 2` (bar prefix).
     if width == 0 {
         return 1;
     }
@@ -465,7 +474,6 @@ fn wrapped_tool_rows(b: &ToolBlock, width: u16) -> usize {
             rows += 1;
         }
     }
-    // Footer + trailing blank.
     rows + 2
 }
 
@@ -552,7 +560,6 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16) {
         }
     }
 
-    // Footer: right-aligned [exit:N | Xms] in green/red bold.
     let footer = format!("[exit:{} | {}ms]", b.exit_code, b.duration_ms);
     let pad = (inner_w as usize).saturating_sub(footer.chars().count());
     out.push(Line::from(vec![
@@ -564,7 +571,6 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16) {
         ),
     ]));
 
-    // Trailing blank so two adjacent blocks don't merge visually.
     out.push(Line::from(""));
 }
 

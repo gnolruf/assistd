@@ -12,6 +12,7 @@ use assistd_ipc::{Event, IpcClient, Request};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
+/// Arguments for the `memory` subcommand.
 #[derive(Args)]
 pub struct MemoryArgs {
     #[command(subcommand)]
@@ -82,6 +83,12 @@ impl MemoryAction {
     }
 }
 
+/// Dispatch a `memory` subcommand to the daemon and print the response.
+///
+/// # Errors
+///
+/// Returns an error if the IPC connection fails or the daemon sends an
+/// unexpected terminal event.
 pub async fn run(args: MemoryArgs) -> Result<()> {
     let forget_target = match &args.action {
         MemoryAction::Forget { id } => Some(*id),
@@ -184,7 +191,6 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 eprintln!("daemon error: {message}");
                 std::process::exit(1);
             }
-            // Other event types are not expected for memory commands
             _ => {}
         }
     }

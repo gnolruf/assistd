@@ -14,6 +14,7 @@
 use super::Chain;
 use thiserror::Error;
 
+/// Error returned by [`parse_chain`] when the input cannot be parsed.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
     #[error("empty command")]
@@ -51,6 +52,12 @@ impl Token {
     }
 }
 
+/// Parse a shell-style command line into a [`Chain`] AST.
+///
+/// # Errors
+///
+/// Returns [`ParseError`] when the input is empty, contains an unterminated
+/// quote, an unexpected or trailing operator, or an unsupported shell feature.
 pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
@@ -59,13 +66,10 @@ pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
     let mut p = Parser { tokens, pos: 0 };
     let chain = p.parse_seq()?;
     if p.pos != p.tokens.len() {
-        // Should be unreachable given the grammar, but belt-and-suspenders.
         return Err(ParseError::Empty);
     }
     Ok(chain)
 }
-
-// ---- tokenizer ----------------------------------------------------------
 
 fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
     let bytes = input.as_bytes();
@@ -181,8 +185,6 @@ fn read_word(input: &str, start: usize) -> Result<(String, usize), ParseError> {
     Ok((buf, i))
 }
 
-// ---- parser --------------------------------------------------------------
-
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -205,8 +207,6 @@ impl Parser {
         let mut left = self.parse_andor()?;
         while let Some(Token::Seq) = self.peek() {
             self.bump();
-            // Trailing ';' is permissible: if nothing (or another
-            // terminator) follows, just return what we have so far.
             if self.peek().is_none() {
                 return Ok(left);
             }

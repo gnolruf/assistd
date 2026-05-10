@@ -87,6 +87,7 @@ struct ConversationContextInner {
 }
 
 impl ConversationContext {
+    /// Construct a new context, wrapping `session_id` in an `Arc`.
     pub fn new(session_id: SessionId, branch_id: BranchId) -> Self {
         Self {
             inner: tokio::sync::RwLock::new(ConversationContextInner {
@@ -96,6 +97,7 @@ impl ConversationContext {
         }
     }
 
+    /// Construct a new context from an already-`Arc`-wrapped session id.
     pub fn from_arc(session_id: Arc<SessionId>, branch_id: BranchId) -> Self {
         Self {
             inner: tokio::sync::RwLock::new(ConversationContextInner {
@@ -224,6 +226,11 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Construct a minimal `AppState` with stub memory and embedding backends.
+    ///
+    /// All optional subsystems (memory, embedder, vision revalidator, window
+    /// manager) are wired to their no-op placeholders. Use the `with_*` builder
+    /// methods to attach real backends before serving requests.
     pub fn new(
         config: Config,
         llm: Arc<dyn LlmBackend>,
@@ -609,8 +616,6 @@ impl AppState {
         let mut block = String::from("Relevant past context:\n");
         for h in hits {
             let snippet = truncate_for_context(&h.content, 200);
-            // One line per hit; format keeps the model-visible block
-            // compact and predictable. `as_wire()` is "user"/"assistant".
             block.push_str(&format!(
                 "- [{} {} sim={:.0}%] {}\n",
                 h.timestamp,
@@ -1097,6 +1102,11 @@ impl AppState {
         Ok(())
     }
 
+    /// Handle a single user query: wake the daemon if needed, run the agent
+    /// loop, stream events back through `tx`, and persist the turn.
+    ///
+    /// This is the primary entry point for all LLM-backed queries, including
+    /// those dispatched internally by [`Self::handle_ptt_stop`].
     pub async fn handle_query(
         self: Arc<Self>,
         id: String,
@@ -1228,9 +1238,6 @@ impl AppState {
         let llm = self.llm.clone();
         let tools = self.tools.clone();
         let max_iterations = self.config.agent.max_iterations;
-        // Build the LLM health probe from the presence manager so the
-        // agent loop can wait for restart and replay on
-        // `LlmError::ServerRestarting`.
         let health: Option<std::sync::Arc<dyn assistd_llm::LlmHealthProbe>> =
             Some(std::sync::Arc::new(
                 crate::presence::PresenceLlmHealthProbe::new(self.presence.clone()),
@@ -1365,10 +1372,8 @@ impl AppState {
                 },
             };
 
-            // Build the wire event. Sentence-buffer pushes happen
-            // here too — but the wire event is sent BEFORE any
-            // speech_tx.send below, so client display latency stays
-            // independent of TTS backpressure.
+            // Wire events are forwarded before speech_tx.send so client display
+            // latency stays independent of TTS backpressure.
             let (wire_event, sentences_to_speak): (Event, Vec<String>) = match llm_event {
                 LlmEvent::Delta { text } => {
                     let sentences = sentence_buf.push(&text);
@@ -1475,8 +1480,6 @@ impl AppState {
                 LlmEvent::Done => {
                     let tail = sentence_buf.finish();
                     let sentences = tail.into_iter().collect();
-                    // Final assistant row: whatever text accumulated
-                    // since the last tool-call flush.
                     if !assistant_accum.is_empty() {
                         let final_text = std::mem::take(&mut assistant_accum);
                         self.persist_message_fire_and_forget(
@@ -1488,14 +1491,12 @@ impl AppState {
                 }
             };
 
-            // Forward wire event first.
             if client_alive && tx.send(wire_event).await.is_err() {
                 client_alive = false;
             }
 
-            // Then enqueue speech (in arrival order). Channel send
-            // failure means the worker died — log and continue; we
-            // still want to forward remaining wire events.
+            // Channel send failure means the worker died — log and continue
+            // so remaining wire events are still forwarded.
             for s in sentences_to_speak {
                 if !first_sentence_emitted {
                     tracing::debug!(
@@ -1515,30 +1516,23 @@ impl AppState {
             }
 
             if !client_alive {
-                // Client gone: stop pulling from llm_rx so the agent
-                // loop's tx.is_closed() check fires at its next
-                // iteration boundary. The worker keeps draining
-                // queued audio.
+                // Stop pulling from llm_rx so the agent loop's tx.is_closed()
+                // check fires at its next iteration boundary. The speech worker
+                // keeps draining any queued audio.
                 break;
             }
         }
 
-        // Stop the speech pipeline. Dropping speech_tx tells the worker
-        // to consume the remainder of its channel and then run
-        // wait_idle() — playback finishes naturally.
+        // Dropping speech_tx signals the worker to drain its queue and
+        // call wait_idle() before exiting — playback finishes naturally.
         drop(speech_tx);
 
-        // Wait for the agent turn to finish so we know whether to
-        // surface a backend error. The agent_turn_lock can be released
-        // as soon as the turn ends — concurrent queries shouldn't wait
-        // for audio to finish playing.
+        // The agent_turn_lock can be released as soon as the turn ends —
+        // concurrent queries shouldn't wait for audio playback to finish.
         let gen_result = generator.await;
         drop(_agent_guard);
 
-        // Close out the persisted turn whether we exited cleanly,
-        // hit an LLM error, or the client disconnected mid-stream —
-        // every path lands an `ended_at` timestamp on the row.
-        // Fire-and-forget like the message persistence above.
+        // Every exit path lands an ended_at timestamp on the turn row.
         if let Some(t) = turn_id {
             let conv = self.conversations.clone();
             self.persistence_tracker.spawn(async move {
@@ -1552,8 +1546,7 @@ impl AppState {
             });
         }
 
-        // Now await the speech worker. _request_guard is still held so
-        // presence stays Active through playback.
+        // _request_guard is still held so presence stays Active through playback.
         let _ = speech_handle.await;
 
         match gen_result {
@@ -1669,13 +1662,10 @@ impl AppState {
         }
         match self.voice.start_recording().await {
             Ok(()) => {
-                // Kick off the LLM presence wake in parallel with the
-                // user's capture. `handle_ptt_stop` joins this handle
-                // alongside `stop_and_transcribe`, so a Drowsy → Active
-                // model load runs *during* whisper inference instead of
-                // serially after it. `ensure_active` is idempotent, so
-                // the second call from `handle_query::acquire_request_guard`
-                // short-circuits to a single RwLock read.
+                // Kick off the presence wake in parallel with capture so a
+                // Drowsy → Active model load runs during Whisper inference.
+                // `ensure_active` is idempotent; the second call from
+                // `acquire_request_guard` short-circuits to a single RwLock read.
                 let presence = self.presence.clone();
                 let warm =
                     tokio::spawn(async move { presence.ensure_active().await }.in_current_span());
@@ -1948,9 +1938,6 @@ impl AppState {
             .replace(session.clone(), new_branch)
             .await;
 
-        // Echo the fork point back to the client. Look up the freshly
-        // created branch so we can emit the canonical metadata
-        // (parent name, fork_point_seq) without recomputing.
         let parent_name = self.lookup_branch_name(current_branch).await;
         let fork_point_seq = self.lookup_branch_tail_seq(current_branch).await;
         let _ = tx
@@ -2081,7 +2068,6 @@ impl AppState {
             .replace(target_session_arc.clone(), target_branch)
             .await;
 
-        // Reload history into the LLM backend.
         let rows = match self.conversations.load_branch_history(target_branch).await {
             Ok(v) => v,
             Err(e) => {
@@ -2112,7 +2098,6 @@ impl AppState {
             );
         }
 
-        // Look up the new branch's metadata for the BranchSwitched event.
         let (branch_name, parent_name, fork_point_seq) =
             self.lookup_branch_meta(target_branch).await;
 
@@ -2254,12 +2239,10 @@ impl AppState {
             })
             .await;
 
-        // Run Whisper inference and the presence-warmup join concurrently.
-        // The warmup was spawned at PTT-start; on a cold (Drowsy → Active)
-        // wake it would otherwise serialize behind transcription before
-        // `handle_query`'s `acquire_request_guard`. A failed warmup is
-        // logged but not fatal — the request guard inside `handle_query`
-        // will retry the wake itself.
+        // The warmup was spawned at PTT-start; joining it concurrently with
+        // Whisper means a Drowsy → Active model load runs during transcription
+        // rather than serially after it. A failed warmup is non-fatal — the
+        // request guard in `handle_query` will retry the wake.
         let warmup = self.warmup_handle.lock().await.take();
         let (text_res, warm_res) = tokio::join!(self.voice.stop_and_transcribe(), async {
             match warmup {
@@ -2312,15 +2295,11 @@ impl AppState {
             .await;
 
         if text.trim().is_empty() {
-            // VAD trimmed to silence — end the stream here rather
-            // than dispatching an empty user message to the LLM.
+            // VAD trimmed to silence — don't dispatch an empty user message.
             let _ = tx.send(Event::Done { id }).await;
             return Ok(());
         }
 
-        // Auto-feed the agent loop, reusing the Query handler so
-        // streaming deltas, tool calls, and Done all land on the
-        // same connection and correlate to this request's id.
         self.handle_query(id, text, Vec::new(), tx).await
     }
 }

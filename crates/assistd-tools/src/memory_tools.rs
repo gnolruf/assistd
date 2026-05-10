@@ -57,6 +57,7 @@ pub struct RememberTool {
 }
 
 impl RememberTool {
+    /// Construct a `RememberTool` backed by the given ops handle and embed channel.
     pub fn new(ops: Arc<MemoryOps>, embed_tx: mpsc::Sender<EmbedJob>) -> Self {
         Self { ops, embed_tx }
     }
@@ -180,6 +181,7 @@ pub struct RecallTool {
 }
 
 impl RecallTool {
+    /// Construct a `RecallTool` with the given embedder, semantic store, and model name.
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
@@ -236,7 +238,6 @@ impl Tool for RecallTool {
             .to_string();
 
         let (output, returned) = if self.embedding_model.is_empty() {
-            // Embedding subsystem disabled — no semantic index to search.
             ("(no memories)".to_string(), 0)
         } else {
             match self.embedder.embed(query).await {
@@ -315,6 +316,7 @@ pub struct ReminisceTool {
 }
 
 impl ReminisceTool {
+    /// Construct a `ReminisceTool` with the given embedder, semantic store, and model name.
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
@@ -419,9 +421,6 @@ impl Tool for ReminisceTool {
         } else {
             let mut s = String::new();
             for h in &hits {
-                // Compact one-line-per-hit format. Timestamps + role +
-                // similarity give the model enough metadata to weigh
-                // the relevance of each line.
                 s.push_str(&format!(
                     "[{} {} sim={:.0}%] {}\n",
                     h.timestamp,

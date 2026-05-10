@@ -137,6 +137,7 @@ impl Default for NoVoiceInput {
 }
 
 impl NoVoiceInput {
+    /// Create a new `NoVoiceInput`.
     pub fn new() -> Self {
         let (state_tx, _) = watch::channel(VoiceCaptureState::Idle);
         Self { state_tx }
@@ -174,6 +175,7 @@ impl VoiceOutput for NoVoiceOutput {
     }
 }
 
+/// Returns the crate version string from `Cargo.toml`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

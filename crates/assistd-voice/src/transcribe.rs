@@ -161,6 +161,8 @@ pub struct QueuedTranscriber {
 }
 
 impl QueuedTranscriber {
+    /// Construct a new `QueuedTranscriber`. `primary_is_gpu` controls whether
+    /// the queue-and-fallback path is active; pass `false` for a CPU-only primary.
     pub fn new(
         primary: Arc<dyn Transcriber>,
         primary_is_gpu: bool,
@@ -184,9 +186,6 @@ impl QueuedTranscriber {
 #[async_trait]
 impl Transcriber for QueuedTranscriber {
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
-        // Fast path: the primary is already CPU-backed, or the user has
-        // opted out of the fallback entirely. No contention window, no
-        // Queued state — straight to Transcribing.
         if !self.primary_is_gpu || !self.cfg.cpu_fallback_enabled {
             let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
             let result = self.primary.transcribe(pcm_i16_16k_mono).await;

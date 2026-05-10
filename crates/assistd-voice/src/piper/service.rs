@@ -36,9 +36,12 @@ const FAILURE_THRESHOLD: usize = 3;
 /// Sliding window for circuit-breaker accounting.
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 
+/// Current health state of the [`PiperVoiceOutput`] circuit breaker.
 #[derive(Debug, Clone)]
 pub enum ReadyState {
+    /// Synthesis is operating normally.
     Ready,
+    /// Circuit breaker has tripped after repeated failures; `reason` carries the last error.
     Degraded { reason: String },
 }
 
@@ -50,6 +53,7 @@ struct CircuitState {
     logged_degraded: bool,
 }
 
+/// [`VoiceOutput`] implementation backed by a per-utterance piper subprocess and rodio playback.
 pub struct PiperVoiceOutput {
     synth: Arc<OneShotSynth>,
     playback: Arc<RodioPlaybackWorker>,
@@ -127,6 +131,7 @@ impl PiperVoiceOutput {
         })
     }
 
+    /// Returns the current circuit-breaker state.
     pub fn ready_state(&self) -> ReadyState {
         self.state
             .lock()
@@ -150,7 +155,6 @@ impl PiperVoiceOutput {
     fn record_failure(&self, err: &PiperError) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        // Drop entries older than the window.
         while let Some(&front) = s.recent_failures.front() {
             if now.duration_since(front) > FAILURE_WINDOW {
                 s.recent_failures.pop_front();
@@ -177,8 +181,6 @@ impl PiperVoiceOutput {
 #[async_trait]
 impl VoiceOutput for PiperVoiceOutput {
     async fn speak(&self, text: String) -> Result<()> {
-        // Short-circuit when degraded — log once, then silent until a
-        // future health check (manual restart for now) clears it.
         {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if let ReadyState::Degraded { ref reason } = s.ready {

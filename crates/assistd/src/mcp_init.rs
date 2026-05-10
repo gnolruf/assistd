@@ -15,12 +15,16 @@ use assistd_mcp::{
 use tokio::sync::watch;
 use tracing::info;
 
+/// Live handles for all started MCP servers and their adapted tools.
 pub struct McpSubsystem {
+    /// One handle per successfully started MCP server.
     pub handles: Vec<McpServerHandle>,
+    /// Tool adapters discovered from each server's `tools/list` response.
     pub tools: Vec<Box<dyn assistd_tools::Tool>>,
 }
 
 impl McpSubsystem {
+    /// Shut down all MCP server processes gracefully.
     pub async fn shutdown(self) {
         for handle in self.handles {
             handle.shutdown().await;
@@ -28,6 +32,10 @@ impl McpSubsystem {
     }
 }
 
+/// Start all configured MCP servers and adapt their tools.
+///
+/// Servers that fail to start or fail tool discovery are skipped with a
+/// warning; they do not prevent the daemon from starting.
 pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubsystem {
     if !config.mcp.enabled {
         info!("mcp: disabled in config (mcp.enabled = false)");

@@ -13,12 +13,14 @@ use crate::{MemoryRecord, MemoryStore};
 use super::connection::SqliteHandle;
 use super::writer::{WriteCall, WriteOp};
 
+/// SQLite-backed [`crate::MemoryStore`] implementation.
 #[derive(Clone)]
 pub struct SqliteMemoryStore {
     handle: Arc<SqliteHandle>,
 }
 
 impl SqliteMemoryStore {
+    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }

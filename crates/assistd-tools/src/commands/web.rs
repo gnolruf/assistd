@@ -14,15 +14,18 @@ use crate::command::{Command, CommandInput, CommandOutput, error_line};
 /// stage either.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
 
+/// `web URL` — HTTP GET a URL and return the response body as stdout.
 pub struct WebCommand {
     client: reqwest::Client,
 }
 
 impl WebCommand {
+    /// Create a `WebCommand` with the default 30-second timeout.
     pub fn new() -> Self {
         Self::with_timeout(Duration::from_secs(30))
     }
 
+    /// Create a `WebCommand` with a custom request timeout.
     pub fn with_timeout(timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()

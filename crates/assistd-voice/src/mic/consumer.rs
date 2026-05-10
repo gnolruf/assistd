@@ -29,6 +29,10 @@ const DRAIN_CHUNK_SIZE: usize = 1024;
 /// smaller value would burn CPU.
 const IDLE_PARK: Duration = Duration::from_millis(10);
 
+/// Drain the ring buffer, resample to 16 kHz, and return accumulated i16 PCM.
+///
+/// Blocks until `stop_flag` is set or `max_pcm_samples` is reached. Pads the
+/// final partial chunk with zeros so the tail of the utterance is not dropped.
 pub fn drain_loop(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
@@ -56,7 +60,7 @@ pub fn drain_loop(
         1.0, // fixed ratio — no runtime modulation
         PolynomialDegree::Linear,
         DRAIN_CHUNK_SIZE,
-        1, // mono
+        1,
         FixedAsync::Input,
     )
     .map_err(|e| AudioCaptureError::BuildStream(format!("rubato init: {e}")))?;
@@ -169,7 +173,7 @@ fn resample_and_append(
 
 #[inline]
 pub(crate) fn f32_to_i16(s: f32) -> i16 {
-    // Clamp to avoid wrap on occasional out-of-range float noise.
+    // Clamp to avoid wrapping on occasional out-of-range float noise.
     let clamped = s.clamp(-1.0, 1.0);
     (clamped * i16::MAX as f32) as i16
 }

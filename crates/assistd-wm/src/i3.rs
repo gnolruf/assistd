@@ -31,11 +31,6 @@ use crate::{
     WorkspaceId, WorkspaceInfo,
 };
 
-// PR 4: the Snapshot struct + apply-event race rules now live in
-// `crate::snapshot` so the i3 and Sway backends share them. This file
-// only owns the i3-specific connection plumbing and reply-to-snapshot
-// projection.
-
 /// `WindowManager` impl wrapping a single i3 IPC command socket.
 /// Held inside `Arc<dyn WindowManager>` by the daemon's `AppState`.
 ///
@@ -64,9 +59,9 @@ pub struct I3Handle {
 }
 
 impl I3Handle {
+    /// Awaits the supervisor task. The daemon should flip `shutdown_tx` before
+    /// calling this so the supervisor exits cleanly rather than blocking.
     pub async fn shutdown(self) {
-        // The daemon flips `shutdown_tx` first; the supervisor task
-        // selects on `shutdown.changed()` and exits.
         let _ = self.supervisor_task.await;
     }
 }
@@ -379,8 +374,6 @@ async fn supervisor_loop(
     reconnect: Arc<tokio::sync::Notify>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    // First pass: drive the events conn we got at startup. cmd is
-    // already in `Some(_)` state, no reconnect needed yet.
     if !drive_events(
         initial_events,
         snapshot.clone(),
@@ -393,7 +386,6 @@ async fn supervisor_loop(
         return;
     }
 
-    // Subsequent passes: clear cmd, reconnect, re-seed, drive events.
     let mut attempt: u32 = 0;
     loop {
         *backend.cmd.lock().await = None;

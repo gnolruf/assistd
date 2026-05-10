@@ -44,6 +44,7 @@ pub struct StdioConfig {
 }
 
 impl StdioConfig {
+    /// Create a config with a 30-second default request timeout and no extra env vars.
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
@@ -113,7 +114,6 @@ impl StdioMcpClient {
                 error = %e,
                 "MCP initialize failed; tearing down transport",
             );
-            // Kill child, await background tasks, propagate error.
             let _ = child.kill().await;
             let _ = transport_handles.shutdown_and_join().await;
             let _ = stderr_task.await;
@@ -357,6 +357,7 @@ pub struct ChildLifeline {
 }
 
 impl ChildLifeline {
+    /// Return the OS PID of the child process, if still running.
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().and_then(|c| c.id())
     }
@@ -431,6 +432,7 @@ pub struct TransportHandles {
 }
 
 impl TransportHandles {
+    /// Abort the read and write tasks and wait up to 500ms for each to finish.
     pub async fn shutdown_and_join(mut self) {
         if let Some(t) = self.read_task.take() {
             t.abort();

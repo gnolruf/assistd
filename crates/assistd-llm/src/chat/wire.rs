@@ -43,6 +43,7 @@ pub struct ChatRequest<'a> {
     pub tool_choice: Option<&'a str>,
 }
 
+/// One message in the outgoing `messages` array.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage<'a> {
     pub role: &'a str,
@@ -108,11 +109,13 @@ pub struct FunctionCallSpec<'a> {
 }
 
 /// Non-streaming response shape — used only for the summarization call.
+/// Non-streaming response body — used only for the summarization call.
 #[derive(Debug, Deserialize)]
 pub struct ChatResponse {
     pub choices: Vec<ChatChoice>,
 }
 
+/// One choice in a non-streaming [`ChatResponse`].
 #[derive(Debug, Deserialize)]
 pub struct ChatChoice {
     pub message: ChatChoiceMessage,
@@ -121,6 +124,7 @@ pub struct ChatChoice {
     pub finish_reason: Option<String>,
 }
 
+/// The assistant message inside a non-streaming choice.
 #[derive(Debug, Deserialize)]
 pub struct ChatChoiceMessage {
     #[allow(dead_code)]
@@ -134,6 +138,7 @@ pub struct ChatCompletionChunk {
     pub choices: Vec<ChatChunkChoice>,
 }
 
+/// One choice slot in a streaming [`ChatCompletionChunk`].
 #[derive(Debug, Deserialize)]
 pub struct ChatChunkChoice {
     pub delta: ChatChunkDelta,
@@ -141,6 +146,7 @@ pub struct ChatChunkChoice {
     pub finish_reason: Option<String>,
 }
 
+/// Incremental fields emitted in a single streaming chunk.
 #[derive(Debug, Deserialize, Default)]
 pub struct ChatChunkDelta {
     #[serde(default)]
@@ -148,13 +154,12 @@ pub struct ChatChunkDelta {
     pub role: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
-    /// When the model calls a tool, llama.cpp streams call fragments across
-    /// multiple chunks. Each fragment carries a stable `index` so the
-    /// receiver can accumulate by slot.
+    /// Tool-call fragments streamed across multiple chunks; accumulate by `index`.
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
+/// One tool-call slot streamed in a [`ChatChunkDelta`].
 #[derive(Debug, Deserialize, Default)]
 pub struct ToolCallDelta {
     /// Stable across chunks for the same call. Required to reassemble
@@ -170,6 +175,7 @@ pub struct ToolCallDelta {
     pub function: Option<FunctionCallDelta>,
 }
 
+/// Incremental function-call fields within a [`ToolCallDelta`].
 #[derive(Debug, Deserialize, Default)]
 pub struct FunctionCallDelta {
     #[serde(default)]

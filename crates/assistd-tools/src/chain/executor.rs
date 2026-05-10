@@ -140,8 +140,6 @@ async fn run_command(
         })
         .await?;
 
-    // Prefix stderr with `[name]\t` so the caller can localize errors
-    // across a chain.
     let stderr = if out.stderr.is_empty() {
         Vec::new()
     } else {
@@ -156,8 +154,6 @@ async fn run_command(
 }
 
 fn prefix_stderr(name: &str, raw: &[u8]) -> Vec<u8> {
-    // One `[name]\t` prefix per newline-terminated chunk; if the final
-    // byte isn't a newline, still prefix the trailing remainder.
     let mut out = Vec::with_capacity(raw.len() + name.len() + 4);
     let mut line_start = true;
     for &b in raw {

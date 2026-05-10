@@ -25,6 +25,12 @@ impl VoiceCtlAction {
     }
 }
 
+/// Send a voice-output command to the daemon and print the response.
+///
+/// # Errors
+///
+/// Returns an error if the IPC connection fails or the daemon sends an
+/// unexpected terminal event.
 pub async fn run(action: VoiceCtlAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     let mut stream = IpcClient::new()

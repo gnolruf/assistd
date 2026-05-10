@@ -32,7 +32,6 @@ use tracing::{info, warn};
 /// imposing near-zero cost at idle (one std-mutex read + compare).
 const POLL_INTERVAL_SECS: u64 = 10;
 
-/// Decision output for one poll cycle. Pure and trivially unit-testable.
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     None,

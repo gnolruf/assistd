@@ -191,6 +191,7 @@ pub struct SqliteSemanticStore {
 }
 
 impl SqliteSemanticStore {
+    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
@@ -209,8 +210,6 @@ impl SemanticStore for SqliteSemanticStore {
         }
         let model = model.to_string();
         let q = query_vector;
-        // Phase 1: scan + score. Returns Vec<(chunk_id, similarity)> for
-        // the top-K results, ordered descending by similarity.
         let ranked: Vec<(i64, f32)> = self
             .handle
             .conn()
@@ -235,8 +234,7 @@ impl SemanticStore for SqliteSemanticStore {
         if ranked.is_empty() {
             return Ok(Vec::new());
         }
-        // Phase 2: hydrate winners with one batched JOIN. Batching keeps
-        // it O(1) round-trips regardless of K.
+        // Batched JOIN keeps hydration O(1) round-trips regardless of K.
         let chunk_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
         let sims: std::collections::HashMap<i64, f32> = ranked.iter().copied().collect();
         let placeholders = vec!["?"; chunk_ids.len()].join(",");
@@ -272,8 +270,6 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .context("nearest_chunks: hydrate winners")?;
-        // Re-order to match the rank order (the IN-clause query may
-        // return rows in any order; we want best-first).
         let by_id: std::collections::HashMap<i64, (i64, String, String, String, String)> = raw
             .into_iter()
             .map(|(cc_id, c_id, sess, ts, role, content)| (cc_id, (c_id, sess, ts, role, content)))
@@ -556,7 +552,6 @@ fn push_top_k(heap: &mut BinaryHeap<HeapEntry>, k: usize, rowid: i64, sim: f32) 
 
 fn heap_to_sorted(heap: BinaryHeap<HeapEntry>) -> Vec<(i64, f32)> {
     let mut v: Vec<(i64, f32)> = heap.into_iter().map(|e| (e.rowid, e.sim)).collect();
-    // Best-first.
     v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
     v
 }

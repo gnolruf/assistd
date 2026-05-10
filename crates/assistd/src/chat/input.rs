@@ -6,8 +6,10 @@ use std::collections::VecDeque;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+/// Maximum number of history entries retained by default.
 pub const DEFAULT_HISTORY_CAP: usize = 500;
 
+/// Single-line text editor with readline-style keybindings and submission history.
 #[derive(Debug)]
 pub struct InputLine {
     buffer: String,
@@ -18,10 +20,14 @@ pub struct InputLine {
     history_cap: usize,
 }
 
+/// Action returned by [`InputLine::on_key`] to the event loop.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InputAction {
+    /// No action required.
     None,
+    /// The user pressed Enter with non-empty input; contains the submitted text.
     Submit(String),
+    /// The user pressed Ctrl+C or Ctrl+D on an empty buffer.
     Quit,
 }
 
@@ -32,6 +38,7 @@ impl Default for InputLine {
 }
 
 impl InputLine {
+    /// Create an empty `InputLine` with the default history capacity.
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
@@ -43,6 +50,7 @@ impl InputLine {
         }
     }
 
+    /// Current buffer contents.
     pub fn buffer(&self) -> &str {
         &self.buffer
     }
@@ -61,6 +69,7 @@ impl InputLine {
         self.buffer[..self.cursor].chars().count() as u16
     }
 
+    /// Process one key event and return the resulting action.
     pub fn on_key(&mut self, ev: KeyEvent) -> InputAction {
         if !matches!(ev.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return InputAction::None;

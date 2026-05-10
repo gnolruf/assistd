@@ -124,6 +124,7 @@ pub struct McpToolAdapter {
 }
 
 impl McpToolAdapter {
+    /// Create an adapter for a single `(client, schema)` pair under the given registry name.
     pub fn new(client: Arc<dyn McpClient>, schema: ToolSchema, registry_name: String) -> Self {
         Self {
             client,
@@ -313,6 +314,7 @@ mod base64_dep {
     pub use base64::*;
 }
 
+/// Returns the crate version string from `Cargo.toml`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

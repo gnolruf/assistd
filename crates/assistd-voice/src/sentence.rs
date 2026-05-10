@@ -40,25 +40,20 @@ const ABBREVIATIONS: &[&str] = &[
     "U.S", "U.K", "approx", "Prof", "Gen", "Capt",
 ];
 
+/// Streaming sentence segmenter for LLM-to-TTS pipelines.
+///
+/// Accepts incremental token deltas via [`push`](Self::push), strips markdown,
+/// handles fenced code blocks per the configured [`CodeBlockMode`], and emits
+/// complete sentences at natural prosody boundaries. Call [`finish`](Self::finish)
+/// when the LLM stream ends to flush any trailing text, or [`flush_idle`](Self::flush_idle)
+/// to emit a mid-stream partial sentence when the LLM pauses.
 pub struct SentenceBuffer {
-    /// Accumulated, already-stripped text awaiting a flush.
     buf: String,
-    /// True when we're currently inside a triple-backtick fence —
-    /// raw deltas while in this state are dropped from `buf` entirely.
     in_code_fence: bool,
-    /// Pending raw delta characters that haven't yet been classified
-    /// (e.g. we've seen one or two backticks but not the third). Kept
-    /// small — only enough lookahead to spot a fence opener / closer.
     pending: String,
     max_len: usize,
-    /// How fence content is treated.
     mode: CodeBlockMode,
-    /// True from the moment a fence opens until we see whitespace —
-    /// the chars in this window are the language tag (e.g. `rust`,
-    /// `python`) on the opener line.
     capturing_lang: bool,
-    /// Captured fence-opener language tag. Used in `Summarize` mode to
-    /// produce phrases like "Code block in rust." on close.
     lang_buf: String,
 }
 
@@ -184,8 +179,6 @@ impl SentenceBuffer {
     }
 
     fn feed_char(&mut self, ch: char, out: &mut Vec<String>) {
-        // Manage triple-backtick fences first since they suppress all
-        // sentence flushes for their contents.
         if ch == '`' {
             self.pending.push('`');
             if self.pending.ends_with("```") {
@@ -236,7 +229,6 @@ impl SentenceBuffer {
                     self.capturing_lang = false;
                 }
             }
-            // Drop fenced content.
             self.pending.clear();
             return;
         }
@@ -254,8 +246,6 @@ impl SentenceBuffer {
             return;
         }
         self.buf.push(ch);
-        // Scan opportunistically as content arrives. Cheap because we
-        // only inspect the suffix.
         self.scan_boundaries(out);
     }
 
@@ -330,7 +320,6 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
                 i += 1;
                 continue;
             }
-            // Decimal guard: digit . digit (only `.`)
             let prev = if i > 0 {
                 bytes.get(i - 1).copied()
             } else {
@@ -343,12 +332,10 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
                 i += 1;
                 continue;
             }
-            // Abbreviation guard.
             if c == b'.' && is_abbreviation_at(buf, i) {
                 i += 1;
                 continue;
             }
-            // Skip past the terminator + trailing whitespace.
             let mut j = i + 1;
             while j < bytes.len() && bytes[j].is_ascii_whitespace() {
                 j += 1;
@@ -374,7 +361,6 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
     // 4. Length safety net.
     if buf.len() >= max_len {
         if let Some(ws) = buf[..max_len].rfind(char::is_whitespace) {
-            // Ensure ws is on a char boundary.
             let mut idx = ws + 1;
             while !buf.is_char_boundary(idx) && idx < buf.len() {
                 idx += 1;
@@ -393,9 +379,6 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
 }
 
 fn find_bullet_marker(buf: &str) -> Option<usize> {
-    // Search for "\n- " or "\n* " anywhere after the first character —
-    // skipping a buffer that *starts* with a marker since that's a
-    // partial fragment, not a boundary.
     let bytes = buf.as_bytes();
     let mut i = 1;
     while i + 2 < bytes.len() {
@@ -412,7 +395,6 @@ fn find_bullet_marker(buf: &str) -> Option<usize> {
 
 /// True when the period at `bytes[i]` ends a known abbreviation token.
 fn is_abbreviation_at(buf: &str, i: usize) -> bool {
-    // Back up to the start of the token (whitespace or start-of-buf).
     let bytes = buf.as_bytes();
     let mut start = i;
     while start > 0 {
@@ -422,9 +404,7 @@ fn is_abbreviation_at(buf: &str, i: usize) -> bool {
         }
         start -= 1;
     }
-    // Token includes the period at position `i`.
     let token = &buf[start..=i];
-    // Strip trailing period for comparison.
     let stem = &token[..token.len() - 1];
     ABBREVIATIONS
         .iter()
@@ -434,21 +414,14 @@ fn is_abbreviation_at(buf: &str, i: usize) -> bool {
 /// Strip markdown decorations from a chunk that's about to be spoken.
 /// Inline transformations only — no boundary detection.
 fn postprocess_for_speech(s: &str) -> String {
-    // 1. Markdown link `[text](url)` → `text`.
     let s = strip_links(s);
-    // 2. Strip emphasis markers (`**`, `__`, `*`, `_`) without
-    //    consuming the wrapped content.
     let s = strip_emphasis(&s);
-    // 3. Replace bare URLs with the literal word "link".
     let s = replace_urls(&s);
-    // 4. Inline code `` ` ``-wrapped: strip backticks, keep contents.
     let s = strip_inline(&s);
-    // 5. Collapse runs of whitespace.
     collapse_whitespace(&s)
 }
 
 fn strip_inline(s: &str) -> String {
-    // Single backticks → drop the backticks but keep contents.
     s.replace('`', "")
 }
 
@@ -470,7 +443,7 @@ fn strip_links(s: &str) -> String {
                 text.push(inner);
             }
             if found_close_bracket && chars.peek() == Some(&'(') {
-                chars.next(); // consume '('
+                chars.next();
                 let mut consumed_paren = false;
                 for url_c in chars.by_ref() {
                     if url_c == ')' {
@@ -510,18 +483,15 @@ fn strip_emphasis(s: &str) -> String {
         if c == '*' || c == '_' {
             buf.push_back(c);
             if buf.len() >= 3 {
-                buf.clear(); // 3+ in a row: drop
+                buf.clear();
             }
         } else {
-            // Decide whether to drop the buffered run or emit it.
             if !buf.is_empty() {
-                // 1, 2, or 3 markers → drop.
                 buf.clear();
             }
             out.push(c);
         }
     }
-    // Trailing markers — drop.
     out
 }
 

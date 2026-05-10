@@ -89,10 +89,12 @@ impl LlamaService {
         }
     }
 
+    /// Returns `true` iff the supervisor is currently in [`ReadyState::Ready`].
     pub fn is_ready(&self) -> bool {
         matches!(*self.ready_rx.borrow(), ReadyState::Ready)
     }
 
+    /// Snapshot of the current [`ReadyState`].
     pub fn state(&self) -> ReadyState {
         *self.ready_rx.borrow()
     }

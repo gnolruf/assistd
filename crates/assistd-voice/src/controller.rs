@@ -59,10 +59,12 @@ impl VoiceOutputController {
         })
     }
 
+    /// Returns `true` if TTS is currently enabled.
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
     }
 
+    /// Returns the current skip epoch counter.
     pub fn current_epoch(&self) -> u64 {
         self.skip_epoch.load(Ordering::SeqCst)
     }

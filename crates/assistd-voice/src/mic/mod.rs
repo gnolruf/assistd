@@ -54,21 +54,16 @@ pub struct MicVoiceInput {
     mic_device: Option<String>,
     max_recording_secs: u32,
     state_tx: watch::Sender<VoiceCaptureState>,
-    /// Monotonic counter so a stale transcription from an aborted PTT
-    /// press cannot clobber the state of a newer press. Incremented in
-    /// `start_recording`; checked in the state-forwarder before each
-    /// forwarded transition. Shared in an `Arc` with the forwarder task.
+    // Monotonic counter so a stale transcription from an aborted PTT
+    // press cannot clobber the state of a newer press. Incremented in
+    // `start_recording`; checked in the state-forwarder before each
+    // forwarded transition. Shared in an `Arc` with the forwarder task.
     active_session_id: Arc<AtomicU64>,
     inner: Arc<Mutex<InnerState>>,
 }
 
 struct InnerState {
-    /// Handles for the currently active capture session, `Some`
-    /// between `start_recording` and `stop_and_transcribe`.
     session: Option<capture::CaptureSession>,
-    /// JoinHandle for the active state-forwarder task, if any. Kept so
-    /// `stop_and_transcribe` can let it exit cleanly without leaking a
-    /// subscriber.
     forwarder: Option<JoinHandle<()>>,
 }
 
@@ -91,6 +86,10 @@ impl MicVoiceInput {
         ))
     }
 
+    /// Construct a `MicVoiceInput` from an already-built transcriber.
+    ///
+    /// `mic_device` selects the cpal input device by name, or `None` for the system default.
+    /// `max_recording_secs` caps each PTT session; the ring buffer is sized accordingly.
     pub fn new(
         transcriber: Arc<dyn Transcriber>,
         mic_device: Option<String>,

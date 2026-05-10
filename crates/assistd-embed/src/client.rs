@@ -25,8 +25,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
-    /// Per OpenAI's API: an `input` array (or single string). We always
-    /// send a single string so the response shape is stable.
     input: &'a str,
     model: &'a str,
 }
@@ -153,9 +151,6 @@ async fn embed_raw(
     Ok(first.embedding)
 }
 
-/// Normalise `v` to unit L2 length in place. Returns the input vector
-/// untouched if its norm is non-finite or zero (degenerate cases that
-/// the caller must surface as a failed embed; we don't divide by zero).
 fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
     let mut sum_sq = 0.0f64;
     for &x in &v {

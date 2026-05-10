@@ -44,13 +44,6 @@ use crate::{
     WmResult, WorkspaceId, WorkspaceInfo,
 };
 
-// PR 4: the Snapshot struct + apply-event race rules now live in
-// `crate::snapshot` so the i3 and Sway backends share them. Sway's
-// `focused_class` semantics (prefer `app_id` for Wayland-native
-// windows, fall back to the X11 class for XWayland views) live in
-// `handle_window_event` below, where we project the native event into
-// the shared `(id, class, title)` tuple.
-
 /// Cast a sway `Node.id` (`i64`) to a [`WindowId`]. Sway never emits
 /// non-positive ids in practice, but the bounds check keeps the
 /// conversion total — non-positive ids are silently dropped (the
@@ -84,9 +77,9 @@ pub struct SwayHandle {
 }
 
 impl SwayHandle {
+    /// Awaits the supervisor task. The daemon should flip `shutdown_tx` before
+    /// calling this so the supervisor exits cleanly rather than blocking.
     pub async fn shutdown(self) {
-        // The daemon flips `shutdown_tx` first; the supervisor task
-        // selects on `shutdown.changed()` and exits.
         let _ = self.supervisor_task.await;
     }
 }

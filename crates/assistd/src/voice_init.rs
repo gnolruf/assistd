@@ -19,12 +19,17 @@ use tracing::info;
 
 use crate::voice_probe::PresenceGpuProbe;
 
+/// Live handles for the voice subsystem, returned by [`init`].
 pub struct VoiceSubsystem {
+    /// Push-to-talk microphone input (no-op when voice is disabled).
     pub input: Arc<dyn VoiceInput>,
+    /// Continuous hands-free listener (no-op when continuous listen is disabled).
     pub listener: Arc<dyn ContinuousListener>,
+    /// TTS output controller wrapping the Piper synthesis backend.
     pub output: Arc<VoiceOutputController>,
 }
 
+/// Initialise mic input, continuous listener, and TTS output from config.
 pub async fn init(config: &Config, presence: &Arc<PresenceManager>) -> VoiceSubsystem {
     let (input, listener) = init_input(config, presence).await;
     let output_inner = init_output(config).await;

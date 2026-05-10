@@ -50,6 +50,7 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Construct a new `Agent` with the given backend, tool registry, and iteration cap.
     pub fn new(
         backend: Arc<dyn LlmBackend>,
         tools: Arc<ToolRegistry>,
@@ -200,7 +201,6 @@ impl Agent {
                                         message: "LLM restored — replaying your query".to_string(),
                                     })
                                     .await;
-                                // Retry the same iteration.
                                 continue;
                             }
                             Err(wait_err) => {
@@ -300,7 +300,6 @@ impl Agent {
                             break;
                         }
 
-                        // Surface the in-flight call to clients before it runs.
                         let _ = tx
                             .send(LlmEvent::ToolCall {
                                 id: call.id.clone(),

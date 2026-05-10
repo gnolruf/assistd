@@ -13,40 +13,54 @@ use tracing::warn;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Live VRAM usage for all NVIDIA GPUs, summed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VramInfo {
     pub used_mb: u64,
     pub total_mb: u64,
 }
 
+/// Live RAM usage read from `/proc/meminfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RamInfo {
     pub used_mb: u64,
     pub total_mb: u64,
 }
 
+/// Current state of the VRAM probe.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum VramState {
+    /// Not yet probed.
     #[default]
     Unknown,
+    /// `nvidia-smi` not found; VRAM monitoring unavailable.
     Disabled,
+    /// Successfully polled.
     Ok(VramInfo),
+    /// `nvidia-smi` returned an error.
     Err(String),
 }
 
+/// Current state of the RAM probe.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum RamState {
+    /// Not yet probed.
     #[default]
     Unknown,
+    /// Successfully read from `/proc/meminfo`.
     Ok(RamInfo),
 }
 
+/// Combined VRAM + RAM snapshot used by the status-bar renderer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceState {
     pub vram: VramState,
     pub ram: RamState,
 }
 
+/// Spawn a background task that polls VRAM and RAM every [`POLL_INTERVAL`].
+///
+/// Returns a watch channel receiver that the TUI event loop reads on each tick.
 pub fn spawn_probe(mut shutdown: watch::Receiver<bool>) -> watch::Receiver<ResourceState> {
     let (tx, rx) = watch::channel(ResourceState::default());
     let mut vram_disabled = false;
@@ -120,7 +134,6 @@ async fn run_nvidia_smi() -> Result<VramInfo, ProbeError> {
     parse_output(&out.stdout).map_err(ProbeError::Transient)
 }
 
-/// Read used/total RAM from `/proc/meminfo`. Used = Total - Available.
 fn read_meminfo() -> Result<RamInfo, String> {
     let content =
         std::fs::read_to_string("/proc/meminfo").map_err(|e| format!("read /proc/meminfo: {e}"))?;

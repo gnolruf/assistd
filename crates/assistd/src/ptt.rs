@@ -33,6 +33,12 @@ impl PttAction {
     }
 }
 
+/// Send a PTT command to the daemon and stream the response to stdout.
+///
+/// # Errors
+///
+/// Returns an error if the IPC connection fails or the daemon sends an
+/// unexpected terminal event.
 pub async fn run(action: PttAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     let mut stream = IpcClient::new()

@@ -28,13 +28,19 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, error, info, warn};
 
-/// Spawn both background tasks. Returns a `JoinHandle` for each so
-/// the daemon can await them at shutdown.
+/// Join handles for the two tasks spawned by [`spawn`].
+///
+/// The daemon holds these until shutdown and awaits each in order.
 pub struct ListenDispatcherHandles {
+    /// Utterance-forwarder task: routes transcriptions to [`AppState::handle_query`].
     pub forwarder: JoinHandle<()>,
+    /// Presence-gate task: pauses/resumes the listener on sleep transitions.
     pub presence_gate: JoinHandle<()>,
 }
 
+/// Spawn the utterance-forwarder and presence-gate background tasks.
+///
+/// Returns [`ListenDispatcherHandles`] for the daemon to await at shutdown.
 pub fn spawn(
     state: Arc<AppState>,
     listener: Arc<dyn ContinuousListener>,

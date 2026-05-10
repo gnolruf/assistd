@@ -79,6 +79,8 @@ enum WaylandCompositor {
     Unknown(String),
 }
 
+/// `screenshot [--full|--focused|--monitor=NAME]` — capture the screen as a PNG
+/// and attach it as a vision input for the next LLM turn.
 pub struct ScreenshotCommand {
     cfg: Arc<ScreenshotPolicyCfg>,
     /// Shared, runtime-mutable vision flag. See [`crate::VisionGate`].
@@ -88,6 +90,7 @@ pub struct ScreenshotCommand {
 }
 
 impl ScreenshotCommand {
+    /// Construct a `ScreenshotCommand` with the given policy and vision gate.
     pub fn new(cfg: Arc<ScreenshotPolicyCfg>, gate: Arc<crate::VisionGate>) -> Self {
         Self { cfg, gate }
     }

@@ -2,6 +2,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 use thiserror::Error;
 
+/// Errors produced by the llama-server lifecycle manager and HTTP control plane.
 #[derive(Debug, Error)]
 pub enum LlamaServerError {
     #[error("I/O error: {0}")]

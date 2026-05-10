@@ -23,6 +23,8 @@ use crate::gpu_monitor;
 /// backing shader on a secondary display.
 const FOREIGN_VRAM_THRESHOLD_MB: u64 = 100;
 
+/// [`BusyProbe`] implementation that checks both LLM-stream activity via
+/// [`PresenceManager`] and foreign NVML process VRAM usage.
 pub struct PresenceGpuProbe {
     presence: Arc<PresenceManager>,
     nvml: Option<Arc<Nvml>>,

@@ -54,35 +54,42 @@ pub struct McpServerConfig {
     /// and in tracing logs. Must be unique within `[mcp.servers]` and
     /// non-empty. Convention: lowercase, no spaces.
     pub name: String,
+    /// Selects between stdio child-process and SSE remote-endpoint connections.
     pub transport: McpTransport,
-
-    // Stdio fields (required when `transport = "stdio"`).
+    /// Command to spawn for stdio transport. Required when `transport = "stdio"`.
     #[serde(default)]
     pub command: Option<String>,
+    /// Arguments passed to the stdio command.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment variables injected into the stdio child process.
     #[serde(default)]
     pub env: HashMap<String, String>,
-
-    // SSE fields (required when `transport = "sse"`).
+    /// Endpoint URL for SSE transport. Required when `transport = "sse"`.
+    /// Must begin with `http://` or `https://`.
     #[serde(default)]
     pub url: Option<String>,
+    /// Extra HTTP headers sent with each SSE request.
     #[serde(default)]
     pub headers: HashMap<String, String>,
-
-    // Common.
+    /// Per-request JSON-RPC timeout in seconds.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
+    /// Per-chunk inactivity deadline for SSE byte reads, in seconds.
     #[serde(default = "default_sse_read_timeout_secs")]
     pub sse_read_timeout_secs: u64,
+    /// Period of the background ping task that detects wedged SSE connections, in seconds.
     #[serde(default = "default_sse_ping_interval_secs")]
     pub sse_ping_interval_secs: u64,
 }
 
+/// Wire transport for an MCP server connection.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum McpTransport {
+    /// Newline-delimited JSON-RPC over a child process's stdin/stdout.
     Stdio,
+    /// HTTP Server-Sent Events endpoint.
     Sse,
 }
 

@@ -29,6 +29,10 @@ pub struct LlamaServerControl {
 }
 
 impl LlamaServerControl {
+    /// Creates a control client pointing at `http://{host}:{port}`.
+    ///
+    /// # Errors
+    /// Returns [`LlamaServerError`] if the underlying HTTP client cannot be built.
     pub fn new(host: &str, port: u16) -> Result<Self, LlamaServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()

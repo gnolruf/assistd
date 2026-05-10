@@ -25,11 +25,6 @@ daemon = [
     "dep:nvml-wrapper",
     "dep:rustix",
 ]
-# Compile whisper-rs with CUDA support so the daemon's whisper
-# transcription runs on GPU when `voice.transcription.prefer_gpu`
-# is true (the default). Requires the CUDA toolkit at build time
-# (`nvcc` on PATH); first build is slow because whisper.cpp is
-# recompiled with `-DGGML_CUDA=ON`.
 cuda = ["assistd-voice/cuda"]
 client = ["dep:uuid"]
 chat = [
@@ -48,18 +43,14 @@ chat = [
 ]
 
 [dependencies]
-# Always-on — shared CLI plumbing and wire protocol. The `client`
-# feature pulls in the typed `IpcClient` socket wrapper used by every
-# CLI subcommand and the chat TUI.
 assistd-ipc   = { workspace = true, features = ["client"] }
-assistd-tools = { workspace = true }  # the `client` --image flag uses load_image_attachment
+assistd-tools = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 
-# Daemon-only
 assistd-core   = { workspace = true, optional = true }
 assistd-embed  = { workspace = true, optional = true }
 assistd-llm    = { workspace = true, optional = true }
@@ -71,11 +62,7 @@ tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 global-hotkey = { workspace = true, optional = true }
 nvml-wrapper = { workspace = true, optional = true }
-
-# Client-only
 uuid = { workspace = true, optional = true }
-
-# Chat TUI
 ratatui          = { workspace = true, optional = true }
 crossterm        = { workspace = true, optional = true }
 futures-util     = { workspace = true, optional = true }

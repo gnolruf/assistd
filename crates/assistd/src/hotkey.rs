@@ -74,9 +74,13 @@ pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
 /// `None`, that hotkey is never registered. `voice` is the only
 /// required handle because PTT is the primary use case.
 pub struct Subsystems {
+    /// Presence manager for the cycle hotkey; `None` disables that hotkey.
     pub presence: Option<Arc<PresenceManager>>,
+    /// Voice input for PTT press/release events.
     pub voice: Arc<dyn VoiceInput>,
+    /// Continuous listener for the toggle hotkey; `None` disables it.
     pub listener: Option<Arc<dyn ContinuousListener>>,
+    /// TTS controller for the mute/skip hotkeys; `None` disables them.
     pub voice_output: Option<Arc<VoiceOutputController>>,
 }
 
@@ -198,10 +202,8 @@ pub fn spawn_listener(
     Some(tokio::spawn(hotkeys.run(manager, subsystems, shutdown)))
 }
 
-/// Parse and register one configured hotkey. Returns `None` when the
-/// input is `None`, when parsing fails, or when registration fails;
-/// the daemon stays up regardless because the IPC socket fallback
-/// always works.
+// Parse and register one configured hotkey string. Returns `None` on parse
+// or registration failure — the daemon stays up via IPC socket fallback.
 fn register(
     manager: &GlobalHotKeyManager,
     spec: Option<String>,

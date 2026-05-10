@@ -18,13 +18,21 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
 
+/// Live handles for the memory subsystem, returned by [`init`].
 pub struct MemorySubsystem {
+    /// Key-value memory store (SQLite-backed or no-op).
     pub memory_store: Arc<dyn MemoryStore>,
+    /// Conversation and branch store.
     pub conversation_store: Arc<dyn ConversationStore>,
+    /// Background SQLite writer task.
     pub writer_handle: Option<JoinHandle<()>>,
+    /// Identity of the current session, shared with [`AppState`](assistd_core::AppState).
     pub session_id: Arc<SessionId>,
+    /// Active branch within the current session.
     pub branch_id: BranchId,
+    /// History rows loaded from the resumed session, to be replayed into the LLM.
     pub resumed_history: Vec<HistoryRow>,
+    /// Raw SQLite handle; passed to the embedding subsystem for chunk queries.
     pub sqlite_handle: Option<Arc<SqliteHandle>>,
 }
 
@@ -55,6 +63,10 @@ impl MemorySubsystem {
     }
 }
 
+/// Open SQLite and establish (or resume) the daemon session.
+///
+/// Degrades to a no-op subsystem when `memory.enabled = false` or when
+/// the database cannot be opened.
 pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> MemorySubsystem {
     if !config.memory.enabled {
         info!("memory: disabled in config (memory.enabled = false)");

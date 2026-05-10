@@ -79,6 +79,7 @@ impl Default for BashPolicyCfg {
     }
 }
 
+/// `bash SCRIPT` — spawn a real `bash -c <script>` subprocess, policy-gated.
 pub struct BashCommand {
     cfg: Arc<BashPolicyCfg>,
     sandbox: Arc<SandboxInfo>,
@@ -86,6 +87,7 @@ pub struct BashCommand {
 }
 
 impl BashCommand {
+    /// Construct a `BashCommand` with the given policy, sandbox, and confirmation gate.
     pub fn new(
         cfg: Arc<BashPolicyCfg>,
         sandbox: Arc<SandboxInfo>,
@@ -147,7 +149,6 @@ impl Command for BashCommand {
         }
         let script = input.args.join(" ");
 
-        // 1. Denylist: synchronous, bypasses the gate.
         if let Some(pat) = matches_denylist(&script, &self.cfg.denylist) {
             warn!(
                 target: "assistd::policy",
@@ -167,7 +168,6 @@ impl Command for BashCommand {
             ));
         }
 
-        // 2. Destructive patterns: require gate approval.
         if let Some(matched) = matches_destructive(&script, &self.cfg.destructive_patterns) {
             let pattern_display = matched.join(" ");
             let approved = self
@@ -194,7 +194,6 @@ impl Command for BashCommand {
             }
         }
 
-        // 3. Build the subprocess argv, wrapping in bwrap if configured.
         let start = Instant::now();
         let mut cmd = build_command(&self.sandbox, &script);
         cmd.stdin(Stdio::piped())
@@ -228,9 +227,8 @@ impl Command for BashCommand {
             drop(stdin);
         }
 
-        // 4. Timeout. On expiry, the tokio::Child is dropped, which sends
-        //    SIGKILL to the process group thanks to kill_on_drop + the
-        //    process_group(0) we set above.
+        // On timeout, the tokio::Child is dropped, sending SIGKILL to the
+        // process group via kill_on_drop + process_group(0).
         let output = match timeout(self.cfg.timeout, child.wait_with_output()).await {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {

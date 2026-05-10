@@ -28,6 +28,7 @@ const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
 /// summarizing earlier rather than overflowing.
 const TOKENS_PER_IMAGE: u32 = 1000;
 
+/// Message role for conversation turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     System,
@@ -36,6 +37,7 @@ pub enum Role {
 }
 
 impl Role {
+    /// Returns the OpenAI wire string for this role.
     pub fn as_wire(self) -> &'static str {
         match self {
             Role::System => "system",
@@ -57,6 +59,7 @@ pub struct ToolCallRecord {
     pub arguments: String,
 }
 
+/// One turn in the in-memory conversation, owned by [`Conversation`].
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
@@ -73,9 +76,14 @@ pub struct Message {
 }
 
 /// Summarizer trait so unit tests can inject a fake without spinning up
-/// an HTTP server. `LlamaChatClient` implements this trait for itself.
+/// an HTTP server. [`crate::LlamaChatClient`] implements this trait for itself.
 #[async_trait]
 pub trait Summarizer: Send + Sync {
+    /// Summarize `dialogue` into at most `max_tokens`, targeting `target_tokens`.
+    ///
+    /// # Errors
+    /// Returns [`ChatClientError`] if the underlying HTTP call fails or the
+    /// server returns a non-success status.
     async fn summarize(
         &self,
         dialogue: String,
@@ -105,6 +113,7 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    /// Creates an empty conversation with the given static system prompt.
     pub fn new(system_prompt: String) -> Self {
         Self {
             system_prompt,
@@ -136,6 +145,7 @@ impl Conversation {
         self.transient_context.as_deref()
     }
 
+    /// Appends a plain-text user turn.
     pub fn push_user(&mut self, content: String) {
         self.messages.push(Message {
             role: Role::User,
@@ -158,6 +168,7 @@ impl Conversation {
         });
     }
 
+    /// Appends a plain-text assistant turn.
     pub fn push_assistant(&mut self, content: String) {
         self.messages.push(Message {
             role: Role::Assistant,
@@ -230,6 +241,7 @@ impl Conversation {
         removed
     }
 
+    /// Estimates the total token count of the conversation using a bytes-per-token heuristic.
     pub fn approx_total_tokens(&self) -> u32 {
         let mut total = 0u32;
         if !self.system_prompt.is_empty() {

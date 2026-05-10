@@ -16,6 +16,12 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
+    /// Spawn a `llama-server` child process configured for embedding and begin
+    /// forwarding its stdout/stderr to tracing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmbedServerError::Spawn`] if the process cannot be started.
     pub fn spawn(cfg: &EmbeddingConfig) -> Result<Self, EmbedServerError> {
         // The embedding server is NOT in router mode. We pass `--hf-repo`
         // directly so the model is downloaded once and held resident for
@@ -78,10 +84,12 @@ impl ChildProcess {
         })
     }
 
+    /// Returns the OS PID of the child process, or `None` if it has already exited.
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }
 
+    /// Wait for the child process to exit and return its [`ExitStatus`].
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait().await
     }

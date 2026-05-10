@@ -17,6 +17,7 @@ use super::app::{App, ConfirmationModal};
 use super::output::THUMBNAIL_ROWS;
 use super::vram::{RamState, VramState};
 
+/// Render the full chat TUI into `frame`, updating the app's cached layout state.
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Min(3),

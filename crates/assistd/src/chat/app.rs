@@ -119,18 +119,35 @@ pub struct ConfirmationModal {
     confirm_id: String,
 }
 
+/// Top-level TUI application state.
+///
+/// Owns the output pane, input line, throughput meter, resource stats, and
+/// the IPC connection to the daemon. The `on_*` methods are pure reducers;
+/// I/O is confined to [`App::spawn_query`] and the attach handler.
 pub struct App {
+    /// Scrollable output region.
     pub output: OutputPane,
+    /// Single-line input with readline keybindings and history.
     pub input: InputLine,
+    /// Token-rate meter for the status bar.
     pub throughput: ThroughputMeter,
+    /// Live VRAM / RAM readings.
     pub resources: ResourceState,
+    /// Display name of the loaded model.
     pub model_name: String,
+    /// `true` while a query stream is open.
     pub generating: bool,
+    /// Set to `true` to exit the event loop.
     pub quitting: bool,
+    /// Index into [`SPINNER_CHARS`], incremented on each tick.
     pub spinner: usize,
+    /// Transient status-bar message with its display timestamp. Cleared by [`App::on_tick`] after [`NOTICE_HOLD`].
     pub notice: Option<(String, Instant)>,
+    /// Height of the output area as of the last render, used for scrolling math.
     pub last_output_height: u16,
+    /// Last-known daemon presence state; `None` until the first poll response.
     pub presence_state: Option<PresenceState>,
+    /// Idle-sleep thresholds copied from config for the local countdown display.
     pub sleep_cfg: SleepConfig,
     /// Local wallclock for the most recent user activity (typing /
     /// submitting / answering a modal). Used to compute the
@@ -143,6 +160,7 @@ pub struct App {
     /// rejects with the AC `vision not available` error and the
     /// status bar renders `vision: off`.
     pub vision_enabled: bool,
+    /// Active confirmation modal, if any. Only one can be open at a time.
     pub modal: Option<ConfirmationModal>,
     /// Push-to-talk capture state. Updated by `Event::VoiceState`
     /// flowing in over the wire. Rendered as an indicator in
@@ -207,6 +225,7 @@ struct BranchListEntry {
 }
 
 impl App {
+    /// Construct a new `App` with the given IPC handle and configuration.
     pub fn new(
         ipc: Arc<IpcClient>,
         chat_tx: mpsc::Sender<ChatEvent>,
@@ -301,22 +320,27 @@ impl App {
         self.modal.is_some()
     }
 
+    /// Returns `true` when the event loop should exit.
     pub fn should_quit(&self) -> bool {
         self.quitting
     }
 
+    /// Current spinner character for the status bar.
     pub fn spinner_char(&self) -> char {
         SPINNER_CHARS[self.spinner % SPINNER_CHARS.len()]
     }
 
+    /// Active notice text, if one is currently being displayed.
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_ref().map(|(s, _)| s.as_str())
     }
 
+    /// Record the output pane's rendered height so scrolling math stays correct.
     pub fn set_output_height(&mut self, h: u16) {
         self.last_output_height = h;
     }
 
+    /// Handle a terminal key event, routing to the modal or the input line.
     pub fn on_key(&mut self, ev: KeyEvent) {
         self.touch_activity();
         if self.modal.is_some() {
@@ -371,6 +395,7 @@ impl App {
         }
     }
 
+    /// Update live resource (VRAM / RAM) readings from the probe background task.
     pub fn on_resources(&mut self, v: ResourceState) {
         self.resources = v;
     }
@@ -716,6 +741,7 @@ impl App {
         }
     }
 
+    /// Advance the spinner and expire stale notices.
     pub fn on_tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
         if let Some((_, at)) = &self.notice {

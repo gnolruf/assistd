@@ -58,6 +58,9 @@ pub struct VadTuning {
 }
 
 impl VadTuning {
+    /// Construct [`VadTuning`] from millisecond/second config values, converting
+    /// each to whole-frame counts (one frame = 20 ms). Aggressiveness is clamped
+    /// to `[0, 3]` matching webrtc-vad's accepted range.
     pub fn from_ms(
         silence_ms: u32,
         min_utterance_ms: u32,
@@ -102,6 +105,8 @@ enum State {
     Trailing { silent: u32 },
 }
 
+/// State machine that classifies 20-ms frames via webrtc-vad and emits
+/// complete utterances bounded by confirmed silence.
 pub struct UtteranceVad {
     vad: Vad,
     tuning: VadTuning,
@@ -112,6 +117,7 @@ pub struct UtteranceVad {
 }
 
 impl UtteranceVad {
+    /// Create a new [`UtteranceVad`] with the given tuning parameters.
     pub fn new(tuning: VadTuning) -> Self {
         let mode = match tuning.aggressiveness {
             0 => VadMode::Quality,

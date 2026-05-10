@@ -31,6 +31,7 @@ enum CycleResult {
     },
 }
 
+/// Drives the llama-server restart loop, broadcasting [`ReadyState`] transitions.
 pub struct Supervisor {
     pub cfg: LlamaServerConfig,
     pub model: ModelConfig,
@@ -40,6 +41,8 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// Runs the supervisor loop until shutdown is requested or [`MAX_CONSECUTIVE_FAILURES`]
+    /// is reached. Intended to be spawned as a Tokio task.
     pub async fn run(mut self) {
         let mut consecutive_failures: u32 = 0;
 
@@ -115,14 +118,13 @@ impl Supervisor {
         }
     }
 
+    /// Spawns the child, waits for it to become healthy, then watches for exit or shutdown.
     async fn supervise_once(&mut self) -> Result<CycleResult, LlamaServerError> {
         let mut child = ChildProcess::spawn(&self.cfg, &self.model)?;
         *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = child.pid();
         let ready_timeout = Duration::from_secs(self.cfg.ready_timeout_secs);
         let health = HealthChecker::new(&self.cfg.host, self.cfg.port, ready_timeout)?;
 
-        // Phase 1: wait for /health to return 200. Race against child exit.
-        // `health.wait_ready` internally handles shutdown signals.
         enum Phase1 {
             Ready,
             ChildExited(ExitStatus),
@@ -160,7 +162,6 @@ impl Supervisor {
             }
         }
 
-        // Phase 2: child is healthy. Watch for exit or shutdown.
         let ready_at = Instant::now();
         let _ = self.ready_tx.send(ReadyState::Ready);
         info!(target: "assistd::llama_server", "llama-server ready");

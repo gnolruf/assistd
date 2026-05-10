@@ -36,7 +36,6 @@ impl Command for CatCommand {
         let (metadata_only, files) = partition_flags(&input.args);
 
         if files.is_empty() {
-            // No files → operate on stdin.
             if metadata_only {
                 return Ok(CommandOutput::ok(describe(&input.stdin, None)));
             }

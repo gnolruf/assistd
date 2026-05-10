@@ -47,6 +47,7 @@ pub enum TransportConfig {
 }
 
 impl TransportConfig {
+    /// Return the human-readable label for this transport, used in tracing logs.
     pub fn label(&self) -> &str {
         match self {
             Self::Stdio(s) => &s.label,
@@ -79,8 +80,6 @@ impl McpServerHandle {
         transport_cfg: TransportConfig,
         external_shutdown_rx: watch::Receiver<bool>,
     ) -> Result<Self, McpError> {
-        // First connection. If this fails, propagate so the daemon
-        // can log a warn and skip the server.
         let initial = spawn_transport(&transport_cfg).await?;
         let (health_tx, health_rx) = watch::channel(HealthState::Healthy);
         let switch = Arc::new(SwitchingClient::new(Some(initial.client.clone())));
@@ -107,18 +106,22 @@ impl McpServerHandle {
         })
     }
 
+    /// Return the stable [`McpClient`] handle backed by the current transport.
     pub fn client(&self) -> Arc<dyn McpClient> {
         self.switch.clone()
     }
 
+    /// Return the current health state without waiting for a change.
     pub fn health(&self) -> HealthState {
         *self.health_rx.borrow()
     }
 
+    /// Return a watch receiver that fires on every health-state transition.
     pub fn watch_health(&self) -> watch::Receiver<HealthState> {
         self.health_rx.clone()
     }
 
+    /// Signal the supervisor to stop and wait up to 15 seconds for it to exit.
     pub async fn shutdown(mut self) {
         let _ = self.supervisor_shutdown_tx.send(true);
         if let Some(task) = self.supervisor_task.take() {
@@ -175,12 +178,6 @@ impl McpClient for SwitchingClient {
         client.invoke(name, arguments).await
     }
 }
-
-// ---------------------------------------------------------------------------
-// Internal: transport-agnostic supervisor loop. Mirrors the embed-server
-// pattern (1s,2s,4s,8s,16s,32s,60s backoff; cap at 5 failures; reset
-// counter after 30s of healthy uptime).
-// ---------------------------------------------------------------------------
 
 struct TransportInstance {
     client: Arc<dyn McpClient>,
@@ -265,7 +262,6 @@ impl Supervisor {
         let mut session_start = Instant::now();
 
         loop {
-            // 1) Wait for the current transport to die or shutdown to fire.
             match current_lifeline.take() {
                 Some(mut lifeline) => {
                     tokio::select! {
@@ -277,12 +273,10 @@ impl Supervisor {
                                 ran_for_secs = ran_for.as_secs(),
                                 "MCP server transport died",
                             );
-                            // Free the dead transport and any background tasks.
                             lifeline.shutdown().await;
                             if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
                                 consecutive_failures = 0;
                             }
-                            // fall through to restart logic
                         }
                         _ = supervisor_shutdown_rx.changed() => {
                             if *supervisor_shutdown_rx.borrow() {
@@ -302,13 +296,11 @@ impl Supervisor {
                         }
                     }
                 }
-                None => {
-                    // First iteration with no lifeline (after a failed restart).
-                }
+                None => {}
             }
 
-            // 2) Mark unhealthy, swap the switching client to None so direct
-            //    consumers see ServerDown rather than calling a dead transport.
+            // Swap the switching client to None so direct consumers see
+            // ServerDown rather than calling a dead transport.
             let _ = health_tx.send(HealthState::Restarting);
             switch.swap(None).await;
 
@@ -328,7 +320,6 @@ impl Supervisor {
                 return;
             }
 
-            // 3) Backoff before retry.
             let delay = backoff_delay(consecutive_failures);
             warn!(
                 target: "assistd::mcp",
@@ -343,7 +334,6 @@ impl Supervisor {
                 _ = external_shutdown_rx.changed() => return,
             }
 
-            // 4) Try to bring up a new transport.
             match spawn_transport(&transport_cfg).await {
                 Ok(instance) => {
                     consecutive_failures = 0;
@@ -362,7 +352,7 @@ impl Supervisor {
                         error = %e,
                         "MCP server restart failed",
                     );
-                    // current_lifeline stays None; loop will retry with backoff.
+                    // current_lifeline stays None; the loop retries with backoff.
                 }
             }
         }

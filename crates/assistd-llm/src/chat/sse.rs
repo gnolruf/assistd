@@ -8,22 +8,26 @@
 
 use super::error::ChatClientError;
 
+/// A parsed SSE event from a `/v1/chat/completions` stream.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SseEvent {
     Data(String),
     Done,
 }
 
+/// Byte-buffered SSE line parser that handles chunk boundaries safely.
 #[derive(Debug, Default)]
 pub struct SseLineReader {
     buf: Vec<u8>,
 }
 
 impl SseLineReader {
+    /// Creates a new reader with an empty internal buffer.
     pub fn new() -> Self {
         Self { buf: Vec::new() }
     }
 
+    /// Appends `chunk` to the internal buffer.
     pub fn feed(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
     }

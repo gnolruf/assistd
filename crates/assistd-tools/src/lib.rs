@@ -73,10 +73,12 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// Create an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Register a tool by value.
     pub fn register<T: Tool>(&mut self, tool: T) {
         self.tools.push(Box::new(tool));
     }
@@ -88,6 +90,7 @@ impl ToolRegistry {
         self.tools.push(tool);
     }
 
+    /// Look up a registered tool by its `name()`.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()
@@ -95,14 +98,17 @@ impl ToolRegistry {
             .map(|t| t.as_ref())
     }
 
+    /// Number of registered tools.
     pub fn len(&self) -> usize {
         self.tools.len()
     }
 
+    /// Returns `true` when no tools have been registered.
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
 
+    /// Iterator over every registered tool's name.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tools.iter().map(|t| t.name())
     }
@@ -129,6 +135,7 @@ impl ToolRegistry {
     }
 }
 
+/// Crate version string from `Cargo.toml`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

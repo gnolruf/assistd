@@ -20,6 +20,8 @@ const SUPPORTED_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 /// pipeline and OOM the daemon.
 pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Error returned by [`load_image_attachment`] when the file cannot be loaded
+/// or is not a supported image format.
 #[derive(Debug)]
 pub enum LoadImageError {
     /// File missing, unreadable, or other I/O failure.

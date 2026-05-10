@@ -26,6 +26,8 @@ use crate::presentation::{PresentResult, PresentSpec, present};
 use assistd_config::ToolsOutputConfig;
 use std::path::PathBuf;
 
+/// The single LLM-facing `run` tool. Dispatches a command-line string
+/// through the chain parser and executor, then presents the result.
 pub struct RunTool {
     registry: Arc<CommandRegistry>,
     spec: PresentSpec,
@@ -38,6 +40,8 @@ pub struct RunTool {
 }
 
 impl RunTool {
+    /// Construct a `RunTool` from a command registry, output limits, and overflow directory.
+    ///
     /// `output` provides the line/byte truncation caps; `overflow_dir` is
     /// the resolved on-disk location chosen by the caller (daemon and chat
     /// TUI use different dirs so their startup resets don't race).
@@ -143,9 +147,6 @@ impl Tool for RunTool {
         let chain = match parse_chain(command) {
             Ok(c) => c,
             Err(e) => {
-                // Surface parse errors through `present()` like any other
-                // failure so the LLM gets the usual `[stderr] ... [exit:N | Xms]`
-                // shape instead of a raw anyhow at the tool boundary.
                 let stderr = parse_error_line(&e).into_bytes();
                 let failed = CommandOutput::failed(2, stderr);
                 let r = present(failed, &self.spec, &self.counter, start.elapsed());

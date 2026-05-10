@@ -31,6 +31,7 @@ pub struct MemoryOps {
 }
 
 impl MemoryOps {
+    /// Construct a `MemoryOps` from the provided store and conversation backends.
     pub fn new(store: Arc<dyn MemoryStore>, conversations: Arc<dyn ConversationStore>) -> Self {
         Self {
             store,
@@ -46,14 +47,17 @@ impl MemoryOps {
         self.store.save(key, value).await
     }
 
+    /// Load the value for `key`, returning `None` if not present.
     pub async fn load(&self, key: &str) -> Result<Option<String>> {
         self.store.load(key).await
     }
 
+    /// List keys with the given `prefix`.
     pub async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.store.list(prefix).await
     }
 
+    /// Delete the memory at `key`.
     pub async fn delete(&self, key: &str) -> Result<()> {
         self.store.delete(key).await
     }
@@ -75,6 +79,7 @@ impl MemoryOps {
         self.store.list_full(prefix).await
     }
 
+    /// Return recent conversation turns, up to `limit` (or [`DEFAULT_SEARCH_LIMIT`] when `limit` is 0).
     pub async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>> {
         let limit = if limit == 0 {
             DEFAULT_SEARCH_LIMIT

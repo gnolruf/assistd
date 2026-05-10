@@ -8,10 +8,7 @@ license.workspace = true
 assistd-config = { workspace = true }
 assistd-embed = { workspace = true }
 assistd-memory = { workspace = true }
-# Wire-protocol types for the IpcConfirmationGate. Default features
-# only — no client/socket code, just the Event/Request enums.
 assistd-ipc = { workspace = true }
-# WindowManager trait + types, consumed by `commands::wm`.
 assistd-wm = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

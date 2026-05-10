@@ -43,6 +43,7 @@ use uuid::Uuid;
 
 use self::app::{App, ChatEvent};
 
+/// Arguments for the `chat` subcommand.
 #[derive(Args)]
 pub struct ChatArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
@@ -62,6 +63,12 @@ struct TuiContext {
     startup_error: Option<String>,
 }
 
+/// Launch the interactive chat TUI, auto-spawning the daemon if needed.
+///
+/// # Errors
+///
+/// Returns an error if config loading fails, the terminal cannot be set up,
+/// or a fatal I/O error occurs during the session.
 pub async fn run(args: ChatArgs) -> Result<()> {
     let _stderr_redirect = redirect_stderr_to_log()?;
 

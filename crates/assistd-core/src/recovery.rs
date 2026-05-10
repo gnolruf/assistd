@@ -37,6 +37,7 @@ pub enum RecoverySeverity {
 }
 
 impl RecoverySeverity {
+    /// Returns the canonical lowercase wire string for this severity level.
     pub fn as_str(self) -> &'static str {
         match self {
             RecoverySeverity::Info => "info",
@@ -78,6 +79,7 @@ pub enum Component {
 }
 
 impl Component {
+    /// Returns the canonical lowercase wire string for this component identifier.
     pub fn as_str(self) -> &'static str {
         match self {
             Component::Llm => "llm",

@@ -65,11 +65,13 @@ fn hint_for(err: &WmError) -> (&'static str, &'static str) {
 const NAME: &str = "wm";
 const SUMMARY: &str = "manage windows and workspaces (focus, move, open, list, workspaces, etc.)";
 
+/// `wm <subcommand> [args]` — drive the active window manager from the LLM's `run` tool.
 pub struct WmCommand {
     wm: Arc<dyn WindowManager>,
 }
 
 impl WmCommand {
+    /// Construct a `WmCommand` backed by the given [`WindowManager`] implementation.
     pub fn new(wm: Arc<dyn WindowManager>) -> Self {
         Self { wm }
     }
@@ -298,9 +300,6 @@ async fn handle_open(args: &[String]) -> Result<CommandOutput> {
 }
 
 async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
-    // Use focused_context (one snapshot read) so the LLM gets both the
-    // con_id (column 1, pipe-able to `wm focus`) and the human label
-    // (column 2, used to disambiguate id collisions when reading).
     match wm.focused_context().await {
         Ok(Some(ctx)) => {
             let id_str = match ctx.id {
@@ -394,10 +393,8 @@ async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
     use std::fmt::Write;
     match wm.list_windows().await {
         Ok(mut windows) => {
-            // Group by workspace (ascending lexicographic), then by app
-            // label so two windows of the same app sit together. The
-            // LLM scans this list to find an id by app+title, so
-            // proximity matters more than chronological order.
+            // Sort by workspace then app so the LLM can find an id by
+            // app+title without scanning unrelated rows.
             windows.sort_by(|a, b| {
                 a.workspace
                     .as_deref()
@@ -448,9 +445,8 @@ async fn handle_outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
                 out.push('\t');
                 match o.current_mode {
                     Some((w, h, hz)) => {
-                        // Sway reports refresh in mHz; emit a friendly Hz
-                        // form rounded to the nearest integer when the
-                        // mantissa is exactly zero, else 3-decimal Hz.
+                        // Sway reports refresh in mHz; emit integer Hz when
+                        // the fractional part is zero, else 3-decimal form.
                         let hz_int = hz / 1000;
                         let hz_frac = hz % 1000;
                         if hz_frac == 0 {

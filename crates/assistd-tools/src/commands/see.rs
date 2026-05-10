@@ -16,6 +16,7 @@ use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_lin
 use crate::commands::cat::human_size;
 use crate::vision::VisionGate;
 
+/// `see PATH` — read an image file and attach it as a vision input.
 pub struct SeeCommand {
     /// Shared, runtime-mutable vision flag. Read on every `run()` so a
     /// model swap on the running llama-server (revalidated by the
@@ -24,6 +25,7 @@ pub struct SeeCommand {
 }
 
 impl SeeCommand {
+    /// Construct a `SeeCommand` with the given vision gate.
     pub fn new(gate: Arc<VisionGate>) -> Self {
         Self { gate }
     }

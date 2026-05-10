@@ -113,6 +113,7 @@ pub struct CommandOutput {
 }
 
 impl CommandOutput {
+    /// Construct a successful output with the given stdout bytes.
     pub fn ok(stdout: Vec<u8>) -> Self {
         Self {
             stdout,
@@ -122,6 +123,7 @@ impl CommandOutput {
         }
     }
 
+    /// Construct a failed output with the given exit code and stderr bytes.
     pub fn failed(exit_code: i32, stderr: impl Into<Vec<u8>>) -> Self {
         Self {
             stdout: Vec::new(),
@@ -143,6 +145,7 @@ impl CommandOutput {
 /// own `run` body (Level-2).
 #[async_trait]
 pub trait Command: Send + Sync + 'static {
+    /// Machine-readable name used to dispatch the command (e.g. `"cat"`, `"grep"`).
     fn name(&self) -> &str;
     /// One-line advertisement (≤80 chars, no trailing newline). Used to
     /// build the `run` tool's Level-0 description. Convention: terse verb
@@ -153,6 +156,7 @@ pub trait Command: Send + Sync + 'static {
     /// with `usage: <name> …` so the LLM can visually disambiguate help
     /// output from a real `[<name>]\terror: …` failure.
     fn help(&self) -> String;
+    /// Execute the command with the given input and return its output.
     async fn run(&self, input: CommandInput) -> Result<CommandOutput>;
 }
 
@@ -163,14 +167,17 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
+    /// Create an empty registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Register a command by value.
     pub fn register<C: Command>(&mut self, cmd: C) {
         self.commands.push(Box::new(cmd));
     }
 
+    /// Look up a registered command by its `name()`.
     pub fn get(&self, name: &str) -> Option<&dyn Command> {
         self.commands
             .iter()
@@ -178,10 +185,12 @@ impl CommandRegistry {
             .map(|c| c.as_ref())
     }
 
+    /// Number of registered commands.
     pub fn len(&self) -> usize {
         self.commands.len()
     }
 
+    /// Returns `true` when no commands have been registered.
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }

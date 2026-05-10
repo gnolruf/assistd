@@ -425,6 +425,12 @@ pub fn is_terminal_class(class: &str) -> bool {
         .any(|t| t.eq_ignore_ascii_case(class))
 }
 
+/// Async interface to a window manager / compositor.
+///
+/// Each method maps to one IPC operation. Backends implement this trait and
+/// are held behind `Arc<dyn WindowManager>` by the daemon. All methods are
+/// subject to [`crate::WM_IPC_TIMEOUT`]; implementations should return
+/// [`WmError::Timeout`] when a call exceeds it and trigger reconnection.
 #[async_trait]
 pub trait WindowManager: Send + Sync + 'static {
     /// Focus the window with the given id.
@@ -536,6 +542,7 @@ impl WindowManager for NoWindowManager {
     }
 }
 
+/// Returns the crate version string from `CARGO_PKG_VERSION`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

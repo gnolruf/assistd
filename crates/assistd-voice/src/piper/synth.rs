@@ -36,6 +36,7 @@ pub struct OneShotSynth {
 }
 
 impl OneShotSynth {
+    /// Create an `OneShotSynth` from the given runtime config.
     pub fn new(cfg: Arc<PiperRuntimeConfig>) -> Self {
         Self { cfg }
     }

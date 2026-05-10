@@ -438,8 +438,6 @@ async fn ensure_wav_cached(url: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-// ---------- latency collection ----------
-
 type StageLog = Vec<(String, Instant)>;
 
 #[derive(Default, Clone)]
@@ -547,11 +545,8 @@ where
     }
 }
 
-// ---------- summary ----------
-
 #[derive(Debug)]
 struct RunMetrics {
-    /// Stage name → ms from t0
     per_stage: HashMap<String, u64>,
     end_to_end_ms: Option<u64>,
 }

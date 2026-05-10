@@ -130,6 +130,7 @@ pub enum LlmError {
 /// over `anyhow::Error` so callers can pattern-match.
 pub type LlmResult<T> = std::result::Result<T, LlmError>;
 
+/// Events streamed from a backend to the caller during generation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LlmEvent {
     /// A streamed chunk of model output.
@@ -314,6 +315,7 @@ impl Default for EchoBackend {
 }
 
 impl EchoBackend {
+    /// Creates a new `EchoBackend` with an empty conversation state.
     pub fn new() -> Self {
         Self {
             last_user: Mutex::new(String::new()),
@@ -356,6 +358,7 @@ pub struct FailedBackend {
 }
 
 impl FailedBackend {
+    /// Creates a `FailedBackend` that always returns [`LlmError::Unavailable`] with `reason`.
     pub fn new(reason: String) -> Self {
         Self { reason }
     }
@@ -384,6 +387,7 @@ impl LlmBackend for FailedBackend {
     }
 }
 
+/// Returns the crate version string from `Cargo.toml`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

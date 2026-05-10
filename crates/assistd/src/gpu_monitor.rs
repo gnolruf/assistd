@@ -31,8 +31,6 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-/// Stop polling after this many consecutive NVML failures. The daemon
-/// keeps running without the monitor afterwards.
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
 /// Who owns the current Sleeping state, from the monitor's point of view.
@@ -52,7 +50,6 @@ enum SleepCause {
     Contention { pid: u32 },
 }
 
-/// Decision output for one poll cycle.
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     None,
@@ -64,7 +61,9 @@ enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProcSample {
     pub(crate) pid: u32,
+    /// Megabytes of VRAM used, summed across all devices.
     pub(crate) used_mb: u64,
+    /// Process name read from `/proc/<pid>/comm`.
     pub(crate) name: String,
 }
 
@@ -259,6 +258,9 @@ fn decide(
     }
 }
 
+/// Enumerate all processes holding VRAM, excluding `self_pid` and `llama_pid`.
+///
+/// Per-device VRAM is summed across all GPUs and converted to MiB.
 pub(crate) fn collect_foreign_usage(
     nvml: &Nvml,
     self_pid: u32,

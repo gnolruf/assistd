@@ -18,6 +18,11 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
+    /// Spawns a new llama-server child with the given config, wires up stdout/stderr
+    /// forwarding to tracing, and returns the handle.
+    ///
+    /// # Errors
+    /// Returns [`LlamaServerError::Spawn`] if the OS cannot fork/exec the binary.
     pub fn spawn(cfg: &LlamaServerConfig, model: &ModelConfig) -> Result<Self, LlamaServerError> {
         // Router mode: start with no `--hf-repo`. The presence state machine
         // calls `POST /models/load` with `model.name` to bring weights in on
@@ -140,6 +145,7 @@ impl ChildProcess {
         })
     }
 
+    /// Returns the OS PID of the running child, or `None` if it has already exited.
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }

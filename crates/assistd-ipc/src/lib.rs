@@ -109,9 +109,16 @@ pub enum VoiceCaptureState {
     Transcribing,
 }
 
+/// Wire-protocol request sent by a client to the daemon over the Unix socket.
+///
+/// Serialized as a single JSON line with a `"type"` discriminant field.
+/// Every variant carries an `id` string that is echoed back on every
+/// [`Event`] the daemon emits in response, enabling correlation when a
+/// future multiplexing transport is added.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
+    /// Submit a text prompt (with optional image attachments) to the daemon.
     Query {
         id: String,
         text: String,
@@ -362,11 +369,12 @@ impl Request {
     }
 }
 
-/// Note: `Eq` is intentionally not derived. `Event::SemanticHit`
-/// carries an `f32` similarity score and `f32: !Eq`. Tests compare
-/// events with `PartialEq` (sufficient for `assert_eq!`) — an `Eq`
-/// bound is only needed for hashing/Set membership, neither of which
-/// the IPC layer requires.
+/// Wire-protocol events streamed from the daemon to the client.
+///
+/// Serialized as line-delimited JSON with a `"type"` discriminant field.
+/// `Eq` is intentionally not derived: `SemanticHit` carries an `f32`
+/// similarity score and `f32: !Eq`. `PartialEq` is sufficient for
+/// `assert_eq!`; hashing and set membership are not needed at the IPC layer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -600,6 +608,11 @@ impl Event {
     }
 }
 
+/// Return the assistd daemon socket path for the current user.
+///
+/// Prefers `$XDG_RUNTIME_DIR/assistd.sock`; falls back to
+/// `/tmp/assistd-$USER.sock` (or `/tmp/assistd-nobody.sock` when `$USER`
+/// is unset).
 pub fn socket_path() -> PathBuf {
     socket_path_for(
         std::env::var_os("XDG_RUNTIME_DIR"),
