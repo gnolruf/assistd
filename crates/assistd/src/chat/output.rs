@@ -46,7 +46,7 @@ pub struct ThumbnailItem {
 enum OutputItem {
     Text(Line<'static>),
     Tool(ToolBlock),
-    Thumbnail(ThumbnailItem),
+    Thumbnail(Box<ThumbnailItem>),
 }
 
 /// Scrollable output region holding the full chat history for the TUI session.
@@ -359,7 +359,10 @@ impl OutputPane {
     pub fn push_thumbnail(&mut self, name: String, protocol: StatefulProtocol) {
         self.close_open_assistant();
         self.items
-            .push(OutputItem::Thumbnail(ThumbnailItem { name, protocol }));
+            .push(OutputItem::Thumbnail(Box::new(ThumbnailItem {
+                name,
+                protocol,
+            })));
         self.dirty = true;
     }
 
