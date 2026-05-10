@@ -67,7 +67,7 @@ impl SqliteHandle {
         .await
         .context("apply SQLite pragmas")?;
 
-        conn.call(|c| migrations::run(c))
+        conn.call(migrations::run)
             .await
             .context("run migrations")?;
 
