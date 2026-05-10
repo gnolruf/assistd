@@ -1,4 +1,4 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
+#![allow(unsafe_code)] // pre_exec closure invokes libc::prctl; see SAFETY note below.
 
 use super::error::LlamaServerError;
 use assistd_config::{LlamaServerConfig, ModelConfig};
@@ -155,15 +155,13 @@ impl ChildProcess {
     /// in the journal before returning.
     pub async fn shutdown(mut self, term_timeout: Duration) -> Result<(), LlamaServerError> {
         #[cfg(unix)]
-        if let Some(pid) = self.child.id() {
-            // Negative pid signals the entire process group.
-            let gid: i32 = -(pid as i32);
-            // SAFETY: libc::kill is safe to call with any pid/signal pair;
-            // failures are surfaced as a return code that we ignore because
-            // the child may have already exited between this check and now.
-            unsafe {
-                libc::kill(gid, libc::SIGTERM);
-            }
+        if let Some(pid) = self.child.id()
+            && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
+        {
+            // The child was put in its own process group at spawn time
+            // (see `process_group(0)` above), so pgid == pid. Errors are
+            // ignored: the child may have already exited.
+            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
         }
 
         match tokio::time::timeout(term_timeout, self.child.wait()).await {

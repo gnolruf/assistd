@@ -124,10 +124,9 @@ async fn restarts_after_external_kill() {
     let (service, shutdown_tx) = start_service("normal", port).await;
 
     let first_pid = service.pid().expect("first pid");
-    // SAFETY: libc::kill with a valid pid and signal.
-    unsafe {
-        libc::kill(first_pid as i32, libc::SIGKILL);
-    }
+    let pid = rustix::process::Pid::from_raw(first_pid as i32).expect("nonzero pid");
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL)
+        .expect("SIGKILL on test child");
 
     // Wait for the supervisor to notice and respawn.
     let deadline = Instant::now() + Duration::from_secs(8);

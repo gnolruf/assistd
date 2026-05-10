@@ -140,20 +140,16 @@ pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> MemoryS
     }
 }
 
-#[allow(unsafe_code)] // libc::kill probe — see SAFETY comment below
 fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 {
+    let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
         return false;
+    };
+    // `test_kill_process` issues `kill(pid, 0)`: no memory read, no signal
+    // sent — just an existence probe. EPERM means the process exists but
+    // we can't signal it; ESRCH (and anything else) means it's gone.
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) => true,
+        Err(rustix::io::Errno::PERM) => true,
+        Err(_) => false,
     }
-    // SAFETY: `kill(pid, 0)` reads no memory and writes no signal; it
-    // only probes for the pid's existence. The libc binding is safe
-    // to call from any thread.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
-    }
-    // EPERM: process exists but we lack permission. EINVAL: bad sig
-    // (won't happen with 0). ESRCH: no such process.
-    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    errno == libc::EPERM
 }

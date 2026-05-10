@@ -101,8 +101,15 @@ async fn new_active_manager(port: u16) -> (Arc<PresenceManager>, watch::Sender<b
 }
 
 fn pid_alive(pid: u32) -> bool {
-    // `kill(pid, 0)` returns 0 if the process exists and we may signal it.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    // `test_kill_process` does `kill(pid, 0)`: existence probe with no
+    // signal sent. EPERM means the process exists but we can't signal it.
+    let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
+        return false;
+    };
+    matches!(
+        rustix::process::test_kill_process(pid),
+        Ok(()) | Err(rustix::io::Errno::PERM)
+    )
 }
 
 async fn wait_for_pid_gone(pid: u32, timeout: Duration) -> bool {

@@ -7,8 +7,6 @@
 //! the full request/response loop against a `tokio::io::duplex` pair —
 //! see [`StdioMcpClient::from_streams`].
 
-#![allow(unsafe_code)] // libc::kill for SIGTERM-then-SIGKILL on shutdown.
-
 use std::collections::HashMap;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
@@ -381,13 +379,10 @@ impl ChildLifeline {
         let label = self.label.clone();
         if let Some(mut child) = self.child.take() {
             #[cfg(unix)]
-            if let Some(pid) = child.id() {
-                let gid: i32 = -(pid as i32);
-                // SAFETY: libc::kill is thread-safe; failures (ESRCH for an
-                // already-exited process) are surfaced via errno and ignored.
-                unsafe {
-                    libc::kill(gid, libc::SIGTERM);
-                }
+            if let Some(pid) = child.id()
+                && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
+            {
+                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
             }
             match tokio::time::timeout(term_timeout, child.wait()).await {
                 Ok(Ok(status)) => {

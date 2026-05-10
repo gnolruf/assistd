@@ -1,4 +1,3 @@
-#![allow(unsafe_code)] // libc / env / fd primitives — each unsafe block is locally justified
 #![cfg_attr(
     test,
     allow(
@@ -27,6 +26,7 @@
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[cfg(feature = "client")]
@@ -601,12 +601,23 @@ impl Event {
 }
 
 pub fn socket_path() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+    socket_path_for(
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("USER"),
+    )
+}
+
+/// Pure resolver: env reads happen at the boundary so this can be tested
+/// without mutating process-global state.
+fn socket_path_for(xdg_runtime_dir: Option<OsString>, user: Option<OsString>) -> PathBuf {
+    if let Some(dir) = xdg_runtime_dir {
         let mut p = PathBuf::from(dir);
         p.push("assistd.sock");
         return p;
     }
-    let user = std::env::var("USER").unwrap_or_else(|_| "nobody".into());
+    let user = user
+        .and_then(|u| u.into_string().ok())
+        .unwrap_or_else(|| "nobody".into());
     PathBuf::from(format!("/tmp/assistd-{user}.sock"))
 }
 
@@ -1329,9 +1340,19 @@ mod tests {
 
     #[test]
     fn socket_path_uses_xdg_runtime_dir() {
-        // Safe to set env in this single-threaded test function.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1234") };
-        let path = socket_path();
+        let path = socket_path_for(Some(OsString::from("/run/user/1234")), None);
         assert_eq!(path, PathBuf::from("/run/user/1234/assistd.sock"));
+    }
+
+    #[test]
+    fn socket_path_falls_back_to_tmp_with_user() {
+        let path = socket_path_for(None, Some(OsString::from("alice")));
+        assert_eq!(path, PathBuf::from("/tmp/assistd-alice.sock"));
+    }
+
+    #[test]
+    fn socket_path_falls_back_to_nobody_without_user() {
+        let path = socket_path_for(None, None);
+        assert_eq!(path, PathBuf::from("/tmp/assistd-nobody.sock"));
     }
 }
