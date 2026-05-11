@@ -19,12 +19,15 @@ use super::vram::{RamState, VramState};
 
 /// Render the full chat TUI into `frame`, updating the app's cached layout state.
 pub fn render(frame: &mut Frame, app: &mut App) {
+    let frame_area = frame.area();
+    let input_height =
+        compute_input_height(frame_area.width, frame_area.height, app.input.buffer());
     let chunks = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(input_height),
     ])
-    .split(frame.area());
+    .split(frame_area);
     let output_area = chunks[0];
     let status_area = chunks[1];
     let input_area = chunks[2];
@@ -294,16 +297,77 @@ fn format_countdown(d: Duration) -> String {
     }
 }
 
+const INPUT_PROMPT: &str = "> ";
+
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    const PROMPT: &str = "> ";
-    let content = format!("{PROMPT}{}", app.input.buffer());
-    let para = Paragraph::new(content);
+    let prompt_w = INPUT_PROMPT.chars().count() as u16;
+    let width = area.width;
+    let buf_chars: Vec<char> = app.input.buffer().chars().collect();
+
+    let first_cap = width.saturating_sub(prompt_w) as usize;
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut idx = first_cap.min(buf_chars.len());
+    let mut first = String::with_capacity(width as usize);
+    first.push_str(INPUT_PROMPT);
+    first.extend(&buf_chars[..idx]);
+    lines.push(Line::from(first));
+    while idx < buf_chars.len() {
+        let take = (width as usize).min(buf_chars.len() - idx);
+        let s: String = buf_chars[idx..idx + take].iter().collect();
+        lines.push(Line::from(s));
+        idx += take;
+    }
+
+    let para = Paragraph::new(Text::from(lines));
     frame.render_widget(para, area);
 
-    let cursor_x = area.x + PROMPT.chars().count() as u16 + app.input.cursor_col();
-    let cursor_x = cursor_x.min(area.x + area.width.saturating_sub(1));
-    frame.set_cursor_position(Position::new(cursor_x, area.y));
+    let cursor_total = prompt_w + app.input.cursor_col();
+    let cursor_y = cursor_total / width;
+    let cursor_x = cursor_total % width;
+    let cy = (area.y + cursor_y).min(area.y + area.height.saturating_sub(1));
+    frame.set_cursor_position(Position::new(area.x + cursor_x, cy));
+}
+
+/// Number of rows the input area needs to display `buffer` plus the prompt,
+/// wrapping at `frame_width` cells. Capped so the output pane keeps at least
+/// its minimum height (3 rows) plus the 1-row status bar.
+fn compute_input_height(frame_width: u16, frame_height: u16, buffer: &str) -> u16 {
+    if frame_width == 0 {
+        return 1;
+    }
+    let prompt_w = INPUT_PROMPT.chars().count() as u16;
+    let total = prompt_w.saturating_add(buffer.chars().count() as u16);
+    let needed = (total / frame_width).saturating_add(1);
+    let cap = frame_height.saturating_sub(4).max(1);
+    needed.clamp(1, cap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_height_grows_when_buffer_overflows_width() {
+        // width=10, prompt=2, so first row fits 8 chars of buffer.
+        assert_eq!(compute_input_height(10, 24, ""), 1);
+        assert_eq!(compute_input_height(10, 24, &"a".repeat(7)), 1);
+        // total=10 → exactly fills row 0, cursor must wrap to row 1.
+        assert_eq!(compute_input_height(10, 24, &"a".repeat(8)), 2);
+        assert_eq!(compute_input_height(10, 24, &"a".repeat(18)), 3);
+    }
+
+    #[test]
+    fn input_height_capped_to_leave_room_for_output_and_status() {
+        // frame_height=6 → cap = 6-4 = 2.
+        assert_eq!(compute_input_height(10, 6, &"a".repeat(100)), 2);
+    }
+
+    #[test]
+    fn input_height_minimum_one_even_in_tiny_frame() {
+        assert_eq!(compute_input_height(10, 0, ""), 1);
+        assert_eq!(compute_input_height(0, 24, "anything"), 1);
+    }
 }

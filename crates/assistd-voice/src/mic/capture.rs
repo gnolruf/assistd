@@ -250,7 +250,11 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
 }
 
 fn name_of(device: &Device) -> Result<String, cpal::DeviceNameError> {
-    device.description().map(|d| d.name().to_string())
+    device.description().map(|d| {
+        d.driver()
+            .map(str::to_string)
+            .unwrap_or_else(|| d.name().to_string())
+    })
 }
 
 /// Select a cpal input device by optional name hint, or fall back to the system default.
