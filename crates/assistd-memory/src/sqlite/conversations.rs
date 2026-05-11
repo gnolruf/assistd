@@ -319,6 +319,12 @@ pub trait ConversationStore: Send + Sync + 'static {
     /// resume to repopulate the in-memory `Conversation`.
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>>;
 
+    /// Return the RFC3339 timestamp of the most recent message on
+    /// `branch`, or `None` when the branch has no messages. Used by
+    /// [`Request::ResumeOrNew`] to decide whether to replay the current
+    /// branch or start a fresh session.
+    async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<String>>;
+
     /// Drop the latest turn from `branch`. Implementation:
     /// 1. find max(turn_id) for messages reachable from `branch`,
     /// 2. delete the matching `branch_messages` rows for `branch`,
@@ -431,6 +437,10 @@ impl ConversationStore for NoConversationStore {
 
     async fn load_branch_history(&self, _b: BranchId) -> Result<Vec<HistoryRow>> {
         Ok(Vec::new())
+    }
+
+    async fn latest_branch_activity(&self, _b: BranchId) -> Result<Option<String>> {
+        Ok(None)
     }
 
     async fn undo_last_turn(&self, _b: BranchId) -> Result<UndoOutcome> {
@@ -859,6 +869,27 @@ impl ConversationStore for SqliteConversationStore {
             })
             .await
             .context("load_branch_history")
+    }
+
+    async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<String>> {
+        self.handle
+            .conn()
+            .call(move |c| -> rusqlite::Result<_> {
+                let ts: Option<String> = c
+                    .query_row(
+                        "SELECT c.timestamp
+                         FROM branch_messages bm
+                         JOIN conversations c ON c.id = bm.conversation_id
+                         WHERE bm.branch_id = ?1
+                         ORDER BY bm.seq DESC LIMIT 1",
+                        rusqlite::params![branch.0],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok();
+                Ok(ts)
+            })
+            .await
+            .context("latest_branch_activity")
     }
 
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome> {

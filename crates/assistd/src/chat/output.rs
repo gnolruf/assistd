@@ -76,13 +76,17 @@ impl OutputPane {
         }
     }
 
-    /// Append a user prompt line prefixed with `"> "`.
+    /// Append a user prompt line prefixed with `"> "`, followed by a
+    /// blank separator row so the next assistant reply visually
+    /// breathes — matching the blank row that `finish_assistant`
+    /// emits after a reply ends.
     pub fn push_user(&mut self, text: &str) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
             format!("> {text}"),
             user_style(),
         )));
+        self.items.push(OutputItem::Text(Line::from("")));
         self.dirty = true;
     }
 
@@ -101,6 +105,7 @@ impl OutputPane {
             format!("> {text}{tag}"),
             user_style(),
         )));
+        self.items.push(OutputItem::Text(Line::from("")));
         self.dirty = true;
     }
 
@@ -261,6 +266,18 @@ impl OutputPane {
     pub fn scroll_page_down(&mut self, viewport_height: u16) {
         let step = (viewport_height / 2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_sub(step);
+    }
+
+    /// Scroll up by `lines` wrapped rows. Used for mouse-wheel ticks
+    /// where a half-page step would feel too coarse.
+    pub fn scroll_lines_up(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines.max(1));
+    }
+
+    /// Scroll down by `lines` wrapped rows. The bottom of the buffer is
+    /// pinned at offset 0; the next `render_view` clamps overshoot.
+    pub fn scroll_lines_down(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines.max(1));
     }
 
     /// Reset the scroll offset to the bottom (most-recent content).
@@ -766,8 +783,12 @@ mod tests {
         p.append_assistant("half");
         p.push_user("new question");
         assert_eq!(p.open_assistant, None);
-        assert_eq!(p.items.len(), 3);
+        // close_open_assistant pushes a separator, then push_user pushes the
+        // prompt line and a trailing blank so the next assistant reply
+        // visually breathes.
+        assert_eq!(p.items.len(), 4);
         assert_eq!(item_text(&p.items[2]), "> new question");
+        assert_eq!(item_text(&p.items[3]), "");
     }
 
     #[test]
@@ -997,7 +1018,8 @@ mod tests {
     fn render_view_zero_width_falls_back_to_raw_lines() {
         let mut p = OutputPane::new();
         p.push_user("hi");
+        // push_user emits the prompt line plus a trailing blank separator.
         let (wrapped, _) = p.render_view(0, 5);
-        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped.len(), 2);
     }
 }
