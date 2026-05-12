@@ -793,9 +793,6 @@ mod tests {
         p.append_assistant("half");
         p.push_user("new question");
         assert_eq!(p.open_assistant, None);
-        // close_open_assistant pushes a separator, then push_user pushes the
-        // prompt line and a trailing blank so the next assistant reply
-        // visually breathes.
         assert_eq!(p.items.len(), 4);
         assert_eq!(item_text(&p.items[2]), "> new question");
         assert_eq!(item_text(&p.items[3]), "");
@@ -1028,7 +1025,6 @@ mod tests {
     fn render_view_zero_width_falls_back_to_raw_lines() {
         let mut p = OutputPane::new();
         p.push_user("hi");
-        // push_user emits the prompt line plus a trailing blank separator.
         let (wrapped, _) = p.render_view(0, 5);
         assert_eq!(wrapped.len(), 2);
     }

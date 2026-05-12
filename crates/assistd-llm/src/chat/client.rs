@@ -574,8 +574,6 @@ impl LlmBackend for LlamaChatClient {
 
         let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
         let outcome = self.stream_openai(body_bytes, &tx).await;
-        // Drop the sender so the receiver loop terminates after we've
-        // collected everything `stream_openai` already pushed.
         drop(tx);
         let mut buf = String::new();
         while let Some(ev) = rx.recv().await {
@@ -587,11 +585,6 @@ impl LlmBackend for LlamaChatClient {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)
             | StreamOutcome::ClientDisconnected(accum) => {
-                // `accum.text` is the canonical assistant text the
-                // streamer assembled; prefer it over our local buffer
-                // since accum is what the streamer would have shown the
-                // user, and `buf` may be empty for backends that report
-                // text only via `accum`.
                 if !accum.text.is_empty() {
                     Ok(accum.text)
                 } else {

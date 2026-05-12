@@ -23,8 +23,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let input_height =
         compute_input_height(frame_area.width, frame_area.height, app.input.buffer());
     let suggestions = app.slash_suggestions();
-    // One row per matching command, capped so the popup never crowds
-    // the output pane out. Zero rows when the popup is hidden.
     let popup_height = if suggestions.is_empty() {
         0
     } else {
@@ -66,7 +64,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_branch_picker_modal(frame: &mut Frame, area: Rect, picker: &BranchPickerModal) {
     let width = (area.width.saturating_mul(4) / 5).clamp(50, 120);
     let max_height = area.height.saturating_sub(2);
-    // Two rows of chrome (title + footer) plus the entry list.
     let desired = picker.entries.len() as u16 + 4;
     let height = desired.min(max_height).max(6);
     let x = area.x + area.width.saturating_sub(width) / 2;
@@ -110,8 +107,6 @@ fn render_branch_picker_modal(frame: &mut Frame, area: Rect, picker: &BranchPick
     let total = picker.entries.len();
     let mut start = 0usize;
     if total > visible {
-        // Scroll so the selected row stays in view, biased toward
-        // showing context above the selection.
         if picker.selected >= visible {
             start = picker.selected + 1 - visible;
         }
@@ -136,9 +131,6 @@ fn render_branch_picker_modal(frame: &mut Frame, area: Rect, picker: &BranchPick
                 (Some(p), Some(seq)) => format!("  (forked from {p}@{seq})"),
                 _ => String::new(),
             };
-            // Prefer the LLM-generated session title; fall back to the
-            // 8-char session-id prefix when title generation hasn't
-            // landed yet (or for legacy pre-V4 sessions).
             let session_label = e
                 .session_title
                 .as_deref()
@@ -543,7 +535,6 @@ fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
             break;
         }
         let end_max = start + cap;
-        // Scan backwards for the rightmost whitespace inside the row.
         let mut break_at: Option<usize> = None;
         let mut i = end_max;
         while i > start {
@@ -554,8 +545,6 @@ fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
             }
         }
         let mut row_end = break_at.unwrap_or(end_max);
-        // Guard against a degenerate boundary at `start` itself, which would
-        // produce a zero-length row and loop forever.
         if row_end <= start {
             row_end = end_max;
         }
@@ -565,8 +554,6 @@ fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
     if rows.is_empty() {
         rows.push((0, 0));
     }
-    // If the last row uses all its visible cells, append a phantom row so
-    // the cursor at end-of-buffer remains visible.
     let (ls, le) = *rows.last().expect("rows non-empty");
     let last_visible = (le - ls)
         + if rows.len() == 1 {

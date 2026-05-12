@@ -191,10 +191,6 @@ pub struct BranchInfo {
     pub session_id: String,
     pub session_started_at: String,
     pub session_ended_at: Option<String>,
-    /// LLM-summarised title for the parent session, or `None` when
-    /// title generation hasn't completed (or didn't run, e.g. for
-    /// pre-V4 rows). The TUI's branch picker prefers this over the
-    /// session UUID prefix when displaying entries.
     pub session_title: Option<String>,
     pub name: String,
     pub parent_branch_id: Option<BranchId>,

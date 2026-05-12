@@ -239,17 +239,8 @@ enum BranchOp {
     Fork,
     Switch,
     Undo,
-    /// In-flight `ResumeOrNew` issued at TUI startup. Suppresses the
-    /// usual "[branch X is now active]" banner; on resume the
-    /// HistoryEntry events repaint the conversation, on fresh-start
-    /// the cleared output pane is the user-visible signal.
     Resume,
-    /// In-flight `/new`: clear the chat pane silently when the
-    /// daemon's `BranchSwitched` lands.
     New,
-    /// In-flight `Branches` request triggered by `/resume`. Rows are
-    /// buffered into `branches_buffer`; on terminal `Done` the
-    /// branch-picker modal opens populated from that buffer.
     ResumePicker,
 }
 
@@ -263,10 +254,6 @@ pub struct BranchListEntry {
     pub is_current_in_session: bool,
     pub is_active_session: bool,
     pub session_short: String,
-    /// LLM-generated session title, when available. Picker rows show
-    /// this in place of `session_short` whenever it's set so resuming
-    /// reads as "resume the chat about cats" rather than "resume
-    /// 4f9a1b2c".
     pub session_title: Option<String>,
 }
 
@@ -279,9 +266,6 @@ pub struct BranchPickerModal {
 }
 
 impl BranchPickerModal {
-    /// Build the qualified `<session_prefix>/<name>` target the
-    /// daemon's `Request::Switch` expects for unambiguous
-    /// cross-session resolution.
     pub fn current_target(&self) -> Option<String> {
         self.entries
             .get(self.selected)
@@ -828,10 +812,6 @@ impl App {
                     self.output.push_info(&msg);
                 }
                 Some(BranchOp::Resume) | Some(BranchOp::New) => {
-                    // Startup resume / `/new`: silently clear so
-                    // HistoryEntry events (if any) repaint into a
-                    // clean pane, or the user simply sees a fresh
-                    // chat.
                     self.output.clear();
                 }
                 _ => {

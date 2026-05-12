@@ -232,10 +232,6 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         app.output
             .push_error("once the daemon is reachable, retry your query");
     } else {
-        // 10s mirrors the "follow-up window" smart-speakers use: a
-        // conversation triggered via voice (or any other daemon
-        // channel) within the last few seconds stays threaded, but
-        // opening the TUI cold gives a fresh chat.
         app.spawn_resume_or_new(10);
     }
 

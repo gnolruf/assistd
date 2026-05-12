@@ -2035,9 +2035,6 @@ impl AppState {
     /// shutdown drains the task; survives `complete_oneshot` failures
     /// silently because a missing title is a UX downgrade, not a bug.
     fn spawn_session_title_generation(self: Arc<Self>, session: Arc<SessionId>, user_text: String) {
-        // Cap at a reasonable length so a giant first prompt doesn't
-        // pay an unbounded summarisation cost. The trim is char-aware
-        // (not byte-aware) so we never split a multi-byte codepoint.
         const MAX_PROMPT_CHARS: usize = 1024;
         let trimmed: String = user_text.chars().take(MAX_PROMPT_CHARS).collect();
         self.persistence_tracker.clone().spawn(async move {
@@ -2586,12 +2583,6 @@ impl AppState {
     }
 }
 
-/// Normalise an LLM-generated session title before it lands in
-/// `sessions.title`. Picks the first non-empty line, strips wrapping
-/// quotes/markdown, drops a trailing period, and caps the length so a
-/// runaway model can't blow up the picker UI. Returns an empty string
-/// when nothing usable survived; callers must skip the write in that
-/// case.
 fn clean_generated_title(raw: &str) -> String {
     const MAX_TITLE_CHARS: usize = 80;
     let first_line = raw
