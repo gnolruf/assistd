@@ -818,12 +818,18 @@ impl App {
                 name,
                 parent_branch_name,
                 fork_point_seq,
+                session_title,
                 ..
             } => match self.in_flight_branch_op {
                 Some(BranchOp::Switch) => {
                     self.output.clear();
-                    self.output
-                        .push_info(&format!("[switched to branch '{name}']"));
+                    let msg = match session_title.as_deref().map(str::trim) {
+                        Some(t) if !t.is_empty() => {
+                            format!("[switched to conversation '{t}' on branch '{name}']")
+                        }
+                        _ => format!("[switched to new conversation on branch '{name}']"),
+                    };
+                    self.output.push_info(&msg);
                 }
                 Some(BranchOp::Resume) | Some(BranchOp::New) => {
                     // Startup resume / `/new`: silently clear so

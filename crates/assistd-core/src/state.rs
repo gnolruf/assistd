@@ -1955,11 +1955,18 @@ impl AppState {
 
         let parent_name = self.lookup_branch_name(current_branch).await;
         let fork_point_seq = self.lookup_branch_tail_seq(current_branch).await;
+        let session_title = self
+            .conversations
+            .get_session_title(&session)
+            .await
+            .ok()
+            .flatten();
         let _ = tx
             .send(Event::BranchSwitched {
                 id: id.clone(),
                 branch_id: new_branch.0,
                 session_id: session.0.clone(),
+                session_title,
                 name,
                 parent_branch_name: parent_name,
                 fork_point_seq,
@@ -2171,12 +2178,19 @@ impl AppState {
 
         let (branch_name, parent_name, fork_point_seq) =
             self.lookup_branch_meta(target_branch).await;
+        let session_title = self
+            .conversations
+            .get_session_title(&target_session)
+            .await
+            .ok()
+            .flatten();
 
         let _ = tx
             .send(Event::BranchSwitched {
                 id: id.clone(),
                 branch_id: target_branch.0,
                 session_id: target_session.0.clone(),
+                session_title,
                 name: branch_name.unwrap_or_default(),
                 parent_branch_name: parent_name,
                 fork_point_seq,
@@ -2311,11 +2325,18 @@ impl AppState {
                 );
             }
             let (branch_name, parent_name, fork_point_seq) = self.lookup_branch_meta(branch).await;
+            let session_title = self
+                .conversations
+                .get_session_title(&session)
+                .await
+                .ok()
+                .flatten();
             let _ = tx
                 .send(Event::BranchSwitched {
                     id: id.clone(),
                     branch_id: branch.0,
                     session_id: session.0.clone(),
+                    session_title,
                     name: branch_name.unwrap_or_default(),
                     parent_branch_name: parent_name,
                     fork_point_seq,
@@ -2368,6 +2389,7 @@ impl AppState {
                 id: id.clone(),
                 branch_id: new_branch.0,
                 session_id: new_session.0.clone(),
+                session_title: None,
                 name: "main".to_string(),
                 parent_branch_name: None,
                 fork_point_seq: None,
@@ -2421,6 +2443,7 @@ impl AppState {
                 id: id.clone(),
                 branch_id: new_branch.0,
                 session_id: new_session.0.clone(),
+                session_title: None,
                 name: "main".to_string(),
                 parent_branch_name: None,
                 fork_point_seq: None,
