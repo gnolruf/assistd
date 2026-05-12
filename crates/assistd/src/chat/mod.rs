@@ -231,6 +231,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         app.output.push_error(&format!("daemon startup: {err}"));
         app.output
             .push_error("once the daemon is reachable, retry your query");
+    } else {
+        app.spawn_resume_or_new(10);
     }
 
     let mut events = EventStream::new();
@@ -246,6 +248,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
             maybe_ev = events.next() => {
                 match maybe_ev {
                     Some(Ok(TermEvent::Key(k))) => app.on_key(k),
+                    Some(Ok(TermEvent::Mouse(m))) => app.on_mouse(m),
                     Some(Ok(TermEvent::Resize(_, _))) => {}
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {

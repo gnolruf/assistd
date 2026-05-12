@@ -76,13 +76,17 @@ impl OutputPane {
         }
     }
 
-    /// Append a user prompt line prefixed with `"> "`.
+    /// Append a user prompt line prefixed with `"> "`, followed by a
+    /// blank separator row so the next assistant reply visually
+    /// breathes — matching the blank row that `finish_assistant`
+    /// emits after a reply ends.
     pub fn push_user(&mut self, text: &str) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
             format!("> {text}"),
             user_style(),
         )));
+        self.items.push(OutputItem::Text(Line::from("")));
         self.dirty = true;
     }
 
@@ -101,6 +105,7 @@ impl OutputPane {
             format!("> {text}{tag}"),
             user_style(),
         )));
+        self.items.push(OutputItem::Text(Line::from("")));
         self.dirty = true;
     }
 
@@ -261,6 +266,18 @@ impl OutputPane {
     pub fn scroll_page_down(&mut self, viewport_height: u16) {
         let step = (viewport_height / 2).max(1);
         self.scroll_offset = self.scroll_offset.saturating_sub(step);
+    }
+
+    /// Scroll up by `lines` wrapped rows. Used for mouse-wheel ticks
+    /// where a half-page step would feel too coarse.
+    pub fn scroll_lines_up(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines.max(1));
+    }
+
+    /// Scroll down by `lines` wrapped rows. The bottom of the buffer is
+    /// pinned at offset 0; the next `render_view` clamps overshoot.
+    pub fn scroll_lines_down(&mut self, lines: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines.max(1));
     }
 
     /// Reset the scroll offset to the bottom (most-recent content).
@@ -492,8 +509,20 @@ fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16
         out.push(Line::from(""));
         return;
     }
+    // When the line carries a background color (e.g. the user-message
+    // box), pad each wrapped chunk out to the full viewport width so the
+    // highlight extends across the row instead of stopping at the text.
+    let pad_to_width = style.bg.is_some();
     for chunk in wrapped {
-        out.push(single_span_line(chunk.into_owned(), style));
+        let mut s = chunk.into_owned();
+        if pad_to_width {
+            let visible = s.chars().count();
+            let cap = width as usize;
+            if visible < cap {
+                s.push_str(&" ".repeat(cap - visible));
+            }
+        }
+        out.push(single_span_line(s, style));
     }
 }
 
@@ -637,9 +666,7 @@ fn append_to_line(line: &mut Line<'static>, text: &str) {
 }
 
 fn user_style() -> Style {
-    Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD)
+    Style::default().bg(Color::DarkGray)
 }
 
 fn assistant_style() -> Style {
@@ -766,8 +793,9 @@ mod tests {
         p.append_assistant("half");
         p.push_user("new question");
         assert_eq!(p.open_assistant, None);
-        assert_eq!(p.items.len(), 3);
+        assert_eq!(p.items.len(), 4);
         assert_eq!(item_text(&p.items[2]), "> new question");
+        assert_eq!(item_text(&p.items[3]), "");
     }
 
     #[test]
@@ -998,6 +1026,6 @@ mod tests {
         let mut p = OutputPane::new();
         p.push_user("hi");
         let (wrapped, _) = p.render_view(0, 5);
-        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped.len(), 2);
     }
 }

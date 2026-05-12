@@ -270,6 +270,21 @@ pub enum Request {
     /// from the current branch. Emits a single [`Event::UndoApplied`]
     /// reporting how many messages were removed, then `Done`.
     Undo { id: String },
+    /// TUI startup: decide whether to resume the current branch or
+    /// start a fresh conversation. If the latest message on the
+    /// current branch was written within `recency_secs`, the daemon
+    /// keeps that branch and streams its history back (one
+    /// [`Event::HistoryEntry`] per message). Otherwise it creates a
+    /// new session with an empty `main` branch, sets it as current,
+    /// and emits [`Event::BranchSwitched`]. Either path terminates
+    /// with `Done`.
+    ResumeOrNew { id: String, recency_secs: u64 },
+    /// `/new`: unconditionally start a fresh conversation. Creates a
+    /// new session with an empty `main` branch, sets it as current,
+    /// emits [`Event::BranchSwitched`], then `Done`. Distinct from
+    /// [`Request::ResumeOrNew`] which may decide to keep an existing
+    /// branch when it's recent or empty.
+    NewSession { id: String },
 }
 
 impl Request {
@@ -330,7 +345,9 @@ impl Request {
             | Request::Fork { id, .. }
             | Request::Branches { id }
             | Request::Switch { id, .. }
-            | Request::Undo { id } => id,
+            | Request::Undo { id }
+            | Request::ResumeOrNew { id, .. }
+            | Request::NewSession { id } => id,
         }
     }
 
@@ -365,6 +382,8 @@ impl Request {
             Request::Branches { .. } => "branches",
             Request::Switch { .. } => "switch",
             Request::Undo { .. } => "undo",
+            Request::ResumeOrNew { .. } => "resume_or_new",
+            Request::NewSession { .. } => "new_session",
         }
     }
 }
@@ -525,6 +544,8 @@ pub enum Event {
         session_id: String,
         session_started_at: String,
         session_ended_at: Option<String>,
+        #[serde(default)]
+        session_title: Option<String>,
         name: String,
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
@@ -540,6 +561,7 @@ pub enum Event {
         id: String,
         branch_id: i64,
         session_id: String,
+        session_title: Option<String>,
         name: String,
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
@@ -753,6 +775,7 @@ mod tests {
             session_id: "abc12345-...".into(),
             session_started_at: "2026-01-01T00:00:00Z".into(),
             session_ended_at: None,
+            session_title: Some("a chat about cats".into()),
             name: "main".into(),
             parent_branch_name: None,
             fork_point_seq: None,
@@ -773,6 +796,7 @@ mod tests {
             id: "r-2".into(),
             branch_id: 9,
             session_id: "sess".into(),
+            session_title: Some("a chat about cats".into()),
             name: "experiment".into(),
             parent_branch_name: Some("main".into()),
             fork_point_seq: Some(5),

@@ -543,6 +543,60 @@ impl LlmBackend for LlamaChatClient {
         let mut conv = self.conv.lock().await;
         Ok(conv.truncate_to_last_real_user())
     }
+
+    /// Stateless completion. Builds a one-message wire payload directly
+    /// (skipping `self.conv` entirely) so the daemon's title-generation
+    /// hook can summarise without polluting the user's chat history.
+    /// The drained `mpsc::Receiver` collects deltas locally; the caller
+    /// only sees the final concatenated text.
+    async fn complete_oneshot(&self, prompt: String) -> LlmResult<String> {
+        let body_bytes = {
+            let payload = wire::ChatRequest {
+                model: self.model.name.as_str(),
+                messages: vec![wire::ChatMessage {
+                    role: "user",
+                    content: Some(wire::ContentBody::Text(prompt.as_str())),
+                    tool_calls: None,
+                    tool_call_id: None,
+                }],
+                stream: true,
+                temperature: self.chat.temperature,
+                max_tokens: self.chat.max_response_tokens,
+                top_p: self.chat.top_p,
+                top_k: self.chat.top_k,
+                min_p: self.chat.min_p,
+                presence_penalty: self.chat.presence_penalty,
+                tools: None,
+                tool_choice: None,
+            };
+            serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
+        };
+
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
+        let outcome = self.stream_openai(body_bytes, &tx).await;
+        drop(tx);
+        let mut buf = String::new();
+        while let Some(ev) = rx.recv().await {
+            if let LlmEvent::Delta { text } = ev {
+                buf.push_str(&text);
+            }
+        }
+        match outcome {
+            StreamOutcome::Ok(accum)
+            | StreamOutcome::PartialAfterEmit(accum)
+            | StreamOutcome::ClientDisconnected(accum) => {
+                if !accum.text.is_empty() {
+                    Ok(accum.text)
+                } else {
+                    Ok(buf)
+                }
+            }
+            StreamOutcome::PreEmitError(e) => Err(LlmError::Chat(e)),
+            StreamOutcome::ServerRestart { .. } => Err(LlmError::ServerRestarting(
+                "llama-server crashed during complete_oneshot".into(),
+            )),
+        }
+    }
 }
 
 fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::ToolCallRecord>> {

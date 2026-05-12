@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use assistd_core::{PresenceState, SleepConfig};
 use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
 use assistd_tools::{Attachment, ConfirmationRequest, load_image_attachment};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
@@ -26,6 +26,22 @@ use super::vram::ResourceState;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
+/// Rows scrolled per mouse-wheel tick. Three matches the de facto
+/// terminal-app convention (Claude Code, less, htop, …) and keeps a
+/// single click responsive without launching past several messages.
+const MOUSE_WHEEL_STEP: u16 = 3;
+
+/// Slash commands surfaced by the input-line autocomplete popup.
+/// Each entry is `(command, usage_hint)` where `usage_hint` is shown
+/// in dim text next to the command name in the suggestion list.
+pub const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/attach", "<path>"),
+    ("/fork", "<name>"),
+    ("/new", ""),
+    ("/resume", ""),
+    ("/switch", "<target>"),
+    ("/undo", ""),
+];
 
 /// One image staged by `/attach`, waiting to ride along with the user's
 /// next text submission.
@@ -195,10 +211,24 @@ pub struct App {
     /// `UndoApplied` events into the right rendering path. Cleared on
     /// terminal `Done` / `Error`.
     in_flight_branch_op: Option<BranchOp>,
-    /// Buffer for `/branches` rows accumulated until the terminal
-    /// `Done` so the table renders as one cohesive block.
+    /// Buffer for branch rows accumulated during a `/resume` listing
+    /// until the terminal `Done`, at which point they're handed off to
+    /// the picker modal in one batch.
     branches_buffer: Vec<BranchListEntry>,
     chat_tx: mpsc::Sender<ChatEvent>,
+    /// Highlighted entry in the slash-command suggestion popup.
+    /// Reset to 0 whenever the buffer leaves a `/` prefix; clamped to
+    /// `len-1` after each keystroke filters the list down.
+    slash_selected: usize,
+    /// Set by Esc while the slash popup is visible. Cleared once the
+    /// buffer no longer starts with `/`, so the next `/<x>` reopens
+    /// the popup as the user expects.
+    slash_dismissed: bool,
+    /// Interactive branch picker shown by `/resume`. Mutually
+    /// exclusive with [`Self::modal`] (destructive-command modals);
+    /// when both somehow co-exist, the destructive modal wins
+    /// because the agent is blocked on it.
+    pub picker_modal: Option<BranchPickerModal>,
 }
 
 /// Which branch slash-command is currently in flight, if any. Used to
@@ -207,21 +237,40 @@ pub struct App {
 #[derive(Debug, Clone, Copy)]
 enum BranchOp {
     Fork,
-    Branches,
     Switch,
     Undo,
+    Resume,
+    New,
+    ResumePicker,
 }
 
-/// One row buffered during a `/branches` listing.
+/// One row buffered during a `/resume` branch listing.
 #[derive(Debug, Clone)]
-struct BranchListEntry {
-    name: String,
-    parent_branch_name: Option<String>,
-    fork_point_seq: Option<i64>,
-    message_count: i64,
-    is_current_in_session: bool,
-    is_active_session: bool,
-    session_short: String,
+pub struct BranchListEntry {
+    pub name: String,
+    pub parent_branch_name: Option<String>,
+    pub fork_point_seq: Option<i64>,
+    pub message_count: i64,
+    pub is_current_in_session: bool,
+    pub is_active_session: bool,
+    pub session_short: String,
+    pub session_title: Option<String>,
+}
+
+/// Interactive picker shown by `/resume`. Rendered as a modal overlay
+/// with arrow-key navigation; Enter dispatches `Request::Switch`
+/// against the qualified target, Esc cancels.
+pub struct BranchPickerModal {
+    pub entries: Vec<BranchListEntry>,
+    pub selected: usize,
+}
+
+impl BranchPickerModal {
+    pub fn current_target(&self) -> Option<String> {
+        self.entries
+            .get(self.selected)
+            .map(|e| format!("{}/{}", e.session_short, e.name))
+    }
 }
 
 impl App {
@@ -261,6 +310,9 @@ impl App {
             in_flight_branch_op: None,
             branches_buffer: Vec::new(),
             chat_tx,
+            slash_selected: 0,
+            slash_dismissed: false,
+            picker_modal: None,
         }
     }
 
@@ -340,6 +392,79 @@ impl App {
         self.last_output_height = h;
     }
 
+    /// Slash-command entries that prefix-match the current buffer.
+    /// Empty when the popup should be hidden (buffer doesn't start
+    /// with `/`, contains whitespace, or the user dismissed it with
+    /// Esc).
+    pub fn slash_suggestions(&self) -> Vec<&'static (&'static str, &'static str)> {
+        if self.slash_dismissed {
+            return Vec::new();
+        }
+        let buf = self.input.buffer();
+        if !buf.starts_with('/') {
+            return Vec::new();
+        }
+        if buf.chars().any(char::is_whitespace) {
+            return Vec::new();
+        }
+        SLASH_COMMANDS
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(buf) && *cmd != buf)
+            .collect()
+    }
+
+    /// Index of the currently highlighted suggestion, clamped to the
+    /// visible list length. Used by [`super::ui`] to render the
+    /// selection highlight.
+    pub fn slash_selected(&self) -> usize {
+        self.slash_selected
+    }
+
+    /// Replace the input buffer with the highlighted suggestion. No
+    /// trailing space — the user adds one themselves if the command
+    /// takes an argument.
+    fn accept_slash_selection(&mut self) {
+        let suggestions = self.slash_suggestions();
+        if let Some((cmd, _)) = suggestions.get(self.slash_selected).copied() {
+            self.input.set_buffer(cmd.to_string());
+        }
+    }
+
+    /// Recompute slash-popup invariants after the input buffer mutates.
+    /// Resets dismissal when the prefix leaves; clamps the selection
+    /// to the (possibly smaller) filtered list.
+    fn refresh_slash_state(&mut self) {
+        let buf = self.input.buffer();
+        if !buf.starts_with('/') {
+            self.slash_dismissed = false;
+            self.slash_selected = 0;
+            return;
+        }
+        let n = self.slash_suggestions().len();
+        if n == 0 {
+            self.slash_selected = 0;
+        } else if self.slash_selected >= n {
+            self.slash_selected = n - 1;
+        }
+    }
+
+    /// Handle a terminal mouse event. Only scroll-wheel ticks are
+    /// consumed today; other mouse events (clicks, drags, motion) are
+    /// ignored so the alt-screen behaves like a static viewport.
+    pub fn on_mouse(&mut self, ev: MouseEvent) {
+        match ev.kind {
+            MouseEventKind::ScrollUp => {
+                self.touch_activity();
+                self.output.scroll_lines_up(MOUSE_WHEEL_STEP);
+            }
+            MouseEventKind::ScrollDown => {
+                self.touch_activity();
+                self.output.scroll_lines_down(MOUSE_WHEEL_STEP);
+            }
+            _ => {}
+        }
+    }
+
     /// Handle a terminal key event, routing to the modal or the input line.
     pub fn on_key(&mut self, ev: KeyEvent) {
         self.touch_activity();
@@ -347,6 +472,11 @@ impl App {
             self.handle_modal_key(ev);
             return;
         }
+        if self.picker_modal.is_some() {
+            self.handle_picker_key(ev);
+            return;
+        }
+        let slash_active = !self.slash_suggestions().is_empty();
         match ev.code {
             KeyCode::PageUp => {
                 self.output.scroll_page_up(self.last_output_height);
@@ -361,15 +491,39 @@ impl App {
                 return;
             }
             KeyCode::Tab => {
+                if slash_active {
+                    self.accept_slash_selection();
+                    self.refresh_slash_state();
+                    return;
+                }
                 if self.try_complete_attach_path() {
                     return;
                 }
                 self.output.toggle_last_tool_block();
                 return;
             }
+            KeyCode::Up if slash_active => {
+                if self.slash_selected > 0 {
+                    self.slash_selected -= 1;
+                }
+                return;
+            }
+            KeyCode::Down if slash_active => {
+                let n = self.slash_suggestions().len();
+                if self.slash_selected + 1 < n {
+                    self.slash_selected += 1;
+                }
+                return;
+            }
+            KeyCode::Esc if slash_active => {
+                self.slash_dismissed = true;
+                return;
+            }
             _ => {}
         }
-        match self.input.on_key(ev) {
+        let action = self.input.on_key(ev);
+        self.refresh_slash_state();
+        match action {
             InputAction::None => {}
             InputAction::Submit(text) => {
                 self.submit_typed(text);
@@ -378,6 +532,32 @@ impl App {
                 self.resolve_modal(false);
                 self.quitting = true;
             }
+        }
+    }
+
+    /// Process keys while the `/resume` branch picker is open.
+    /// Up/Down move the highlight, Enter dispatches a `Switch`, Esc
+    /// cancels. Other keys are swallowed so the input line stays
+    /// untouched.
+    fn handle_picker_key(&mut self, ev: KeyEvent) {
+        let Some(picker) = self.picker_modal.as_mut() else {
+            return;
+        };
+        let len = picker.entries.len();
+        match ev.code {
+            KeyCode::Up if picker.selected > 0 => {
+                picker.selected -= 1;
+            }
+            KeyCode::Down if picker.selected + 1 < len => {
+                picker.selected += 1;
+            }
+            KeyCode::Home => picker.selected = 0,
+            KeyCode::End => picker.selected = len.saturating_sub(1),
+            KeyCode::Enter => self.picker_confirm(),
+            KeyCode::Esc => {
+                self.picker_modal = None;
+            }
+            _ => {}
         }
     }
 
@@ -599,6 +779,7 @@ impl App {
                 is_current_in_session,
                 is_active_session,
                 session_id,
+                session_title,
                 ..
             } => {
                 let session_short = session_id.chars().take(8).collect::<String>();
@@ -610,18 +791,28 @@ impl App {
                     is_current_in_session,
                     is_active_session,
                     session_short,
+                    session_title,
                 });
             }
             Event::BranchSwitched {
                 name,
                 parent_branch_name,
                 fork_point_seq,
+                session_title,
                 ..
             } => match self.in_flight_branch_op {
                 Some(BranchOp::Switch) => {
                     self.output.clear();
-                    self.output
-                        .push_info(&format!("[switched to branch '{name}']"));
+                    let msg = match session_title.as_deref().map(str::trim) {
+                        Some(t) if !t.is_empty() => {
+                            format!("[switched to conversation '{t}' on branch '{name}']")
+                        }
+                        _ => format!("[switched to new conversation on branch '{name}']"),
+                    };
+                    self.output.push_info(&msg);
+                }
+                Some(BranchOp::Resume) | Some(BranchOp::New) => {
+                    self.output.clear();
                 }
                 _ => {
                     let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
@@ -683,8 +874,8 @@ impl App {
                 self.output.finish_assistant();
                 self.generating = false;
                 self.active_writer = None;
-                if matches!(self.in_flight_branch_op, Some(BranchOp::Branches)) {
-                    self.render_branches_buffer();
+                if let Some(BranchOp::ResumePicker) = self.in_flight_branch_op {
+                    self.open_branch_picker();
                 }
                 self.in_flight_branch_op = None;
             }
@@ -703,41 +894,6 @@ impl App {
             | Event::MemoryRow { .. }
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. } => {}
-        }
-    }
-
-    fn render_branches_buffer(&mut self) {
-        if self.branches_buffer.is_empty() {
-            self.output.push_info("[no branches]");
-            return;
-        }
-        let entries = std::mem::take(&mut self.branches_buffer);
-        let mut last_session: Option<String> = None;
-        for entry in entries {
-            if last_session.as_deref() != Some(entry.session_short.as_str()) {
-                let header = if entry.is_active_session {
-                    format!("[session {} (active)]", entry.session_short)
-                } else {
-                    format!("[session {}]", entry.session_short)
-                };
-                self.output.push_info(&header);
-                last_session = Some(entry.session_short.clone());
-            }
-            let star = if entry.is_current_in_session {
-                "* "
-            } else {
-                "  "
-            };
-            let parent = match (entry.parent_branch_name.as_deref(), entry.fork_point_seq) {
-                (Some(p), Some(seq)) => format!(" (from '{p}'@seq{seq})"),
-                (Some(p), None) => format!(" (from '{p}')"),
-                _ => String::new(),
-            };
-            let msgs = entry.message_count;
-            self.output.push_info(&format!(
-                "  {star}{name}{parent}  [{msgs} msg]",
-                name = entry.name
-            ));
         }
     }
 
@@ -845,16 +1001,20 @@ impl App {
             self.handle_fork_cmd(name.to_string());
             return;
         }
-        if text.trim() == "/branches" {
-            self.handle_branches_cmd();
-            return;
-        }
         if let Some(target) = parse_slash_arg(&text, "/switch") {
             self.handle_switch_cmd(target.to_string());
             return;
         }
         if text.trim() == "/undo" {
             self.handle_undo_cmd();
+            return;
+        }
+        if text.trim() == "/new" {
+            self.handle_new_cmd();
+            return;
+        }
+        if text.trim() == "/resume" {
+            self.handle_resume_cmd();
             return;
         }
         if self.generating {
@@ -1005,6 +1165,19 @@ impl App {
         });
     }
 
+    /// Issue `Request::ResumeOrNew` at TUI startup so the daemon
+    /// decides between resuming the current branch (when its latest
+    /// message landed within `recency_secs`) and starting a fresh
+    /// session. Wire events flow into the existing
+    /// `BranchSwitched` / `HistoryEntry` handlers via `chat_tx`.
+    pub fn spawn_resume_or_new(&mut self, recency_secs: u64) {
+        let req = Request::ResumeOrNew {
+            id: Uuid::new_v4().to_string(),
+            recency_secs,
+        };
+        self.spawn_branch_command(BranchOp::Resume, req);
+    }
+
     fn handle_fork_cmd(&mut self, name: String) {
         if name.trim().is_empty() {
             self.output
@@ -1017,13 +1190,6 @@ impl App {
             name,
         };
         self.spawn_branch_command(BranchOp::Fork, req);
-    }
-
-    fn handle_branches_cmd(&mut self) {
-        let req = Request::Branches {
-            id: Uuid::new_v4().to_string(),
-        };
-        self.spawn_branch_command(BranchOp::Branches, req);
     }
 
     fn handle_switch_cmd(&mut self, target: String) {
@@ -1045,6 +1211,52 @@ impl App {
             id: Uuid::new_v4().to_string(),
         };
         self.spawn_branch_command(BranchOp::Undo, req);
+    }
+
+    fn handle_new_cmd(&mut self) {
+        let req = Request::NewSession {
+            id: Uuid::new_v4().to_string(),
+        };
+        self.spawn_branch_command(BranchOp::New, req);
+    }
+
+    fn handle_resume_cmd(&mut self) {
+        let req = Request::Branches {
+            id: Uuid::new_v4().to_string(),
+        };
+        self.spawn_branch_command(BranchOp::ResumePicker, req);
+    }
+
+    /// Drain the branch buffer that just landed in response to
+    /// `/resume` and open the interactive picker. The current branch
+    /// (in the active session) starts highlighted so Enter on it is a
+    /// no-op switch.
+    fn open_branch_picker(&mut self) {
+        let entries = std::mem::take(&mut self.branches_buffer);
+        if entries.is_empty() {
+            self.set_notice("no branches to resume");
+            return;
+        }
+        let selected = entries
+            .iter()
+            .position(|e| e.is_active_session && e.is_current_in_session)
+            .unwrap_or(0);
+        self.picker_modal = Some(BranchPickerModal { entries, selected });
+    }
+
+    /// Dispatch a `Request::Switch` for the currently-highlighted
+    /// branch in the picker, then close the modal. Used by the
+    /// picker's Enter handler.
+    fn picker_confirm(&mut self) {
+        let target = match self.picker_modal.as_ref().and_then(|m| m.current_target()) {
+            Some(t) => t,
+            None => {
+                self.picker_modal = None;
+                return;
+            }
+        };
+        self.picker_modal = None;
+        self.handle_switch_cmd(target);
     }
 
     /// Open a daemon dialog connection for a Query and pump its
@@ -1207,7 +1419,7 @@ fn human_size_short(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
     fn test_sleep_cfg() -> SleepConfig {
         let mut cfg = assistd_core::Config::default().sleep;
@@ -1283,6 +1495,40 @@ mod tests {
         app.last_output_height = 10;
         app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         assert!(app.output.scroll_offset() > 0);
+    }
+
+    fn wheel(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_wheel_up_scrolls_history_up() {
+        let (mut app, _rx) = test_app();
+        let before = app.output.scroll_offset();
+        app.on_mouse(wheel(MouseEventKind::ScrollUp));
+        let after = app.output.scroll_offset();
+        assert_eq!(after - before, MOUSE_WHEEL_STEP);
+    }
+
+    #[test]
+    fn mouse_wheel_down_undoes_wheel_up() {
+        let (mut app, _rx) = test_app();
+        app.on_mouse(wheel(MouseEventKind::ScrollUp));
+        app.on_mouse(wheel(MouseEventKind::ScrollUp));
+        app.on_mouse(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.output.scroll_offset(), MOUSE_WHEEL_STEP);
+    }
+
+    #[test]
+    fn mouse_non_wheel_events_are_ignored() {
+        let (mut app, _rx) = test_app();
+        app.on_mouse(wheel(MouseEventKind::Moved));
+        assert_eq!(app.output.scroll_offset(), 0);
     }
 
     #[test]
@@ -1433,5 +1679,166 @@ mod tests {
         }));
         assert!(app.vision_enabled);
         assert_eq!(app.model_name, "Qwen");
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.on_key(typed(c));
+        }
+    }
+
+    #[test]
+    fn slash_popup_shows_after_slash() {
+        let (mut app, _rx) = test_app();
+        assert!(app.slash_suggestions().is_empty());
+        type_str(&mut app, "/");
+        let s = app.slash_suggestions();
+        assert_eq!(s.len(), SLASH_COMMANDS.len());
+    }
+
+    #[test]
+    fn slash_popup_filters_by_prefix() {
+        let (mut app, _rx) = test_app();
+        type_str(&mut app, "/fo");
+        let s = app.slash_suggestions();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].0, "/fork");
+    }
+
+    #[test]
+    fn slash_popup_hides_after_whitespace() {
+        let (mut app, _rx) = test_app();
+        type_str(&mut app, "/attach ");
+        assert!(app.slash_suggestions().is_empty());
+    }
+
+    #[test]
+    fn tab_accepts_selection_and_fills_buffer() {
+        let (mut app, _rx) = test_app();
+        type_str(&mut app, "/f");
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input.buffer(), "/fork");
+        assert!(app.slash_suggestions().is_empty());
+    }
+
+    #[test]
+    fn down_moves_selection_when_popup_active() {
+        let (mut app, _rx) = test_app();
+        type_str(&mut app, "/");
+        assert_eq!(app.slash_selected(), 0);
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.slash_selected(), 1);
+    }
+
+    #[test]
+    fn esc_dismisses_popup_without_clearing_buffer() {
+        let (mut app, _rx) = test_app();
+        type_str(&mut app, "/at");
+        assert!(!app.slash_suggestions().is_empty());
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.slash_suggestions().is_empty());
+        assert_eq!(app.input.buffer(), "/at");
+    }
+
+    #[test]
+    fn slash_registry_contains_new_and_resume() {
+        let names: Vec<&str> = SLASH_COMMANDS.iter().map(|(c, _)| *c).collect();
+        assert!(names.contains(&"/new"));
+        assert!(names.contains(&"/resume"));
+    }
+
+    fn picker_entry(
+        name: &str,
+        session: &str,
+        current: bool,
+        active_sess: bool,
+    ) -> BranchListEntry {
+        BranchListEntry {
+            name: name.into(),
+            parent_branch_name: None,
+            fork_point_seq: None,
+            message_count: 0,
+            is_current_in_session: current,
+            is_active_session: active_sess,
+            session_short: session.into(),
+            session_title: None,
+        }
+    }
+
+    #[test]
+    fn open_branch_picker_highlights_active_current() {
+        let (mut app, _rx) = test_app();
+        app.branches_buffer = vec![
+            picker_entry("main", "aaaaaaaa", false, false),
+            picker_entry("main", "bbbbbbbb", true, true),
+            picker_entry("feat", "bbbbbbbb", false, true),
+        ];
+        app.open_branch_picker();
+        let picker = app.picker_modal.as_ref().expect("picker opened");
+        assert_eq!(picker.selected, 1);
+        assert_eq!(picker.entries.len(), 3);
+    }
+
+    #[test]
+    fn open_branch_picker_with_no_entries_sets_notice() {
+        let (mut app, _rx) = test_app();
+        app.branches_buffer.clear();
+        app.open_branch_picker();
+        assert!(app.picker_modal.is_none());
+        assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn picker_current_target_is_session_qualified() {
+        let modal = BranchPickerModal {
+            entries: vec![picker_entry("feature-x", "deadbeef", false, false)],
+            selected: 0,
+        };
+        assert_eq!(
+            modal.current_target().as_deref(),
+            Some("deadbeef/feature-x")
+        );
+    }
+
+    #[test]
+    fn picker_arrow_keys_move_selection() {
+        let (mut app, _rx) = test_app();
+        app.picker_modal = Some(BranchPickerModal {
+            entries: vec![
+                picker_entry("a", "11111111", false, false),
+                picker_entry("b", "11111111", false, false),
+                picker_entry("c", "11111111", false, false),
+            ],
+            selected: 0,
+        });
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.picker_modal.as_ref().unwrap().selected, 2);
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.picker_modal.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn picker_esc_cancels_without_dispatching() {
+        let (mut app, _rx) = test_app();
+        app.picker_modal = Some(BranchPickerModal {
+            entries: vec![picker_entry("a", "11111111", false, false)],
+            selected: 0,
+        });
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.picker_modal.is_none());
+    }
+
+    #[test]
+    fn dismissal_resets_after_buffer_clears() {
+        let (mut app, _rx) = test_app();
+        type_str(&mut app, "/at");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // Wipe the buffer; popup should re-arm on the next `/`.
+        for _ in 0..3 {
+            app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        type_str(&mut app, "/");
+        assert!(!app.slash_suggestions().is_empty());
     }
 }
