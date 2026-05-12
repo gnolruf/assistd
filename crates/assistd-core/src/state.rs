@@ -1869,11 +1869,33 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
-        let probe = assistd_llm::probe_capabilities(
+        // Router-aware probe: in router mode the configured host:port is
+        // just the router; the real /props (with `modalities`) lives on
+        // the child server. `probe_capabilities_routed` follows the
+        // indirection when present and degrades to the direct probe
+        // otherwise. Failure (e.g. transient client-build error) is
+        // surfaced as `vision: false` so the TUI shows the safe default.
+        let probe = match assistd_llm::LlamaServerControl::new(
             &self.config.llama_server.host,
             self.config.llama_server.port,
-        )
-        .await;
+        ) {
+            Ok(control) => {
+                assistd_llm::probe_capabilities_routed(
+                    &self.config.llama_server.host,
+                    self.config.llama_server.port,
+                    &self.config.model.name,
+                    &control,
+                )
+                .await
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "assistd::vision",
+                    "GetCapabilities: failed to build control client: {e}"
+                );
+                assistd_llm::VisionState::default()
+            }
+        };
         // Match the TUI's old basename rendering: prefer the part after
         // the last `/` (e.g. `Qwen3-14B-GGUF:Q4_K_M` from
         // `bartowski/Qwen3-14B-GGUF:Q4_K_M`), fall back to the full

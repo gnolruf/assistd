@@ -741,6 +741,32 @@ impl PresenceManager {
             PresenceState::Active => unreachable!("short-circuited above"),
         }
 
+        // `POST /models/load` returns 200 the moment the router accepts
+        // the spawn request — the child still needs to load weights and
+        // (for vision models) the mmproj. Without waiting here, the
+        // daemon's initial vision probe races the child startup and
+        // permanently reads `vision: off` even for vision-capable
+        // models. Poll `/models` until the entry flips to `loaded`.
+        const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
+        if let Err(e) = self
+            .control
+            .wait_for_loaded(&self.model.name, load_budget, LOAD_POLL_INTERVAL)
+            .await
+        {
+            warn!(
+                target: "assistd::presence",
+                model = %self.model.name,
+                timeout_secs = self.timeouts.presence_wake_load_secs,
+                "llama-server did not flip {} to loaded within budget: {e}",
+                self.model.name
+            );
+            return Err(anyhow!(
+                "llama-server did not finish loading {} within {}s during wake",
+                self.model.name,
+                self.timeouts.presence_wake_load_secs
+            ));
+        }
+
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = PresenceState::Active;
         let _ = self.state_tx.send(PresenceState::Active);
         info!(

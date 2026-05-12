@@ -22,7 +22,7 @@ pub use chat::conversation::ToolCallRecord;
 pub use chat::{ChatClientError, LlamaChatClient};
 pub use llama_server::{
     LlamaServerControl, LlamaServerError, LlamaService, ReadyState, VisionState,
-    detect_vision_support, probe_capabilities,
+    detect_vision_support, probe_capabilities, probe_capabilities_routed,
 };
 
 use assistd_tools::Attachment;
