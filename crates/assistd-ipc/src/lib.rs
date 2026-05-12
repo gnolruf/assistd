@@ -544,6 +544,12 @@ pub enum Event {
         session_id: String,
         session_started_at: String,
         session_ended_at: Option<String>,
+        /// LLM-summarised title for the parent session, or `None` when
+        /// title generation hasn't completed yet (or didn't run for
+        /// pre-V4 rows). The TUI's `/resume` picker prefers this over
+        /// the raw session UUID prefix when displaying entries.
+        #[serde(default)]
+        session_title: Option<String>,
         name: String,
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
@@ -772,6 +778,7 @@ mod tests {
             session_id: "abc12345-...".into(),
             session_started_at: "2026-01-01T00:00:00Z".into(),
             session_ended_at: None,
+            session_title: Some("a chat about cats".into()),
             name: "main".into(),
             parent_branch_name: None,
             fork_point_seq: None,

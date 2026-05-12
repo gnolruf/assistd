@@ -163,6 +163,14 @@ pub enum WriteOp {
         branch_id: BranchId,
         ack: oneshot::Sender<Result<UndoOutcome>>,
     },
+    /// Set `sessions.title` to the LLM-generated summary. Issued
+    /// fire-and-forget by the daemon's title-generation task after the
+    /// first agent response in a session completes.
+    SetSessionTitle {
+        session_id: String,
+        title: String,
+        ack: oneshot::Sender<Result<()>>,
+    },
 }
 
 /// Spawn the writer worker. Returns its `JoinHandle` so the daemon
@@ -361,7 +369,27 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
             let res = undo_last_turn(conn, branch_id).await;
             let _ = ack.send(res);
         }
+        WriteOp::SetSessionTitle {
+            session_id,
+            title,
+            ack,
+        } => {
+            let res = set_session_title(conn, session_id, title).await;
+            let _ = ack.send(res);
+        }
     }
+}
+
+async fn set_session_title(conn: &Connection, session_id: String, title: String) -> Result<()> {
+    conn.call(move |c| -> rusqlite::Result<_> {
+        c.execute(
+            "UPDATE sessions SET title = ?1 WHERE id = ?2",
+            rusqlite::params![title, session_id],
+        )?;
+        Ok(())
+    })
+    .await
+    .context("set_session_title")
 }
 
 async fn begin_session(conn: &Connection, id: String, pid: u32) -> Result<()> {

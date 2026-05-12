@@ -509,8 +509,20 @@ fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16
         out.push(Line::from(""));
         return;
     }
+    // When the line carries a background color (e.g. the user-message
+    // box), pad each wrapped chunk out to the full viewport width so the
+    // highlight extends across the row instead of stopping at the text.
+    let pad_to_width = style.bg.is_some();
     for chunk in wrapped {
-        out.push(single_span_line(chunk.into_owned(), style));
+        let mut s = chunk.into_owned();
+        if pad_to_width {
+            let visible = s.chars().count();
+            let cap = width as usize;
+            if visible < cap {
+                s.push_str(&" ".repeat(cap - visible));
+            }
+        }
+        out.push(single_span_line(s, style));
     }
 }
 
@@ -654,9 +666,7 @@ fn append_to_line(line: &mut Line<'static>, text: &str) {
 }
 
 fn user_style() -> Style {
-    Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD)
+    Style::default().bg(Color::DarkGray)
 }
 
 fn assistant_style() -> Style {

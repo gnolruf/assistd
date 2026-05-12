@@ -36,7 +36,6 @@ const MOUSE_WHEEL_STEP: u16 = 3;
 /// in dim text next to the command name in the suggestion list.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/attach", "<path>"),
-    ("/branches", ""),
     ("/fork", "<name>"),
     ("/new", ""),
     ("/resume", ""),
@@ -212,8 +211,9 @@ pub struct App {
     /// `UndoApplied` events into the right rendering path. Cleared on
     /// terminal `Done` / `Error`.
     in_flight_branch_op: Option<BranchOp>,
-    /// Buffer for `/branches` rows accumulated until the terminal
-    /// `Done` so the table renders as one cohesive block.
+    /// Buffer for branch rows accumulated during a `/resume` listing
+    /// until the terminal `Done`, at which point they're handed off to
+    /// the picker modal in one batch.
     branches_buffer: Vec<BranchListEntry>,
     chat_tx: mpsc::Sender<ChatEvent>,
     /// Highlighted entry in the slash-command suggestion popup.
@@ -237,7 +237,6 @@ pub struct App {
 #[derive(Debug, Clone, Copy)]
 enum BranchOp {
     Fork,
-    Branches,
     Switch,
     Undo,
     /// In-flight `ResumeOrNew` issued at TUI startup. Suppresses the
@@ -249,13 +248,12 @@ enum BranchOp {
     /// daemon's `BranchSwitched` lands.
     New,
     /// In-flight `Branches` request triggered by `/resume`. Rows are
-    /// buffered the same way as `BranchOp::Branches` but on terminal
-    /// `Done` we open the branch-picker modal instead of rendering
-    /// the table inline.
+    /// buffered into `branches_buffer`; on terminal `Done` the
+    /// branch-picker modal opens populated from that buffer.
     ResumePicker,
 }
 
-/// One row buffered during a `/branches` listing.
+/// One row buffered during a `/resume` branch listing.
 #[derive(Debug, Clone)]
 pub struct BranchListEntry {
     pub name: String,
@@ -265,6 +263,11 @@ pub struct BranchListEntry {
     pub is_current_in_session: bool,
     pub is_active_session: bool,
     pub session_short: String,
+    /// LLM-generated session title, when available. Picker rows show
+    /// this in place of `session_short` whenever it's set so resuming
+    /// reads as "resume the chat about cats" rather than "resume
+    /// 4f9a1b2c".
+    pub session_title: Option<String>,
 }
 
 /// Interactive picker shown by `/resume`. Rendered as a modal overlay
@@ -422,7 +425,7 @@ impl App {
         }
         SLASH_COMMANDS
             .iter()
-            .filter(|(cmd, _)| cmd.starts_with(buf))
+            .filter(|(cmd, _)| cmd.starts_with(buf) && *cmd != buf)
             .collect()
     }
 
@@ -433,14 +436,13 @@ impl App {
         self.slash_selected
     }
 
-    /// Replace the input buffer with the highlighted suggestion plus a
-    /// trailing space, so the user lands at the arg position. For
-    /// arg-less commands the trailing space is harmless — `submit_typed`
-    /// trims before matching.
+    /// Replace the input buffer with the highlighted suggestion. No
+    /// trailing space — the user adds one themselves if the command
+    /// takes an argument.
     fn accept_slash_selection(&mut self) {
         let suggestions = self.slash_suggestions();
         if let Some((cmd, _)) = suggestions.get(self.slash_selected).copied() {
-            self.input.set_buffer(format!("{cmd} "));
+            self.input.set_buffer(cmd.to_string());
         }
     }
 
@@ -797,6 +799,7 @@ impl App {
                 is_current_in_session,
                 is_active_session,
                 session_id,
+                session_title,
                 ..
             } => {
                 let session_short = session_id.chars().take(8).collect::<String>();
@@ -808,6 +811,7 @@ impl App {
                     is_current_in_session,
                     is_active_session,
                     session_short,
+                    session_title,
                 });
             }
             Event::BranchSwitched {
@@ -888,10 +892,8 @@ impl App {
                 self.output.finish_assistant();
                 self.generating = false;
                 self.active_writer = None;
-                match self.in_flight_branch_op {
-                    Some(BranchOp::Branches) => self.render_branches_buffer(),
-                    Some(BranchOp::ResumePicker) => self.open_branch_picker(),
-                    _ => {}
+                if let Some(BranchOp::ResumePicker) = self.in_flight_branch_op {
+                    self.open_branch_picker();
                 }
                 self.in_flight_branch_op = None;
             }
@@ -910,41 +912,6 @@ impl App {
             | Event::MemoryRow { .. }
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. } => {}
-        }
-    }
-
-    fn render_branches_buffer(&mut self) {
-        if self.branches_buffer.is_empty() {
-            self.output.push_info("[no branches]");
-            return;
-        }
-        let entries = std::mem::take(&mut self.branches_buffer);
-        let mut last_session: Option<String> = None;
-        for entry in entries {
-            if last_session.as_deref() != Some(entry.session_short.as_str()) {
-                let header = if entry.is_active_session {
-                    format!("[session {} (active)]", entry.session_short)
-                } else {
-                    format!("[session {}]", entry.session_short)
-                };
-                self.output.push_info(&header);
-                last_session = Some(entry.session_short.clone());
-            }
-            let star = if entry.is_current_in_session {
-                "* "
-            } else {
-                "  "
-            };
-            let parent = match (entry.parent_branch_name.as_deref(), entry.fork_point_seq) {
-                (Some(p), Some(seq)) => format!(" (from '{p}'@seq{seq})"),
-                (Some(p), None) => format!(" (from '{p}')"),
-                _ => String::new(),
-            };
-            let msgs = entry.message_count;
-            self.output.push_info(&format!(
-                "  {star}{name}{parent}  [{msgs} msg]",
-                name = entry.name
-            ));
         }
     }
 
@@ -1050,10 +1017,6 @@ impl App {
         }
         if let Some(name) = parse_slash_arg(&text, "/fork") {
             self.handle_fork_cmd(name.to_string());
-            return;
-        }
-        if text.trim() == "/branches" {
-            self.handle_branches_cmd();
             return;
         }
         if let Some(target) = parse_slash_arg(&text, "/switch") {
@@ -1247,13 +1210,6 @@ impl App {
         self.spawn_branch_command(BranchOp::Fork, req);
     }
 
-    fn handle_branches_cmd(&mut self) {
-        let req = Request::Branches {
-            id: Uuid::new_v4().to_string(),
-        };
-        self.spawn_branch_command(BranchOp::Branches, req);
-    }
-
     fn handle_switch_cmd(&mut self, target: String) {
         if target.trim().is_empty() {
             self.output
@@ -1289,7 +1245,7 @@ impl App {
         self.spawn_branch_command(BranchOp::ResumePicker, req);
     }
 
-    /// Drain the `/branches` buffer that just landed in response to
+    /// Drain the branch buffer that just landed in response to
     /// `/resume` and open the interactive picker. The current branch
     /// (in the active session) starts highlighted so Enter on it is a
     /// no-op switch.
@@ -1779,7 +1735,7 @@ mod tests {
         let (mut app, _rx) = test_app();
         type_str(&mut app, "/f");
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input.buffer(), "/fork ");
+        assert_eq!(app.input.buffer(), "/fork");
         assert!(app.slash_suggestions().is_empty());
     }
 
@@ -1823,6 +1779,7 @@ mod tests {
             is_current_in_session: current,
             is_active_session: active_sess,
             session_short: session.into(),
+            session_title: None,
         }
     }
 

@@ -191,6 +191,11 @@ pub struct BranchInfo {
     pub session_id: String,
     pub session_started_at: String,
     pub session_ended_at: Option<String>,
+    /// LLM-summarised title for the parent session, or `None` when
+    /// title generation hasn't completed (or didn't run, e.g. for
+    /// pre-V4 rows). The TUI's branch picker prefers this over the
+    /// session UUID prefix when displaying entries.
+    pub session_title: Option<String>,
     pub name: String,
     pub parent_branch_id: Option<BranchId>,
     pub parent_branch_name: Option<String>,
@@ -341,6 +346,16 @@ pub trait ConversationStore: Send + Sync + 'static {
     /// `None` when nothing is resumable (first-ever startup, or the
     /// only candidate is owned by a still-running daemon).
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>>;
+
+    /// Return the current `sessions.title` for `session`, or `None`
+    /// when no title has been generated yet. Used by the daemon's
+    /// title-generation hook to decide whether to call the LLM.
+    async fn get_session_title(&self, session: &SessionId) -> Result<Option<String>>;
+
+    /// Persist `title` as the human-readable summary for `session`.
+    /// Issued fire-and-forget by the title-generation task after the
+    /// first agent response completes.
+    async fn set_session_title(&self, session: &SessionId, title: &str) -> Result<()>;
 }
 
 /// Candidate session returned by [`ConversationStore::find_resumable_session`].
@@ -449,6 +464,14 @@ impl ConversationStore for NoConversationStore {
 
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>> {
         Ok(None)
+    }
+
+    async fn get_session_title(&self, _s: &SessionId) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    async fn set_session_title(&self, _s: &SessionId, _t: &str) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -710,6 +733,7 @@ impl ConversationStore for SqliteConversationStore {
                             b.session_id,
                             s.started_at,
                             s.ended_at,
+                            s.title,
                             b.name,
                             b.parent_branch_id,
                             (SELECT name FROM branches p WHERE p.id = b.parent_branch_id),
@@ -723,19 +747,20 @@ impl ConversationStore for SqliteConversationStore {
                 let mut stmt = c.prepare(sql)?;
                 let rows: Vec<BranchInfo> = stmt
                     .query_map([], |row| {
-                        let parent_id: Option<i64> = row.get(5)?;
-                        let is_current: i64 = row.get(10)?;
+                        let parent_id: Option<i64> = row.get(6)?;
+                        let is_current: i64 = row.get(11)?;
                         Ok(BranchInfo {
                             branch_id: BranchId(row.get(0)?),
                             session_id: row.get(1)?,
                             session_started_at: row.get(2)?,
                             session_ended_at: row.get(3)?,
-                            name: row.get(4)?,
+                            session_title: row.get(4)?,
+                            name: row.get(5)?,
                             parent_branch_id: parent_id.map(BranchId),
-                            parent_branch_name: row.get(6)?,
-                            fork_point_seq: row.get(7)?,
-                            created_at: row.get(8)?,
-                            message_count: row.get(9)?,
+                            parent_branch_name: row.get(7)?,
+                            fork_point_seq: row.get(8)?,
+                            created_at: row.get(9)?,
+                            message_count: row.get(10)?,
                             is_current_in_session: is_current != 0,
                         })
                     })?
@@ -895,6 +920,36 @@ impl ConversationStore for SqliteConversationStore {
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome> {
         WriteCall::run(self.handle.writer(), |ack| WriteOp::UndoLastTurn {
             branch_id: branch,
+            ack,
+        })
+        .await
+    }
+
+    async fn get_session_title(&self, session: &SessionId) -> Result<Option<String>> {
+        let session_id = session.0.clone();
+        self.handle
+            .conn()
+            .call(move |c| -> rusqlite::Result<_> {
+                let title: Option<String> = c
+                    .query_row(
+                        "SELECT title FROM sessions WHERE id = ?1",
+                        rusqlite::params![session_id],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                    .ok()
+                    .flatten();
+                Ok(title)
+            })
+            .await
+            .context("get_session_title")
+    }
+
+    async fn set_session_title(&self, session: &SessionId, title: &str) -> Result<()> {
+        let session_id = session.0.clone();
+        let title = title.to_string();
+        WriteCall::run(self.handle.writer(), |ack| WriteOp::SetSessionTitle {
+            session_id,
+            title,
             ack,
         })
         .await

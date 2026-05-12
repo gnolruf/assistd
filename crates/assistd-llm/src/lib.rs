@@ -300,6 +300,19 @@ pub trait LlmBackend: Send + Sync + 'static {
     async fn truncate_to_last_real_user(&self) -> LlmResult<usize> {
         Ok(0)
     }
+
+    /// One-shot completion that does NOT touch the in-memory
+    /// conversation. Used by the daemon's title-generation hook so the
+    /// summarisation prompt cannot leak into the user's chat history.
+    /// Returns the model's final text concatenated.
+    ///
+    /// Default impl reports unavailable; backends that can run a
+    /// stateless completion override it.
+    async fn complete_oneshot(&self, _prompt: String) -> LlmResult<String> {
+        Err(LlmError::Unavailable(
+            "complete_oneshot not supported by this backend".into(),
+        ))
+    }
 }
 
 /// Trivial backend that echoes the user's most recent push as a single

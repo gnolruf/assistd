@@ -136,9 +136,17 @@ fn render_branch_picker_modal(frame: &mut Frame, area: Rect, picker: &BranchPick
                 (Some(p), Some(seq)) => format!("  (forked from {p}@{seq})"),
                 _ => String::new(),
             };
+            // Prefer the LLM-generated session title; fall back to the
+            // 8-char session-id prefix when title generation hasn't
+            // landed yet (or for legacy pre-V4 sessions).
+            let session_label = e
+                .session_title
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .unwrap_or(e.session_short.as_str());
             let row = format!(
                 " {marker} [{}] {}  · {} msgs{}",
-                e.session_short, e.name, e.message_count, parent
+                session_label, e.name, e.message_count, parent
             );
             let style = if i == picker.selected {
                 Style::default()

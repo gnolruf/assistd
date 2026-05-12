@@ -1259,6 +1259,10 @@ impl AppState {
         // guard cancels the token, ensuring the agent task wakes up
         // and exits even if it's parked in `backend.step`.
         let _cancel_on_return = cancel.clone().drop_guard();
+        // Snapshot the user's prompt so the post-turn title-generation
+        // hook (Done arm below) can summarise without racing
+        // `run_turn`, which moves `text`.
+        let title_user_text = text.clone();
         let agent = Agent::new(llm, tools, max_iterations, health);
         let generator = tokio::spawn(
             async move {
@@ -1491,6 +1495,13 @@ impl AppState {
                             PersistedMessage::assistant_text(final_text),
                         );
                     }
+                    // Kick off LLM title summarisation in the background.
+                    // The helper short-circuits when a title is already
+                    // set, so this is cheap on every-turn-but-the-first.
+                    self.clone().spawn_session_title_generation(
+                        current_session.clone(),
+                        title_user_text.clone(),
+                    );
                     (Event::Done { id: id.clone() }, sentences)
                 }
             };
@@ -1958,8 +1969,9 @@ impl AppState {
         Ok(())
     }
 
-    /// `/branches`: enumerate every branch across every session, with
-    /// the active session's branches surfaced first.
+    /// `/resume`: enumerate every branch across every session, with
+    /// the active session's branches surfaced first. The TUI feeds the
+    /// resulting `BranchInfo` events into its branch picker.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     async fn handle_branches(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) -> Result<()> {
         let branches = match self.conversations.list_branches().await {
@@ -1968,7 +1980,7 @@ impl AppState {
                 let _ = tx
                     .send(Event::Error {
                         id,
-                        message: format!("/branches: {e:#}"),
+                        message: format!("/resume: {e:#}"),
                     })
                     .await;
                 return Ok(());
@@ -1995,6 +2007,7 @@ impl AppState {
                     session_id: b.session_id,
                     session_started_at: b.session_started_at,
                     session_ended_at: b.session_ended_at,
+                    session_title: b.session_title,
                     name: b.name,
                     parent_branch_name: b.parent_branch_name,
                     fork_point_seq: b.fork_point_seq,
@@ -2007,6 +2020,60 @@ impl AppState {
         }
         let _ = tx.send(Event::Done { id }).await;
         Ok(())
+    }
+
+    /// Background hook: if `session` has no `title` yet, ask the LLM
+    /// for a short summary of `user_text` and write it back via
+    /// `set_session_title`. Spawns onto `persistence_tracker` so daemon
+    /// shutdown drains the task; survives `complete_oneshot` failures
+    /// silently because a missing title is a UX downgrade, not a bug.
+    fn spawn_session_title_generation(self: Arc<Self>, session: Arc<SessionId>, user_text: String) {
+        // Cap at a reasonable length so a giant first prompt doesn't
+        // pay an unbounded summarisation cost. The trim is char-aware
+        // (not byte-aware) so we never split a multi-byte codepoint.
+        const MAX_PROMPT_CHARS: usize = 1024;
+        let trimmed: String = user_text.chars().take(MAX_PROMPT_CHARS).collect();
+        self.persistence_tracker.clone().spawn(async move {
+            match self.conversations.get_session_title(&session).await {
+                Ok(Some(_)) => return,
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        target: "assistd::memory",
+                        error = %e,
+                        "get_session_title failed; skipping title generation"
+                    );
+                    return;
+                }
+            }
+            let prompt = format!(
+                "Summarize this conversation in 4 to 6 words for use as a UI title. \
+                Reply with only the title — no quotes, no punctuation, no leading verbs \
+                like \"chat about\". Conversation:\n\n{trimmed}"
+            );
+            let raw = match self.llm.complete_oneshot(prompt).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!(
+                        target: "assistd::chat",
+                        error = %e,
+                        "title generation LLM call failed"
+                    );
+                    return;
+                }
+            };
+            let title = clean_generated_title(&raw);
+            if title.is_empty() {
+                return;
+            }
+            if let Err(e) = self.conversations.set_session_title(&session, &title).await {
+                tracing::warn!(
+                    target: "assistd::memory",
+                    error = %e,
+                    "set_session_title failed"
+                );
+            }
+        });
     }
 
     /// `/switch <target>`: drain in-flight writes, swap the active
@@ -2496,6 +2563,24 @@ impl AppState {
     }
 }
 
+/// Normalise an LLM-generated session title before it lands in
+/// `sessions.title`. Picks the first non-empty line, strips wrapping
+/// quotes/markdown, drops a trailing period, and caps the length so a
+/// runaway model can't blow up the picker UI. Returns an empty string
+/// when nothing usable survived; callers must skip the write in that
+/// case.
+fn clean_generated_title(raw: &str) -> String {
+    const MAX_TITLE_CHARS: usize = 80;
+    let first_line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let stripped = first_line
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '*' | '_' | '#' | ' ' | '\t' | '.'));
+    stripped.chars().take(MAX_TITLE_CHARS).collect::<String>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2505,6 +2590,25 @@ mod tests {
     use assistd_tools::{CommandRegistry, RunTool, commands::EchoCommand};
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn clean_generated_title_strips_quotes_and_first_lines_only() {
+        assert_eq!(clean_generated_title("\"Cats and dogs\""), "Cats and dogs");
+        assert_eq!(
+            clean_generated_title("Title: weather in Berlin\n(extra explanation)"),
+            "Title: weather in Berlin"
+        );
+        assert_eq!(clean_generated_title("\n\n  hello world.  "), "hello world");
+        assert_eq!(clean_generated_title("**bolded title**"), "bolded title");
+        assert_eq!(clean_generated_title(""), "");
+    }
+
+    #[test]
+    fn clean_generated_title_caps_length() {
+        let raw = "x".repeat(200);
+        let out = clean_generated_title(&raw);
+        assert_eq!(out.chars().count(), 80);
+    }
 
     fn test_state(backend: Arc<dyn LlmBackend>, initial_state: PresenceState) -> Arc<AppState> {
         Arc::new(AppState::new(

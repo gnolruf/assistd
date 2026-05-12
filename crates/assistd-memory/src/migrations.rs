@@ -186,10 +186,27 @@ CREATE TABLE memory_embeddings (
 CREATE INDEX idx_memory_embeddings_model ON memory_embeddings(model);
 "#;
 
+/// V4: per-session human-readable title.
+///
+/// Adds a nullable `title` column to `sessions`, populated asynchronously
+/// after the first agent response in a session by an LLM-summarisation
+/// task in the daemon. The TUI's `/resume` picker prefers this title
+/// over the raw session UUID prefix when listing branches; legacy rows
+/// (and rows whose title generation hasn't completed yet) keep showing
+/// the UUID prefix as a fallback.
+const V4_SQL: &str = r#"
+ALTER TABLE sessions ADD COLUMN title TEXT;
+"#;
+
 /// Build the full migration set. `'static` because the SQL is embedded
 /// in the binary; rusqlite_migration just needs read access.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1_SQL), M::up(V2_SQL), M::up(V3_SQL)])
+    Migrations::new(vec![
+        M::up(V1_SQL),
+        M::up(V2_SQL),
+        M::up(V3_SQL),
+        M::up(V4_SQL),
+    ])
 }
 
 /// Apply all pending migrations to `conn`. Idempotent: re-running on an
