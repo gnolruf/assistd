@@ -10,7 +10,7 @@
 //! [`AppState`] and retains the shutdown-relevant pieces in
 //! [`DaemonShutdown`] for ordered teardown.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use assistd_core::{AppState, Config, PresenceManager};
 use assistd_llm::LlamaChatClient;
 use assistd_tools::{IpcConfirmationGate, MemoryOps};
@@ -97,8 +97,24 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     assistd_core::install_panic_hook(Arc::downgrade(&presence));
 
-    let initial_vision_state =
-        assistd_llm::probe_capabilities(&config.llama_server.host, config.llama_server.port).await;
+    // In router mode the daemon-managed port hosts only the router; the
+    // real /props (with `modalities`) lives on the child server's
+    // transient port. `probe_capabilities_routed` follows that indirection
+    // when present, and degrades to the direct path otherwise.
+    let initial_vision_state = {
+        let control = assistd_llm::LlamaServerControl::new(
+            &config.llama_server.host,
+            config.llama_server.port,
+        )
+        .context("failed to construct llama-server control client for vision probe")?;
+        assistd_llm::probe_capabilities_routed(
+            &config.llama_server.host,
+            config.llama_server.port,
+            &config.model.name,
+            &control,
+        )
+        .await
+    };
     if initial_vision_state.vision_supported {
         info!("vision: enabled (model has mmproj)");
     } else {
@@ -110,6 +126,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         initial_vision_state.model_id,
         config.llama_server.host.clone(),
         config.llama_server.port,
+        config.model.name.clone(),
     );
 
     let health_probe: std::sync::Arc<dyn assistd_llm::LlmHealthProbe> = std::sync::Arc::new(

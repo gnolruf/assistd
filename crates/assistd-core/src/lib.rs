@@ -275,6 +275,10 @@ pub struct VisionRevalidator {
     cached_model: tokio::sync::Mutex<Option<String>>,
     host: String,
     port: u16,
+    /// Configured model id (e.g. `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_XL`).
+    /// Used to look up the live child server in router mode; see
+    /// [`assistd_llm::probe_capabilities_routed`].
+    model_name: String,
 }
 
 impl VisionRevalidator {
@@ -282,17 +286,21 @@ impl VisionRevalidator {
     ///
     /// `initial_model_id` is the model id known at startup; `None` means the
     /// first probe result will be accepted unconditionally as the baseline.
+    /// `model_name` is the configured model — required so router-mode
+    /// probes can find the corresponding child server.
     pub fn new(
         gate: Arc<assistd_tools::VisionGate>,
         initial_model_id: Option<String>,
         host: String,
         port: u16,
+        model_name: String,
     ) -> Arc<Self> {
         Arc::new(Self {
             gate,
             cached_model: tokio::sync::Mutex::new(initial_model_id),
             host,
             port,
+            model_name,
         })
     }
 
@@ -300,7 +308,20 @@ impl VisionRevalidator {
     /// gate. Tolerates probe failures silently; a transient HTTP
     /// blip should not flip vision off mid-session.
     pub async fn revalidate(&self) {
-        let probe = assistd_llm::probe_capabilities(&self.host, self.port).await;
+        let Ok(control) = assistd_llm::LlamaServerControl::new(&self.host, self.port) else {
+            tracing::warn!(
+                target: "assistd::vision",
+                "VisionRevalidator could not build control client; skipping probe"
+            );
+            return;
+        };
+        let probe = assistd_llm::probe_capabilities_routed(
+            &self.host,
+            self.port,
+            &self.model_name,
+            &control,
+        )
+        .await;
         self.apply_probe(probe).await;
     }
 
@@ -347,6 +368,7 @@ mod vision_revalidator_tests {
             // make a real revalidate() obviously fail loudly if anyone
             // accidentally points the test at it.
             0,
+            "test/model:Q4".to_string(),
         )
     }
 

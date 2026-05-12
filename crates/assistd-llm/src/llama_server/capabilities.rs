@@ -1,11 +1,22 @@
 //! Capability probe for the running llama-server.
 //!
 //! After [`super::LlamaService::start`] reports the child as ready
-//! (`/health` = 200), call [`detect_vision_support`] to decide whether
-//! the loaded model has a multimodal projector (mmproj) bundled.
-//! llama.cpp auto-loads the projector when the HF repo carries one
-//! alongside the text weights; there is no separate config flag to
-//! opt in. The only way to know is to ask the server.
+//! (`/health` = 200), call [`probe_capabilities_routed`] (or
+//! [`detect_vision_support`] for the boolean-only variant) to decide
+//! whether the loaded model has a multimodal projector (mmproj)
+//! bundled. llama.cpp auto-loads the projector when the HF repo
+//! carries one alongside the text weights; there is no separate
+//! config flag to opt in. The only way to know is to ask the server.
+//!
+//! Router-mode awareness: when llama-server runs as a router, the
+//! daemon-managed port hosts only the router process, and `/props`
+//! there reports `role: "router"` with no model info — the real model
+//! (and the real `/props`, including `modalities`) lives in a child
+//! server spawned on a transient port. [`probe_capabilities_routed`]
+//! detects this by checking the `role` field, then consults
+//! [`super::LlamaServerControl::find_loaded_child_port`] to discover
+//! the child's port and re-probes `/props` there. Non-router setups
+//! see no detour: the first probe is the answer.
 //!
 //! The probe intentionally fails-closed: any HTTP error, parse
 //! failure, or absent capability field collapses to
@@ -15,16 +26,22 @@
 //! safer default than silently sending image bytes the model will drop.
 //!
 //! Field-name spread: across the multimodal-merge era llama.cpp has
-//! exposed the capability under several different keys. We tolerate
-//! the spread by checking a small union: any of `has_multimodal`,
-//! `has_vision`, `multimodal`, or
-//! `default_generation_settings.multimodal` set to `true` enables
-//! vision. New names can be added here without touching call sites.
+//! exposed the capability under several different keys. The current
+//! canonical shape is a structured `modalities` object
+//! (`{"modalities": {"vision": true}}`); legacy builds reported a
+//! flat boolean under `has_multimodal`, `has_vision`, `multimodal`,
+//! or `default_generation_settings.multimodal`. We tolerate the
+//! spread by checking the structured field first and falling back to
+//! the legacy union, so a server upgrade in either direction keeps
+//! vision detection working. New names can be added here without
+//! touching call sites.
 
 use std::time::Duration;
 
 use serde_json::Value;
 use tracing::{debug, warn};
+
+use super::control::LlamaServerControl;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -69,6 +86,91 @@ pub async fn probe_capabilities(host: &str, port: u16) -> VisionState {
 /// that don't need the model id.
 pub async fn detect_vision_support(host: &str, port: u16) -> bool {
     probe_capabilities(host, port).await.vision_supported
+}
+
+/// Probe the *effective* model's capabilities, transparently following
+/// router indirection when needed.
+///
+/// `host`/`port` identify the daemon-managed llama-server. `model` is
+/// the configured model id (e.g. `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_XL`)
+/// — used to look up the right child when the server is in router
+/// mode. `control` is the same HTTP client the presence layer uses, so
+/// router-mode discovery reuses the configured base URL and connection
+/// pool.
+///
+/// Behaviour:
+/// - Direct mode: `/props` carries the model info → return it.
+/// - Router mode (`role == "router"` in `/props`): consult `/models`
+///   for the loaded child's port, then probe `/props` on that child.
+/// - Anything that fails along the way collapses to the default
+///   (vision off, no model id) so the gate fails closed.
+pub async fn probe_capabilities_routed(
+    host: &str,
+    port: u16,
+    model: &str,
+    control: &LlamaServerControl,
+) -> VisionState {
+    let body = match fetch_props(host, port).await {
+        Some(v) => v,
+        None => return VisionState::default(),
+    };
+
+    if !is_router_props(&body) {
+        return VisionState {
+            model_id: parse_model_id(&body),
+            vision_supported: parse_vision_supported(&body),
+        };
+    }
+
+    let child_port = match control.find_loaded_child_port(model).await {
+        Ok(Some(p)) if p != 0 => p,
+        Ok(Some(_)) => {
+            debug!(
+                target: "assistd::llama_server",
+                "router /models reports `--port 0` for {model}; child not yet bound — \
+                 reporting vision unsupported until the next probe"
+            );
+            return VisionState::default();
+        }
+        Ok(None) => {
+            debug!(
+                target: "assistd::llama_server",
+                "router /models has no loaded entry for {model}; reporting vision \
+                 unsupported until the next probe"
+            );
+            return VisionState::default();
+        }
+        Err(e) => {
+            warn!(
+                target: "assistd::llama_server",
+                "router /models lookup for {model} failed: {e}"
+            );
+            return VisionState::default();
+        }
+    };
+
+    let child_body = match fetch_props(host, child_port).await {
+        Some(v) => v,
+        None => return VisionState::default(),
+    };
+    let vision_supported = parse_vision_supported(&child_body);
+    // The child's /props sets `model` to null and only carries `model_path`;
+    // fall back to the configured name so the revalidator's swap detection
+    // has a stable identity to compare against.
+    let model_id = parse_model_id(&child_body).or_else(|| Some(model.to_string()));
+    debug!(
+        target: "assistd::llama_server",
+        "router child probe: model={model_id:?}, vision_supported={vision_supported}, \
+         child_port={child_port}"
+    );
+    VisionState {
+        model_id,
+        vision_supported,
+    }
+}
+
+fn is_router_props(body: &Value) -> bool {
+    body.get("role").and_then(Value::as_str) == Some("router")
 }
 
 async fn fetch_props(host: &str, port: u16) -> Option<Value> {
@@ -140,6 +242,11 @@ fn parse_model_id(body: &Value) -> Option<String> {
 /// multimodal/vision support. Tolerates the historical spread of
 /// field names in llama.cpp.
 fn parse_vision_supported(body: &Value) -> bool {
+    if let Some(modalities) = body.get("modalities")
+        && modalities.get("vision").and_then(Value::as_bool) == Some(true)
+    {
+        return true;
+    }
     const TOP_LEVEL_KEYS: &[&str] = &["has_multimodal", "has_vision", "multimodal"];
     for key in TOP_LEVEL_KEYS {
         if body.get(*key).and_then(Value::as_bool) == Some(true) {
@@ -158,6 +265,48 @@ fn parse_vision_supported(body: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn detects_modalities_vision_true() {
+        let body = json!({"modalities": {"vision": true}, "total_slots": 1});
+        assert!(parse_vision_supported(&body));
+    }
+
+    #[test]
+    fn modalities_vision_false_does_not_promote_to_true() {
+        let body = json!({"modalities": {"vision": false}});
+        assert!(!parse_vision_supported(&body));
+    }
+
+    #[test]
+    fn modalities_vision_true_wins_over_legacy_false() {
+        // A server reporting the new structured field while still
+        // emitting a stale legacy `has_multimodal: false` must enable
+        // vision. The structured field is canonical.
+        let body = json!({
+            "modalities": {"vision": true},
+            "has_multimodal": false,
+        });
+        assert!(parse_vision_supported(&body));
+    }
+
+    #[test]
+    fn modalities_without_vision_key_falls_through_to_legacy() {
+        // Future-proof: if `modalities` exists but doesn't yet carry a
+        // `vision` key (e.g. audio-only build), we must not short-circuit
+        // — fall through and let the legacy union decide.
+        let body = json!({
+            "modalities": {"audio": true},
+            "has_vision": true,
+        });
+        assert!(parse_vision_supported(&body));
+    }
+
+    #[test]
+    fn ignores_non_bool_modalities_vision() {
+        let body = json!({"modalities": {"vision": "true"}});
+        assert!(!parse_vision_supported(&body));
+    }
 
     #[test]
     fn detects_top_level_has_multimodal_true() {
@@ -266,5 +415,25 @@ mod tests {
     fn ignores_non_string_model_value() {
         let body = json!({"model": 42});
         assert_eq!(parse_model_id(&body), None);
+    }
+
+    #[test]
+    fn detects_router_props_by_role_field() {
+        let body = json!({"role": "router", "max_instances": 4, "model_path": "none"});
+        assert!(is_router_props(&body));
+    }
+
+    #[test]
+    fn non_router_props_lack_router_role() {
+        // Real child-server /props: `model` may be null but `role` is absent.
+        let body = json!({"model": null, "model_path": "/some/model.gguf", "modalities": {"vision": true}});
+        assert!(!is_router_props(&body));
+    }
+
+    #[test]
+    fn non_router_props_with_unrelated_role_value() {
+        // Future-proof: only the literal "router" triggers the detour.
+        let body = json!({"role": "worker", "model_path": "/x.gguf"});
+        assert!(!is_router_props(&body));
     }
 }
