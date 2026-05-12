@@ -561,15 +561,11 @@ impl App {
         };
         let len = picker.entries.len();
         match ev.code {
-            KeyCode::Up => {
-                if picker.selected > 0 {
-                    picker.selected -= 1;
-                }
+            KeyCode::Up if picker.selected > 0 => {
+                picker.selected -= 1;
             }
-            KeyCode::Down => {
-                if picker.selected + 1 < len {
-                    picker.selected += 1;
-                }
+            KeyCode::Down if picker.selected + 1 < len => {
+                picker.selected += 1;
             }
             KeyCode::Home => picker.selected = 0,
             KeyCode::End => picker.selected = len.saturating_sub(1),
