@@ -31,6 +31,7 @@ use super::conversation::{Conversation, Summarizer, ToolCallRecord};
 use super::conversation::{Message, Role};
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
+use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
     HistoryEntry, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult,
@@ -258,24 +259,59 @@ impl LlamaChatClient {
                                 accum.merge_tool_call_delta(delta);
                             }
                         }
+                        if let Some(reasoning) = choice.delta.reasoning_content
+                            && !reasoning.is_empty()
+                            && tx
+                                .send(LlmEvent::ReasoningDelta { text: reasoning })
+                                .await
+                                .is_err()
+                        {
+                            debug!(
+                                target: "assistd::chat",
+                                "client disconnected mid-stream"
+                            );
+                            return StreamOutcome::ClientDisconnected(accum);
+                        }
                         if let Some(text) = choice.delta.content
                             && !text.is_empty()
                         {
-                            if !accum.has_emitted {
-                                tracing::debug!(
-                                    target: "assistd::voice::latency",
-                                    stage = "llm_first_token",
-                                    "voice latency stage"
-                                );
-                            }
-                            accum.text.push_str(&text);
-                            accum.has_emitted = true;
-                            if tx.send(LlmEvent::Delta { text }).await.is_err() {
-                                debug!(
-                                    target: "assistd::chat",
-                                    "client disconnected mid-stream"
-                                );
-                                return StreamOutcome::ClientDisconnected(accum);
+                            for seg in accum.splitter.feed(&text) {
+                                match seg {
+                                    Segment::Reasoning(s) => {
+                                        if tx
+                                            .send(LlmEvent::ReasoningDelta { text: s })
+                                            .await
+                                            .is_err()
+                                        {
+                                            debug!(
+                                                target: "assistd::chat",
+                                                "client disconnected mid-stream"
+                                            );
+                                            return StreamOutcome::ClientDisconnected(accum);
+                                        }
+                                    }
+                                    Segment::Visible(s) => {
+                                        if s.is_empty() {
+                                            continue;
+                                        }
+                                        if !accum.has_emitted {
+                                            tracing::debug!(
+                                                target: "assistd::voice::latency",
+                                                stage = "llm_first_token",
+                                                "voice latency stage"
+                                            );
+                                        }
+                                        accum.text.push_str(&s);
+                                        accum.has_emitted = true;
+                                        if tx.send(LlmEvent::Delta { text: s }).await.is_err() {
+                                            debug!(
+                                                target: "assistd::chat",
+                                                "client disconnected mid-stream"
+                                            );
+                                            return StreamOutcome::ClientDisconnected(accum);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -298,6 +334,25 @@ impl LlamaChatClient {
                 accum.text.len(),
                 accum.tool_calls.len()
             );
+        }
+        // Flush any dangling tag-prefix the splitter held back. In
+        // practice this only fires if the stream ends mid-tag (rare:
+        // models close their `</think>` before stopping), and we
+        // classify the residual according to the splitter's current
+        // state rather than swallowing it.
+        if let Some(seg) = accum.splitter.finish() {
+            match seg {
+                Segment::Reasoning(s) => {
+                    let _ = tx.send(LlmEvent::ReasoningDelta { text: s }).await;
+                }
+                Segment::Visible(s) => {
+                    if !s.is_empty() {
+                        accum.text.push_str(&s);
+                        accum.has_emitted = true;
+                        let _ = tx.send(LlmEvent::Delta { text: s }).await;
+                    }
+                }
+            }
         }
         StreamOutcome::Ok(accum)
     }
@@ -640,9 +695,12 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::
 ///
 /// On `finish_reason: "tool_calls"` (or an inferred tool-call outcome,
 /// non-empty builders even without an explicit reason) we drop any
-/// accumulated narrative text. Qwen3 and similar reasoning models
-/// sometimes prefix tool calls with `<think>...</think>` content that
-/// would poison the assistant-with-tool_calls message on replay.
+/// accumulated narrative text. Inline `<think>...</think>` blocks are
+/// already stripped upstream by [`ThinkSplitter`] (their bytes go to
+/// `LlmEvent::ReasoningDelta` and never enter `accum.text`), so this
+/// drop-on-tool-calls behaviour is now belt-and-suspenders for any
+/// remaining mid-stream narration the model emitted as visible text
+/// before deciding to call a tool.
 fn commit_step(conv: &mut Conversation, accum: StreamAccum) -> LlmResult<StepOutcome> {
     let wants_tool_calls =
         accum.finish_reason.as_deref() == Some("tool_calls") && !accum.tool_calls.is_empty();
@@ -723,6 +781,10 @@ struct StreamAccum {
     tool_calls: BTreeMap<u32, ToolCallBuilder>,
     finish_reason: Option<String>,
     has_emitted: bool,
+    /// Splits `delta.content` into Visible vs Reasoning segments for
+    /// models that emit `<think>...</think>` inline. State persists
+    /// across SSE chunks so tags split across chunks classify correctly.
+    splitter: ThinkSplitter,
 }
 
 impl StreamAccum {

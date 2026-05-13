@@ -376,8 +376,13 @@ async fn run_one(
             // is invoked via generate() (not the agent loop), so tool
             // events never appear. Status events likewise only fire on
             // a managed-server crash, which the bench's stub backend
-            // can't trigger. Ignore for completeness.
-            LlmEvent::ToolCall { .. } | LlmEvent::ToolResult { .. } | LlmEvent::Status { .. } => {}
+            // can't trigger. ReasoningDelta is silently dropped: this
+            // bench measures TTS latency for the visible reply, and
+            // chain-of-thought tokens are never read aloud.
+            LlmEvent::ToolCall { .. }
+            | LlmEvent::ToolResult { .. }
+            | LlmEvent::Status { .. }
+            | LlmEvent::ReasoningDelta { .. } => {}
         }
     }
     drop(speech_tx);

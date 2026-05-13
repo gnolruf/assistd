@@ -399,6 +399,16 @@ impl Request {
 pub enum Event {
     /// A streamed chunk of response text.
     Delta { id: String, text: String },
+    /// A streamed chunk of the model's chain-of-thought / reasoning
+    /// content. Distinct from `Delta` so the TUI can render it as an
+    /// expandable "Thinking…" block rather than mainline reply text.
+    /// Emitted when the backend exposes a separate `reasoning_content`
+    /// channel or when our SSE handler extracts content between
+    /// `<think>...</think>` tags. Models without reasoning never emit
+    /// this; old clients silently ignore unknown variants only when the
+    /// stream decoder is hardened to skip them, so for now this is a
+    /// same-crate-version contract between TUI and daemon.
+    ReasoningDelta { id: String, text: String },
     /// The model asked to invoke a tool. (Reserved for future milestones.)
     ToolCall {
         id: String,
@@ -604,6 +614,7 @@ impl Event {
     pub fn id(&self) -> &str {
         match self {
             Event::Delta { id, .. }
+            | Event::ReasoningDelta { id, .. }
             | Event::ToolCall { id, .. }
             | Event::ToolResult { id, .. }
             | Event::Presence { id, .. }
@@ -849,6 +860,23 @@ mod tests {
         assert_eq!(json, r#"{"type":"delta","id":"req-1","text":"pong"}"#);
         let parsed: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn reasoning_delta_event_roundtrip() {
+        let evt = Event::ReasoningDelta {
+            id: "req-1".into(),
+            text: "let me think...".into(),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"reasoning_delta","id":"req-1","text":"let me think..."}"#
+        );
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, evt);
+        assert!(!evt.is_terminal());
+        assert_eq!(evt.id(), "req-1");
     }
 
     #[test]

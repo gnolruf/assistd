@@ -153,6 +153,13 @@ pub struct ChatChunkDelta {
     pub role: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
+    /// llama.cpp's "separated" reasoning channel. Present when the
+    /// server runs with `--reasoning-format` set; otherwise reasoning
+    /// arrives inline in `content` between `<think>...</think>` tags
+    /// (handled by `ThinkSplitter` in the SSE loop). Streams
+    /// independently of `content` chunk-by-chunk.
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
     /// Tool-call fragments streamed across multiple chunks; accumulate by `index`.
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
@@ -341,6 +348,33 @@ mod tests {
         assert_eq!(parsed.choices.len(), 1);
         assert_eq!(parsed.choices[0].delta.content.as_deref(), Some("hello"));
         assert!(parsed.choices[0].delta.tool_calls.is_none());
+        assert!(parsed.choices[0].delta.reasoning_content.is_none());
+    }
+
+    #[test]
+    fn deserializes_reasoning_content_delta() {
+        // llama.cpp's separated-reasoning shape: `reasoning_content`
+        // alongside (or in place of) `content`.
+        let payload = r#"{"choices":[{"index":0,"delta":{"reasoning_content":"let me think"},"finish_reason":null}]}"#;
+        let parsed: ChatCompletionChunk = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            parsed.choices[0].delta.reasoning_content.as_deref(),
+            Some("let me think")
+        );
+        assert!(parsed.choices[0].delta.content.is_none());
+    }
+
+    #[test]
+    fn deserializes_content_with_inline_think_tags() {
+        // Inline-reasoning shape: the model emits `<think>...</think>`
+        // verbatim inside `content`. We parse it as a plain string
+        // here; the splitter in client.rs is what classifies it.
+        let payload = r#"{"choices":[{"index":0,"delta":{"content":"<think>maybe</think>4"},"finish_reason":null}]}"#;
+        let parsed: ChatCompletionChunk = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            parsed.choices[0].delta.content.as_deref(),
+            Some("<think>maybe</think>4")
+        );
     }
 
     #[test]
