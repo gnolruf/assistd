@@ -9,6 +9,7 @@ pub mod client;
 pub mod conversation;
 pub mod error;
 pub mod sse;
+pub mod think_splitter;
 pub mod wire;
 
 pub use client::LlamaChatClient;

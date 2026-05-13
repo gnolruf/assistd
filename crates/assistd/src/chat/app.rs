@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use assistd_core::{PresenceState, SleepConfig};
 use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
 use assistd_tools::{Attachment, ConfirmationRequest, load_image_attachment};
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
@@ -229,6 +229,19 @@ pub struct App {
     /// when both somehow co-exist, the destructive modal wins
     /// because the agent is blocked on it.
     pub picker_modal: Option<BranchPickerModal>,
+    /// Last-rounded-second of any live thinking block, used to throttle
+    /// wrap-cache invalidation to 1 Hz. The tick handler reads the
+    /// current second from [`OutputPane::live_thinking_seconds`]; when
+    /// it differs from this stamp it marks the output pane dirty so
+    /// the rewrap picks up the new header text. `None` when no
+    /// thinking block is live; cleared on `Done`/`Error`.
+    last_thinking_seconds: Option<u64>,
+    /// Verbose-rendering toggle, flipped by Ctrl+O. When `true`, the
+    /// output pane force-expands every Thinking and Tool block in
+    /// scrollback regardless of their per-item `expanded` flag. The
+    /// per-item flag still tracks individual Tab toggles so flipping
+    /// verbose off restores the previous fine-grained state.
+    pub verbose: bool,
 }
 
 /// Which branch slash-command is currently in flight, if any. Used to
@@ -313,6 +326,8 @@ impl App {
             slash_selected: 0,
             slash_dismissed: false,
             picker_modal: None,
+            last_thinking_seconds: None,
+            verbose: false,
         }
     }
 
@@ -499,7 +514,17 @@ impl App {
                 if self.try_complete_attach_path() {
                     return;
                 }
-                self.output.toggle_last_tool_block();
+                self.output.toggle_last_expandable();
+                return;
+            }
+            KeyCode::Char('o') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.verbose = !self.verbose;
+                self.output.set_verbose(self.verbose);
+                self.set_notice(if self.verbose {
+                    "verbose mode: on"
+                } else {
+                    "verbose mode: off"
+                });
                 return;
             }
             KeyCode::Up if slash_active => {
@@ -682,10 +707,24 @@ impl App {
         let now = Instant::now();
         match ev {
             Event::Delta { text, .. } => {
+                // First visible delta of a turn (or of a new phase
+                // after thinking) closes any open Thinking block,
+                // stamping its duration and auto-collapsing it.
+                self.output.finish_thinking();
                 self.throughput.on_delta(now);
                 self.output.append_assistant(&text);
             }
+            Event::ReasoningDelta { text, .. } => {
+                // Throughput is generation-throughput; reasoning
+                // tokens are generated, so count them here too. The
+                // append_thinking call closes any open assistant
+                // line cleanly and opens a fresh Thinking block when
+                // none is live (mid-turn multi-phase reasoning).
+                self.throughput.on_delta(now);
+                self.output.append_thinking(&text);
+            }
             Event::ToolCall { id, args, name, .. } => {
+                self.output.finish_thinking();
                 let cmd = args
                     .get("command")
                     .and_then(|v| v.as_str())
@@ -765,6 +804,7 @@ impl App {
             } => {
                 self.set_notice(&message);
                 if event == "restarting" {
+                    self.output.finish_thinking();
                     self.output.finish_assistant();
                     self.output.push_info(&format!("[{component} restarting…]"));
                 } else if severity == "error" {
@@ -871,9 +911,11 @@ impl App {
             }
             Event::Done { .. } => {
                 self.throughput.on_done(now);
+                self.output.finish_thinking();
                 self.output.finish_assistant();
                 self.generating = false;
                 self.active_writer = None;
+                self.last_thinking_seconds = None;
                 if let Some(BranchOp::ResumePicker) = self.in_flight_branch_op {
                     self.open_branch_picker();
                 }
@@ -881,10 +923,12 @@ impl App {
             }
             Event::Error { message, .. } => {
                 self.throughput.on_done(now);
+                self.output.finish_thinking();
                 self.output.finish_assistant();
                 self.output.push_error(&message);
                 self.generating = false;
                 self.active_writer = None;
+                self.last_thinking_seconds = None;
                 self.in_flight_branch_op = None;
                 self.branches_buffer.clear();
             }
@@ -897,12 +941,22 @@ impl App {
         }
     }
 
-    /// Advance the spinner and expire stale notices.
+    /// Advance the spinner and expire stale notices. Also bumps the
+    /// output-pane's wrap cache once per second whenever a thinking
+    /// block is live, so its "Thinking… (Ns)" header keeps counting
+    /// up without invalidating the cache on every 250 ms frame.
     pub fn on_tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
         if let Some((_, at)) = &self.notice {
             if at.elapsed() > NOTICE_HOLD {
                 self.notice = None;
+            }
+        }
+        let live_secs = self.output.live_thinking_seconds();
+        if live_secs != self.last_thinking_seconds {
+            self.last_thinking_seconds = live_secs;
+            if live_secs.is_some() {
+                self.output.mark_dirty();
             }
         }
     }

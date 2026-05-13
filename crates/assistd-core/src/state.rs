@@ -1396,6 +1396,19 @@ impl AppState {
                         sentences,
                     )
                 }
+                LlmEvent::ReasoningDelta { text } => {
+                    // Reasoning is ephemeral display-only: never
+                    // persisted to history, never fed to TTS. The TUI
+                    // is the only client that renders it; non-TUI
+                    // consumers silently drop the variant.
+                    (
+                        Event::ReasoningDelta {
+                            id: id.clone(),
+                            text,
+                        },
+                        Vec::new(),
+                    )
+                }
                 LlmEvent::ToolCall {
                     id: call_id,
                     name,

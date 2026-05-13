@@ -6,6 +6,8 @@
 //! `OutputItem::Tool(ToolBlock)` items expanded into bar-prefixed,
 //! color-coded line groups at render time.
 
+use std::time::Instant;
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui_image::protocol::StatefulProtocol;
@@ -43,10 +45,28 @@ pub struct ThumbnailItem {
     pub protocol: StatefulProtocol,
 }
 
+/// One reasoning / chain-of-thought phase displayed as an expandable
+/// block. Header reads `"✻ Thinking… (Ns)"` while streaming and
+/// `"✦ Thought for Ns"` once finalised; body is the accumulated
+/// reasoning text, bar-prefixed in dim italic. Auto-collapses when
+/// `finish_thinking` runs so scrollback doesn't drown in CoT.
+#[derive(Debug, Clone)]
+pub struct ThinkingBlock {
+    pub text: String,
+    pub started_at: Instant,
+    /// `None` while the block is still receiving deltas; the renderer
+    /// computes the live duration from `started_at.elapsed()`. Set to
+    /// `Some(t)` by `finish_thinking`; the duration shown then freezes
+    /// at `(t - started_at)`.
+    pub ended_at: Option<Instant>,
+    pub expanded: bool,
+}
+
 enum OutputItem {
     Text(Line<'static>),
     Tool(ToolBlock),
     Thumbnail(Box<ThumbnailItem>),
+    Thinking(ThinkingBlock),
 }
 
 /// Scrollable output region holding the full chat history for the TUI session.
@@ -56,6 +76,12 @@ pub struct OutputPane {
     scroll_offset: u16,
     wrap_cache: Option<(u16, Vec<Line<'static>>)>,
     dirty: bool,
+    /// When `true`, both `Thinking` and `Tool` items render fully
+    /// expanded regardless of their per-item `expanded` flag. The
+    /// App's Ctrl+O handler flips this; per-item Tab toggles still
+    /// adjust the underlying `expanded` flag (their effect is just
+    /// hidden while verbose is on).
+    verbose: bool,
 }
 
 impl Default for OutputPane {
@@ -73,6 +99,16 @@ impl OutputPane {
             scroll_offset: 0,
             wrap_cache: None,
             dirty: true,
+            verbose: false,
+        }
+    }
+
+    /// Update verbose-mode rendering. When the flag flips, the wrap
+    /// cache is invalidated so the next render sees the new shape.
+    pub fn set_verbose(&mut self, verbose: bool) {
+        if self.verbose != verbose {
+            self.verbose = verbose;
+            self.dirty = true;
         }
     }
 
@@ -205,18 +241,104 @@ impl OutputPane {
         self.dirty = true;
     }
 
-    /// Toggle the expand/collapse state of the most-recently-appended tool
-    /// block. Returns `true` if a toggle happened so the keybinding handler
-    /// can decide whether to show feedback.
-    pub fn toggle_last_tool_block(&mut self) -> bool {
+    /// Toggle the most-recent expandable item — either a tool block
+    /// or a thinking block, whichever appears later. The Tab key
+    /// handler binds to this so a user can re-open the last collapsed
+    /// thinking block (or tool block) regardless of which kind came
+    /// last in the turn.
+    pub fn toggle_last_expandable(&mut self) -> bool {
         for item in self.items.iter_mut().rev() {
-            if let OutputItem::Tool(b) = item {
-                b.expanded = !b.expanded;
-                self.dirty = true;
-                return true;
+            match item {
+                OutputItem::Tool(b) => {
+                    b.expanded = !b.expanded;
+                    self.dirty = true;
+                    return true;
+                }
+                OutputItem::Thinking(t) => {
+                    t.expanded = !t.expanded;
+                    self.dirty = true;
+                    return true;
+                }
+                _ => {}
             }
         }
         false
+    }
+
+    /// Open a fresh thinking block. Closes any open assistant block
+    /// first (mirroring `push_tool_block`'s convention) so reasoning
+    /// arriving mid-reply bracket-renders cleanly. New blocks start
+    /// collapsed: only the live header (`"✻ Thinking… (Ns)"`) is
+    /// visible until the user expands it via Tab, or the App turns
+    /// verbose mode on.
+    pub fn begin_thinking(&mut self) {
+        self.close_open_assistant();
+        self.items.push(OutputItem::Thinking(ThinkingBlock {
+            text: String::new(),
+            started_at: Instant::now(),
+            ended_at: None,
+            expanded: false,
+        }));
+        self.dirty = true;
+    }
+
+    /// Append a reasoning delta to the most-recent live thinking
+    /// block, opening a fresh one if none is live. A "live" block is
+    /// the trailing item with `ended_at.is_none()`; once finished
+    /// blocks have stamped `ended_at`, a subsequent delta opens a new
+    /// block (multi-phase reasoning like think → tool → think again).
+    pub fn append_thinking(&mut self, delta: &str) {
+        let needs_new = !matches!(
+            self.items.last(),
+            Some(OutputItem::Thinking(t)) if t.ended_at.is_none()
+        );
+        if needs_new {
+            self.begin_thinking();
+        }
+        if let Some(OutputItem::Thinking(t)) = self.items.last_mut() {
+            t.text.push_str(delta);
+        }
+        self.dirty = true;
+    }
+
+    /// Finalise the most-recent live thinking block: stamp `ended_at`
+    /// and auto-collapse. No-op when no block is live, so this is
+    /// safe to call from every "thinking is over" trigger (Delta,
+    /// ToolCall, Status::restarting, Done, Error).
+    pub fn finish_thinking(&mut self) {
+        for item in self.items.iter_mut().rev() {
+            if let OutputItem::Thinking(t) = item {
+                if t.ended_at.is_none() {
+                    t.ended_at = Some(Instant::now());
+                    t.expanded = false;
+                    self.dirty = true;
+                }
+                return;
+            }
+        }
+    }
+
+    /// Elapsed integer seconds of the most-recent live thinking
+    /// block, or `None` if none is live. Used by the App's tick
+    /// reducer to decide whether the duration text changed and a
+    /// rewrap is warranted.
+    pub fn live_thinking_seconds(&self) -> Option<u64> {
+        for item in self.items.iter().rev() {
+            if let OutputItem::Thinking(t) = item {
+                if t.ended_at.is_none() {
+                    return Some(t.started_at.elapsed().as_secs());
+                }
+            }
+        }
+        None
+    }
+
+    /// Force a rewrap on the next `wrapped()` call without touching
+    /// the items themselves. The App's tick handler calls this when
+    /// a live thinking block's integer-second has changed so the
+    /// header's duration text refreshes.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     /// Wipe every visible item. Used by `/switch` before replaying the
@@ -342,6 +464,9 @@ impl OutputPane {
                     OutputItem::Thumbnail(t) => {
                         single_span_line(format!("📎 {}", t.name), info_style())
                     }
+                    OutputItem::Thinking(t) => {
+                        single_span_line(thinking_header_text(t), thinking_header_style())
+                    }
                 })
                 .collect();
         }
@@ -349,16 +474,31 @@ impl OutputPane {
         for item in &self.items {
             match item {
                 OutputItem::Text(line) => wrap_line_into(&mut out, line, width),
-                OutputItem::Tool(b) => render_tool_block(&mut out, b, width),
+                OutputItem::Tool(b) => render_tool_block(&mut out, b, width, self.verbose),
                 OutputItem::Thumbnail(t) => render_thumbnail_placeholder(&mut out, t),
+                OutputItem::Thinking(t) => render_thinking_block(&mut out, t, width, self.verbose),
             }
         }
         out
     }
 
     fn close_open_assistant(&mut self) {
-        if self.open_assistant.take().is_some() {
-            self.items.push(OutputItem::Text(Line::from("")));
+        if let Some(idx) = self.open_assistant.take() {
+            // The `begin_submit` flow proactively opens an empty
+            // assistant line so streaming Deltas have somewhere to
+            // land. If reasoning arrives first (no Delta yet), the
+            // line is still empty when we close it — pop instead of
+            // appending a blank separator on top of nothing, which
+            // would leave a stray empty row above the Thinking block.
+            let empty = matches!(
+                self.items.get(idx),
+                Some(OutputItem::Text(l)) if l.spans.iter().all(|s| s.content.is_empty())
+            );
+            if empty && idx + 1 == self.items.len() {
+                self.items.pop();
+            } else {
+                self.items.push(OutputItem::Text(Line::from("")));
+            }
             self.dirty = true;
         }
     }
@@ -366,7 +506,7 @@ impl OutputPane {
     fn text_at_mut(&mut self, idx: usize) -> Option<&mut Line<'static>> {
         match self.items.get_mut(idx)? {
             OutputItem::Text(line) => Some(line),
-            OutputItem::Tool(_) | OutputItem::Thumbnail(_) => None,
+            OutputItem::Tool(_) | OutputItem::Thumbnail(_) | OutputItem::Thinking(_) => None,
         }
     }
 
@@ -394,8 +534,9 @@ impl OutputPane {
         for (idx, item) in self.items.iter().enumerate() {
             let height = match item {
                 OutputItem::Text(line) => wrapped_text_rows(line, width),
-                OutputItem::Tool(b) => wrapped_tool_rows(b, width),
+                OutputItem::Tool(b) => wrapped_tool_rows(b, width, self.verbose),
                 OutputItem::Thumbnail(_) => THUMBNAIL_ROWS as usize,
+                OutputItem::Thinking(t) => wrapped_thinking_rows(t, width, self.verbose),
             };
             if matches!(item, OutputItem::Thumbnail(_)) {
                 slots.push(ThumbnailSlot {
@@ -454,7 +595,24 @@ fn wrapped_text_rows(line: &Line<'static>, width: u16) -> usize {
     n.max(1)
 }
 
-fn wrapped_tool_rows(b: &ToolBlock, width: u16) -> usize {
+fn wrapped_thinking_rows(t: &ThinkingBlock, width: u16, verbose: bool) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let inner_w = width.saturating_sub(2).max(1) as usize;
+    // 1 row for the header.
+    let mut rows: usize = 1;
+    let show_body = (t.expanded || verbose) && !t.text.is_empty();
+    if show_body {
+        for line in t.text.lines() {
+            rows += textwrap::wrap(line, inner_w).len().max(1);
+        }
+    }
+    // Trailing blank separator below the block.
+    rows + 1
+}
+
+fn wrapped_tool_rows(b: &ToolBlock, width: u16, verbose: bool) -> usize {
     if width == 0 {
         return 1;
     }
@@ -464,7 +622,7 @@ fn wrapped_tool_rows(b: &ToolBlock, width: u16) -> usize {
         .len()
         .max(1);
     let body_lines = split_body(&b.output);
-    let collapsed = !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
+    let collapsed = !verbose && !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
     let stderr_idxs: Vec<usize> = body_lines
         .iter()
         .enumerate()
@@ -526,7 +684,54 @@ fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16
     }
 }
 
-fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16) {
+fn render_thinking_block(
+    out: &mut Vec<Line<'static>>,
+    t: &ThinkingBlock,
+    width: u16,
+    verbose: bool,
+) {
+    let bar = Span::styled("▎ ", thinking_bar_style());
+    let inner_w = width.saturating_sub(2).max(1);
+    push_barred(
+        out,
+        &bar,
+        &thinking_header_text(t),
+        thinking_header_style(),
+        inner_w,
+    );
+    if (t.expanded || verbose) && !t.text.is_empty() {
+        for line in t.text.lines() {
+            // Empty lines in the body still need a bar so the visual
+            // column stays continuous through paragraph breaks.
+            if line.is_empty() {
+                out.push(Line::from(vec![bar.clone()]));
+            } else {
+                push_barred(out, &bar, line, thinking_text_style(), inner_w);
+            }
+        }
+    }
+    out.push(Line::from(""));
+}
+
+/// Header label for a Thinking block. Reads `"✻ Thinking… (Ns)"` while
+/// the block is live; the integer-second display advances at most
+/// 1 Hz (the `App::on_tick` reducer marks the output pane dirty when
+/// the second changes). After `finish_thinking`, the label freezes at
+/// `"✦ Thought for Ns"` with the final duration.
+fn thinking_header_text(t: &ThinkingBlock) -> String {
+    let elapsed = match t.ended_at {
+        Some(end) => end.saturating_duration_since(t.started_at),
+        None => t.started_at.elapsed(),
+    };
+    let secs = elapsed.as_secs();
+    if t.ended_at.is_some() {
+        format!("✦ Thought for {secs}s")
+    } else {
+        format!("✻ Thinking… ({secs}s)")
+    }
+}
+
+fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, verbose: bool) {
     let bar_color = if b.exit_code == 0 {
         Color::Green
     } else {
@@ -554,7 +759,7 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16) {
         .map(|(i, _)| i)
         .collect();
 
-    let collapsed = !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
+    let collapsed = !verbose && !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
     let visible_idxs: Vec<usize> = if collapsed {
         let mut idxs: Vec<usize> = (0..COLLAPSED_HEAD_LINES.min(body_lines.len())).collect();
         for &si in &stderr_idxs {
@@ -695,6 +900,26 @@ fn header_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+fn thinking_bar_style() -> Style {
+    Style::default()
+        .fg(Color::Gray)
+        .add_modifier(Modifier::DIM)
+        .add_modifier(Modifier::ITALIC)
+}
+
+fn thinking_header_style() -> Style {
+    Style::default()
+        .fg(Color::Gray)
+        .add_modifier(Modifier::DIM)
+        .add_modifier(Modifier::ITALIC)
+}
+
+fn thinking_text_style() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC)
+}
+
 fn stderr_style() -> Style {
     Style::default().fg(Color::Red)
 }
@@ -719,6 +944,11 @@ mod tests {
             OutputItem::Text(l) => line_text(l),
             OutputItem::Tool(b) => format!("[tool:{}]", b.command),
             OutputItem::Thumbnail(t) => format!("[thumb:{}]", t.name),
+            OutputItem::Thinking(t) => format!(
+                "[thinking:{}:{}]",
+                if t.ended_at.is_some() { "done" } else { "live" },
+                t.text
+            ),
         }
     }
 
@@ -855,7 +1085,7 @@ mod tests {
         let body: String =
             (0..30).map(|i| format!("line {i}\n")).collect::<String>() + "[exit:0 | 1ms]";
         p.push_tool_block("seq 30".into(), body, 0, 1);
-        assert!(p.toggle_last_tool_block());
+        assert!(p.toggle_last_expandable());
         let rendered = rendered_lines(&mut p, 60, 80);
         let head_visible = rendered.iter().filter(|l| l.contains("line ")).count();
         assert_eq!(head_visible, 30);
@@ -952,9 +1182,243 @@ mod tests {
     }
 
     #[test]
-    fn toggle_last_tool_block_no_op_with_no_blocks() {
+    fn toggle_last_expandable_no_op_with_no_blocks() {
         let mut p = OutputPane::new();
-        assert!(!p.toggle_last_tool_block());
+        assert!(!p.toggle_last_expandable());
+    }
+
+    // --- thinking blocks -------------------------------------------------
+
+    #[test]
+    fn begin_thinking_creates_live_block_collapsed_by_default() {
+        let mut p = OutputPane::new();
+        p.begin_thinking();
+        assert_eq!(p.items.len(), 1);
+        match &p.items[0] {
+            OutputItem::Thinking(t) => {
+                assert!(t.ended_at.is_none());
+                assert!(!t.expanded, "new live blocks start collapsed");
+                assert!(t.text.is_empty());
+            }
+            _ => panic!("expected Thinking item"),
+        }
+        assert!(p.live_thinking_seconds().is_some());
+    }
+
+    #[test]
+    fn append_thinking_streams_into_open_block() {
+        let mut p = OutputPane::new();
+        p.append_thinking("let me ");
+        p.append_thinking("think");
+        assert_eq!(p.items.len(), 1);
+        match &p.items[0] {
+            OutputItem::Thinking(t) => assert_eq!(t.text, "let me think"),
+            _ => panic!("expected Thinking item"),
+        }
+    }
+
+    #[test]
+    fn append_thinking_opens_block_when_none_live() {
+        let mut p = OutputPane::new();
+        p.append_thinking("instant");
+        match &p.items[0] {
+            OutputItem::Thinking(t) => assert_eq!(t.text, "instant"),
+            _ => panic!("expected Thinking item"),
+        }
+    }
+
+    #[test]
+    fn finish_thinking_stamps_ended_at_and_collapses() {
+        let mut p = OutputPane::new();
+        p.append_thinking("done thinking");
+        p.finish_thinking();
+        match &p.items[0] {
+            OutputItem::Thinking(t) => {
+                assert!(t.ended_at.is_some());
+                assert!(!t.expanded);
+            }
+            _ => panic!("expected Thinking item"),
+        }
+        assert!(p.live_thinking_seconds().is_none());
+    }
+
+    #[test]
+    fn finish_thinking_is_idempotent() {
+        let mut p = OutputPane::new();
+        p.append_thinking("x");
+        p.finish_thinking();
+        // Repeat calls are no-ops; no panic, no double-stamp shift.
+        p.finish_thinking();
+        p.finish_thinking();
+        assert!(matches!(&p.items[0], OutputItem::Thinking(t) if t.ended_at.is_some()));
+    }
+
+    #[test]
+    fn thinking_block_renders_collapsed_live_header_only() {
+        let mut p = OutputPane::new();
+        p.append_thinking("reasoning body line 1");
+        let rendered = rendered_lines(&mut p, 60, 20);
+        assert!(
+            rendered.iter().any(|l| l.contains("Thinking…")),
+            "missing live header: {rendered:?}"
+        );
+        // Body is hidden by default — Tab or verbose mode reveals it.
+        assert!(
+            !rendered.iter().any(|l| l.contains("reasoning body line 1")),
+            "body should be hidden while collapsed: {rendered:?}"
+        );
+        for l in rendered.iter().filter(|l| !l.trim().is_empty()) {
+            assert!(l.starts_with('▎'), "missing bar on: {l:?}");
+        }
+    }
+
+    #[test]
+    fn thinking_block_renders_body_after_tab_expand_while_live() {
+        let mut p = OutputPane::new();
+        p.append_thinking("reasoning body line 1");
+        assert!(p.toggle_last_expandable());
+        let rendered = rendered_lines(&mut p, 60, 20);
+        assert!(rendered.iter().any(|l| l.contains("reasoning body line 1")));
+    }
+
+    #[test]
+    fn verbose_mode_expands_live_thinking_without_per_item_toggle() {
+        let mut p = OutputPane::new();
+        p.append_thinking("verbose body");
+        // Default: body hidden.
+        let rendered = rendered_lines(&mut p, 60, 20);
+        assert!(!rendered.iter().any(|l| l.contains("verbose body")));
+        // Flip verbose on → body appears, per-item flag untouched.
+        p.set_verbose(true);
+        let rendered = rendered_lines(&mut p, 60, 20);
+        assert!(rendered.iter().any(|l| l.contains("verbose body")));
+        match &p.items[0] {
+            OutputItem::Thinking(t) => assert!(!t.expanded, "per-item flag stays collapsed"),
+            _ => panic!("expected Thinking item"),
+        }
+        // Flip verbose off → body hides again.
+        p.set_verbose(false);
+        let rendered = rendered_lines(&mut p, 60, 20);
+        assert!(!rendered.iter().any(|l| l.contains("verbose body")));
+    }
+
+    #[test]
+    fn verbose_mode_expands_collapsed_tool_block() {
+        let mut p = OutputPane::new();
+        let body: String =
+            (0..30).map(|i| format!("line {i}\n")).collect::<String>() + "[exit:0 | 1ms]";
+        p.push_tool_block("seq 30".into(), body, 0, 1);
+        // Default: collapsed (only first COLLAPSED_HEAD_LINES visible).
+        let rendered = rendered_lines(&mut p, 60, 80);
+        let head_visible = rendered.iter().filter(|l| l.contains("line ")).count();
+        assert_eq!(head_visible, COLLAPSED_HEAD_LINES);
+        // Verbose ON: all 30 visible.
+        p.set_verbose(true);
+        let rendered = rendered_lines(&mut p, 60, 80);
+        let head_visible = rendered.iter().filter(|l| l.contains("line ")).count();
+        assert_eq!(head_visible, 30);
+    }
+
+    #[test]
+    fn thinking_block_renders_past_tense_after_finish() {
+        let mut p = OutputPane::new();
+        p.append_thinking("body");
+        p.finish_thinking();
+        let rendered = rendered_lines(&mut p, 60, 20);
+        assert!(
+            rendered.iter().any(|l| l.contains("Thought for")),
+            "missing past-tense header: {rendered:?}"
+        );
+        // Auto-collapsed: body is not rendered.
+        assert!(
+            !rendered.iter().any(|l| l.contains("body")),
+            "body should be hidden after collapse: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn thinking_block_body_visible_after_toggle_when_collapsed() {
+        let mut p = OutputPane::new();
+        p.append_thinking("expand-me body");
+        p.finish_thinking();
+        assert!(p.toggle_last_expandable());
+        let rendered = rendered_lines(&mut p, 60, 20);
+        assert!(rendered.iter().any(|l| l.contains("expand-me body")));
+    }
+
+    #[test]
+    fn begin_thinking_prunes_empty_open_assistant() {
+        let mut p = OutputPane::new();
+        // Mirrors the begin_submit flow which proactively opens an
+        // empty assistant block before any Delta arrives.
+        p.begin_assistant();
+        assert_eq!(p.items.len(), 1);
+        p.append_thinking("first thoughts");
+        // The empty assistant line should have been pruned, not
+        // left as a stray separator above the Thinking block.
+        assert_eq!(p.items.len(), 1);
+        assert!(matches!(&p.items[0], OutputItem::Thinking(_)));
+        assert_eq!(p.open_assistant, None);
+    }
+
+    #[test]
+    fn finished_thinking_then_new_reasoning_opens_fresh_block() {
+        let mut p = OutputPane::new();
+        p.append_thinking("phase one");
+        p.finish_thinking();
+        p.append_thinking("phase two");
+        let thinking_count = p
+            .items
+            .iter()
+            .filter(|i| matches!(i, OutputItem::Thinking(_)))
+            .count();
+        assert_eq!(thinking_count, 2, "expected two distinct phases");
+    }
+
+    #[test]
+    fn toggle_last_expandable_prefers_most_recent_item() {
+        // Most recent expandable is a Thinking block → Tab toggles it.
+        let mut p = OutputPane::new();
+        small_block(&mut p, "ls", "a\n[exit:0 | 1ms]", 0, 1);
+        p.append_thinking("recent reasoning");
+        p.finish_thinking();
+        // After finish_thinking the block is collapsed; toggle expands it.
+        assert!(p.toggle_last_expandable());
+        match &p.items.last().unwrap() {
+            OutputItem::Thinking(t) => assert!(t.expanded, "expected toggled-open"),
+            _ => panic!("expected Thinking item last"),
+        }
+        // Tool block above stays untouched.
+        match &p.items[0] {
+            OutputItem::Tool(b) => assert!(b.expanded, "tool block must remain expanded"),
+            _ => panic!("expected Tool item at index 0"),
+        }
+
+        // Most recent expandable is a Tool block → Tab toggles it.
+        let mut q = OutputPane::new();
+        q.append_thinking("earlier reasoning");
+        q.finish_thinking();
+        small_block(&mut q, "ls", "a\n[exit:0 | 1ms]", 0, 1);
+        // The freshly-pushed tool block starts expanded (body ≤ 20 lines).
+        match q.items.last().unwrap() {
+            OutputItem::Tool(b) => assert!(b.expanded),
+            _ => panic!("expected Tool item last"),
+        }
+        assert!(q.toggle_last_expandable());
+        match q.items.last().unwrap() {
+            OutputItem::Tool(b) => assert!(!b.expanded, "toggle should have collapsed"),
+            _ => panic!("expected Tool item last"),
+        }
+    }
+
+    #[test]
+    fn live_thinking_seconds_returns_some_while_live_none_otherwise() {
+        let mut p = OutputPane::new();
+        assert_eq!(p.live_thinking_seconds(), None);
+        p.append_thinking("x");
+        assert!(p.live_thinking_seconds().is_some());
+        p.finish_thinking();
+        assert_eq!(p.live_thinking_seconds(), None);
     }
 
     #[test]

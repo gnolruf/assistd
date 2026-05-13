@@ -70,6 +70,10 @@ pub async fn run(action: PttAction) -> Result<()> {
                 stdout.flush()?;
                 wrote_delta = wrote_delta || !text.is_empty();
             }
+            Event::ReasoningDelta { .. } => {
+                // Non-interactive PTT consumers expect only the model's
+                // visible reply; chain-of-thought is silently dropped.
+            }
             Event::ToolCall { name, args, .. } => {
                 let preview = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 if preview.is_empty() {

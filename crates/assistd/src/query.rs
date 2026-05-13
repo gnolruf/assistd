@@ -90,6 +90,10 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                 stdout.flush()?;
                 wrote_anything = wrote_anything || !text.is_empty();
             }
+            Event::ReasoningDelta { .. } => {
+                // CLI `assistd query` streams only the model's visible
+                // reply; chain-of-thought is silently dropped.
+            }
             Event::ToolCall { name, args, .. } => {
                 let preview = args
                     .get("command")

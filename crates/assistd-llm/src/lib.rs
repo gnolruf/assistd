@@ -135,6 +135,15 @@ pub type LlmResult<T> = std::result::Result<T, LlmError>;
 pub enum LlmEvent {
     /// A streamed chunk of model output.
     Delta { text: String },
+    /// A streamed chunk of the model's chain-of-thought / reasoning
+    /// content. Surfaced separately from `Delta` so the agent loop and
+    /// downstream translators can render it as an expandable
+    /// "Thinking…" block rather than mainline reply text, and so it
+    /// doesn't get persisted into conversation history or read aloud
+    /// by TTS. Backends emit this when the model has a separated
+    /// reasoning channel (`reasoning_content`) or when the SSE handler
+    /// extracts content between `<think>...</think>` tags.
+    ReasoningDelta { text: String },
     /// The model asked to invoke a tool. Emitted by the agent loop just
     /// before the tool executes so clients can surface the call in-flight.
     ToolCall {

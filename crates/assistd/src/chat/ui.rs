@@ -269,35 +269,58 @@ fn render_output(frame: &mut Frame, area: Rect, app: &mut App) {
     let viewport_bottom = viewport_top.saturating_add(area.height as usize);
     const CAPTION_ROWS: u16 = 1;
     let image_height = THUMBNAIL_ROWS.saturating_sub(CAPTION_ROWS);
-    if image_height == 0 {
-        return;
+    if image_height > 0 {
+        for slot in slots {
+            let image_start = slot.start_row + CAPTION_ROWS as usize;
+            let image_end = slot.start_row + slot.height;
+            if image_start < viewport_top || image_end > viewport_bottom {
+                continue;
+            }
+            let local_row = (image_start - viewport_top) as u16;
+            if local_row >= area.height {
+                continue;
+            }
+            let avail = area.height - local_row;
+            let h = image_height.min(avail);
+            if h == 0 {
+                continue;
+            }
+            let w = area.width.min(32);
+            let rect = Rect {
+                x: area.x,
+                y: area.y + local_row,
+                width: w,
+                height: h,
+            };
+            let widget = StatefulImage::default();
+            if let Some(state) = app.output.thumbnail_protocol_mut(slot.item_idx) {
+                frame.render_stateful_widget(widget, rect, state);
+            }
+        }
     }
-    for slot in slots {
-        let image_start = slot.start_row + CAPTION_ROWS as usize;
-        let image_end = slot.start_row + slot.height;
-        if image_start < viewport_top || image_end > viewport_bottom {
-            continue;
-        }
-        let local_row = (image_start - viewport_top) as u16;
-        if local_row >= area.height {
-            continue;
-        }
-        let avail = area.height - local_row;
-        let h = image_height.min(avail);
-        if h == 0 {
-            continue;
-        }
-        let w = area.width.min(32);
-        let rect = Rect {
+
+    // Inline "Generating…" indicator pinned to the bottom row of the
+    // chat pane while a turn is in flight. Replaces the bottom
+    // status-bar chip; staying inside the output rect keeps the cue
+    // visually attached to the current reply rather than buried at
+    // the screen edge.
+    if app.generating {
+        let row = Rect {
             x: area.x,
-            y: area.y + local_row,
-            width: w,
-            height: h,
+            y: area.y + area.height.saturating_sub(1),
+            width: area.width,
+            height: 1,
         };
-        let widget = StatefulImage::default();
-        if let Some(state) = app.output.thumbnail_protocol_mut(slot.item_idx) {
-            frame.render_stateful_widget(widget, rect, state);
-        }
+        let label = format!("{} Generating…", app.spinner_char());
+        let para = Paragraph::new(Line::from(Span::styled(
+            label,
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::DIM)
+                .add_modifier(Modifier::ITALIC),
+        )));
+        frame.render_widget(Clear, row);
+        frame.render_widget(para, row);
     }
 }
 
@@ -305,12 +328,6 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 {
         return;
     }
-
-    let state = if app.generating {
-        format!("{} generating", app.spinner_char())
-    } else {
-        "idle".to_string()
-    };
 
     let snap = app.throughput.snapshot(Instant::now());
     let rate = snap.rate.map(|r| format!("{r:.0} tok/s"));
@@ -366,10 +383,23 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         ("vision: off", Color::DarkGray)
     };
+    left_spans.push(Span::styled(" │ ", reversed));
     left_spans.push(Span::styled(
-        format!(" │ {vision_label}"),
+        vision_label,
         Style::default()
             .fg(vision_color)
+            .add_modifier(Modifier::REVERSED),
+    ));
+    let (verbose_label, verbose_color) = if app.verbose {
+        ("verbose: on", Color::Green)
+    } else {
+        ("verbose: off", Color::DarkGray)
+    };
+    left_spans.push(Span::styled(" │ ", reversed));
+    left_spans.push(Span::styled(
+        verbose_label,
+        Style::default()
+            .fg(verbose_color)
             .add_modifier(Modifier::REVERSED),
     ));
 
@@ -389,7 +419,6 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::REVERSED),
         ));
     }
-    left_spans.push(Span::styled(format!(" │ {state}"), reversed));
     if let Some(r) = rate {
         left_spans.push(Span::styled(format!(" │ {r}"), reversed));
     }
