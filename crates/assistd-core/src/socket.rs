@@ -17,6 +17,12 @@ const EVENT_CHANNEL_CAPACITY: usize = 32;
 /// Errors produced by the socket listener and per-connection handlers.
 #[derive(Debug, Error)]
 pub enum SocketError {
+    #[error(
+        "another assistd daemon is already accepting connections at {path}; refusing to clobber \
+         its socket"
+    )]
+    AlreadyRunning { path: PathBuf },
+
     #[error("failed to remove stale socket file at {path}: {source}")]
     StaleCleanup {
         path: PathBuf,
@@ -36,6 +42,51 @@ pub enum SocketError {
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// How long to wait for an existing socket to accept a probe connection
+/// before deciding it's stale. A live daemon's accept loop is reactive
+/// enough that 1s is generous; a hung socket past this point is treated
+/// as live to avoid clobbering it.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Decide what to do with an existing file at the would-be socket path.
+///
+/// Connect-probes the path: if the connect succeeds, a live daemon owns
+/// the socket and we must not unlink it. If the connect fails (refused,
+/// not-a-socket, etc.) the file is stale and we remove it. If the probe
+/// hangs past [`PROBE_TIMEOUT`] we assume "live" — better to refuse
+/// startup than rip an in-use socket out from under another process.
+async fn prepare_socket_path(path: &Path) -> Result<(), SocketError> {
+    match path.try_exists() {
+        Ok(false) => return Ok(()),
+        Ok(true) => {}
+        Err(e) => {
+            return Err(SocketError::StaleCleanup {
+                path: path.to_path_buf(),
+                source: e,
+            });
+        }
+    }
+
+    match tokio::time::timeout(PROBE_TIMEOUT, UnixStream::connect(path)).await {
+        Ok(Ok(_stream)) => Err(SocketError::AlreadyRunning {
+            path: path.to_path_buf(),
+        }),
+        Ok(Err(e)) => {
+            // ECONNREFUSED (no listener), ENOTSOCK (regular file at the
+            // path), or similar — all mean the file is leftover from a
+            // previous run and is safe to remove.
+            warn!("removing stale socket file at {} ({})", path.display(), e);
+            std::fs::remove_file(path).map_err(|source| SocketError::StaleCleanup {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+        Err(_) => Err(SocketError::AlreadyRunning {
+            path: path.to_path_buf(),
+        }),
+    }
 }
 
 /// Serve the IPC socket at the default path from [`assistd_ipc::socket_path`].
@@ -70,13 +121,7 @@ pub async fn serve_at<F>(path: &Path, state: Arc<AppState>, shutdown: F) -> Resu
 where
     F: Future<Output = ()>,
 {
-    if path.exists() {
-        warn!("removing stale socket file at {}", path.display());
-        std::fs::remove_file(path).map_err(|source| SocketError::StaleCleanup {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    }
+    prepare_socket_path(path).await?;
 
     let listener = UnixListener::bind(path).map_err(|source| SocketError::Bind {
         path: path.to_path_buf(),
@@ -546,6 +591,50 @@ mod tests {
             matches!(events.last(), Some(Event::Error { message, .. }) if message.contains("not enabled")),
             "expected Error with 'not enabled' message; got {events:?}"
         );
+
+        tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn second_serve_refuses_to_clobber_live_socket() {
+        // Regression test for the socket-clobbering hazard: a live
+        // listener on the path must not have its socket ripped out by
+        // a second `serve_at` call. The second call must error with
+        // `AlreadyRunning`, and the first must keep serving requests.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistd.sock");
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_path = path.clone();
+        let state = test_state();
+        let server = tokio::spawn(async move {
+            serve_at(&server_path, state, async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        });
+        wait_for_listener(&path).await;
+
+        // Second attempt at the same path: must refuse, and must not
+        // unlink the live socket.
+        let second_state = test_state();
+        let err = serve_at(&path, second_state, std::future::pending::<()>())
+            .await
+            .expect_err("second serve_at must fail while first is alive");
+        match err {
+            SocketError::AlreadyRunning { path: p } => assert_eq!(p, path),
+            other => panic!("expected AlreadyRunning, got {other:?}"),
+        }
+        assert!(
+            path.exists(),
+            "live socket must remain after a refused second-bind attempt"
+        );
+
+        // The first daemon is still healthy and serving requests.
+        let events =
+            send_request_collect_events(&path, r#"{"type":"query","id":"q","text":"ok"}"#).await;
+        assert!(matches!(events.last(), Some(Event::Done { .. })));
 
         tx.send(()).unwrap();
         server.await.unwrap();
