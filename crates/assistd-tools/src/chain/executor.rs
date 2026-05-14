@@ -191,8 +191,8 @@ mod tests {
     use crate::chain::parse_chain;
     use crate::command::{Command, CommandInput, CommandOutput, CommandRegistry};
     use async_trait::async_trait;
+    use parking_lot::Mutex;
     use std::sync::Arc;
-    use std::sync::Mutex;
 
     /// Fake command: returns a fixed exit code and stdout; records that
     /// it was invoked. `args[0]` (when present) overrides exit code,
@@ -231,7 +231,7 @@ mod tests {
             "stub help".to_string()
         }
         async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
-            *self.invoked.lock().unwrap() = true;
+            *self.invoked.lock() = true;
             Ok(CommandOutput {
                 stdout: self.stdout.clone(),
                 stderr: Vec::new(),
@@ -342,8 +342,8 @@ mod tests {
         };
         let chain = parse_chain("ok && right").unwrap();
         let out = execute(&chain, &r, Vec::new()).await.unwrap();
-        assert!(*ok_flag.lock().unwrap());
-        assert!(*right_flag.lock().unwrap());
+        assert!(*ok_flag.lock());
+        assert!(*right_flag.lock());
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"firstsecond");
     }
@@ -360,7 +360,7 @@ mod tests {
         };
         let chain = parse_chain("bad && right").unwrap();
         let out = execute(&chain, &r, Vec::new()).await.unwrap();
-        assert!(!*right_flag.lock().unwrap(), "right must not run");
+        assert!(!*right_flag.lock(), "right must not run");
         assert_eq!(out.exit_code, 1);
     }
 
@@ -387,7 +387,7 @@ mod tests {
         };
         let chain = parse_chain("good || right").unwrap();
         let out = execute(&chain, &r, Vec::new()).await.unwrap();
-        assert!(!*right_flag.lock().unwrap());
+        assert!(!*right_flag.lock());
         assert_eq!(out.stdout, b"g");
     }
 
@@ -436,7 +436,7 @@ mod tests {
         };
         let chain = parse_chain("nope && right").unwrap();
         let out = execute(&chain, &r, Vec::new()).await.unwrap();
-        assert!(!*right_flag.lock().unwrap(), "right must not run");
+        assert!(!*right_flag.lock(), "right must not run");
         assert_eq!(out.exit_code, 127);
     }
 
@@ -483,7 +483,7 @@ mod tests {
         };
         let chain = parse_chain("a && b | lc || d").unwrap();
         let out = execute(&chain, &r, Vec::new()).await.unwrap();
-        assert!(!*d_flag.lock().unwrap());
+        assert!(!*d_flag.lock());
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"1\n");
     }

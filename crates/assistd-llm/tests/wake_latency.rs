@@ -1,4 +1,10 @@
 #![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 
 //! Latency benchmarks for the auto-wake-on-query path. Each test
 //! measures `Instant`-to-first-Delta latency end-to-end through the

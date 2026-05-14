@@ -118,7 +118,7 @@ mod tests {
     use crate::NoVoiceOutput;
     use anyhow::Result;
     use async_trait::async_trait;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     #[derive(Default)]
     struct RecordingOutput {
@@ -130,7 +130,7 @@ mod tests {
     #[async_trait]
     impl VoiceOutput for RecordingOutput {
         async fn speak(&self, text: String) -> Result<()> {
-            self.spoken.lock().unwrap().push(text);
+            self.spoken.lock().push(text);
             Ok(())
         }
         async fn wait_idle(&self) -> Result<()> {

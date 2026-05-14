@@ -14,8 +14,9 @@
 //! pending caller wakes with a typed error rather than hanging.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,7 +92,7 @@ impl Correlator {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
-            let mut guard = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self.pending.lock();
             if guard.len() >= MAX_IN_FLIGHT {
                 return Err(McpError::TooManyInFlight);
             }
@@ -116,7 +117,7 @@ impl Correlator {
             return;
         };
         let tx = {
-            let mut guard = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self.pending.lock();
             guard.remove(&id)
         };
         let Some(tx) = tx else {
@@ -136,7 +137,7 @@ impl Correlator {
     /// connection closes.
     pub fn fail_all(&self, err_factory: impl Fn() -> RpcError) {
         let drained: Vec<_> = {
-            let mut guard = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = self.pending.lock();
             guard.drain().collect()
         };
         for (_, tx) in drained {
@@ -146,7 +147,7 @@ impl Correlator {
 
     /// Returns the number of requests currently awaiting a response.
     pub fn in_flight(&self) -> usize {
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.pending.lock().len()
     }
 }
 

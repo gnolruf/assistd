@@ -16,7 +16,9 @@
 
 use std::any::Any;
 use std::future::Future;
-use std::sync::{Mutex, Weak};
+use std::sync::Weak;
+
+use parking_lot::Mutex;
 
 use tokio::task::JoinHandle;
 
@@ -225,7 +227,7 @@ where
 /// safely re-install in setup.
 pub fn install_panic_hook(presence: Weak<PresenceManager>) {
     static PRESENCE: Mutex<Option<Weak<PresenceManager>>> = Mutex::new(None);
-    *PRESENCE.lock().unwrap_or_else(|e| e.into_inner()) = Some(presence);
+    *PRESENCE.lock() = Some(presence);
 
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -249,8 +251,8 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
         // long enough to grab a strong ref + read the pid.
         let pid_opt = PRESENCE
             .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().and_then(|w| w.upgrade()))
+            .as_ref()
+            .and_then(|w| w.upgrade())
             .and_then(|p| p.llama_pid_blocking());
         if let Some(pid) = pid_opt {
             // The child was started in its own session via `setsid`, so its

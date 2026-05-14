@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
+
 //! End-to-end audio pipeline tests using a deterministic stub transcriber
 //! so the suite runs in CI without downloading whisper models or relying
 //! on a microphone. Exercises the public state machine

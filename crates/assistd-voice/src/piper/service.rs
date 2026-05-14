@@ -17,8 +17,10 @@
 //! binary or broken audio device shouldn't spam the logs forever.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use anyhow::{Context, Result};
 use assistd_config::SynthesisConfig;
@@ -133,15 +135,11 @@ impl PiperVoiceOutput {
 
     /// Returns the current circuit-breaker state.
     pub fn ready_state(&self) -> ReadyState {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .ready
-            .clone()
+        self.state.lock().ready.clone()
     }
 
     fn record_success(&self) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock();
         s.recent_failures.clear();
         // Re-arming after a transient flap is intentional: a transient
         // stutter shouldn't permanently disable speech.
@@ -153,7 +151,7 @@ impl PiperVoiceOutput {
     }
 
     fn record_failure(&self, err: &PiperError) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock();
         let now = Instant::now();
         while let Some(&front) = s.recent_failures.front() {
             if now.duration_since(front) > FAILURE_WINDOW {
@@ -182,7 +180,7 @@ impl PiperVoiceOutput {
 impl VoiceOutput for PiperVoiceOutput {
     async fn speak(&self, text: String) -> Result<()> {
         {
-            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = self.state.lock();
             if let ReadyState::Degraded { ref reason } = s.ready {
                 if !s.logged_degraded {
                     tracing::warn!(
@@ -240,7 +238,7 @@ impl VoiceOutput for PiperVoiceOutput {
         // for any in-flight non-piper PCM, but in practice a degraded
         // service has no inflight work, so this is safe.
         {
-            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = self.state.lock();
             if matches!(s.ready, ReadyState::Degraded { .. }) {
                 return Ok(());
             }

@@ -1,4 +1,10 @@
 #![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 
 //! End-to-end tests for the presence state machine.
 //!
