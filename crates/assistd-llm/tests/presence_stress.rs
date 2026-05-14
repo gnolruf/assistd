@@ -1,4 +1,10 @@
 #![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 
 //! Heavyweight stress tests for the presence state machine and the
 //! request-guard / chat-client interaction. Each test spawns a real

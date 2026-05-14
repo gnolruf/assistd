@@ -19,7 +19,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
@@ -127,7 +129,7 @@ pub struct ConfirmRouter {
     wire: mpsc::Sender<Event>,
     /// Pending confirmation prompts, keyed by `confirm_id`. The lock
     /// is held only across HashMap insert/remove; no `.await` is
-    /// held under the guard, so std::sync::Mutex is sufficient.
+    /// held under the guard, so a sync Mutex is sufficient.
     pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
 }
 
@@ -151,11 +153,7 @@ impl ConfirmRouter {
         let confirm_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         {
-            // SAFETY: poisoning would mean another task panicked while
-            // holding the lock. Recover by taking the inner; one
-            // dropped sender just denies the affected confirm, and the
-            // agent loop continues correctly.
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = self.pending.lock();
             if pending.len() >= MAX_PENDING_CONFIRMS {
                 warn!(
                     target: "assistd::policy",
@@ -178,10 +176,7 @@ impl ConfirmRouter {
         };
         if self.wire.send(event).await.is_err() {
             // Wire dead; clean up and deny.
-            self.pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&confirm_id);
+            self.pending.lock().remove(&confirm_id);
             warn!(
                 target: "assistd::policy",
                 tool = %req.tool,
@@ -196,10 +191,7 @@ impl ConfirmRouter {
                 // Pending sender dropped without responding; happens
                 // when the connection's read loop ends before a reply
                 // arrives. Deny.
-                self.pending
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&confirm_id);
+                self.pending.lock().remove(&confirm_id);
                 warn!(
                     target: "assistd::policy",
                     tool = %req.tool,
@@ -216,11 +208,7 @@ impl ConfirmRouter {
     /// either a buggy client or a confirm whose deadline already
     /// expired.
     pub fn route_response(&self, confirm_id: &str, allow: bool) -> Result<(), &'static str> {
-        let sender = self
-            .pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(confirm_id);
+        let sender = self.pending.lock().remove(confirm_id);
         match sender {
             Some(tx) => {
                 let _ = tx.send(allow);
@@ -504,7 +492,7 @@ mod tests {
         // don't have to keep the wire sender alive; we just want the
         // router to think it's full.
         {
-            let mut pending = router.pending.lock().unwrap();
+            let mut pending = router.pending.lock();
             for i in 0..MAX_PENDING_CONFIRMS {
                 let (tx, _rx) = oneshot::channel();
                 pending.insert(format!("preloaded-{i}"), tx);
@@ -519,7 +507,7 @@ mod tests {
         let result = router.ask(req).await;
         assert!(!result, "ask must deny when pending cap is reached");
         // The cap path returns before insert, so the map size is unchanged.
-        let pending_len = router.pending.lock().unwrap().len();
+        let pending_len = router.pending.lock().len();
         assert_eq!(
             pending_len, MAX_PENDING_CONFIRMS,
             "denied ask must not insert into pending"

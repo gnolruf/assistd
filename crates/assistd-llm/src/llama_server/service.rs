@@ -2,7 +2,8 @@ use super::backoff::MAX_CONSECUTIVE_FAILURES;
 use super::error::LlamaServerError;
 use super::supervisor::Supervisor;
 use assistd_config::{LlamaServerConfig, ModelConfig};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -109,7 +110,7 @@ impl LlamaService {
     /// PID of the currently-running child, or `None` if no child is alive.
     /// The value changes as the supervisor restarts the child.
     pub fn pid(&self) -> Option<u32> {
-        *self.pid.lock().unwrap_or_else(|e| e.into_inner())
+        *self.pid.lock()
     }
 
     /// Awaits the supervisor task. The caller is expected to have already

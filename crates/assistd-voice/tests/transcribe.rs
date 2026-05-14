@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
+
 //! End-to-end transcription test. Downloads a small Whisper model and a
 //! known speech clip from public URLs, then asserts:
 //!   - the 5+ second clip of clear English is transcribed accurately;

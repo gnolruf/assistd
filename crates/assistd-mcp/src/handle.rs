@@ -366,8 +366,8 @@ fn transport_label(cfg: &TransportConfig) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use serde_json::json;
-    use std::sync::Mutex;
 
     /// Trivial McpClient that returns a fixed tool list and echoes args.
     struct FakeClient {
@@ -384,7 +384,7 @@ mod tests {
             }])
         }
         async fn invoke(&self, _name: &str, _args: Value) -> AnyResult<ToolResult> {
-            *self.invocations.lock().unwrap() += 1;
+            *self.invocations.lock() += 1;
             Ok(ToolResult::Text("pong".into()))
         }
     }
@@ -405,7 +405,7 @@ mod tests {
         });
         let switch = Arc::new(SwitchingClient::new(Some(fake)));
         let _ = switch.invoke("ping", json!({})).await.unwrap();
-        assert_eq!(*invocations.lock().unwrap(), 1);
+        assert_eq!(*invocations.lock(), 1);
 
         // Swap to None; subsequent calls fail.
         switch.swap(None).await;

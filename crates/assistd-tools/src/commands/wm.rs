@@ -556,7 +556,7 @@ mod tests {
         FocusedWindowContext, Layout, NoWindowManager, OutputInfo, ResizeDir, Window, WindowId,
         WmResult, WorkspaceId, WorkspaceInfo,
     };
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     /// Test-only id constructor; every fixture id is non-zero by
     /// construction, so this `expect` is unreachable at runtime.
@@ -615,7 +615,7 @@ mod tests {
     #[async_trait]
     impl WindowManager for StubWm {
         async fn focus(&self, window: &WindowId) -> WmResult<()> {
-            self.focus_calls.lock().unwrap().push(*window);
+            self.focus_calls.lock().push(*window);
             if let Some(msg) = &self.focus_err {
                 return Err(ipc_err(msg));
             }
@@ -626,10 +626,7 @@ mod tests {
             window: &WindowId,
             workspace: &WorkspaceId,
         ) -> WmResult<()> {
-            self.move_calls
-                .lock()
-                .unwrap()
-                .push((*window, workspace.clone()));
+            self.move_calls.lock().push((*window, workspace.clone()));
             if let Some(msg) = &self.move_err {
                 return Err(ipc_err(msg));
             }
@@ -673,17 +670,14 @@ mod tests {
             direction: ResizeDir,
             pixels: u32,
         ) -> WmResult<()> {
-            self.resize_calls
-                .lock()
-                .unwrap()
-                .push((*window, direction, pixels));
+            self.resize_calls.lock().push((*window, direction, pixels));
             if let Some(msg) = &self.resize_err {
                 return Err(ipc_err(msg));
             }
             Ok(())
         }
         async fn set_layout(&self, layout: Layout) -> WmResult<()> {
-            self.layout_calls.lock().unwrap().push(layout);
+            self.layout_calls.lock().push(layout);
             if let Some(msg) = &self.layout_err {
                 return Err(ipc_err(msg));
             }
@@ -778,7 +772,7 @@ mod tests {
         let stub = Arc::new(StubWm::connected());
         let out = run_wm(stub.clone(), &["focus", "42"]).await;
         assert_eq!(out.exit_code, 0);
-        let calls = stub.focus_calls.lock().unwrap();
+        let calls = stub.focus_calls.lock();
         assert_eq!(*calls, vec![id(42)]);
     }
 
@@ -793,7 +787,7 @@ mod tests {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("not a valid window id"), "{stderr}");
         assert!(stderr.contains("wm list"), "{stderr}");
-        assert!(stub.focus_calls.lock().unwrap().is_empty());
+        assert!(stub.focus_calls.lock().is_empty());
     }
 
     #[tokio::test]
@@ -865,7 +859,7 @@ mod tests {
         let stub = Arc::new(StubWm::connected());
         let out = run_wm(stub.clone(), &["move", "42", "3"]).await;
         assert_eq!(out.exit_code, 0);
-        let calls = stub.move_calls.lock().unwrap();
+        let calls = stub.move_calls.lock();
         // "3" parses as numeric → WorkspaceId::Num(3); the args are
         // typed all the way through to the backend now.
         assert_eq!(*calls, vec![(id(42), WorkspaceId::Num(3))]);
@@ -878,7 +872,7 @@ mod tests {
         assert_eq!(out.exit_code, 2);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("not a valid window id"), "{stderr}");
-        assert!(stub.move_calls.lock().unwrap().is_empty());
+        assert!(stub.move_calls.lock().is_empty());
     }
 
     #[tokio::test]
@@ -982,7 +976,7 @@ mod tests {
         let stub = Arc::new(StubWm::connected());
         let out = run_wm(stub.clone(), &["resize", "42", "grow", "50"]).await;
         assert_eq!(out.exit_code, 0);
-        let calls = stub.resize_calls.lock().unwrap();
+        let calls = stub.resize_calls.lock();
         assert_eq!(*calls, vec![(id(42), ResizeDir::Grow, 50)]);
     }
 
@@ -993,7 +987,7 @@ mod tests {
         assert_eq!(out.exit_code, 2);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("not a valid window id"), "{stderr}");
-        assert!(stub.resize_calls.lock().unwrap().is_empty());
+        assert!(stub.resize_calls.lock().is_empty());
     }
 
     #[tokio::test]
@@ -1099,7 +1093,7 @@ mod tests {
         let stub = Arc::new(StubWm::connected());
         let out = run_wm(stub.clone(), &["layout", "tabbed"]).await;
         assert_eq!(out.exit_code, 0);
-        let calls = stub.layout_calls.lock().unwrap();
+        let calls = stub.layout_calls.lock();
         assert_eq!(*calls, vec![Layout::Tabbed]);
     }
 

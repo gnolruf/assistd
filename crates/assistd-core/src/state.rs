@@ -2637,7 +2637,7 @@ mod tests {
     use assistd_config::ToolsOutputConfig;
     use assistd_llm::{EchoBackend, FailedBackend, StepOutcome, ToolCall, ToolResultPayload};
     use assistd_tools::{CommandRegistry, RunTool, commands::EchoCommand};
-    use std::sync::Mutex as StdMutex;
+    use parking_lot::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -2855,7 +2855,7 @@ mod tests {
     /// results. Same shape as the one in `agent::tests` but re-declared
     /// here so we can wire it into AppState and exercise IPC mapping.
     struct ScriptedBackend {
-        outcomes: std::sync::Mutex<Vec<StepOutcome>>,
+        outcomes: parking_lot::Mutex<Vec<StepOutcome>>,
     }
 
     #[async_trait::async_trait]
@@ -2886,7 +2886,7 @@ mod tests {
             _tx: mpsc::Sender<LlmEvent>,
         ) -> assistd_llm::LlmResult<StepOutcome> {
             let outcome = {
-                let mut q = self.outcomes.lock().unwrap();
+                let mut q = self.outcomes.lock();
                 if q.is_empty() {
                     StepOutcome::Final
                 } else {
@@ -2923,7 +2923,7 @@ mod tests {
         // LlmEvent::ToolCall → Event::ToolCall (with the request id),
         // LlmEvent::ToolResult → Event::ToolResult, then Done.
         let backend = Arc::new(ScriptedBackend {
-            outcomes: std::sync::Mutex::new(vec![
+            outcomes: parking_lot::Mutex::new(vec![
                 StepOutcome::ToolCalls(vec![ToolCall {
                     id: "call-opaque".into(),
                     name: "run".into(),
@@ -2988,8 +2988,8 @@ mod tests {
     /// outcomes, used to exercise the PttStart / PttStop handlers
     /// without touching cpal or whisper.
     struct MockVoice {
-        start_result: std::sync::Mutex<Option<anyhow::Result<()>>>,
-        stop_result: std::sync::Mutex<Option<anyhow::Result<String>>>,
+        start_result: parking_lot::Mutex<Option<anyhow::Result<()>>>,
+        stop_result: parking_lot::Mutex<Option<anyhow::Result<String>>>,
         state_tx: tokio::sync::watch::Sender<assistd_voice::VoiceCaptureState>,
     }
 
@@ -2997,8 +2997,8 @@ mod tests {
         fn new(start: anyhow::Result<()>, stop: anyhow::Result<String>) -> Self {
             let (state_tx, _) = tokio::sync::watch::channel(assistd_voice::VoiceCaptureState::Idle);
             Self {
-                start_result: std::sync::Mutex::new(Some(start)),
-                stop_result: std::sync::Mutex::new(Some(stop)),
+                start_result: parking_lot::Mutex::new(Some(start)),
+                stop_result: parking_lot::Mutex::new(Some(stop)),
                 state_tx,
             }
         }
@@ -3007,16 +3007,11 @@ mod tests {
     #[async_trait::async_trait]
     impl assistd_voice::VoiceInput for MockVoice {
         async fn start_recording(&self) -> anyhow::Result<()> {
-            self.start_result
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or_else(|| Ok(()))
+            self.start_result.lock().take().unwrap_or_else(|| Ok(()))
         }
         async fn stop_and_transcribe(&self) -> anyhow::Result<String> {
             self.stop_result
                 .lock()
-                .unwrap()
                 .take()
                 .unwrap_or_else(|| Ok(String::new()))
         }
@@ -3374,7 +3369,7 @@ mod tests {
         }
 
         fn calls(&self) -> Vec<String> {
-            self.calls.lock().unwrap().clone()
+            self.calls.lock().clone()
         }
 
         fn wait_idle_count(&self) -> usize {
@@ -3385,7 +3380,7 @@ mod tests {
     #[async_trait::async_trait]
     impl assistd_voice::VoiceOutput for MockSpeechRecorder {
         async fn speak(&self, text: String) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(text);
+            self.calls.lock().push(text);
             Ok(())
         }
         async fn wait_idle(&self) -> anyhow::Result<()> {
@@ -3510,7 +3505,7 @@ mod tests {
             _tools: Vec<serde_json::Value>,
             tx: mpsc::Sender<LlmEvent>,
         ) -> assistd_llm::LlmResult<StepOutcome> {
-            let script = self.script.lock().unwrap().take();
+            let script = self.script.lock().take();
             if let Some(actions) = script {
                 for action in actions {
                     match action {
@@ -3658,7 +3653,7 @@ mod tests {
             tx: mpsc::Sender<LlmEvent>,
         ) -> assistd_llm::LlmResult<StepOutcome> {
             let outcome = {
-                let mut q = self.outcomes.lock().unwrap();
+                let mut q = self.outcomes.lock();
                 if q.is_empty() {
                     StepOutcome::Final
                 } else {

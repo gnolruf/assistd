@@ -13,9 +13,10 @@
 #![cfg(feature = "test-support")]
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -452,11 +453,7 @@ struct LatencyCollector {
 
 impl LatencyCollector {
     fn take(&self, corr: &str) -> StageLog {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(corr)
-            .unwrap_or_default()
+        self.inner.lock().remove(corr).unwrap_or_default()
     }
 }
 
@@ -514,11 +511,7 @@ where
             if let Some(span) = ctx.span(id) {
                 span.extensions_mut().insert(SpanCorr(corr.clone()));
             }
-            self.inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(corr)
-                .or_default();
+            self.inner.lock().entry(corr).or_default();
         }
     }
 
@@ -540,7 +533,6 @@ where
             if let Some(corr) = exts.get::<SpanCorr>() {
                 self.inner
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
                     .entry(corr.0.clone())
                     .or_default()
                     .push((stage, now));

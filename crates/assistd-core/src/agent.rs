@@ -497,7 +497,7 @@ mod tests {
     use assistd_llm::{LlmBackend, LlmEvent, StepOutcome, ToolCall};
     use assistd_tools::{CommandRegistry, RunTool};
     use async_trait::async_trait;
-    use std::sync::Mutex as StdMutex;
+    use parking_lot::Mutex as StdMutex;
 
     /// Scripted mock backend: returns queued step outcomes in order.
     /// Records what was pushed so tests can assert the loop fed results
@@ -529,7 +529,7 @@ mod tests {
         }
 
         fn slow_step_ms(self: Arc<Self>, ms: u64) -> Arc<Self> {
-            *self.slow_step.lock().unwrap() = Some(std::time::Duration::from_millis(ms));
+            *self.slow_step.lock() = Some(std::time::Duration::from_millis(ms));
             self
         }
     }
@@ -549,8 +549,8 @@ mod tests {
             text: String,
             attachments: Vec<Attachment>,
         ) -> assistd_llm::LlmResult<()> {
-            self.pushed_users.lock().unwrap().push(text);
-            self.pushed_attachments.lock().unwrap().push(attachments);
+            self.pushed_users.lock().push(text);
+            self.pushed_attachments.lock().push(attachments);
             Ok(())
         }
 
@@ -558,7 +558,7 @@ mod tests {
             &self,
             results: Vec<ToolResultPayload>,
         ) -> assistd_llm::LlmResult<()> {
-            self.pushed_results.lock().unwrap().push(results);
+            self.pushed_results.lock().push(results);
             Ok(())
         }
 
@@ -572,12 +572,12 @@ mod tests {
             // Honour any configured slow-step delay BEFORE consuming
             // an outcome; cancellation tests rely on this future
             // being long-lived so the cancel signal can race it.
-            let delay = *self.slow_step.lock().unwrap();
+            let delay = *self.slow_step.lock();
             if let Some(d) = delay {
                 tokio::time::sleep(d).await;
             }
             let outcome = {
-                let mut q = self.outcomes.lock().unwrap();
+                let mut q = self.outcomes.lock();
                 if q.is_empty() {
                     StepOutcome::Final
                 } else {
@@ -638,9 +638,9 @@ mod tests {
             .unwrap();
         let events = collect(&mut rx).await;
         assert!(matches!(events.last(), Some(LlmEvent::Done)));
-        assert_eq!(backend.pushed_users.lock().unwrap().len(), 1);
+        assert_eq!(backend.pushed_users.lock().len(), 1);
         // No tool calls dispatched → no tool_results pushed.
-        assert!(backend.pushed_results.lock().unwrap().is_empty());
+        assert!(backend.pushed_results.lock().is_empty());
     }
 
     #[tokio::test]
@@ -673,7 +673,7 @@ mod tests {
 
         // And the backend saw the echoed result pushed back before the
         // second step.
-        let pushed = backend.pushed_results.lock().unwrap();
+        let pushed = backend.pushed_results.lock();
         assert_eq!(pushed.len(), 1);
         assert_eq!(pushed[0].len(), 1);
         assert!(
@@ -719,7 +719,7 @@ mod tests {
             .count();
         assert_eq!(calls, 1);
 
-        let results = backend.pushed_results.lock().unwrap();
+        let results = backend.pushed_results.lock();
         assert_eq!(results.len(), 1);
         // `echo "alpha\nbeta\nalpha"` prints 1 line; grep alpha filters
         // the full body; wc -l counts it. The exact count depends on
@@ -782,7 +782,7 @@ mod tests {
             .await
             .unwrap();
         drop(collect(&mut rx).await);
-        let pushed = backend.pushed_results.lock().unwrap();
+        let pushed = backend.pushed_results.lock();
         assert_eq!(pushed.len(), 1);
         let payload = &pushed[0][0];
         assert!(
@@ -828,7 +828,7 @@ mod tests {
             .await
             .unwrap();
         drop(collect(&mut rx).await);
-        let pushed = backend.pushed_results.lock().unwrap();
+        let pushed = backend.pushed_results.lock();
         let payload = &pushed[0][0];
         assert!(
             payload
@@ -856,7 +856,7 @@ mod tests {
             .await
             .unwrap();
         // With the receiver already dropped, no step was called.
-        let pushed = backend.pushed_results.lock().unwrap();
+        let pushed = backend.pushed_results.lock();
         assert!(
             pushed.is_empty(),
             "no tool results should be pushed after disconnect: {pushed:?}"
@@ -883,7 +883,7 @@ mod tests {
             .unwrap();
         // user push happened (it's the first thing in the loop), but
         // no step ran.
-        assert_eq!(backend.pushed_users.lock().unwrap().len(), 1);
+        assert_eq!(backend.pushed_users.lock().len(), 1);
         assert_eq!(
             backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
             0
@@ -1000,7 +1000,7 @@ mod tests {
             .expect("expected a recall ToolResult");
         assert_eq!(recall_output, "(no memories)");
 
-        let pushed = backend.pushed_results.lock().unwrap();
+        let pushed = backend.pushed_results.lock();
         assert_eq!(pushed.len(), 2);
         assert_eq!(pushed[1][0].content, "(no memories)");
     }
@@ -1102,7 +1102,7 @@ mod tests {
             "tool calls didn't fire in the scripted order"
         );
 
-        let pushed = backend.pushed_results.lock().unwrap();
+        let pushed = backend.pushed_results.lock();
         assert_eq!(pushed.len(), 2, "two push_tool_results round-trips");
         assert!(
             pushed[0][0].content.contains("standup"),
@@ -1162,7 +1162,7 @@ mod tests {
             .unwrap();
         drop(collect(&mut rx).await);
 
-        let pushed = backend.pushed_results.lock().unwrap();
+        let pushed = backend.pushed_results.lock();
         assert_eq!(pushed.len(), 1);
         let payload = &pushed[0][0];
         assert!(
@@ -1248,11 +1248,11 @@ mod tests {
     #[async_trait]
     impl LlmHealthProbe for MockProbe {
         fn pid(&self) -> Option<u32> {
-            *self.pid.lock().unwrap()
+            *self.pid.lock()
         }
 
         fn state(&self) -> Option<assistd_llm::ReadyState> {
-            Some(*self.state.lock().unwrap())
+            Some(*self.state.lock())
         }
 
         async fn wait_for_ready(
@@ -1261,7 +1261,7 @@ mod tests {
         ) -> Result<(), assistd_llm::HealthWaitError> {
             self.wait_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            (*self.wait_result.lock().unwrap()).unwrap_or(Ok(()))
+            (*self.wait_result.lock()).unwrap_or(Ok(()))
         }
     }
 
@@ -1302,7 +1302,7 @@ mod tests {
             text: String,
             _attachments: Vec<Attachment>,
         ) -> assistd_llm::LlmResult<()> {
-            self.pushed_users.lock().unwrap().push(text);
+            self.pushed_users.lock().push(text);
             Ok(())
         }
 
@@ -1323,16 +1323,11 @@ mod tests {
             // Errors first; once they're exhausted, fall through to
             // outcomes. Lets a single test script "first attempt
             // crashes, second attempt succeeds".
-            let next_err = self.errors.lock().unwrap().pop();
+            let next_err = self.errors.lock().pop();
             if let Some(e) = next_err {
                 return Err(e);
             }
-            let outcome = self
-                .outcomes
-                .lock()
-                .unwrap()
-                .pop()
-                .unwrap_or(StepOutcome::Final);
+            let outcome = self.outcomes.lock().pop().unwrap_or(StepOutcome::Final);
             if matches!(outcome, StepOutcome::Final) {
                 let _ = tx.send(LlmEvent::Delta { text: "ok".into() }).await;
             }

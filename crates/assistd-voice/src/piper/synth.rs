@@ -13,7 +13,9 @@
 
 use std::collections::VecDeque;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout, Command};
@@ -151,7 +153,6 @@ impl OneShotSynth {
         if !status.success() {
             let tail_joined = stderr_tail
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>()
@@ -234,7 +235,7 @@ async fn drain_stderr(stderr: ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         tracing::debug!(target: "assistd::voice::piper", "{line}");
-        let mut guard = tail.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = tail.lock();
         if guard.len() == 20 {
             guard.pop_front();
         }

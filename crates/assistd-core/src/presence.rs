@@ -27,7 +27,9 @@
 //! [`crate::AppState`]; request handlers call [`PresenceManager::ensure_active`]
 //! before dispatching work to the LLM backend.
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -172,14 +174,14 @@ struct WakeMarker {
 
 impl WakeMarker {
     fn new(slot: Arc<StdMutex<Option<Instant>>>) -> Self {
-        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        *slot.lock() = Some(Instant::now());
         Self { slot }
     }
 }
 
 impl Drop for WakeMarker {
     fn drop(&mut self) {
-        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.slot.lock() = None;
     }
 }
 
@@ -230,7 +232,7 @@ impl PresenceManager {
                     if daemon_rx.wait_for(|v| *v).await.is_err() {
                         return;
                     }
-                    let tx = current.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let tx = current.lock().clone();
                     if let Some(tx) = tx {
                         let _ = tx.send(true);
                     }
@@ -266,7 +268,7 @@ impl PresenceManager {
 
     /// Current presence state. Cheap, lock-protected snapshot.
     pub fn state(&self) -> PresenceState {
-        *self.state.lock().unwrap_or_else(|e| e.into_inner())
+        *self.state.lock()
     }
 
     /// Record that the user just interacted with the daemon. Called at
@@ -275,17 +277,14 @@ impl PresenceManager {
     /// low-level transition methods (`wake`/`drowse`/`sleep`) so that
     /// automatic monitors (GPU, idle) don't defer their own progress.
     fn mark_activity(&self) {
-        *self.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        *self.last_activity.lock() = Instant::now();
     }
 
     /// Time since the last recorded user interaction. Read by the idle
     /// monitor to decide when to drowse/sleep, and by the TUI status
     /// bar for its countdown display.
     pub fn idle_duration(&self) -> Duration {
-        self.last_activity
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .elapsed()
+        self.last_activity.lock().elapsed()
     }
 
     /// Time until the next idle-based transition given the current
@@ -447,7 +446,7 @@ impl PresenceManager {
     /// indicator during cold-start wakes (which can take tens of
     /// seconds to minutes).
     pub fn wake_in_progress(&self) -> Option<Instant> {
-        *self.wake_started.lock().unwrap_or_else(|e| e.into_inner())
+        *self.wake_started.lock()
     }
 
     /// Register an in-flight LLM stream. The returned guard decrements
@@ -534,11 +533,7 @@ impl PresenceManager {
 
         let started = Instant::now();
         // Flip inner-shutdown to trigger supervisor teardown.
-        let tx = self
-            .current_inner_shutdown
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
+        let tx = self.current_inner_shutdown.lock().take();
         if let Some(tx) = tx {
             let _ = tx.send(true);
         }
@@ -572,7 +567,7 @@ impl PresenceManager {
             }
         }
 
-        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = PresenceState::Sleeping;
+        *self.state.lock() = PresenceState::Sleeping;
         let _ = self.state_tx.send(PresenceState::Sleeping);
         info!(
             target: "assistd::presence",
@@ -626,7 +621,7 @@ impl PresenceManager {
             }
         }
 
-        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = PresenceState::Drowsy;
+        *self.state.lock() = PresenceState::Drowsy;
         let _ = self.state_tx.send(PresenceState::Drowsy);
         info!(
             target: "assistd::presence",
@@ -682,10 +677,7 @@ impl PresenceManager {
             }
             PresenceState::Sleeping => {
                 let (inner_tx, inner_rx) = watch::channel(false);
-                *self
-                    .current_inner_shutdown
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = Some(inner_tx);
+                *self.current_inner_shutdown.lock() = Some(inner_tx);
 
                 let cold_budget = Duration::from_secs(self.timeouts.presence_wake_cold_start_secs);
                 let service = match timeout(
@@ -767,7 +759,7 @@ impl PresenceManager {
             ));
         }
 
-        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = PresenceState::Active;
+        *self.state.lock() = PresenceState::Active;
         let _ = self.state_tx.send(PresenceState::Active);
         info!(
             target: "assistd::presence",
@@ -838,7 +830,7 @@ impl PresenceManager {
     /// Does not touch the transition mutex or the llama handle.
     #[cfg(test)]
     pub(crate) fn set_state_for_test(&self, s: PresenceState) {
-        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = s;
+        *self.state.lock() = s;
         let _ = self.state_tx.send(s);
     }
 }

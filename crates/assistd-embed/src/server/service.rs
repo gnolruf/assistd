@@ -2,7 +2,8 @@ use super::backoff::MAX_CONSECUTIVE_FAILURES;
 use super::error::EmbedServerError;
 use super::supervisor::Supervisor;
 use assistd_config::EmbeddingConfig;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -94,7 +95,7 @@ impl EmbedService {
 
     /// Returns the OS PID of the running child process, or `None` if not currently running.
     pub fn pid(&self) -> Option<u32> {
-        *self.pid.lock().unwrap_or_else(|e| e.into_inner())
+        *self.pid.lock()
     }
 
     /// Await the supervisor task. Caller is expected to have flipped the

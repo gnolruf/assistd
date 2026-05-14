@@ -345,7 +345,7 @@ mod tests {
     /// `McpError`, after an optional sleep. Used to exercise the
     /// adapter's error-envelope path and duration tracking.
     struct ErrFakeClient {
-        err: std::sync::Mutex<Option<McpError>>,
+        err: parking_lot::Mutex<Option<McpError>>,
         sleep: std::time::Duration,
     }
 
@@ -361,7 +361,7 @@ mod tests {
 
         async fn invoke(&self, _name: &str, _arguments: Value) -> Result<ToolResult> {
             tokio::time::sleep(self.sleep).await;
-            let e = self.err.lock().unwrap().take().expect("err pre-armed");
+            let e = self.err.lock().take().expect("err pre-armed");
             Err(e.into())
         }
     }
@@ -378,7 +378,7 @@ mod tests {
 
     fn err_client_with(err: McpError, sleep: std::time::Duration) -> Arc<dyn McpClient> {
         Arc::new(ErrFakeClient {
-            err: std::sync::Mutex::new(Some(err)),
+            err: parking_lot::Mutex::new(Some(err)),
             sleep,
         })
     }

@@ -4,8 +4,9 @@ use super::health::HealthChecker;
 use super::process::ChildProcess;
 use super::service::ReadyState;
 use assistd_config::{LlamaServerConfig, ModelConfig};
+use parking_lot::Mutex;
 use std::process::ExitStatus;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -125,7 +126,7 @@ impl Supervisor {
     /// Spawns the child, waits for it to become healthy, then watches for exit or shutdown.
     async fn supervise_once(&mut self) -> Result<CycleResult, LlamaServerError> {
         let mut child = ChildProcess::spawn(&self.cfg, &self.model)?;
-        *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = child.pid();
+        *self.pid.lock() = child.pid();
         let ready_timeout = Duration::from_secs(self.cfg.ready_timeout_secs);
         let health = HealthChecker::new(&self.cfg.host, self.cfg.port, ready_timeout)?;
 
@@ -151,17 +152,17 @@ impl Supervisor {
         match phase1 {
             Phase1::Ready => { /* fall through */ }
             Phase1::ChildExited(status) => {
-                *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.pid.lock() = None;
                 return Ok(CycleResult::FailedToStart { status });
             }
             Phase1::ShuttingDown => {
                 child.shutdown(TERM_TIMEOUT).await?;
-                *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.pid.lock() = None;
                 return Ok(CycleResult::ShutdownRequested);
             }
             Phase1::StartupError(e) => {
                 child.shutdown(TERM_TIMEOUT).await?;
-                *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.pid.lock() = None;
                 return Err(e);
             }
         }
@@ -183,7 +184,7 @@ impl Supervisor {
                 Ok(CycleResult::ShutdownRequested)
             }
         };
-        *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.pid.lock() = None;
         result
     }
 }

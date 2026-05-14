@@ -69,6 +69,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 tokio-i3ipc = "0.16"
 swayipc-async = "3"
 url = "2"
+parking_lot = "0.12"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
