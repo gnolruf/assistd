@@ -99,6 +99,10 @@ impl Supervisor {
                 return;
             }
 
+            if consecutive_failures == 0 {
+                continue;
+            }
+
             let delay = backoff_delay(consecutive_failures - 1);
             warn!(
                 target: "assistd::llama_server",
