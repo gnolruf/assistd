@@ -1106,6 +1106,7 @@ impl App {
         self.generating = true;
     }
 
+    #[allow(clippy::expect_used)]
     fn handle_attach(&mut self, raw: &str) {
         let args = match shlex::split(raw) {
             Some(v) => v,

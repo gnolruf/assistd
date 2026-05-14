@@ -23,6 +23,7 @@ impl ChildProcess {
     ///
     /// # Errors
     /// Returns [`LlamaServerError::Spawn`] if the OS cannot fork/exec the binary.
+    #[allow(clippy::expect_used)]
     pub fn spawn(cfg: &LlamaServerConfig, model: &ModelConfig) -> Result<Self, LlamaServerError> {
         // Router mode: start with no `--hf-repo`. The presence state machine
         // calls `POST /models/load` with `model.name` to bring weights in on

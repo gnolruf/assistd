@@ -39,6 +39,7 @@ const RECALL_LIMIT: usize = 50;
 
 /// Validation regex for memory keys.
 const KEY_PATTERN: &str = r"^[a-z0-9._]+$";
+#[allow(clippy::expect_used)]
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 

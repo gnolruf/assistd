@@ -93,6 +93,7 @@ impl Agent {
     /// the caller doesn't need explicit cancellation; the
     /// `tx.is_closed()` path keeps existing behaviour for that case.
     #[instrument(skip_all, name = "agent_turn")]
+    #[allow(clippy::expect_used)]
     pub async fn run_turn(
         &self,
         user_text: String,

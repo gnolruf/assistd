@@ -415,6 +415,7 @@ impl OutputPane {
     /// Returns the full wrapped line list and the index of the first line
     /// to render at the top of the viewport. The scroll offset is clamped
     /// in place so it never exceeds the wrapped total.
+    #[allow(clippy::expect_used)]
     pub fn render_view(&mut self, width: u16, height: u16) -> (&[Line<'static>], u16) {
         let wrapped_len = self.wrapped(width).len();
         let max_offset = wrapped_len.saturating_sub(height as usize) as u16;
@@ -432,6 +433,7 @@ impl OutputPane {
         (lines, start)
     }
 
+    #[allow(clippy::expect_used)]
     fn wrapped(&mut self, width: u16) -> &[Line<'static>] {
         let needs_rewrap = self.dirty
             || self

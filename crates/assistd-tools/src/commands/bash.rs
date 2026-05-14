@@ -151,6 +151,7 @@ impl Command for BashCommand {
         )
     }
 
+    #[allow(clippy::expect_used)]
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         if input.args.is_empty() {
             return Ok(CommandOutput {

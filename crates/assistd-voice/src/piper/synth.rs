@@ -46,6 +46,7 @@ impl OneShotSynth {
     /// kernel pipe from filling and blocking piper mid-synthesis.
     /// On non-zero exit, the last 20 stderr lines are included in the
     /// error so callers can see piper's complaint.
+    #[allow(clippy::expect_used)]
     pub async fn synthesize(&self, text: &str) -> Result<SynthOutput, PiperError> {
         let cfg = &*self.cfg;
         let mut cmd = Command::new(&cfg.binary_path);

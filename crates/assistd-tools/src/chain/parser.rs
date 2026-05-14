@@ -133,6 +133,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
 ///   literal; `\` escapes the following character.
 /// - Unquoted chars: stop on whitespace or the start of an operator
 ///   (`|`, `&`, `;`). Backslash outside quotes is treated as literal.
+#[allow(clippy::unwrap_used)]
 fn read_word(input: &str, start: usize) -> Result<(String, usize), ParseError> {
     let bytes = input.as_bytes();
     let mut buf = String::new();
@@ -261,6 +262,7 @@ impl Parser {
         }
     }
 
+    #[allow(clippy::unwrap_used)]
     fn parse_cmd(&mut self) -> Result<Chain, ParseError> {
         let mut argv: Vec<String> = Vec::new();
         while let Some(Token::Word(_)) = self.peek() {

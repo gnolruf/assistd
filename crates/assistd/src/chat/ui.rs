@@ -546,6 +546,7 @@ fn compute_input_height(frame_width: u16, frame_height: u16, buffer: &str) -> u1
 /// to make forward progress). If the last row exactly fills its visible
 /// width, an empty phantom row is appended so the cursor at end-of-buffer
 /// has somewhere visible to sit.
+#[allow(clippy::expect_used)]
 fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
     let n = buf.len();
     if width == 0 {

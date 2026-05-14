@@ -17,6 +17,7 @@ pub fn minimal_toml() -> &'static str {
 /// Parse [`minimal_toml`] into a valid [`Config`]. Panics on failure; the
 /// fixture is a code-controlled literal, so a failure is a bug, not an
 /// environmental error.
+#[allow(clippy::expect_used)]
 pub fn minimal() -> Config {
     toml::from_str(minimal_toml()).expect("minimal fixture TOML must parse")
 }

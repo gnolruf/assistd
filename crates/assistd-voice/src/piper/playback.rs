@@ -191,6 +191,7 @@ impl RodioPlaybackWorker {
     /// are appended to rodio's internal queue and consumed by the
     /// audio thread. To wait for the queue to drain, follow with
     /// [`drain`](Self::drain).
+    #[allow(clippy::expect_used)]
     pub fn play(&self, output: SynthOutput) -> Result<(), PiperError> {
         let channels: ChannelCount = NonZero::new(1u16).expect("1 is non-zero");
         let sample_rate: SampleRate = NonZero::new(output.sample_rate).ok_or_else(|| {

@@ -70,6 +70,7 @@ impl StdioMcpClient {
     /// Returns the client (an `Arc<dyn McpClient>` once cast) and a
     /// `ChildLifeline` whose `wait_for_exit()` future fires when the
     /// child exits; used by the per-server supervisor.
+    #[allow(clippy::expect_used)]
     pub async fn spawn(cfg: StdioConfig) -> Result<(Arc<Self>, ChildLifeline), McpError> {
         let mut cmd = Command::new(&cfg.command);
         cmd.args(&cfg.args)
@@ -365,6 +366,7 @@ impl ChildLifeline {
     /// Block until the child exits naturally. Returns whatever
     /// `Child::wait` returns. The supervisor races this against the
     /// shared shutdown signal.
+    #[allow(clippy::expect_used)]
     pub async fn wait_for_exit(&mut self) -> std::io::Result<ExitStatus> {
         let child = self
             .child

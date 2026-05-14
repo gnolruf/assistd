@@ -81,6 +81,7 @@ pub async fn ensure_voice(hf_id: &str, cache_dir: &Path) -> Result<VoiceFiles, P
     })
 }
 
+#[allow(clippy::expect_used)]
 async fn ensure_one(repo: &str, file: &str, dest: &Path) -> Result<(), PiperError> {
     if dest.exists() {
         tracing::debug!(

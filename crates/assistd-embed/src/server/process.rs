@@ -22,6 +22,7 @@ impl ChildProcess {
     /// # Errors
     ///
     /// Returns [`EmbedServerError::Spawn`] if the process cannot be started.
+    #[allow(clippy::expect_used)]
     pub fn spawn(cfg: &EmbeddingConfig) -> Result<Self, EmbedServerError> {
         // The embedding server is NOT in router mode. We pass `--hf-repo`
         // directly so the model is downloaded once and held resident for

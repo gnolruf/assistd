@@ -476,6 +476,7 @@ async fn capture_x11_monitor(monitor: &str, deadline: Duration) -> Result<Vec<u8
 /// pattern (`kill_on_drop` + `process_group(0)` on Unix) mirrors
 /// `assistd-voice/src/piper/synth.rs`: a timeout drops the `Child`,
 /// which sends SIGKILL to the process group via `kill_on_drop`.
+#[allow(clippy::expect_used)]
 async fn spawn_subprocess(
     binary: &str,
     args: &[&str],

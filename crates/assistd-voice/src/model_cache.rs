@@ -47,6 +47,7 @@ fn cached_path(cache_dir: &Path, repo: &str, file: &str) -> PathBuf {
 /// Ensure the file for `hf_id` exists locally, downloading it on first
 /// use. Returns the resolved path. Safe against partial writes: the
 /// download lands in `<file>.part` and is atomically renamed on success.
+#[allow(clippy::expect_used)]
 pub async fn ensure_model(hf_id: &str, cache_dir: &Path) -> Result<PathBuf, TranscriptionError> {
     let (repo, file) = parse_hf_id(hf_id)?;
     let dest = cached_path(cache_dir, &repo, &file);

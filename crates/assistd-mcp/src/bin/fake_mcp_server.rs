@@ -16,7 +16,12 @@
 //! test can locate it under `target/<profile>/fake_mcp_server` via the
 //! `CARGO_BIN_EXE_<name>` env var that cargo sets for tests.
 
-#![allow(clippy::print_stdout, clippy::print_stderr)]
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::unwrap_used,
+    clippy::expect_used
+)]
 
 use std::io::{BufRead, BufReader, Write};
 

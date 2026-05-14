@@ -26,6 +26,7 @@ impl WebCommand {
     }
 
     /// Create a `WebCommand` with a custom request timeout.
+    #[allow(clippy::expect_used)]
     pub fn with_timeout(timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()

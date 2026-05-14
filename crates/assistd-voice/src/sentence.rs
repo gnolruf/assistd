@@ -495,6 +495,7 @@ fn strip_emphasis(s: &str) -> String {
     out
 }
 
+#[allow(clippy::expect_used)]
 fn replace_urls(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
