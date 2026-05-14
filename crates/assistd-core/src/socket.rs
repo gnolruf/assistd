@@ -6,13 +6,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
 const EVENT_CHANNEL_CAPACITY: usize = 32;
+
+/// Hard cap on a single newline-delimited request frame. `read_line` is
+/// otherwise unbounded; a runaway client streaming a multi-GB prompt
+/// would OOM the daemon. 64 MiB fits a single 32 MiB image attachment
+/// (`MAX_IMAGE_BYTES`) base64-encoded plus JSON overhead with margin.
+const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Errors produced by the socket listener and per-connection handlers.
 #[derive(Debug, Error)]
@@ -230,9 +236,25 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
-    let n = reader.read_line(&mut line).await?;
+    let n = (&mut reader)
+        .take(MAX_REQUEST_BYTES)
+        .read_line(&mut line)
+        .await?;
     if n == 0 {
         debug!("client disconnected without sending a request");
+        return Ok(());
+    }
+    // `Take` signals "EOF" once the cap is hit, so a truncated frame
+    // arrives with no trailing newline. Reject it before we hand the
+    // partial bytes to serde_json (which would otherwise emit a
+    // misleading parse error).
+    if !line.ends_with('\n') {
+        let err = Event::Error {
+            id: String::new(),
+            message: format!("request exceeded {MAX_REQUEST_BYTES}-byte limit"),
+        };
+        write_event(&mut write_half, &err).await?;
+        write_half.shutdown().await?;
         return Ok(());
     }
 
@@ -299,7 +321,11 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
         let mut buf = String::new();
         loop {
             buf.clear();
-            match reader.read_line(&mut buf).await {
+            match (&mut reader)
+                .take(MAX_REQUEST_BYTES)
+                .read_line(&mut buf)
+                .await
+            {
                 Ok(0) => {
                     // Half-close from the client (the legacy CLI
                     // pattern). Exit cleanly.
@@ -310,6 +336,17 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
                     debug!("connection read loop ended: {e}");
                     break;
                 }
+            }
+            if !buf.ends_with('\n') {
+                // `Take` hit its cap before the frame terminated.
+                // Stop reading further client input rather than try
+                // to resync mid-stream; dispatch continues to drain.
+                warn!(
+                    bytes = buf.len(),
+                    "mid-stream request exceeded {MAX_REQUEST_BYTES}-byte limit; closing read \
+                     side"
+                );
+                break;
             }
             let trimmed = buf.trim();
             if trimmed.is_empty() {
@@ -506,6 +543,51 @@ mod tests {
 
         tx.send(()).unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversize_request_is_rejected_without_oom() {
+        // A request larger than MAX_REQUEST_BYTES must be rejected
+        // with an Error event rather than buffered in full. We send
+        // MAX_REQUEST_BYTES + 1 bytes (no newline) so the daemon's
+        // `.take()` cap fires before any newline arrives.
+        with_server(test_state(), |path| async move {
+            let stream = UnixStream::connect(&path).await.unwrap();
+            let (read, mut write) = stream.into_split();
+
+            // Send the cap + 1 bytes in chunks so we don't allocate
+            // the whole payload up front in the test process.
+            let chunk = vec![b'a'; 1024 * 1024];
+            let mut remaining = MAX_REQUEST_BYTES as usize + 1;
+            while remaining > 0 {
+                let n = remaining.min(chunk.len());
+                if write.write_all(&chunk[..n]).await.is_err() {
+                    // Daemon may close the read side once the cap
+                    // is hit; that's a valid outcome too.
+                    break;
+                }
+                remaining -= n;
+            }
+            // Best-effort shutdown; daemon may already be closing.
+            let _ = write.shutdown().await;
+
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            let n = reader.read_line(&mut line).await.unwrap();
+            assert!(n > 0, "expected an Error event before EOF");
+            let event: Event = serde_json::from_str(line.trim()).unwrap();
+            match event {
+                Event::Error { id, message } => {
+                    assert_eq!(id, "");
+                    assert!(
+                        message.contains("limit"),
+                        "expected limit error, got {message}"
+                    );
+                }
+                other => panic!("expected Error event, got {other:?}"),
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
