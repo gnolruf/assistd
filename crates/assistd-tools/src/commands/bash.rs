@@ -267,8 +267,20 @@ impl Command for BashCommand {
             let _ = child.wait().await;
         }
 
-        let stdout = stdout_task.await.unwrap_or_default();
-        let stderr_bytes = stderr_task.await.unwrap_or_default();
+        let (stdout, stdout_overflowed) = stdout_task.await.unwrap_or_default();
+        let (stderr_bytes, stderr_overflowed) = stderr_task.await.unwrap_or_default();
+
+        // The reader closes its pipe on overflow, which can SIGPIPE the
+        // child; that race makes `child.wait()` ready at the same time as
+        // the overflow notify, and `select!` picks pseudo-randomly. The
+        // bool returned by `read_capped` is the source of truth — if
+        // either stream overflowed, force the Overflow outcome regardless
+        // of which select branch won.
+        let outcome = if stdout_overflowed || stderr_overflowed {
+            WaitOutcome::Overflow
+        } else {
+            outcome
+        };
 
         match outcome {
             WaitOutcome::Exited(status) => {
@@ -331,29 +343,35 @@ enum WaitOutcome {
     Overflow,
 }
 
-/// Read bytes from `reader` into a `Vec` capped at `limit`. On the first
-/// read that would push the buffer past `limit`, the excess is dropped,
-/// `overflow` is signalled, and the function returns. EOF and read errors
-/// terminate without signalling.
+/// Read bytes from `reader` into a `Vec` capped at `limit`. Returns the
+/// captured bytes and an `overflowed` flag: `true` iff the cap was hit.
+/// On overflow the excess is dropped, `overflow` is signalled (to wake
+/// the main `select!`), and the function returns. EOF and read errors
+/// return `(buf, false)` without signalling.
+///
+/// The bool is the authoritative overflow signal — the `Notify` is only
+/// an "wake up early" hint. The main task always checks this flag after
+/// joining, because closing the pipe on return may SIGPIPE the child and
+/// make `child.wait()` race the notify.
 async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     limit: usize,
     overflow: Arc<Notify>,
-) -> Vec<u8> {
+) -> (Vec<u8>, bool) {
     let mut buf: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 8192];
     loop {
         match reader.read(&mut tmp).await {
-            Ok(0) => return buf,
+            Ok(0) => return (buf, false),
             Ok(n) => {
                 buf.extend_from_slice(&tmp[..n]);
                 if buf.len() > limit {
                     buf.truncate(limit);
                     overflow.notify_one();
-                    return buf;
+                    return (buf, true);
                 }
             }
-            Err(_) => return buf,
+            Err(_) => return (buf, false),
         }
     }
 }
