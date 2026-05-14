@@ -38,11 +38,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as ProcCommand;
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use tracing::warn;
 
+use crate::chain::PIPE_BUF_MAX;
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
 use crate::policy::{
     ConfirmationGate, ConfirmationRequest, ResolvedSandboxMode, SandboxInfo, matches_denylist,
@@ -57,6 +59,17 @@ const POLICY_DENIED_EXIT: i32 = 126;
 /// when the `tokio::time::timeout` future fires and the `tokio::Child`
 /// handle's `kill_on_drop(true)` destructor runs.
 const TIMEOUT_EXIT: i32 = 137;
+
+/// Max bytes captured from the child's stdout or stderr while it runs.
+/// Mirrors the chain executor's `PIPE_BUF_MAX` so a runaway script (e.g.
+/// `bash "yes"`) can't balloon daemon memory before the timeout fires.
+/// Applied per-stream: stdout and stderr are bounded independently.
+const OUTPUT_BUF_MAX: usize = PIPE_BUF_MAX;
+
+/// Exit code returned when a bash script exceeds [`OUTPUT_BUF_MAX`] on
+/// either pipe. Matches the chain executor's pipe-overflow exit so `||`
+/// fallbacks behave the same regardless of where the overflow happened.
+const OUTPUT_OVERFLOW_EXIT: i32 = 141;
 
 /// Bash-policy bundle: timeout, denylist substrings, tokenized destructive
 /// patterns. Caller (e.g. `assistd-core::build_tools`) shlex-tokenizes
@@ -227,23 +240,69 @@ impl Command for BashCommand {
             drop(stdin);
         }
 
-        // On timeout, the tokio::Child is dropped, sending SIGKILL to the
-        // process group via kill_on_drop + process_group(0).
-        let output = match timeout(self.cfg.timeout, child.wait_with_output()).await {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
-                return Ok(CommandOutput::failed(
-                    1,
-                    error_line(
-                        "bash",
-                        format_args!("wait failed: {e}"),
-                        "Try",
-                        "re-running the command",
-                    )
-                    .into_bytes(),
-                ));
+        // Drive the child's stdout/stderr ourselves rather than letting
+        // `wait_with_output()` collect them into unbounded Vecs. Without
+        // this, a script like `yes` would buffer tens of GB in-process
+        // before the chain executor's PIPE_BUF_MAX check ever fires; that
+        // check only runs *after* this function returns.
+        let stdout_pipe = child.stdout.take().expect("stdout was piped");
+        let stderr_pipe = child.stderr.take().expect("stderr was piped");
+        let overflow = Arc::new(Notify::new());
+        let stdout_task = tokio::spawn(read_capped(stdout_pipe, OUTPUT_BUF_MAX, overflow.clone()));
+        let stderr_task = tokio::spawn(read_capped(stderr_pipe, OUTPUT_BUF_MAX, overflow.clone()));
+
+        // On timeout or overflow, the tokio::Child is killed; readers see
+        // EOF as the kernel closes the pipes and the reader tasks join.
+        let outcome = tokio::select! {
+            res = timeout(self.cfg.timeout, child.wait()) => match res {
+                Ok(Ok(status)) => WaitOutcome::Exited(status),
+                Ok(Err(e)) => WaitOutcome::WaitErr(e),
+                Err(_) => WaitOutcome::Timeout,
+            },
+            _ = overflow.notified() => WaitOutcome::Overflow,
+        };
+
+        if matches!(outcome, WaitOutcome::Timeout | WaitOutcome::Overflow) {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+
+        let (stdout, stdout_overflowed) = stdout_task.await.unwrap_or_default();
+        let (stderr_bytes, stderr_overflowed) = stderr_task.await.unwrap_or_default();
+
+        // The reader closes its pipe on overflow, which can SIGPIPE the
+        // child; that race makes `child.wait()` ready at the same time as
+        // the overflow notify, and `select!` picks pseudo-randomly. The
+        // bool returned by `read_capped` is the source of truth — if
+        // either stream overflowed, force the Overflow outcome regardless
+        // of which select branch won.
+        let outcome = if stdout_overflowed || stderr_overflowed {
+            WaitOutcome::Overflow
+        } else {
+            outcome
+        };
+
+        match outcome {
+            WaitOutcome::Exited(status) => {
+                let exit_code = status.code().unwrap_or(TIMEOUT_EXIT);
+                Ok(CommandOutput {
+                    stdout,
+                    stderr: stderr_bytes,
+                    exit_code,
+                    attachments: Vec::new(),
+                })
             }
-            Err(_) => {
+            WaitOutcome::WaitErr(e) => Ok(CommandOutput::failed(
+                1,
+                error_line(
+                    "bash",
+                    format_args!("wait failed: {e}"),
+                    "Try",
+                    "re-running the command",
+                )
+                .into_bytes(),
+            )),
+            WaitOutcome::Timeout => {
                 // AC #2: exact one-line format including the `[exit:N | Ms]`
                 // suffix inline. This is a deliberate divergence from the
                 // `error_line` / presentation-footer convention because
@@ -254,17 +313,66 @@ impl Command for BashCommand {
                 let msg = format!(
                     "[error] bash: timed out after {secs}s [exit:{TIMEOUT_EXIT} | {elapsed_secs:.1}s]\n"
                 );
-                return Ok(CommandOutput::failed(TIMEOUT_EXIT, msg.into_bytes()));
+                Ok(CommandOutput::failed(TIMEOUT_EXIT, msg.into_bytes()))
             }
-        };
+            WaitOutcome::Overflow => {
+                let overflow_msg = error_line(
+                    "bash",
+                    format_args!("output exceeded {OUTPUT_BUF_MAX} bytes; child killed"),
+                    "Try",
+                    "redirect to a file or pipe through head/wc -l to shrink the stream",
+                )
+                .into_bytes();
+                let mut merged_stderr = stderr_bytes;
+                merged_stderr.extend_from_slice(&overflow_msg);
+                Ok(CommandOutput {
+                    stdout,
+                    stderr: merged_stderr,
+                    exit_code: OUTPUT_OVERFLOW_EXIT,
+                    attachments: Vec::new(),
+                })
+            }
+        }
+    }
+}
 
-        let exit_code = output.status.code().unwrap_or(TIMEOUT_EXIT);
-        Ok(CommandOutput {
-            stdout: output.stdout,
-            stderr: output.stderr,
-            exit_code,
-            attachments: Vec::new(),
-        })
+enum WaitOutcome {
+    Exited(std::process::ExitStatus),
+    WaitErr(std::io::Error),
+    Timeout,
+    Overflow,
+}
+
+/// Read bytes from `reader` into a `Vec` capped at `limit`. Returns the
+/// captured bytes and an `overflowed` flag: `true` iff the cap was hit.
+/// On overflow the excess is dropped, `overflow` is signalled (to wake
+/// the main `select!`), and the function returns. EOF and read errors
+/// return `(buf, false)` without signalling.
+///
+/// The bool is the authoritative overflow signal — the `Notify` is only
+/// an "wake up early" hint. The main task always checks this flag after
+/// joining, because closing the pipe on return may SIGPIPE the child and
+/// make `child.wait()` race the notify.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+    overflow: Arc<Notify>,
+) -> (Vec<u8>, bool) {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 8192];
+    loop {
+        match reader.read(&mut tmp).await {
+            Ok(0) => return (buf, false),
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.len() > limit {
+                    buf.truncate(limit);
+                    overflow.notify_one();
+                    return (buf, true);
+                }
+            }
+            Err(_) => return (buf, false),
+        }
     }
 }
 
@@ -553,6 +661,82 @@ mod tests {
             .unwrap();
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"rm -rf\n");
+    }
+
+    /// A runaway script (`yes`) emits gigabytes per second. Without an
+    /// execution-time cap, `wait_with_output()` would buffer it all into
+    /// memory before the chain executor's PIPE_BUF_MAX check fires. With
+    /// the cap, the child is killed at OUTPUT_BUF_MAX and we return exit
+    /// 141 with a bounded `stdout`. We use a short timeout so the test
+    /// is fast even if the overflow path is broken — but the test only
+    /// passes if overflow (141) fires *before* timeout (137).
+    #[tokio::test]
+    async fn bash_output_overflow_kills_child_and_returns_141() {
+        let cfg = BashPolicyCfg {
+            timeout: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
+        let out = cmd
+            .run(CommandInput {
+                args: vec!["yes".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
+        assert!(
+            out.stdout.len() <= OUTPUT_BUF_MAX,
+            "stdout was {} bytes, expected <= {OUTPUT_BUF_MAX}",
+            out.stdout.len()
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("output exceeded"),
+            "expected overflow message in stderr, got {stderr}"
+        );
+    }
+
+    /// Stderr is bounded too: a script that floods only stderr is killed
+    /// once it crosses the cap. Uses `bash -c` redirection inside the
+    /// script so the bytes land on fd 2.
+    #[tokio::test]
+    async fn bash_stderr_overflow_also_caps() {
+        let cfg = BashPolicyCfg {
+            timeout: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
+        let out = cmd
+            .run(CommandInput {
+                args: vec!["yes 1>&2".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
+        assert!(
+            out.stderr.len() <= OUTPUT_BUF_MAX + 256,
+            "stderr was {} bytes, expected <= ~{OUTPUT_BUF_MAX} + overflow message",
+            out.stderr.len()
+        );
+    }
+
+    /// A script that writes well under the cap and exits cleanly must
+    /// still return exit 0 with its full stdout — i.e. the streaming
+    /// path doesn't drop bytes or false-positive on overflow.
+    #[tokio::test]
+    async fn bash_below_cap_returns_full_output() {
+        let out = BashCommand::default()
+            .run(CommandInput {
+                // ~50 KiB, comfortably below 10 MiB.
+                args: vec!["printf '%.0sx' {1..51200}".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout.len(), 51200);
     }
 
     /// Sandbox mode `None` executes bash directly with no wrapper.
