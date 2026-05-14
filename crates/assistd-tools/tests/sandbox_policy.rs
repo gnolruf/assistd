@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
+
 //! Integration tests for the bash command's policy and sandbox layers.
 //!
 //! Covers all four layers in the order they fire (per

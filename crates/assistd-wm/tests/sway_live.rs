@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
+
 //! Live Sway integration test. `#[ignore]` so it never runs in CI or
 //! `cargo test`; opt in with:
 //!

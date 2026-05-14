@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! End-to-end test for AC #3 of Milestone 4: open the SQLite store at
 //! a real on-disk path, write a turn, drop everything, reopen at the
 //! *same* path, and prove the search returns a hit.

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Live i3 integration test. `#[ignore]` so it never runs in CI or
 //! `cargo test`; opt in with:
 //!

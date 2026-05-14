@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Verifies that every default constant defined in [`defaults`] lines up
 //! with the field initializer produced by the corresponding `Default`
 //! impl. Catches the common drift where a default is changed in one

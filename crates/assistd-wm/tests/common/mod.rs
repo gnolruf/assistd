@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Shared, read-only assertions exercised by both `i3_live.rs` and
 //! `sway_live.rs`. These are the "i3 test suite" that the Sway backend
 //! must also pass: every assertion reads cached or freshly-fetched

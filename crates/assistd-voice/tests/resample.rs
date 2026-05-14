@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! 48 kHz stereo → 16 kHz mono resampling coverage.
 //!
 //! Exercises `mic::consumer::drain_loop` end-to-end by feeding a
