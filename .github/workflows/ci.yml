@@ -24,10 +24,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
+      # Reads channel + components from rust-toolchain.toml so CI tracks
+      # the pinned toolchain instead of silently drifting to whatever
+      # "stable" resolves to on the runner.
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: clippy, rustfmt
+          cache: false
 
       # cpal links to libasound2 on Linux (ALSA backend) and pkg-config
       # is invoked by alsa-sys at build time. ubuntu-latest ships
