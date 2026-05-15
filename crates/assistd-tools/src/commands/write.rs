@@ -1,5 +1,3 @@
-#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
-
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -115,7 +113,12 @@ impl Command for WriteCommand {
         let write_target: PathBuf = if self.cfg.writable_paths.is_empty() {
             PathBuf::from(&raw_path)
         } else {
-            match resolve_for_allowlist(&raw_path) {
+            // Read $HOME once here so `resolve_for_allowlist`/`expand_tilde`
+            // stay pure: passing `home` as an arg avoids touching process-
+            // global env from the hot path and makes both functions
+            // trivially unit-testable without env mutation.
+            let home = std::env::var("HOME").ok();
+            match resolve_for_allowlist(&raw_path, home.as_deref()) {
                 Ok(resolved) => {
                     if !self
                         .cfg
@@ -212,8 +215,8 @@ enum PathResolveError {
 /// can create symlinks under an allowlisted directory could swap one in
 /// between check and write to redirect output. The v1 trust model is
 /// "LLM-as-user", so this is accepted.
-fn resolve_for_allowlist(raw: &str) -> Result<PathBuf, PathResolveError> {
-    let expanded = expand_tilde(raw)?;
+fn resolve_for_allowlist(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
+    let expanded = expand_tilde(raw, home)?;
     if !expanded.is_absolute() {
         return Err(PathResolveError::Relative);
     }
@@ -224,16 +227,20 @@ fn resolve_for_allowlist(raw: &str) -> Result<PathBuf, PathResolveError> {
     Ok(canonical_anchor.join(tail))
 }
 
-/// Expand a leading `~` (with or without trailing slash) using `$HOME`.
-/// `~user` is not supported; expand to `$HOME` regardless of user, which
-/// is fine since in single-user trust model the only `~` the LLM should
-/// emit is the running user's.
-fn expand_tilde(raw: &str) -> Result<PathBuf, PathResolveError> {
+/// Expand a leading `~` (with or without trailing slash) using the supplied
+/// `home`. `~user` is not supported; expand to `home` regardless of user,
+/// which is fine since in the single-user trust model the only `~` the LLM
+/// should emit is the running user's.
+///
+/// `home` is taken as a parameter rather than read from `$HOME` here so the
+/// function is pure: callers read the env once at the boundary, and tests
+/// can supply a literal value without mutating process-global state.
+fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
     if let Some(rest) = raw.strip_prefix("~/") {
-        let home = std::env::var("HOME").map_err(|_| PathResolveError::HomeNotSet)?;
+        let home = home.ok_or(PathResolveError::HomeNotSet)?;
         Ok(PathBuf::from(home).join(rest))
     } else if raw == "~" {
-        let home = std::env::var("HOME").map_err(|_| PathResolveError::HomeNotSet)?;
+        let home = home.ok_or(PathResolveError::HomeNotSet)?;
         Ok(PathBuf::from(home))
     } else {
         Ok(PathBuf::from(raw))
@@ -472,34 +479,29 @@ mod tests {
         assert!(stderr.contains("relative paths not permitted"), "{stderr}");
     }
 
-    /// Tilde expansion should resolve `~/foo` to `$HOME/foo` before the
-    /// allowlist match. Uses a tempdir overridden as $HOME so the test is
-    /// hermetic.
-    #[tokio::test]
-    async fn write_allowlist_expands_tilde() {
+    /// Tilde expansion should resolve `~/foo` to `<home>/foo` before the
+    /// allowlist match. Exercised against `resolve_for_allowlist` directly
+    /// with an explicit `home` so the test never mutates the process-global
+    /// `$HOME` (which would race with parallel tests under `cargo test`).
+    #[test]
+    fn write_allowlist_expands_tilde() {
         let dir = tempdir().unwrap();
-        let saved_home = std::env::var("HOME").ok();
-        // SAFETY: std::env is process-global; we restore before returning.
-        unsafe {
-            std::env::set_var("HOME", dir.path());
-        }
-        let target_raw = "~/tilde-target.txt";
-        let cmd = WriteCommand::new(cfg_from(&[dir.path()]));
-        let out = cmd
-            .run(CommandInput {
-                args: vec![target_raw.into(), "ok".into()],
-                stdin: Vec::new(),
-            })
-            .await
-            .unwrap();
-        // Restore HOME before asserting so a failure doesn't leave a dirty
-        // env for subsequent tests in the same process.
-        match saved_home {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        assert_eq!(out.exit_code, 0);
-        assert!(dir.path().join("tilde-target.txt").exists());
+        let home = dir.path().to_str().expect("tempdir path is valid utf-8");
+        let resolved =
+            resolve_for_allowlist("~/tilde-target.txt", Some(home)).expect("tilde resolves");
+        let expected = std::fs::canonicalize(dir.path())
+            .expect("tempdir canonicalizes")
+            .join("tilde-target.txt");
+        assert_eq!(resolved, expected);
+    }
+
+    /// `expand_tilde` should fail with `HomeNotSet` when no home value is
+    /// provided. This is the failure path the production code surfaces as
+    /// exit-126 with the "$HOME not set" message.
+    #[test]
+    fn expand_tilde_without_home_errors() {
+        let err = expand_tilde("~/foo", None).expect_err("missing home should error");
+        assert!(matches!(err, PathResolveError::HomeNotSet));
     }
 
     /// A path like `/tmp/<dir>/newsub/file.txt` where `newsub` doesn't exist
