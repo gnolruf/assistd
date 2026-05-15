@@ -66,7 +66,7 @@ pub use assistd_voice::{
 pub use assistd_wm::{NoWindowManager, WindowManager};
 
 pub use presence::{PresenceManager, RequestGuard};
-pub use state::{AppState, ConversationContext};
+pub use state::{AppState, ConversationContext, MemoryStack, RuntimeState, Subsystems};
 
 use anyhow::{Context, Result};
 use assistd_embed::{EmbedJob, Embedder};
