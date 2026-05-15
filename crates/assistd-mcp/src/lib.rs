@@ -64,6 +64,7 @@ pub mod error;
 pub mod handle;
 pub mod health_route;
 pub mod jsonrpc;
+pub mod prompt;
 pub mod sse;
 pub mod stdio;
 
