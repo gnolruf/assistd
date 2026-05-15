@@ -1,5 +1,3 @@
-#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
-
 //! Command-execution policy: confirmation gates, pattern matchers, and
 //! sandbox probing.
 //!
@@ -380,12 +378,24 @@ pub fn probe_sandbox(
     request: SandboxRequest,
     extra_args: Vec<String>,
 ) -> anyhow::Result<Arc<SandboxInfo>> {
+    let path_env = std::env::var_os("PATH").unwrap_or_default();
+    probe_sandbox_in(request, extra_args, &path_env)
+}
+
+/// Inner form of [`probe_sandbox`] that takes the `PATH` value explicitly,
+/// so tests can exercise the missing-bwrap failure path without mutating
+/// the global process environment (which would race with parallel tests).
+fn probe_sandbox_in(
+    request: SandboxRequest,
+    extra_args: Vec<String>,
+    path_env: &std::ffi::OsStr,
+) -> anyhow::Result<Arc<SandboxInfo>> {
     let mode = match request {
         SandboxRequest::None => {
             info!(target: "assistd::policy", "bash sandbox: disabled by config");
             ResolvedSandboxMode::None
         }
-        SandboxRequest::Auto => match which_in_path("bwrap") {
+        SandboxRequest::Auto => match which_in_path_in("bwrap", path_env) {
             Some(path) => {
                 info!(
                     target: "assistd::policy",
@@ -403,7 +413,7 @@ pub fn probe_sandbox(
                 ResolvedSandboxMode::None
             }
         },
-        SandboxRequest::Bwrap => match which_in_path("bwrap") {
+        SandboxRequest::Bwrap => match which_in_path_in("bwrap", path_env) {
             Some(path) => {
                 info!(
                     target: "assistd::policy",
@@ -423,11 +433,13 @@ pub fn probe_sandbox(
     Ok(Arc::new(SandboxInfo { mode, extra_args }))
 }
 
-/// Minimal `which`: first PATH entry that contains an executable file with
-/// the given basename. Avoids a dependency on the `which` crate.
-fn which_in_path(name: &str) -> Option<PathBuf> {
-    let path_env = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_env) {
+/// Minimal `which`: first entry in the supplied PATH value that contains an
+/// executable file with the given basename. Taking `path_env` as a parameter
+/// (rather than reading `std::env::var_os("PATH")` directly) keeps the
+/// function pure and lets tests inject an empty PATH without racing other
+/// threads.
+fn which_in_path_in(name: &str, path_env: &std::ffi::OsStr) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path_env) {
         if dir.as_os_str().is_empty() {
             continue;
         }
@@ -609,25 +621,10 @@ mod tests {
 
     #[test]
     fn probe_sandbox_bwrap_missing_fails_startup() {
-        // Force an empty PATH so bwrap can't be found.
-        let saved = std::env::var_os("PATH");
-        // SAFETY: tests run single-threaded by default for std::env mutation;
-        // we restore on exit. Accept the test smell here because isolating
-        // the probe otherwise requires injecting PATH, which would clutter
-        // the public API.
-        unsafe {
-            std::env::set_var("PATH", "");
-        }
-        let result = probe_sandbox(SandboxRequest::Bwrap, Vec::new());
-        if let Some(p) = saved {
-            unsafe {
-                std::env::set_var("PATH", p);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("PATH");
-            }
-        }
+        // Inject an empty PATH directly into the inner probe so the test
+        // doesn't touch process-global env, which would race with the rest
+        // of the test binary under `cargo test`'s default thread pool.
+        let result = probe_sandbox_in(SandboxRequest::Bwrap, Vec::new(), std::ffi::OsStr::new(""));
         assert!(
             result.is_err(),
             "expected bwrap probe to fail with empty PATH"
