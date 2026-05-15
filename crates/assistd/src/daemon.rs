@@ -11,7 +11,7 @@
 //! [`DaemonShutdown`] for ordered teardown.
 
 use anyhow::{Context, Result};
-use assistd_core::{AppState, Config, PresenceManager};
+use assistd_core::{AppState, Config, MemoryStack, PresenceManager, RuntimeState, Subsystems};
 use assistd_llm::LlamaChatClient;
 use assistd_tools::{IpcConfirmationGate, MemoryOps};
 use clap::Args;
@@ -215,8 +215,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let chat: Arc<dyn assistd_llm::LlmBackend> = Arc::new(chat);
 
     replay_history(chat.as_ref(), resumed_history).await;
-    let mut state_builder = AppState::new(
-        config,
+
+    let subsystems = Subsystems::new(
         chat,
         presence.clone(),
         tools,
@@ -224,20 +224,28 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         voice.listener.clone(),
         voice.output,
     )
-    .with_vision_revalidator(vision_revalidator)
-    .with_memory(memory_store)
-    .with_conversations(memory.conversation_store.clone())
-    .with_conversation_ctx(conversation_ctx)
-    .with_embedder(embedder)
-    .with_semantic(semantic_store)
-    .with_embed_tx(embed_tx)
-    .with_embedding_cfg(embedding_cfg_for_state)
-    .with_window_manager(window_manager);
+    .with_window_manager(window_manager)
+    .with_vision_revalidator(vision_revalidator);
+
+    let mut memory_stack = MemoryStack::disabled(embedding_cfg_for_state)
+        .with_memory(memory_store)
+        .with_conversations(memory.conversation_store.clone())
+        .with_embedder(embedder)
+        .with_semantic(semantic_store)
+        .with_embed_tx(embed_tx);
     if let Some(handle) = sqlite_handle {
-        state_builder = state_builder.with_chunks(handle);
+        memory_stack = memory_stack.with_chunks(handle);
     }
-    let state = Arc::new(state_builder);
-    let persistence_tracker = state.persistence_tracker();
+
+    let runtime = RuntimeState::new().with_conversation_ctx(conversation_ctx);
+
+    let state = Arc::new(AppState {
+        config,
+        subsystems,
+        memory: memory_stack,
+        runtime,
+    });
+    let persistence_tracker = state.runtime.persistence_tracker_handle();
 
     let listen_handles = if continuous_enabled {
         Some(listen_dispatcher::spawn(
