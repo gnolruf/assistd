@@ -20,6 +20,23 @@ const EVENT_CHANNEL_CAPACITY: usize = 32;
 /// (`MAX_IMAGE_BYTES`) base64-encoded plus JSON overhead with margin.
 const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Backoff applied when `accept()` returns EMFILE/ENFILE. Without it the
+/// select! arm spins as fast as the runtime can poll because the error
+/// is returned synchronously from the syscall and nothing else changes
+/// to clear the condition. 100 ms gives in-flight connections time to
+/// finish and release file descriptors, while keeping the daemon
+/// responsive once recovery happens.
+const FD_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Returns true when an accept error reflects a file-descriptor limit
+/// (`EMFILE` — per-process limit, the common case; `ENFILE` —
+/// system-wide). We can't rely on `io::ErrorKind` here because EMFILE
+/// maps to the unstable `Uncategorized` variant on current stable Rust,
+/// so we match the raw errno directly.
+fn is_fd_exhaustion(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE))
+}
+
 /// Errors produced by the socket listener and per-connection handlers.
 #[derive(Debug, Error)]
 pub enum SocketError {
@@ -159,6 +176,11 @@ where
 {
     let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
     let mut connections: JoinSet<()> = JoinSet::new();
+    // Tracks whether the previous accept hit EMFILE/ENFILE so we log
+    // exactly once per incident (entry + recovery) instead of once per
+    // failed syscall — the latter floods the log channel and starves
+    // other tasks of the writer.
+    let mut fd_exhausted = false;
 
     tokio::pin!(shutdown);
     loop {
@@ -170,12 +192,38 @@ where
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _addr)) => {
+                        if fd_exhausted {
+                            info!(
+                                "accept loop recovered from FD exhaustion; resuming \
+                                 normal operation"
+                            );
+                            fd_exhausted = false;
+                        }
                         let conn_state = state.clone();
                         connections.spawn(async move {
                             if let Err(e) = handle_connection(stream, conn_state).await {
                                 error!("connection error: {e}");
                             }
                         });
+                    }
+                    Err(e) if is_fd_exhaustion(&e) => {
+                        // Without a backoff this arm spins: the kernel
+                        // returns EMFILE synchronously every time we
+                        // call accept(), so the select! wakes again
+                        // immediately. Sleep gives reaping connections
+                        // a window to drop their FDs; suppress repeat
+                        // logs until accept() succeeds again.
+                        if !fd_exhausted {
+                            warn!(
+                                error = %e,
+                                backoff_ms = FD_EXHAUSTION_BACKOFF.as_millis() as u64,
+                                "accept failed: file-descriptor limit reached; backing \
+                                 off until in-flight connections release descriptors. \
+                                 Repeat occurrences suppressed until recovery."
+                            );
+                            fd_exhausted = true;
+                        }
+                        tokio::time::sleep(FD_EXHAUSTION_BACKOFF).await;
                     }
                     Err(e) => {
                         error!("accept error: {e}");
@@ -419,6 +467,34 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn fd_exhaustion_predicate_matches_emfile_and_enfile() {
+        // Pinning the predicate is the load-bearing piece of the
+        // EMFILE-spin fix: misclassifying these as "Other" would
+        // route them through the silent `error!` arm and the loop
+        // would spin again with no backoff.
+        let emfile = std::io::Error::from_raw_os_error(libc::EMFILE);
+        let enfile = std::io::Error::from_raw_os_error(libc::ENFILE);
+        assert!(
+            is_fd_exhaustion(&emfile),
+            "EMFILE must classify as FD exhaustion"
+        );
+        assert!(
+            is_fd_exhaustion(&enfile),
+            "ENFILE must classify as FD exhaustion"
+        );
+    }
+
+    #[test]
+    fn fd_exhaustion_predicate_rejects_unrelated_errors() {
+        let conn_reset = std::io::Error::from_raw_os_error(libc::ECONNRESET);
+        let conn_aborted = std::io::Error::from_raw_os_error(libc::ECONNABORTED);
+        let no_errno = std::io::Error::other("synthetic non-OS error");
+        assert!(!is_fd_exhaustion(&conn_reset));
+        assert!(!is_fd_exhaustion(&conn_aborted));
+        assert!(!is_fd_exhaustion(&no_errno));
+    }
 
     fn test_state() -> Arc<AppState> {
         Arc::new(AppState::new(
