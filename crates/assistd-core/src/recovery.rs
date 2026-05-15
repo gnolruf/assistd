@@ -119,7 +119,7 @@ impl Component {
 /// ```
 #[macro_export]
 macro_rules! recovery_event {
-    ($severity:expr, $component:expr, $event:literal, $($field:tt)+) => {{
+    ($severity:expr, $component:expr, $event:literal $(, $($field:tt)*)?) => {{
         let __component_str: &'static str = $crate::recovery::Component::as_str($component);
         let __event_str: &'static str = $event;
         match $severity {
@@ -128,45 +128,21 @@ macro_rules! recovery_event {
                 severity = "info",
                 component = __component_str,
                 event = __event_str,
-                $($field)+
+                $($($field)*)?
             ),
             $crate::recovery::RecoverySeverity::Warning => ::tracing::warn!(
                 target: "assistd::recovery",
                 severity = "warning",
                 component = __component_str,
                 event = __event_str,
-                $($field)+
+                $($($field)*)?
             ),
             $crate::recovery::RecoverySeverity::Error => ::tracing::error!(
                 target: "assistd::recovery",
                 severity = "error",
                 component = __component_str,
                 event = __event_str,
-                $($field)+
-            ),
-        }
-    }};
-    ($severity:expr, $component:expr, $event:literal) => {{
-        let __component_str: &'static str = $crate::recovery::Component::as_str($component);
-        let __event_str: &'static str = $event;
-        match $severity {
-            $crate::recovery::RecoverySeverity::Info => ::tracing::info!(
-                target: "assistd::recovery",
-                severity = "info",
-                component = __component_str,
-                event = __event_str,
-            ),
-            $crate::recovery::RecoverySeverity::Warning => ::tracing::warn!(
-                target: "assistd::recovery",
-                severity = "warning",
-                component = __component_str,
-                event = __event_str,
-            ),
-            $crate::recovery::RecoverySeverity::Error => ::tracing::error!(
-                target: "assistd::recovery",
-                severity = "error",
-                component = __component_str,
-                event = __event_str,
+                $($($field)*)?
             ),
         }
     }};
