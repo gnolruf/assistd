@@ -32,6 +32,8 @@
 //! *obvious* cases the user expects blocked.
 
 use std::ffi::OsStr;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -284,7 +286,16 @@ impl Command for BashCommand {
 
         match outcome {
             WaitOutcome::Exited(status) => {
-                let exit_code = status.code().unwrap_or(TIMEOUT_EXIT);
+                // `ExitStatus::code()` returns `None` when the child was
+                // killed by a signal. Encode signal death as `128 + signum`
+                // (the POSIX convention bash itself uses) so a segfault
+                // surfaces as 139 rather than masquerading as our timeout
+                // sentinel 137. Non-unix or truly indeterminate cases fall
+                // back to 1.
+                let exit_code = status
+                    .code()
+                    .or_else(|| signal_exit_code(&status))
+                    .unwrap_or(1);
                 Ok(CommandOutput {
                     stdout,
                     stderr: stderr_bytes,
@@ -341,6 +352,16 @@ enum WaitOutcome {
     WaitErr(std::io::Error),
     Timeout,
     Overflow,
+}
+
+#[cfg(unix)]
+fn signal_exit_code(status: &std::process::ExitStatus) -> Option<i32> {
+    status.signal().map(|s| 128 + s)
+}
+
+#[cfg(not(unix))]
+fn signal_exit_code(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 /// Read bytes from `reader` into a `Vec` capped at `limit`. Returns the
@@ -737,6 +758,26 @@ mod tests {
             .unwrap();
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout.len(), 51200);
+    }
+
+    /// A script killed by a signal (here SIGSEGV via `kill -SEGV $$`) must
+    /// report `128 + signum` (139), not the timeout sentinel 137. Before
+    /// the fix, `status.code()` returning `None` collapsed both the
+    /// signal-death and timeout cases to 137.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_signal_death_reports_128_plus_signum_not_timeout() {
+        let out = BashCommand::default()
+            .run(CommandInput {
+                args: vec!["kill -SEGV $$".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            out.exit_code, 139,
+            "SIGSEGV should surface as 128+11=139, not the timeout sentinel"
+        );
     }
 
     /// Sandbox mode `None` executes bash directly with no wrapper.
