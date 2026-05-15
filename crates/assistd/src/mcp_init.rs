@@ -52,7 +52,7 @@ pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubs
         let label = s_cfg.name.clone();
         match McpServerHandle::start(label.clone(), transport_cfg, shutdown_tx.subscribe()).await {
             Ok(handle) => {
-                let prefix = format!("mcp__{}", handle.name);
+                let prefix = format!("{}{}", assistd_tools::MCP_TOOL_NAME_PREFIX, handle.name);
                 match adapt_handle_as_tools(&handle, &prefix).await {
                     Ok(t) => {
                         info!(

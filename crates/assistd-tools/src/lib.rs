@@ -26,6 +26,7 @@ pub mod memory;
 pub mod memory_tools;
 pub mod policy;
 pub mod presentation;
+pub mod prompt;
 pub mod run;
 pub mod vision;
 
@@ -46,6 +47,13 @@ pub use vision::VisionGate;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
+
+/// Prefix every MCP-adapted tool's `name()` carries. Maintained by
+/// `assistd/src/mcp_init.rs` when registering `adapt_handle_as_tools`
+/// (which builds names of the form `mcp__<server>__<tool>`). Exposed
+/// here so the daemon's prompt-augmentation step can partition the
+/// unified registry into native vs MCP without re-deriving the literal.
+pub const MCP_TOOL_NAME_PREFIX: &str = "mcp__";
 
 /// A single tool the LLM can invoke.
 #[async_trait]
@@ -111,6 +119,13 @@ impl ToolRegistry {
     /// Iterator over every registered tool's name.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tools.iter().map(|t| t.name())
+    }
+
+    /// Iterator over every registered tool as a borrowed trait object.
+    /// Used by the daemon to render tool listings into the system prompt
+    /// at startup.
+    pub fn iter_tools(&self) -> impl Iterator<Item = &dyn Tool> {
+        self.tools.iter().map(|t| t.as_ref())
     }
 
     /// Render the registry as an OpenAI chat-completions `tools` array.
@@ -191,6 +206,47 @@ mod tests {
         assert_eq!(entry["function"]["name"], "noop");
         assert_eq!(entry["function"]["strict"], true);
         assert_eq!(entry["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn iter_tools_yields_registered_tools_in_order() {
+        struct Named(&'static str);
+        #[async_trait]
+        impl Tool for Named {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn description(&self) -> &str {
+                "n/a"
+            }
+            fn parameters_schema(&self) -> Value {
+                json!({"type": "object"})
+            }
+            async fn invoke(&self, _args: Value) -> Result<Value> {
+                Ok(Value::Null)
+            }
+        }
+
+        let mut reg = ToolRegistry::new();
+        reg.register(Named("a"));
+        reg.register(Named("b"));
+        reg.register(Named("c"));
+        let names: Vec<&str> = reg.iter_tools().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn iter_tools_empty_registry_yields_nothing() {
+        let reg = ToolRegistry::new();
+        assert_eq!(reg.iter_tools().count(), 0);
+    }
+
+    #[test]
+    fn mcp_tool_name_prefix_matches_mcp_init_convention() {
+        // The constant must equal the literal that assistd/src/mcp_init.rs
+        // stamps onto adapted tool names. Catches an accidental rename
+        // here without the mcp_init side updating.
+        assert_eq!(MCP_TOOL_NAME_PREFIX, "mcp__");
     }
 
     #[test]

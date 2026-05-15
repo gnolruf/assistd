@@ -132,13 +132,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let health_probe: std::sync::Arc<dyn assistd_llm::LlmHealthProbe> = std::sync::Arc::new(
         assistd_core::presence::PresenceLlmHealthProbe::new(presence.clone()),
     );
-    let chat = LlamaChatClient::new(
-        &config.chat,
-        &config.llama_server,
-        &config.model,
-        &config.timeouts,
-        Some(health_probe.clone()),
-    )?;
 
     let voice = voice_init::init(&config, &presence).await;
 
@@ -203,6 +196,31 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         tools.len(),
         overflow_dir.display()
     );
+
+    // Partition the unified registry into native vs MCP by the same
+    // `mcp__` prefix mcp_init.rs stamps onto adapted tools, then render
+    // each half as a Markdown bullet section and append both to the
+    // configured base prompt. This is the single point of system-prompt
+    // assembly: adding a new tool surfaces in the prompt automatically.
+    let (native_refs, mcp_refs): (Vec<&dyn assistd_tools::Tool>, Vec<&dyn assistd_tools::Tool>) =
+        tools
+            .iter_tools()
+            .partition(|t| !t.name().starts_with(assistd_tools::MCP_TOOL_NAME_PREFIX));
+    let native_block = assistd_tools::prompt::format_tool_listing(&native_refs);
+    let mcp_block = assistd_mcp::prompt::format_mcp_listing(&mcp_refs);
+    let mut system_prompt = config.chat.system_prompt.clone();
+    append_prompt_block(&mut system_prompt, &native_block);
+    append_prompt_block(&mut system_prompt, &mcp_block);
+
+    let mut chat_cfg = config.chat.clone();
+    chat_cfg.system_prompt = system_prompt;
+    let chat = LlamaChatClient::new(
+        &chat_cfg,
+        &config.llama_server,
+        &config.model,
+        &config.timeouts,
+        Some(health_probe.clone()),
+    )?;
 
     let continuous_enabled = config.voice.enabled && config.voice.continuous.enabled;
     let continuous_start_on_launch = config.voice.continuous.start_on_launch;
@@ -341,6 +359,19 @@ async fn replay_history(chat: &dyn assistd_llm::LlmBackend, rows: Vec<assistd_me
     } else {
         info!("memory: resumed {count} message(s) from prior branch");
     }
+}
+
+/// Append `block` to `prompt` with a `\n\n` separator, but only when
+/// `block` is non-empty. Keeps the augmented system prompt tidy when one
+/// of the bullet sections (typically MCP) is empty.
+fn append_prompt_block(prompt: &mut String, block: &str) {
+    if block.is_empty() {
+        return;
+    }
+    if !prompt.is_empty() {
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(block);
 }
 
 fn persisted_role_to_history_role(role: assistd_memory::PersistedRole) -> assistd_llm::HistoryRole {

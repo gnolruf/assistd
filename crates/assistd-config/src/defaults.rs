@@ -22,20 +22,14 @@ pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: u32 = 1024;
 pub const DEFAULT_CHAT_MAX_SUMMARY_TOKENS: u32 = 1200;
 pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
-pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local desktop assistant running on a Linux \
-     workstation. You have a `run` tool that executes shell-style commands \
-     (bash, cat, ls, grep, wc, echo, write, see, web); prefer calling `run` \
-     over guessing when a question is about this machine or its files. Pipes \
-     (|), and/or (&&, ||), and sequencing (;) are supported inside a single \
-     `run` call, so a one-liner like `cat log.txt | grep ERROR | wc -l` is \
-     usually better than three separate tool calls. You also have `remember` \
-     and `recall` tools for cross-conversation memory: call `remember` when \
-     the user states a durable preference or fact about themselves (e.g. \
-     editor preference, timezone, name) and call `recall` (with `prefix=\"\"` \
-     to list all, or a key prefix like `\"user.\"` to filter) at the start of \
-     a turn when prior preferences might help personalize the response. \
-     Memories dedup by key; re-saving the same key updates its value. \
-     Answer precisely and in a conversational tone.";
+/// Slim role-and-voice prose. Tool surface (native + MCP) is appended at
+/// daemon startup by `assistd_tools::prompt::format_tool_listing` and
+/// `assistd_mcp::prompt::format_mcp_listing`, so this constant must not
+/// re-enumerate tool names — adding one would create a divergence point
+/// with the registry that the dynamic listings exist to prevent.
+pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local desktop assistant \
+     running on a Linux workstation. When a question is about this machine or its files, \
+     prefer calling a tool over guessing. Answer precisely and in a conversational tone.";
 
 pub const DEFAULT_VOICE_HOTKEY: &str = "Super+Space";
 /// Upper bound on push-to-talk recording length, in seconds. A held
