@@ -23,7 +23,7 @@ pub(crate) mod wire;
 
 pub use self::memory_stack::MemoryStack;
 pub use self::runtime::{ConversationContext, RuntimeState};
-pub use self::subsystems::Subsystems;
+pub use self::subsystems::{McpStartupFailure, Subsystems};
 
 /// Shared, long-lived daemon state handed to every request handler.
 ///

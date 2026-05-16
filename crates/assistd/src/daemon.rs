@@ -177,6 +177,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     let mut mcp = mcp_init::init(&config, &shutdown_tx).await;
     let mcp_tools = std::mem::take(&mut mcp.tools);
+    let mcp_startup_failures = mcp.startup_failures.clone();
 
     let tools = assistd_core::build_tools(assistd_core::BuildToolsDeps {
         config: &config,
@@ -243,7 +244,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         voice.output,
     )
     .with_window_manager(window_manager)
-    .with_vision_revalidator(vision_revalidator);
+    .with_vision_revalidator(vision_revalidator)
+    .with_mcp_startup_failures(mcp_startup_failures);
 
     let mut memory_stack = MemoryStack::disabled(embedding_cfg_for_state)
         .with_memory(memory_store)

@@ -441,6 +441,41 @@ impl PresenceManager {
         bail!("failed to acquire active request guard after {MAX_RETRIES} retries")
     }
 
+    /// Variant of [`Self::acquire_request_guard`] that emits periodic
+    /// `Event::Status` updates while a wake transition is in progress.
+    ///
+    /// Without this, a cold-start wake (which can run for 30s+ while
+    /// llama-server loads weights) looks identical to a daemon hang
+    /// from the TUI's perspective. The progress emitter polls
+    /// [`Self::wake_in_progress`] every few seconds and sends an
+    /// `Event::Status` with the elapsed time so the user gets visible
+    /// feedback. Short wakes (those that complete before the first
+    /// tick) emit nothing, so the steady-state cost is zero.
+    pub async fn acquire_request_guard_with_progress(
+        self: &Arc<Self>,
+        request_id: String,
+        tx: tokio::sync::mpsc::Sender<assistd_ipc::Event>,
+    ) -> Result<RequestGuard> {
+        self.mark_activity();
+        const MAX_RETRIES: usize = 3;
+        for _ in 0..MAX_RETRIES {
+            let guard = self.inflight.clone().read_owned().await;
+            if self.state() == PresenceState::Active {
+                return Ok(RequestGuard { _guard: guard });
+            }
+            drop(guard);
+            let progress_task =
+                spawn_load_progress_emitter(Arc::clone(self), request_id.clone(), tx.clone());
+            let result = self.ensure_active().await;
+            progress_task.abort();
+            // Best-effort: wait for the abort to settle so we don't
+            // race with task drop. JoinError on Cancelled is expected.
+            let _ = progress_task.await;
+            result?;
+        }
+        bail!("failed to acquire active request guard after {MAX_RETRIES} retries")
+    }
+
     /// `Some(started_at)` if a wake transition is currently running;
     /// `None` otherwise. Used by the TUI to drive a "waking up"
     /// indicator during cold-start wakes (which can take tens of
@@ -770,6 +805,51 @@ impl PresenceManager {
         );
         Ok(())
     }
+}
+
+/// Period between model-load progress `Event::Status` emissions. Chosen so
+/// short wakes (already-Active fast path, sub-second drowse-to-active model
+/// reloads) emit nothing while a multi-minute cold-start gets ~1 update
+/// every 3s — enough for the TUI to update an elapsed-time indicator
+/// without flooding the channel.
+const LOAD_PROGRESS_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Spawn a background task that emits `Event::Status` updates while
+/// `presence.wake_in_progress()` returns `Some(_)`. The task exits as
+/// soon as the wake completes (or is aborted by the caller); the first
+/// emission only happens after `LOAD_PROGRESS_INTERVAL`, so fast-path
+/// wakes incur no extra IPC traffic.
+fn spawn_load_progress_emitter(
+    presence: Arc<PresenceManager>,
+    request_id: String,
+    tx: tokio::sync::mpsc::Sender<assistd_ipc::Event>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(LOAD_PROGRESS_INTERVAL);
+        // Skip the first immediate tick so sub-interval wakes stay quiet.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(started) = presence.wake_in_progress() else {
+                return;
+            };
+            let elapsed_secs = started.elapsed().as_secs();
+            if tx
+                .send(assistd_ipc::Event::Status {
+                    id: request_id.clone(),
+                    severity: crate::recovery::RecoverySeverity::Info.as_str().to_string(),
+                    component: crate::recovery::Component::Llm.as_str().to_string(),
+                    event: "model_loading".to_string(),
+                    message: format!("loading model ({elapsed_secs}s elapsed)"),
+                })
+                .await
+                .is_err()
+            {
+                // Client disconnected; nothing left to report progress to.
+                return;
+            }
+        }
+    })
 }
 
 impl PresenceManager {

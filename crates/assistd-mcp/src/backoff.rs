@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 /// Cap on consecutive transport-startup failures before a server's
-/// supervisor parks itself in `HealthState::Unhealthy` permanently.
-/// Matches the embed-server budget at
+/// supervisor backs off to a slow-cadence retry loop in
+/// `HealthState::Unhealthy`. Matches the embed-server budget at
 /// `assistd_embed::server::backoff::MAX_CONSECUTIVE_FAILURES`.
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
@@ -13,6 +13,13 @@ pub const MIN_HEALTHY_SECONDS: u64 = 30;
 
 /// Cap on the SSE reconnection delay (also reused for stdio restarts).
 pub const RECONNECT_MAX_SECS: u64 = 60;
+
+/// Once a supervisor has hit `MAX_CONSECUTIVE_FAILURES`, it transitions
+/// to `HealthState::Unhealthy` and sleeps this long between further
+/// spawn attempts. Picked so a misconfigured server the user has just
+/// fixed (typo'd binary path, etc.) self-heals within minutes without
+/// the daemon thrashing if the underlying problem persists.
+pub const UNHEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (capped).
 pub fn backoff_delay(attempt: u32) -> Duration {

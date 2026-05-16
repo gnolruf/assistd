@@ -164,7 +164,12 @@ impl AppState {
         id: &str,
         tx: &mpsc::Sender<Event>,
     ) -> Result<Option<QueryGuards>> {
-        let request = match self.subsystems.presence.acquire_request_guard().await {
+        let request = match self
+            .subsystems
+            .presence
+            .acquire_request_guard_with_progress(id.to_string(), tx.clone())
+            .await
+        {
             Ok(g) => g,
             Err(e) => {
                 let _ = tx
