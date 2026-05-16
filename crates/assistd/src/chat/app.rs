@@ -46,7 +46,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// One image staged by `/attach`, waiting to ride along with the user's
 /// next text submission.
 pub struct PendingAttachment {
-    /// Display name (file basename) shown in the `📎×N` indicator and
+    /// Display name (file basename) shown in the attachment indicator and
     /// the user-prompt tag.
     pub name: String,
     pub mime: String,
@@ -435,9 +435,6 @@ impl App {
         self.slash_selected
     }
 
-    /// Replace the input buffer with the highlighted suggestion. No
-    /// trailing space — the user adds one themselves if the command
-    /// takes an argument.
     fn accept_slash_selection(&mut self) {
         let suggestions = self.slash_suggestions();
         if let Some((cmd, _)) = suggestions.get(self.slash_selected).copied() {
@@ -445,9 +442,6 @@ impl App {
         }
     }
 
-    /// Recompute slash-popup invariants after the input buffer mutates.
-    /// Resets dismissal when the prefix leaves; clamps the selection
-    /// to the (possibly smaller) filtered list.
     fn refresh_slash_state(&mut self) {
         let buf = self.input.buffer();
         if !buf.starts_with('/') {
@@ -560,10 +554,6 @@ impl App {
         }
     }
 
-    /// Process keys while the `/resume` branch picker is open.
-    /// Up/Down move the highlight, Enter dispatches a `Switch`, Esc
-    /// cancels. Other keys are swallowed so the input line stays
-    /// untouched.
     fn handle_picker_key(&mut self, ev: KeyEvent) {
         let Some(picker) = self.picker_modal.as_mut() else {
             return;
@@ -707,19 +697,11 @@ impl App {
         let now = Instant::now();
         match ev {
             Event::Delta { text, .. } => {
-                // First visible delta of a turn (or of a new phase
-                // after thinking) closes any open Thinking block,
-                // stamping its duration and auto-collapsing it.
                 self.output.finish_thinking();
                 self.throughput.on_delta(now);
                 self.output.append_assistant(&text);
             }
             Event::ReasoningDelta { text, .. } => {
-                // Throughput is generation-throughput; reasoning
-                // tokens are generated, so count them here too. The
-                // append_thinking call closes any open assistant
-                // line cleanly and opens a fresh Thinking block when
-                // none is live (mid-turn multi-phase reasoning).
                 self.throughput.on_delta(now);
                 self.output.append_thinking(&text);
             }
@@ -1281,10 +1263,6 @@ impl App {
         self.spawn_branch_command(BranchOp::ResumePicker, req);
     }
 
-    /// Drain the branch buffer that just landed in response to
-    /// `/resume` and open the interactive picker. The current branch
-    /// (in the active session) starts highlighted so Enter on it is a
-    /// no-op switch.
     fn open_branch_picker(&mut self) {
         let entries = std::mem::take(&mut self.branches_buffer);
         if entries.is_empty() {
@@ -1298,9 +1276,6 @@ impl App {
         self.picker_modal = Some(BranchPickerModal { entries, selected });
     }
 
-    /// Dispatch a `Request::Switch` for the currently-highlighted
-    /// branch in the picker, then close the modal. Used by the
-    /// picker's Enter handler.
     fn picker_confirm(&mut self) {
         let target = match self.picker_modal.as_ref().and_then(|m| m.current_target()) {
             Some(t) => t,
@@ -1313,11 +1288,6 @@ impl App {
         self.handle_switch_cmd(target);
     }
 
-    /// Open a daemon dialog connection for a Query and pump its
-    /// streaming events onto `chat_tx`. The dialog connection stays
-    /// open while the query is generating so the modal can write a
-    /// `Request::ConfirmResponse` back on the same connection if the
-    /// model triggers a destructive bash command.
     fn spawn_query(&mut self, text: String, attachments: Vec<Attachment>) {
         let ipc = self.ipc.clone();
         let chat_tx = self.chat_tx.clone();

@@ -169,12 +169,6 @@ impl AppState {
                 self.handle_resume_or_new(id, recency_secs, tx).await
             }
             Request::NewSession { id } => self.handle_new_session(id, tx).await,
-            // ConfirmResponse is intercepted by the connection-level
-            // read loop (see `assistd-core/src/socket.rs`) and routed to
-            // the active confirmation gate's pending oneshot. If we see
-            // it as the *initial* request on a fresh connection there
-            // is no in-flight prompt to satisfy; surface as an error
-            // so a buggy client gets a clear signal instead of timing out.
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 let _ = tx
                     .send(Event::Error {
@@ -278,9 +272,6 @@ mod tests {
 
     #[tokio::test]
     async fn persistence_tracker_drains_in_flight_tasks() {
-        // AppState's persistence tracker must wait for spawned tasks to
-        // complete on shutdown drain. Spawn a slow task through the
-        // tracker; close+wait must block until that task finishes.
         let state = test_state(Arc::new(EchoBackend::new()), PresenceState::Active);
         let tracker = state.runtime.persistence_tracker_handle();
         let counter = Arc::new(AtomicUsize::new(0));
@@ -324,9 +315,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_set_presence_emits_presence_and_done() {
-        // Active → Sleeping avoids hitting the stub's non-existent
-        // control-plane endpoint while still exercising the transition
-        // path end-to-end.
         let state = test_state(Arc::new(EchoBackend::new()), PresenceState::Active);
         let (tx, rx) = mpsc::channel::<Event>(8);
         let req = Request::SetPresence {
@@ -367,9 +355,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_cycle_advances_to_next_state() {
-        // Drowsy → Sleeping: the Drowsy→Sleeping branch of `sleep()` is
-        // network-free when `llama` is None (as in the stub), so this
-        // exercises the full cycle path without a live server.
         let state = test_state(Arc::new(EchoBackend::new()), PresenceState::Drowsy);
         let (tx, rx) = mpsc::channel::<Event>(8);
         let req = Request::Cycle { id: "c1".into() };
@@ -486,9 +471,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_query_forwards_tool_call_and_result_events() {
-        // One tool call, then Final. We expect the forwarder to map
-        // LlmEvent::ToolCall → Event::ToolCall (with the request id),
-        // LlmEvent::ToolResult → Event::ToolResult, then Done.
         let backend = Arc::new(ScriptedBackend {
             outcomes: parking_lot::Mutex::new(vec![
                 StepOutcome::ToolCalls(vec![ToolCall {
@@ -638,9 +620,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_ptt_stop_with_text_runs_query() {
-        // Non-empty transcription should: emit Transcribing → Idle →
-        // Transcription(text), then dispatch as a Query (EchoBackend
-        // echoes the text), then terminal Done.
         let voice = Arc::new(MockVoice::new(Ok(()), Ok("hello world".into())));
         let state = state_with_voice(Arc::new(EchoBackend::new()), voice);
         let (tx, rx) = mpsc::channel::<Event>(16);
@@ -984,11 +963,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_query_speaks_sentences_in_order() {
-        // EchoBackend emits the input as a single Delta. SentenceBuffer
-        // pushes that into 4 sentences (3 from push, 1 from finish).
-        // The new per-query speech worker MUST consume them in arrival
-        // order; the previous fire-and-forget tokio::spawn pattern
-        // could scramble them based on synthesis time.
         let recorder = MockSpeechRecorder::new();
         let state = state_with_speech_recorder(
             Arc::new(EchoBackend::new()),
@@ -1095,12 +1069,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_query_partial_flush_after_idle() {
-        // Backend emits a partial sentence ("Half a sente"), then
-        // *stalls* for >partial_flush_ms, then completes ("nce. End.").
-        // With the idle flush enabled the partial cuts at the last
-        // whitespace ("Half a") and is spoken during the stall;
-        // "sentence." then completes naturally on resume; "End." on
-        // finish.
         let recorder = MockSpeechRecorder::new();
         let backend = StreamingDeltaBackend::new(vec![
             DeltaScript::Text("Half a sente"),
@@ -1138,9 +1106,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_query_partial_flush_zero_disables() {
-        // Same backend, same stall, but partial_flush_ms = 0 means no
-        // idle flush. Only the completed sentence and the final tail
-        // are spoken.
         let recorder = MockSpeechRecorder::new();
         let backend = StreamingDeltaBackend::new(vec![
             DeltaScript::Text("Half a sente"),
@@ -1227,8 +1192,6 @@ mod tests {
                     q.remove(0)
                 }
             };
-            // Emit pre-delta on the FIRST step (when ToolCalls is queued)
-            // and post-delta on Final.
             match &outcome {
                 StepOutcome::ToolCalls(_) => {
                     tx.send(LlmEvent::Delta {
@@ -1280,12 +1243,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_query_tool_call_inhibits_idle_flush() {
-        // Stream: Delta("Half a ") → ToolCall(sleep 300ms) →
-        //          ToolResult → Delta("done.") → Done.
-        // partial_flush_ms = 50 would fire 6+ times during the
-        // 300ms tool dispatch if not inhibited. With proper
-        // `awaiting_tool_result` tracking, only the final tail is
-        // spoken: "Half a done."
         let recorder = MockSpeechRecorder::new();
         let backend = ToolCallBackend::new(
             "Half a ",
@@ -1341,8 +1298,6 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_query_speech_worker_drains_before_return() {
-        // The worker's wait_idle() must be awaited before handle_query
-        // returns; otherwise daemon shutdown could cut off audio.
         let recorder = MockSpeechRecorder::new();
         let state = state_with_speech_recorder(
             Arc::new(EchoBackend::new()),
@@ -1372,8 +1327,6 @@ mod tests {
         title: Option<&str>,
         ws: Option<&str>,
     ) -> assistd_wm::FocusedWindowContext {
-        // PR 3b adds an `id: Option<WindowId>` field; the prompt
-        // formatter doesn't render it, so the helper leaves it None.
         assistd_wm::FocusedWindowContext {
             id: None,
             class: class.map(str::to_string),
@@ -1394,7 +1347,6 @@ mod tests {
         assert!(block.contains("- Focused window: Alacritty - nvim ~ src/main.rs\n"));
         assert!(block.contains("- Workspace: 2\n"));
         assert!(block.contains("interacting with a terminal window."));
-        // AC#3: hint references the actual `run` sub-command names.
         assert!(block.contains("`command: \"bash\"`"));
         assert!(block.contains("`command: \"wm\"`"));
     }
@@ -1414,7 +1366,6 @@ mod tests {
 
     #[test]
     fn format_window_context_block_omits_missing_fields() {
-        // Class only: no title bar, no workspace line.
         let block = format_window_context_block(&ctx(Some("Alacritty"), None, None)).expect("Some");
         assert!(block.contains("- Focused window: Alacritty\n"));
         assert!(!block.contains(" - "));
@@ -1444,8 +1395,6 @@ mod tests {
             Some("Current desktop context:\n- bar".into()),
         )
         .expect("Some");
-        // Trailing newline of semantic block trimmed; blank line inserted
-        // between the two blocks so the LLM sees clean separation.
         assert_eq!(
             merged,
             "Relevant past context:\n- foo\nCurrent desktop context:\n- bar"

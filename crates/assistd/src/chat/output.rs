@@ -146,7 +146,7 @@ impl OutputPane {
     }
 
     /// Push a styled informational line, used by `/attach` to confirm
-    /// "📎 attached: name.png (image/png, 12 KB)" without polluting the
+    /// "attached: name.png (image/png, 12 KB)" without polluting the
     /// error stream. Distinct from `push_user` (no `> ` prefix) and
     /// `push_error` (no `!! ` prefix or red color).
     pub fn push_info(&mut self, text: &str) {
@@ -484,12 +484,6 @@ impl OutputPane {
 
     fn close_open_assistant(&mut self) {
         if let Some(idx) = self.open_assistant.take() {
-            // The `begin_submit` flow proactively opens an empty
-            // assistant line so streaming Deltas have somewhere to
-            // land. If reasoning arrives first (no Delta yet), the
-            // line is still empty when we close it — pop instead of
-            // appending a blank separator on top of nothing, which
-            // would leave a stray empty row above the Thinking block.
             let empty = matches!(
                 self.items.get(idx),
                 Some(OutputItem::Text(l)) if l.spans.iter().all(|s| s.content.is_empty())
@@ -667,9 +661,6 @@ fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16
         out.push(Line::from(""));
         return;
     }
-    // When the line carries a background color (e.g. the user-message
-    // box), pad each wrapped chunk out to the full viewport width so the
-    // highlight extends across the row instead of stopping at the text.
     let pad_to_width = style.bg.is_some();
     for chunk in wrapped {
         let mut s = chunk.into_owned();
@@ -701,8 +692,6 @@ fn render_thinking_block(
     );
     if (t.expanded || verbose) && !t.text.is_empty() {
         for line in t.text.lines() {
-            // Empty lines in the body still need a bar so the visual
-            // column stays continuous through paragraph breaks.
             if line.is_empty() {
                 out.push(Line::from(vec![bar.clone()]));
             } else {
@@ -713,11 +702,6 @@ fn render_thinking_block(
     out.push(Line::from(""));
 }
 
-/// Header label for a Thinking block. Reads `"✻ Thinking… (Ns)"` while
-/// the block is live; the integer-second display advances at most
-/// 1 Hz (the `App::on_tick` reducer marks the output pane dirty when
-/// the second changes). After `finish_thinking`, the label freezes at
-/// `"✦ Thought for Ns"` with the final duration.
 fn thinking_header_text(t: &ThinkingBlock) -> String {
     let elapsed = match t.ended_at {
         Some(end) => end.saturating_duration_since(t.started_at),

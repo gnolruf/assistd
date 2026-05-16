@@ -37,10 +37,6 @@ impl AppState {
             chunk_chars: self.memory.embedding_cfg.chunk_chars,
             overlap_chars: self.memory.embedding_cfg.chunk_overlap_chars,
         };
-        // Snapshot what we need for chunking *before* moving `msg` into
-        // append_message. Tool-call assistant rows and tool-result rows
-        // skip chunking: the former have empty content, the latter are
-        // JSON-y noise that pollutes semantic search.
         let should_embed = embedding_enabled
             && chunks_handle.is_some()
             && matches!(msg.role, PersistedRole::User | PersistedRole::Assistant)
@@ -116,11 +112,6 @@ impl AppState {
     /// task has landed. Held inside `agent_turn_lock` so no new tasks
     /// can spawn during the wait.
     pub(super) async fn drain_persistence_inflight(&self) {
-        // `TaskTracker::wait()` on a *closed* tracker is permanent; we
-        // don't want to close it. Instead we just wait briefly via a
-        // probe; there's no public "wait for current tasks" API on
-        // the tracker. As a workaround, sample with a fixed budget:
-        // most persistence tasks finish in microseconds (one DB hop).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while !self.runtime.persistence_tracker.is_empty() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;

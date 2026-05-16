@@ -34,9 +34,6 @@ impl MemoryStack {
         let memory: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
         let conversations: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
         let memory_ops = Arc::new(MemoryOps::new(memory.clone(), conversations.clone()));
-        // Closed channel: every `try_send` fails immediately so the
-        // persistence hook degrades to chunk-only behaviour when nothing
-        // else wires a real embedder task in.
         let (embed_tx, embed_rx) = mpsc::channel::<EmbedJob>(1);
         drop(embed_rx);
         Self {
@@ -102,11 +99,6 @@ mod tests {
 
     #[tokio::test]
     async fn with_memory_then_conversations_keeps_both_fields() {
-        // Cross-update invariant: chaining both builders in either order
-        // must leave the final stack with the supplied handles on the
-        // matching fields. This test pins that ordering doesn't drop
-        // either store; the `memory_ops` rebuild path is observed
-        // indirectly via the Arc::ptr_eq assertions.
         let m1: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
         let c1: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
         let stack = MemoryStack::disabled(EmbeddingConfig::default())
@@ -118,9 +110,6 @@ mod tests {
 
     #[tokio::test]
     async fn with_conversations_before_memory_keeps_both_fields() {
-        // Same invariant, reverse order. Documents that the rebuild of
-        // `memory_ops` happens in BOTH `with_*` methods so the last one
-        // sees consistent inputs regardless of chain direction.
         let m1: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
         let c1: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
         let stack = MemoryStack::disabled(EmbeddingConfig::default())

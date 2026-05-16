@@ -202,8 +202,6 @@ pub fn spawn_listener(
     Some(tokio::spawn(hotkeys.run(manager, subsystems, shutdown)))
 }
 
-// Parse and register one configured hotkey string. Returns `None` on parse
-// or registration failure; the daemon stays up via IPC socket fallback.
 fn register(
     manager: &GlobalHotKeyManager,
     spec: Option<String>,

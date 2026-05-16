@@ -16,8 +16,6 @@ impl AppState {
     ) -> Result<()> {
         let model = self.memory.embedder.model().to_string();
         if model.is_empty() {
-            // Embedding subsystem disabled: emit Done with no hits so
-            // the CLI sees a clean empty stream, not an error.
             let _ = tx.send(Event::Done { id }).await;
             return Ok(());
         }
@@ -82,10 +80,6 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
         match self.memory.memory_ops.save(&key, value).await {
-            // The IPC `MemorySave` handler doesn't surface the row id;
-            // its only callers are the `assistd memory save` CLI which
-            // just wants confirmation. Discard the id; the LLM tool
-            // (`RememberTool`) is the one that consumes it directly.
             Ok(_id) => {
                 let _ = tx.send(Event::Done { id }).await;
                 Ok(())
@@ -193,10 +187,6 @@ impl AppState {
     ) -> Result<()> {
         match self.memory.memory_ops.list_full(&prefix).await {
             Ok(rows) => {
-                // `limit = 0` means no cap (matches the wire convention
-                // used by other search-style memory variants). Otherwise
-                // truncate after the SQL has already ordered
-                // lexicographically by key.
                 let cap = if limit == 0 {
                     rows.len()
                 } else {
@@ -313,9 +303,6 @@ impl AppState {
         let chunks_total = chunks.len() as u32;
         let memories_total = memories.len() as u32;
 
-        // Always emit a kickoff progress for each kind so a client that
-        // only sees `(0, 0)` still learns the totals before receiving
-        // `Done`; useful when the run has nothing to do.
         let _ = tx
             .send(Event::ReindexProgress {
                 id: id.clone(),

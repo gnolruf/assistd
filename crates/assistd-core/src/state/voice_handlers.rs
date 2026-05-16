@@ -19,9 +19,6 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
-        // Barge-in: stop any in-flight TTS playback before opening the
-        // mic. Fire unconditionally; even if recording is rejected
-        // below, the user signaled "shut up", which we should honor.
         self.subsystems.voice_output.interrupt().await;
         if self.subsystems.listener.is_active() {
             let _ = tx
@@ -34,10 +31,6 @@ impl AppState {
         }
         match self.subsystems.voice.start_recording().await {
             Ok(()) => {
-                // Kick off the presence wake in parallel with capture so a
-                // Drowsy → Active model load runs during Whisper inference.
-                // `ensure_active` is idempotent; the second call from
-                // `acquire_request_guard` short-circuits to a single RwLock read.
                 let presence = self.subsystems.presence.clone();
                 let warm =
                     tokio::spawn(async move { presence.ensure_active().await }.in_current_span());
@@ -242,10 +235,6 @@ impl AppState {
             })
             .await;
 
-        // The warmup was spawned at PTT-start; joining it concurrently with
-        // Whisper means a Drowsy → Active model load runs during transcription
-        // rather than serially after it. A failed warmup is non-fatal; the
-        // request guard in `handle_query` will retry the wake.
         let warmup = self.runtime.warmup_handle.lock().await.take();
         let (text_res, warm_res) =
             tokio::join!(self.subsystems.voice.stop_and_transcribe(), async {

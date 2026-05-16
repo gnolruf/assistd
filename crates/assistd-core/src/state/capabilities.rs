@@ -19,12 +19,6 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
-        // Surface any MCP-server startup failures as non-terminal Status
-        // events. Without this, a misconfigured server (typo'd binary
-        // path, missing dep) fails silently at boot and the user only
-        // discovers the problem when the model tries to invoke a tool.
-        // GetCapabilities is the TUI's on-connect probe, so warnings
-        // landing here hit the user during the first render.
         for failure in &self.subsystems.mcp_startup_failures {
             let _ = tx
                 .send(Event::Status {
@@ -40,12 +34,6 @@ impl AppState {
                 .await;
         }
 
-        // Router-aware probe: in router mode the configured host:port is
-        // just the router; the real /props (with `modalities`) lives on
-        // the child server. `probe_capabilities_routed` follows the
-        // indirection when present and degrades to the direct probe
-        // otherwise. Failure (e.g. transient client-build error) is
-        // surfaced as `vision: false` so the TUI shows the safe default.
         let probe = match assistd_llm::LlamaServerControl::new(
             &self.config.llama_server.host,
             self.config.llama_server.port,
@@ -67,10 +55,6 @@ impl AppState {
                 assistd_llm::VisionState::default()
             }
         };
-        // Match the TUI's old basename rendering: prefer the part after
-        // the last `/` (e.g. `Qwen3-14B-GGUF:Q4_K_M` from
-        // `bartowski/Qwen3-14B-GGUF:Q4_K_M`), fall back to the full
-        // string when there's no `/`.
         let model_name = self
             .config
             .model

@@ -56,9 +56,6 @@ impl AppState {
                 .await;
             return Ok(());
         }
-        // Lock first, then drain; order matters: holding the lock
-        // prevents new persistence tasks from being spawned, then we
-        // wait for already-spawned ones to finish.
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
 
@@ -145,8 +142,6 @@ impl AppState {
             }
         };
         let (active_session, _) = self.runtime.conversation_ctx.current().await;
-        // Active-session-first ordering: keep the original list_branches
-        // sort but pull active-session branches to the top.
         let mut active = Vec::new();
         let mut other = Vec::new();
         for b in branches {
@@ -283,9 +278,6 @@ impl AppState {
         };
         let (target_session, target_branch) = resolved;
 
-        // Update DB pointer first; if the daemon crashes between this
-        // and the in-memory swap, the next startup resumes the *new*
-        // active branch (consistent), not the old one.
         if let Err(e) = self
             .memory
             .conversations
@@ -403,10 +395,6 @@ impl AppState {
             }
         };
         if outcome.removed_messages > 0 {
-            // Mirror the deletion in the in-memory conversation. We
-            // call `truncate_to_last_real_user` rather than recompute
-            // from the DB because the DB is now authoritative; the
-            // backend's job is just to align.
             if let Err(e) = self.subsystems.llm.truncate_to_last_real_user().await {
                 tracing::warn!(
                     target: "assistd::state",
@@ -450,8 +438,6 @@ impl AppState {
             .await
             .ok()
             .flatten();
-        // Keep the current branch when it's either empty (nothing to
-        // stale-out) or its latest message landed within the window.
         let keep_current = match latest.as_deref() {
             None => true,
             Some(s) => chrono::DateTime::parse_from_rfc3339(s)

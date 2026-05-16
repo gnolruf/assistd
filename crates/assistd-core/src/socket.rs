@@ -73,13 +73,6 @@ pub enum SocketError {
 /// as live to avoid clobbering it.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Decide what to do with an existing file at the would-be socket path.
-///
-/// Connect-probes the path: if the connect succeeds, a live daemon owns
-/// the socket and we must not unlink it. If the connect fails (refused,
-/// not-a-socket, etc.) the file is stale and we remove it. If the probe
-/// hangs past [`PROBE_TIMEOUT`] we assume "live" — better to refuse
-/// startup than rip an in-use socket out from under another process.
 async fn prepare_socket_path(path: &Path) -> Result<(), SocketError> {
     match path.try_exists() {
         Ok(false) => return Ok(()),
@@ -97,9 +90,6 @@ async fn prepare_socket_path(path: &Path) -> Result<(), SocketError> {
             path: path.to_path_buf(),
         }),
         Ok(Err(e)) => {
-            // ECONNREFUSED (no listener), ENOTSOCK (regular file at the
-            // path), or similar — all mean the file is leftover from a
-            // previous run and is safe to remove.
             warn!("removing stale socket file at {} ({})", path.display(), e);
             std::fs::remove_file(path).map_err(|source| SocketError::StaleCleanup {
                 path: path.to_path_buf(),
@@ -176,10 +166,6 @@ where
 {
     let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
     let mut connections: JoinSet<()> = JoinSet::new();
-    // Tracks whether the previous accept hit EMFILE/ENFILE so we log
-    // exactly once per incident (entry + recovery) instead of once per
-    // failed syscall — the latter floods the log channel and starves
-    // other tasks of the writer.
     let mut fd_exhausted = false;
 
     tokio::pin!(shutdown);
@@ -207,12 +193,6 @@ where
                         });
                     }
                     Err(e) if is_fd_exhaustion(&e) => {
-                        // Without a backoff this arm spins: the kernel
-                        // returns EMFILE synchronously every time we
-                        // call accept(), so the select! wakes again
-                        // immediately. Sleep gives reaping connections
-                        // a window to drop their FDs; suppress repeat
-                        // logs until accept() succeeds again.
                         if !fd_exhausted {
                             warn!(
                                 error = %e,
@@ -230,9 +210,6 @@ where
                     }
                 }
             }
-            // Reap finished connections eagerly so the set doesn't grow
-            // unbounded. `join_next` yields `None` when the set is empty,
-            // which would busy-loop; gate on `len()` to avoid that.
             Some(res) = connections.join_next(), if !connections.is_empty() => {
                 if let Err(e) = res
                     && e.is_panic()
@@ -243,9 +220,6 @@ where
         }
     }
 
-    // Stop accepting and drain in-flight handlers with bounded grace so
-    // streaming responses can emit their final `Done` event before the
-    // daemon exits.
     drop(listener);
 
     let in_flight = connections.len();
@@ -292,10 +266,6 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
         debug!("client disconnected without sending a request");
         return Ok(());
     }
-    // `Take` signals "EOF" once the cap is hit, so a truncated frame
-    // arrives with no trailing newline. Reject it before we hand the
-    // partial bytes to serde_json (which would otherwise emit a
-    // misleading parse error).
     if !line.ends_with('\n') {
         let err = Event::Error {
             id: String::new(),
@@ -323,26 +293,10 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
     let (tx, mut rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
     let dispatch_state = state.clone();
 
-    // Span carries the request id and kind so all child events emitted
-    // by `dispatch` (LLM stream, tool calls, TTS sentences) and by the
-    // forward loop are correlatable in `RUST_LOG=assistd=debug` output
-    // when several requests are in flight on different connections.
     let span = tracing::info_span!("ipc", id = %req.id(), req = req.kind());
 
-    // Per-connection router for mid-stream confirmation prompts. The
-    // `IpcConfirmationGate` (if installed in the daemon's tool registry)
-    // reads it from the `CONFIRM_ROUTER` task-local during dispatch;
-    // the read loop below routes inbound `Request::ConfirmResponse`
-    // lines to it. The wire channel is cloned so the router can emit
-    // its own `Event::ConfirmRequest` events into the same forward
-    // pipeline as dispatch.
     let router = ConfirmRouter::new(req.id().to_string(), tx.clone());
 
-    // Dispatch and event-forwarding run concurrently on this task rather
-    // than on a spawned child. If the task is cancelled (e.g. the outer
-    // accept loop hits its shutdown grace and calls `JoinSet::shutdown`),
-    // both halves are torn down together; the dispatcher can't be
-    // orphaned.
     let router_for_dispatch = router.clone();
     let dispatch_fut = async move {
         CONFIRM_ROUTER
@@ -356,14 +310,6 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
         Ok::<_, SocketError>(write_half)
     };
 
-    // Read loop: drains additional client lines (mostly
-    // `Request::ConfirmResponse`, possibly nothing if the client is a
-    // legacy CLI that shut down its write half). Exits on EOF or
-    // I/O error so the connection can finish even if the client
-    // disconnects mid-stream. Every dispatched response routes
-    // through the router; unknown additional Requests are logged
-    // and ignored (we don't surface them to the client because
-    // doing so would muddle the streaming Event protocol).
     let router_for_reader = router.clone();
     let read_fut = async move {
         let mut buf = String::new();
@@ -386,9 +332,6 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
                 }
             }
             if !buf.ends_with('\n') {
-                // `Take` hit its cap before the frame terminated.
-                // Stop reading further client input rather than try
-                // to resync mid-stream; dispatch continues to drain.
                 warn!(
                     bytes = buf.len(),
                     "mid-stream request exceeded {MAX_REQUEST_BYTES}-byte limit; closing read \
@@ -422,18 +365,10 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
         }
     };
 
-    // Run dispatch + forward + read concurrently. When dispatch
-    // returns, drop the router so any still-pending oneshots resolve
-    // to "deny" (see `ConfirmRouter::ask`). The forward future then
-    // sees `rx.recv()` return None once both `tx` clones are dropped.
     let (dispatch_res, forward_res, _) = async {
         let read_handle = tokio::spawn(read_fut);
         let (d, f) = tokio::join!(dispatch_fut, forward_fut);
-        // dispatch is done; drop the router clone we held outside
-        // the task so the read loop's clone is the only remaining
-        // reference (we'll abort it next).
         drop(router);
-        // Stop reading more client input; dispatch is over.
         read_handle.abort();
         let _ = read_handle.await;
         (d, f, ())
@@ -470,10 +405,6 @@ mod tests {
 
     #[test]
     fn fd_exhaustion_predicate_matches_emfile_and_enfile() {
-        // Pinning the predicate is the load-bearing piece of the
-        // EMFILE-spin fix: misclassifying these as "Other" would
-        // route them through the silent `error!` arm and the loop
-        // would spin again with no backoff.
         let emfile = std::io::Error::from_raw_os_error(libc::EMFILE);
         let enfile = std::io::Error::from_raw_os_error(libc::ENFILE);
         assert!(
@@ -518,8 +449,6 @@ mod tests {
         panic!("listener at {} did not become ready", path.display());
     }
 
-    /// Send a raw request line and collect every event the daemon emits
-    /// until the stream terminates.
     async fn send_request_collect_events(path: &Path, body: &str) -> Vec<Event> {
         let stream = UnixStream::connect(path).await.unwrap();
         let (read, mut write) = stream.into_split();
@@ -623,16 +552,10 @@ mod tests {
 
     #[tokio::test]
     async fn oversize_request_is_rejected_without_oom() {
-        // A request larger than MAX_REQUEST_BYTES must be rejected
-        // with an Error event rather than buffered in full. We send
-        // MAX_REQUEST_BYTES + 1 bytes (no newline) so the daemon's
-        // `.take()` cap fires before any newline arrives.
         with_server(test_state(), |path| async move {
             let stream = UnixStream::connect(&path).await.unwrap();
             let (read, mut write) = stream.into_split();
 
-            // Send the cap + 1 bytes in chunks so we don't allocate
-            // the whole payload up front in the test process.
             let chunk = vec![b'a'; 1024 * 1024];
             let mut remaining = MAX_REQUEST_BYTES as usize + 1;
             while remaining > 0 {
@@ -644,7 +567,6 @@ mod tests {
                 }
                 remaining -= n;
             }
-            // Best-effort shutdown; daemon may already be closing.
             let _ = write.shutdown().await;
 
             let mut reader = BufReader::new(read);
@@ -724,11 +646,6 @@ mod tests {
 
     #[tokio::test]
     async fn listen_start_errors_with_no_continuous_listener_stub() {
-        // The default `test_state` builds with a `NoContinuousListener`
-        // whose `start()` is a hard error; this asserts the error
-        // propagation path. A real MicContinuousListener has different
-        // semantics (it actually starts) but needs cpal + whisper to
-        // exercise end-to-end.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("assistd.sock");
         let (tx, rx) = oneshot::channel::<()>();
@@ -756,10 +673,6 @@ mod tests {
 
     #[tokio::test]
     async fn second_serve_refuses_to_clobber_live_socket() {
-        // Regression test for the socket-clobbering hazard: a live
-        // listener on the path must not have its socket ripped out by
-        // a second `serve_at` call. The second call must error with
-        // `AlreadyRunning`, and the first must keep serving requests.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("assistd.sock");
         let (tx, rx) = oneshot::channel::<()>();
@@ -774,8 +687,6 @@ mod tests {
         });
         wait_for_listener(&path).await;
 
-        // Second attempt at the same path: must refuse, and must not
-        // unlink the live socket.
         let second_state = test_state();
         let err = serve_at(&path, second_state, std::future::pending::<()>())
             .await
@@ -789,7 +700,6 @@ mod tests {
             "live socket must remain after a refused second-bind attempt"
         );
 
-        // The first daemon is still healthy and serving requests.
         let events =
             send_request_collect_events(&path, r#"{"type":"query","id":"q","text":"ok"}"#).await;
         assert!(matches!(events.last(), Some(Event::Done { .. })));
@@ -901,8 +811,6 @@ mod tests {
                     text: "stuck".into(),
                 })
                 .await;
-            // Park forever; this future is cancelled when the parent
-            // task is aborted via JoinSet::shutdown.
             std::future::pending::<()>().await;
             Ok(())
         }
@@ -997,9 +905,6 @@ mod tests {
 
         tx.send(()).unwrap();
 
-        // All remaining Deltas and the terminal Done must still arrive
-        // before the stream closes, because grace (5s) comfortably
-        // exceeds the remaining ~100ms of backend work.
         let mut seen_delta = 1;
         let mut seen_done = false;
         loop {
@@ -1059,27 +964,12 @@ mod tests {
 
         tx.send(()).unwrap();
 
-        // Server task must exit promptly: the grace is 0, so the
-        // connection is aborted as soon as shutdown fires. Bound with
-        // a 2s timeout so a regression doesn't hang the test forever.
         tokio::time::timeout(std::time::Duration::from_secs(2), server)
             .await
             .expect("server did not exit within 2s of shutdown")
             .unwrap();
     }
 
-    // ---------------------------------------------------------------
-    // Wire-protocol contract tests: one happy (or expected-failure)
-    // path per `assistd_ipc::Request` variant. Each variant must
-    // produce a sensible event sequence terminated by `Done` or
-    // `Error`. Adding/renaming a variant should fail at least one of
-    // these tests, so a protocol regression is caught at CI time
-    // rather than at runtime in a TUI session.
-    // ---------------------------------------------------------------
-
-    /// Spin up `serve_at` against the given state, hand the socket
-    /// path to the body, then trigger shutdown and join the server.
-    /// Removes the boilerplate from per-variant tests below.
     async fn with_server<F, Fut, R>(state: Arc<AppState>, body: F) -> R
     where
         F: FnOnce(PathBuf) -> Fut,
@@ -1105,9 +995,6 @@ mod tests {
 
     #[tokio::test]
     async fn set_presence_to_sleeping_returns_presence_then_done() {
-        // Active → Sleeping is the stub-friendly path: it drops the
-        // (None) llama service and flips the state field. drowse()
-        // and Drowsy-bound wake() require a live HTTP server.
         with_server(test_state(), |path| async move {
             let events = send_request_collect_events(
                 &path,
@@ -1159,11 +1046,6 @@ mod tests {
 
     #[tokio::test]
     async fn cycle_from_active_attempts_drowse_and_errors_on_stub() {
-        // Cycle Active → Drowsy invokes `drowse()`, which calls
-        // `control.unload_model()` against the stub's bogus
-        // 127.0.0.1:1 endpoint. We don't care about the exact error
-        // text, only that the IPC layer surfaces it as an `Error`
-        // event with the matching id.
         with_server(test_state(), |path| async move {
             let events =
                 send_request_collect_events(&path, r#"{"type":"cycle","id":"cy-1"}"#).await;
@@ -1200,8 +1082,6 @@ mod tests {
         with_server(test_state(), |path| async move {
             let events =
                 send_request_collect_events(&path, r#"{"type":"ptt_stop","id":"ptt-2"}"#).await;
-            // ptt_stop emits VoiceState::Transcribing first, then
-            // surfaces the NoVoiceInput error.
             assert!(
                 matches!(
                     events.last(),
@@ -1215,9 +1095,6 @@ mod tests {
 
     #[tokio::test]
     async fn listen_stop_when_inactive_returns_listenstate_then_done() {
-        // NoContinuousListener::stop is idempotent: the daemon
-        // emits ListenState{active:false} + Done even when nothing
-        // was running.
         with_server(test_state(), |path| async move {
             let events =
                 send_request_collect_events(&path, r#"{"type":"listen_stop","id":"ls-stop"}"#)
@@ -1236,9 +1113,6 @@ mod tests {
 
     #[tokio::test]
     async fn listen_toggle_from_inactive_attempts_start_and_errors_on_stub() {
-        // Toggle delegates to start/stop based on `is_active()`. With
-        // NoContinuousListener inactive, toggle routes to start,
-        // which then errors with "not enabled".
         with_server(test_state(), |path| async move {
             let events =
                 send_request_collect_events(&path, r#"{"type":"listen_toggle","id":"lt-1"}"#).await;
@@ -1290,10 +1164,6 @@ mod tests {
         .await;
     }
 
-    /// Sending a `ConfirmResponse` as the *initial* request is a
-    /// protocol error: there's no in-flight prompt to satisfy. The
-    /// daemon surfaces it as `Event::Error` so a buggy client gets
-    /// a clear signal instead of a hang.
     #[tokio::test]
     async fn confirm_response_as_initial_request_returns_error() {
         with_server(test_state(), |path| async move {
@@ -1314,9 +1184,6 @@ mod tests {
         .await;
     }
 
-    /// A mid-stream `ConfirmResponse` whose `confirm_id` doesn't match
-    /// any pending prompt is logged + ignored; the daemon doesn't
-    /// crash and the original stream still terminates cleanly.
     #[tokio::test]
     async fn unmatched_mid_stream_confirm_response_does_not_crash() {
         let dir = tempfile::tempdir().unwrap();
@@ -1333,10 +1200,6 @@ mod tests {
         });
         wait_for_listener(&path).await;
 
-        // Open a Query connection without shutting the write half;
-        // the EchoBackend's stream is so fast that we may already see
-        // Done before our second write lands. That's fine; the test
-        // is "doesn't crash."
         let stream = UnixStream::connect(&path).await.unwrap();
         let (read, mut write) = stream.into_split();
         write
@@ -1344,9 +1207,6 @@ mod tests {
             .await
             .unwrap();
         write.write_all(b"\n").await.unwrap();
-        // Now send an unmatched ConfirmResponse: there is no
-        // in-flight prompt because the EchoBackend doesn't trigger
-        // tools.
         write
             .write_all(
                 br#"{"type":"confirm_response","id":"cr-x","confirm_id":"missing","allow":false}"#,
@@ -1371,8 +1231,6 @@ mod tests {
                 break;
             }
         }
-        // The Query still gets its Delta + Done. The unmatched
-        // ConfirmResponse is silently discarded by the read loop.
         assert!(
             matches!(events.last(), Some(Event::Done { id }) if id == "q1"),
             "got {events:?}"
@@ -1410,11 +1268,6 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_set_presence_to_sleeping_is_idempotent_under_fanout() {
-        // 32 connections each ask the daemon to enter Sleeping. The
-        // first one transitions Active → Sleeping; the rest hit the
-        // idempotency fast path and still receive Presence{Sleeping}
-        // + Done. Pins the invariant that the transition mutex
-        // serializes correctly under a connection storm.
         with_server(test_state(), |path| async move {
             let mut handles = Vec::new();
             for i in 0..32 {
@@ -1451,13 +1304,6 @@ mod tests {
 
     #[tokio::test]
     async fn mixed_query_and_set_presence_does_not_drop_events() {
-        // Half the connections issue Queries against SlowBackend (3
-        // deltas × 50ms ≈ 150ms); the other half issue idempotent
-        // SetPresence{Active} calls. Queries hold the inflight RwLock
-        // as readers; SetPresence takes the transition mutex. The
-        // target is Active (the stub's starting state) so auto-wake
-        // doesn't fire (the stub can't cold-start a llama-server).
-        // No connection should see an Error or miss its terminal Done.
         let state = state_with_backend_and_grace(
             Arc::new(SlowBackend {
                 deltas: 3,
@@ -1496,10 +1342,6 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_request_id_across_connections_does_not_leak_events() {
-        // Four connections each fire a Query with the literal id
-        // "shared". Per-connection event isolation means each socket
-        // sees Delta + Done with id="shared" and no extras from
-        // sibling connections. EchoBackend echoes text as one delta.
         with_server(test_state(), |path| async move {
             let mut handles = Vec::new();
             for i in 0..4 {
@@ -1535,10 +1377,6 @@ mod tests {
 
     #[tokio::test]
     async fn query_without_version_field_is_treated_as_legacy_v1() {
-        // Pre-versioning clients send Query without the optional
-        // `version` field. The daemon must accept it and stream a
-        // normal Delta + Done. This pins the additive-evolution
-        // contract for the protocol.
         with_server(test_state(), |path| async move {
             let events =
                 send_request_collect_events(&path, r#"{"type":"query","id":"legacy","text":"hi"}"#)
@@ -1554,10 +1392,6 @@ mod tests {
 
     #[tokio::test]
     async fn query_with_future_protocol_version_is_warned_but_accepted() {
-        // A client claiming a higher protocol version than the daemon
-        // knows about must still get a normal stream (additive
-        // evolution invariant). The daemon logs a warn (not asserted
-        // here) and proceeds.
         with_server(test_state(), |path| async move {
             let events = send_request_collect_events(
                 &path,
