@@ -88,10 +88,10 @@ impl ChildProcess {
     /// `term_timeout`, then SIGKILL if still running.
     pub async fn shutdown(mut self, term_timeout: Duration) -> Result<(), EmbedServerError> {
         #[cfg(unix)]
-        if let Some(pid) = self.child.id() {
-            if let Some(pgid) = rustix::process::Pid::from_raw(pid as i32) {
-                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
-            }
+        if let Some(pid) = self.child.id()
+            && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
+        {
+            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
         }
 
         match tokio::time::timeout(term_timeout, self.child.wait()).await {
