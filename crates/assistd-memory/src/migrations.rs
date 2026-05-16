@@ -14,16 +14,29 @@
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
-/// V1: initial schema. Tables in order:
+/// V1: full MVP schema. Tables in order:
 /// - `schema_migrations` - version log for future upgrades.
-/// - `sessions` - one row per daemon process (uuid PK).
-/// - `turns` - logical user-prompt-to-final-assistant grouping inside a session.
+/// - `sessions` - one row per daemon process (uuid PK), carries a
+///   nullable `title` (filled asynchronously by an LLM-summarisation
+///   task after the first agent response) and a `current_branch_id`
+///   pointer into `branches`.
+/// - `turns` - logical user-prompt-to-final-assistant grouping inside
+///   a session.
 /// - `conversations` - one row per `Message`. Tool results are
 ///   `role='tool'` rows with `tool_call_id` / `tool_name` set.
 /// - `conversations_fts` - FTS5 mirror, kept in sync via triggers.
 /// - `memories` - flat KV with provenance (source_conversation_id).
-/// - `conversation_chunks` + `embeddings` - schema only this milestone;
-///   populated by a follow-up that wires the embedder.
+/// - `memory_embeddings` - sibling to `embeddings`, indexes the KV
+///   rows for semantic recall. `UNIQUE(memory_id)` powers the
+///   `INSERT ... ON CONFLICT(memory_id) DO UPDATE` upsert path so
+///   re-saving an existing key overwrites the embedding in place and
+///   no stale vector survives a value change.
+/// - `branches` + `branch_messages` - named branches per session plus
+///   a join table mapping `(branch_id, branch-local seq)` to
+///   `conversation_id`. Forks share `conversations` rows across
+///   branches via separate `branch_messages` entries; no row duplication.
+/// - `conversation_chunks` + `embeddings` - chunked conversation text
+///   with one embedding per chunk for semantic search.
 const V1_SQL: &str = r#"
 CREATE TABLE schema_migrations (
     version    INTEGER PRIMARY KEY,
@@ -31,10 +44,12 @@ CREATE TABLE schema_migrations (
 );
 
 CREATE TABLE sessions (
-    id          TEXT PRIMARY KEY,
-    started_at  TEXT NOT NULL,
-    ended_at    TEXT,
-    daemon_pid  INTEGER NOT NULL
+    id                 TEXT PRIMARY KEY,
+    started_at         TEXT NOT NULL,
+    ended_at           TEXT,
+    daemon_pid         INTEGER NOT NULL,
+    title              TEXT,
+    current_branch_id  INTEGER
 );
 
 CREATE TABLE turns (
@@ -87,6 +102,36 @@ CREATE TABLE memories (
 );
 CREATE INDEX idx_memories_key ON memories(key);
 
+CREATE TABLE memory_embeddings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id   INTEGER NOT NULL UNIQUE REFERENCES memories(id) ON DELETE CASCADE,
+    model       TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX idx_memory_embeddings_model ON memory_embeddings(model);
+
+CREATE TABLE branches (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    name              TEXT NOT NULL,
+    parent_branch_id  INTEGER REFERENCES branches(id) ON DELETE SET NULL,
+    fork_point_seq    INTEGER,
+    created_at        TEXT NOT NULL,
+    UNIQUE(session_id, name)
+);
+CREATE INDEX idx_branches_session ON branches(session_id);
+
+CREATE TABLE branch_messages (
+    branch_id       INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+    seq             INTEGER NOT NULL,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    PRIMARY KEY (branch_id, seq)
+);
+CREATE INDEX idx_branch_messages_branch_seq ON branch_messages(branch_id, seq);
+CREATE INDEX idx_branch_messages_conv ON branch_messages(conversation_id);
+
 CREATE TABLE conversation_chunks (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -108,105 +153,10 @@ CREATE TABLE embeddings (
 CREATE INDEX idx_embeddings_model ON embeddings(model);
 "#;
 
-/// V3: conversation branching.
-///
-/// Adds named branches per session plus a `branch_messages` join table
-/// that maps `(branch_id, branch-local seq) -> conversation_id`. We
-/// deliberately do NOT duplicate `conversations` rows on fork; a single
-/// conversation row can be reachable from multiple branches at
-/// different (or the same) seq via separate `branch_messages` entries.
-/// This avoids FTS5 trigger-driven duplication and keeps
-/// `conversation_chunks` / `embeddings` referentially clean.
-///
-/// `sessions` gains `current_branch_id` (NULL on legacy rows; backfilled
-/// to the freshly-inserted "main" branch in this migration). The
-/// existing `conversations.seq` column stays as the session-wide insert
-/// order used by FTS5 ranking; branch-local order lives in
-/// `branch_messages.seq`.
-const V3_SQL: &str = r#"
-CREATE TABLE branches (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    name              TEXT NOT NULL,
-    parent_branch_id  INTEGER REFERENCES branches(id) ON DELETE SET NULL,
-    fork_point_seq    INTEGER,
-    created_at        TEXT NOT NULL,
-    UNIQUE(session_id, name)
-);
-CREATE INDEX idx_branches_session ON branches(session_id);
-
-CREATE TABLE branch_messages (
-    branch_id       INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
-    seq             INTEGER NOT NULL,
-    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    PRIMARY KEY (branch_id, seq)
-);
-CREATE INDEX idx_branch_messages_branch_seq ON branch_messages(branch_id, seq);
-CREATE INDEX idx_branch_messages_conv ON branch_messages(conversation_id);
-
-ALTER TABLE sessions ADD COLUMN current_branch_id INTEGER REFERENCES branches(id);
-
-INSERT INTO branches (session_id, name, parent_branch_id, fork_point_seq, created_at)
-    SELECT id, 'main', NULL, NULL, started_at FROM sessions;
-
-INSERT INTO branch_messages (branch_id, seq, conversation_id)
-    SELECT b.id, c.seq, c.id
-    FROM conversations c
-    JOIN branches b ON b.session_id = c.session_id AND b.name = 'main';
-
-UPDATE sessions
-    SET current_branch_id = (
-        SELECT id FROM branches
-        WHERE branches.session_id = sessions.id AND name = 'main'
-    );
-"#;
-
-/// V2: per-memory embeddings.
-///
-/// Adds a sibling table to `embeddings` that indexes the `memories` KV
-/// rows for semantic recall. Kept separate from `embeddings` (which is
-/// chunk-keyed) because (a) the data sources are independent (chunks
-/// are unstructured conversation text, memories are key/value facts),
-/// and (b) `ON DELETE CASCADE` on each FK gives free cleanup when the
-/// parent row is deleted, with no nullable FKs or CHECK constraints.
-///
-/// `UNIQUE(memory_id)` is what makes the
-/// `INSERT ... ON CONFLICT(memory_id) DO UPDATE` upsert work: re-saving
-/// the same memory key (which keeps its row id) overwrites the embedding
-/// in place, so a stale vector never survives a value change.
-const V2_SQL: &str = r#"
-CREATE TABLE memory_embeddings (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    memory_id   INTEGER NOT NULL UNIQUE REFERENCES memories(id) ON DELETE CASCADE,
-    model       TEXT NOT NULL,
-    dim         INTEGER NOT NULL,
-    vector      BLOB NOT NULL,
-    created_at  TEXT NOT NULL
-);
-CREATE INDEX idx_memory_embeddings_model ON memory_embeddings(model);
-"#;
-
-/// V4: per-session human-readable title.
-///
-/// Adds a nullable `title` column to `sessions`, populated asynchronously
-/// after the first agent response in a session by an LLM-summarisation
-/// task in the daemon. The TUI's `/resume` picker prefers this title
-/// over the raw session UUID prefix when listing branches; legacy rows
-/// (and rows whose title generation hasn't completed yet) keep showing
-/// the UUID prefix as a fallback.
-const V4_SQL: &str = r#"
-ALTER TABLE sessions ADD COLUMN title TEXT;
-"#;
-
 /// Build the full migration set. `'static` because the SQL is embedded
 /// in the binary; rusqlite_migration just needs read access.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![
-        M::up(V1_SQL),
-        M::up(V2_SQL),
-        M::up(V3_SQL),
-        M::up(V4_SQL),
-    ])
+    Migrations::new(vec![M::up(V1_SQL)])
 }
 
 /// Apply all pending migrations to `conn`. Idempotent: re-running on an

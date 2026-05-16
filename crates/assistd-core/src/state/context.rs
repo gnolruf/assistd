@@ -31,16 +31,12 @@ impl AppState {
     /// Best-effort: errors propagate but the caller treats every failure
     /// (embedder down, dim mismatch, …) as "skip injection".
     pub(super) async fn build_semantic_context(&self, query: &str) -> Result<Option<String>> {
-        // Skip very short queries: no useful semantic signal in 1-2
-        // chars, and the cost of a wasted embed call is non-zero.
         if query.trim().chars().count() < 3 {
             return Ok(None);
         }
         let vec = self.memory.embedder.embed(query.to_string()).await?;
         let model = self.memory.embedder.model().to_string();
         if model.is_empty() {
-            // NoEmbedder path: model() == "" → never matches stored
-            // rows. Bail without a write.
             return Ok(None);
         }
         let top_k = self.memory.embedding_cfg.top_k as usize;
@@ -122,9 +118,6 @@ pub(super) fn format_window_context_block(
     let kind = if is_term { "terminal" } else { "non-terminal" };
     block.push_str(&format!("The user is interacting with a {kind} window."));
     if is_term {
-        // Bias the LLM toward in-place execution. Phrasing references
-        // the actual `run` tool's sub-command names so the model maps
-        // the hint cleanly onto its tool schema.
         block.push_str(
             " If the user asks to run a command, build, or test, prefer calling `run` \
              with `command: \"bash\"` (executing the command in this terminal context) over \

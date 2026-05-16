@@ -127,10 +127,6 @@ impl Tool for RememberTool {
         }
 
         let memory_id = self.ops.save(&key, value.clone()).await?;
-        // Enqueue an embed job so semantic recall can find this memory
-        // by paraphrase. `try_send` (not `send`) so a wedged embedder
-        // never backpressures the tool. Skip when the id is 0; that's
-        // the `NoMemoryStore` sentinel, no row to FK.
         if memory_id != 0
             && self
                 .embed_tx
@@ -258,8 +254,6 @@ impl Tool for RecallTool {
                     }
                 }
                 Err(e) => {
-                    // Best-effort: log and return empty rather than
-                    // surfacing as a tool error. The LLM can retry next turn.
                     tracing::debug!(
                         target: "assistd::embed",
                         error = %e,

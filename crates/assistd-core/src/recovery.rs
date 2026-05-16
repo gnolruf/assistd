@@ -178,8 +178,6 @@ where
                 );
             }
             Err(join_err) if join_err.is_cancelled() => {
-                // Cancellation is normal during shutdown; do not
-                // promote to a recovery event.
                 ::tracing::debug!(
                     target: "assistd::recovery",
                     component = component.as_str(),
@@ -222,30 +220,22 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
             "daemon panic; killing llama-server before propagating"
         );
 
-        // Best-effort: try to SIGTERM the llama-server process group so
-        // the child doesn't outlive the daemon. We hold the lock only
-        // long enough to grab a strong ref + read the pid.
         let pid_opt = PRESENCE
             .lock()
             .as_ref()
             .and_then(|w| w.upgrade())
             .and_then(|p| p.llama_pid_blocking());
-        if let Some(pid) = pid_opt {
-            // The child was started in its own session via `setsid`, so its
-            // pgid equals its pid. `kill_process_group` is the safe rustix
-            // wrapper around `killpg(2)`. We ignore the result: the child
-            // may have already exited between read and kill, and there is
-            // nothing actionable to do from a panic hook regardless.
-            if let Some(pgid) = rustix::process::Pid::from_raw(pid as i32) {
-                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
-                recovery_event!(
-                    RecoverySeverity::Warning,
-                    Component::Llm,
-                    "panic_kill",
-                    pid = pid,
-                    "sent SIGTERM to llama-server process group from panic hook"
-                );
-            }
+        if let Some(pid) = pid_opt
+            && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
+        {
+            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+            recovery_event!(
+                RecoverySeverity::Warning,
+                Component::Llm,
+                "panic_kill",
+                pid = pid,
+                "sent SIGTERM to llama-server process group from panic hook"
+            );
         }
 
         previous(info);
@@ -285,18 +275,11 @@ mod tests {
         let handle = spawn_supervised("ok_task", Component::Daemon, async {
             tokio::task::yield_now().await;
         });
-        // The sentinel handle resolves once the inner task finishes.
-        // We don't assert any panic logging here; the absence of a
-        // panic event is the whole point.
         handle.await.expect("sentinel join");
     }
 
     #[tokio::test]
     async fn spawn_supervised_logs_on_panic() {
-        // We don't have a captured-subscriber harness wired here; the
-        // assertion is that the sentinel itself does not panic and
-        // resolves cleanly even when the inner task panicked. Visual
-        // verification via test-log output covers the message shape.
         let handle = spawn_supervised("panicker", Component::Llm, async {
             panic!("boom");
         });

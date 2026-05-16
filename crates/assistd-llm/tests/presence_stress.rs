@@ -249,7 +249,6 @@ async fn sleep_defers_until_inflight_real_chat_stream_done() {
         id: "q-stream".into(),
         text: "hello".into(),
         attachments: Vec::new(),
-        version: None,
     };
     let mut body = serde_json::to_string(&req).unwrap();
     body.push('\n');

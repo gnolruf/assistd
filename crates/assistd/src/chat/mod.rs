@@ -279,13 +279,6 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     Ok(())
 }
 
-/// Auto-spawn a detached daemon child. We exec the same binary
-/// (`current_exe`) so a `cargo run` build doesn't accidentally fork
-/// off a stale system install. The child calls `setsid()` itself on
-/// startup (gated on `--client-mode`) so it becomes its own session
-/// leader and survives the TUI's controlling-terminal closing; we
-/// drop the `Child` handle without reaping, which is fine because
-/// the daemon already self-handles SIGTERM.
 fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
     use std::process::{Command, Stdio};
 

@@ -124,8 +124,7 @@ mod tests {
     async fn forwards_when_healthy() {
         let (tool, _tx) = make_tool(HealthState::Healthy);
         let result = tool.invoke(json!({})).await.unwrap();
-        // McpToolAdapter renders Text results into the dispatch envelope
-        // shape (`output` field, not the old `text` field).
+
         assert_eq!(result["type"], "text");
         assert!(result["output"].as_str().unwrap().contains("search"));
     }
@@ -137,12 +136,10 @@ mod tests {
         assert_eq!(result["type"], "error");
         assert_eq!(result["exit_code"], -1);
         assert_eq!(result["truncated"], false);
-        // Server name carried out-of-band on a separate field so the
-        // message body itself can stay convention-compliant without
-        // having to embed the supervisor's identifier mid-sentence.
+
         assert_eq!(result["server_name"], "web");
         let output = result["output"].as_str().unwrap();
-        // Convention-compliant line: `[error] <tool>: <what>. <Hint>: <recovery>\n`
+
         assert!(output.starts_with("[error] mcp__web__search: "), "{output}");
         assert!(
             output.contains("Try:") || output.contains("Check:"),

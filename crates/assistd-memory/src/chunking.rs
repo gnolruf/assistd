@@ -112,9 +112,6 @@ mod tests {
 
     #[test]
     fn long_input_splits_with_overlap() {
-        // 100 chars, chunk=40, overlap=10 → step=30 → starts at 0, 30, 60.
-        // Window 2 (start=60) reaches end=100 and the loop breaks, so the
-        // last chunk is exactly chunk_chars wide; no separate tail.
         let s: String = (0..100).map(|i| (b'a' + (i % 26) as u8) as char).collect();
         let r = chunk_message(&s, &cfg(40, 10));
         assert_eq!(
@@ -170,8 +167,6 @@ mod tests {
         let s: String = (0..30).map(|_| '世').collect();
         let r = chunk_message(&s, &cfg(10, 2));
         for c in &r {
-            // Every chunk must be a valid UTF-8 string (Rust guarantees) and
-            // contain only whole `世` characters (no boundary splits).
             assert!(c.chars().all(|ch| ch == '世'));
         }
         assert!(r.len() >= 3);
@@ -179,8 +174,6 @@ mod tests {
 
     #[test]
     fn pure_whitespace_chunk_is_dropped() {
-        // 30 chars of spaces. Whole thing becomes a single chunk; trim
-        // detects it as whitespace and the function returns empty.
         let s = " ".repeat(30);
         let r = chunk_message(&s, &cfg(10, 2));
         assert!(r.is_empty());
@@ -188,8 +181,6 @@ mod tests {
 
     #[test]
     fn defensive_against_overlap_geq_chunk() {
-        // Validation should prevent this, but if it slips through we
-        // return one chunk rather than loop forever.
         let s = "a".repeat(50);
         let r = chunk_message(&s, &cfg(10, 10));
         assert_eq!(r, vec![s]);

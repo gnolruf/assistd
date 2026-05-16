@@ -122,11 +122,6 @@ impl Agent {
                 return Ok(());
             }
 
-            // Per-iteration replay budget: at most one restart-driven
-            // retry. The supervisor's own consecutive-failure cap (5) is
-            // the daemon-level circuit breaker; this keeps the user-visible
-            // latency bounded if the supervisor recovers but the model
-            // still crashes on the same prompt.
             let mut restart_attempted = false;
 
             let outcome = loop {
@@ -246,17 +241,10 @@ impl Agent {
                         }
                     }
                     Err(e) => {
-                        // Surface the typed error category to the model so
-                        // a transient HTTP hiccup doesn't read the same as
-                        // a persistent backend-unavailable state. The
-                        // human-readable Display is still the primary
-                        // signal in the user-facing delta.
                         let label = match &e {
                             LlmError::Chat(_) => "chat backend",
                             LlmError::ToolCallParse(_) => "tool-call parse",
                             LlmError::Unavailable(_) => "backend unavailable",
-                            // Already-attempted restart, or no probe wired.
-                            // Fall through as a terminal failure.
                             LlmError::ServerRestarting(_) => "llm restarting",
                         };
                         let _ = tx
@@ -286,9 +274,6 @@ impl Agent {
                                 cancelled = cancel.is_cancelled(),
                                 "stopping mid-call (client gone or explicit cancel) without dispatch"
                             );
-                            // Unwind: push synthetic errors for all pending calls
-                            // so conversation state isn't left with a dangling
-                            // assistant-with-tool_calls on the next turn.
                             results.push(ToolResultPayload {
                                 call_id: call.id,
                                 name: call.name,
@@ -311,9 +296,6 @@ impl Agent {
                         let (payload, raw_result) =
                             dispatch_tool_call(tools, &call, iteration).await;
 
-                        // Emit the result for downstream observers. Ignore
-                        // send errors; the next `tx.is_closed()` check will
-                        // catch the disconnect.
                         let _ = tx
                             .send(LlmEvent::ToolResult {
                                 id: payload.call_id.clone(),
@@ -347,15 +329,6 @@ impl Agent {
     }
 }
 
-/// Dispatch one tool call and produce both the LLM-facing payload and the
-/// raw JSON result (for event emission).
-///
-/// Error handling: failures at any level become synthetic tool results
-/// formatted with the Layer 2 navigational-hint convention
-/// (`[error] <cmd>: <what>. <Hint>: <recovery>`) so the model can
-/// self-correct on the next step. Only fundamental errors (like a
-/// `send` failure on `tx`) bubble up to the loop, and even those
-/// result in graceful shutdown, not a hung history.
 async fn dispatch_tool_call(
     tools: &ToolRegistry,
     call: &ToolCall,
@@ -474,8 +447,6 @@ async fn dispatch_tool_call(
     )
 }
 
-/// Decode one `attachments[i]` entry from a RunTool result. Currently
-/// only handles `{"type": "image", "mime": "...", "data": <base64>}`.
 fn parse_attachment(v: &Value) -> Option<Attachment> {
     let kind = v.get("type")?.as_str()?;
     if kind != "image" {
@@ -569,9 +540,6 @@ mod tests {
         ) -> assistd_llm::LlmResult<StepOutcome> {
             self.step_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            // Honour any configured slow-step delay BEFORE consuming
-            // an outcome; cancellation tests rely on this future
-            // being long-lived so the cancel signal can race it.
             let delay = *self.slow_step.lock();
             if let Some(d) = delay {
                 tokio::time::sleep(d).await;
@@ -585,8 +553,6 @@ mod tests {
                 }
             };
             if matches!(outcome, StepOutcome::Final) {
-                // Emulate a real step sending a text delta on Final so
-                // callers can observe streaming.
                 let _ = tx.send(LlmEvent::Delta { text: "ok".into() }).await;
             }
             Ok(outcome)
@@ -657,8 +623,6 @@ mod tests {
             .unwrap();
         let events = collect(&mut rx).await;
 
-        // Expected event sequence (intermixed with deltas):
-        // ToolCall, ToolResult, Delta("ok"), Done
         assert!(
             events
                 .iter()
@@ -671,8 +635,6 @@ mod tests {
         );
         assert!(matches!(events.last(), Some(LlmEvent::Done)));
 
-        // And the backend saw the echoed result pushed back before the
-        // second step.
         let pushed = backend.pushed_results.lock();
         assert_eq!(pushed.len(), 1);
         assert_eq!(pushed[0].len(), 1);
@@ -721,10 +683,6 @@ mod tests {
 
         let results = backend.pushed_results.lock();
         assert_eq!(results.len(), 1);
-        // `echo "alpha\nbeta\nalpha"` prints 1 line; grep alpha filters
-        // the full body; wc -l counts it. The exact count depends on
-        // how echo interprets \n, but the content should start with an
-        // integer and contain an [exit:0] footer.
         assert!(
             results[0][0].content.contains("[exit:0"),
             "expected success footer: {:?}",
@@ -765,8 +723,6 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool_passes_error_to_next_step() {
-        // Model calls a non-existent tool; dispatch produces an error
-        // payload rather than aborting; next step sees it and goes Final.
         let backend = MockBackend::with(vec![
             StepOutcome::ToolCalls(vec![ToolCall {
                 id: "c-1".into(),
@@ -794,10 +750,6 @@ mod tests {
 
     #[tokio::test]
     async fn tool_invoke_err_becomes_synthetic_error_result() {
-        // A hand-written tool that errors at the Rust level (rather than
-        // via a non-zero exit code) triggers the dispatch `Err` path and
-        // must be converted into a synthetic tool-result payload so the
-        // next step can self-correct.
         struct ErrTool;
         #[async_trait]
         impl assistd_tools::Tool for ErrTool {
@@ -855,7 +807,6 @@ mod tests {
             .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
             .await
             .unwrap();
-        // With the receiver already dropped, no step was called.
         let pushed = backend.pushed_results.lock();
         assert!(
             pushed.is_empty(),
@@ -865,9 +816,6 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_cancel_before_first_step_stops_loop_immediately() {
-        // The token is cancelled before the loop starts. The very
-        // first iteration's pre-step check sees `cancel.is_cancelled()`
-        // and bails; no step is ever called.
         let backend = MockBackend::with(vec![
             StepOutcome::Final,
             // If we get here the cancellation didn't take effect.
@@ -881,8 +829,6 @@ mod tests {
             .run_turn("go".into(), Vec::new(), tx, token)
             .await
             .unwrap();
-        // user push happened (it's the first thing in the loop), but
-        // no step ran.
         assert_eq!(backend.pushed_users.lock().len(), 1);
         assert_eq!(
             backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -931,8 +877,6 @@ mod tests {
         tools.register(RecallTool::new(no_embedder, no_semantic, String::new()));
         let tools = Arc::new(tools);
 
-        // Step 1: model calls remember(...). Step 2: model calls
-        // recall(...). Step 3: Final.
         let backend = MockBackend::with(vec![
             StepOutcome::ToolCalls(vec![ToolCall {
                 id: "c-1".into(),
@@ -972,19 +916,11 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["remember", "recall"]);
 
-        // Save landed in the underlying SQLite store (the wire-level
-        // contract for `remember`).
         assert_eq!(
             mem.load("editor_preference").await.unwrap().as_deref(),
             Some("vim")
         );
 
-        // Recall's ToolResult and the second push_tool_results carry
-        // the no-memories sentinel; the embedder is disabled, so
-        // semantic search has nothing to return. The point of this
-        // assertion is that the recall result *was* round-tripped back
-        // to the model on the next step (proving the loop wiring), not
-        // that the data was actually retrievable.
         let recall_output = events
             .iter()
             .find_map(|e| match e {
@@ -1032,12 +968,6 @@ mod tests {
         }
     }
 
-    /// Acceptance: a turn that mixes an MCP-shaped tool call and a
-    /// native `run` call drives both through `dispatch_tool_call`,
-    /// emits a `ToolCall`/`ToolResult` pair for each, and pushes both
-    /// results back to the backend in order. This is the wire-level
-    /// proof that the agent loop is tool-source-agnostic: MCP tools
-    /// and native tools share the same dispatch/result/feedback path.
     #[tokio::test]
     async fn agent_loop_mixes_native_and_mcp_calls() {
         use assistd_tools::commands::EchoCommand;
@@ -1049,8 +979,6 @@ mod tests {
             &ToolsOutputConfig::default(),
             std::env::temp_dir().join(format!("assistd-agent-test-mix-{}", std::process::id())),
         ));
-        // Same envelope shape `McpToolAdapter::tool_result_to_json`
-        // produces for a `ToolResult::Text("calendar entries")`.
         tools.register(FakeMcpTool {
             name: "mcp__google_calendar__list_events".into(),
             result: serde_json::json!({
@@ -1127,9 +1055,6 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(FakeMcpTool {
             name: "mcp__google_calendar__list_events".into(),
-            // Mirrors `error_envelope` in `assistd-mcp/src/lib.rs`;
-            // the line carries `Check:` which the model needs to see
-            // intact.
             result: serde_json::json!({
                 "type": "error",
                 "output": "[error] mcp__google_calendar__list_events: \
@@ -1186,16 +1111,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_during_slow_step_preempts_loop() {
-        // Fire a cancellation while the LLM step is still pending,
-        // and verify Agent::run_turn returns promptly via the
-        // tokio::select! against `cancel.cancelled()` rather than
-        // waiting for the step future to complete on its own.
         let backend = MockBackend::with(vec![StepOutcome::Final]).slow_step_ms(2_000);
         let tools = tools_with_echo();
         let (tx, _rx) = mpsc::channel::<LlmEvent>(16);
         let token = CancellationToken::new();
         let token_for_kicker = token.clone();
-        // Spawn a task that fires cancel after a short delay.
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             token_for_kicker.cancel();
@@ -1206,9 +1126,6 @@ mod tests {
             .await
             .unwrap();
         let elapsed = started.elapsed();
-        // The slow step is 2s; if cancellation didn't preempt we'd
-        // be waiting that long. Allow a generous 500ms buffer for
-        // CI scheduling variance.
         assert!(
             elapsed < std::time::Duration::from_millis(500),
             "cancellation did not preempt slow step (elapsed: {elapsed:?})"
@@ -1320,9 +1237,6 @@ mod tests {
         ) -> assistd_llm::LlmResult<StepOutcome> {
             self.step_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            // Errors first; once they're exhausted, fall through to
-            // outcomes. Lets a single test script "first attempt
-            // crashes, second attempt succeeds".
             let next_err = self.errors.lock().pop();
             if let Some(e) = next_err {
                 return Err(e);
@@ -1337,10 +1251,6 @@ mod tests {
 
     #[tokio::test]
     async fn replay_once_on_server_restarting() {
-        // First attempt: ServerRestarting. Probe says Ready returns Ok.
-        // Second attempt: Final.
-        // Expected: exactly one step retry; Status events for restarting
-        // and replaying; final Done; no terminal Error.
         let backend = ErrorInjectingBackend::new(
             vec![LlmError::ServerRestarting("boom".into())],
             vec![StepOutcome::Final],
@@ -1379,11 +1289,6 @@ mod tests {
 
     #[tokio::test]
     async fn replay_does_not_loop_on_repeated_server_restarting() {
-        // Two ServerRestarting in a row: the loop should retry once,
-        // see the second crash, and surface a terminal error rather
-        // than continue replaying. The supervisor's circuit-breaker
-        // (Degraded after 5 consecutive failures) is the daemon-level
-        // backstop; this test asserts the per-iteration cap.
         let backend = ErrorInjectingBackend::new(
             vec![
                 LlmError::ServerRestarting("second".into()),
@@ -1418,9 +1323,6 @@ mod tests {
 
     #[tokio::test]
     async fn replay_abandons_on_degraded_supervisor() {
-        // ServerRestarting once, but the probe reports Degraded.
-        // Expected: a `degraded` Status event followed by a terminal
-        // error. No second step call.
         let backend =
             ErrorInjectingBackend::new(vec![LlmError::ServerRestarting("dead".into())], vec![]);
         let probe = MockProbe::ready_with_wait_err(assistd_llm::HealthWaitError::Degraded);
@@ -1439,8 +1341,6 @@ mod tests {
             "expected a degraded Status event"
         );
         assert!(matches!(events.last(), Some(LlmEvent::Done)));
-        // Only one step call: wait_for_ready returned Err, so no
-        // replay step was attempted.
         assert_eq!(
             backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
             1

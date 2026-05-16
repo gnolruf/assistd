@@ -249,8 +249,8 @@ pub trait LlmBackend: Send + Sync + 'static {
     /// `mpsc`; if `send` fails it means the consumer has disconnected and
     /// the implementation should stop generating and return `Ok(())`.
     ///
-    /// This is the legacy single-turn API used by code paths that don't
-    /// want the agent loop's tool-dispatch machinery.
+    /// Single-turn API used by code paths that don't want the agent
+    /// loop's tool-dispatch machinery.
     async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()>;
 
     /// Append a user message to the conversation. Does not invoke the
@@ -310,13 +310,9 @@ pub trait LlmBackend: Send + Sync + 'static {
         Ok(0)
     }
 
-    /// One-shot completion that does NOT touch the in-memory
-    /// conversation. Used by the daemon's title-generation hook so the
+    /// Used by the daemon's title-generation hook so the
     /// summarisation prompt cannot leak into the user's chat history.
     /// Returns the model's final text concatenated.
-    ///
-    /// Default impl reports unavailable; backends that can run a
-    /// stateless completion override it.
     async fn complete_oneshot(&self, _prompt: String) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),

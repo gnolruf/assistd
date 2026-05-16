@@ -21,7 +21,9 @@ use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::backoff::{MAX_CONSECUTIVE_FAILURES, MIN_HEALTHY_SECONDS, backoff_delay};
+use crate::backoff::{
+    MAX_CONSECUTIVE_FAILURES, MIN_HEALTHY_SECONDS, UNHEALTHY_RETRY_INTERVAL, backoff_delay,
+};
 use crate::error::McpError;
 use crate::sse::{SseConfig, SseLifeline, SseMcpClient};
 use crate::stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
@@ -276,6 +278,8 @@ impl Supervisor {
                         if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
                             consecutive_failures = 0;
                         }
+                        let _ = health_tx.send(HealthState::Restarting);
+                        switch.swap(None).await;
                     }
                     _ = supervisor_shutdown_rx.changed() => {
                         if *supervisor_shutdown_rx.borrow() {
@@ -296,35 +300,28 @@ impl Supervisor {
                 }
             }
 
-            // Swap the switching client to None so direct consumers see
-            // ServerDown rather than calling a dead transport.
-            let _ = health_tx.send(HealthState::Restarting);
-            switch.swap(None).await;
-
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            let unhealthy = consecutive_failures >= MAX_CONSECUTIVE_FAILURES;
+            let delay = if unhealthy {
                 error!(
                     target: "assistd::mcp",
                     server = %name,
                     attempts = consecutive_failures,
-                    "MCP server reached {MAX_CONSECUTIVE_FAILURES} consecutive failures; marking permanently unhealthy",
+                    retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
+                    "MCP server reached {MAX_CONSECUTIVE_FAILURES} consecutive failures; marking unhealthy and retrying at slow cadence",
                 );
                 let _ = health_tx.send(HealthState::Unhealthy);
-                // Park awaiting any shutdown signal.
-                tokio::select! {
-                    _ = supervisor_shutdown_rx.changed() => {}
-                    _ = external_shutdown_rx.changed() => {}
-                }
-                return;
-            }
-
-            let delay = backoff_delay(consecutive_failures);
-            warn!(
-                target: "assistd::mcp",
-                server = %name,
-                attempt = consecutive_failures + 1,
-                cap = MAX_CONSECUTIVE_FAILURES,
-                "restarting MCP server in {delay:?}",
-            );
+                UNHEALTHY_RETRY_INTERVAL
+            } else {
+                let d = backoff_delay(consecutive_failures);
+                warn!(
+                    target: "assistd::mcp",
+                    server = %name,
+                    attempt = consecutive_failures + 1,
+                    cap = MAX_CONSECUTIVE_FAILURES,
+                    "restarting MCP server in {d:?}",
+                );
+                d
+            };
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 _ = supervisor_shutdown_rx.changed() => return,

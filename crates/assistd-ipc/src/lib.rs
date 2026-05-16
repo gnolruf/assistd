@@ -34,12 +34,6 @@ pub mod client;
 #[cfg(feature = "client")]
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 
-/// Wire-protocol version. Bumped when an existing field's semantics
-/// change in a non-additive way; new optional fields don't bump this.
-/// Servers log a warning and continue when they see a version they
-/// don't understand, so additive evolution stays compatible.
-pub const PROTOCOL_VERSION: u32 = 1;
-
 /// An image attachment carried over the wire alongside a [`Request::Query`].
 /// `data_base64` is standard base64 (with padding); the daemon decodes
 /// it back into raw bytes before handing it to the LLM. `mime` is one of
@@ -123,15 +117,9 @@ pub enum Request {
         id: String,
         text: String,
         /// Image attachments to surface as vision inputs on this turn.
-        /// Empty for text-only queries; deserializes from missing fields
-        /// for backward compat.
+        /// Empty for text-only queries.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<ImageAttachment>,
-        /// Wire-protocol version the client speaks. None means a
-        /// legacy client (pre-versioning); the daemon accepts these
-        /// for now but logs a warning.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        version: Option<u32>,
     },
     /// Drive the daemon to a specific presence state.
     SetPresence { id: String, target: PresenceState },
@@ -288,21 +276,16 @@ pub enum Request {
 }
 
 impl Request {
-    /// Build a text-only [`Request::Query`] tagged with the current
-    /// [`PROTOCOL_VERSION`]. Use this in clients to keep call sites
-    /// short; legacy struct-literal construction still works for
-    /// callers that need to set `attachments` explicitly.
+    /// Build a text-only [`Request::Query`].
     pub fn query(id: impl Into<String>, text: impl Into<String>) -> Self {
         Request::Query {
             id: id.into(),
             text: text.into(),
             attachments: Vec::new(),
-            version: Some(PROTOCOL_VERSION),
         }
     }
 
-    /// Build a [`Request::Query`] with one or more image attachments,
-    /// tagged with the current [`PROTOCOL_VERSION`].
+    /// Build a [`Request::Query`] with one or more image attachments.
     pub fn query_with_attachments(
         id: impl Into<String>,
         text: impl Into<String>,
@@ -312,7 +295,6 @@ impl Request {
             id: id.into(),
             text: text.into(),
             attachments,
-            version: Some(PROTOCOL_VERSION),
         }
     }
 
@@ -653,8 +635,6 @@ pub fn socket_path() -> PathBuf {
     )
 }
 
-/// Pure resolver: env reads happen at the boundary so this can be tested
-/// without mutating process-global state.
 fn socket_path_for(xdg_runtime_dir: Option<OsString>, user: Option<OsString>) -> PathBuf {
     if let Some(dir) = xdg_runtime_dir {
         let mut p = PathBuf::from(dir);
@@ -673,14 +653,10 @@ mod tests {
 
     #[test]
     fn request_roundtrip() {
-        // Legacy struct-literal form: empty attachments + no version are
-        // both skipped on serialize so the wire shape is unchanged from
-        // pre-multimodality clients.
         let req = Request::Query {
             id: "req-1".into(),
             text: "ping".into(),
             attachments: Vec::new(),
-            version: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(json, r#"{"type":"query","id":"req-1","text":"ping"}"#);
@@ -689,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn request_query_with_version_and_attachments_roundtrip() {
+    fn request_query_with_attachments_roundtrip() {
         let req = Request::query_with_attachments(
             "req-2",
             "describe this",
@@ -699,40 +675,15 @@ mod tests {
             )],
         );
         let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains(r#""version":1"#));
         assert!(json.contains(r#""data_base64":"3q2+7w==""#));
         let parsed: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, req);
     }
 
     #[test]
-    fn request_query_helper_emits_current_version() {
-        let req = Request::query("req-3", "hi");
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains(&format!(r#""version":{PROTOCOL_VERSION}"#)));
-    }
-
-    #[test]
-    fn legacy_query_payload_deserializes_with_default_attachments() {
-        // A pre-multimodality client emits the original two-field shape.
-        // Older daemons keep accepting it: attachments defaults to empty,
-        // version defaults to None.
-        let json = r#"{"type":"query","id":"req-4","text":"hello"}"#;
-        let parsed: Request = serde_json::from_str(json).unwrap();
-        match parsed {
-            Request::Query {
-                id,
-                text,
-                attachments,
-                version,
-            } => {
-                assert_eq!(id, "req-4");
-                assert_eq!(text, "hello");
-                assert!(attachments.is_empty());
-                assert_eq!(version, None);
-            }
-            _ => panic!("expected Query"),
-        }
+    fn text_only_query_omits_attachments_on_the_wire() {
+        let json = serde_json::to_string(&Request::query("req-3", "hi")).unwrap();
+        assert_eq!(json, r#"{"type":"query","id":"req-3","text":"hi"}"#);
     }
 
     #[test]
@@ -950,9 +901,6 @@ mod tests {
 
     #[test]
     fn memory_list_all_request_omits_optional_fields() {
-        // Both `prefix` and `limit` use `#[serde(default)]`, so a
-        // pre-feature client that only sends `id` should still parse
-        // (additive evolution).
         let json = r#"{"type":"memory_list_all","id":"r"}"#;
         let parsed: Request = serde_json::from_str(json).unwrap();
         match parsed {

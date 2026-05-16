@@ -40,9 +40,6 @@ pub async fn assert_focused_context_agrees(wm: &Arc<dyn WindowManager>) {
         .await
         .expect("focused_context query failed")
         .expect("expected Some(FocusedWindowContext) for a focused session");
-    // PR 3b: focused_window() returns the compositor con_id; the
-    // focused_context().id field carries the same id, surfaced from the
-    // same snapshot read. Both are `Option<WindowId>` (NonZeroU64).
     assert_eq!(
         ctx.id, focused,
         "focused_context().id should agree with focused_window()"

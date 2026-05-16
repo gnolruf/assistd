@@ -111,9 +111,6 @@ impl Correlator {
     /// when an in-flight reply arrives just after the supervisor swap.
     pub fn deliver(&self, response: Response) {
         let Some(id) = response.id else {
-            // Server sent a notification or a malformed response without id.
-            // Notifications other than the initial handshake are ignored
-            // by this v1 client.
             return;
         };
         let tx = {

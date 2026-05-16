@@ -25,16 +25,8 @@
 //! `[error] …: vision not available …` line in that case, which is a
 //! safer default than silently sending image bytes the model will drop.
 //!
-//! Field-name spread: across the multimodal-merge era llama.cpp has
-//! exposed the capability under several different keys. The current
-//! canonical shape is a structured `modalities` object
-//! (`{"modalities": {"vision": true}}`); legacy builds reported a
-//! flat boolean under `has_multimodal`, `has_vision`, `multimodal`,
-//! or `default_generation_settings.multimodal`. We tolerate the
-//! spread by checking the structured field first and falling back to
-//! the legacy union, so a server upgrade in either direction keeps
-//! vision detection working. New names can be added here without
-//! touching call sites.
+//! We read the capability from llama.cpp's canonical structured
+//! `modalities` object (`{"modalities": {"vision": true}}`).
 
 use std::time::Duration;
 
@@ -154,9 +146,7 @@ pub async fn probe_capabilities_routed(
         None => return VisionState::default(),
     };
     let vision_supported = parse_vision_supported(&child_body);
-    // The child's /props sets `model` to null and only carries `model_path`;
-    // fall back to the configured name so the revalidator's swap detection
-    // has a stable identity to compare against.
+
     let model_id = parse_model_id(&child_body).or_else(|| Some(model.to_string()));
     debug!(
         target: "assistd::llama_server",
@@ -219,10 +209,6 @@ async fn fetch_props(host: &str, port: u16) -> Option<Value> {
     }
 }
 
-/// Pull a model identifier from a `/props` body. llama.cpp has reported
-/// this under a few different keys (`model`, `model_path`,
-/// `default_generation_settings.model`), so try them in order. Returns
-/// `None` if no recognizable field is present.
 fn parse_model_id(body: &Value) -> Option<String> {
     const TOP_LEVEL_KEYS: &[&str] = &["model", "model_path", "model_name"];
     for key in TOP_LEVEL_KEYS {
@@ -238,27 +224,11 @@ fn parse_model_id(body: &Value) -> Option<String> {
     None
 }
 
-/// Inspect a parsed `/props` body for any field that signals
-/// multimodal/vision support. Tolerates the historical spread of
-/// field names in llama.cpp.
 fn parse_vision_supported(body: &Value) -> bool {
-    if let Some(modalities) = body.get("modalities")
-        && modalities.get("vision").and_then(Value::as_bool) == Some(true)
-    {
-        return true;
-    }
-    const TOP_LEVEL_KEYS: &[&str] = &["has_multimodal", "has_vision", "multimodal"];
-    for key in TOP_LEVEL_KEYS {
-        if body.get(*key).and_then(Value::as_bool) == Some(true) {
-            return true;
-        }
-    }
-    if let Some(settings) = body.get("default_generation_settings")
-        && settings.get("multimodal").and_then(Value::as_bool) == Some(true)
-    {
-        return true;
-    }
-    false
+    body.get("modalities")
+        .and_then(|m| m.get("vision"))
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 #[cfg(test)]
@@ -279,87 +249,20 @@ mod tests {
     }
 
     #[test]
-    fn modalities_vision_true_wins_over_legacy_false() {
-        // A server reporting the new structured field while still
-        // emitting a stale legacy `has_multimodal: false` must enable
-        // vision. The structured field is canonical.
-        let body = json!({
-            "modalities": {"vision": true},
-            "has_multimodal": false,
-        });
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn modalities_without_vision_key_falls_through_to_legacy() {
-        // Future-proof: if `modalities` exists but doesn't yet carry a
-        // `vision` key (e.g. audio-only build), we must not short-circuit
-        // — fall through and let the legacy union decide.
-        let body = json!({
-            "modalities": {"audio": true},
-            "has_vision": true,
-        });
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
     fn ignores_non_bool_modalities_vision() {
         let body = json!({"modalities": {"vision": "true"}});
         assert!(!parse_vision_supported(&body));
     }
 
     #[test]
-    fn detects_top_level_has_multimodal_true() {
-        let body = json!({"has_multimodal": true, "total_slots": 1});
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn detects_top_level_has_vision_true() {
-        let body = json!({"has_vision": true});
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn detects_top_level_multimodal_true() {
-        let body = json!({"multimodal": true});
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn detects_nested_multimodal_under_default_generation_settings() {
-        let body = json!({
-            "default_generation_settings": {"multimodal": true, "temperature": 0.7},
-        });
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn ignores_field_when_explicitly_false() {
-        let body = json!({"has_multimodal": false, "has_vision": false});
-        assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn defaults_false_when_no_field_present() {
+    fn defaults_false_when_modalities_absent() {
         let body = json!({"total_slots": 1, "model_path": "/some/model.gguf"});
         assert!(!parse_vision_supported(&body));
     }
 
     #[test]
-    fn nested_false_does_not_promote_to_true() {
-        let body = json!({
-            "default_generation_settings": {"multimodal": false},
-        });
-        assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn ignores_non_bool_field_value() {
-        // Future-proofing: a string "true" must NOT count. We require
-        // a JSON boolean to avoid accidentally enabling vision based on
-        // an unrelated string field that happens to share a name.
-        let body = json!({"has_multimodal": "true"});
+    fn defaults_false_when_modalities_lacks_vision_key() {
+        let body = json!({"modalities": {"audio": true}});
         assert!(!parse_vision_supported(&body));
     }
 
@@ -367,16 +270,6 @@ mod tests {
     fn empty_object_is_not_vision_supported() {
         let body = json!({});
         assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn any_truthy_field_wins_even_if_others_false() {
-        let body = json!({
-            "has_multimodal": false,
-            "has_vision": true,
-            "multimodal": false,
-        });
-        assert!(parse_vision_supported(&body));
     }
 
     #[test]
@@ -425,14 +318,12 @@ mod tests {
 
     #[test]
     fn non_router_props_lack_router_role() {
-        // Real child-server /props: `model` may be null but `role` is absent.
         let body = json!({"model": null, "model_path": "/some/model.gguf", "modalities": {"vision": true}});
         assert!(!is_router_props(&body));
     }
 
     #[test]
     fn non_router_props_with_unrelated_role_value() {
-        // Future-proof: only the literal "router" triggers the detour.
         let body = json!({"role": "worker", "model_path": "/x.gguf"});
         assert!(!is_router_props(&body));
     }

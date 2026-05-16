@@ -66,7 +66,9 @@ pub use assistd_voice::{
 pub use assistd_wm::{NoWindowManager, WindowManager};
 
 pub use presence::{PresenceManager, RequestGuard};
-pub use state::{AppState, ConversationContext, MemoryStack, RuntimeState, Subsystems};
+pub use state::{
+    AppState, ConversationContext, McpStartupFailure, MemoryStack, RuntimeState, Subsystems,
+};
 
 use anyhow::{Context, Result};
 use assistd_embed::{EmbedJob, Embedder};
@@ -173,8 +175,6 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     };
     let sandbox = probe_sandbox(sandbox_request, config.tools.bash.bwrap_extra_args.clone())?;
 
-    // Shlex-tokenize destructive patterns once so the hot path in
-    // `matches_destructive` doesn't re-parse them on every invocation.
     let destructive_patterns: Vec<Vec<String>> = config
         .tools
         .bash
@@ -189,8 +189,6 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
         destructive_patterns,
     });
 
-    // Non-existent entries are dropped with a warning so a fresh install
-    // missing (say) `~/Documents` doesn't break the command entirely.
     let mut writable_paths: Vec<PathBuf> = Vec::new();
     for raw in &config.tools.write.writable_paths {
         let expanded = expand_config_tilde(raw);
@@ -250,8 +248,6 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     ));
     tools.register(ReminisceTool::new(embedder, semantic, embedding_model));
 
-    // MCP tools are registered last so a malicious server cannot shadow
-    // native tool names; the registry's linear lookup returns the first match.
     for t in mcp_tools {
         tools.register_boxed(t);
     }
@@ -329,8 +325,6 @@ impl VisionRevalidator {
     /// [`Self::revalidate`] so unit tests can drive the swap logic
     /// without standing up an HTTP server.
     pub async fn apply_probe(&self, probe: assistd_llm::VisionState) {
-        // No model id means the probe failed. Don't mutate the gate
-        // on a transient error; keep the last known good state.
         if probe.model_id.is_none() {
             return;
         }
@@ -364,9 +358,6 @@ mod vision_revalidator_tests {
             assistd_tools::VisionGate::new(gate_initial),
             cached_model.map(str::to_string),
             "127.0.0.1".to_string(),
-            // Port is unused in the apply_probe path; set to 0 to
-            // make a real revalidate() obviously fail loudly if anyone
-            // accidentally points the test at it.
             0,
             "test/model:Q4".to_string(),
         )
@@ -374,10 +365,6 @@ mod vision_revalidator_tests {
 
     #[tokio::test]
     async fn no_model_id_keeps_gate_unchanged() {
-        // Simulates a transient probe failure: probe_capabilities
-        // returns the default (None model id, false vision). The gate
-        // must stay where it was; flipping it on a network blip would
-        // disable vision mid-session.
         let rev = make_revalidator(true, Some("model-A"));
         rev.apply_probe(VisionState::default()).await;
         assert!(
@@ -391,8 +378,6 @@ mod vision_revalidator_tests {
         let rev = make_revalidator(true, Some("model-A"));
         rev.apply_probe(VisionState {
             model_id: Some("model-A".into()),
-            // Even if the new probe says false, no model swap means we
-            // don't disturb the gate; the same model can't lose vision.
             vision_supported: false,
         })
         .await;
@@ -423,9 +408,6 @@ mod vision_revalidator_tests {
 
     #[tokio::test]
     async fn fresh_revalidator_with_no_cached_model_still_picks_up_first_probe() {
-        // Daemon starts before the probe completes; the initial cache
-        // is None. When the first probe lands, we accept it as the
-        // baseline (None != Some) and update the gate to match.
         let rev = make_revalidator(false, None);
         rev.apply_probe(VisionState {
             model_id: Some("vision-model".into()),
@@ -436,9 +418,6 @@ mod vision_revalidator_tests {
     }
 }
 
-/// Expand a leading `~` / `~/` in a config-supplied path string using
-/// `$HOME`. Falls back to the literal path when `$HOME` is unset so the
-/// subsequent canonicalize call produces the diagnostic error.
 fn expand_config_tilde(raw: &str) -> PathBuf {
     if let Some(rest) = raw.strip_prefix("~/") {
         match std::env::var("HOME") {

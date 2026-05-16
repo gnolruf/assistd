@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use assistd_core::{Config, McpServerConfig, McpTransport};
+use assistd_core::{Config, McpServerConfig, McpStartupFailure, McpTransport};
 use assistd_mcp::{
     McpServerHandle, SseConfig, StdioConfig, TransportConfig, adapt_handle_as_tools,
 };
@@ -21,6 +21,11 @@ pub struct McpSubsystem {
     pub handles: Vec<McpServerHandle>,
     /// Tool adapters discovered from each server's `tools/list` response.
     pub tools: Vec<Box<dyn assistd_tools::Tool>>,
+    /// Servers that failed to start or complete discovery; surfaced to
+    /// connected clients via `Event::Status` during `GetCapabilities` so
+    /// the TUI can render a warning instead of letting the user discover
+    /// the failure only when the model tries to call a tool.
+    pub startup_failures: Vec<McpStartupFailure>,
 }
 
 impl McpSubsystem {
@@ -35,18 +40,21 @@ impl McpSubsystem {
 /// Start all configured MCP servers and adapt their tools.
 ///
 /// Servers that fail to start or fail tool discovery are skipped with a
-/// warning; they do not prevent the daemon from starting.
+/// warning and recorded in [`McpSubsystem::startup_failures`]; they do
+/// not prevent the daemon from starting.
 pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubsystem {
     if !config.mcp.enabled {
         info!("mcp: disabled in config (mcp.enabled = false)");
         return McpSubsystem {
             handles: Vec::new(),
             tools: Vec::new(),
+            startup_failures: Vec::new(),
         };
     }
 
     let mut handles: Vec<McpServerHandle> = Vec::new();
     let mut tools: Vec<Box<dyn assistd_tools::Tool>> = Vec::new();
+    let mut startup_failures: Vec<McpStartupFailure> = Vec::new();
     for s_cfg in &config.mcp.servers {
         let transport_cfg = build_transport_config(s_cfg);
         let label = s_cfg.name.clone();
@@ -65,20 +73,31 @@ pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubs
                         handles.push(handle);
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "mcp: {} discovery failed ({e:#}); shutting down server",
-                            handle.name
-                        );
+                        let reason = format!("discovery failed: {e:#}");
+                        tracing::warn!("mcp: {} {reason}; shutting down server", handle.name);
+                        startup_failures.push(McpStartupFailure {
+                            server_name: handle.name.clone(),
+                            reason,
+                        });
                         handle.shutdown().await;
                     }
                 }
             }
             Err(e) => {
-                tracing::warn!("mcp: {label} failed to start ({e:#}); skipping");
+                let reason = format!("failed to start: {e:#}");
+                tracing::warn!("mcp: {label} {reason}; skipping");
+                startup_failures.push(McpStartupFailure {
+                    server_name: label,
+                    reason,
+                });
             }
         }
     }
-    McpSubsystem { handles, tools }
+    McpSubsystem {
+        handles,
+        tools,
+        startup_failures,
+    }
 }
 
 fn build_transport_config(s: &McpServerConfig) -> TransportConfig {

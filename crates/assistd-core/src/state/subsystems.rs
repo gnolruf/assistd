@@ -12,6 +12,19 @@ use assistd_voice::{ContinuousListener, VoiceInput, VoiceOutputController};
 use assistd_wm::{NoWindowManager, WindowManager};
 use std::sync::Arc;
 
+/// One MCP server that failed to start or complete tool discovery during
+/// daemon boot. Retained on [`Subsystems`] so the daemon can surface the
+/// failure to connected clients via `Event::Status` instead of leaving
+/// users to discover broken servers only when the model invokes a tool.
+#[derive(Debug, Clone)]
+pub struct McpStartupFailure {
+    /// Configured server name (matches `mcp.servers[].name`).
+    pub server_name: String,
+    /// Human-readable reason for the failure, suitable for the TUI to
+    /// render verbatim (e.g. `"binary not found at /usr/bin/foo-mcp"`).
+    pub reason: String,
+}
+
 pub struct Subsystems {
     pub llm: Arc<dyn LlmBackend>,
     pub presence: Arc<PresenceManager>,
@@ -21,6 +34,8 @@ pub struct Subsystems {
     pub voice_output: Arc<VoiceOutputController>,
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<crate::VisionRevalidator>>,
+    /// MCP servers that failed at boot. Empty in the happy path.
+    pub mcp_startup_failures: Vec<McpStartupFailure>,
 }
 
 impl Subsystems {
@@ -45,6 +60,7 @@ impl Subsystems {
             voice_output,
             window_manager: Arc::new(NoWindowManager),
             vision_revalidator: None,
+            mcp_startup_failures: Vec::new(),
         }
     }
 
@@ -55,6 +71,11 @@ impl Subsystems {
 
     pub fn with_vision_revalidator(mut self, r: Arc<crate::VisionRevalidator>) -> Self {
         self.vision_revalidator = Some(r);
+        self
+    }
+
+    pub fn with_mcp_startup_failures(mut self, failures: Vec<McpStartupFailure>) -> Self {
+        self.mcp_startup_failures = failures;
         self
     }
 }

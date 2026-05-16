@@ -1,10 +1,13 @@
-use super::backoff::{MAX_CONSECUTIVE_FAILURES, backoff_delay};
+use super::backoff::{
+    MAX_CONSECUTIVE_FAILURES, MAX_RESTARTS_PER_WINDOW, RESTART_WINDOW, backoff_delay,
+};
 use super::error::LlamaServerError;
 use super::health::HealthChecker;
 use super::process::ChildProcess;
 use super::service::ReadyState;
 use assistd_config::{LlamaServerConfig, ModelConfig};
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,7 +17,7 @@ use tracing::{error, info, warn};
 /// Seconds a child must stay healthy after reaching Ready before a subsequent
 /// exit is treated as a runtime crash (counter reset) rather than a startup
 /// flap (counter increment).
-const MIN_HEALTHY_SECONDS: u64 = 30;
+pub(crate) const MIN_HEALTHY_SECONDS: u64 = 30;
 
 /// Graceful shutdown budget per child; fits under systemd's 15s stop budget.
 const TERM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -42,10 +45,13 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    /// Runs the supervisor loop until shutdown is requested or [`MAX_CONSECUTIVE_FAILURES`]
-    /// is reached. Intended to be spawned as a Tokio task.
+    /// Runs the supervisor loop until shutdown is requested, [`MAX_CONSECUTIVE_FAILURES`]
+    /// is reached, or [`MAX_RESTARTS_PER_WINDOW`] is exceeded inside
+    /// [`RESTART_WINDOW`]. Intended to be spawned as a Tokio task.
     pub async fn run(mut self) {
         let mut consecutive_failures: u32 = 0;
+
+        let mut restart_history: VecDeque<Instant> = VecDeque::new();
 
         loop {
             if *self.shutdown_rx.borrow() {
@@ -54,6 +60,19 @@ impl Supervisor {
             let _ = self.ready_tx.send(ReadyState::Starting);
 
             let outcome = self.supervise_once().await;
+
+            let recorded_restart = !matches!(outcome, Ok(CycleResult::ShutdownRequested));
+            if recorded_restart {
+                let now = Instant::now();
+                while let Some(&oldest) = restart_history.front() {
+                    if now.duration_since(oldest) > RESTART_WINDOW {
+                        restart_history.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                restart_history.push_back(now);
+            }
 
             match outcome {
                 Ok(CycleResult::ShutdownRequested) => {
@@ -87,15 +106,24 @@ impl Supervisor {
                 }
             }
 
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                error!(
-                    target: "assistd::llama_server",
-                    "{MAX_CONSECUTIVE_FAILURES} consecutive failures; entering degraded state"
-                );
+            let consecutive_tripped = consecutive_failures >= MAX_CONSECUTIVE_FAILURES;
+            let window_tripped = restart_history.len() >= MAX_RESTARTS_PER_WINDOW;
+            if consecutive_tripped || window_tripped {
+                if window_tripped {
+                    error!(
+                        target: "assistd::llama_server",
+                        restarts = restart_history.len(),
+                        window_secs = RESTART_WINDOW.as_secs(),
+                        "llama-server hit {MAX_RESTARTS_PER_WINDOW} restarts in rolling window; entering degraded state"
+                    );
+                } else {
+                    error!(
+                        target: "assistd::llama_server",
+                        "{MAX_CONSECUTIVE_FAILURES} consecutive failures; entering degraded state"
+                    );
+                }
                 let _ = self.ready_tx.send(ReadyState::Degraded);
-                // Park until the daemon tells us to stop. Keeping the task
-                // alive means the daemon process doesn't crash, and the
-                // LlamaService::shutdown() path still works.
+
                 let _ = self.shutdown_rx.wait_for(|v| *v).await;
                 return;
             }
@@ -123,7 +151,6 @@ impl Supervisor {
         }
     }
 
-    /// Spawns the child, waits for it to become healthy, then watches for exit or shutdown.
     async fn supervise_once(&mut self) -> Result<CycleResult, LlamaServerError> {
         let mut child = ChildProcess::spawn(&self.cfg, &self.model)?;
         *self.pid.lock() = child.pid();

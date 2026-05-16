@@ -75,9 +75,6 @@ impl LlamaService {
                             });
                         }
                         ReadyState::Degraded => {
-                            // Supervisor is parked waiting for shutdown. We
-                            // don't own the shutdown sender here, so abort
-                            // the task rather than `await` it.
                             task.abort();
                             return Err(LlamaServerError::StartupFailed {
                                 attempts: MAX_CONSECUTIVE_FAILURES,

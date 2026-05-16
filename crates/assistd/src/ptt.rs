@@ -3,13 +3,6 @@
 //! Unix socket, prints event lines as they arrive (voice state, the
 //! final transcription, and for `ptt-stop' the streaming LLM
 //! response), and exits on `Event::Done` or `Event::Error`.
-//!
-//! Typical i3 binding:
-//!
-//! ```text
-//! bindsym           $mod+space exec --no-startup-id assistd ptt-start
-//! bindsym --release $mod+space exec --no-startup-id assistd ptt-stop
-//! ```
 
 use std::io::Write;
 

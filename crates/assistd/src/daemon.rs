@@ -97,10 +97,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     assistd_core::install_panic_hook(Arc::downgrade(&presence));
 
-    // In router mode the daemon-managed port hosts only the router; the
-    // real /props (with `modalities`) lives on the child server's
-    // transient port. `probe_capabilities_routed` follows that indirection
-    // when present, and degrades to the direct path otherwise.
     let initial_vision_state = {
         let control = assistd_llm::LlamaServerControl::new(
             &config.llama_server.host,
@@ -177,6 +173,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     let mut mcp = mcp_init::init(&config, &shutdown_tx).await;
     let mcp_tools = std::mem::take(&mut mcp.tools);
+    let mcp_startup_failures = mcp.startup_failures.clone();
 
     let tools = assistd_core::build_tools(assistd_core::BuildToolsDeps {
         config: &config,
@@ -197,11 +194,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         overflow_dir.display()
     );
 
-    // Partition the unified registry into native vs MCP by the same
-    // `mcp__` prefix mcp_init.rs stamps onto adapted tools, then render
-    // each half as a Markdown bullet section and append both to the
-    // configured base prompt. This is the single point of system-prompt
-    // assembly: adding a new tool surfaces in the prompt automatically.
     let (native_refs, mcp_refs): (Vec<&dyn assistd_tools::Tool>, Vec<&dyn assistd_tools::Tool>) =
         tools
             .iter_tools()
@@ -243,7 +235,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         voice.output,
     )
     .with_window_manager(window_manager)
-    .with_vision_revalidator(vision_revalidator);
+    .with_vision_revalidator(vision_revalidator)
+    .with_mcp_startup_failures(mcp_startup_failures);
 
     let mut memory_stack = MemoryStack::disabled(embedding_cfg_for_state)
         .with_memory(memory_store)
@@ -361,9 +354,6 @@ async fn replay_history(chat: &dyn assistd_llm::LlmBackend, rows: Vec<assistd_me
     }
 }
 
-/// Append `block` to `prompt` with a `\n\n` separator, but only when
-/// `block` is non-empty. Keeps the augmented system prompt tidy when one
-/// of the bullet sections (typically MCP) is empty.
 fn append_prompt_block(prompt: &mut String, block: &str) {
     if block.is_empty() {
         return;

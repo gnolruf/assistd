@@ -25,7 +25,7 @@ pub enum WmError {
     /// The backend is not currently connected to a compositor. Either no
     /// backend was configured (`NoWindowManager`), the initial connect
     /// failed, or a previously-connected backend's reconnection
-    /// supervisor (PR 5) is mid-backoff.
+    /// supervisor is mid-backoff.
     #[error("compositor IPC disconnected")]
     Disconnected,
 

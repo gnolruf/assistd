@@ -57,10 +57,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-/// Render the `/resume` branch-picker modal. Each row shows the
-/// session prefix, branch name, message count, and parent (when
-/// forked); the currently-selected row is shown in reverse video
-/// and the active-session current branch carries a `●` marker.
 fn render_branch_picker_modal(frame: &mut Frame, area: Rect, picker: &BranchPickerModal) {
     let width = (area.width.saturating_mul(4) / 5).clamp(50, 120);
     let max_height = area.height.saturating_sub(2);
@@ -161,9 +157,6 @@ fn render_branch_picker_modal(frame: &mut Frame, area: Rect, picker: &BranchPick
     frame.render_widget(Paragraph::new(footer), footer_area);
 }
 
-/// Render the slash-command suggestion list above the status bar.
-/// The selected row is shown in reverse video; usage hints (e.g.
-/// `<path>` next to `/attach`) appear in dim text.
 fn render_slash_popup(
     frame: &mut Frame,
     area: Rect,
@@ -299,11 +292,6 @@ fn render_output(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    // Inline "Generating…" indicator pinned to the bottom row of the
-    // chat pane while a turn is in flight. Replaces the bottom
-    // status-bar chip; staying inside the output rect keeps the cue
-    // visually attached to the current reply rather than buried at
-    // the screen edge.
     if app.generating {
         let row = Rect {
             x: area.x,
@@ -522,9 +510,6 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.set_cursor_position(Position::new(cx, cy));
 }
 
-/// Number of rows the input area needs to display `buffer` plus the prompt,
-/// wrapping at `frame_width` cells. Capped so the output pane keeps at least
-/// its minimum height (3 rows) plus the 1-row status bar.
 fn compute_input_height(frame_width: u16, frame_height: u16, buffer: &str) -> u16 {
     if frame_width == 0 {
         return 1;
@@ -536,16 +521,6 @@ fn compute_input_height(frame_width: u16, frame_height: u16, buffer: &str) -> u1
     needed.clamp(1, cap)
 }
 
-/// Word-aware wrap of the input buffer. Returns `(start, end)` char-index
-/// ranges for each visible row. The first row reserves `prompt_w` cells
-/// for the `"> "` prompt; subsequent rows use the full frame width.
-///
-/// Breaks happen at the last whitespace boundary that fits inside the
-/// row, so a word never splits across rows. When a single word is wider
-/// than the row, we fall back to a hard character break (the only way
-/// to make forward progress). If the last row exactly fills its visible
-/// width, an empty phantom row is appended so the cursor at end-of-buffer
-/// has somewhere visible to sit.
 fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
     let n = buf.len();
     if width == 0 {
@@ -596,9 +571,6 @@ fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
     rows
 }
 
-/// Locate the cursor in the wrapped layout. Returns `(row_idx, col)`.
-/// When the cursor sits exactly on a wrap boundary, it lands at column 0
-/// of the next row so editing past a wrap looks natural.
 fn locate_cursor(rows: &[(usize, usize)], cursor: usize) -> (usize, usize) {
     for (idx, &(s, e)) in rows.iter().enumerate() {
         if cursor < e {

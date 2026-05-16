@@ -96,11 +96,10 @@ fn parse_args() -> Args {
                 mode = parse_mode(&argv[i + 1]).expect("invalid --mode");
                 i += 2;
             }
-            // Ignore llama-server args we don't implement. `--hf-repo` is no
-            // longer passed in router mode, but accept it anyway for forward
-            // compat in case an old test path invokes us that way.
+            // Ignore llama-server args we don't implement but real
+            // router-mode spawns pass through.
             "--jinja" => i += 1,
-            "--hf-repo" | "-ngl" | "-c" => i += 2,
+            "-ngl" | "-c" => i += 2,
             _ => i += 1,
         }
     }
@@ -390,7 +389,7 @@ async fn list_models_response(
     let s = state.lock().await;
     let body = match &s.loaded_model {
         Some(name) => format!(
-            "{{\"data\":[{{\"id\":\"{}\",\"status\":\"loaded\"}}]}}",
+            "{{\"data\":[{{\"id\":\"{}\",\"status\":{{\"value\":\"loaded\",\"args\":[]}}}}]}}",
             escape_json(name)
         ),
         None => "{\"data\":[]}".to_string(),

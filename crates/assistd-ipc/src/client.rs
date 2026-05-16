@@ -7,9 +7,9 @@
 //!
 //! Two connection shapes are supported:
 //!
-//! - [`IpcClient::one_shot`]: legacy "send one Request, shutdown write
-//!   half, read until terminal Event". The vast majority of CLI calls
-//!   take this path.
+//! - [`IpcClient::one_shot`]: "send one Request, shutdown write half,
+//!   read until terminal Event". The vast majority of CLI calls take
+//!   this path.
 //! - [`IpcClient::open_dialog`]: bidirectional. The connection stays
 //!   write-open after the initial Request so the client can answer
 //!   mid-stream prompts (e.g. [`Request::ConfirmResponse`]) on the same
@@ -233,9 +233,6 @@ mod tests {
     /// JoinHandle the test should await once it's done.
     async fn mock_server(responses: Vec<Event>) -> (PathBuf, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
-        // Leak the tempdir so the socket file survives until process
-        // exit; tests don't bother to clean up explicitly and this
-        // avoids the dir being dropped before the connection completes.
         let path = dir.path().join("mock.sock");
         std::mem::forget(dir);
 
@@ -253,15 +250,10 @@ mod tests {
                 write.write_all(out.as_bytes()).await.unwrap();
             }
             write.flush().await.unwrap();
-            // Half-close so the client's read returns Ok(None) instead
-            // of "connection reset by peer" on the next poll.
             write.shutdown().await.unwrap();
             drop(listener);
         });
 
-        // Yield once so the spawned task gets a chance to bind+accept.
-        // The path already exists from `bind`; an explicit connect
-        // would consume the only `accept()` on this listener.
         tokio::task::yield_now().await;
         (path, h)
     }
@@ -302,7 +294,6 @@ mod tests {
 
     #[tokio::test]
     async fn collect_errors_on_premature_close() {
-        // Server sends one delta and closes; no terminal event.
         let (path, _h) = mock_server(vec![Event::Delta {
             id: "r".into(),
             text: "incomplete".into(),
@@ -316,8 +307,6 @@ mod tests {
 
     #[tokio::test]
     async fn dialog_can_send_after_initial_request() {
-        // Server: read initial request, send a ConfirmRequest event,
-        // then read a ConfirmResponse and echo Done.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dialog.sock");
         let listener = UnixListener::bind(&path).unwrap();
@@ -325,12 +314,11 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
             let mut reader = BufReader::new(read);
-            // Read initial Request::Query.
+
             let mut first = String::new();
             reader.read_line(&mut first).await.unwrap();
             let _: Request = serde_json::from_str(first.trim()).unwrap();
 
-            // Emit a ConfirmRequest event.
             let cr = Event::ConfirmRequest {
                 id: "r".into(),
                 confirm_id: "c1".into(),
@@ -343,20 +331,17 @@ mod tests {
             write.write_all(out.as_bytes()).await.unwrap();
             write.flush().await.unwrap();
 
-            // Read the client's ConfirmResponse.
             let mut second = String::new();
             reader.read_line(&mut second).await.unwrap();
             let req: Request = serde_json::from_str(second.trim()).unwrap();
             assert!(matches!(req, Request::ConfirmResponse { allow: true, .. }));
 
-            // Emit Done.
             let mut done = serde_json::to_string(&Event::Done { id: "r".into() }).unwrap();
             done.push('\n');
             write.write_all(done.as_bytes()).await.unwrap();
             write.flush().await.unwrap();
         });
 
-        // Yield so the spawned listener task starts before we connect.
         tokio::task::yield_now().await;
 
         let client = IpcClient::with_path(&path);

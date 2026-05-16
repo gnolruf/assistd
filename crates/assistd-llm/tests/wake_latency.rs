@@ -179,7 +179,6 @@ async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Durati
         id: id.to_string(),
         text: "ping".into(),
         attachments: Vec::new(),
-        version: None,
     };
     let mut body = serde_json::to_string(&req).unwrap();
     body.push('\n');
