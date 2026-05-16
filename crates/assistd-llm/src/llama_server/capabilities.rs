@@ -25,16 +25,8 @@
 //! `[error] …: vision not available …` line in that case, which is a
 //! safer default than silently sending image bytes the model will drop.
 //!
-//! Field-name spread: across the multimodal-merge era llama.cpp has
-//! exposed the capability under several different keys. The current
-//! canonical shape is a structured `modalities` object
-//! (`{"modalities": {"vision": true}}`); legacy builds reported a
-//! flat boolean under `has_multimodal`, `has_vision`, `multimodal`,
-//! or `default_generation_settings.multimodal`. We tolerate the
-//! spread by checking the structured field first and falling back to
-//! the legacy union, so a server upgrade in either direction keeps
-//! vision detection working. New names can be added here without
-//! touching call sites.
+//! We read the capability from llama.cpp's canonical structured
+//! `modalities` object (`{"modalities": {"vision": true}}`).
 
 use std::time::Duration;
 
@@ -233,23 +225,10 @@ fn parse_model_id(body: &Value) -> Option<String> {
 }
 
 fn parse_vision_supported(body: &Value) -> bool {
-    if let Some(modalities) = body.get("modalities")
-        && modalities.get("vision").and_then(Value::as_bool) == Some(true)
-    {
-        return true;
-    }
-    const TOP_LEVEL_KEYS: &[&str] = &["has_multimodal", "has_vision", "multimodal"];
-    for key in TOP_LEVEL_KEYS {
-        if body.get(*key).and_then(Value::as_bool) == Some(true) {
-            return true;
-        }
-    }
-    if let Some(settings) = body.get("default_generation_settings")
-        && settings.get("multimodal").and_then(Value::as_bool) == Some(true)
-    {
-        return true;
-    }
-    false
+    body.get("modalities")
+        .and_then(|m| m.get("vision"))
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 #[cfg(test)]
@@ -270,78 +249,20 @@ mod tests {
     }
 
     #[test]
-    fn modalities_vision_true_wins_over_legacy_false() {
-        let body = json!({
-            "modalities": {"vision": true},
-            "has_multimodal": false,
-        });
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn modalities_without_vision_key_falls_through_to_legacy() {
-        let body = json!({
-            "modalities": {"audio": true},
-            "has_vision": true,
-        });
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
     fn ignores_non_bool_modalities_vision() {
         let body = json!({"modalities": {"vision": "true"}});
         assert!(!parse_vision_supported(&body));
     }
 
     #[test]
-    fn detects_top_level_has_multimodal_true() {
-        let body = json!({"has_multimodal": true, "total_slots": 1});
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn detects_top_level_has_vision_true() {
-        let body = json!({"has_vision": true});
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn detects_top_level_multimodal_true() {
-        let body = json!({"multimodal": true});
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn detects_nested_multimodal_under_default_generation_settings() {
-        let body = json!({
-            "default_generation_settings": {"multimodal": true, "temperature": 0.7},
-        });
-        assert!(parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn ignores_field_when_explicitly_false() {
-        let body = json!({"has_multimodal": false, "has_vision": false});
-        assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn defaults_false_when_no_field_present() {
+    fn defaults_false_when_modalities_absent() {
         let body = json!({"total_slots": 1, "model_path": "/some/model.gguf"});
         assert!(!parse_vision_supported(&body));
     }
 
     #[test]
-    fn nested_false_does_not_promote_to_true() {
-        let body = json!({
-            "default_generation_settings": {"multimodal": false},
-        });
-        assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn ignores_non_bool_field_value() {
-        let body = json!({"has_multimodal": "true"});
+    fn defaults_false_when_modalities_lacks_vision_key() {
+        let body = json!({"modalities": {"audio": true}});
         assert!(!parse_vision_supported(&body));
     }
 
@@ -349,16 +270,6 @@ mod tests {
     fn empty_object_is_not_vision_supported() {
         let body = json!({});
         assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn any_truthy_field_wins_even_if_others_false() {
-        let body = json!({
-            "has_multimodal": false,
-            "has_vision": true,
-            "multimodal": false,
-        });
-        assert!(parse_vision_supported(&body));
     }
 
     #[test]

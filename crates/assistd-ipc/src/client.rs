@@ -7,9 +7,9 @@
 //!
 //! Two connection shapes are supported:
 //!
-//! - [`IpcClient::one_shot`]: legacy "send one Request, shutdown write
-//!   half, read until terminal Event". The vast majority of CLI calls
-//!   take this path.
+//! - [`IpcClient::one_shot`]: "send one Request, shutdown write half,
+//!   read until terminal Event". The vast majority of CLI calls take
+//!   this path.
 //! - [`IpcClient::open_dialog`]: bidirectional. The connection stays
 //!   write-open after the initial Request so the client can answer
 //!   mid-stream prompts (e.g. [`Request::ConfirmResponse`]) on the same

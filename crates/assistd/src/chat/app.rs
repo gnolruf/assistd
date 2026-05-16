@@ -1297,12 +1297,7 @@ impl App {
 
         let req_id = Uuid::new_v4().to_string();
         let req = if attachments.is_empty() {
-            Request::Query {
-                id: req_id,
-                text,
-                attachments: Vec::new(),
-                version: Some(assistd_ipc::PROTOCOL_VERSION),
-            }
+            Request::query(req_id, text)
         } else {
             let wire_attachments: Vec<assistd_ipc::ImageAttachment> = attachments
                 .into_iter()
@@ -1312,12 +1307,7 @@ impl App {
                     }
                 })
                 .collect();
-            Request::Query {
-                id: req_id,
-                text,
-                attachments: wire_attachments,
-                version: Some(assistd_ipc::PROTOCOL_VERSION),
-            }
+            Request::query_with_attachments(req_id, text, wire_attachments)
         };
 
         tokio::spawn(async move {

@@ -427,9 +427,9 @@ impl LlmBackend for LlamaChatClient {
                 Err(LlmError::Chat(e))
             }
             StreamOutcome::ServerRestart { .. } => {
-                // `generate` is the legacy single-turn API; callers cannot
-                // replay. Leave the user message in place; a follow-up call
-                // would re-push, and double-pushing would duplicate.
+                // `generate` is single-turn; callers cannot replay. Leave
+                // the user message in place; a follow-up call would
+                // re-push, and double-pushing would duplicate.
                 Err(LlmError::ServerRestarting(
                     "llama-server crashed during generate".into(),
                 ))

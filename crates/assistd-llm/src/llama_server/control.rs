@@ -59,11 +59,9 @@ impl LlamaServerControl {
 
     /// Best-effort check for whether `model` is currently loaded.
     ///
-    /// Queries `GET /models` and looks for an entry matching `model` with
-    /// a loaded status marker. Resilient to different response shapes:
-    /// tolerates either a top-level `data`/`models` array and either a
-    /// structured `status: {value: "loaded", args: [...]}` object, a flat
-    /// `status: "loaded"` string, or a boolean `loaded` field.
+    /// Queries `GET /models` and looks for an entry matching `model`
+    /// with a structured `status: {value: "loaded", args: [...]}` field
+    /// (the router-mode response shape).
     pub async fn model_is_loaded(&self, model: &str) -> Result<bool, LlamaServerError> {
         Ok(self.fetch_models().await?.contains_loaded(model))
     }
@@ -161,21 +159,16 @@ struct ModelActionRequest<'a> {
 struct ModelsResponse {
     #[serde(default)]
     data: Vec<ModelEntry>,
-    #[serde(default)]
-    models: Vec<ModelEntry>,
 }
 
 impl ModelsResponse {
-    fn entries(&self) -> impl Iterator<Item = &ModelEntry> {
-        self.data.iter().chain(self.models.iter())
-    }
-
     fn contains_loaded(&self, model: &str) -> bool {
-        self.entries().any(|e| e.matches(model) && e.is_loaded())
+        self.data.iter().any(|e| e.matches(model) && e.is_loaded())
     }
 
     fn find_loaded_child_port(&self, model: &str) -> Option<u16> {
-        self.entries()
+        self.data
+            .iter()
             .find(|e| e.matches(model) && e.is_loaded())
             .and_then(ModelEntry::child_port)
     }
@@ -186,43 +179,25 @@ struct ModelEntry {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
     status: Option<ModelStatus>,
-    #[serde(default)]
-    loaded: Option<bool>,
 }
 
-/// `/models` historically returned `status` as a flat string
-/// (`"loaded"` / `"unloaded"`); current router-mode builds return a
-/// structured object with the child's spawn args. We accept both via
-/// an untagged enum so an upgrade in either direction keeps parsing.
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum ModelStatus {
-    Structured {
-        value: String,
-        #[serde(default)]
-        args: Vec<String>,
-    },
-    Legacy(String),
+struct ModelStatus {
+    value: String,
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 impl ModelStatus {
     fn is_loaded(&self) -> bool {
-        match self {
-            ModelStatus::Structured { value, .. } | ModelStatus::Legacy(value) => value == "loaded",
-        }
+        self.value == "loaded"
     }
 
-    /// Extract the value following `--port` in the spawn args of a
-    /// structured status. Only present when the router actually spawned
-    /// a child for this model.
+    /// Extract the value following `--port` in the spawn args. Only
+    /// present when the router actually spawned a child for this model.
     fn child_port(&self) -> Option<u16> {
-        let ModelStatus::Structured { args, .. } = self else {
-            return None;
-        };
-        let mut iter = args.iter();
+        let mut iter = self.args.iter();
         while let Some(arg) = iter.next() {
             if arg == "--port" {
                 return iter.next().and_then(|s| s.parse::<u16>().ok());
@@ -234,13 +209,10 @@ impl ModelStatus {
 
 impl ModelEntry {
     fn matches(&self, model: &str) -> bool {
-        self.id.as_deref() == Some(model) || self.name.as_deref() == Some(model)
+        self.id.as_deref() == Some(model)
     }
 
     fn is_loaded(&self) -> bool {
-        if let Some(true) = self.loaded {
-            return true;
-        }
         self.status.as_ref().is_some_and(ModelStatus::is_loaded)
     }
 
@@ -252,22 +224,6 @@ impl ModelEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn models_response_recognises_loaded_status_field() {
-        let body = r#"{"data":[{"id":"a","status":"loaded"},{"id":"b","status":"unloaded"}]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert!(parsed.contains_loaded("a"));
-        assert!(!parsed.contains_loaded("b"));
-        assert!(!parsed.contains_loaded("c"));
-    }
-
-    #[test]
-    fn models_response_recognises_loaded_bool_field() {
-        let body = r#"{"models":[{"name":"x","loaded":true}]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert!(parsed.contains_loaded("x"));
-    }
 
     #[test]
     fn models_response_empty_is_not_loaded() {
@@ -285,6 +241,7 @@ mod tests {
         let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
         assert!(parsed.contains_loaded("foo/bar:Q4"));
         assert!(!parsed.contains_loaded("baz/qux:Q4"));
+        assert!(!parsed.contains_loaded("c"));
     }
 
     #[test]
@@ -302,14 +259,6 @@ mod tests {
             {"id":"foo/bar:Q4","status":{"value":"unloaded","args":["--port","48881"]}}
         ]}"#;
         let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed.find_loaded_child_port("foo/bar:Q4"), None);
-    }
-
-    #[test]
-    fn find_loaded_child_port_returns_none_when_args_missing() {
-        let body = r#"{"data":[{"id":"foo/bar:Q4","status":"loaded"}]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert!(parsed.contains_loaded("foo/bar:Q4"));
         assert_eq!(parsed.find_loaded_child_port("foo/bar:Q4"), None);
     }
 

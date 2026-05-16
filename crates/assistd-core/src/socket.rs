@@ -321,8 +321,8 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
                 .await
             {
                 Ok(0) => {
-                    // Half-close from the client (the legacy CLI
-                    // pattern). Exit cleanly.
+                    // Half-close from the client (one-shot CLI pattern).
+                    // Exit cleanly.
                     break;
                 }
                 Ok(_) => {}
@@ -1376,26 +1376,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_without_version_field_is_treated_as_legacy_v1() {
-        with_server(test_state(), |path| async move {
-            let events =
-                send_request_collect_events(&path, r#"{"type":"query","id":"legacy","text":"hi"}"#)
-                    .await;
-            assert!(
-                matches!(events.first(), Some(Event::Delta { id, .. }) if id == "legacy"),
-                "expected Delta, got {events:?}"
-            );
-            assert!(matches!(events.last(), Some(Event::Done { id }) if id == "legacy"));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn query_with_future_protocol_version_is_warned_but_accepted() {
+    async fn query_ignores_unknown_top_level_fields() {
+        // Extra unrecognized fields on a Query payload (forward-compat
+        // hook for future additive evolution) must not break parsing.
         with_server(test_state(), |path| async move {
             let events = send_request_collect_events(
                 &path,
-                r#"{"type":"query","id":"future","text":"hi","version":99}"#,
+                r#"{"type":"query","id":"future","text":"hi","extra":"ignored"}"#,
             )
             .await;
             assert!(

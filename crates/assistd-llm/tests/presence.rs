@@ -350,7 +350,6 @@ async fn query_during_sleeping_triggers_auto_wake() {
         id: "q1".into(),
         text: "hello".into(),
         attachments: Vec::new(),
-        version: None,
     };
     let stream = UnixStream::connect(&sock_path).await.unwrap();
     let (read, mut write) = stream.into_split();
@@ -513,7 +512,6 @@ async fn sleep_defers_until_inflight_query_done() {
         id: "q1".into(),
         text: "hello".into(),
         attachments: Vec::new(),
-        version: None,
     };
     let sock_for_client = sock_path.clone();
     let client_task = tokio::spawn(async move { connect_and_send(&sock_for_client, &req).await });
@@ -612,7 +610,6 @@ async fn multiple_queries_during_wake_complete_in_order() {
             id: id.clone(),
             text: text.clone(),
             attachments: Vec::new(),
-            version: None,
         };
         handles.push((
             id,

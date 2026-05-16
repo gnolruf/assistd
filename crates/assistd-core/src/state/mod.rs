@@ -115,22 +115,7 @@ impl AppState {
                 id,
                 text,
                 attachments,
-                version,
-            } => {
-                if let Some(v) = version {
-                    if v > assistd_ipc::PROTOCOL_VERSION {
-                        tracing::warn!(
-                            client = v,
-                            server = assistd_ipc::PROTOCOL_VERSION,
-                            "client sent newer protocol version than daemon understands; \
-                             extra fields will be ignored"
-                        );
-                    }
-                } else {
-                    tracing::debug!("client did not send protocol version; treating as legacy v1");
-                }
-                self.handle_query(id, text, attachments, tx).await
-            }
+            } => self.handle_query(id, text, attachments, tx).await,
             Request::SetPresence { id, target } => self.handle_set_presence(id, target, tx).await,
             Request::GetPresence { id } => self.handle_get_presence(id, tx).await,
             Request::Cycle { id } => self.handle_cycle(id, tx).await,
@@ -299,7 +284,6 @@ mod tests {
             id: "q1".into(),
             text: "hello".into(),
             attachments: Vec::new(),
-            version: None,
         };
 
         state.dispatch(req, tx).await.unwrap();
@@ -380,7 +364,6 @@ mod tests {
             id: "q-err".into(),
             text: "boom".into(),
             attachments: Vec::new(),
-            version: None,
         };
 
         let err = state.dispatch(req, tx).await.unwrap_err();
@@ -487,7 +470,6 @@ mod tests {
             id: "req-42".into(),
             text: "go".into(),
             attachments: Vec::new(),
-            version: None,
         };
         state.dispatch(req, tx).await.unwrap();
 
@@ -976,7 +958,6 @@ mod tests {
                     id: "ord".into(),
                     text: "First. Second. Third. End.".into(),
                     attachments: Vec::new(),
-                    version: None,
                 },
                 tx,
             )
@@ -1084,7 +1065,6 @@ mod tests {
                     id: "pf".into(),
                     text: "go".into(),
                     attachments: Vec::new(),
-                    version: None,
                 },
                 tx,
             )
@@ -1121,7 +1101,6 @@ mod tests {
                     id: "pf0".into(),
                     text: "go".into(),
                     attachments: Vec::new(),
-                    version: None,
                 },
                 tx,
             )
@@ -1276,7 +1255,6 @@ mod tests {
                     id: "tc".into(),
                     text: "go".into(),
                     attachments: Vec::new(),
-                    version: None,
                 },
                 tx,
             )
@@ -1311,7 +1289,6 @@ mod tests {
                     id: "drain".into(),
                     text: "Hello world.".into(),
                     attachments: Vec::new(),
-                    version: None,
                 },
                 tx,
             )

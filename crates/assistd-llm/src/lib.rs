@@ -249,8 +249,8 @@ pub trait LlmBackend: Send + Sync + 'static {
     /// `mpsc`; if `send` fails it means the consumer has disconnected and
     /// the implementation should stop generating and return `Ok(())`.
     ///
-    /// This is the legacy single-turn API used by code paths that don't
-    /// want the agent loop's tool-dispatch machinery.
+    /// Single-turn API used by code paths that don't want the agent
+    /// loop's tool-dispatch machinery.
     async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()>;
 
     /// Append a user message to the conversation. Does not invoke the
