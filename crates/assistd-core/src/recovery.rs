@@ -225,17 +225,17 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
             .as_ref()
             .and_then(|w| w.upgrade())
             .and_then(|p| p.llama_pid_blocking());
-        if let Some(pid) = pid_opt {
-            if let Some(pgid) = rustix::process::Pid::from_raw(pid as i32) {
-                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
-                recovery_event!(
-                    RecoverySeverity::Warning,
-                    Component::Llm,
-                    "panic_kill",
-                    pid = pid,
-                    "sent SIGTERM to llama-server process group from panic hook"
-                );
-            }
+        if let Some(pid) = pid_opt
+            && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
+        {
+            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+            recovery_event!(
+                RecoverySeverity::Warning,
+                Component::Llm,
+                "panic_kill",
+                pid = pid,
+                "sent SIGTERM to llama-server process group from panic hook"
+            );
         }
 
         previous(info);

@@ -394,14 +394,14 @@ impl AppState {
                 return Ok(());
             }
         };
-        if outcome.removed_messages > 0 {
-            if let Err(e) = self.subsystems.llm.truncate_to_last_real_user().await {
-                tracing::warn!(
-                    target: "assistd::state",
-                    error = %e,
-                    "truncate_to_last_real_user failed (non-fatal)"
-                );
-            }
+        if outcome.removed_messages > 0
+            && let Err(e) = self.subsystems.llm.truncate_to_last_real_user().await
+        {
+            tracing::warn!(
+                target: "assistd::state",
+                error = %e,
+                "truncate_to_last_real_user failed (non-fatal)"
+            );
         }
         let _ = tx
             .send(Event::UndoApplied {
