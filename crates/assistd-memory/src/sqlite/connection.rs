@@ -55,9 +55,6 @@ impl SqliteHandle {
             .await
             .with_context(|| format!("open SQLite at {}", path_owned.display()))?;
 
-        // Pragmas first, then migrations. WAL gives us concurrent reads
-        // alongside the single writer; foreign_keys must be ON before
-        // any FK is exercised by migrations.
         conn.call(|c| -> rusqlite::Result<_> {
             c.pragma_update(None, "journal_mode", "WAL")?;
             c.pragma_update(None, "synchronous", "NORMAL")?;
@@ -134,9 +131,6 @@ mod tests {
 
     #[tokio::test]
     async fn open_creates_parent_dirs_and_runs_migrations() {
-        // Point at a path inside a non-existent directory; open() must
-        // mkdir -p it. This is exactly what AC #1 ("created automatically
-        // on first run") demands.
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("nested/dir/memory.db");
 

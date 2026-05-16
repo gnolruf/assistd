@@ -33,8 +33,6 @@ mod tests {
         assert_eq!(escape_for_criteria("Firefox"), "Firefox");
         assert_eq!(escape_for_criteria(r#"a"b"#), r#"a\"b"#);
         assert_eq!(escape_for_criteria(r"a\b"), r"a\\b");
-        // Order matters: backslash inserted by quote-escape must NOT be
-        // re-escaped. `a"b` → `a\"b` (single inserted slash, single quote).
         assert_eq!(escape_for_criteria(r#"a"b\c"#), r#"a\"b\\c"#);
     }
 
@@ -68,9 +66,6 @@ mod tests {
 
     #[test]
     fn workspace_id_parse_or_name() {
-        // Parse-or-name preserves the prior alias semantics: digits
-        // round-trip through u32 → Num, everything else → Name.
-        // Zero-padded numbers normalize: "03" parses to 3.
         assert_eq!("3".parse::<WorkspaceId>().unwrap(), WorkspaceId::Num(3));
         assert_eq!("03".parse::<WorkspaceId>().unwrap(), WorkspaceId::Num(3));
         assert_eq!(

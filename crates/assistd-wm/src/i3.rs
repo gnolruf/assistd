@@ -33,12 +33,6 @@ use crate::{
 
 /// `WindowManager` impl wrapping a single i3 IPC command socket.
 /// Held inside `Arc<dyn WindowManager>` by the daemon's `AppState`.
-///
-/// PR 5: the cmd connection is now `Option<I3>`. The supervisor task
-/// sets it to `None` while reconnecting after a socket drop or a
-/// timeout strike, and `Some` once the new connection is seeded. The
-/// trait-method helpers return [`WmError::Disconnected`] for the None
-/// state so callers can render the right hint without blocking.
 pub struct I3Backend {
     cmd: Arc<Mutex<Option<I3>>>,
     snapshot: Arc<RwLock<Snapshot>>,
@@ -176,8 +170,6 @@ impl WindowManager for I3Backend {
             }
             Ok(Ok(t)) => t,
         };
-        // Drop the lock before walking the tree so concurrent calls
-        // can proceed against the shared cmd socket.
         drop(guard);
         let mut out = Vec::new();
         collect_windows(&tree, None, &mut out);
@@ -249,10 +241,6 @@ fn i3_layout_payload(layout: Layout) -> String {
 /// containers). Tracks the most recent `NodeType::Workspace` ancestor
 /// in `current_ws` so each window can be tagged with the workspace it
 /// lives on.
-///
-/// PR 3b: the [`Window::id`] is the i3 con_id (`reply::Node.id`),
-/// which is unique. The X11 class moves into [`Window::app`] for human
-/// display (`wm list`'s second column).
 fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<Window>) {
     let next_ws = if matches!(node.node_type, reply::NodeType::Workspace) {
         node.name.as_deref()
@@ -288,10 +276,7 @@ async fn seed_snapshot(cmd: &mut I3) -> Result<Snapshot> {
         .and_then(|n| n.window_properties.as_ref())
         .and_then(|p| p.class.clone());
     let focused_title = focused.and_then(|n| n.name.clone());
-    // Active workspace seeded from a separate query: walking the
-    // tree to the focused leaf's workspace ancestor would work, but
-    // GET_WORKSPACES is one round-trip and gives an authoritative
-    // `focused == true` row that already accounts for multi-output.
+
     let active_workspace = match cmd.get_workspaces().await {
         Ok(ws) => ws.into_iter().find(|w| w.focused).map(|w| w.name),
         Err(e) => {
@@ -480,8 +465,6 @@ mod tests {
 
     #[test]
     fn resize_payload_renders_id_in_decimal() {
-        // No need for escape: con_id is a decimal integer literal,
-        // never a free-form string.
         let p = i3_resize_payload(&id(1234567890), ResizeDir::Shrink, 5);
         assert_eq!(
             p,

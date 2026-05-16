@@ -778,9 +778,6 @@ mod tests {
 
     #[tokio::test]
     async fn focus_rejects_non_numeric_arg() {
-        // PR 3b: the LLM must use `wm list` to get a numeric con_id;
-        // passing the X11 class (the old PR 3a behavior) is now an
-        // explicit error.
         let stub = Arc::new(StubWm::connected());
         let out = run_wm(stub.clone(), &["focus", "Firefox"]).await;
         assert_eq!(out.exit_code, 2);
@@ -992,9 +989,6 @@ mod tests {
 
     #[tokio::test]
     async fn list_emits_tsv_sorted_by_workspace_then_app() {
-        // PR 3b list format: `<id>\t<app>\t<workspace>\t<title>`.
-        // Sorted by workspace, then app, then id, so two Firefox
-        // windows on the same workspace sit together.
         let stub = Arc::new(StubWm {
             connected: true,
             windows: vec![

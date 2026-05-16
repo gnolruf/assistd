@@ -95,9 +95,6 @@ impl SseMcpClient {
             headers.insert(name, value);
         }
 
-        // We deliberately set `read_timeout` (per-read) rather than
-        // `timeout` (whole-request); the SSE GET is meant to be long-lived,
-        // so the per-read deadline is what catches a frozen server.
         let http = reqwest::Client::builder()
             .read_timeout(cfg.read_timeout)
             .timeout(cfg.request_timeout)
@@ -132,9 +129,6 @@ impl SseMcpClient {
         };
         let stream_task = tokio::spawn(reader.run());
 
-        // Wait briefly for the optional `endpoint` discovery event. If
-        // we don't get one in 5s, fall back to assuming POSTs go to the
-        // base URL. Many MCP SSE servers omit the event.
         let _ = tokio::time::timeout(Duration::from_secs(5), endpoint_ready_rx).await;
         if post_url.read().await.is_none() {
             *post_url.write().await = Some(base_url.clone());
@@ -157,11 +151,6 @@ impl SseMcpClient {
             return Err(e);
         }
 
-        // Periodic ping task, separate from the SSE stream so a server
-        // that holds the SSE connection open while wedged still gets
-        // detected. On ping failure, we flip the cancel watch which the
-        // read loop selects on; that closes the transport and trips the
-        // supervisor's restart path.
         let ping_task = tokio::spawn(ping_loop(
             client.clone(),
             cfg.ping_interval,
@@ -491,11 +480,6 @@ async fn handle_event(
 ) {
     match event.event_type.as_str() {
         "endpoint" => {
-            // Server tells us where to POST. Spec allows either an
-            // absolute URL or a path relative to the base. We treat
-            // anything that doesn't parse as an absolute URL as a
-            // missed event for now; the daemon falls back to the base
-            // URL after a 5s timeout in `connect`.
             let resolved = Url::parse(&event.data).ok();
             if let Some(url) = resolved {
                 debug!(
@@ -558,8 +542,6 @@ async fn ping_loop(
                         debug!(target: "assistd::mcp", server = %label, "ping ok");
                     }
                     Err(McpError::RpcError { code: -32601, message, .. }) => {
-                        // Server doesn't implement `ping`. Treat as healthy;
-                        // the SSE stream itself will tell us about death.
                         debug!(
                             target: "assistd::mcp",
                             server = %label,
@@ -650,7 +632,6 @@ impl EventParser {
             };
             let (field, value) = match line_str.split_once(':') {
                 Some((f, v)) => {
-                    // Strip a single leading space from value, per spec.
                     let v = v.strip_prefix(' ').unwrap_or(v);
                     (f, v)
                 }

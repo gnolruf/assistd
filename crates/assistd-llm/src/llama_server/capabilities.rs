@@ -154,9 +154,7 @@ pub async fn probe_capabilities_routed(
         None => return VisionState::default(),
     };
     let vision_supported = parse_vision_supported(&child_body);
-    // The child's /props sets `model` to null and only carries `model_path`;
-    // fall back to the configured name so the revalidator's swap detection
-    // has a stable identity to compare against.
+
     let model_id = parse_model_id(&child_body).or_else(|| Some(model.to_string()));
     debug!(
         target: "assistd::llama_server",
@@ -219,10 +217,6 @@ async fn fetch_props(host: &str, port: u16) -> Option<Value> {
     }
 }
 
-/// Pull a model identifier from a `/props` body. llama.cpp has reported
-/// this under a few different keys (`model`, `model_path`,
-/// `default_generation_settings.model`), so try them in order. Returns
-/// `None` if no recognizable field is present.
 fn parse_model_id(body: &Value) -> Option<String> {
     const TOP_LEVEL_KEYS: &[&str] = &["model", "model_path", "model_name"];
     for key in TOP_LEVEL_KEYS {
@@ -238,9 +232,6 @@ fn parse_model_id(body: &Value) -> Option<String> {
     None
 }
 
-/// Inspect a parsed `/props` body for any field that signals
-/// multimodal/vision support. Tolerates the historical spread of
-/// field names in llama.cpp.
 fn parse_vision_supported(body: &Value) -> bool {
     if let Some(modalities) = body.get("modalities")
         && modalities.get("vision").and_then(Value::as_bool) == Some(true)
@@ -280,9 +271,6 @@ mod tests {
 
     #[test]
     fn modalities_vision_true_wins_over_legacy_false() {
-        // A server reporting the new structured field while still
-        // emitting a stale legacy `has_multimodal: false` must enable
-        // vision. The structured field is canonical.
         let body = json!({
             "modalities": {"vision": true},
             "has_multimodal": false,
@@ -292,9 +280,6 @@ mod tests {
 
     #[test]
     fn modalities_without_vision_key_falls_through_to_legacy() {
-        // Future-proof: if `modalities` exists but doesn't yet carry a
-        // `vision` key (e.g. audio-only build), we must not short-circuit
-        // — fall through and let the legacy union decide.
         let body = json!({
             "modalities": {"audio": true},
             "has_vision": true,
@@ -356,9 +341,6 @@ mod tests {
 
     #[test]
     fn ignores_non_bool_field_value() {
-        // Future-proofing: a string "true" must NOT count. We require
-        // a JSON boolean to avoid accidentally enabling vision based on
-        // an unrelated string field that happens to share a name.
         let body = json!({"has_multimodal": "true"});
         assert!(!parse_vision_supported(&body));
     }
@@ -425,14 +407,12 @@ mod tests {
 
     #[test]
     fn non_router_props_lack_router_role() {
-        // Real child-server /props: `model` may be null but `role` is absent.
         let body = json!({"model": null, "model_path": "/some/model.gguf", "modalities": {"vision": true}});
         assert!(!is_router_props(&body));
     }
 
     #[test]
     fn non_router_props_with_unrelated_role_value() {
-        // Future-proof: only the literal "router" triggers the detour.
         let body = json!({"role": "worker", "model_path": "/x.gguf"});
         assert!(!is_router_props(&body));
     }

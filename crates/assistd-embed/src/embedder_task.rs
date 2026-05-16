@@ -152,7 +152,6 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Mock that returns a fixed vector and counts calls.
     struct MockEmbedder {
         calls: AtomicUsize,
         vec: Vec<f32>,
@@ -208,7 +207,6 @@ mod tests {
             _ => panic!("expected StoreChunkEmbedding"),
         }
 
-        // Shutdown so the task exits cleanly.
         sd_tx.send(true).unwrap();
         drop(job_tx);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
@@ -256,7 +254,6 @@ mod tests {
         let (job_tx, job_rx) = mpsc::channel::<EmbedJob>(8);
         let (sd_tx, sd_rx) = watch::channel(false);
 
-        // Pre-load 3 jobs before the worker starts.
         for i in 0..3 {
             job_tx
                 .send(EmbedJob::Chunk {
@@ -272,7 +269,6 @@ mod tests {
         sd_tx.send(true).unwrap();
         drop(job_tx);
 
-        // Collect 3 writes, ack each.
         for _ in 0..3 {
             let op = tokio::time::timeout(std::time::Duration::from_secs(2), write_rx.recv())
                 .await

@@ -264,13 +264,6 @@ impl Supervisor {
         let mut session_start = Instant::now();
 
         loop {
-            // If we had a live transport, wait for it to die or for a
-            // shutdown signal. On crash, flip to Restarting so direct
-            // consumers see ServerDown rather than calling a dead
-            // transport. When we re-enter the loop after a failed
-            // respawn, current_lifeline is None and we leave the health
-            // state alone (Restarting or Unhealthy as appropriate) to
-            // avoid flapping the watch channel.
             if let Some(mut lifeline) = current_lifeline.take() {
                 tokio::select! {
                     _ = lifeline.wait() => {

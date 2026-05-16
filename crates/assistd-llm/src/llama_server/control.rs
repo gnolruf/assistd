@@ -103,9 +103,6 @@ impl LlamaServerControl {
     ) -> Result<(), LlamaServerError> {
         let start = tokio::time::Instant::now();
         loop {
-            // Suppress transient errors during the poll — the router can
-            // briefly 5xx while spawning a child. Only the deadline is
-            // fatal.
             if let Ok(true) = self.model_is_loaded(model).await {
                 return Ok(());
             }
@@ -281,8 +278,6 @@ mod tests {
 
     #[test]
     fn models_response_recognises_structured_status_loaded() {
-        // Shape the router currently returns: status is an object with
-        // `value` and `args` (the child's spawn command line).
         let body = r#"{"data":[
             {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--host","127.0.0.1","--port","48881"]}},
             {"id":"baz/qux:Q4","status":{"value":"unloaded","args":["--host","127.0.0.1","--port","0"]}}
@@ -303,8 +298,6 @@ mod tests {
 
     #[test]
     fn find_loaded_child_port_returns_none_for_unloaded_model() {
-        // Even with a `--port` in args, an unloaded entry has no live
-        // child — surface None rather than a stale port.
         let body = r#"{"data":[
             {"id":"foo/bar:Q4","status":{"value":"unloaded","args":["--port","48881"]}}
         ]}"#;
@@ -314,8 +307,6 @@ mod tests {
 
     #[test]
     fn find_loaded_child_port_returns_none_when_args_missing() {
-        // Legacy/flat status carries no spawn args; vision detection
-        // falls back to direct probing in that case.
         let body = r#"{"data":[{"id":"foo/bar:Q4","status":"loaded"}]}"#;
         let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
         assert!(parsed.contains_loaded("foo/bar:Q4"));
@@ -333,8 +324,6 @@ mod tests {
 
     #[test]
     fn find_loaded_child_port_ignores_non_numeric_port() {
-        // Future-proof: if `--port` is followed by a non-numeric token,
-        // refuse to invent one rather than panicking.
         let body = r#"{"data":[
             {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--port","auto"]}}
         ]}"#;
@@ -344,9 +333,6 @@ mod tests {
 
     #[test]
     fn find_loaded_child_port_handles_port_zero_as_unbound() {
-        // The router stores `--port 0` for entries it has never spawned;
-        // we parse it as 0 which callers should treat as "no live child."
-        // A real spawn replaces 0 with the actual bound port.
         let body = r#"{"data":[
             {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--port","0"]}}
         ]}"#;

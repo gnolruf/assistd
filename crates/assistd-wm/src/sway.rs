@@ -57,11 +57,6 @@ fn sway_id(raw: i64) -> Option<WindowId> {
 
 /// `WindowManager` impl wrapping a single Sway IPC command socket.
 /// Held inside `Arc<dyn WindowManager>` by the daemon's `AppState`.
-///
-/// PR 5: cmd is `Option<Connection>`. The supervisor task sets it to
-/// `None` while reconnecting after a socket drop or a timeout strike,
-/// and `Some` once the new connection is seeded. Trait-method helpers
-/// short-circuit with [`WmError::Disconnected`] for the None state.
 pub struct SwayBackend {
     cmd: Arc<Mutex<Option<Connection>>>,
     snapshot: Arc<RwLock<Snapshot>>,
@@ -381,9 +376,6 @@ async fn supervisor_loop(
     }
 }
 
-/// Format the Sway RUN_COMMAND payload for `resize_width`. PR 3b
-/// drops the `app_id|class` composite; Sway accepts `[con_id=N]`
-/// criteria for any window regardless of XWayland-vs-Wayland origin.
 fn sway_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
     format!(
         r#"[con_id="{}"] resize {} width {} px or 0 ppt"#,
@@ -460,10 +452,7 @@ async fn seed_snapshot(cmd: &mut Connection) -> Result<Snapshot> {
             .clone()
             .or_else(|| n.window_properties.as_ref().and_then(|p| p.title.clone()))
     });
-    // Active workspace seeded from a separate query: walking the tree
-    // to the focused leaf's workspace ancestor would work, but
-    // GET_WORKSPACES is one round-trip and gives an authoritative
-    // `focused == true` row that already accounts for multi-output.
+
     let active_workspace = match cmd.get_workspaces().await {
         Ok(ws) => ws.into_iter().find(|w| w.focused).map(|w| w.name),
         Err(e) => {
@@ -479,11 +468,6 @@ async fn seed_snapshot(cmd: &mut Connection) -> Result<Snapshot> {
     })
 }
 
-/// Project a Sway `WindowEvent` into the shared snapshot's
-/// `(id, class, title, kind)` tuple and dispatch to
-/// [`apply_window_event`]. The Sway-specific bits (`app_id` lookup,
-/// XWayland fallback, name-vs-window_properties.title preference)
-/// live here; the race rules live in `crate::snapshot`.
 async fn handle_window_event(w: &swayipc_async::WindowEvent, snap: &Arc<RwLock<Snapshot>>) {
     let kind = match w.change {
         WindowChange::Focus => WindowChangeKind::Focus,
@@ -529,9 +513,6 @@ mod tests {
 
     #[test]
     fn resize_payload_uses_con_id_criteria() {
-        // PR 3b: Sway's `[con_id=N]` is a single-clause match; no
-        // more `app_id|class` composite, since con_id covers Wayland-
-        // native and XWayland views uniformly.
         let p = sway_resize_payload(&id(42), ResizeDir::Grow, 50);
         assert_eq!(p, r#"[con_id="42"] resize grow width 50 px or 0 ppt"#);
     }
@@ -555,8 +536,6 @@ mod tests {
 
     #[test]
     fn layout_payload_emits_bare_form() {
-        // No criteria prefix; Sway speaks the i3 dialect for layout
-        // and acts on the focused container.
         for (l, expected) in [
             (Layout::Default, "layout default"),
             (Layout::Tabbed, "layout tabbed"),

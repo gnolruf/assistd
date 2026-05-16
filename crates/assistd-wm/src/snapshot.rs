@@ -21,8 +21,6 @@
 //! shape that risks GAT pitfalls and would force every backend to
 //! own-and-pin its event stream. The simpler share-the-rules form
 //! removes the bulk of the duplication without the lifetime gymnastics.
-//! Revisit if PR 5 (reconnection supervisor) ends up wanting the same
-//! generic shape.
 
 use std::sync::Arc;
 

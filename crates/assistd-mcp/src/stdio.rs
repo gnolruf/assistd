@@ -81,8 +81,6 @@ impl StdioMcpClient {
 
         #[cfg(unix)]
         {
-            // Process group so SIGTERM to -pid takes down any grandchildren
-            // (e.g., npx → node → server-filesystem).
             cmd.process_group(0);
         }
 
@@ -104,9 +102,6 @@ impl StdioMcpClient {
         let (client, transport_handles) =
             Self::from_streams(stdout, stdin, cfg.label.clone(), cfg.request_timeout).await?;
 
-        // Initialize handshake. Failure here brings down the whole transport
-        // since a server that won't agree on the protocol version cannot
-        // serve tools/list / tools/call.
         if let Err(e) = client.initialize().await {
             warn!(
                 target: "assistd::mcp",
@@ -189,9 +184,6 @@ impl StdioMcpClient {
         });
         let result = self.call("initialize", params).await?;
 
-        // Some servers return their negotiated protocolVersion; we don't
-        // hard-fail on mismatch because servers commonly advertise multiple
-        // versions and tools/call still works. We log it for the operator.
         if let Some(server_pv) = result.get("protocolVersion").and_then(Value::as_str)
             && server_pv != PROTOCOL_VERSION
         {
@@ -278,13 +270,6 @@ impl McpClient for StdioMcpClient {
         let params = json!({ "name": name, "arguments": arguments });
         let result = self.call("tools/call", params).await?;
 
-        // The MCP spec says tools/call returns:
-        //   { "content": [{"type":"text","text":...}|{"type":"image",...}|...],
-        //     "isError": bool }
-        // We map the first content entry into our ToolResult shape. Multiple
-        // content entries are uncommon enough in practice that taking the
-        // first is the right v1 trade-off; downstream code can still surface
-        // a helpful message.
         let content_arr = result
             .get("content")
             .and_then(Value::as_array)
@@ -302,9 +287,6 @@ impl McpClient for StdioMcpClient {
         };
 
         if is_error {
-            // Wrap text errors so the model sees the failure mode in the
-            // result body. Image errors keep their image; the model can
-            // still react.
             let parsed = match parsed {
                 ToolResult::Text(t) => ToolResult::Text(format!("[mcp tool error] {t}")),
                 other => other,

@@ -69,8 +69,6 @@ impl LlamaEmbedder {
             .context("build embed reqwest client")?;
         let base_url = format!("http://{host}:{port}");
 
-        // Probe dim with a one-token request. Any failure here is fatal;
-        // the daemon's try-warn-fallback path will swap in NoEmbedder.
         let probe = embed_raw(&client, &base_url, &model, "x").await?;
         let dim = probe.len();
         if dim == 0 {

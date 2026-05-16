@@ -653,8 +653,6 @@ pub fn socket_path() -> PathBuf {
     )
 }
 
-/// Pure resolver: env reads happen at the boundary so this can be tested
-/// without mutating process-global state.
 fn socket_path_for(xdg_runtime_dir: Option<OsString>, user: Option<OsString>) -> PathBuf {
     if let Some(dir) = xdg_runtime_dir {
         let mut p = PathBuf::from(dir);
@@ -673,9 +671,6 @@ mod tests {
 
     #[test]
     fn request_roundtrip() {
-        // Legacy struct-literal form: empty attachments + no version are
-        // both skipped on serialize so the wire shape is unchanged from
-        // pre-multimodality clients.
         let req = Request::Query {
             id: "req-1".into(),
             text: "ping".into(),
@@ -714,9 +709,6 @@ mod tests {
 
     #[test]
     fn legacy_query_payload_deserializes_with_default_attachments() {
-        // A pre-multimodality client emits the original two-field shape.
-        // Older daemons keep accepting it: attachments defaults to empty,
-        // version defaults to None.
         let json = r#"{"type":"query","id":"req-4","text":"hello"}"#;
         let parsed: Request = serde_json::from_str(json).unwrap();
         match parsed {
@@ -950,9 +942,6 @@ mod tests {
 
     #[test]
     fn memory_list_all_request_omits_optional_fields() {
-        // Both `prefix` and `limit` use `#[serde(default)]`, so a
-        // pre-feature client that only sends `id` should still parse
-        // (additive evolution).
         let json = r#"{"type":"memory_list_all","id":"r"}"#;
         let parsed: Request = serde_json::from_str(json).unwrap();
         match parsed {

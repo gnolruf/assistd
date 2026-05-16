@@ -430,11 +430,7 @@ mod tests {
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0]["type"], "image");
         assert_eq!(attachments[0]["mime"], "image/png");
-        // Matches the agent loop's `parse_attachment`, which decodes
-        // `attachments[i]["data"]` (NOT `bytes_base64`).
         assert_eq!(attachments[0]["data"], "3q2+7w==");
-        // Body should describe the image so the model has something to
-        // anchor its next turn against.
         let output = v["output"].as_str().unwrap();
         assert!(output.contains("image/png"));
         assert!(output.contains("4 bytes"));

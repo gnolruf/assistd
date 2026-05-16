@@ -50,10 +50,7 @@ impl Supervisor {
     /// [`RESTART_WINDOW`]. Intended to be spawned as a Tokio task.
     pub async fn run(mut self) {
         let mut consecutive_failures: u32 = 0;
-        // Rolling window of restart timestamps. Catches the crash-loop case
-        // where each child runs for ≥ MIN_HEALTHY_SECONDS (resetting
-        // consecutive_failures) but the process keeps dying in a short
-        // wall-clock window.
+
         let mut restart_history: VecDeque<Instant> = VecDeque::new();
 
         loop {
@@ -64,9 +61,6 @@ impl Supervisor {
 
             let outcome = self.supervise_once().await;
 
-            // Record any non-shutdown outcome in the rolling window before
-            // updating consecutive_failures, so the cap is enforced even when
-            // the per-cycle counter keeps resetting.
             let recorded_restart = !matches!(outcome, Ok(CycleResult::ShutdownRequested));
             if recorded_restart {
                 let now = Instant::now();
@@ -129,9 +123,7 @@ impl Supervisor {
                     );
                 }
                 let _ = self.ready_tx.send(ReadyState::Degraded);
-                // Park until the daemon tells us to stop. Keeping the task
-                // alive means the daemon process doesn't crash, and the
-                // LlamaService::shutdown() path still works.
+
                 let _ = self.shutdown_rx.wait_for(|v| *v).await;
                 return;
             }
@@ -159,7 +151,6 @@ impl Supervisor {
         }
     }
 
-    /// Spawns the child, waits for it to become healthy, then watches for exit or shutdown.
     async fn supervise_once(&mut self) -> Result<CycleResult, LlamaServerError> {
         let mut child = ChildProcess::spawn(&self.cfg, &self.model)?;
         *self.pid.lock() = child.pid();

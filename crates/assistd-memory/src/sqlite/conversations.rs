@@ -994,10 +994,6 @@ impl ConversationStore for SqliteConversationStore {
 #[allow(dead_code)]
 fn _force_oneshot_referenced(_: oneshot::Receiver<Result<()>>) {}
 
-/// Wrap a user-supplied query as an FTS5 literal phrase by surrounding
-/// it with double-quotes and doubling any internal quotes (per FTS5's
-/// quoted-string rules). The result is safe to paste into a `MATCH`
-/// expression as a single phrase token.
 fn fts5_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

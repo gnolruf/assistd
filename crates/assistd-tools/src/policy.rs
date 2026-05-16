@@ -186,9 +186,6 @@ impl ConfirmRouter {
         match rx.await {
             Ok(allow) => allow,
             Err(_) => {
-                // Pending sender dropped without responding; happens
-                // when the connection's read loop ends before a reply
-                // arrives. Deny.
                 self.pending.lock().remove(&confirm_id);
                 warn!(
                     target: "assistd::policy",
@@ -297,9 +294,6 @@ pub fn matches_destructive<'a>(script: &str, prefixes: &'a [Vec<String>]) -> Opt
     }
     let lower: Vec<String> = tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
 
-    // Split into "commands": anything that isn't a shell separator starts a
-    // new command; these are the positions we try to anchor prefixes at.
-    // Separators include `;`, `&&`, `||`, `|`, and `&`.
     let separators: &[&str] = &["|", "||", ";", "&&", "&"];
     let mut anchors: Vec<usize> = vec![0];
     for (i, tok) in lower.iter().enumerate() {
@@ -621,9 +615,6 @@ mod tests {
 
     #[test]
     fn probe_sandbox_bwrap_missing_fails_startup() {
-        // Inject an empty PATH directly into the inner probe so the test
-        // doesn't touch process-global env, which would race with the rest
-        // of the test binary under `cargo test`'s default thread pool.
         let result = probe_sandbox_in(SandboxRequest::Bwrap, Vec::new(), std::ffi::OsStr::new(""));
         assert!(
             result.is_err(),
