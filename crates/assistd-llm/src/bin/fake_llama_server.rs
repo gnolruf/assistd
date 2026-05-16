@@ -389,7 +389,7 @@ async fn list_models_response(
     let s = state.lock().await;
     let body = match &s.loaded_model {
         Some(name) => format!(
-            "{{\"data\":[{{\"id\":\"{}\",\"status\":\"loaded\"}}]}}",
+            "{{\"data\":[{{\"id\":\"{}\",\"status\":{{\"value\":\"loaded\",\"args\":[]}}}}]}}",
             escape_json(name)
         ),
         None => "{\"data\":[]}".to_string(),
