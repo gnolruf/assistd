@@ -13,6 +13,7 @@ members = [
     "crates/assistd-tools",
     "crates/assistd-wm",
 ]
+default-members = ["crates/assistd"]
 
 [workspace.package]
 version = "0.1.0"
