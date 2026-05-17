@@ -919,7 +919,8 @@ impl App {
             | Event::MemoryKeys { .. }
             | Event::MemoryRow { .. }
             | Event::MemoryForgetResult { .. }
-            | Event::ReindexProgress { .. } => {}
+            | Event::ReindexProgress { .. }
+            | Event::LastDelta { .. } => {}
         }
     }
 

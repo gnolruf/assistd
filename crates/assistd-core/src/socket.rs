@@ -297,6 +297,9 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
 
     let router = ConfirmRouter::new(req.id().to_string(), tx.clone());
 
+    let is_subscribe = matches!(req, Request::Subscribe { .. });
+    let events_bus = state.runtime.events_bus().clone();
+
     let router_for_dispatch = router.clone();
     let dispatch_fut = async move {
         CONFIRM_ROUTER
@@ -305,6 +308,11 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
     };
     let forward_fut = async {
         while let Some(event) = rx.recv().await {
+            // Subscribe forwarders read from the bus; teeing back
+            // onto it would loop.
+            if !is_subscribe && event.kind().is_some() {
+                let _ = events_bus.send(event.clone());
+            }
             write_event(&mut write_half, &event).await?;
         }
         Ok::<_, SocketError>(write_half)
@@ -1390,6 +1398,149 @@ mod tests {
                 "expected Delta, got {events:?}"
             );
             assert!(matches!(events.last(), Some(Event::Done { id }) if id == "future"));
+        })
+        .await;
+    }
+
+    async fn open_subscribe_stream(
+        path: &Path,
+        body: &str,
+    ) -> (
+        tokio::net::unix::OwnedWriteHalf,
+        BufReader<tokio::net::unix::OwnedReadHalf>,
+    ) {
+        let stream = UnixStream::connect(path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write.write_all(body.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+        (write, BufReader::new(read))
+    }
+
+    async fn drain_subscribe(
+        reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        idle: std::time::Duration,
+    ) -> Vec<Event> {
+        let mut out = Vec::new();
+        loop {
+            let mut line = String::new();
+            match tokio::time::timeout(idle, reader.read_line(&mut line)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(_)) => match serde_json::from_str::<Event>(line.trim()) {
+                    Ok(ev) => out.push(ev),
+                    Err(e) => panic!("subscriber received invalid event {line:?}: {e}"),
+                },
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn subscribe_receives_query_events_from_other_client() {
+        with_server(test_state(), |path| async move {
+            let (_write_a, mut read_a) = open_subscribe_stream(
+                &path,
+                r#"{"type":"subscribe","id":"sub-1","filter":{"kinds":[]}}"#,
+            )
+            .await;
+
+            // Let the Subscribe handler attach to the bus before B
+            // starts emitting; otherwise the events race past it.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            let b_events = send_request_collect_events(
+                &path,
+                r#"{"type":"query","id":"q-1","text":"hello"}"#,
+            )
+            .await;
+            assert!(
+                matches!(b_events.first(), Some(Event::Delta { id, text }) if id == "q-1" && text == "hello"),
+                "client B regression: expected Delta(q-1, hello) first, got {b_events:?}"
+            );
+            assert!(
+                matches!(b_events.last(), Some(Event::Done { id }) if id == "q-1"),
+                "client B regression: expected terminal Done(q-1), got {b_events:?}"
+            );
+
+            let a_events =
+                drain_subscribe(&mut read_a, std::time::Duration::from_millis(200)).await;
+            assert!(
+                a_events
+                    .iter()
+                    .any(|e| matches!(e, Event::Delta { id, text } if id == "q-1" && text == "hello")),
+                "subscriber missed Delta from q-1; got {a_events:?}"
+            );
+            assert!(
+                a_events
+                    .iter()
+                    .any(|e| matches!(e, Event::Done { id } if id == "q-1")),
+                "subscriber missed Done from q-1; got {a_events:?}"
+            );
+            assert!(
+                a_events
+                    .iter()
+                    .any(|e| matches!(e, Event::LastDelta { id, text } if id == "q-1" && text == "hello")),
+                "subscriber missed LastDelta(q-1, 'hello'); got {a_events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_filter_rejects_unmatched_kinds() {
+        with_server(test_state(), |path| async move {
+            let (_write_a, mut read_a) = open_subscribe_stream(
+                &path,
+                r#"{"type":"subscribe","id":"sub-2","filter":{"kinds":["presence"]}}"#,
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            let _ =
+                send_request_collect_events(&path, r#"{"type":"query","id":"q-2","text":"hi"}"#)
+                    .await;
+            let _ = send_request_collect_events(
+                &path,
+                r#"{"type":"set_presence","id":"sp-1","target":"sleeping"}"#,
+            )
+            .await;
+
+            let a_events =
+                drain_subscribe(&mut read_a, std::time::Duration::from_millis(200)).await;
+            assert!(
+                a_events.iter().all(|e| !matches!(
+                    e,
+                    Event::Delta { id, .. } | Event::Done { id, .. } if id == "q-2"
+                )),
+                "Presence-only filter leaked Query events: {a_events:?}"
+            );
+            assert!(
+                a_events.iter().any(|e| matches!(
+                    e,
+                    Event::Presence { id, .. } if id == "sp-1"
+                )),
+                "expected Presence(sp-1) on subscriber, got {a_events:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_does_not_self_loop() {
+        with_server(test_state(), |path| async move {
+            let (_write_a, mut read_a) = open_subscribe_stream(
+                &path,
+                r#"{"type":"subscribe","id":"sub-3","filter":{"kinds":[]}}"#,
+            )
+            .await;
+
+            let a_events =
+                drain_subscribe(&mut read_a, std::time::Duration::from_millis(150)).await;
+            assert!(
+                a_events.is_empty(),
+                "idle subscriber emitted unexpected events: {a_events:?}"
+            );
         })
         .await;
     }

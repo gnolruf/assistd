@@ -103,7 +103,8 @@ pub async fn run(action: PttAction) -> Result<()> {
             | Event::BranchInfo { .. }
             | Event::BranchSwitched { .. }
             | Event::HistoryEntry { .. }
-            | Event::UndoApplied { .. } => {}
+            | Event::UndoApplied { .. }
+            | Event::LastDelta { .. } => {}
             Event::ConfirmRequest { .. } => {
                 eprintln!(
                     "[daemon asked for destructive-command confirmation; denying \
