@@ -24,12 +24,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 
-/// Maximum cadence at which a turn's running reply is republished as
-/// [`Event::LastDelta`] on the broadcast bus. Picked to feel real-time
-/// (≤100 ms staleness) for a status-bar consumer while bounding the
-/// per-turn bus traffic at ~10 events/sec regardless of token rate.
-/// A final `LastDelta` carrying the complete reply is always flushed
-/// when the turn ends, regardless of this window.
+/// Caps the per-turn `Event::LastDelta` republish rate so a fast
+/// token stream doesn't flood passive subscribers.
 const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// The two presence-side guards that must outlive the entire turn
@@ -295,8 +291,7 @@ impl AppState {
         let mut first_sentence_emitted = false;
 
         let events_bus = self.runtime.events_bus().clone();
-        // Initialize so the first Delta is eligible to emit a
-        // LastDelta without waiting a full debounce window.
+        // Backdate so the first Delta emits without waiting a window.
         let mut last_emit_at = Instant::now()
             .checked_sub(LAST_DELTA_DEBOUNCE)
             .unwrap_or_else(Instant::now);

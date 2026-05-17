@@ -26,14 +26,11 @@
 //!
 //! ## Passive subscription
 //!
-//! [`Request::Subscribe`] keeps the connection open for the lifetime of
-//! the client and forwards every broadcast-eligible event the daemon
-//! emits across all connections, filtered by [`SubscribeFilter`]. The
-//! filter selects from [`EventKind`]; an empty filter receives every
-//! broadcast-eligible kind. Subscribe never emits a terminal `Done`:
-//! the stream closes only when the client shuts down the connection or
-//! the daemon exits. Events arrive carrying the **originating turn's**
-//! `id`, not the `Subscribe.id` — subscribers correlate by event id.
+//! [`Request::Subscribe`] is a long-lived attachment to the daemon-
+//! wide events bus. The connection stays open until either side
+//! closes it; no terminal `Done` is emitted. Events arrive with the
+//! originating turn's `id` (not `Subscribe.id`), filtered by the
+//! requested [`SubscribeFilter`].
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -114,21 +111,10 @@ pub enum VoiceCaptureState {
     Transcribing,
 }
 
-/// Categories of [`Event`] that may be observed by a passive
-/// [`Request::Subscribe`] connection.
-///
-/// The set is intentionally narrower than [`Event`]: only events that
-/// represent **global** daemon state changes (and therefore make sense
-/// to fan out across every connected client) appear here. Dialog-local
-/// events — history rows, branch info, memory values, semantic hits,
-/// confirm prompts, capability replies, mid-stream status — stay
-/// scoped to the connection that issued the originating request and
-/// are never broadcast.
-///
-/// `LastDelta` is a daemon-coalesced summary of an in-flight turn's
-/// reply: it carries the cumulative accumulated text at the moment of
-/// emission and is debounced server-side so subscribers see at most a
-/// handful per second regardless of token rate.
+/// Categories of [`Event`] that pass through the daemon-wide
+/// broadcast bus and so can be selected by a [`SubscribeFilter`].
+/// Dialog-local events stay scoped to the originating connection
+/// and have no [`EventKind`] variant.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
@@ -145,9 +131,7 @@ pub enum EventKind {
 }
 
 /// Set-of-kinds filter for [`Request::Subscribe`]. An empty `kinds`
-/// vector matches **every** broadcast-eligible kind (the firehose);
-/// a populated vector matches only the listed kinds. Duplicates are
-/// tolerated by the daemon (the filter is treated as a set).
+/// vector matches every broadcast-eligible kind.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SubscribeFilter {
     #[serde(default)]
@@ -155,8 +139,7 @@ pub struct SubscribeFilter {
 }
 
 impl SubscribeFilter {
-    /// True when `kind` should be delivered under this filter. An
-    /// empty `kinds` vector matches every kind.
+    /// True when `kind` should be delivered under this filter.
     pub fn matches(&self, kind: EventKind) -> bool {
         self.kinds.is_empty() || self.kinds.contains(&kind)
     }
@@ -332,14 +315,11 @@ pub enum Request {
     /// [`Request::ResumeOrNew`] which may decide to keep an existing
     /// branch when it's recent or empty.
     NewSession { id: String },
-    /// Passive fan-out subscription. The daemon registers this
-    /// connection against an internal events bus and forwards every
-    /// broadcast-eligible event that matches `filter`. The connection
-    /// stays open until the client closes it or the daemon shuts
-    /// down; **no terminal `Done` is emitted for the subscription
-    /// itself**. Events arrive carrying the **originating turn's**
-    /// `id`, not this `Subscribe.id` — subscribers correlate by
-    /// inspecting the event stream.
+    /// Attach a passive subscriber to the daemon-wide events bus.
+    /// Forwards every broadcast-eligible event that matches
+    /// `filter` until the client disconnects. No terminal `Done`
+    /// is emitted for the subscription itself; events carry the
+    /// originating turn's `id`, not `Subscribe.id`.
     Subscribe {
         id: String,
         #[serde(default)]
@@ -658,14 +638,10 @@ pub enum Event {
     Error { id: String, message: String },
     /// Terminal success event; the stream is over.
     Done { id: String },
-    /// Daemon-coalesced summary of an in-flight turn's assistant
-    /// reply. Emitted **only onto the broadcast bus** for passive
-    /// [`Request::Subscribe`] consumers; never appears on the
-    /// originating turn's per-request stream. `text` is the
-    /// cumulative accumulated reply at the moment of emission, not
-    /// the latest token — so subscribers always see the full
-    /// running snapshot. Server-side debouncing caps the emission
-    /// rate; a final `LastDelta` is flushed on turn completion.
+    /// Daemon-coalesced cumulative snapshot of an in-flight turn's
+    /// reply. Emitted only onto the broadcast bus for
+    /// [`Request::Subscribe`] consumers; `text` is the running
+    /// reply so far, not just the latest token.
     LastDelta { id: String, text: String },
 }
 
@@ -706,14 +682,10 @@ impl Event {
         }
     }
 
-    /// Classify this event for [`Request::Subscribe`] filtering.
-    ///
-    /// Returns `None` for dialog-local events that are never
-    /// broadcast across connections (memory rows, branch info,
-    /// semantic hits, confirm prompts, history entries, and so on).
-    /// The exhaustive match below is intentional: adding a new
-    /// [`Event`] variant must force a deliberate decision about
-    /// whether it belongs on the broadcast bus.
+    /// Classify this event for [`SubscribeFilter`] matching. Returns
+    /// `None` for dialog-local events that don't cross the broadcast
+    /// bus. The match below is intentionally exhaustive — adding an
+    /// [`Event`] variant forces a decision about its bus eligibility.
     pub fn kind(&self) -> Option<EventKind> {
         Some(match self {
             Event::Delta { .. } => EventKind::Delta,

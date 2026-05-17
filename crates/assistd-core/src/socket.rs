@@ -297,12 +297,6 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
 
     let router = ConfirmRouter::new(req.id().to_string(), tx.clone());
 
-    // Tee broadcast-eligible events from this connection's outbound
-    // stream onto the daemon-wide events bus so `Request::Subscribe`
-    // connections can observe activity. Skipped on Subscribe
-    // connections themselves to prevent a feedback loop: a Subscribe
-    // forwarder's events came *from* the bus, and re-broadcasting
-    // them would amplify every event across every subscriber.
     let is_subscribe = matches!(req, Request::Subscribe { .. });
     let events_bus = state.runtime.events_bus().clone();
 
@@ -314,7 +308,9 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
     };
     let forward_fut = async {
         while let Some(event) = rx.recv().await {
-            if !is_subscribe && let Some(_kind) = event.kind() {
+            // Subscribe forwarders read from the bus; teeing back
+            // onto it would loop.
+            if !is_subscribe && event.kind().is_some() {
                 let _ = events_bus.send(event.clone());
             }
             write_event(&mut write_half, &event).await?;
@@ -1406,10 +1402,6 @@ mod tests {
         .await;
     }
 
-    /// Open a Subscribe connection without closing the write half (the
-    /// daemon keeps the stream open for the lifetime of the
-    /// subscription). Returns the write half (so the test can drop it
-    /// to signal shutdown) plus a buffered reader for events.
     async fn open_subscribe_stream(
         path: &Path,
         body: &str,
@@ -1425,10 +1417,6 @@ mod tests {
         (write, BufReader::new(read))
     }
 
-    /// Drain a Subscribe stream until either the per-line timeout
-    /// fires (the stream is idle) or the connection closes. Used by
-    /// integration tests to capture every event a subscriber received
-    /// up to a steady state.
     async fn drain_subscribe(
         reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
         idle: std::time::Duration,
@@ -1451,21 +1439,16 @@ mod tests {
     #[tokio::test]
     async fn subscribe_receives_query_events_from_other_client() {
         with_server(test_state(), |path| async move {
-            // Open client A as a passive subscriber with the default
-            // (empty) filter — it should see every broadcast-eligible
-            // event the daemon emits.
             let (_write_a, mut read_a) = open_subscribe_stream(
                 &path,
                 r#"{"type":"subscribe","id":"sub-1","filter":{"kinds":[]}}"#,
             )
             .await;
 
-            // Give the Subscribe handler a moment to register on the
-            // broadcast bus before client B starts emitting events.
+            // Let the Subscribe handler attach to the bus before B
+            // starts emitting; otherwise the events race past it.
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-            // Client B runs a normal Query. Per-request flow must be
-            // unchanged (regression check).
             let b_events = send_request_collect_events(
                 &path,
                 r#"{"type":"query","id":"q-1","text":"hello"}"#,
@@ -1480,13 +1463,6 @@ mod tests {
                 "client B regression: expected terminal Done(q-1), got {b_events:?}"
             );
 
-            // Client A should have observed the Query's Delta and
-            // Done events on the bus, plus at least one LastDelta
-            // (the on-Done flush is mandatory; the in-stream
-            // debounced emission may or may not fire depending on
-            // timing, but EchoBackend emits one Delta which sits
-            // ≥100 ms after the initial Instant::now() - DEBOUNCE,
-            // so the in-stream emission also fires here).
             let a_events =
                 drain_subscribe(&mut read_a, std::time::Duration::from_millis(200)).await;
             assert!(
@@ -1514,7 +1490,6 @@ mod tests {
     #[tokio::test]
     async fn subscribe_filter_rejects_unmatched_kinds() {
         with_server(test_state(), |path| async move {
-            // Client A subscribes with a Presence-only filter.
             let (_write_a, mut read_a) = open_subscribe_stream(
                 &path,
                 r#"{"type":"subscribe","id":"sub-2","filter":{"kinds":["presence"]}}"#,
@@ -1522,12 +1497,9 @@ mod tests {
             .await;
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-            // A Query should produce Delta/Done on the bus, but the
-            // Presence-only filter must drop them.
             let _ =
                 send_request_collect_events(&path, r#"{"type":"query","id":"q-2","text":"hi"}"#)
                     .await;
-            // Now flip presence — that *does* match the filter.
             let _ = send_request_collect_events(
                 &path,
                 r#"{"type":"set_presence","id":"sp-1","target":"sleeping"}"#,
@@ -1536,7 +1508,6 @@ mod tests {
 
             let a_events =
                 drain_subscribe(&mut read_a, std::time::Duration::from_millis(200)).await;
-            // Nothing from the Query: neither Delta(q-2) nor Done(q-2).
             assert!(
                 a_events.iter().all(|e| !matches!(
                     e,
@@ -1544,7 +1515,6 @@ mod tests {
                 )),
                 "Presence-only filter leaked Query events: {a_events:?}"
             );
-            // But the Presence event passes.
             assert!(
                 a_events.iter().any(|e| matches!(
                     e,
@@ -1558,11 +1528,6 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_does_not_self_loop() {
-        // A subscriber's own forward task must not re-broadcast the
-        // events it writes (those events came from the bus in the
-        // first place). Verify by attaching a subscriber and waiting
-        // — no other client is connected, so the only way A could
-        // see an event is via a feedback loop.
         with_server(test_state(), |path| async move {
             let (_write_a, mut read_a) = open_subscribe_stream(
                 &path,

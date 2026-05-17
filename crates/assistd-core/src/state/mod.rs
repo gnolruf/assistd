@@ -81,9 +81,7 @@ impl AppState {
     /// is responsible for surfacing `Err` to the client as an
     /// [`Event::Error`] if one hasn't been emitted already.
     pub async fn dispatch(self: Arc<Self>, req: Request, tx: mpsc::Sender<Event>) -> Result<()> {
-        // `Subscribe` is long-lived by design (a passive bus
-        // attachment that stays open until the client disconnects),
-        // so the `dispatch_envelope_secs` cap doesn't apply.
+        // Subscribe lives for the client's lifetime; no envelope cap.
         if matches!(req, Request::Subscribe { .. }) {
             return self.dispatch_inner(req, tx).await;
         }

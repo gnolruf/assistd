@@ -1,8 +1,6 @@
-//! Handler for [`assistd_ipc::Request::Subscribe`] — passive fan-out
-//! connections that forward broadcast-eligible events from the
-//! daemon-wide bus to a long-lived client (tray icon, status bar,
-//! external dashboard) until the client disconnects or the daemon
-//! shuts down.
+//! Handler for [`assistd_ipc::Request::Subscribe`]: forwards
+//! broadcast-eligible events from the daemon-wide bus to a passive
+//! client until either side closes the connection.
 
 use super::AppState;
 use anyhow::Result;
