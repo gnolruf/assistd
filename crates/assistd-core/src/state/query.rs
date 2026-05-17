@@ -19,10 +19,18 @@ use assistd_memory::{PersistedMessage, SessionId, TurnId};
 use assistd_tools::Attachment;
 use assistd_voice::{SentenceBuffer, SpeakDecision};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::Instrument;
+
+/// Maximum cadence at which a turn's running reply is republished as
+/// [`Event::LastDelta`] on the broadcast bus. Picked to feel real-time
+/// (≤100 ms staleness) for a status-bar consumer while bounding the
+/// per-turn bus traffic at ~10 events/sec regardless of token rate.
+/// A final `LastDelta` carrying the complete reply is always flushed
+/// when the turn ends, regardless of this window.
+const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// The two presence-side guards that must outlive the entire turn
 /// (including post-Done audio playback). The agent-turn lock is held
@@ -286,6 +294,13 @@ impl AppState {
         let mut client_alive = true;
         let mut first_sentence_emitted = false;
 
+        let events_bus = self.runtime.events_bus().clone();
+        // Initialize so the first Delta is eligible to emit a
+        // LastDelta without waiting a full debounce window.
+        let mut last_emit_at = Instant::now()
+            .checked_sub(LAST_DELTA_DEBOUNCE)
+            .unwrap_or_else(Instant::now);
+
         loop {
             let llm_event = match (partial_flush, awaiting_tool_result) {
                 (Some(d), false) => match tokio::time::timeout(d, llm_rx.recv()).await {
@@ -315,6 +330,13 @@ impl AppState {
                 LlmEvent::Delta { text } => {
                     let sentences = sentence_buf.push(&text);
                     assistant_accum.push_str(&text);
+                    if last_emit_at.elapsed() >= LAST_DELTA_DEBOUNCE {
+                        let _ = events_bus.send(Event::LastDelta {
+                            id: id.clone(),
+                            text: assistant_accum.clone(),
+                        });
+                        last_emit_at = Instant::now();
+                    }
                     (
                         Event::Delta {
                             id: id.clone(),
@@ -342,6 +364,10 @@ impl AppState {
                     awaiting_tool_result = true;
                     if !assistant_accum.is_empty() {
                         let pre_text = std::mem::take(&mut assistant_accum);
+                        let _ = events_bus.send(Event::LastDelta {
+                            id: id.clone(),
+                            text: pre_text.clone(),
+                        });
                         self.persist_message_fire_and_forget(
                             turn_id,
                             PersistedMessage::assistant_text(pre_text),
@@ -415,6 +441,10 @@ impl AppState {
                     let sentences = tail.into_iter().collect();
                     if !assistant_accum.is_empty() {
                         let final_text = std::mem::take(&mut assistant_accum);
+                        let _ = events_bus.send(Event::LastDelta {
+                            id: id.clone(),
+                            text: final_text.clone(),
+                        });
                         self.persist_message_fire_and_forget(
                             turn_id,
                             PersistedMessage::assistant_text(final_text),

@@ -23,6 +23,17 @@
 //!
 //! Every event carries the originating request's `id`, so a future
 //! multiplexing transport can correlate concurrent in-flight requests.
+//!
+//! ## Passive subscription
+//!
+//! [`Request::Subscribe`] keeps the connection open for the lifetime of
+//! the client and forwards every broadcast-eligible event the daemon
+//! emits across all connections, filtered by [`SubscribeFilter`]. The
+//! filter selects from [`EventKind`]; an empty filter receives every
+//! broadcast-eligible kind. Subscribe never emits a terminal `Done`:
+//! the stream closes only when the client shuts down the connection or
+//! the daemon exits. Events arrive carrying the **originating turn's**
+//! `id`, not the `Subscribe.id` — subscribers correlate by event id.
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -101,6 +112,54 @@ pub enum VoiceCaptureState {
     Queued,
     Recording,
     Transcribing,
+}
+
+/// Categories of [`Event`] that may be observed by a passive
+/// [`Request::Subscribe`] connection.
+///
+/// The set is intentionally narrower than [`Event`]: only events that
+/// represent **global** daemon state changes (and therefore make sense
+/// to fan out across every connected client) appear here. Dialog-local
+/// events — history rows, branch info, memory values, semantic hits,
+/// confirm prompts, capability replies, mid-stream status — stay
+/// scoped to the connection that issued the originating request and
+/// are never broadcast.
+///
+/// `LastDelta` is a daemon-coalesced summary of an in-flight turn's
+/// reply: it carries the cumulative accumulated text at the moment of
+/// emission and is debounced server-side so subscribers see at most a
+/// handful per second regardless of token rate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
+    Delta,
+    ReasoningDelta,
+    ToolCall,
+    ToolResult,
+    Presence,
+    ListenState,
+    VoiceState,
+    Done,
+    Error,
+    LastDelta,
+}
+
+/// Set-of-kinds filter for [`Request::Subscribe`]. An empty `kinds`
+/// vector matches **every** broadcast-eligible kind (the firehose);
+/// a populated vector matches only the listed kinds. Duplicates are
+/// tolerated by the daemon (the filter is treated as a set).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SubscribeFilter {
+    #[serde(default)]
+    pub kinds: Vec<EventKind>,
+}
+
+impl SubscribeFilter {
+    /// True when `kind` should be delivered under this filter. An
+    /// empty `kinds` vector matches every kind.
+    pub fn matches(&self, kind: EventKind) -> bool {
+        self.kinds.is_empty() || self.kinds.contains(&kind)
+    }
 }
 
 /// Wire-protocol request sent by a client to the daemon over the Unix socket.
@@ -273,6 +332,19 @@ pub enum Request {
     /// [`Request::ResumeOrNew`] which may decide to keep an existing
     /// branch when it's recent or empty.
     NewSession { id: String },
+    /// Passive fan-out subscription. The daemon registers this
+    /// connection against an internal events bus and forwards every
+    /// broadcast-eligible event that matches `filter`. The connection
+    /// stays open until the client closes it or the daemon shuts
+    /// down; **no terminal `Done` is emitted for the subscription
+    /// itself**. Events arrive carrying the **originating turn's**
+    /// `id`, not this `Subscribe.id` — subscribers correlate by
+    /// inspecting the event stream.
+    Subscribe {
+        id: String,
+        #[serde(default)]
+        filter: SubscribeFilter,
+    },
 }
 
 impl Request {
@@ -329,7 +401,8 @@ impl Request {
             | Request::Switch { id, .. }
             | Request::Undo { id }
             | Request::ResumeOrNew { id, .. }
-            | Request::NewSession { id } => id,
+            | Request::NewSession { id }
+            | Request::Subscribe { id, .. } => id,
         }
     }
 
@@ -366,6 +439,7 @@ impl Request {
             Request::Undo { .. } => "undo",
             Request::ResumeOrNew { .. } => "resume_or_new",
             Request::NewSession { .. } => "new_session",
+            Request::Subscribe { .. } => "subscribe",
         }
     }
 }
@@ -584,6 +658,15 @@ pub enum Event {
     Error { id: String, message: String },
     /// Terminal success event; the stream is over.
     Done { id: String },
+    /// Daemon-coalesced summary of an in-flight turn's assistant
+    /// reply. Emitted **only onto the broadcast bus** for passive
+    /// [`Request::Subscribe`] consumers; never appears on the
+    /// originating turn's per-request stream. `text` is the
+    /// cumulative accumulated reply at the moment of emission, not
+    /// the latest token — so subscribers always see the full
+    /// running snapshot. Server-side debouncing caps the emission
+    /// rate; a final `LastDelta` is flushed on turn completion.
+    LastDelta { id: String, text: String },
 }
 
 impl Event {
@@ -618,8 +701,47 @@ impl Event {
             | Event::HistoryEntry { id, .. }
             | Event::UndoApplied { id, .. }
             | Event::Error { id, .. }
-            | Event::Done { id } => id,
+            | Event::Done { id }
+            | Event::LastDelta { id, .. } => id,
         }
+    }
+
+    /// Classify this event for [`Request::Subscribe`] filtering.
+    ///
+    /// Returns `None` for dialog-local events that are never
+    /// broadcast across connections (memory rows, branch info,
+    /// semantic hits, confirm prompts, history entries, and so on).
+    /// The exhaustive match below is intentional: adding a new
+    /// [`Event`] variant must force a deliberate decision about
+    /// whether it belongs on the broadcast bus.
+    pub fn kind(&self) -> Option<EventKind> {
+        Some(match self {
+            Event::Delta { .. } => EventKind::Delta,
+            Event::ReasoningDelta { .. } => EventKind::ReasoningDelta,
+            Event::ToolCall { .. } => EventKind::ToolCall,
+            Event::ToolResult { .. } => EventKind::ToolResult,
+            Event::Presence { .. } => EventKind::Presence,
+            Event::VoiceState { .. } => EventKind::VoiceState,
+            Event::ListenState { .. } => EventKind::ListenState,
+            Event::Done { .. } => EventKind::Done,
+            Event::Error { .. } => EventKind::Error,
+            Event::LastDelta { .. } => EventKind::LastDelta,
+            Event::Transcription { .. }
+            | Event::VoiceOutputState { .. }
+            | Event::SemanticHit { .. }
+            | Event::MemoryValue { .. }
+            | Event::MemoryKeys { .. }
+            | Event::MemoryRow { .. }
+            | Event::MemoryForgetResult { .. }
+            | Event::ReindexProgress { .. }
+            | Event::ConfirmRequest { .. }
+            | Event::Capabilities { .. }
+            | Event::Status { .. }
+            | Event::BranchInfo { .. }
+            | Event::BranchSwitched { .. }
+            | Event::HistoryEntry { .. }
+            | Event::UndoApplied { .. } => return None,
+        })
     }
 }
 
@@ -1367,5 +1489,256 @@ mod tests {
     fn socket_path_falls_back_to_nobody_without_user() {
         let path = socket_path_for(None, None);
         assert_eq!(path, PathBuf::from("/tmp/assistd-nobody.sock"));
+    }
+
+    #[test]
+    fn subscribe_request_roundtrip_empty_filter() {
+        let req = Request::Subscribe {
+            id: "s-1".into(),
+            filter: SubscribeFilter::default(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"subscribe","id":"s-1","filter":{"kinds":[]}}"#
+        );
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn subscribe_request_accepts_missing_filter_field() {
+        let parsed: Request = serde_json::from_str(r#"{"type":"subscribe","id":"s-1"}"#).unwrap();
+        assert_eq!(
+            parsed,
+            Request::Subscribe {
+                id: "s-1".into(),
+                filter: SubscribeFilter::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn subscribe_request_roundtrip_populated_filter() {
+        let req = Request::Subscribe {
+            id: "s-2".into(),
+            filter: SubscribeFilter {
+                kinds: vec![
+                    EventKind::Presence,
+                    EventKind::ListenState,
+                    EventKind::LastDelta,
+                ],
+            },
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"subscribe","id":"s-2","filter":{"kinds":["presence","listen_state","last_delta"]}}"#
+        );
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn subscribe_request_id_and_kind() {
+        let req = Request::Subscribe {
+            id: "s-3".into(),
+            filter: SubscribeFilter::default(),
+        };
+        assert_eq!(req.id(), "s-3");
+        assert_eq!(req.kind(), "subscribe");
+    }
+
+    #[test]
+    fn subscribe_filter_default_matches_all() {
+        let f = SubscribeFilter::default();
+        for k in [
+            EventKind::Delta,
+            EventKind::ReasoningDelta,
+            EventKind::ToolCall,
+            EventKind::ToolResult,
+            EventKind::Presence,
+            EventKind::ListenState,
+            EventKind::VoiceState,
+            EventKind::Done,
+            EventKind::Error,
+            EventKind::LastDelta,
+        ] {
+            assert!(f.matches(k), "default filter should match {k:?}");
+        }
+    }
+
+    #[test]
+    fn subscribe_filter_matches_listed_only() {
+        let f = SubscribeFilter {
+            kinds: vec![EventKind::Presence, EventKind::LastDelta],
+        };
+        assert!(f.matches(EventKind::Presence));
+        assert!(f.matches(EventKind::LastDelta));
+        assert!(!f.matches(EventKind::Delta));
+        assert!(!f.matches(EventKind::ToolCall));
+        assert!(!f.matches(EventKind::Done));
+    }
+
+    #[test]
+    fn last_delta_event_roundtrip() {
+        let ev = Event::LastDelta {
+            id: "q-7".into(),
+            text: "Hello world".into(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"last_delta","id":"q-7","text":"Hello world"}"#
+        );
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ev);
+    }
+
+    #[test]
+    fn last_delta_is_not_terminal() {
+        let ev = Event::LastDelta {
+            id: "q-1".into(),
+            text: "snapshot".into(),
+        };
+        assert!(!ev.is_terminal());
+        assert_eq!(ev.id(), "q-1");
+    }
+
+    #[test]
+    fn event_kind_classifies_broadcast_eligible_variants() {
+        let cases: Vec<(Event, EventKind)> = vec![
+            (
+                Event::Delta {
+                    id: "q".into(),
+                    text: "t".into(),
+                },
+                EventKind::Delta,
+            ),
+            (
+                Event::ReasoningDelta {
+                    id: "q".into(),
+                    text: "t".into(),
+                },
+                EventKind::ReasoningDelta,
+            ),
+            (
+                Event::ToolCall {
+                    id: "q".into(),
+                    name: "bash".into(),
+                    args: serde_json::json!({}),
+                },
+                EventKind::ToolCall,
+            ),
+            (
+                Event::ToolResult {
+                    id: "q".into(),
+                    name: "bash".into(),
+                    result: serde_json::json!({}),
+                },
+                EventKind::ToolResult,
+            ),
+            (
+                Event::Presence {
+                    id: "q".into(),
+                    state: PresenceState::Active,
+                },
+                EventKind::Presence,
+            ),
+            (
+                Event::VoiceState {
+                    id: "q".into(),
+                    state: VoiceCaptureState::Idle,
+                },
+                EventKind::VoiceState,
+            ),
+            (
+                Event::ListenState {
+                    id: "q".into(),
+                    active: false,
+                },
+                EventKind::ListenState,
+            ),
+            (Event::Done { id: "q".into() }, EventKind::Done),
+            (
+                Event::Error {
+                    id: "q".into(),
+                    message: "m".into(),
+                },
+                EventKind::Error,
+            ),
+            (
+                Event::LastDelta {
+                    id: "q".into(),
+                    text: "t".into(),
+                },
+                EventKind::LastDelta,
+            ),
+        ];
+        for (ev, expected) in cases {
+            assert_eq!(ev.kind(), Some(expected), "wrong kind for {ev:?}");
+        }
+    }
+
+    #[test]
+    fn event_kind_returns_none_for_dialog_local_variants() {
+        let dialog_local = vec![
+            Event::Transcription {
+                id: "q".into(),
+                text: "t".into(),
+            },
+            Event::VoiceOutputState {
+                id: "q".into(),
+                enabled: true,
+            },
+            Event::MemoryValue {
+                id: "q".into(),
+                key: "k".into(),
+                value: None,
+            },
+            Event::MemoryKeys {
+                id: "q".into(),
+                keys: Vec::new(),
+            },
+            Event::MemoryRow {
+                id: "q".into(),
+                memory_id: 0,
+                key: "k".into(),
+                value: "v".into(),
+            },
+            Event::MemoryForgetResult {
+                id: "q".into(),
+                deleted: false,
+                key: None,
+            },
+            Event::ReindexProgress {
+                id: "q".into(),
+                kind: "chunks".into(),
+                done: 0,
+                total: 0,
+            },
+            Event::ConfirmRequest {
+                id: "q".into(),
+                confirm_id: "c".into(),
+                tool: "bash".into(),
+                script: "ls".into(),
+                matched_pattern: "ls".into(),
+            },
+            Event::Capabilities {
+                id: "q".into(),
+                vision: false,
+                model_name: "m".into(),
+            },
+            Event::Status {
+                id: "q".into(),
+                severity: "info".into(),
+                component: "llm".into(),
+                event: "ok".into(),
+                message: "".into(),
+            },
+        ];
+        for ev in dialog_local {
+            assert_eq!(ev.kind(), None, "expected None for {ev:?}");
+        }
     }
 }

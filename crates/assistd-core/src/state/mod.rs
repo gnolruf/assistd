@@ -17,6 +17,7 @@ pub(crate) mod persistence;
 pub(crate) mod presence_handlers;
 pub(crate) mod query;
 pub(crate) mod runtime;
+pub(crate) mod subscribe;
 pub(crate) mod subsystems;
 pub(crate) mod voice_handlers;
 pub(crate) mod wire;
@@ -80,6 +81,12 @@ impl AppState {
     /// is responsible for surfacing `Err` to the client as an
     /// [`Event::Error`] if one hasn't been emitted already.
     pub async fn dispatch(self: Arc<Self>, req: Request, tx: mpsc::Sender<Event>) -> Result<()> {
+        // `Subscribe` is long-lived by design (a passive bus
+        // attachment that stays open until the client disconnects),
+        // so the `dispatch_envelope_secs` cap doesn't apply.
+        if matches!(req, Request::Subscribe { .. }) {
+            return self.dispatch_inner(req, tx).await;
+        }
         let envelope = Duration::from_secs(self.config.timeouts.dispatch_envelope_secs);
         let req_id = req.id().to_string();
         let req_kind = req.kind();
@@ -154,6 +161,7 @@ impl AppState {
                 self.handle_resume_or_new(id, recency_secs, tx).await
             }
             Request::NewSession { id } => self.handle_new_session(id, tx).await,
+            Request::Subscribe { id, filter } => self.handle_subscribe(id, filter, tx).await,
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 let _ = tx
                     .send(Event::Error {
