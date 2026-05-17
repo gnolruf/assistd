@@ -4,8 +4,8 @@
 
 [model]
 # Model identifier passed to llama-server's --hf flag.
-# Format: owner/repo:quant (e.g. "bartowski/Qwen3-14B-GGUF:Q4_K_M")
-name = "bartowski/Qwen3-14B-GGUF:Q4_K_M"
+# Format: owner/repo:quant (e.g. "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M")
+name = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
 # Context window length in tokens. Must be > 0.
 context_length = 8192
 

@@ -11,7 +11,7 @@ pub const DEFAULT_LLAMA_PORT: u16 = 8385;
 pub const DEFAULT_GPU_LAYERS: u32 = 9999;
 pub const DEFAULT_READY_TIMEOUT_SECS: u64 = 300;
 
-pub const DEFAULT_MODEL_NAME: &str = "bartowski/Qwen3-14B-GGUF:Q4_K_M";
+pub const DEFAULT_MODEL_NAME: &str = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M";
 pub const DEFAULT_MODEL_CONTEXT_LENGTH: u32 = 8192;
 
 pub const DEFAULT_CHAT_MAX_HISTORY_TOKENS: u32 = 6000;

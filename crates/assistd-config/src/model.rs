@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelConfig {
     /// Model identifier passed to llama-server's `--hf` flag.
-    /// Format: `owner/repo:quant` (e.g. `"bartowski/Qwen3-14B-GGUF:Q4_K_M"`).
+    /// Format: `owner/repo:quant` (e.g. `"unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"`).
     pub name: String,
     /// Context window length in tokens.
     pub context_length: u32,
