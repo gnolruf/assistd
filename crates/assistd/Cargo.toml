@@ -10,7 +10,7 @@ name = "assistd"
 path = "src/main.rs"
 
 [features]
-default = ["daemon", "client", "chat"]
+default = ["daemon", "client", "chat", "tray"]
 daemon = [
     "dep:assistd-core",
     "dep:assistd-embed",
@@ -40,6 +40,13 @@ chat = [
     "dep:shlex",
     "dep:ratatui-image",
     "dep:image",
+]
+tray = [
+    "client",
+    "dep:assistd-config",
+    "dep:ksni",
+    "dep:tracing",
+    "dep:tracing-subscriber",
 ]
 
 [dependencies]
@@ -74,6 +81,8 @@ rustix           = { workspace = true, optional = true }
 shlex            = { workspace = true, optional = true }
 ratatui-image    = { workspace = true, optional = true }
 image            = { workspace = true, optional = true }
+ksni             = { workspace = true, optional = true }
+assistd-config   = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
