@@ -103,8 +103,10 @@ pub struct PopupHandle {
 
 impl PopupHandle {
     /// Shut everything down cooperatively: tell the driver to quit
-    /// (which causes the GUI thread to drop its watch and exit), then
-    /// flip the WM-backend shutdown signal and join the supervisor.
+    /// (which drops the watch sender, which wakes the egui-waker
+    /// task, which sends `ViewportCommand::Close` to the GUI thread).
+    /// Then drain the placement worker, join the GUI thread, and
+    /// stop the WM backend.
     pub async fn shutdown(mut self) {
         let _ = self.sink.driver_tx.send(DriverInput::Shutdown);
         let _ = self.driver_task.await;
@@ -112,10 +114,20 @@ impl PopupHandle {
         // observe EOF and exit.
         drop(self.sink);
         let _ = self.place_task.await;
-        if let Some(t) = self.gui_thread.take()
-            && let Err(e) = t.join()
-        {
-            tracing::warn!(target: "tray", "popup: GUI thread panicked on join: {e:?}");
+        if let Some(t) = self.gui_thread.take() {
+            // std::thread::join blocks; offload to spawn_blocking so
+            // the tokio worker stays available for the egui-waker
+            // task that's busy sending Close to the GUI loop.
+            let join = tokio::task::spawn_blocking(move || t.join()).await;
+            match join {
+                Ok(Ok(())) => {}
+                Ok(Err(panic)) => {
+                    tracing::warn!(target: "tray", "popup: GUI thread panicked: {panic:?}");
+                }
+                Err(e) => {
+                    tracing::warn!(target: "tray", "popup: GUI join task failed: {e}");
+                }
+            }
         }
         let _ = self.wm_shutdown.send(true);
         if let Some(h) = self.wm_handle {
@@ -144,6 +156,67 @@ pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
     let (place_tx, place_rx) = mpsc::unbounded_channel::<PlaceRequest>();
 
     let anchor = anchor_from_config(&popup_cfg);
+
+    // Compute a best-effort initial position so eframe creates the
+    // window at the configured corner from the very first map — this
+    // is what kills the brief "popup flashes in the centre" on the
+    // first wake. Prefer the user's explicit `scale_factor` config
+    // knob; fall back to parsing `Xft.dpi` out of `xrdb -query`.
+    // Either way, we scale the configured size by that factor so the
+    // pre-position lands at the right corner on HiDPI displays (a
+    // configured 360x120 popup becomes 420x140 physical at scale
+    // 1.17). The actual rect snap via `place_floating` then locks in
+    // the precise pixel position once the window is mapped.
+    let scale = popup_cfg
+        .scale_factor
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .inspect(|s| {
+            tracing::info!(
+                target: "tray",
+                "popup: using manual scale factor {s:.4} from config"
+            );
+        })
+        .or_else(|| {
+            let detected = detect_x11_scale_factor();
+            if let Some(s) = detected {
+                tracing::info!(
+                    target: "tray",
+                    "popup: detected X11 scale factor {s:.4} from Xft.dpi"
+                );
+            } else {
+                tracing::info!(
+                    target: "tray",
+                    "popup: no scale factor detected (no Xft.dpi in xrdb; \
+                     set tray.popup.scale_factor if your display is HiDPI)"
+                );
+            }
+            detected
+        })
+        .unwrap_or(1.0);
+    let scaled_anchor = if (scale - 1.0).abs() > f32::EPSILON {
+        scale_anchor_size(anchor, scale)
+    } else {
+        anchor
+    };
+    let initial_position = match manager.focused_workspace_rect().await {
+        Ok(ws) => {
+            let (x, y) = assistd_wm::criteria::compute_target_position(scaled_anchor, ws);
+            tracing::info!(
+                target: "tray",
+                "popup: pre-positioning at ({x}, {y}) on workspace {}x{}",
+                ws.width, ws.height
+            );
+            Some((x, y))
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "tray",
+                "popup: could not query workspace rect ({e}); window will appear at compositor default until first place_floating"
+            );
+            None
+        }
+    };
+
     let place_task = tokio::spawn(place_worker(
         place_rx,
         manager.clone(),
@@ -177,10 +250,21 @@ pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
     let width = popup_cfg.width;
     let height = popup_cfg.height;
     let gui_state_rx = state_rx.clone();
+    // Capture the workspace runtime handle before crossing the
+    // thread boundary; window::run uses it to spawn the egui waker.
+    let runtime = tokio::runtime::Handle::current();
     let gui_thread = std::thread::Builder::new()
         .name("assistd-popup-gui".into())
         .spawn(move || {
-            if let Err(e) = window::run(gui_state_rx, gui_event_tx, &app_id, width, height) {
+            if let Err(e) = window::run(
+                gui_state_rx,
+                gui_event_tx,
+                &app_id,
+                width,
+                height,
+                initial_position,
+                runtime,
+            ) {
                 tracing::warn!(target: "tray", "popup: eframe loop exited with error: {e}");
             }
         })?;
@@ -202,10 +286,81 @@ pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
     }))
 }
 
+/// Try to read `Xft.dpi` from the X resource database and return the
+/// scale factor `dpi / 96`. Returns `None` on Wayland, when `xrdb`
+/// isn't installed, or when `Xft.dpi` is unset. The check is a small
+/// one-shot subprocess at popup spawn time — winit doesn't expose
+/// the scale before a window exists, and we need a sizing hint for
+/// pre-positioning before the first `with_position` is committed.
+fn detect_x11_scale_factor() -> Option<f32> {
+    use std::process::Command;
+    let output = Command::new("xrdb").arg("-query").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = std::str::from_utf8(&output.stdout).ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Xft.dpi:") {
+            let dpi: f32 = rest.trim().parse().ok()?;
+            if dpi.is_finite() && dpi > 0.0 {
+                return Some((dpi / 96.0).max(1.0));
+            }
+        }
+    }
+    None
+}
+
+/// Scale an anchor's `width` / `height` by `scale`, keeping the
+/// corner and offsets untouched. Used for HiDPI-aware pre-positioning.
+fn scale_anchor_size(
+    anchor: assistd_wm::PlacementAnchor,
+    scale: f32,
+) -> assistd_wm::PlacementAnchor {
+    assistd_wm::PlacementAnchor {
+        width: (anchor.width as f32 * scale).round() as u32,
+        height: (anchor.height as f32 * scale).round() as u32,
+        ..anchor
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn scale_anchor_size_rounds_to_nearest_pixel() {
+        use assistd_wm::{AnchorCorner, PlacementAnchor};
+        let a = PlacementAnchor {
+            corner: AnchorCorner::BottomRight,
+            offset_x: -10,
+            offset_y: -30,
+            width: 360,
+            height: 120,
+        };
+        let scaled = scale_anchor_size(a, 1.1666666);
+        assert_eq!(scaled.width, 420);
+        assert_eq!(scaled.height, 140);
+        // Offsets and corner are not touched.
+        assert_eq!(scaled.offset_x, -10);
+        assert_eq!(scaled.offset_y, -30);
+        assert_eq!(scaled.corner, AnchorCorner::BottomRight);
+    }
+
+    #[test]
+    fn scale_anchor_size_identity_at_scale_one() {
+        use assistd_wm::{AnchorCorner, PlacementAnchor};
+        let a = PlacementAnchor {
+            corner: AnchorCorner::TopLeft,
+            offset_x: 5,
+            offset_y: 5,
+            width: 200,
+            height: 100,
+        };
+        let scaled = scale_anchor_size(a, 1.0);
+        assert_eq!(scaled.width, 200);
+        assert_eq!(scaled.height, 100);
+    }
 
     fn sink(
         wake_tool_call: bool,

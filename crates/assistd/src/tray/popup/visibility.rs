@@ -54,9 +54,13 @@ pub struct PlaceRequest;
 
 /// Run the driver loop until a [`DriverInput::Shutdown`] arrives or
 /// all senders are dropped. Pushes a new [`PopupState`] onto the
-/// `watch` whenever the visible content changes; sends
-/// [`PlaceRequest`]s onto `place_tx` when the popup becomes visible
-/// and once again ~250 ms later as a follow-up.
+/// `watch` whenever the visible content changes; sends a single
+/// [`PlaceRequest`] onto `place_tx` when the popup becomes visible.
+/// Earlier versions also re-fired on the GUI's `Mapped` event and on
+/// a 250 ms ticker as a workaround for the MapNotify race, but
+/// `WindowManager::place_floating` now retries internally, so a
+/// single trigger is sufficient and avoids the 3× duplicate
+/// placement IPC traffic per wake.
 pub async fn run(
     state_tx: watch::Sender<PopupState>,
     mut rx: UnboundedReceiver<DriverInput>,
@@ -66,13 +70,7 @@ pub async fn run(
     let mut tracker = PopupTracker::default();
     let mut visible = false;
     let mut last_activity = Instant::now();
-    let mut pending_retry: Option<Instant> = None;
     let auto_hide = Duration::from_millis(cfg.auto_hide_ms);
-    // 250 ms retry covers the brief window between
-    // `set_visible(true)` and the compositor processing the new-window
-    // event — the criteria-matched command is silent-success either
-    // way, so a single follow-up is enough.
-    const PLACE_RETRY_DELAY: Duration = Duration::from_millis(250);
     let mut ticker = interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -104,38 +102,24 @@ pub async fn run(
                             visible = true;
                             push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
                             let _ = place_tx.send(PlaceRequest);
-                            pending_retry = Some(Instant::now() + PLACE_RETRY_DELAY);
                         }
                     }
                     DriverInput::FocusLost => {
                         if visible {
                             visible = false;
                             push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
-                            pending_retry = None;
                         }
                     }
-                    DriverInput::Mapped => {
-                        // Fire the placement on first paint too — the
-                        // compositor has the window now for sure.
-                        if visible {
-                            let _ = place_tx.send(PlaceRequest);
-                        }
-                    }
+                    // GUI thread sends Mapped on first paint after Show;
+                    // we used to re-fire placement here but the internal
+                    // retry in place_floating makes it redundant.
+                    DriverInput::Mapped => {}
                 }
             }
             _ = ticker.tick() => {
                 if visible && last_activity.elapsed() >= auto_hide {
                     visible = false;
                     push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
-                    pending_retry = None;
-                }
-                if let Some(at) = pending_retry
-                    && Instant::now() >= at
-                {
-                    pending_retry = None;
-                    if visible {
-                        let _ = place_tx.send(PlaceRequest);
-                    }
                 }
             }
         }

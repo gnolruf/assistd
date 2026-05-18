@@ -20,7 +20,7 @@
 use async_trait::async_trait;
 
 pub(crate) mod backoff;
-pub(crate) mod criteria;
+pub mod criteria;
 pub mod error;
 #[cfg(feature = "i3")]
 pub mod i3;
@@ -426,18 +426,23 @@ pub fn is_terminal_class(class: &str) -> bool {
 }
 
 /// How a window the compositor should act on is matched. The criteria
-/// becomes the `[key="value"]` prefix on the IPC command; both i3 and
-/// sway accept all three forms.
-///
-/// `AppId` is the Wayland-native identifier (xdg-shell `app_id`); on
-/// X11 it maps to `WM_CLASS`. Pick whichever the GUI toolkit sets and
-/// stick with it across the build.
+/// becomes the `[key="value"]` prefix on the IPC command; all four
+/// forms are accepted by i3 and sway with the caveat that `AppId`
+/// only works for Wayland-native sway windows (i3 is X11-only and
+/// doesn't grammar `app_id`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PlacementCriteria {
-    /// Match by Wayland `app_id` (`[app_id="…"]`).
+    /// Match by Wayland `app_id` (`[app_id="…"]`). Sway-only; on i3,
+    /// each backend rewrites this to whichever identifier is actually
+    /// reliable on its compositor.
     AppId(String),
     /// Match by X11 `WM_CLASS` (`[class="…"]`).
     Class(String),
+    /// Match by `_NET_WM_NAME` / `WM_NAME` with the value treated as
+    /// an exact (anchored) regular expression. Used as an escape
+    /// hatch on i3 when the GUI toolkit doesn't set `WM_CLASS` (e.g.
+    /// egui-winit 0.34 leaves `WM_CLASS` empty on X11).
+    Title(String),
     /// Match a specific compositor container id (`[con_id="…"]`).
     ConId(WindowId),
 }
@@ -456,6 +461,67 @@ pub enum AnchorCorner {
     BottomRight,
     /// Centred horizontally and vertically.
     Center,
+}
+
+/// A pixel-space rectangle, used by `place_floating` to compute
+/// output-relative target coordinates for the focused workspace.
+/// `(x, y)` is the top-left corner in global screen coordinates;
+/// `(width, height)` is the visible area in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Compositor-emitted window lifecycle event. Each concrete backend
+/// fans these out from its IPC events stream onto an internal
+/// broadcast channel that `place_floating` uses to detect a freshly
+/// mapped window without polling. `Opened` is the one consumers
+/// typically care about; the others exist for completeness so the
+/// channel can grow into more general uses without renaming.
+#[derive(Debug, Clone)]
+pub enum WindowEvent {
+    /// A window was mapped (i3/sway `window::new`).
+    Opened {
+        id: WindowId,
+        title: Option<String>,
+        class: Option<String>,
+        app_id: Option<String>,
+    },
+    /// A window's title (`_NET_WM_NAME` / Wayland title) changed.
+    TitleChanged {
+        id: WindowId,
+        new_title: Option<String>,
+    },
+    /// A window was unmapped or destroyed.
+    Closed { id: WindowId },
+}
+
+impl WindowEvent {
+    /// Return the window id if this event represents a freshly-opened
+    /// window matching `criteria`; `None` for non-`Opened` events or
+    /// non-matching windows. Used by `place_floating` to filter the
+    /// broadcast stream down to "events that affect my window."
+    pub fn matches_opened(&self, criteria: &PlacementCriteria) -> Option<WindowId> {
+        let Self::Opened {
+            id,
+            title,
+            class,
+            app_id,
+        } = self
+        else {
+            return None;
+        };
+        let matched = match criteria {
+            PlacementCriteria::Title(want) => title.as_deref() == Some(want.as_str()),
+            PlacementCriteria::Class(want) => class.as_deref() == Some(want.as_str()),
+            PlacementCriteria::AppId(want) => app_id.as_deref() == Some(want.as_str()),
+            PlacementCriteria::ConId(want) => id == want,
+        };
+        matched.then_some(*id)
+    }
 }
 
 /// Where to place a floating window: a corner anchor plus offsets and
@@ -540,6 +606,17 @@ pub trait WindowManager: Send + Sync + 'static {
         Err(WmError::Unsupported("output enumeration"))
     }
 
+    /// Return the pixel rect of the workspace currently focused on the
+    /// active output. Callers use this to compute target coordinates
+    /// for `place_floating` callers that need to position a window
+    /// before it's mapped (e.g. eframe's `ViewportBuilder::with_position`
+    /// runs before `place_floating` has anything to act on). The
+    /// default impl returns [`WmError::Unsupported`] so backends
+    /// without workspace introspection compile unchanged.
+    async fn focused_workspace_rect(&self) -> WmResult<Rect> {
+        Err(WmError::Unsupported("focused workspace rect"))
+    }
+
     /// Mark the matched window floating, resize it to
     /// [`PlacementAnchor::width`] / [`PlacementAnchor::height`], and
     /// move it to the chosen corner with the configured offsets. The
@@ -620,6 +697,9 @@ impl WindowManager for NoWindowManager {
         _criteria: &PlacementCriteria,
         _anchor: PlacementAnchor,
     ) -> WmResult<()> {
+        Err(WmError::Disconnected)
+    }
+    async fn focused_workspace_rect(&self) -> WmResult<Rect> {
         Err(WmError::Disconnected)
     }
     fn is_connected(&self) -> bool {
@@ -753,6 +833,70 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WmError::Disconnected));
+    }
+
+    #[test]
+    fn window_event_matches_opened_by_title() {
+        let ev = WindowEvent::Opened {
+            id: WindowId::new(7).unwrap(),
+            title: Some("dev.assistd.popup".into()),
+            class: None,
+            app_id: None,
+        };
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::Title("dev.assistd.popup".into())),
+            WindowId::new(7)
+        );
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::Title("other".into())),
+            None
+        );
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::Class("dev.assistd.popup".into())),
+            None,
+            "title-only event should not match class criteria"
+        );
+    }
+
+    #[test]
+    fn window_event_matches_opened_by_app_id_and_class_and_con_id() {
+        let id = WindowId::new(11).unwrap();
+        let ev = WindowEvent::Opened {
+            id,
+            title: None,
+            class: Some("Firefox".into()),
+            app_id: Some("org.mozilla.firefox".into()),
+        };
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::Class("Firefox".into())),
+            Some(id)
+        );
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::AppId("org.mozilla.firefox".into())),
+            Some(id)
+        );
+        assert_eq!(ev.matches_opened(&PlacementCriteria::ConId(id)), Some(id));
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::ConId(WindowId::new(99).unwrap())),
+            None
+        );
+    }
+
+    #[test]
+    fn window_event_non_opened_variants_never_match() {
+        let id = WindowId::new(3).unwrap();
+        assert_eq!(
+            WindowEvent::Closed { id }.matches_opened(&PlacementCriteria::ConId(id)),
+            None
+        );
+        assert_eq!(
+            WindowEvent::TitleChanged {
+                id,
+                new_title: Some("x".into())
+            }
+            .matches_opened(&PlacementCriteria::Title("x".into())),
+            None
+        );
     }
 
     #[tokio::test]

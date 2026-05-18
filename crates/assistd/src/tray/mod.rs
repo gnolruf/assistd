@@ -91,9 +91,10 @@ pub async fn run(args: TrayArgs) -> Result<()> {
     let subscribe_ipc = ipc.clone();
     // Move popup_sink into the subscribe task — it's not used after the
     // activate-callback was built above, so we don't need a clone.
-    let subscribe_task = tokio::spawn(async move {
-        subscribe::run(subscribe_handle, subscribe_ipc, popup_sink).await
-    });
+    let subscribe_task =
+        tokio::spawn(
+            async move { subscribe::run(subscribe_handle, subscribe_ipc, popup_sink).await },
+        );
 
     let action_task = tokio::spawn(menu::run_actions(actions_rx, ipc));
 

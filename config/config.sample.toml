@@ -560,6 +560,15 @@ hotkey = "Super+Escape"
 # auto_hide_ms   = 3000          # idle timeout; reset by every new event while visible (500..=60000)
 # truncate_chars = 300           # body renders last N codepoints of the live reply (1..=10000)
 #
+# HiDPI scale factor for pre-positioning. The tray auto-detects this
+# from `xrdb -query` (Xft.dpi / 96) when unset, which covers most i3
+# setups; for XSETTINGS-only configurations where `xrdb` returns no
+# `Xft.dpi`, set this explicitly to your display scale so the popup
+# lands at the precise corner from its very first map (otherwise it
+# briefly appears at the unscaled corner and snaps once place_floating
+# discovers the real rendered size). A value of 1.0 opts out.
+# scale_factor   = 1.6667        # e.g. 96 DPI base * 7/6 ≈ 112 DPI display
+#
 # Which events automatically open the popup. The tray left-click always
 # opens it regardless of these flags. With `delta = true` the popup
 # surfaces on every chat turn — flip it to `false` if you live in the

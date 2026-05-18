@@ -5,7 +5,7 @@
 //! Backslashes and quotes inside a criteria value need escaping; numeric
 //! workspace targets get the more-robust `workspace number N` form.
 
-use crate::{AnchorCorner, PlacementAnchor, PlacementCriteria, WorkspaceId};
+use crate::{AnchorCorner, PlacementAnchor, PlacementCriteria, Rect, WorkspaceId};
 
 /// Escape `\` and `"` inside a value that lands between `[class="..."]`
 /// or `workspace "..."`. Backslashes are escaped first so we don't
@@ -26,125 +26,65 @@ pub fn format_workspace_target(ws: &WorkspaceId) -> String {
 
 /// Render a [`PlacementCriteria`] into the `[key="value"]` prefix both
 /// compositors expect. `con_id` skips the escape pass — it's a
-/// `NonZeroU64` and can't carry quotes.
+/// `NonZeroU64` and can't carry quotes. `Title` is anchored with
+/// `^…$` so the regex i3/sway run against `_NET_WM_NAME` matches
+/// only the full title, not any substring of it.
 pub fn format_criteria_clause(c: &PlacementCriteria) -> String {
     match c {
         PlacementCriteria::AppId(s) => format!(r#"[app_id="{}"]"#, escape_for_criteria(s)),
         PlacementCriteria::Class(s) => format!(r#"[class="{}"]"#, escape_for_criteria(s)),
+        PlacementCriteria::Title(s) => format!(r#"[title="^{}$"]"#, escape_for_criteria(s)),
         PlacementCriteria::ConId(id) => format!(r#"[con_id="{}"]"#, id.get()),
     }
 }
 
-/// Build the chained `floating enable, resize set W H, move position …`
-/// payload for the configured anchor. The output is one IPC string that
-/// i3 / sway both accept; we use `<X> ppt <Y> ppt` to anchor at the
-/// focused output's corner without querying its dimensions, then
-/// `move left/right/up/down <N>px` to apply the offsets (and to inset
-/// the window's far edges back inside the output for right/bottom
-/// anchors).
-pub fn format_place_floating_payload(c: &PlacementCriteria, anchor: PlacementAnchor) -> String {
-    let prefix = format_criteria_clause(c);
-    let geometry = format!(
-        "{prefix} floating enable, {prefix} resize set {} {}",
-        anchor.width, anchor.height
-    );
-    let position = match anchor.corner {
-        AnchorCorner::TopLeft => format_corner_position(
-            &prefix,
-            "0 ppt 0 ppt",
-            anchor.offset_x,
-            anchor.offset_y,
-            0,
-            0,
-        ),
-        AnchorCorner::TopRight => format_corner_position(
-            &prefix,
-            "100 ppt 0 ppt",
-            anchor.offset_x,
-            anchor.offset_y,
-            -(anchor.width as i64),
-            0,
-        ),
-        AnchorCorner::BottomLeft => format_corner_position(
-            &prefix,
-            "0 ppt 100 ppt",
-            anchor.offset_x,
-            anchor.offset_y,
-            0,
-            -(anchor.height as i64),
-        ),
-        AnchorCorner::BottomRight => format_corner_position(
-            &prefix,
-            "100 ppt 100 ppt",
-            anchor.offset_x,
-            anchor.offset_y,
-            -(anchor.width as i64),
-            -(anchor.height as i64),
-        ),
-        AnchorCorner::Center => format_center_position(&prefix, anchor.offset_x, anchor.offset_y),
-    };
-    if position.is_empty() {
-        geometry
-    } else {
-        format!("{geometry}, {position}")
-    }
-}
-
-/// Build the position clause for a non-centre anchor. `base_position`
-/// is the `<X> ppt <Y> ppt` form for the corner. `intrinsic_dx`/
-/// `intrinsic_dy` shift back inward by the window's own dimensions for
-/// right/bottom anchors (zero for left/top); `offset_x`/`offset_y` add
-/// the user-configured offset on top of that.
-fn format_corner_position(
-    prefix: &str,
-    base_position: &str,
-    offset_x: i32,
-    offset_y: i32,
-    intrinsic_dx: i64,
-    intrinsic_dy: i64,
+/// Build the `floating enable, resize set W H, move position X Y` payload
+/// for the configured anchor, given the focused workspace's pixel rect.
+///
+/// We use an explicit pixel position (`move position {X}px {Y}px`)
+/// rather than `move position 100 ppt 100 ppt, move left Wpx` because
+/// i3 silently clamps off-screen ppt-based positions to keep some
+/// portion of the window visible. With clamping in play, the
+/// `move position` becomes a near-no-op and the chained `move left`
+/// then walks the window leftward by `W` pixels on each placement —
+/// the popup ends up further off-screen with every wake event.
+///
+/// Pixel coordinates are output-relative (no `absolute` keyword) so
+/// multi-monitor setups continue to anchor the popup to whichever
+/// output the focused workspace currently lives on.
+pub fn format_place_floating_pixels(
+    c: &PlacementCriteria,
+    anchor: PlacementAnchor,
+    workspace: Rect,
 ) -> String {
-    let dx = intrinsic_dx + offset_x as i64;
-    let dy = intrinsic_dy + offset_y as i64;
-    let mut parts = Vec::with_capacity(3);
-    parts.push(format!("{prefix} move position {base_position}"));
-    if let Some(clause) = horizontal_move_clause(prefix, dx) {
-        parts.push(clause);
-    }
-    if let Some(clause) = vertical_move_clause(prefix, dy) {
-        parts.push(clause);
-    }
-    parts.join(", ")
+    let prefix = format_criteria_clause(c);
+    let (x, y) = compute_target_position(anchor, workspace);
+    format!(
+        "{prefix} floating enable, {prefix} resize set {} {}, \
+         {prefix} move position {} px {} px",
+        anchor.width, anchor.height, x, y,
+    )
 }
 
-fn format_center_position(prefix: &str, offset_x: i32, offset_y: i32) -> String {
-    let mut parts = Vec::with_capacity(3);
-    parts.push(format!("{prefix} move position center"));
-    if let Some(clause) = horizontal_move_clause(prefix, offset_x as i64) {
-        parts.push(clause);
-    }
-    if let Some(clause) = vertical_move_clause(prefix, offset_y as i64) {
-        parts.push(clause);
-    }
-    parts.join(", ")
-}
-
-/// `move left|right Npx` clause for a signed pixel delta. Returns
-/// `None` for zero — i3/sway both treat `move right 0px` as a no-op,
-/// but the suppressed clause keeps the rendered string minimal and the
-/// snapshot tests readable.
-fn horizontal_move_clause(prefix: &str, dx: i64) -> Option<String> {
-    match dx.cmp(&0) {
-        std::cmp::Ordering::Greater => Some(format!("{prefix} move right {dx}px")),
-        std::cmp::Ordering::Less => Some(format!("{prefix} move left {}px", -dx)),
-        std::cmp::Ordering::Equal => None,
-    }
-}
-
-fn vertical_move_clause(prefix: &str, dy: i64) -> Option<String> {
-    match dy.cmp(&0) {
-        std::cmp::Ordering::Greater => Some(format!("{prefix} move down {dy}px")),
-        std::cmp::Ordering::Less => Some(format!("{prefix} move up {}px", -dy)),
-        std::cmp::Ordering::Equal => None,
+/// Top-left corner of the window, in output-relative pixels, for the
+/// given anchor + offsets on a workspace of the given size. Negative
+/// values are allowed and let users intentionally push the popup
+/// off-screen if they really want to — we don't second-guess the
+/// configured offsets.
+pub fn compute_target_position(anchor: PlacementAnchor, workspace: Rect) -> (i32, i32) {
+    let w = anchor.width as i32;
+    let h = anchor.height as i32;
+    let ww = workspace.width as i32;
+    let wh = workspace.height as i32;
+    match anchor.corner {
+        AnchorCorner::TopLeft => (anchor.offset_x, anchor.offset_y),
+        AnchorCorner::TopRight => (ww - w + anchor.offset_x, anchor.offset_y),
+        AnchorCorner::BottomLeft => (anchor.offset_x, wh - h + anchor.offset_y),
+        AnchorCorner::BottomRight => (ww - w + anchor.offset_x, wh - h + anchor.offset_y),
+        AnchorCorner::Center => (
+            (ww - w) / 2 + anchor.offset_x,
+            (wh - h) / 2 + anchor.offset_y,
+        ),
     }
 }
 
@@ -160,6 +100,15 @@ mod tests {
             offset_y: oy,
             width: 360,
             height: 120,
+        }
+    }
+
+    fn workspace_1920_1055() -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1055,
         }
     }
 
@@ -226,6 +175,10 @@ mod tests {
             r#"[class="Firefox"]"#
         );
         assert_eq!(
+            format_criteria_clause(&PlacementCriteria::Title("Inbox".into())),
+            r#"[title="^Inbox$"]"#
+        );
+        assert_eq!(
             format_criteria_clause(&PlacementCriteria::ConId(WindowId::new(42).unwrap())),
             r#"[con_id="42"]"#
         );
@@ -244,147 +197,111 @@ mod tests {
     }
 
     #[test]
-    fn place_floating_payload_top_right_default_offsets() {
-        let p = format_place_floating_payload(
-            &PlacementCriteria::AppId("dev.assistd.popup".into()),
+    fn place_floating_pixels_bottom_right_default_offsets() {
+        // 1920×1055 workspace, 360×120 popup, BottomRight (-10, -30):
+        // TL = (1920 - 360 - 10, 1055 - 120 - 30) = (1550, 905).
+        let p = format_place_floating_pixels(
+            &PlacementCriteria::Title("dev.assistd.popup".into()),
+            anchor(AnchorCorner::BottomRight, -10, -30),
+            workspace_1920_1055(),
+        );
+        assert_eq!(
+            p,
+            concat!(
+                r#"[title="^dev.assistd.popup$"] floating enable, "#,
+                r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
+                r#"[title="^dev.assistd.popup$"] move position 1550 px 905 px"#,
+            )
+        );
+    }
+
+    #[test]
+    fn place_floating_pixels_top_right_default_offsets() {
+        // TL = (1920 - 360 - 10, 10) = (1550, 10).
+        let p = format_place_floating_pixels(
+            &PlacementCriteria::Title("dev.assistd.popup".into()),
             anchor(AnchorCorner::TopRight, -10, 10),
+            workspace_1920_1055(),
         );
-        // Default tray-popup geometry: 360×120 at top-right, inset 10px
-        // from the right edge, 10px from the top. Window width pulls
-        // top-left 370px to the left of the right edge; offset_y of 10
-        // pushes it 10px down from the top.
         assert_eq!(
             p,
             concat!(
-                r#"[app_id="dev.assistd.popup"] floating enable, "#,
-                r#"[app_id="dev.assistd.popup"] resize set 360 120, "#,
-                r#"[app_id="dev.assistd.popup"] move position 100 ppt 0 ppt, "#,
-                r#"[app_id="dev.assistd.popup"] move left 370px, "#,
-                r#"[app_id="dev.assistd.popup"] move down 10px"#,
+                r#"[title="^dev.assistd.popup$"] floating enable, "#,
+                r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
+                r#"[title="^dev.assistd.popup$"] move position 1550 px 10 px"#,
             )
         );
     }
 
     #[test]
-    fn place_floating_payload_top_left_default_offsets() {
-        let p = format_place_floating_payload(
-            &PlacementCriteria::AppId("dev.assistd.popup".into()),
+    fn place_floating_pixels_top_left_default_offsets() {
+        let p = format_place_floating_pixels(
+            &PlacementCriteria::Title("dev.assistd.popup".into()),
             anchor(AnchorCorner::TopLeft, 10, 10),
+            workspace_1920_1055(),
         );
         assert_eq!(
             p,
             concat!(
-                r#"[app_id="dev.assistd.popup"] floating enable, "#,
-                r#"[app_id="dev.assistd.popup"] resize set 360 120, "#,
-                r#"[app_id="dev.assistd.popup"] move position 0 ppt 0 ppt, "#,
-                r#"[app_id="dev.assistd.popup"] move right 10px, "#,
-                r#"[app_id="dev.assistd.popup"] move down 10px"#,
+                r#"[title="^dev.assistd.popup$"] floating enable, "#,
+                r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
+                r#"[title="^dev.assistd.popup$"] move position 10 px 10 px"#,
             )
         );
     }
 
     #[test]
-    fn place_floating_payload_bottom_left_negative_offset_y() {
-        let p = format_place_floating_payload(
-            &PlacementCriteria::AppId("dev.assistd.popup".into()),
+    fn place_floating_pixels_bottom_left_negative_offset_y() {
+        // TL = (10, 1055 - 120 - 10) = (10, 925).
+        let p = format_place_floating_pixels(
+            &PlacementCriteria::Title("dev.assistd.popup".into()),
             anchor(AnchorCorner::BottomLeft, 10, -10),
+            workspace_1920_1055(),
         );
-        // BottomLeft: intrinsic_dy = -height = -120; offset_y = -10
-        // → dy = -130 → move up 130px.
         assert_eq!(
             p,
             concat!(
-                r#"[app_id="dev.assistd.popup"] floating enable, "#,
-                r#"[app_id="dev.assistd.popup"] resize set 360 120, "#,
-                r#"[app_id="dev.assistd.popup"] move position 0 ppt 100 ppt, "#,
-                r#"[app_id="dev.assistd.popup"] move right 10px, "#,
-                r#"[app_id="dev.assistd.popup"] move up 130px"#,
+                r#"[title="^dev.assistd.popup$"] floating enable, "#,
+                r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
+                r#"[title="^dev.assistd.popup$"] move position 10 px 925 px"#,
             )
         );
     }
 
     #[test]
-    fn place_floating_payload_bottom_right_default_offsets() {
-        let p = format_place_floating_payload(
-            &PlacementCriteria::AppId("dev.assistd.popup".into()),
-            anchor(AnchorCorner::BottomRight, -10, -10),
-        );
-        // BottomRight: intrinsic_dx = -360, offset_x = -10 → -370 → move left 370px.
-        // intrinsic_dy = -120, offset_y = -10 → -130 → move up 130px.
-        assert_eq!(
-            p,
-            concat!(
-                r#"[app_id="dev.assistd.popup"] floating enable, "#,
-                r#"[app_id="dev.assistd.popup"] resize set 360 120, "#,
-                r#"[app_id="dev.assistd.popup"] move position 100 ppt 100 ppt, "#,
-                r#"[app_id="dev.assistd.popup"] move left 370px, "#,
-                r#"[app_id="dev.assistd.popup"] move up 130px"#,
-            )
-        );
-    }
-
-    #[test]
-    fn place_floating_payload_zero_offsets_omit_move_clauses() {
-        // TopLeft with both offsets at 0 collapses to just the position
-        // clause — no redundant "move right 0px".
-        let p = format_place_floating_payload(
-            &PlacementCriteria::AppId("x".into()),
-            anchor(AnchorCorner::TopLeft, 0, 0),
-        );
-        assert_eq!(
-            p,
-            concat!(
-                r#"[app_id="x"] floating enable, "#,
-                r#"[app_id="x"] resize set 360 120, "#,
-                r#"[app_id="x"] move position 0 ppt 0 ppt"#,
-            )
-        );
-    }
-
-    #[test]
-    fn place_floating_payload_center_with_offsets() {
-        let p = format_place_floating_payload(
-            &PlacementCriteria::AppId("dev.assistd.popup".into()),
+    fn place_floating_pixels_center_default_offsets() {
+        // TL = ((1920 - 360) / 2, (1055 - 120) / 2) = (780, 467).
+        let p = format_place_floating_pixels(
+            &PlacementCriteria::Title("dev.assistd.popup".into()),
             anchor(AnchorCorner::Center, 0, 0),
+            workspace_1920_1055(),
         );
         assert_eq!(
             p,
             concat!(
-                r#"[app_id="dev.assistd.popup"] floating enable, "#,
-                r#"[app_id="dev.assistd.popup"] resize set 360 120, "#,
-                r#"[app_id="dev.assistd.popup"] move position center"#,
-            )
-        );
-        let p2 = format_place_floating_payload(
-            &PlacementCriteria::AppId("dev.assistd.popup".into()),
-            anchor(AnchorCorner::Center, 20, -20),
-        );
-        assert_eq!(
-            p2,
-            concat!(
-                r#"[app_id="dev.assistd.popup"] floating enable, "#,
-                r#"[app_id="dev.assistd.popup"] resize set 360 120, "#,
-                r#"[app_id="dev.assistd.popup"] move position center, "#,
-                r#"[app_id="dev.assistd.popup"] move right 20px, "#,
-                r#"[app_id="dev.assistd.popup"] move up 20px"#,
+                r#"[title="^dev.assistd.popup$"] floating enable, "#,
+                r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
+                r#"[title="^dev.assistd.popup$"] move position 780 px 467 px"#,
             )
         );
     }
 
     #[test]
-    fn place_floating_payload_for_con_id_uses_con_id_criteria() {
-        let p = format_place_floating_payload(
+    fn place_floating_pixels_for_con_id_uses_con_id_criteria() {
+        let p = format_place_floating_pixels(
             &PlacementCriteria::ConId(WindowId::new(1234).unwrap()),
             anchor(AnchorCorner::TopRight, -10, 10),
+            workspace_1920_1055(),
         );
         assert!(p.starts_with(r#"[con_id="1234"] floating enable"#));
     }
 
     #[test]
-    fn place_floating_payload_escapes_quotes_in_app_id() {
-        let p = format_place_floating_payload(
+    fn place_floating_pixels_escapes_quotes_in_app_id() {
+        let p = format_place_floating_pixels(
             &PlacementCriteria::AppId(r#"a"b"#.into()),
             anchor(AnchorCorner::Center, 0, 0),
+            workspace_1920_1055(),
         );
         assert!(
             p.starts_with(r#"[app_id="a\"b"] floating enable"#),

@@ -9,11 +9,12 @@
 //! tripping over the socket.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_i3ipc::{
     I3,
@@ -21,15 +22,27 @@ use tokio_i3ipc::{
     reply,
 };
 
-use crate::criteria::{format_place_floating_payload, format_workspace_target};
+use crate::criteria::{format_place_floating_pixels, format_workspace_target};
 use crate::error::ipc_ctx;
 use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
 use crate::{
-    FocusedWindowContext, Layout, PlacementAnchor, PlacementCriteria, ResizeDir, Window, WindowId,
-    WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
+    FocusedWindowContext, Layout, PlacementAnchor, PlacementCriteria, Rect, ResizeDir, Window,
+    WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
+
+/// How many window events to buffer per subscriber. Subscribers that
+/// fall this far behind get a `Lagged` error and must reconnect — we
+/// treat that as a no-op in the popup placement path (just fall back
+/// to polling), so a small buffer is fine.
+const WINDOW_EVENTS_CAPACITY: usize = 32;
+
+/// Max time `find_window_rect_by_criteria` waits for a matching
+/// `WindowEvent::Opened` after its initial tree poll comes up empty.
+/// Bounded so the popup never blocks indefinitely if the window
+/// somehow never appears.
+const WINDOW_EVENT_WAIT: Duration = Duration::from_millis(500);
 
 /// `WindowManager` impl wrapping a single i3 IPC command socket.
 /// Held inside `Arc<dyn WindowManager>` by the daemon's `AppState`.
@@ -40,6 +53,12 @@ pub struct I3Backend {
     /// the supervisor task reconnects without waiting for the next
     /// event-stream error to fire.
     reconnect: Arc<tokio::sync::Notify>,
+    /// Broadcasts every i3 `window::*` event so consumers (currently
+    /// just the tray popup's placement path) can react synchronously
+    /// to a freshly mapped window instead of polling `GET_TREE`.
+    /// Receivers are created on demand via `subscribe`; lagged
+    /// receivers get a typed `Lagged` error and fall back to polling.
+    window_events: broadcast::Sender<WindowEvent>,
 }
 
 /// Returned by [`I3Backend::start`] alongside the backend itself. The
@@ -82,10 +101,12 @@ impl I3Backend {
         };
         let snapshot = Arc::new(RwLock::new(initial));
         let reconnect = Arc::new(tokio::sync::Notify::new());
+        let (window_events, _) = broadcast::channel(WINDOW_EVENTS_CAPACITY);
         let backend = Arc::new(Self {
             cmd: Arc::new(Mutex::new(Some(cmd))),
             snapshot: snapshot.clone(),
             reconnect: reconnect.clone(),
+            window_events,
         });
 
         let supervisor_task = tokio::spawn(supervisor_loop(
@@ -217,13 +238,218 @@ impl WindowManager for I3Backend {
         self.run(&i3_layout_payload(layout)).await
     }
 
+    async fn focused_workspace_rect(&self) -> WmResult<Rect> {
+        self.focused_workspace_rect_inner().await
+    }
+
     async fn place_floating(
         &self,
         criteria: &PlacementCriteria,
         anchor: PlacementAnchor,
     ) -> WmResult<()> {
-        self.run(&format_place_floating_payload(criteria, anchor))
-            .await
+        let translated = translate_criteria_for_i3(criteria);
+        let workspace = self.focused_workspace_rect_inner().await?;
+        // eframe / winit / X11 don't always honour the size we passed
+        // to `with_inner_size` exactly — DPI scaling especially can
+        // turn a configured 360-logical-px window into a 420-physical-
+        // px one. Compute placement using the window's actual rect so
+        // the anchor lands precisely regardless of scale.
+        let effective = match self.find_window_rect_by_criteria(&translated).await {
+            Ok(actual) => {
+                tracing::info!(
+                    target: "tray",
+                    "popup: actual window rect = {}x{} (configured {}x{}); placing accordingly",
+                    actual.width, actual.height, anchor.width, anchor.height
+                );
+                PlacementAnchor {
+                    width: actual.width,
+                    height: actual.height,
+                    ..anchor
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "tray",
+                    "popup: could not query window rect ({e}); falling back to configured size"
+                );
+                anchor
+            }
+        };
+        self.run(&format_place_floating_pixels(
+            &translated,
+            effective,
+            workspace,
+        ))
+        .await
+    }
+}
+
+impl I3Backend {
+    /// Walk the i3 tree looking for a window matching the given
+    /// criteria, returning its current rect. Used by
+    /// [`Self::place_floating`] to feed the actual on-screen
+    /// dimensions into the placement formula. Only the
+    /// title/class/app_id variants are searched here; `con_id`
+    /// short-circuits via the tree's `id` field.
+    ///
+    /// Subscribes to the backend's window-event broadcast first, then
+    /// does a single tree poll. If the window is already there we
+    /// return immediately. Otherwise we wait (up to
+    /// [`WINDOW_EVENT_WAIT`]) for a matching `WindowEvent::Opened`
+    /// from i3's `window::new` event stream and then re-poll the tree
+    /// to get the rect. Subscribing before polling closes the race
+    /// where the supervisor processes the new-window event after our
+    /// `GET_TREE` reply but before we get a chance to wait.
+    async fn find_window_rect_by_criteria(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
+        let mut events = self.window_events.subscribe();
+
+        if let Ok(rect) = self.find_window_rect_once(criteria).await {
+            return Ok(rect);
+        }
+
+        let waited = tokio::time::timeout(WINDOW_EVENT_WAIT, async {
+            loop {
+                match events.recv().await {
+                    Ok(ev) => {
+                        if ev.matches_opened(criteria).is_some() {
+                            return true;
+                        }
+                    }
+                    // Sender dropped (backend shutting down) — bail.
+                    Err(broadcast::error::RecvError::Closed) => return false,
+                    // Lagged: we missed events. The window might
+                    // already be in the tree, so break out and let the
+                    // final poll find it.
+                    Err(broadcast::error::RecvError::Lagged(_)) => return false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        let result = self.find_window_rect_once(criteria).await;
+        if waited && result.is_ok() {
+            tracing::debug!(
+                target: "tray",
+                "popup: window appeared via i3 window::new event"
+            );
+        }
+        result
+    }
+
+    async fn find_window_rect_once(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let tree = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_tree()).await {
+            Err(_) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(ipc_ctx(e, "i3 GET_TREE (window rect)"));
+            }
+            Ok(Ok(t)) => t,
+        };
+        drop(guard);
+        find_node_rect(&tree, criteria)
+            .ok_or_else(|| WmError::Rejected(format!("no window matches {criteria:?}")))
+    }
+
+    /// Query the focused workspace's pixel rect via `GET_WORKSPACES`.
+    /// Used by [`Self::place_floating`] to compute absolute pixel
+    /// coordinates for the popup, bypassing i3's silent clamping of
+    /// off-screen ppt-based positions. Exposed through the
+    /// `WindowManager` trait method of the same name; the private
+    /// `_inner` suffix avoids the trait/inherent collision.
+    async fn focused_workspace_rect_inner(&self) -> WmResult<Rect> {
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let workspaces =
+            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
+                Err(_) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+                }
+                Ok(Err(e)) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(ipc_ctx(e, "i3 GET_WORKSPACES (focused rect)"));
+                }
+                Ok(Ok(w)) => w,
+            };
+        drop(guard);
+        workspaces
+            .into_iter()
+            .find(|w| w.focused)
+            .map(|w| Rect {
+                // tokio-i3ipc reports rect coordinates as `isize`; sway
+                // uses `i32`. Normalise both to `i32` at this seam.
+                x: w.rect.x as i32,
+                y: w.rect.y as i32,
+                width: w.rect.width.max(0) as u32,
+                height: w.rect.height.max(0) as u32,
+            })
+            .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
+    }
+}
+
+/// i3's IPC grammar predates Wayland; its criteria block accepts
+/// `class` / `instance` / `con_id` / `id` / `title` etc. but not
+/// `app_id`. Map the protocol-neutral [`PlacementCriteria::AppId`]
+/// onto `title` — egui-winit 0.34 (and presumably other toolkits)
+/// doesn't reliably populate X11 `WM_CLASS` from the same identifier
+/// they pass to `with_app_id` on Wayland, but the title is always
+/// settable. Callers that own their popup window must set its title
+/// to the same string they pass as `AppId(...)`.
+fn translate_criteria_for_i3(c: &PlacementCriteria) -> PlacementCriteria {
+    match c {
+        PlacementCriteria::AppId(s) => PlacementCriteria::Title(s.clone()),
+        other => other.clone(),
+    }
+}
+
+/// Recursively search the i3 tree for a window matching the given
+/// criteria and return its rendered rect. The rect is i3's
+/// `window_rect` (the client area inside any decorations), which is
+/// what the placement formula needs to anchor exactly. Container
+/// nodes (no `window`) are skipped.
+fn find_node_rect(node: &reply::Node, criteria: &PlacementCriteria) -> Option<Rect> {
+    if node.window.is_some() && node_matches(node, criteria) {
+        return Some(Rect {
+            x: node.rect.x as i32,
+            y: node.rect.y as i32,
+            width: node.rect.width.max(0) as u32,
+            height: node.rect.height.max(0) as u32,
+        });
+    }
+    for child in node.nodes.iter().chain(node.floating_nodes.iter()) {
+        if let Some(r) = find_node_rect(child, criteria) {
+            return Some(r);
+        }
+    }
+    None
+}
+
+fn node_matches(node: &reply::Node, criteria: &PlacementCriteria) -> bool {
+    let props = node.window_properties.as_ref();
+    match criteria {
+        PlacementCriteria::Title(want) => node
+            .name
+            .as_deref()
+            .or_else(|| props.and_then(|p| p.title.as_deref()))
+            .is_some_and(|t| t == want),
+        PlacementCriteria::Class(want) => props
+            .and_then(|p| p.class.as_deref())
+            .is_some_and(|c| c == want),
+        // AppId is rewritten to Title before reaching here; ConId is
+        // matched by id at a different layer. Leave as no-match so a
+        // misuse fails loudly rather than silently picking the wrong
+        // window.
+        _ => false,
     }
 }
 
@@ -325,6 +551,7 @@ async fn drive_events(
     events_conn: I3,
     snapshot: Arc<RwLock<Snapshot>>,
     reconnect: Arc<tokio::sync::Notify>,
+    window_events: broadcast::Sender<WindowEvent>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> bool {
     let mut stream = events_conn.listen();
@@ -338,7 +565,14 @@ async fn drive_events(
             }
             evt = stream.next() => {
                 match evt {
-                    Some(Ok(Event::Window(w))) => handle_window_event(&w, &snapshot).await,
+                    Some(Ok(Event::Window(w))) => {
+                        handle_window_event(&w, &snapshot).await;
+                        if let Some(ev) = window_event_from_i3(&w) {
+                            // Best-effort: receivers may not exist yet
+                            // (no popup running), and that's fine.
+                            let _ = window_events.send(ev);
+                        }
+                    }
                     Some(Ok(Event::Workspace(d))) => {
                         if matches!(d.change, WorkspaceChange::Focus) {
                             let ws = d.current.as_ref().and_then(|n| n.name.clone());
@@ -357,6 +591,35 @@ async fn drive_events(
     }
 }
 
+/// Project an i3 `WindowData` event onto our backend-neutral
+/// [`WindowEvent`]. Returns `None` for change kinds the broadcast
+/// channel doesn't care about (focus, move, urgent, mark, fullscreen,
+/// floating).
+fn window_event_from_i3(w: &tokio_i3ipc::event::WindowData) -> Option<WindowEvent> {
+    let id = WindowId::new(w.container.id as u64)?;
+    match w.change {
+        WindowChange::New => {
+            let props = w.container.window_properties.as_ref();
+            let class = props.and_then(|p| p.class.clone());
+            // i3 is X11-only; Wayland app_id doesn't apply. Setting
+            // `app_id` to `None` keeps the field shape uniform with
+            // sway, where the same enum variant carries both.
+            Some(WindowEvent::Opened {
+                id,
+                title: w.container.name.clone(),
+                class,
+                app_id: None,
+            })
+        }
+        WindowChange::Title => Some(WindowEvent::TitleChanged {
+            id,
+            new_title: w.container.name.clone(),
+        }),
+        WindowChange::Close => Some(WindowEvent::Closed { id }),
+        _ => None,
+    }
+}
+
 /// Outer reconnect loop. Drives events through `drive_events`; on
 /// fall-through (socket error, forced-reconnect, or initial events-
 /// stream creation failure), drops `cmd` to `None`, sleeps with
@@ -372,6 +635,7 @@ async fn supervisor_loop(
         initial_events,
         snapshot.clone(),
         reconnect.clone(),
+        backend.window_events.clone(),
         &mut shutdown,
     )
     .await
@@ -408,6 +672,7 @@ async fn supervisor_loop(
                     events_conn,
                     snapshot.clone(),
                     reconnect.clone(),
+                    backend.window_events.clone(),
                     &mut shutdown,
                 )
                 .await
@@ -478,6 +743,29 @@ mod tests {
         assert_eq!(
             p,
             r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#
+        );
+    }
+
+    #[test]
+    fn translate_criteria_rewrites_app_id_to_title() {
+        let out = translate_criteria_for_i3(&PlacementCriteria::AppId("dev.assistd.popup".into()));
+        assert_eq!(out, PlacementCriteria::Title("dev.assistd.popup".into()));
+    }
+
+    #[test]
+    fn translate_criteria_preserves_class_title_and_con_id() {
+        assert_eq!(
+            translate_criteria_for_i3(&PlacementCriteria::Class("Firefox".into())),
+            PlacementCriteria::Class("Firefox".into())
+        );
+        assert_eq!(
+            translate_criteria_for_i3(&PlacementCriteria::Title("Inbox".into())),
+            PlacementCriteria::Title("Inbox".into())
+        );
+        let con = WindowId::new(42).unwrap();
+        assert_eq!(
+            translate_criteria_for_i3(&PlacementCriteria::ConId(con)),
+            PlacementCriteria::ConId(con)
         );
     }
 
