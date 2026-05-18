@@ -31,6 +31,8 @@ mod presence;
 mod ptt;
 #[cfg(feature = "client")]
 mod query;
+#[cfg(feature = "tray")]
+mod tray;
 #[cfg(feature = "client")]
 mod voice_ctl;
 #[cfg(feature = "daemon")]
@@ -126,6 +128,11 @@ enum Commands {
     #[cfg(feature = "chat")]
     Chat(chat::ChatArgs),
 
+    /// Run the system-tray icon (StatusNotifierItem over DBus). Long-
+    /// lived; suitable for compositor autostart (`exec assistd tray`).
+    #[cfg(feature = "tray")]
+    Tray(tray::TrayArgs),
+
     /// Inspect or mutate persistent memory: search conversation
     /// history, save / load / list / forget / delete key-value
     /// memories.
@@ -171,6 +178,8 @@ async fn main() -> Result<()> {
         Commands::VoiceState => voice_ctl::run(voice_ctl::VoiceCtlAction::State).await,
         #[cfg(feature = "chat")]
         Commands::Chat(args) => chat::run(args).await,
+        #[cfg(feature = "tray")]
+        Commands::Tray(args) => tray::run(args).await,
         #[cfg(feature = "client")]
         Commands::Memory(args) => memory_cli::run(args).await,
     }

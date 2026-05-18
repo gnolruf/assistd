@@ -71,6 +71,7 @@ tokio-i3ipc = "0.16"
 swayipc-async = "3"
 url = "2"
 parking_lot = "0.12"
+ksni = { version = "0.3.4", default-features = false, features = ["tokio"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -85,6 +85,19 @@ them. `core` sits at the top because it's where every subsystem is
 wired into a working daemon. The binary itself is intentionally thin:
 parse argv, load config, build `AppState`, hand off.
 
+The same binary also ships several client subcommands that speak the
+Unix-socket IPC: `query`, `chat`, `cycle` / `sleep` / `wake` /
+`drowse`, `ptt-start` / `ptt-stop`, `listen-*`, `voice-*`, `memory`,
+and `tray`. The tray subcommand is a long-lived
+[StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/)
+client (via the [`ksni`](https://crates.io/crates/ksni) crate): it
+holds a passive `Request::Subscribe` connection, translates the
+broadcast events into icon state (disconnected → generating →
+listening → presence), and provides a Sleep / Wake menu that issues
+`Request::SetPresence` on isolated one-shot connections. Like every
+other client it depends only on `assistd-ipc` + `assistd-config`, so
+client-only builds stay daemon-free.
+
 ## Subsystem walk-throughs
 
 ### LLM lifecycle (`assistd-llm` ↔ llama-server)

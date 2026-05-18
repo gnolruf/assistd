@@ -81,6 +81,26 @@ If you'd rather let `assistd chat` auto-spawn the daemon on first use
 (it runs `assistd daemon --client-mode` under `setsid`), skip this
 line. The trade-off is a slightly slower first launch.
 
+## System tray icon
+
+`assistd tray` publishes a StatusNotifierItem over DBus and reflects
+daemon state at a glance: idle, listening, generating, sleeping, or
+offline. It is a passive client — it never auto-spawns the daemon, so
+keep the `exec assistd daemon` line above as well.
+
+```sway
+# Launch the tray at session start. Reconnects automatically if the
+# daemon restarts.
+exec assistd tray
+```
+
+Sway has no built-in tray host;
+[Waybar](https://github.com/Alexays/Waybar) with the `tray` module is
+the canonical answer. The icon appears as soon as Waybar starts and
+flips state within ~100 ms of any daemon transition. Customise the
+icon names under `[tray]` in `~/.config/assistd/config.toml` if you
+ship your own theme.
+
 ## Push-to-talk (hold to speak)
 
 Press-and-hold `$mod+space` to record; release to transcribe and send

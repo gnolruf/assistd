@@ -520,3 +520,18 @@ hotkey = "Super+Escape"
 # presence_wake_cold_start_secs = 60 # llama-server spawn + first /health = 200
 # dispatch_envelope_secs = 600       # outer cap on a single dispatch call
 # stream_inactivity_secs = 30        # SSE per-chunk no-bytes deadline
+
+# ---- Tray icon ----------------------------------------------------------
+# Icon-theme names rendered by `assistd tray` (a StatusNotifierItem
+# client suitable for compositor autostart). Defaults are freedesktop
+# names that ship in every major theme (Adwaita, Breeze, Papirus); set
+# any field to an installed icon name if you ship custom artwork under
+# `~/.local/share/icons/<theme>/`.
+#
+# [tray]
+# icon_active       = "user-available"         # daemon awake, idle
+# icon_drowsy       = "user-away"              # presence = Drowsy
+# icon_sleeping     = "user-offline"           # presence = Sleeping
+# icon_listening    = "audio-input-microphone" # continuous listen is on
+# icon_generating   = "system-run"             # a query is streaming
+# icon_disconnected = "network-offline"        # daemon socket unreachable

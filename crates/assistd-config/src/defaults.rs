@@ -147,6 +147,16 @@ pub const DEFAULT_MCP_SSE_READ_TIMEOUT_SECS: u64 = 30;
 /// open but server not processing requests".
 pub const DEFAULT_MCP_SSE_PING_INTERVAL_SECS: u64 = 15;
 
+/// System-tray icon-theme names. Picked to be present in every major
+/// icon theme (Adwaita, Breeze, Papirus) so a fresh install shows
+/// recognizable icons without shipping any image assets in the repo.
+pub const DEFAULT_TRAY_ICON_ACTIVE: &str = "user-available";
+pub const DEFAULT_TRAY_ICON_DROWSY: &str = "user-away";
+pub const DEFAULT_TRAY_ICON_SLEEPING: &str = "user-offline";
+pub const DEFAULT_TRAY_ICON_LISTENING: &str = "audio-input-microphone";
+pub const DEFAULT_TRAY_ICON_GENERATING: &str = "system-run";
+pub const DEFAULT_TRAY_ICON_DISCONNECTED: &str = "network-offline";
+
 /// Returns the default SQLite memory database path, honouring `$XDG_DATA_HOME`.
 ///
 /// Resolves to `$XDG_DATA_HOME/assistd/memory.db` when set and non-empty,

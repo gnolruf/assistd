@@ -37,6 +37,7 @@ pub mod sleep;
 pub mod timeouts;
 pub mod tools;
 pub mod top;
+pub mod tray;
 pub mod voice;
 
 pub use agent::AgentConfig;
@@ -58,6 +59,7 @@ pub use tools::{
     ToolsScreenshotConfig, ToolsWriteConfig,
 };
 pub use top::Config;
+pub use tray::TrayConfig;
 pub use voice::{
     CodeBlockMode, ContinuousListenConfig, SynthesisConfig, TranscriptionConfig, VoiceConfig,
 };

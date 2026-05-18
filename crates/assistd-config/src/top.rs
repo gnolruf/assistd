@@ -17,6 +17,7 @@ use crate::remote::RemoteConfig;
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::ToolsConfig;
+use crate::tray::TrayConfig;
 use crate::voice::VoiceConfig;
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
@@ -45,6 +46,8 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub timeouts: TimeoutsConfig,
+    #[serde(default)]
+    pub tray: TrayConfig,
 }
 
 impl Config {
