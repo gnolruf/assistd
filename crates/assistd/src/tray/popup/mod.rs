@@ -1,0 +1,272 @@
+//! Floating activity popup spawned alongside the tray icon (feature
+//! `tray-popup`). Subscribes to the same daemon event stream as the
+//! tray, renders a small borderless window near the system-tray
+//! corner, and delegates placement to the compositor through
+//! `assistd-wm`.
+//!
+//! Spawned from [`crate::tray::run`] when the feature is enabled. Owns:
+//!
+//! - the watch channel the GUI thread reads from;
+//! - a driver tokio task that ingests events, runs the visibility
+//!   state machine, and pushes new snapshots;
+//! - the WM backend + placement worker task that turns "popup just
+//!   became visible" into a `floating enable, resize set, move
+//!   position …` IPC sequence on i3 / sway;
+//! - the dedicated OS thread that runs the eframe event loop.
+
+use std::sync::Arc;
+use std::thread::JoinHandle as ThreadJoinHandle;
+
+use assistd_config::{Config, TrayPopupConfig};
+use assistd_ipc::Event;
+use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+mod state;
+mod visibility;
+mod window;
+mod wm_bridge;
+
+pub use state::PopupState;
+pub use visibility::DriverInput;
+
+use visibility::{PlaceRequest, run as driver_run};
+use wm_bridge::{
+    WmBackendBundle, anchor_from_config, build_wm_backend, place_worker, popup_criteria,
+};
+
+/// Hook handed to the tray's subscribe loop. The subscribe loop calls
+/// [`PopupSink::ingest`] after pushing each event into the tray icon's
+/// `TrayItem`; it's a no-op when the popup feature is disabled at the
+/// call site (we return `None` from [`spawn`] in that path).
+#[derive(Clone)]
+pub struct PopupSink {
+    driver_tx: UnboundedSender<DriverInput>,
+    wake_tool_call: bool,
+    wake_delta: bool,
+    wake_error: bool,
+}
+
+impl PopupSink {
+    /// Forward a daemon event into the driver task and, if the event
+    /// matches a configured wake rule, also send a `Show`. The event
+    /// is boxed because `assistd_ipc::Event` is ~230 bytes and would
+    /// dominate the [`DriverInput`] enum size otherwise.
+    pub fn ingest(&self, ev: &Event) {
+        if self.matches_wake_rule(ev) {
+            let _ = self.driver_tx.send(DriverInput::Show);
+        }
+        let _ = self
+            .driver_tx
+            .send(DriverInput::Event(Box::new(ev.clone())));
+    }
+
+    /// Tell the popup the daemon connection just came up — the driver
+    /// uses this for the title state's "Disconnected" → "Idle"
+    /// transition and to forget any stale per-turn state.
+    pub fn set_connected(&self) {
+        let _ = self.driver_tx.send(DriverInput::Connected);
+    }
+
+    /// Tell the popup the daemon socket dropped.
+    pub fn set_disconnected(&self) {
+        let _ = self.driver_tx.send(DriverInput::Disconnected);
+    }
+
+    /// Sender exposed so the tray-icon menu code can hand it to
+    /// `TrayItem` for the left-click handler.
+    pub fn show_sender(&self) -> UnboundedSender<DriverInput> {
+        self.driver_tx.clone()
+    }
+
+    fn matches_wake_rule(&self, ev: &Event) -> bool {
+        match ev {
+            Event::ToolCall { .. } => self.wake_tool_call,
+            Event::Delta { .. } | Event::LastDelta { .. } => self.wake_delta,
+            Event::Error { .. } => self.wake_error,
+            _ => false,
+        }
+    }
+}
+
+/// Live popup. Holds every spawned task/thread; [`PopupHandle::shutdown`]
+/// drains them in the right order.
+pub struct PopupHandle {
+    pub sink: PopupSink,
+    driver_task: JoinHandle<()>,
+    place_task: JoinHandle<()>,
+    gui_thread: Option<ThreadJoinHandle<()>>,
+    wm_handle: Option<assistd_wm::WmHandle>,
+    wm_shutdown: watch::Sender<bool>,
+}
+
+impl PopupHandle {
+    /// Shut everything down cooperatively: tell the driver to quit
+    /// (which causes the GUI thread to drop its watch and exit), then
+    /// flip the WM-backend shutdown signal and join the supervisor.
+    pub async fn shutdown(mut self) {
+        let _ = self.sink.driver_tx.send(DriverInput::Shutdown);
+        let _ = self.driver_task.await;
+        // Dropping the senders inside the sink lets the place worker
+        // observe EOF and exit.
+        drop(self.sink);
+        let _ = self.place_task.await;
+        if let Some(t) = self.gui_thread.take()
+            && let Err(e) = t.join()
+        {
+            tracing::warn!(target: "tray", "popup: GUI thread panicked on join: {e:?}");
+        }
+        let _ = self.wm_shutdown.send(true);
+        if let Some(h) = self.wm_handle {
+            h.shutdown().await;
+        }
+    }
+}
+
+/// Spawn the popup subsystem. Returns `Ok(None)` when the popup is
+/// disabled by config; otherwise builds the WM backend, spawns the
+/// driver task, the placement worker, and the GUI thread, and returns
+/// a [`PopupHandle`] the tray can shut down at exit.
+pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
+    if !cfg.tray.popup.enabled {
+        tracing::info!(target: "tray", "popup: disabled by config");
+        return Ok(None);
+    }
+    let popup_cfg: TrayPopupConfig = cfg.tray.popup.clone();
+
+    let (wm_shutdown_tx, wm_shutdown_rx) = watch::channel(false);
+    let WmBackendBundle { manager, handle } = build_wm_backend(cfg, wm_shutdown_rx).await;
+    let manager: Arc<dyn assistd_wm::WindowManager> = manager;
+
+    let (state_tx, state_rx) = watch::channel(PopupState::default());
+    let (driver_tx, driver_rx) = mpsc::unbounded_channel::<DriverInput>();
+    let (place_tx, place_rx) = mpsc::unbounded_channel::<PlaceRequest>();
+
+    let anchor = anchor_from_config(&popup_cfg);
+    let place_task = tokio::spawn(place_worker(
+        place_rx,
+        manager.clone(),
+        popup_criteria(),
+        anchor,
+    ));
+
+    let driver_cfg = popup_cfg.clone();
+    let driver_task = tokio::spawn(driver_run(state_tx, driver_rx, place_tx, driver_cfg));
+
+    let app_id = assistd_config::defaults::DEFAULT_TRAY_POPUP_APP_ID.to_string();
+    let (gui_event_tx, gui_event_rx) = std::sync::mpsc::channel::<DriverInput>();
+
+    // Bridge std mpsc → driver mpsc on a dedicated tokio task. We can't
+    // call `driver_tx.send` from inside the GUI thread directly without
+    // borrowing the tokio runtime, so a small forwarder loop is the
+    // simplest correct option.
+    let bridge_tx = driver_tx.clone();
+    let bridge_task = tokio::task::spawn_blocking(move || {
+        while let Ok(msg) = gui_event_rx.recv() {
+            if bridge_tx.send(msg).is_err() {
+                break;
+            }
+        }
+    });
+    // We don't store bridge_task; it terminates when the GUI thread
+    // closes its sender (on shutdown) which happens when the OS thread
+    // joins.
+    drop(bridge_task);
+
+    let width = popup_cfg.width;
+    let height = popup_cfg.height;
+    let gui_state_rx = state_rx.clone();
+    let gui_thread = std::thread::Builder::new()
+        .name("assistd-popup-gui".into())
+        .spawn(move || {
+            if let Err(e) = window::run(gui_state_rx, gui_event_tx, &app_id, width, height) {
+                tracing::warn!(target: "tray", "popup: eframe loop exited with error: {e}");
+            }
+        })?;
+
+    let sink = PopupSink {
+        driver_tx: driver_tx.clone(),
+        wake_tool_call: popup_cfg.wake_on.tool_call,
+        wake_delta: popup_cfg.wake_on.delta,
+        wake_error: popup_cfg.wake_on.error,
+    };
+
+    Ok(Some(PopupHandle {
+        sink,
+        driver_task,
+        place_task,
+        gui_thread: Some(gui_thread),
+        wm_handle: handle,
+        wm_shutdown: wm_shutdown_tx,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sink(
+        wake_tool_call: bool,
+        wake_delta: bool,
+        wake_error: bool,
+    ) -> (PopupSink, mpsc::UnboundedReceiver<DriverInput>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            PopupSink {
+                driver_tx: tx,
+                wake_tool_call,
+                wake_delta,
+                wake_error,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn sink_wake_rules_respect_config() {
+        let (s, _rx) = sink(true, false, true);
+        assert!(s.matches_wake_rule(&Event::ToolCall {
+            id: "a".into(),
+            name: "x".into(),
+            args: json!({}),
+        }));
+        assert!(!s.matches_wake_rule(&Event::Delta {
+            id: "a".into(),
+            text: "x".into(),
+        }));
+        assert!(!s.matches_wake_rule(&Event::LastDelta {
+            id: "a".into(),
+            text: "x".into(),
+        }));
+        assert!(s.matches_wake_rule(&Event::Error {
+            id: "a".into(),
+            message: "x".into(),
+        }));
+        assert!(!s.matches_wake_rule(&Event::Done { id: "a".into() }));
+    }
+
+    #[test]
+    fn sink_ingest_sends_show_and_event_when_wake_matches() {
+        let (s, mut rx) = sink(true, true, true);
+        s.ingest(&Event::ToolCall {
+            id: "a".into(),
+            name: "x".into(),
+            args: json!({}),
+        });
+        let first = rx.try_recv().expect("show queued");
+        assert!(matches!(first, DriverInput::Show));
+        let second = rx.try_recv().expect("event queued");
+        assert!(matches!(second, DriverInput::Event(_)));
+    }
+
+    #[test]
+    fn sink_ingest_only_sends_event_when_wake_skipped() {
+        let (s, mut rx) = sink(false, false, false);
+        s.ingest(&Event::Done { id: "a".into() });
+        let only = rx.try_recv().expect("event queued");
+        assert!(matches!(only, DriverInput::Event(_)));
+        assert!(rx.try_recv().is_err(), "no Show should have been queued");
+    }
+}

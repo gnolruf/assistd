@@ -21,14 +21,14 @@ use tokio_i3ipc::{
     reply,
 };
 
-use crate::criteria::format_workspace_target;
+use crate::criteria::{format_place_floating_payload, format_workspace_target};
 use crate::error::ipc_ctx;
 use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
 use crate::{
-    FocusedWindowContext, Layout, ResizeDir, Window, WindowId, WindowManager, WmError, WmResult,
-    WorkspaceId, WorkspaceInfo,
+    FocusedWindowContext, Layout, PlacementAnchor, PlacementCriteria, ResizeDir, Window, WindowId,
+    WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
 
 /// `WindowManager` impl wrapping a single i3 IPC command socket.
@@ -215,6 +215,15 @@ impl WindowManager for I3Backend {
 
     async fn set_layout(&self, layout: Layout) -> WmResult<()> {
         self.run(&i3_layout_payload(layout)).await
+    }
+
+    async fn place_floating(
+        &self,
+        criteria: &PlacementCriteria,
+        anchor: PlacementAnchor,
+    ) -> WmResult<()> {
+        self.run(&format_place_floating_payload(criteria, anchor))
+            .await
     }
 }
 

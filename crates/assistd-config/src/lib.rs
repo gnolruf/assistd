@@ -59,7 +59,7 @@ pub use tools::{
     ToolsScreenshotConfig, ToolsWriteConfig,
 };
 pub use top::Config;
-pub use tray::TrayConfig;
+pub use tray::{PopupAnchor, TrayConfig, TrayPopupConfig, TrayPopupWakeConfig};
 pub use voice::{
     CodeBlockMode, ContinuousListenConfig, SynthesisConfig, TranscriptionConfig, VoiceConfig,
 };

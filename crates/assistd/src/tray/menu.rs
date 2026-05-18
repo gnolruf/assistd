@@ -29,6 +29,13 @@ pub enum MenuAction {
     Quit,
 }
 
+/// Optional callback invoked from `Tray::activate` (left-click). The
+/// concrete sender lives in the popup module under
+/// `cfg(feature = "tray-popup")`; this trait-object form keeps the menu
+/// code free of popup imports and works whether or not the feature is
+/// compiled in.
+pub type ActivateCallback = Box<dyn Fn() + Send + Sync>;
+
 /// State owned by the ksni service. Property reads and menu rendering
 /// happen on ksni's task; `subscribe.rs` and `run_actions` reach in via
 /// `Handle::update` and `Handle::shutdown` respectively.
@@ -36,14 +43,20 @@ pub struct TrayItem {
     tracker: TrayTracker,
     cfg: TrayConfig,
     actions: UnboundedSender<MenuAction>,
+    on_activate: Option<ActivateCallback>,
 }
 
 impl TrayItem {
-    pub fn new(cfg: TrayConfig, actions: UnboundedSender<MenuAction>) -> Self {
+    pub fn new(
+        cfg: TrayConfig,
+        actions: UnboundedSender<MenuAction>,
+        on_activate: Option<ActivateCallback>,
+    ) -> Self {
         Self {
             tracker: TrayTracker::default(),
             cfg,
             actions,
+            on_activate,
         }
     }
 
@@ -81,6 +94,12 @@ impl Tray for TrayItem {
 
     fn status(&self) -> Status {
         Status::Active
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        if let Some(cb) = self.on_activate.as_ref() {
+            cb();
+        }
     }
 
     fn icon_name(&self) -> String {

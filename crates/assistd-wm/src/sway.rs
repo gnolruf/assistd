@@ -34,14 +34,14 @@ use swayipc_async::{
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 
-use crate::criteria::format_workspace_target;
+use crate::criteria::{format_place_floating_payload, format_workspace_target};
 use crate::error::ipc_ctx;
 use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
 use crate::{
-    FocusedWindowContext, Layout, OutputInfo, ResizeDir, Window, WindowId, WindowManager, WmError,
-    WmResult, WorkspaceId, WorkspaceInfo,
+    FocusedWindowContext, Layout, OutputInfo, PlacementAnchor, PlacementCriteria, ResizeDir,
+    Window, WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
 
 /// Cast a sway `Node.id` (`i64`) to a [`WindowId`]. Sway never emits
@@ -224,6 +224,15 @@ impl WindowManager for SwayBackend {
 
     async fn set_layout(&self, layout: Layout) -> WmResult<()> {
         self.run(&sway_layout_payload(layout)).await
+    }
+
+    async fn place_floating(
+        &self,
+        criteria: &PlacementCriteria,
+        anchor: PlacementAnchor,
+    ) -> WmResult<()> {
+        self.run(&format_place_floating_payload(criteria, anchor))
+            .await
     }
 
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {

@@ -157,6 +157,36 @@ pub const DEFAULT_TRAY_ICON_LISTENING: &str = "audio-input-microphone";
 pub const DEFAULT_TRAY_ICON_GENERATING: &str = "system-run";
 pub const DEFAULT_TRAY_ICON_DISCONNECTED: &str = "network-offline";
 
+/// Borderless floating popup spawned by `assistd tray` (feature
+/// `tray-popup`). Geometry is in CSS pixels at the compositor's logical
+/// scale. Offsets are taken from the anchored corner: a negative
+/// `offset_x` on a right-anchored popup moves it inward (toward the
+/// screen centre), the same on a left-anchored popup moves it
+/// off-screen.
+pub const DEFAULT_TRAY_POPUP_ENABLED: bool = true;
+pub const DEFAULT_TRAY_POPUP_WIDTH: u32 = 360;
+pub const DEFAULT_TRAY_POPUP_HEIGHT: u32 = 120;
+pub const DEFAULT_TRAY_POPUP_OFFSET_X: i32 = -10;
+pub const DEFAULT_TRAY_POPUP_OFFSET_Y: i32 = 10;
+pub const DEFAULT_TRAY_POPUP_AUTO_HIDE_MS: u64 = 3000;
+pub const DEFAULT_TRAY_POPUP_TRUNCATE_CHARS: usize = 300;
+/// X11 `WM_CLASS` and Wayland `app_id` of the popup window. The popup
+/// GUI builder sets it; the `[app_id="…"]` placement criteria sent
+/// through `assistd-wm` matches against it. Not exposed in
+/// `TrayPopupConfig` because both sides must agree — a config knob is
+/// all footgun and no upside.
+pub const DEFAULT_TRAY_POPUP_APP_ID: &str = "dev.assistd.popup";
+/// Wake the popup on a `Event::ToolCall`. Catches every MCP tool /
+/// bash / web invocation.
+pub const DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL: bool = true;
+/// Wake the popup on the first `Event::LastDelta` of a turn — i.e. as
+/// soon as the model starts replying. Default-on; flip to false if
+/// you're chatting in the TUI and don't want the popup on every turn.
+pub const DEFAULT_TRAY_POPUP_WAKE_DELTA: bool = true;
+/// Wake the popup on `Event::Error`. Useful for noticing failures
+/// you'd otherwise miss in the tracing log.
+pub const DEFAULT_TRAY_POPUP_WAKE_ERROR: bool = true;
+
 /// Returns the default SQLite memory database path, honouring `$XDG_DATA_HOME`.
 ///
 /// Resolves to `$XDG_DATA_HOME/assistd/memory.db` when set and non-empty,

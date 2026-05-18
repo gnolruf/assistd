@@ -425,6 +425,59 @@ pub fn is_terminal_class(class: &str) -> bool {
         .any(|t| t.eq_ignore_ascii_case(class))
 }
 
+/// How a window the compositor should act on is matched. The criteria
+/// becomes the `[key="value"]` prefix on the IPC command; both i3 and
+/// sway accept all three forms.
+///
+/// `AppId` is the Wayland-native identifier (xdg-shell `app_id`); on
+/// X11 it maps to `WM_CLASS`. Pick whichever the GUI toolkit sets and
+/// stick with it across the build.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PlacementCriteria {
+    /// Match by Wayland `app_id` (`[app_id="…"]`).
+    AppId(String),
+    /// Match by X11 `WM_CLASS` (`[class="…"]`).
+    Class(String),
+    /// Match a specific compositor container id (`[con_id="…"]`).
+    ConId(WindowId),
+}
+
+/// Which corner of the focused output the window's anchor sits in.
+/// Offsets are measured inward from this corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnchorCorner {
+    /// Top-left of the focused output.
+    TopLeft,
+    /// Top-right of the focused output.
+    TopRight,
+    /// Bottom-left of the focused output.
+    BottomLeft,
+    /// Bottom-right of the focused output.
+    BottomRight,
+    /// Centred horizontally and vertically.
+    Center,
+}
+
+/// Where to place a floating window: a corner anchor plus offsets and
+/// the target size. The compositor receives one templated IPC sequence
+/// that sets floating, resizes, and moves in a single round-trip; see
+/// [`WindowManager::place_floating`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementAnchor {
+    /// Corner of the focused output the window anchors to.
+    pub corner: AnchorCorner,
+    /// Horizontal offset from the corner, in pixels. Positive shifts
+    /// the window to the right of the anchor; negative shifts left.
+    pub offset_x: i32,
+    /// Vertical offset from the corner, in pixels. Positive shifts
+    /// down; negative shifts up.
+    pub offset_y: i32,
+    /// Target window width in pixels (applied via `resize set`).
+    pub width: u32,
+    /// Target window height in pixels (applied via `resize set`).
+    pub height: u32,
+}
+
 /// Async interface to a window manager / compositor.
 ///
 /// Each method maps to one IPC operation. Backends implement this trait and
@@ -487,6 +540,31 @@ pub trait WindowManager: Send + Sync + 'static {
         Err(WmError::Unsupported("output enumeration"))
     }
 
+    /// Mark the matched window floating, resize it to
+    /// [`PlacementAnchor::width`] / [`PlacementAnchor::height`], and
+    /// move it to the chosen corner with the configured offsets. The
+    /// three steps are sent as one chained IPC payload so the
+    /// compositor applies them atomically.
+    ///
+    /// Backends without floating support return
+    /// [`WmError::Unsupported`]; the default impl is unsupported so a
+    /// future backend (Hyprland) compiles before adding its own
+    /// floating semantics.
+    ///
+    /// Both i3 and sway treat a criteria that matches no windows as
+    /// silent success: the call returns `Ok(())` whether or not the
+    /// targeted window was actually mapped. Callers that need
+    /// at-least-once placement should issue the call only after the
+    /// window has been mapped (e.g. on the GUI toolkit's first-paint
+    /// callback) plus a short follow-up retry.
+    async fn place_floating(
+        &self,
+        _criteria: &PlacementCriteria,
+        _anchor: PlacementAnchor,
+    ) -> WmResult<()> {
+        Err(WmError::Unsupported("floating placement"))
+    }
+
     /// Report whether the backend is actually connected to a compositor.
     /// The default `true` covers concrete backends; [`NoWindowManager`]
     /// overrides to `false` so callers can short-circuit with a single
@@ -535,6 +613,13 @@ impl WindowManager for NoWindowManager {
         Err(WmError::Disconnected)
     }
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
+        Err(WmError::Disconnected)
+    }
+    async fn place_floating(
+        &self,
+        _criteria: &PlacementCriteria,
+        _anchor: PlacementAnchor,
+    ) -> WmResult<()> {
         Err(WmError::Disconnected)
     }
     fn is_connected(&self) -> bool {
@@ -650,6 +735,72 @@ mod tests {
     #[tokio::test]
     async fn no_window_manager_refuses_list_outputs() {
         assert!(NoWindowManager.list_outputs().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn no_window_manager_refuses_place_floating() {
+        let err = NoWindowManager
+            .place_floating(
+                &PlacementCriteria::AppId("dev.assistd.popup".into()),
+                PlacementAnchor {
+                    corner: AnchorCorner::TopRight,
+                    offset_x: -10,
+                    offset_y: 10,
+                    width: 360,
+                    height: 120,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WmError::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn default_place_floating_reports_unsupported() {
+        // A minimal impl that opts in to nothing inherits the default
+        // place_floating, which surfaces Unsupported so Hyprland-class
+        // backends compile before adding their own floating semantics.
+        struct MinimalWm;
+
+        #[async_trait]
+        impl WindowManager for MinimalWm {
+            async fn focus(&self, _w: &WindowId) -> WmResult<()> {
+                Ok(())
+            }
+            async fn move_to_workspace(&self, _w: &WindowId, _ws: &WorkspaceId) -> WmResult<()> {
+                Ok(())
+            }
+            async fn focused_window(&self) -> WmResult<Option<WindowId>> {
+                Ok(None)
+            }
+            async fn list_windows(&self) -> WmResult<Vec<Window>> {
+                Ok(Vec::new())
+            }
+            async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
+                Ok(Vec::new())
+            }
+            async fn resize_width(&self, _w: &WindowId, _d: ResizeDir, _p: u32) -> WmResult<()> {
+                Ok(())
+            }
+            async fn set_layout(&self, _l: Layout) -> WmResult<()> {
+                Ok(())
+            }
+        }
+
+        let err = MinimalWm
+            .place_floating(
+                &PlacementCriteria::AppId("x".into()),
+                PlacementAnchor {
+                    corner: AnchorCorner::Center,
+                    offset_x: 0,
+                    offset_y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WmError::Unsupported(op) if op == "floating placement"));
     }
 
     #[tokio::test]

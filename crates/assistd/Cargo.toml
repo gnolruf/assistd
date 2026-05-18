@@ -10,7 +10,7 @@ name = "assistd"
 path = "src/main.rs"
 
 [features]
-default = ["daemon", "client", "chat", "tray"]
+default = ["daemon", "client", "chat", "tray", "tray-popup"]
 daemon = [
     "dep:assistd-core",
     "dep:assistd-embed",
@@ -48,6 +48,11 @@ tray = [
     "dep:tracing",
     "dep:tracing-subscriber",
 ]
+tray-popup = [
+    "tray",
+    "dep:assistd-wm",
+    "dep:eframe",
+]
 
 [dependencies]
 assistd-ipc   = { workspace = true, features = ["client"] }
@@ -82,6 +87,7 @@ shlex            = { workspace = true, optional = true }
 ratatui-image    = { workspace = true, optional = true }
 image            = { workspace = true, optional = true }
 ksni             = { workspace = true, optional = true }
+eframe           = { workspace = true, optional = true }
 assistd-config   = { workspace = true, optional = true }
 
 [dev-dependencies]
