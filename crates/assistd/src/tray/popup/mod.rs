@@ -160,39 +160,28 @@ pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
     // Compute a best-effort initial position so eframe creates the
     // window at the configured corner from the very first map — this
     // is what kills the brief "popup flashes in the centre" on the
-    // first wake. Prefer the user's explicit `scale_factor` config
-    // knob; fall back to parsing `Xft.dpi` out of `xrdb -query`.
-    // Either way, we scale the configured size by that factor so the
-    // pre-position lands at the right corner on HiDPI displays (a
-    // configured 360x120 popup becomes 420x140 physical at scale
-    // 1.17). The actual rect snap via `place_floating` then locks in
-    // the precise pixel position once the window is mapped.
-    let scale = popup_cfg
-        .scale_factor
-        .filter(|s| s.is_finite() && *s > 0.0)
-        .inspect(|s| {
-            tracing::info!(
+    // first wake. Ask the WM backend for the focused output's scale
+    // and scale the configured size by it (a configured 360×120 popup
+    // becomes 420×140 physical at scale 1.17). On sway this comes
+    // straight from the compositor's output IPC reply; on i3 the
+    // backend cascades through `WINIT_X11_SCALE_FACTOR`, `Xft.dpi` in
+    // xrdb, and RandR-derived DPI to match what winit will apply
+    // to the popup window. The actual rect snap via `place_floating`
+    // then locks in the precise pixel position once the window is
+    // mapped, so any residual error here is invisible.
+    let scale = match manager.focused_output_scale().await {
+        Ok(s) => {
+            tracing::info!(target: "tray", "popup: focused-output scale = {s:.4}");
+            s as f32
+        }
+        Err(e) => {
+            tracing::warn!(
                 target: "tray",
-                "popup: using manual scale factor {s:.4} from config"
+                "popup: could not query focused-output scale ({e}); assuming 1.0"
             );
-        })
-        .or_else(|| {
-            let detected = detect_x11_scale_factor();
-            if let Some(s) = detected {
-                tracing::info!(
-                    target: "tray",
-                    "popup: detected X11 scale factor {s:.4} from Xft.dpi"
-                );
-            } else {
-                tracing::info!(
-                    target: "tray",
-                    "popup: no scale factor detected (no Xft.dpi in xrdb; \
-                     set tray.popup.scale_factor if your display is HiDPI)"
-                );
-            }
-            detected
-        })
-        .unwrap_or(1.0);
+            1.0
+        }
+    };
     let scaled_anchor = if (scale - 1.0).abs() > f32::EPSILON {
         scale_anchor_size(anchor, scale)
     } else {
@@ -284,30 +273,6 @@ pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
         wm_handle: handle,
         wm_shutdown: wm_shutdown_tx,
     }))
-}
-
-/// Try to read `Xft.dpi` from the X resource database and return the
-/// scale factor `dpi / 96`. Returns `None` on Wayland, when `xrdb`
-/// isn't installed, or when `Xft.dpi` is unset. The check is a small
-/// one-shot subprocess at popup spawn time — winit doesn't expose
-/// the scale before a window exists, and we need a sizing hint for
-/// pre-positioning before the first `with_position` is committed.
-fn detect_x11_scale_factor() -> Option<f32> {
-    use std::process::Command;
-    let output = Command::new("xrdb").arg("-query").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = std::str::from_utf8(&output.stdout).ok()?;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("Xft.dpi:") {
-            let dpi: f32 = rest.trim().parse().ok()?;
-            if dpi.is_finite() && dpi > 0.0 {
-                return Some((dpi / 96.0).max(1.0));
-            }
-        }
-    }
-    None
 }
 
 /// Scale an anchor's `width` / `height` by `scale`, keeping the

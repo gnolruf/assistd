@@ -617,6 +617,26 @@ pub trait WindowManager: Send + Sync + 'static {
         Err(WmError::Unsupported("focused workspace rect"))
     }
 
+    /// Scale factor of the output currently holding focus (e.g. `1.0`,
+    /// `1.5`, `2.0`). The tray popup uses this to convert its configured
+    /// logical width / height into the physical size winit will end up
+    /// mapping on HiDPI displays, so a pre-positioned window lands at
+    /// the right corner from its very first frame instead of flashing
+    /// at the compositor default.
+    ///
+    /// Wayland compositors (sway) report this directly through their
+    /// output IPC reply. X11 backends (i3) have to fall back to the
+    /// X-side conventions: `GDK_SCALE` / `QT_SCALE_FACTOR` env vars,
+    /// then `Xft.dpi` from the X resource database.
+    ///
+    /// The default impl returns `1.0` — backends that can't determine
+    /// the scale should report no scaling rather than fail, so callers
+    /// don't have to special-case "unsupported" against a real `1.0`
+    /// display.
+    async fn focused_output_scale(&self) -> WmResult<f64> {
+        Ok(1.0)
+    }
+
     /// Mark the matched window floating, resize it to
     /// [`PlacementAnchor::width`] / [`PlacementAnchor::height`], and
     /// move it to the chosen corner with the configured offsets. The
@@ -701,6 +721,9 @@ impl WindowManager for NoWindowManager {
     }
     async fn focused_workspace_rect(&self) -> WmResult<Rect> {
         Err(WmError::Disconnected)
+    }
+    async fn focused_output_scale(&self) -> WmResult<f64> {
+        Ok(1.0)
     }
     fn is_connected(&self) -> bool {
         false

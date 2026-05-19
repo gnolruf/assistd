@@ -406,6 +406,31 @@ impl WindowManager for SwayBackend {
             })
             .collect())
     }
+
+    async fn focused_output_scale(&self) -> WmResult<f64> {
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let outputs = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_outputs()).await {
+            Err(_) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(ipc_ctx(e, "sway GET_OUTPUTS (focused scale)"));
+            }
+            Ok(Ok(v)) => v,
+        };
+        drop(guard);
+        Ok(outputs
+            .into_iter()
+            .find(|o| o.focused)
+            .and_then(|o| o.scale)
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(1.0))
+    }
 }
 
 /// Open the cmd + events socket pair and subscribe events. Pulled out

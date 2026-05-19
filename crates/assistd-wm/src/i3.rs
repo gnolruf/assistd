@@ -242,6 +242,21 @@ impl WindowManager for I3Backend {
         self.focused_workspace_rect_inner().await
     }
 
+    async fn focused_output_scale(&self) -> WmResult<f64> {
+        if let Some(s) = env_scale("WINIT_X11_SCALE_FACTOR") {
+            return Ok(s);
+        }
+        if let Some(out) = run_xrdb_query().await
+            && let Some(s) = parse_xft_dpi_scale(&out)
+        {
+            return Ok(s);
+        }
+        if let Some(s) = self.focused_output_randr_scale().await {
+            return Ok(s);
+        }
+        Ok(1.0)
+    }
+
     async fn place_floating(
         &self,
         criteria: &PlacementCriteria,
@@ -395,6 +410,43 @@ impl I3Backend {
             })
             .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
     }
+
+    /// Compute the scale factor for the focused output from `xrandr`'s
+    /// physical-size reading, using the same DPI quantisation winit
+    /// applies as its last-resort fallback. Returns `None` when we
+    /// can't determine the focused output's name (no focused workspace)
+    /// or `xrandr` isn't available / doesn't list a matching connected
+    /// output. The xrandr subprocess runs on a `spawn_blocking` thread
+    /// so the async runtime isn't blocked on the fork+exec.
+    async fn focused_output_randr_scale(&self) -> Option<f64> {
+        let output_name = self.focused_output_name().await.ok().flatten()?;
+        let xrandr = run_xrandr_query().await?;
+        let (pixels, mm) = parse_xrandr_output_size(&xrandr, &output_name)?;
+        Some(calc_randr_scale(pixels, mm))
+    }
+
+    /// Name of the output (e.g. `"DP-0"`) currently hosting the focused
+    /// workspace. Returns `Ok(None)` when no workspace is focused.
+    async fn focused_output_name(&self) -> WmResult<Option<String>> {
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let workspaces =
+            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
+                Err(_) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+                }
+                Ok(Err(e)) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(ipc_ctx(e, "i3 GET_WORKSPACES (focused output name)"));
+                }
+                Ok(Ok(w)) => w,
+            };
+        drop(guard);
+        Ok(workspaces.into_iter().find(|w| w.focused).map(|w| w.output))
+    }
 }
 
 /// i3's IPC grammar predates Wayland; its criteria block accepts
@@ -469,6 +521,129 @@ fn i3_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> St
 /// `i3-msg layout …` produces.
 fn i3_layout_payload(layout: Layout) -> String {
     format!("layout {}", layout.as_str())
+}
+
+/// Parse an environment variable as a positive, finite `f64`. Used to
+/// read scale-factor overrides like `WINIT_X11_SCALE_FACTOR` without
+/// blowing up on unset or malformed values.
+fn env_scale(name: &str) -> Option<f64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+}
+
+/// Run `xrdb -query` and return its stdout as a string. `None` when
+/// the binary is missing or exits non-zero. Wrapped in
+/// `spawn_blocking` because the fork+exec is sync and `assistd-wm`
+/// doesn't pull in tokio's `process` feature.
+async fn run_xrdb_query() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        let out = std::process::Command::new("xrdb")
+            .arg("-query")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Run `xrandr --query` and return its stdout. See [`run_xrdb_query`]
+/// for the blocking-task rationale.
+async fn run_xrandr_query() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        let out = std::process::Command::new("xrandr")
+            .arg("--query")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Parse the `Xft.dpi` line out of `xrdb -query` output and convert it
+/// to a scale factor (`dpi / 96`, clamped to `>= 1.0`). Returns `None`
+/// when the line is absent or unparseable.
+fn parse_xft_dpi_scale(xrdb_output: &str) -> Option<f64> {
+    xrdb_output
+        .lines()
+        .find_map(|line| line.strip_prefix("Xft.dpi:"))
+        .and_then(|rest| rest.trim().parse::<f64>().ok())
+        .filter(|dpi| dpi.is_finite() && *dpi > 0.0)
+        .map(|dpi| (dpi / 96.0).max(1.0))
+}
+
+/// Find the `<name> connected …<mm_w>mm x <mm_h>mm` line for the named
+/// output in `xrandr --query` output and return its pixel size and
+/// physical size in millimetres. Disconnected or unlisted outputs
+/// return `None`. The xrandr output format isn't officially stable but
+/// has been consistent since at least xrandr 1.5; we match the
+/// `WIDTHxHEIGHT+X+Y` geometry chunk and the trailing `<W>mm x <H>mm`
+/// physical-size pair.
+fn parse_xrandr_output_size(
+    xrandr_output: &str,
+    output_name: &str,
+) -> Option<((u32, u32), (u64, u64))> {
+    let prefix = format!("{output_name} connected");
+    let line = xrandr_output.lines().find(|l| l.starts_with(&prefix))?;
+
+    let pixels = line.split_whitespace().find_map(parse_geometry_size)?;
+
+    // Physical size sits at the tail as `<W>mm x <H>mm`. We look for
+    // the two `<n>mm` tokens around an `x` separator rather than
+    // assuming exact column positions, so a stray `(normal …)` flags
+    // block doesn't throw off the parse.
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let mm = tokens.windows(3).rev().find_map(|w| {
+        match (w[0].strip_suffix("mm"), w[1], w[2].strip_suffix("mm")) {
+            (Some(wmm), "x", Some(hmm)) => {
+                let w: u64 = wmm.parse().ok()?;
+                let h: u64 = hmm.parse().ok()?;
+                Some((w, h))
+            }
+            _ => None,
+        }
+    })?;
+    Some((pixels, mm))
+}
+
+/// Parse a single xrandr geometry token (`WIDTHxHEIGHT+X+Y` — the `+X+Y`
+/// is required so we don't accidentally match a mode-list entry like
+/// `2560x1440`). Returns the `(width, height)` pixel pair.
+fn parse_geometry_size(token: &str) -> Option<(u32, u32)> {
+    let plus = token.find('+')?;
+    let dims = &token[..plus];
+    let (w, h) = dims.split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?))
+}
+
+/// Winit's RandR-based DPI scaling formula (`platform_impl/linux/x11/util/randr.rs::calc_dpi_factor`).
+/// Quantises to the nearest 1/12 step so consecutive monitors with
+/// minor EDID rounding agree on a single scale. Returns `1.0` for
+/// zero-sized inputs or absurd results.
+fn calc_randr_scale(pixels: (u32, u32), mm: (u64, u64)) -> f64 {
+    let (px_w, px_h) = (pixels.0 as f64, pixels.1 as f64);
+    let (mm_w, mm_h) = (mm.0 as f64, mm.1 as f64);
+    if mm_w == 0.0 || mm_h == 0.0 {
+        return 1.0;
+    }
+    let ppmm = ((px_w * px_h) / (mm_w * mm_h)).sqrt();
+    let factor = ((ppmm * (12.0 * 25.4 / 96.0)).round() / 12.0).max(1.0);
+    if factor.is_finite() && factor <= 20.0 {
+        factor
+    } else {
+        1.0
+    }
 }
 
 /// Walk the i3 tree recursively, emitting one [`Window`] per leaf node
@@ -782,5 +957,100 @@ mod tests {
         ] {
             assert_eq!(i3_layout_payload(l), expected);
         }
+    }
+
+    #[test]
+    fn xft_dpi_parses_standard_xrdb_line() {
+        let xrdb = "*color0:\t#000000\nXft.dpi:\t144\nXft.antialias:\t1\n";
+        assert_eq!(parse_xft_dpi_scale(xrdb), Some(1.5));
+    }
+
+    #[test]
+    fn xft_dpi_returns_none_when_missing() {
+        assert_eq!(parse_xft_dpi_scale(""), None);
+        assert_eq!(parse_xft_dpi_scale("Xft.antialias:\t1\n"), None);
+    }
+
+    #[test]
+    fn xft_dpi_clamps_below_96() {
+        // The Xft.dpi-based path is for HiDPI; sub-96 DPI shouldn't
+        // ever shrink the popup, so clamp to 1.0.
+        let xrdb = "Xft.dpi:\t72\n";
+        assert_eq!(parse_xft_dpi_scale(xrdb), Some(1.0));
+    }
+
+    #[test]
+    fn xft_dpi_rejects_garbage() {
+        assert_eq!(parse_xft_dpi_scale("Xft.dpi:\tnope\n"), None);
+        assert_eq!(parse_xft_dpi_scale("Xft.dpi:\t-50\n"), None);
+        assert_eq!(parse_xft_dpi_scale("Xft.dpi:\t0\n"), None);
+    }
+
+    #[test]
+    fn xrandr_parses_connected_output_geometry_and_mm() {
+        let xrandr = "\
+Screen 0: minimum 8 x 8, current 2560 x 1440, maximum 32767 x 32767
+HDMI-0 disconnected primary (normal left inverted right x axis y axis)
+DP-0 connected 2560x1440+0+0 (normal left inverted right x axis y axis) 587mm x 330mm
+   2560x1440     59.95*+ 280.00   120.00
+";
+        assert_eq!(
+            parse_xrandr_output_size(xrandr, "DP-0"),
+            Some(((2560, 1440), (587, 330)))
+        );
+    }
+
+    #[test]
+    fn xrandr_returns_none_for_disconnected_output() {
+        let xrandr = "HDMI-0 disconnected primary\nDP-0 connected 2560x1440+0+0 587mm x 330mm\n";
+        assert_eq!(parse_xrandr_output_size(xrandr, "HDMI-0"), None);
+    }
+
+    #[test]
+    fn xrandr_returns_none_for_missing_output() {
+        let xrandr = "DP-0 connected 2560x1440+0+0 587mm x 330mm\n";
+        assert_eq!(parse_xrandr_output_size(xrandr, "DP-1"), None);
+    }
+
+    #[test]
+    fn xrandr_returns_none_when_no_mm_dimensions() {
+        // Some virtual outputs report no physical size.
+        let xrandr = "DP-0 connected 2560x1440+0+0 (normal left inverted right)\n";
+        assert_eq!(parse_xrandr_output_size(xrandr, "DP-0"), None);
+    }
+
+    #[test]
+    fn randr_scale_matches_winit_quantization() {
+        // 2560x1440 on 587x330mm reproduces winit's calc_dpi_factor:
+        // ppmm = sqrt((2560*1440)/(587*330)) ≈ 4.32
+        // factor = round(ppmm * 12*25.4/96) / 12 ≈ 1.1667
+        let s = calc_randr_scale((2560, 1440), (587, 330));
+        assert!((s - 1.1667).abs() < 0.001, "got {s}");
+    }
+
+    #[test]
+    fn randr_scale_clamps_zero_mm_to_one() {
+        // A monitor reporting 0mm physical size used to send winit
+        // into NaN; we return 1.0 instead.
+        assert_eq!(calc_randr_scale((1920, 1080), (0, 0)), 1.0);
+        assert_eq!(calc_randr_scale((1920, 1080), (500, 0)), 1.0);
+    }
+
+    #[test]
+    fn randr_scale_floor_is_one() {
+        // Low-DPI monitor: don't scale below 1.0 even when the math
+        // says so (matches winit's `.max(1.0)`).
+        let s = calc_randr_scale((1024, 768), (400, 300));
+        assert_eq!(s, 1.0);
+    }
+
+    #[test]
+    fn parse_geometry_size_requires_position_suffix() {
+        // The `+X+Y` is what distinguishes a real geometry token from a
+        // mode-list entry like `2560x1440`.
+        assert_eq!(parse_geometry_size("2560x1440+0+0"), Some((2560, 1440)));
+        assert_eq!(parse_geometry_size("1920x1080+100+200"), Some((1920, 1080)));
+        assert_eq!(parse_geometry_size("2560x1440"), None);
+        assert_eq!(parse_geometry_size("notageometry"), None);
     }
 }

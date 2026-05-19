@@ -70,10 +70,7 @@ impl Default for TrayConfig {
 /// activity without alt-tabbing to the chat TUI. Placement is delegated
 /// to the compositor through `assistd-wm`; see
 /// [`PopupAnchor`] for the supported corners.
-///
-/// Only `PartialEq` is derived (not `Eq`) because `scale_factor` is
-/// an `Option<f32>` and `f32` has NaN, which breaks total equality.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TrayPopupConfig {
     /// Globally enable or disable the popup. When `false`, the popup
     /// task is not spawned even on a build with `--features tray-popup`.
@@ -121,20 +118,6 @@ pub struct TrayPopupConfig {
     /// left-click always shows it regardless of these flags.
     #[serde(default)]
     pub wake_on: TrayPopupWakeConfig,
-
-    /// Manual HiDPI scale factor for pre-positioning. When set, the
-    /// popup's pre-position is computed using `width * scale_factor`
-    /// and `height * scale_factor` so the window lands at the precise
-    /// corner from its very first map on a HiDPI display. When
-    /// unset (the default), the tray reads `Xft.dpi` from `xrdb` at
-    /// spawn time and computes the scale automatically — that works
-    /// for most i3 setups but misses XSETTINGS-only configurations
-    /// (where `xrdb -query` returns no `Xft.dpi` line). Set this to
-    /// your display's actual scale (e.g. `1.5`, `1.6667`, `2.0`)
-    /// when the auto-detect fails. A value of `1.0` opts out of any
-    /// scaling.
-    #[serde(default)]
-    pub scale_factor: Option<f32>,
 }
 
 impl Default for TrayPopupConfig {
@@ -149,7 +132,6 @@ impl Default for TrayPopupConfig {
             auto_hide_ms: default_popup_auto_hide_ms(),
             truncate_chars: default_popup_truncate_chars(),
             wake_on: TrayPopupWakeConfig::default(),
-            scale_factor: None,
         }
     }
 }
@@ -314,7 +296,6 @@ mod tests {
                 delta: true,
                 error: false,
             },
-            scale_factor: Some(1.5),
         };
         let s = toml::to_string(&p).expect("serialize");
         let back: TrayPopupConfig = toml::from_str(&s).expect("deserialize");
