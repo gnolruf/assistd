@@ -97,6 +97,7 @@ fn subscribe_filter() -> SubscribeFilter {
         kinds: vec![
             EventKind::Delta,
             EventKind::LastDelta,
+            EventKind::ReasoningDelta,
             EventKind::ToolCall,
             EventKind::ToolResult,
             EventKind::Done,

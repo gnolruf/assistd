@@ -76,7 +76,9 @@ impl PopupSink {
     fn matches_wake_rule(&self, ev: &Event) -> bool {
         match ev {
             Event::ToolCall { .. } => self.wake_tool_call,
-            Event::Delta { .. } | Event::LastDelta { .. } => self.wake_delta,
+            Event::Delta { .. } | Event::LastDelta { .. } | Event::ReasoningDelta { .. } => {
+                self.wake_delta
+            }
             Event::Error { .. } => self.wake_error,
             _ => false,
         }

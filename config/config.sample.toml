@@ -557,8 +557,14 @@ hotkey = "Super+Escape"
 # offset_y       = 10
 # width          = 360           # validated 100..=1200
 # height         = 120           # validated 60..=800
-# auto_hide_ms   = 3000          # idle timeout; reset by every new event while visible (500..=60000)
-# truncate_chars = 300           # body renders last N codepoints of the live reply (1..=10000)
+# auto_hide_ms        = 3000     # idle timeout; reset by every new event while visible.
+#                                 # The timer is suspended entirely while a turn is in
+#                                 # flight, so a long-running tool call no longer blinks
+#                                 # the popup out mid-response (500..=60000).
+# listen_auto_hide_ms = 10000    # idle timeout used while continuous listening is active;
+#                                 # longer than `auto_hide_ms` so the user has time to
+#                                 # verbally reply without pressing a key (500..=60000).
+# truncate_chars      = 300      # body renders last N codepoints of the live reply (1..=10000)
 #
 # HiDPI scaling is detected from the WM backend automatically: sway
 # reads its own per-output scale over IPC, and the i3 backend cascades

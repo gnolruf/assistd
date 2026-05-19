@@ -26,10 +26,48 @@ pub struct PopupState {
     /// Most recent tool invocation for the active turn, rendered as
     /// `<fully-qualified-tool-name>` + a one-line arg summary.
     pub footer: Option<ToolCallLine>,
+    /// What the agent / daemon is currently doing, rendered as a small
+    /// status indicator above the body. Driven by the most recent event
+    /// for the displayed turn plus the daemon's listening flag.
+    pub activity: PopupActivity,
     /// Whether the GUI should show the window right now. The visibility
     /// state machine owns this flag; the tracker leaves it untouched
     /// when ingesting events.
     pub visible: bool,
+}
+
+/// Coarse activity classification rendered as a one-line status above
+/// the popup body. Distinct from raw event kind so the GUI can show a
+/// stable label across an event burst (e.g. `Streaming` covers both
+/// `Delta` and `LastDelta`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PopupActivity {
+    /// No turn in flight and listener not active — popup is just
+    /// surfacing the last completed turn.
+    #[default]
+    Idle,
+    /// Agent is producing reply text right now.
+    Streaming,
+    /// Agent is between text chunks: reasoning, planning the next tool
+    /// call, or waiting for the LLM to start the next round after a
+    /// tool result landed.
+    Thinking,
+    /// Agent has dispatched a tool and is waiting for it to return.
+    /// `name` is the fully-qualified tool name.
+    RunningTool { name: String },
+    /// Daemon's continuous listener is on and no turn is in flight; the
+    /// user can speak without pressing a key.
+    Listening,
+}
+
+/// Per-turn activity kind we last observed, used by the snapshot to
+/// derive [`PopupActivity`] for the displayed turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TurnActivity {
+    Streaming,
+    Thinking,
+    RunningTool(String),
+    Finished,
 }
 
 /// Footer row rendered under the body.
@@ -47,12 +85,13 @@ pub struct ToolCallLine {
 }
 
 /// Per-turn working state. The popup may display content from a
-/// single turn even after it terminates, so we retain `body` and
-/// `footer` until the *next* turn's first event lands.
+/// single turn even after it terminates, so we retain `body`, `footer`
+/// and `activity` until the *next* turn's first event lands.
 #[derive(Debug, Clone, Default)]
 struct TurnState {
     body: String,
     footer: Option<ToolCallLine>,
+    activity: Option<TurnActivity>,
 }
 
 /// Tracks every signal the popup cares about and produces a
@@ -72,6 +111,11 @@ pub struct PopupTracker {
     /// showing. Switches on the first event of a new turn so concurrent
     /// queries don't trample each other.
     displayed: Option<String>,
+    /// Whether the daemon's continuous listener is on. Tracked from
+    /// `ListenState` events so the visibility driver can extend the
+    /// auto-hide window when the user can verbally reply without
+    /// pressing a key.
+    listening: bool,
 }
 
 impl PopupTracker {
@@ -79,14 +123,35 @@ impl PopupTracker {
     /// cap is applied here so the GUI never sees more body text than
     /// the user configured.
     pub fn snapshot(&self, cfg: &TrayPopupConfig) -> PopupState {
-        let displayed = self.displayed.as_deref().and_then(|id| self.turns.get(id));
+        let displayed_id = self.displayed.as_deref();
+        let displayed = displayed_id.and_then(|id| self.turns.get(id));
+        let displayed_in_flight = displayed_id
+            .map(|id| self.in_flight.contains(id))
+            .unwrap_or(false);
         PopupState {
             body: displayed
                 .map(|t| truncate_chars_from_end(&t.body, cfg.truncate_chars))
                 .unwrap_or_default(),
             footer: displayed.and_then(|t| t.footer.clone()),
+            activity: self.activity(displayed, displayed_in_flight),
             visible: false,
         }
+    }
+
+    /// Whether any turn is still in flight on the daemon side. The
+    /// visibility driver consults this to keep the popup pinned open
+    /// while the agent is mid-response — including the gap between a
+    /// `ToolCall` and the corresponding `ToolResult`, where no events
+    /// arrive but the agent is still busy.
+    pub fn is_busy(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+
+    /// Whether the daemon's continuous listener is currently active.
+    /// Used by the driver to swap in the longer hands-free auto-hide
+    /// window.
+    pub fn is_listening(&self) -> bool {
+        self.listening
     }
 
     /// Forget per-turn state — any in-flight turn id we remembered no
@@ -95,6 +160,29 @@ impl PopupTracker {
         self.turns.clear();
         self.in_flight.clear();
         self.displayed = None;
+        self.listening = false;
+    }
+
+    fn activity(&self, displayed: Option<&TurnState>, in_flight: bool) -> PopupActivity {
+        if let Some(turn) = displayed
+            && in_flight
+        {
+            return match turn.activity.as_ref() {
+                Some(TurnActivity::Streaming) => PopupActivity::Streaming,
+                Some(TurnActivity::Thinking) => PopupActivity::Thinking,
+                Some(TurnActivity::RunningTool(name)) => {
+                    PopupActivity::RunningTool { name: name.clone() }
+                }
+                // No per-turn signal yet but the turn is still live — the
+                // model has accepted the request and is presumably
+                // composing its first response.
+                Some(TurnActivity::Finished) | None => PopupActivity::Thinking,
+            };
+        }
+        if self.listening {
+            return PopupActivity::Listening;
+        }
+        PopupActivity::Idle
     }
 
     /// Apply one daemon event. Returns the latest snapshot so the
@@ -104,17 +192,22 @@ impl PopupTracker {
             Event::Delta { id, text } => {
                 self.bring_turn_to_front(id);
                 self.in_flight.insert(id.clone());
-                self.turns
-                    .entry(id.clone())
-                    .or_default()
-                    .body
-                    .push_str(text);
+                let turn = self.turns.entry(id.clone()).or_default();
+                turn.body.push_str(text);
+                turn.activity = Some(TurnActivity::Streaming);
             }
             Event::LastDelta { id, text } => {
                 // Server-coalesced cumulative snapshot — overwrite, don't append.
                 self.bring_turn_to_front(id);
                 self.in_flight.insert(id.clone());
-                self.turns.entry(id.clone()).or_default().body = text.clone();
+                let turn = self.turns.entry(id.clone()).or_default();
+                turn.body = text.clone();
+                turn.activity = Some(TurnActivity::Streaming);
+            }
+            Event::ReasoningDelta { id, .. } => {
+                self.bring_turn_to_front(id);
+                self.in_flight.insert(id.clone());
+                self.turns.entry(id.clone()).or_default().activity = Some(TurnActivity::Thinking);
             }
             Event::ToolCall { id, name, args } => {
                 self.bring_turn_to_front(id);
@@ -123,7 +216,17 @@ impl PopupTracker {
                     name: name.clone(),
                     args_summary: summarize_args(args, FOOTER_ARGS_MAX_CHARS),
                 };
-                self.turns.entry(id.clone()).or_default().footer = Some(line);
+                let turn = self.turns.entry(id.clone()).or_default();
+                turn.footer = Some(line);
+                turn.activity = Some(TurnActivity::RunningTool(name.clone()));
+            }
+            Event::ToolResult { id, .. } => {
+                // Tool came back; the agent is now planning the next
+                // step. Surface that as "thinking" until the next
+                // Delta / ToolCall arrives.
+                self.bring_turn_to_front(id);
+                self.in_flight.insert(id.clone());
+                self.turns.entry(id.clone()).or_default().activity = Some(TurnActivity::Thinking);
             }
             Event::Done { id } | Event::Error { id, .. } => {
                 self.in_flight.remove(id);
@@ -132,7 +235,12 @@ impl PopupTracker {
                 // turns are dropped.
                 if self.displayed.as_deref() != Some(id.as_str()) {
                     self.turns.remove(id);
+                } else if let Some(turn) = self.turns.get_mut(id) {
+                    turn.activity = Some(TurnActivity::Finished);
                 }
+            }
+            Event::ListenState { active, .. } => {
+                self.listening = *active;
             }
             _ => {}
         }
@@ -411,16 +519,85 @@ mod tests {
     fn tracker_ignores_unrelated_event_kinds() {
         let mut t = PopupTracker::default();
         let before = t.snapshot(&cfg());
+        // Pick an event kind the popup deliberately has no rendering
+        // for (Capabilities reply); it should leave both content and
+        // activity untouched.
         t.ingest(
-            &Event::ToolResult {
+            &Event::Capabilities {
                 id: "a".into(),
-                name: "x".into(),
-                result: json!({"ok": true}),
+                vision: false,
+                model_name: "test".into(),
             },
             &cfg(),
         );
         let after = t.snapshot(&cfg());
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn tool_result_marks_displayed_turn_as_thinking() {
+        let mut t = PopupTracker::default();
+        t.ingest(
+            &tool_call("a", "bash", json!({"command": "sleep 30"})),
+            &cfg(),
+        );
+        assert!(matches!(
+            t.snapshot(&cfg()).activity,
+            PopupActivity::RunningTool { .. }
+        ));
+        t.ingest(
+            &Event::ToolResult {
+                id: "a".into(),
+                name: "bash".into(),
+                result: json!({"ok": true}),
+            },
+            &cfg(),
+        );
+        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Thinking);
+    }
+
+    #[test]
+    fn tracker_marks_busy_while_turn_in_flight() {
+        let mut t = PopupTracker::default();
+        assert!(!t.is_busy());
+        t.ingest(&delta("a", "hi"), &cfg());
+        assert!(t.is_busy());
+        t.ingest(&done("a"), &cfg());
+        assert!(!t.is_busy());
+    }
+
+    #[test]
+    fn tracker_tracks_listen_state_and_surfaces_listening_activity() {
+        let mut t = PopupTracker::default();
+        assert!(!t.is_listening());
+        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Idle);
+
+        t.ingest(
+            &Event::ListenState {
+                id: "x".into(),
+                active: true,
+            },
+            &cfg(),
+        );
+        assert!(t.is_listening());
+        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Listening);
+
+        // While a turn is in flight, the per-turn activity takes
+        // precedence over the listening flag.
+        t.ingest(&delta("a", "hi"), &cfg());
+        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Streaming);
+        t.ingest(&done("a"), &cfg());
+        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Listening);
+
+        t.ingest(
+            &Event::ListenState {
+                id: "x".into(),
+                active: false,
+            },
+            &cfg(),
+        );
+        assert!(!t.is_listening());
+        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Idle);
     }
 
     #[test]

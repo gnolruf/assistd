@@ -2,9 +2,9 @@ use crate::defaults::{
     DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_DISCONNECTED, DEFAULT_TRAY_ICON_DROWSY,
     DEFAULT_TRAY_ICON_GENERATING, DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
     DEFAULT_TRAY_POPUP_AUTO_HIDE_MS, DEFAULT_TRAY_POPUP_ENABLED, DEFAULT_TRAY_POPUP_HEIGHT,
-    DEFAULT_TRAY_POPUP_OFFSET_X, DEFAULT_TRAY_POPUP_OFFSET_Y, DEFAULT_TRAY_POPUP_TRUNCATE_CHARS,
-    DEFAULT_TRAY_POPUP_WAKE_DELTA, DEFAULT_TRAY_POPUP_WAKE_ERROR,
-    DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL, DEFAULT_TRAY_POPUP_WIDTH,
+    DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS, DEFAULT_TRAY_POPUP_OFFSET_X,
+    DEFAULT_TRAY_POPUP_OFFSET_Y, DEFAULT_TRAY_POPUP_TRUNCATE_CHARS, DEFAULT_TRAY_POPUP_WAKE_DELTA,
+    DEFAULT_TRAY_POPUP_WAKE_ERROR, DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL, DEFAULT_TRAY_POPUP_WIDTH,
 };
 use serde::{Deserialize, Serialize};
 
@@ -103,9 +103,18 @@ pub struct TrayPopupConfig {
     pub height: u32,
 
     /// Idle timeout before the popup auto-hides. Reset by every new
-    /// event while visible. Validated to 500..=60000.
+    /// event while visible, and held off entirely while a turn is
+    /// in flight (so a long tool call doesn't blink the popup out
+    /// mid-response). Validated to 500..=60000.
     #[serde(default = "default_popup_auto_hide_ms")]
     pub auto_hide_ms: u64,
+
+    /// Idle timeout used while the daemon's continuous listener is
+    /// active. The user can verbally reply without pressing a key, so
+    /// the popup hangs around longer than the regular `auto_hide_ms`.
+    /// Validated to 500..=60000.
+    #[serde(default = "default_popup_listen_auto_hide_ms")]
+    pub listen_auto_hide_ms: u64,
 
     /// Cap on the body text rendered in the popup. The displayed text
     /// is the **last** `truncate_chars` codepoints of the running
@@ -130,6 +139,7 @@ impl Default for TrayPopupConfig {
             width: default_popup_width(),
             height: default_popup_height(),
             auto_hide_ms: default_popup_auto_hide_ms(),
+            listen_auto_hide_ms: default_popup_listen_auto_hide_ms(),
             truncate_chars: default_popup_truncate_chars(),
             wake_on: TrayPopupWakeConfig::default(),
         }
@@ -237,6 +247,10 @@ fn default_popup_auto_hide_ms() -> u64 {
     DEFAULT_TRAY_POPUP_AUTO_HIDE_MS
 }
 
+fn default_popup_listen_auto_hide_ms() -> u64 {
+    DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS
+}
+
 fn default_popup_truncate_chars() -> usize {
     DEFAULT_TRAY_POPUP_TRUNCATE_CHARS
 }
@@ -274,6 +288,10 @@ mod tests {
         assert_eq!(p.width, DEFAULT_TRAY_POPUP_WIDTH);
         assert_eq!(p.height, DEFAULT_TRAY_POPUP_HEIGHT);
         assert_eq!(p.auto_hide_ms, DEFAULT_TRAY_POPUP_AUTO_HIDE_MS);
+        assert_eq!(
+            p.listen_auto_hide_ms,
+            DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS
+        );
         assert_eq!(p.truncate_chars, DEFAULT_TRAY_POPUP_TRUNCATE_CHARS);
         assert_eq!(p.wake_on.tool_call, DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL);
         assert_eq!(p.wake_on.delta, DEFAULT_TRAY_POPUP_WAKE_DELTA);
@@ -289,6 +307,7 @@ mod tests {
             width: 500,
             height: 200,
             auto_hide_ms: 7000,
+            listen_auto_hide_ms: 12000,
             truncate_chars: 1024,
             enabled: false,
             wake_on: TrayPopupWakeConfig {

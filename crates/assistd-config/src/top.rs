@@ -461,6 +461,10 @@ impl Config {
             if !(500..=60_000).contains(&p.auto_hide_ms) {
                 errors.push("tray.popup.auto_hide_ms must be in the range 500..=60000".into());
             }
+            if !(500..=60_000).contains(&p.listen_auto_hide_ms) {
+                errors
+                    .push("tray.popup.listen_auto_hide_ms must be in the range 500..=60000".into());
+            }
             if !(1..=10_000).contains(&p.truncate_chars) {
                 errors.push("tray.popup.truncate_chars must be in the range 1..=10000".into());
             }

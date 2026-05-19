@@ -169,6 +169,10 @@ pub const DEFAULT_TRAY_POPUP_HEIGHT: u32 = 120;
 pub const DEFAULT_TRAY_POPUP_OFFSET_X: i32 = -10;
 pub const DEFAULT_TRAY_POPUP_OFFSET_Y: i32 = 10;
 pub const DEFAULT_TRAY_POPUP_AUTO_HIDE_MS: u64 = 3000;
+/// Idle timeout used while the daemon's continuous listener is active.
+/// The popup gives the user a longer hands-free window to verbally
+/// reply before dismissing itself.
+pub const DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS: u64 = 10000;
 pub const DEFAULT_TRAY_POPUP_TRUNCATE_CHARS: usize = 300;
 /// X11 `WM_CLASS` and Wayland `app_id` of the popup window. The popup
 /// GUI builder sets it; the `[app_id="…"]` placement criteria sent

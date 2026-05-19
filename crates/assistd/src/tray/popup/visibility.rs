@@ -68,7 +68,9 @@ pub async fn run(
     let mut tracker = PopupTracker::default();
     let mut visible = false;
     let mut last_activity = Instant::now();
-    let auto_hide = Duration::from_millis(cfg.auto_hide_ms);
+    let mut was_busy = false;
+    let auto_hide_default = Duration::from_millis(cfg.auto_hide_ms);
+    let auto_hide_listening = Duration::from_millis(cfg.listen_auto_hide_ms);
     let mut ticker = interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -81,6 +83,7 @@ pub async fn run(
                     DriverInput::Shutdown => break,
                     DriverInput::Disconnected => {
                         tracker.set_disconnected();
+                        was_busy = false;
                         push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
                     }
                     DriverInput::Event(ev) => {
@@ -88,6 +91,16 @@ pub async fn run(
                         if visible {
                             last_activity = Instant::now();
                         }
+                        // Held-open → idle transition: restart the
+                        // auto-hide countdown from this instant so the
+                        // popup lingers for the full auto_hide_ms after
+                        // the agent finishes, regardless of how long
+                        // the busy stretch was.
+                        let is_busy = tracker.is_busy();
+                        if was_busy && !is_busy {
+                            last_activity = Instant::now();
+                        }
+                        was_busy = is_busy;
                         push_with_visibility(&state_tx, snap, visible);
                     }
                     DriverInput::Show => {
@@ -111,7 +124,23 @@ pub async fn run(
                 }
             }
             _ = ticker.tick() => {
-                if visible && last_activity.elapsed() >= auto_hide {
+                if !visible {
+                    continue;
+                }
+                // Pin the popup open while a turn is in flight — the
+                // gap between a ToolCall and its ToolResult is silent
+                // on the wire but the agent is still working, and
+                // earlier behavior hid the popup in the middle of long
+                // tool calls.
+                if tracker.is_busy() {
+                    continue;
+                }
+                let auto_hide = if tracker.is_listening() {
+                    auto_hide_listening
+                } else {
+                    auto_hide_default
+                };
+                if last_activity.elapsed() >= auto_hide {
                     visible = false;
                     push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
                 }
@@ -214,6 +243,87 @@ mod tests {
 
         let still_visible = state_rx.borrow().visible;
         assert!(still_visible, "events should keep the popup open");
+
+        in_tx.send(DriverInput::Shutdown).expect("send");
+        handle.await.expect("driver join");
+    }
+
+    #[tokio::test]
+    async fn in_flight_turn_pins_popup_open_past_auto_hide() {
+        // ToolCall arrives, then no events for longer than auto_hide_ms.
+        // Before the fix the popup would auto-hide mid-tool-call; now
+        // it must stay visible until Done arrives.
+        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
+        let (in_tx, in_rx) = mpsc::unbounded_channel();
+        let (place_tx, _place_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(500)));
+
+        in_tx.send(DriverInput::Show).expect("send");
+        let _ = drain_watch(&mut state_rx).await;
+        in_tx
+            .send(DriverInput::Event(Box::new(Event::ToolCall {
+                id: "a".into(),
+                name: "bash".into(),
+                args: json!({"command": "sleep 2"}),
+            })))
+            .expect("send");
+        let _ = drain_watch(&mut state_rx).await;
+
+        // Quiet stretch comfortably longer than auto_hide_ms (500ms);
+        // the in-flight turn must hold the popup open.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            state_rx.borrow().visible,
+            "popup should stay visible while turn is in flight"
+        );
+
+        in_tx
+            .send(DriverInput::Event(Box::new(Event::Done { id: "a".into() })))
+            .expect("send");
+        let _ = drain_watch(&mut state_rx).await;
+
+        // After Done, the auto-hide window starts fresh from this
+        // moment; wait it out and confirm the popup closes.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        assert!(
+            !state_rx.borrow().visible,
+            "popup should auto-hide after the turn finishes"
+        );
+
+        in_tx.send(DriverInput::Shutdown).expect("send");
+        handle.await.expect("driver join");
+    }
+
+    #[tokio::test]
+    async fn listening_swaps_in_the_longer_auto_hide_window() {
+        // With listening active, auto-hide uses listen_auto_hide_ms
+        // instead of the shorter default — so the popup outlives the
+        // regular timeout but still dismisses eventually.
+        let popup_cfg = TrayPopupConfig {
+            auto_hide_ms: 500,
+            listen_auto_hide_ms: 2000,
+            ..TrayPopupConfig::default()
+        };
+        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
+        let (in_tx, in_rx) = mpsc::unbounded_channel();
+        let (place_tx, _place_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, popup_cfg));
+
+        in_tx
+            .send(DriverInput::Event(Box::new(Event::ListenState {
+                id: "ls".into(),
+                active: true,
+            })))
+            .expect("send");
+        in_tx.send(DriverInput::Show).expect("send");
+        let _ = drain_watch(&mut state_rx).await;
+
+        // Past the short timeout, well under the listen-extended one.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        assert!(
+            state_rx.borrow().visible,
+            "listening should extend the auto-hide window"
+        );
 
         in_tx.send(DriverInput::Shutdown).expect("send");
         handle.await.expect("driver join");

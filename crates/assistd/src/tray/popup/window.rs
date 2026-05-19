@@ -18,7 +18,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, RichText, ViewportBuilder,
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
-use super::state::PopupState;
+use super::state::{PopupActivity, PopupState};
 use super::visibility::DriverInput;
 
 /// Run the eframe loop in the calling thread. Blocks until the
@@ -198,6 +198,14 @@ impl eframe::App for PopupApp {
             return;
         }
         ui.vertical(|ui| {
+            if let Some((label, color)) = activity_label(&self.current.activity) {
+                ui.label(
+                    RichText::new(label)
+                        .color(color)
+                        .font(FontId::new(11.0, FontFamily::Proportional)),
+                );
+                ui.add_space(2.0);
+            }
             if self.current.body.is_empty() {
                 ui.label(
                     RichText::new("(no reply yet)")
@@ -228,5 +236,20 @@ impl eframe::App for PopupApp {
                 });
             }
         });
+    }
+}
+
+/// Map [`PopupActivity`] to the one-line status header rendered above
+/// the body. Returns `None` when the popup should be header-less (the
+/// idle case — the body already conveys "last completed turn").
+fn activity_label(activity: &PopupActivity) -> Option<(String, Color32)> {
+    match activity {
+        PopupActivity::Idle => None,
+        PopupActivity::Streaming => Some(("● replying…".into(), Color32::LIGHT_GREEN)),
+        PopupActivity::Thinking => Some(("● thinking…".into(), Color32::YELLOW)),
+        PopupActivity::RunningTool { name } => {
+            Some((format!("● running {name}…"), Color32::LIGHT_BLUE))
+        }
+        PopupActivity::Listening => Some(("● listening…".into(), Color32::from_rgb(255, 140, 0))),
     }
 }
