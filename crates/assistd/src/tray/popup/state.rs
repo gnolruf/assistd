@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use assistd_config::TrayPopupConfig;
-use assistd_ipc::{Event, PresenceState};
+use assistd_ipc::Event;
 use serde_json::Value;
 
 /// Snapshot pushed through the `watch` channel to the GUI thread. The
@@ -19,9 +19,6 @@ use serde_json::Value;
 /// changed.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PopupState {
-    /// Short status label rendered on the first line ("Generating",
-    /// "Listening", "Idle", "Sleeping", "Disconnected").
-    pub title: String,
     /// Last N codepoints of the in-flight (or last-completed) turn's
     /// reply text, after coalescing. May be empty when no turn has
     /// produced any output yet.
@@ -49,29 +46,6 @@ pub struct ToolCallLine {
     pub args_summary: String,
 }
 
-/// Coarse tray-icon state mirrored from the tray's own tracker. Used
-/// only to produce the title line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TitleState {
-    Disconnected,
-    Generating,
-    Listening,
-    Idle,
-    Sleeping,
-}
-
-impl TitleState {
-    fn label(self) -> &'static str {
-        match self {
-            TitleState::Disconnected => "Disconnected",
-            TitleState::Generating => "Generating",
-            TitleState::Listening => "Listening",
-            TitleState::Idle => "Idle",
-            TitleState::Sleeping => "Sleeping",
-        }
-    }
-}
-
 /// Per-turn working state. The popup may display content from a
 /// single turn even after it terminates, so we retain `body` and
 /// `footer` until the *next* turn's first event lands.
@@ -84,37 +58,20 @@ struct TurnState {
 /// Tracks every signal the popup cares about and produces a
 /// [`PopupState`] snapshot on demand. Owned by the popup driver task
 /// (one task, single-threaded ingestion — no internal locking needed).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PopupTracker {
-    presence: PresenceState,
-    listening: bool,
-    connected: bool,
     /// Turns we've seen at least one event for. Keyed by IPC request
     /// id. Pruned on `Done` / `Error` only if it isn't the displayed
     /// turn — see [`PopupTracker::ingest`].
     turns: HashMap<String, TurnState>,
-    /// Turn ids that haven't yet received a `Done` / `Error`. Distinct
-    /// from `turns` so a finished turn can stay on screen
-    /// (`turns` retains it) while the title flips back to `Idle`
-    /// (`in_flight` no longer contains it).
+    /// Turn ids that haven't yet received a `Done` / `Error`. Used so
+    /// `set_disconnected` can drop in-flight turns whose ids may no
+    /// longer map to live turns on the daemon after a restart.
     in_flight: HashSet<String>,
     /// IPC id of the turn whose body/footer the popup is currently
     /// showing. Switches on the first event of a new turn so concurrent
     /// queries don't trample each other.
     displayed: Option<String>,
-}
-
-impl Default for PopupTracker {
-    fn default() -> Self {
-        Self {
-            presence: PresenceState::Active,
-            listening: false,
-            connected: false,
-            turns: HashMap::new(),
-            in_flight: HashSet::new(),
-            displayed: None,
-        }
-    }
 }
 
 impl PopupTracker {
@@ -124,7 +81,6 @@ impl PopupTracker {
     pub fn snapshot(&self, cfg: &TrayPopupConfig) -> PopupState {
         let displayed = self.displayed.as_deref().and_then(|id| self.turns.get(id));
         PopupState {
-            title: self.title_state().label().to_string(),
             body: displayed
                 .map(|t| truncate_chars_from_end(&t.body, cfg.truncate_chars))
                 .unwrap_or_default(),
@@ -133,18 +89,9 @@ impl PopupTracker {
         }
     }
 
-    /// Mark the daemon connection up; clear stale per-turn state from
-    /// before the disconnect since the daemon may have restarted.
-    pub fn set_connected(&mut self) {
-        self.connected = true;
-    }
-
-    /// Mark the daemon connection down and forget per-turn state — any
-    /// in-flight turn id we remembered no longer maps to a live turn
-    /// on the daemon side.
+    /// Forget per-turn state — any in-flight turn id we remembered no
+    /// longer maps to a live turn on the daemon side after a restart.
     pub fn set_disconnected(&mut self) {
-        self.connected = false;
-        self.listening = false;
         self.turns.clear();
         self.in_flight.clear();
         self.displayed = None;
@@ -187,12 +134,6 @@ impl PopupTracker {
                     self.turns.remove(id);
                 }
             }
-            Event::Presence { state, .. } => {
-                self.presence = *state;
-            }
-            Event::ListenState { active, .. } => {
-                self.listening = *active;
-            }
             _ => {}
         }
         self.snapshot(cfg)
@@ -211,22 +152,6 @@ impl PopupTracker {
             self.turns.remove(&prev);
         }
         self.displayed = Some(id.to_string());
-    }
-
-    fn title_state(&self) -> TitleState {
-        if !self.connected {
-            return TitleState::Disconnected;
-        }
-        if !self.in_flight.is_empty() {
-            return TitleState::Generating;
-        }
-        if self.listening {
-            return TitleState::Listening;
-        }
-        match self.presence {
-            PresenceState::Active => TitleState::Idle,
-            PresenceState::Drowsy | PresenceState::Sleeping => TitleState::Sleeping,
-        }
     }
 }
 
@@ -430,7 +355,6 @@ mod tests {
     #[test]
     fn tracker_accumulates_delta_text_until_last_delta_overwrites() {
         let mut t = PopupTracker::default();
-        t.set_connected();
         t.ingest(&delta("a", "hello "), &cfg());
         t.ingest(&delta("a", "world"), &cfg());
         let s = t.snapshot(&cfg());
@@ -442,18 +366,15 @@ mod tests {
     #[test]
     fn tracker_keeps_displayed_turn_after_done() {
         let mut t = PopupTracker::default();
-        t.set_connected();
         t.ingest(&last_delta("a", "the reply"), &cfg());
         t.ingest(&done("a"), &cfg());
         let s = t.snapshot(&cfg());
         assert_eq!(s.body, "the reply");
-        assert_eq!(s.title, "Idle"); // no more in-flight turns
     }
 
     #[test]
     fn tracker_switches_to_new_turn_and_drops_old() {
         let mut t = PopupTracker::default();
-        t.set_connected();
         t.ingest(&last_delta("a", "turn a body"), &cfg());
         t.ingest(&done("a"), &cfg());
         t.ingest(&last_delta("b", "turn b body"), &cfg());
@@ -464,7 +385,6 @@ mod tests {
     #[test]
     fn tracker_renders_tool_call_footer_with_args_summary() {
         let mut t = PopupTracker::default();
-        t.set_connected();
         t.ingest(
             &tool_call("a", "bash", json!({"command": "ls /tmp"})),
             &cfg(),
@@ -478,7 +398,6 @@ mod tests {
     #[test]
     fn tracker_truncates_body_to_configured_n() {
         let mut t = PopupTracker::default();
-        t.set_connected();
         let long = "x".repeat(1000);
         t.ingest(&last_delta("a", &long), &cfg());
         let mut narrow = cfg();
@@ -489,40 +408,8 @@ mod tests {
     }
 
     #[test]
-    fn tracker_title_priority_disconnected_over_generating() {
-        let mut t = PopupTracker::default();
-        t.ingest(&last_delta("a", "x"), &cfg());
-        // Connection never went up → still Disconnected even with a
-        // turn in-flight.
-        assert_eq!(t.snapshot(&cfg()).title, "Disconnected");
-    }
-
-    #[test]
-    fn tracker_title_priority_generating_over_listening() {
-        let mut t = PopupTracker::default();
-        t.set_connected();
-        t.ingest(
-            &Event::ListenState {
-                id: "x".into(),
-                active: true,
-            },
-            &cfg(),
-        );
-        t.ingest(&last_delta("a", "x"), &cfg());
-        assert_eq!(t.snapshot(&cfg()).title, "Generating");
-    }
-
-    #[test]
-    fn tracker_title_falls_back_to_idle_when_nothing_in_flight() {
-        let mut t = PopupTracker::default();
-        t.set_connected();
-        assert_eq!(t.snapshot(&cfg()).title, "Idle");
-    }
-
-    #[test]
     fn tracker_ignores_unrelated_event_kinds() {
         let mut t = PopupTracker::default();
-        t.set_connected();
         let before = t.snapshot(&cfg());
         t.ingest(
             &Event::ToolResult {
@@ -537,20 +424,11 @@ mod tests {
     }
 
     #[test]
-    fn tracker_disconnect_clears_turns_and_listening() {
+    fn tracker_disconnect_clears_turn_state() {
         let mut t = PopupTracker::default();
-        t.set_connected();
-        t.ingest(
-            &Event::ListenState {
-                id: "x".into(),
-                active: true,
-            },
-            &cfg(),
-        );
         t.ingest(&last_delta("a", "x"), &cfg());
         t.set_disconnected();
         let s = t.snapshot(&cfg());
-        assert_eq!(s.title, "Disconnected");
         assert_eq!(s.body, "");
         assert!(s.footer.is_none());
     }

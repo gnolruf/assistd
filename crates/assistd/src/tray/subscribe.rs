@@ -7,9 +7,8 @@
 //! exponential backoff (1, 2, 4, … s, capped at 60 s).
 //!
 //! When the popup feature is on, a [`PopupSink`](super::popup::PopupSink)
-//! also forwarded every event (plus `Connected` / `Disconnected`
-//! transitions) so the popup driver can update its content and apply
-//! its wake-on rules.
+//! also forwarded every event (plus `Disconnected` transitions) so the
+//! popup driver can update its content and apply its wake-on rules.
 
 use std::time::Duration;
 
@@ -84,12 +83,6 @@ async fn try_once(
     if push(handle, |item| item.set_connected()).await.is_none() {
         return Ok(ExitReason::ServiceShutdown);
     }
-    #[cfg(feature = "tray-popup")]
-    if let Some(p) = popup {
-        p.set_connected();
-    }
-    // The non-feature case marks the popup arg as intentionally unused.
-    let _ = popup;
 
     seed_initial_state(handle, ipc, popup).await;
 

@@ -3,8 +3,8 @@
 //! thread reads from.
 //!
 //! Inputs:
-//! - daemon events (from the tray's subscribe loop), and a Connect /
-//!   Disconnect signal that re-uses the same mpsc for compactness;
+//! - daemon events (from the tray's subscribe loop), and a Disconnect
+//!   signal that re-uses the same mpsc for compactness;
 //! - explicit `Show` commands (tray-icon left-click + wake-on events);
 //! - GUI events (focus lost, first paint after a show);
 //! - a 250 ms timer that drives the auto-hide check.
@@ -28,8 +28,6 @@ use super::state::{PopupState, PopupTracker};
 pub enum DriverInput {
     /// New IPC event from the daemon's broadcast bus.
     Event(Box<Event>),
-    /// IPC connection up — the daemon is reachable.
-    Connected,
     /// IPC connection down — subscribe loop is in backoff or restart.
     Disconnected,
     /// Tray-icon left-click or a wake-on event matched. The popup
@@ -81,10 +79,6 @@ pub async fn run(
                 let Some(msg) = msg else { break };
                 match msg {
                     DriverInput::Shutdown => break,
-                    DriverInput::Connected => {
-                        tracker.set_connected();
-                        push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
-                    }
                     DriverInput::Disconnected => {
                         tracker.set_disconnected();
                         push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
@@ -165,8 +159,6 @@ mod tests {
         let (place_tx, mut place_rx) = mpsc::unbounded_channel();
 
         let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000)));
-        in_tx.send(DriverInput::Connected).expect("send");
-        let _connected_state = drain_watch(&mut state_rx).await;
         in_tx.send(DriverInput::Show).expect("send");
         let s = drain_watch(&mut state_rx).await;
         assert!(s.visible);
@@ -186,8 +178,6 @@ mod tests {
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000)));
 
-        in_tx.send(DriverInput::Connected).expect("send");
-        let _ = drain_watch(&mut state_rx).await;
         in_tx.send(DriverInput::Show).expect("send");
         let visible_state = drain_watch(&mut state_rx).await;
         assert!(visible_state.visible);
@@ -208,8 +198,6 @@ mod tests {
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(1_000)));
 
-        in_tx.send(DriverInput::Connected).expect("send");
-        let _ = drain_watch(&mut state_rx).await;
         in_tx.send(DriverInput::Show).expect("send");
         let _ = drain_watch(&mut state_rx).await;
 
@@ -240,8 +228,6 @@ mod tests {
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000)));
 
-        in_tx.send(DriverInput::Connected).expect("send");
-        let _ = drain_watch(&mut state_rx).await;
         in_tx
             .send(DriverInput::Event(Box::new(Event::ToolCall {
                 id: "a".into(),
@@ -252,7 +238,6 @@ mod tests {
         let s = drain_watch(&mut state_rx).await;
         let footer = s.footer.expect("footer present");
         assert_eq!(footer.name, "bash");
-        assert_eq!(s.title, "Generating");
 
         in_tx.send(DriverInput::Shutdown).expect("send");
         handle.await.expect("driver join");

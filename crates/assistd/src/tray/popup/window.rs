@@ -1,6 +1,6 @@
 //! eframe-backed window for the tray popup.
 //!
-//! Renders three labels — title, body, footer — from the latest
+//! Renders two labels — body and footer — from the latest
 //! [`PopupState`] snapshot held in a `watch::Receiver`. The GUI
 //! thread owns the entire eframe event loop; it sends focus-lost and
 //! first-paint events back to the tokio-side driver via a `std`
@@ -198,12 +198,6 @@ impl eframe::App for PopupApp {
             return;
         }
         ui.vertical(|ui| {
-            ui.label(
-                RichText::new(&self.current.title)
-                    .strong()
-                    .font(FontId::new(13.0, FontFamily::Proportional)),
-            );
-            ui.add_space(2.0);
             if self.current.body.is_empty() {
                 ui.label(
                     RichText::new("(no reply yet)")

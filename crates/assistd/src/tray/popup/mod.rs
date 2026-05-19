@@ -62,13 +62,6 @@ impl PopupSink {
             .send(DriverInput::Event(Box::new(ev.clone())));
     }
 
-    /// Tell the popup the daemon connection just came up — the driver
-    /// uses this for the title state's "Disconnected" → "Idle"
-    /// transition and to forget any stale per-turn state.
-    pub fn set_connected(&self) {
-        let _ = self.driver_tx.send(DriverInput::Connected);
-    }
-
     /// Tell the popup the daemon socket dropped.
     pub fn set_disconnected(&self) {
         let _ = self.driver_tx.send(DriverInput::Disconnected);
