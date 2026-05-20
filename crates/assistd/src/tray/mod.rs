@@ -112,7 +112,7 @@ pub async fn run(args: TrayArgs) -> Result<()> {
 
 /// Build the optional ksni-activate callback from the popup sink, when
 /// the popup feature is on. Without the feature, returns `None` so the
-/// tray-icon left-click is a no-op (the existing behavior).
+/// tray-icon left-click does nothing.
 #[cfg(feature = "tray-popup")]
 fn build_activate_callback(sink: &Option<popup::PopupSink>) -> Option<menu::ActivateCallback> {
     let sink = sink.as_ref()?.clone();

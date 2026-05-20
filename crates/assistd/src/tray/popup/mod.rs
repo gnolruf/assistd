@@ -270,8 +270,6 @@ pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
     }))
 }
 
-/// Scale an anchor's `width` / `height` by `scale`, keeping the
-/// corner and offsets untouched. Used for HiDPI-aware pre-positioning.
 fn scale_anchor_size(
     anchor: assistd_wm::PlacementAnchor,
     scale: f32,

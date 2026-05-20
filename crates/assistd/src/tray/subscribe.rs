@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn subscribe_filter_lists_tray_and_popup_event_kinds() {
         let f = subscribe_filter();
-        // Pre-existing tray-icon needs (presence priority machine).
+        // Tray-icon needs (presence priority machine).
         for k in [
             EventKind::Delta,
             EventKind::ToolCall,
@@ -222,8 +222,8 @@ mod tests {
         ] {
             assert!(f.kinds.contains(&k), "filter missing {k:?}");
         }
-        // Added for the popup: server-coalesced reply text + tool
-        // results. Both are no-ops on TrayTracker but feed the popup.
+        // Popup-only needs: server-coalesced reply text + tool
+        // results. No-ops on TrayTracker; the popup tracker uses them.
         assert!(f.kinds.contains(&EventKind::LastDelta));
         assert!(f.kinds.contains(&EventKind::ToolResult));
     }

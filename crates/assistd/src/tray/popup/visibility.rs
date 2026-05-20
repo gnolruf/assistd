@@ -35,10 +35,11 @@ pub enum DriverInput {
     Show,
     /// GUI thread reports focus lost — popup should hide.
     FocusLost,
-    /// GUI thread finished its first paint after a Show — the
-    /// compositor knows about the window and `place_floating` can
-    /// match it. Triggers a follow-up retry to handle the rare
-    /// compositor-side race.
+    /// GUI thread finished its first paint after a Show. Kept as a
+    /// signal in case the driver ever needs to act on the
+    /// compositor-aware moment; `place_floating` handles the
+    /// map-time race against the compositor internally, so for now
+    /// the driver doesn't need to react.
     Mapped,
     /// Cooperative shutdown.
     Shutdown,
@@ -54,11 +55,9 @@ pub struct PlaceRequest;
 /// all senders are dropped. Pushes a new [`PopupState`] onto the
 /// `watch` whenever the visible content changes; sends a single
 /// [`PlaceRequest`] onto `place_tx` when the popup becomes visible.
-/// Earlier versions also re-fired on the GUI's `Mapped` event and on
-/// a 250 ms ticker as a workaround for the MapNotify race, but
-/// `WindowManager::place_floating` now retries internally, so a
-/// single trigger is sufficient and avoids the 3× duplicate
-/// placement IPC traffic per wake.
+/// One placement per wake is sufficient because
+/// [`assistd_wm::WindowManager::place_floating`] waits for and
+/// retries against the matching window-event internally.
 pub async fn run(
     state_tx: watch::Sender<PopupState>,
     mut rx: UnboundedReceiver<DriverInput>,
@@ -117,9 +116,6 @@ pub async fn run(
                             push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
                         }
                     }
-                    // GUI thread sends Mapped on first paint after Show;
-                    // we used to re-fire placement here but the internal
-                    // retry in place_floating makes it redundant.
                     DriverInput::Mapped => {}
                 }
             }
@@ -129,9 +125,8 @@ pub async fn run(
                 }
                 // Pin the popup open while a turn is in flight — the
                 // gap between a ToolCall and its ToolResult is silent
-                // on the wire but the agent is still working, and
-                // earlier behavior hid the popup in the middle of long
-                // tool calls.
+                // on the wire but the agent is still working, so an
+                // auto-hide here would dismiss the popup mid-tool-call.
                 if tracker.is_busy() {
                     continue;
                 }
@@ -250,9 +245,8 @@ mod tests {
 
     #[tokio::test]
     async fn in_flight_turn_pins_popup_open_past_auto_hide() {
-        // ToolCall arrives, then no events for longer than auto_hide_ms.
-        // Before the fix the popup would auto-hide mid-tool-call; now
-        // it must stay visible until Done arrives.
+        // While a turn is in flight, the popup must stay visible past
+        // auto_hide_ms — even when no events arrive — until Done.
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();

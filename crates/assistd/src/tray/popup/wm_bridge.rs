@@ -29,9 +29,7 @@ pub struct WmBackendBundle {
 
 /// Detect (or read from config) the compositor and start the matching
 /// backend. Mirrors `crates/assistd/src/wm_init.rs` so the tray can
-/// construct a backend without depending on the `daemon` feature. The
-/// duplication is ~30 lines and isolated; a future refactor lifting
-/// the resolver into `assistd-wm` is fine but not required.
+/// construct a backend without depending on the `daemon` feature.
 pub async fn build_wm_backend(cfg: &Config, shutdown_rx: watch::Receiver<bool>) -> WmBackendBundle {
     let resolved = match cfg.compositor.compositor_type {
         CompositorType::Auto => match detect_from_env(
