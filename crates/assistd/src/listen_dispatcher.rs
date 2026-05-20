@@ -92,11 +92,16 @@ async fn run_utterance_forwarder(
                             id = %id,
                             req = "query",
                         );
+                        let bus = state.runtime.events_bus().clone();
                         handlers.spawn(
                             async move {
                                 let (tx, mut rx) = mpsc::channel::<Event>(32);
-                                let drain = async {
-                                    while rx.recv().await.is_some() {}
+                                let forward = async {
+                                    while let Some(ev) = rx.recv().await {
+                                        if ev.kind().is_some() {
+                                            let _ = bus.send(ev);
+                                        }
+                                    }
                                 };
                                 let query = async {
                                     if let Err(e) =
@@ -108,7 +113,7 @@ async fn run_utterance_forwarder(
                                         );
                                     }
                                 };
-                                tokio::join!(drain, query);
+                                tokio::join!(forward, query);
                             }
                             .instrument(span),
                         );
