@@ -28,6 +28,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 mod menu;
+#[cfg(feature = "tray-popup")]
+pub mod popup;
 mod state;
 mod subscribe;
 
@@ -66,8 +68,16 @@ pub async fn run(args: TrayArgs) -> Result<()> {
         );
     }
 
+    #[cfg(feature = "tray-popup")]
+    let popup_handle = popup::spawn(&config).await?;
+    #[cfg(feature = "tray-popup")]
+    let popup_sink = popup_handle.as_ref().map(|h| h.sink.clone());
+    #[cfg(not(feature = "tray-popup"))]
+    let popup_sink: Option<()> = None;
+
     let (actions_tx, actions_rx) = mpsc::unbounded_channel();
-    let item = TrayItem::new(config.tray.clone(), actions_tx);
+    let activate_cb = build_activate_callback(&popup_sink);
+    let item = TrayItem::new(config.tray.clone(), actions_tx, activate_cb);
 
     let handle = item
         .assume_sni_available(true)
@@ -79,8 +89,12 @@ pub async fn run(args: TrayArgs) -> Result<()> {
     let ipc = IpcClient::new();
     let subscribe_handle = handle.clone();
     let subscribe_ipc = ipc.clone();
+    // Move popup_sink into the subscribe task — it's not used after the
+    // activate-callback was built above, so we don't need a clone.
     let subscribe_task =
-        tokio::spawn(async move { subscribe::run(subscribe_handle, subscribe_ipc).await });
+        tokio::spawn(
+            async move { subscribe::run(subscribe_handle, subscribe_ipc, popup_sink).await },
+        );
 
     let action_task = tokio::spawn(menu::run_actions(actions_rx, ipc));
 
@@ -89,7 +103,28 @@ pub async fn run(args: TrayArgs) -> Result<()> {
     handle.shutdown().await;
     subscribe_task.abort();
     let _ = subscribe_task.await;
+    #[cfg(feature = "tray-popup")]
+    if let Some(p) = popup_handle {
+        p.shutdown().await;
+    }
     Ok(())
+}
+
+/// Build the optional ksni-activate callback from the popup sink, when
+/// the popup feature is on. Without the feature, returns `None` so the
+/// tray-icon left-click does nothing.
+#[cfg(feature = "tray-popup")]
+fn build_activate_callback(sink: &Option<popup::PopupSink>) -> Option<menu::ActivateCallback> {
+    let sink = sink.as_ref()?.clone();
+    Some(Box::new(move || {
+        let tx = sink.show_sender();
+        let _ = tx.send(popup::DriverInput::Show);
+    }))
+}
+
+#[cfg(not(feature = "tray-popup"))]
+fn build_activate_callback(_sink: &Option<()>) -> Option<menu::ActivateCallback> {
+    None
 }
 
 /// Block until any of: Ctrl-C, SIGTERM, or the menu-action task

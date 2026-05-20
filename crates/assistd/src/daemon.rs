@@ -24,8 +24,8 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::{
-    embed_init, gpu_monitor, hotkey, idle_monitor, listen_dispatcher, mcp_init, memory_init,
-    voice_init, wm_init,
+    embed_init, gpu_monitor, hotkey, idle_monitor, ipc_voice_proxy, listen_dispatcher, mcp_init,
+    memory_init, voice_init, wm_init,
 };
 
 /// Command-line arguments for the `daemon` subcommand.
@@ -135,12 +135,23 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         info!("hotkey: deferred to client (--client-mode)");
         None
     } else {
+        // Route the daemon's own hotkey through the same IPC proxy
+        // the chat TUI uses. Press → Request::PttStart, release →
+        // Request::PttStop, both handled by `handle_ptt_start` /
+        // `handle_ptt_stop` over the daemon's Unix socket. That gets
+        // us the presence warmup (Whisper takes the GPU path instead
+        // of the CPU fallback) and the per-connection bus tee in
+        // `socket.rs` for free, instead of duplicating either inside
+        // the hotkey listener.
+        let voice_proxy: Arc<dyn assistd_voice::VoiceInput> = Arc::new(
+            ipc_voice_proxy::IpcVoiceProxy::new(Arc::new(assistd_ipc::IpcClient::new()), None),
+        );
         hotkey::spawn_listener(
             &config.presence,
             &config.voice,
             hotkey::Subsystems {
                 presence: Some(presence.clone()),
-                voice: voice.input.clone(),
+                voice: voice_proxy,
                 listener: Some(voice.listener.clone()),
                 voice_output: Some(voice.output.clone()),
             },

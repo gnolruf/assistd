@@ -24,6 +24,7 @@
 //! caller verifies via `wm active` if it cares.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -31,18 +32,24 @@ use futures_util::StreamExt;
 use swayipc_async::{
     Connection, Event, EventStream, EventType, Node, NodeType, WindowChange, WorkspaceChange,
 };
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 
-use crate::criteria::format_workspace_target;
+use crate::criteria::{format_place_floating_pixels, format_workspace_target};
 use crate::error::ipc_ctx;
 use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
 use crate::{
-    FocusedWindowContext, Layout, OutputInfo, ResizeDir, Window, WindowId, WindowManager, WmError,
-    WmResult, WorkspaceId, WorkspaceInfo,
+    FocusedWindowContext, Layout, OutputInfo, PlacementAnchor, PlacementCriteria, Rect, ResizeDir,
+    Window, WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
+
+/// Mirror of [`crate::i3::WINDOW_EVENTS_CAPACITY`].
+const WINDOW_EVENTS_CAPACITY: usize = 32;
+
+/// Mirror of [`crate::i3::WINDOW_EVENT_WAIT`].
+const WINDOW_EVENT_WAIT: Duration = Duration::from_millis(500);
 
 /// Cast a sway `Node.id` (`i64`) to a [`WindowId`]. Sway never emits
 /// non-positive ids in practice, but the bounds check keeps the
@@ -61,6 +68,8 @@ pub struct SwayBackend {
     cmd: Arc<Mutex<Option<Connection>>>,
     snapshot: Arc<RwLock<Snapshot>>,
     reconnect: Arc<tokio::sync::Notify>,
+    /// Mirror of [`crate::i3::I3Backend::window_events`].
+    window_events: broadcast::Sender<WindowEvent>,
 }
 
 /// Returned by [`SwayBackend::start`] alongside the backend itself. The
@@ -98,10 +107,12 @@ impl SwayBackend {
         };
         let snapshot = Arc::new(RwLock::new(initial));
         let reconnect = Arc::new(tokio::sync::Notify::new());
+        let (window_events, _) = broadcast::channel(WINDOW_EVENTS_CAPACITY);
         let backend = Arc::new(Self {
             cmd: Arc::new(Mutex::new(Some(cmd))),
             snapshot: snapshot.clone(),
             reconnect: reconnect.clone(),
+            window_events,
         });
 
         let supervisor_task = tokio::spawn(supervisor_loop(
@@ -116,6 +127,101 @@ impl SwayBackend {
             backend,
             supervisor_task,
         })
+    }
+
+    /// Walk Sway's tree looking for a window matching `criteria`,
+    /// returning its current rect. Mirror of
+    /// [`crate::i3::I3Backend::find_window_rect_by_criteria`], with
+    /// the same event-driven race-closing: subscribe → quick poll →
+    /// wait for matching `WindowEvent::Opened` → re-poll.
+    async fn find_window_rect_by_criteria(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
+        let mut events = self.window_events.subscribe();
+
+        if let Ok(rect) = self.find_window_rect_once(criteria).await {
+            return Ok(rect);
+        }
+
+        let waited = tokio::time::timeout(WINDOW_EVENT_WAIT, async {
+            loop {
+                match events.recv().await {
+                    Ok(ev) => {
+                        if ev.matches_opened(criteria).is_some() {
+                            return true;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return false,
+                    Err(broadcast::error::RecvError::Lagged(_)) => return false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        let result = self.find_window_rect_once(criteria).await;
+        if waited && result.is_ok() {
+            tracing::debug!(
+                target: "tray",
+                "popup: window appeared via sway window::new event"
+            );
+        }
+        result
+    }
+
+    async fn find_window_rect_once(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let tree = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_tree()).await {
+            Err(_) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(ipc_ctx(e, "sway GET_TREE (window rect)"));
+            }
+            Ok(Ok(t)) => t,
+        };
+        drop(guard);
+        find_sway_node_rect(&tree, criteria)
+            .ok_or_else(|| WmError::Rejected(format!("no window matches {criteria:?}")))
+    }
+
+    /// Query the focused workspace's pixel rect via `GET_WORKSPACES`.
+    /// Used by [`WindowManager::place_floating`] to compute output-
+    /// relative pixel coordinates without relying on ppt-based moves
+    /// that compositors may clamp. Exposed through the
+    /// `WindowManager` trait method of the same name; the private
+    /// `_inner` suffix avoids the trait/inherent collision.
+    async fn focused_workspace_rect_inner(&self) -> WmResult<Rect> {
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let workspaces =
+            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
+                Err(_) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+                }
+                Ok(Err(e)) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(ipc_ctx(e, "sway GET_WORKSPACES (focused rect)"));
+                }
+                Ok(Ok(w)) => w,
+            };
+        drop(guard);
+        workspaces
+            .into_iter()
+            .find(|w| w.focused)
+            .map(|w| Rect {
+                x: w.rect.x,
+                y: w.rect.y,
+                width: w.rect.width.max(0) as u32,
+                height: w.rect.height.max(0) as u32,
+            })
+            .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
     }
 
     async fn run(&self, payload: &str) -> WmResult<()> {
@@ -226,6 +332,46 @@ impl WindowManager for SwayBackend {
         self.run(&sway_layout_payload(layout)).await
     }
 
+    async fn focused_workspace_rect(&self) -> WmResult<Rect> {
+        self.focused_workspace_rect_inner().await
+    }
+
+    async fn place_floating(
+        &self,
+        criteria: &PlacementCriteria,
+        anchor: PlacementAnchor,
+    ) -> WmResult<()> {
+        let workspace = self.focused_workspace_rect_inner().await?;
+        // See I3Backend::place_floating: use the window's actual rect
+        // so DPI scaling / WM-enforced sizing don't push the popup
+        // off-screen.
+        let effective = match self.find_window_rect_by_criteria(criteria).await {
+            Ok(actual) => {
+                tracing::info!(
+                    target: "tray",
+                    "popup: actual window rect = {}x{} (configured {}x{}); placing accordingly",
+                    actual.width, actual.height, anchor.width, anchor.height
+                );
+                PlacementAnchor {
+                    width: actual.width,
+                    height: actual.height,
+                    ..anchor
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "tray",
+                    "popup: could not query window rect ({e}); falling back to configured size"
+                );
+                anchor
+            }
+        };
+        self.run(&format_place_floating_pixels(
+            criteria, effective, workspace,
+        ))
+        .await
+    }
+
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
         let mut guard = self.cmd.lock().await;
         let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
@@ -260,6 +406,31 @@ impl WindowManager for SwayBackend {
             })
             .collect())
     }
+
+    async fn focused_output_scale(&self) -> WmResult<f64> {
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let outputs = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_outputs()).await {
+            Err(_) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                self.reconnect.notify_one();
+                return Err(ipc_ctx(e, "sway GET_OUTPUTS (focused scale)"));
+            }
+            Ok(Ok(v)) => v,
+        };
+        drop(guard);
+        Ok(outputs
+            .into_iter()
+            .find(|o| o.focused)
+            .and_then(|o| o.scale)
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(1.0))
+    }
 }
 
 /// Open the cmd + events socket pair and subscribe events. Pulled out
@@ -286,6 +457,7 @@ async fn drive_events(
     mut stream: EventStream,
     snapshot: Arc<RwLock<Snapshot>>,
     reconnect: Arc<tokio::sync::Notify>,
+    window_events: broadcast::Sender<WindowEvent>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> bool {
     loop {
@@ -298,7 +470,12 @@ async fn drive_events(
             }
             evt = stream.next() => {
                 match evt {
-                    Some(Ok(Event::Window(w))) => handle_window_event(&w, &snapshot).await,
+                    Some(Ok(Event::Window(w))) => {
+                        handle_window_event(&w, &snapshot).await;
+                        if let Some(ev) = window_event_from_sway(&w) {
+                            let _ = window_events.send(ev);
+                        }
+                    }
                     Some(Ok(Event::Workspace(d))) => {
                         if matches!(d.change, WorkspaceChange::Focus) {
                             let ws = d.current.as_ref().and_then(|n| n.name.clone());
@@ -317,6 +494,36 @@ async fn drive_events(
     }
 }
 
+/// Mirror of [`crate::i3::window_event_from_i3`] for sway events.
+fn window_event_from_sway(w: &swayipc_async::WindowEvent) -> Option<WindowEvent> {
+    let id = sway_id(w.container.id)?;
+    match w.change {
+        WindowChange::New => {
+            let props = w.container.window_properties.as_ref();
+            let class = props.and_then(|p| p.class.clone());
+            // Title falls back through Wayland title → XWayland WM_NAME
+            // the same way the snapshot does.
+            let title = w
+                .container
+                .name
+                .clone()
+                .or_else(|| props.and_then(|p| p.title.clone()));
+            Some(WindowEvent::Opened {
+                id,
+                title,
+                class,
+                app_id: w.container.app_id.clone(),
+            })
+        }
+        WindowChange::Title => Some(WindowEvent::TitleChanged {
+            id,
+            new_title: w.container.name.clone(),
+        }),
+        WindowChange::Close => Some(WindowEvent::Closed { id }),
+        _ => None,
+    }
+}
+
 /// Outer reconnect loop. Mirrors the i3 supervisor: drive events
 /// through `drive_events`; on fall-through, drop cmd, sleep with
 /// exponential backoff, reconnect, re-seed, repeat.
@@ -331,6 +538,7 @@ async fn supervisor_loop(
         initial_stream,
         snapshot.clone(),
         reconnect.clone(),
+        backend.window_events.clone(),
         &mut shutdown,
     )
     .await
@@ -363,7 +571,15 @@ async fn supervisor_loop(
                 *backend.cmd.lock().await = Some(cmd);
                 attempt = 0;
                 tracing::info!("sway backend reconnected");
-                if !drive_events(stream, snapshot.clone(), reconnect.clone(), &mut shutdown).await {
+                if !drive_events(
+                    stream,
+                    snapshot.clone(),
+                    reconnect.clone(),
+                    backend.window_events.clone(),
+                    &mut shutdown,
+                )
+                .await
+                {
                     tracing::info!("sway supervisor exited (shutdown during events stream)");
                     return;
                 }
@@ -373,6 +589,46 @@ async fn supervisor_loop(
                 attempt = attempt.saturating_add(1);
             }
         }
+    }
+}
+
+/// Recursively search Sway's tree for a leaf node matching the
+/// criteria; mirror of [`crate::i3::find_node_rect`]. Sway's leaves
+/// are `Con` or `FloatingCon`; container nodes are skipped.
+fn find_sway_node_rect(node: &Node, criteria: &PlacementCriteria) -> Option<Rect> {
+    if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
+        && sway_node_matches(node, criteria)
+    {
+        return Some(Rect {
+            x: node.rect.x,
+            y: node.rect.y,
+            width: node.rect.width.max(0) as u32,
+            height: node.rect.height.max(0) as u32,
+        });
+    }
+    for child in node.nodes.iter().chain(node.floating_nodes.iter()) {
+        if let Some(r) = find_sway_node_rect(child, criteria) {
+            return Some(r);
+        }
+    }
+    None
+}
+
+fn sway_node_matches(node: &Node, criteria: &PlacementCriteria) -> bool {
+    let props = node.window_properties.as_ref();
+    match criteria {
+        PlacementCriteria::AppId(want) => node.app_id.as_deref().is_some_and(|a| a == want),
+        PlacementCriteria::Class(want) => props
+            .and_then(|p| p.class.as_deref())
+            .is_some_and(|c| c == want),
+        PlacementCriteria::Title(want) => node
+            .name
+            .as_deref()
+            .or_else(|| props.and_then(|p| p.title.as_deref()))
+            .is_some_and(|t| t == want),
+        // ConId would short-circuit at a different layer; leave as
+        // no-match so a misuse fails loudly.
+        PlacementCriteria::ConId(_) => false,
     }
 }
 

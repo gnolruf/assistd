@@ -15,6 +15,8 @@ mod hotkey;
 mod idle_monitor;
 #[cfg(any(feature = "client", feature = "chat"))]
 mod ipc_helper;
+#[cfg(any(feature = "daemon", feature = "chat"))]
+mod ipc_voice_proxy;
 #[cfg(feature = "client")]
 mod listen;
 #[cfg(feature = "daemon")]

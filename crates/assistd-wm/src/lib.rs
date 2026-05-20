@@ -20,7 +20,7 @@
 use async_trait::async_trait;
 
 pub(crate) mod backoff;
-pub(crate) mod criteria;
+pub mod criteria;
 pub mod error;
 #[cfg(feature = "i3")]
 pub mod i3;
@@ -425,6 +425,125 @@ pub fn is_terminal_class(class: &str) -> bool {
         .any(|t| t.eq_ignore_ascii_case(class))
 }
 
+/// How a window the compositor should act on is matched. The criteria
+/// becomes the `[key="value"]` prefix on the IPC command; all four
+/// forms are accepted by i3 and sway with the caveat that `AppId`
+/// only works for Wayland-native sway windows (i3 is X11-only and
+/// doesn't grammar `app_id`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PlacementCriteria {
+    /// Match by Wayland `app_id` (`[app_id="…"]`). Sway-only; on i3,
+    /// each backend rewrites this to whichever identifier is actually
+    /// reliable on its compositor.
+    AppId(String),
+    /// Match by X11 `WM_CLASS` (`[class="…"]`).
+    Class(String),
+    /// Match by `_NET_WM_NAME` / `WM_NAME` with the value treated as
+    /// an exact (anchored) regular expression. Used as an escape
+    /// hatch on i3 when the GUI toolkit doesn't set `WM_CLASS` (e.g.
+    /// egui-winit 0.34 leaves `WM_CLASS` empty on X11).
+    Title(String),
+    /// Match a specific compositor container id (`[con_id="…"]`).
+    ConId(WindowId),
+}
+
+/// Which corner of the focused output the window's anchor sits in.
+/// Offsets are measured inward from this corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnchorCorner {
+    /// Top-left of the focused output.
+    TopLeft,
+    /// Top-right of the focused output.
+    TopRight,
+    /// Bottom-left of the focused output.
+    BottomLeft,
+    /// Bottom-right of the focused output.
+    BottomRight,
+    /// Centred horizontally and vertically.
+    Center,
+}
+
+/// A pixel-space rectangle, used by `place_floating` to compute
+/// output-relative target coordinates for the focused workspace.
+/// `(x, y)` is the top-left corner in global screen coordinates;
+/// `(width, height)` is the visible area in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Compositor-emitted window lifecycle event. Each concrete backend
+/// fans these out from its IPC events stream onto an internal
+/// broadcast channel that `place_floating` uses to detect a freshly
+/// mapped window without polling. `Opened` is the one consumers
+/// typically care about; the others exist for completeness so the
+/// channel can grow into more general uses without renaming.
+#[derive(Debug, Clone)]
+pub enum WindowEvent {
+    /// A window was mapped (i3/sway `window::new`).
+    Opened {
+        id: WindowId,
+        title: Option<String>,
+        class: Option<String>,
+        app_id: Option<String>,
+    },
+    /// A window's title (`_NET_WM_NAME` / Wayland title) changed.
+    TitleChanged {
+        id: WindowId,
+        new_title: Option<String>,
+    },
+    /// A window was unmapped or destroyed.
+    Closed { id: WindowId },
+}
+
+impl WindowEvent {
+    /// Return the window id if this event represents a freshly-opened
+    /// window matching `criteria`; `None` for non-`Opened` events or
+    /// non-matching windows. Used by `place_floating` to filter the
+    /// broadcast stream down to "events that affect my window."
+    pub fn matches_opened(&self, criteria: &PlacementCriteria) -> Option<WindowId> {
+        let Self::Opened {
+            id,
+            title,
+            class,
+            app_id,
+        } = self
+        else {
+            return None;
+        };
+        let matched = match criteria {
+            PlacementCriteria::Title(want) => title.as_deref() == Some(want.as_str()),
+            PlacementCriteria::Class(want) => class.as_deref() == Some(want.as_str()),
+            PlacementCriteria::AppId(want) => app_id.as_deref() == Some(want.as_str()),
+            PlacementCriteria::ConId(want) => id == want,
+        };
+        matched.then_some(*id)
+    }
+}
+
+/// Where to place a floating window: a corner anchor plus offsets and
+/// the target size. The compositor receives one templated IPC sequence
+/// that sets floating, resizes, and moves in a single round-trip; see
+/// [`WindowManager::place_floating`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementAnchor {
+    /// Corner of the focused output the window anchors to.
+    pub corner: AnchorCorner,
+    /// Horizontal offset from the corner, in pixels. Positive shifts
+    /// the window to the right of the anchor; negative shifts left.
+    pub offset_x: i32,
+    /// Vertical offset from the corner, in pixels. Positive shifts
+    /// down; negative shifts up.
+    pub offset_y: i32,
+    /// Target window width in pixels (applied via `resize set`).
+    pub width: u32,
+    /// Target window height in pixels (applied via `resize set`).
+    pub height: u32,
+}
+
 /// Async interface to a window manager / compositor.
 ///
 /// Each method maps to one IPC operation. Backends implement this trait and
@@ -487,6 +606,62 @@ pub trait WindowManager: Send + Sync + 'static {
         Err(WmError::Unsupported("output enumeration"))
     }
 
+    /// Return the pixel rect of the workspace currently focused on the
+    /// active output. Callers use this to compute target coordinates
+    /// for `place_floating` callers that need to position a window
+    /// before it's mapped (e.g. eframe's `ViewportBuilder::with_position`
+    /// runs before `place_floating` has anything to act on). The
+    /// default impl returns [`WmError::Unsupported`] so backends
+    /// without workspace introspection compile unchanged.
+    async fn focused_workspace_rect(&self) -> WmResult<Rect> {
+        Err(WmError::Unsupported("focused workspace rect"))
+    }
+
+    /// Scale factor of the output currently holding focus (e.g. `1.0`,
+    /// `1.5`, `2.0`). The tray popup uses this to convert its configured
+    /// logical width / height into the physical size winit will end up
+    /// mapping on HiDPI displays, so a pre-positioned window lands at
+    /// the right corner from its very first frame instead of flashing
+    /// at the compositor default.
+    ///
+    /// Wayland compositors (sway) report this directly through their
+    /// output IPC reply. X11 backends (i3) have to fall back to the
+    /// X-side conventions: `GDK_SCALE` / `QT_SCALE_FACTOR` env vars,
+    /// then `Xft.dpi` from the X resource database.
+    ///
+    /// The default impl returns `1.0` — backends that can't determine
+    /// the scale should report no scaling rather than fail, so callers
+    /// don't have to special-case "unsupported" against a real `1.0`
+    /// display.
+    async fn focused_output_scale(&self) -> WmResult<f64> {
+        Ok(1.0)
+    }
+
+    /// Mark the matched window floating, resize it to
+    /// [`PlacementAnchor::width`] / [`PlacementAnchor::height`], and
+    /// move it to the chosen corner with the configured offsets. The
+    /// three steps are sent as one chained IPC payload so the
+    /// compositor applies them atomically.
+    ///
+    /// Backends without floating support return
+    /// [`WmError::Unsupported`]; the default impl is unsupported so a
+    /// future backend (Hyprland) compiles before adding its own
+    /// floating semantics.
+    ///
+    /// Both i3 and sway treat a criteria that matches no windows as
+    /// silent success: the call returns `Ok(())` whether or not the
+    /// targeted window was actually mapped. Callers that need
+    /// at-least-once placement should issue the call only after the
+    /// window has been mapped (e.g. on the GUI toolkit's first-paint
+    /// callback) plus a short follow-up retry.
+    async fn place_floating(
+        &self,
+        _criteria: &PlacementCriteria,
+        _anchor: PlacementAnchor,
+    ) -> WmResult<()> {
+        Err(WmError::Unsupported("floating placement"))
+    }
+
     /// Report whether the backend is actually connected to a compositor.
     /// The default `true` covers concrete backends; [`NoWindowManager`]
     /// overrides to `false` so callers can short-circuit with a single
@@ -536,6 +711,19 @@ impl WindowManager for NoWindowManager {
     }
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
         Err(WmError::Disconnected)
+    }
+    async fn place_floating(
+        &self,
+        _criteria: &PlacementCriteria,
+        _anchor: PlacementAnchor,
+    ) -> WmResult<()> {
+        Err(WmError::Disconnected)
+    }
+    async fn focused_workspace_rect(&self) -> WmResult<Rect> {
+        Err(WmError::Disconnected)
+    }
+    async fn focused_output_scale(&self) -> WmResult<f64> {
+        Ok(1.0)
     }
     fn is_connected(&self) -> bool {
         false
@@ -650,6 +838,136 @@ mod tests {
     #[tokio::test]
     async fn no_window_manager_refuses_list_outputs() {
         assert!(NoWindowManager.list_outputs().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn no_window_manager_refuses_place_floating() {
+        let err = NoWindowManager
+            .place_floating(
+                &PlacementCriteria::AppId("dev.assistd.popup".into()),
+                PlacementAnchor {
+                    corner: AnchorCorner::TopRight,
+                    offset_x: -10,
+                    offset_y: 10,
+                    width: 360,
+                    height: 120,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WmError::Disconnected));
+    }
+
+    #[test]
+    fn window_event_matches_opened_by_title() {
+        let ev = WindowEvent::Opened {
+            id: WindowId::new(7).unwrap(),
+            title: Some("dev.assistd.popup".into()),
+            class: None,
+            app_id: None,
+        };
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::Title("dev.assistd.popup".into())),
+            WindowId::new(7)
+        );
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::Title("other".into())),
+            None
+        );
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::Class("dev.assistd.popup".into())),
+            None,
+            "title-only event should not match class criteria"
+        );
+    }
+
+    #[test]
+    fn window_event_matches_opened_by_app_id_and_class_and_con_id() {
+        let id = WindowId::new(11).unwrap();
+        let ev = WindowEvent::Opened {
+            id,
+            title: None,
+            class: Some("Firefox".into()),
+            app_id: Some("org.mozilla.firefox".into()),
+        };
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::Class("Firefox".into())),
+            Some(id)
+        );
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::AppId("org.mozilla.firefox".into())),
+            Some(id)
+        );
+        assert_eq!(ev.matches_opened(&PlacementCriteria::ConId(id)), Some(id));
+        assert_eq!(
+            ev.matches_opened(&PlacementCriteria::ConId(WindowId::new(99).unwrap())),
+            None
+        );
+    }
+
+    #[test]
+    fn window_event_non_opened_variants_never_match() {
+        let id = WindowId::new(3).unwrap();
+        assert_eq!(
+            WindowEvent::Closed { id }.matches_opened(&PlacementCriteria::ConId(id)),
+            None
+        );
+        assert_eq!(
+            WindowEvent::TitleChanged {
+                id,
+                new_title: Some("x".into())
+            }
+            .matches_opened(&PlacementCriteria::Title("x".into())),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn default_place_floating_reports_unsupported() {
+        // A minimal impl that opts in to nothing inherits the default
+        // place_floating, which surfaces Unsupported so Hyprland-class
+        // backends compile before adding their own floating semantics.
+        struct MinimalWm;
+
+        #[async_trait]
+        impl WindowManager for MinimalWm {
+            async fn focus(&self, _w: &WindowId) -> WmResult<()> {
+                Ok(())
+            }
+            async fn move_to_workspace(&self, _w: &WindowId, _ws: &WorkspaceId) -> WmResult<()> {
+                Ok(())
+            }
+            async fn focused_window(&self) -> WmResult<Option<WindowId>> {
+                Ok(None)
+            }
+            async fn list_windows(&self) -> WmResult<Vec<Window>> {
+                Ok(Vec::new())
+            }
+            async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
+                Ok(Vec::new())
+            }
+            async fn resize_width(&self, _w: &WindowId, _d: ResizeDir, _p: u32) -> WmResult<()> {
+                Ok(())
+            }
+            async fn set_layout(&self, _l: Layout) -> WmResult<()> {
+                Ok(())
+            }
+        }
+
+        let err = MinimalWm
+            .place_floating(
+                &PlacementCriteria::AppId("x".into()),
+                PlacementAnchor {
+                    corner: AnchorCorner::Center,
+                    offset_x: 0,
+                    offset_y: 0,
+                    width: 100,
+                    height: 100,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WmError::Unsupported(op) if op == "floating placement"));
     }
 
     #[tokio::test]

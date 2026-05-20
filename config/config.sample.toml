@@ -535,3 +535,49 @@ hotkey = "Super+Escape"
 # icon_listening    = "audio-input-microphone" # continuous listen is on
 # icon_generating   = "system-run"             # a query is streaming
 # icon_disconnected = "network-offline"        # daemon socket unreachable
+
+# ---- Tray popup ---------------------------------------------------------
+# Borderless ~360×120 floating window spawned by `assistd tray` (only
+# in builds compiled with `--features tray-popup`, which is on by
+# default). Anchored near the system-tray icon; surfaces the daemon's
+# most-recent assistant reply text plus the last tool call. Shown on
+# tray left-click and on the events you enable below; hidden on
+# focus-out or after `auto_hide_ms` of idle.
+#
+# Placement is delegated to the compositor (i3 / sway) — the tray sends
+# `floating enable, resize set W H, move position …` over the
+# compositor's IPC, templated from the values below. Hyprland users get
+# the popup at the compositor's default placement until a Hyprland
+# backend lands in assistd-wm.
+#
+# [tray.popup]
+# enabled        = true
+# anchor         = "top_right"   # top_left | top_right | bottom_left | bottom_right | center
+# offset_x       = -10           # px from the anchored corner; negative moves inward on right-anchors
+# offset_y       = 10
+# width          = 360           # validated 100..=1200
+# height         = 120           # validated 60..=800
+# auto_hide_ms        = 3000     # idle timeout; reset by every new event while visible.
+#                                 # The timer is suspended entirely while a turn is in
+#                                 # flight, so a long-running tool call no longer blinks
+#                                 # the popup out mid-response (500..=60000).
+# listen_auto_hide_ms = 10000    # idle timeout used while continuous listening is active;
+#                                 # longer than `auto_hide_ms` so the user has time to
+#                                 # verbally reply without pressing a key (500..=60000).
+# truncate_chars      = 300      # body renders last N codepoints of the live reply (1..=10000)
+#
+# HiDPI scaling is detected from the WM backend automatically: sway
+# reads its own per-output scale over IPC, and the i3 backend cascades
+# through `WINIT_X11_SCALE_FACTOR`, `Xft.dpi` in xrdb, and RandR
+# physical-size DPI to match whatever winit will apply to the popup
+# window. No knob is needed in normal use.
+#
+# Which events automatically open the popup. The tray left-click always
+# opens it regardless of these flags. With `delta = true` the popup
+# surfaces on every chat turn — flip it to `false` if you live in the
+# chat TUI and don't want a popup on every reply.
+#
+# [tray.popup.wake_on]
+# tool_call = true
+# delta     = true
+# error     = true

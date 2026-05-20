@@ -10,7 +10,7 @@ name = "assistd"
 path = "src/main.rs"
 
 [features]
-default = ["daemon", "client", "chat", "tray"]
+default = ["daemon", "client", "chat", "tray", "tray-popup"]
 daemon = [
     "dep:assistd-core",
     "dep:assistd-embed",
@@ -19,11 +19,13 @@ daemon = [
     "dep:assistd-memory",
     "dep:assistd-voice",
     "dep:assistd-wm",
+    "dep:async-trait",
     "dep:tracing",
     "dep:tracing-subscriber",
     "dep:global-hotkey",
     "dep:nvml-wrapper",
     "dep:rustix",
+    "dep:uuid",
 ]
 cuda = ["assistd-voice/cuda"]
 client = ["dep:uuid"]
@@ -47,6 +49,12 @@ tray = [
     "dep:ksni",
     "dep:tracing",
     "dep:tracing-subscriber",
+]
+tray-popup = [
+    "tray",
+    "dep:assistd-wm",
+    "dep:eframe",
+    "dep:winit",
 ]
 
 [dependencies]
@@ -82,6 +90,8 @@ shlex            = { workspace = true, optional = true }
 ratatui-image    = { workspace = true, optional = true }
 image            = { workspace = true, optional = true }
 ksni             = { workspace = true, optional = true }
+eframe           = { workspace = true, optional = true }
+winit            = { workspace = true, optional = true }
 assistd-config   = { workspace = true, optional = true }
 
 [dev-dependencies]
