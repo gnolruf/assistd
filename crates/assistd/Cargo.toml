@@ -19,11 +19,13 @@ daemon = [
     "dep:assistd-memory",
     "dep:assistd-voice",
     "dep:assistd-wm",
+    "dep:async-trait",
     "dep:tracing",
     "dep:tracing-subscriber",
     "dep:global-hotkey",
     "dep:nvml-wrapper",
     "dep:rustix",
+    "dep:uuid",
 ]
 cuda = ["assistd-voice/cuda"]
 client = ["dep:uuid"]

@@ -76,7 +76,14 @@ pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
 pub struct Subsystems {
     /// Presence manager for the cycle hotkey; `None` disables that hotkey.
     pub presence: Option<Arc<PresenceManager>>,
-    /// Voice input for PTT press/release events.
+    /// Voice input for PTT press/release events. In both the daemon and
+    /// the chat TUI this is an [`IpcVoiceProxy`](crate::ipc_voice_proxy::IpcVoiceProxy)
+    /// — `start_recording` issues `Request::PttStart` and
+    /// `stop_and_transcribe` issues `Request::PttStop`, which means the
+    /// daemon's `handle_ptt_start` / `handle_ptt_stop` run for both
+    /// callers (with the presence warmup that routes Whisper to GPU,
+    /// and the per-connection bus tee that lets the popup see the
+    /// streamed reply).
     pub voice: Arc<dyn VoiceInput>,
     /// Continuous listener for the toggle hotkey; `None` disables it.
     pub listener: Option<Arc<dyn ContinuousListener>>,
