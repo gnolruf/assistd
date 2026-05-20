@@ -20,12 +20,7 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = [
-    # paste 1.0.15 is archived/unmaintained but has no safe upgrade path;
-    # it is pulled in transitively by ratatui 0.29. Revisit when ratatui
-    # switches to `pastey` or a similar replacement.
-    "RUSTSEC-2024-0436",
-]
+ignore = []
 
 # ---------------------------------------------------------------------------
 # Licenses: keep the dependency set Apache-2.0-compatible.
@@ -40,15 +35,22 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
-    # webpki-roots 1.x ships Mozilla's root CA list under the Community
-    # Data License Agreement. It's a permissive data license and is fine
-    # for an Apache-2.0 downstream.
-    "CDLA-Permissive-2.0",
     # whisper-rs / whisper-rs-sys ship under the Unlicense (public-domain
     # dedication). OSI-approved and FSF Free/Libre compatible with our
     # Apache-2.0 downstream.
     "Unlicense",
 ]
+
+# Per-crate license exceptions for crates whose terms only make sense
+# in context. Keep these narrowly scoped — promoting a font licence to
+# a workspace-wide allow would let it apply to code crates too.
+[[licenses.exceptions]]
+# epaint_default_fonts ships Ubuntu Light + Hack + emoji glyphs under
+# the SIL Open Font Licence and Ubuntu Font Licence respectively. Both
+# are FSF-Free, permissive font-only licences; they don't touch the
+# code paths we redistribute under Apache-2.0.
+name = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
 
 # ---------------------------------------------------------------------------
 # Bans / multiple-version check.
@@ -82,12 +84,33 @@ skip = [
     { name = "getrandom", version = "0.2" },
     # Transitive via ratatui (older) vs toml_edit/indexmap (newer).
     { name = "hashbrown", version = "0.15" },
-    # Transitive via ratatui/unicode-truncate (older) vs newer consumers.
-    { name = "unicode-width", version = "0.1" },
     # nvml-wrapper still pins thiserror 1; global-hotkey and
     # tracing-appender pull thiserror 2.
     { name = "thiserror", version = "1" },
     { name = "thiserror-impl", version = "1" },
+    # eframe/egui (tray popup) brings winit 0.30 → smithay-client-toolkit
+    # 0.19 → calloop 0.13, while egui-winit's smithay-clipboard 0.7
+    # already moved to smithay-client-toolkit 0.20 → calloop 0.14.
+    # Will resolve when winit bumps SCT.
+    { name = "calloop", version = "0.13" },
+    { name = "calloop-wayland-source", version = "0.3" },
+    { name = "smithay-client-toolkit", version = "0.19" },
+    # ahash 0.8 (egui/epaint stack) pulls getrandom 0.3; tempfile/uuid
+    # are on 0.4. Already skipping 0.2 above for the older ring path.
+    { name = "getrandom", version = "0.3" },
+    # hashbrown 0.15 (rusqlite) brings foldhash 0.1; ratatui/vello are
+    # on hashbrown 0.16 → foldhash 0.2.
+    { name = "foldhash", version = "0.1" },
+    # ratatui-core 0.1 sits on hashbrown 0.16; zbus's toml_edit pulls
+    # hashbrown 0.17 transitively.
+    { name = "hashbrown", version = "0.16" },
+    # bindgen 0.72 (whisper-rs-sys) is on itertools 0.13; ratatui-core
+    # 0.1 is on 0.14.
+    { name = "itertools", version = "0.13" },
+    # ratatui-image 10 still depends directly on rand 0.8; the
+    # quantette → icy_sixel path it also pulls is on rand 0.9.
+    { name = "rand", version = "0.8" },
+    { name = "rand_core", version = "0.6" },
 ]
 
 # ---------------------------------------------------------------------------
