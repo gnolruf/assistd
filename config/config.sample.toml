@@ -19,8 +19,11 @@ port = 8385
 # GPU layer count passed as -ngl. Default 9999 offloads all layers; reduce if
 # running out of VRAM.
 # gpu_layers = 9999
-# Timeout in seconds for the health check. Increase for first-time HuggingFace
-# downloads on slow connections.
+# Backstop, in seconds, for two waits: llama-server reporting healthy on
+# /health after spawn, and the model finishing its load afterwards.
+# Neither wait fails on elapsed time while the process is making
+# progress; this is only the last-ditch cap. Increase for first-time
+# HuggingFace downloads on slow connections.
 # ready_timeout_secs = 300
 # Optional alias passed as --alias. Cosmetic: it's the name llama-server
 # reports for the loaded model in /v1/models.
@@ -516,10 +519,13 @@ hotkey = "Super+Escape"
 # [timeouts]
 # presence_sleep_secs = 30           # presence.sleep: SIGTERM grace + slack
 # presence_drowse_secs = 10          # POST /models/unload
-# presence_wake_load_secs = 10       # POST /models/load on wake
-# presence_wake_cold_start_secs = 60 # llama-server spawn + first /health = 200
 # dispatch_envelope_secs = 600       # outer cap on a single dispatch call
 # stream_inactivity_secs = 30        # SSE per-chunk no-bytes deadline
+#
+# Waking from Sleeping (spawn llama-server) and loading model weights
+# are not on a wall-clock budget: a slow load runs to completion as long
+# as the llama-server process stays healthy, and aborts at once if it
+# crashes. The only backstop is llama_server.ready_timeout_secs.
 
 # ---- Tray icon ----------------------------------------------------------
 # Icon-theme names rendered by `assistd tray` (a StatusNotifierItem

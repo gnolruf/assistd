@@ -648,106 +648,41 @@ impl PresenceManager {
         let _wake_marker = WakeMarker::new(Arc::clone(&self.wake_started));
 
         let started = Instant::now();
-        let load_budget = Duration::from_secs(self.timeouts.presence_wake_load_secs);
         match prior {
             PresenceState::Drowsy => {
-                match timeout(load_budget, self.control.load_model(&self.model.name)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        return Err(e).with_context(|| {
-                            format!("llama-server /models/load failed for {}", self.model.name)
-                        });
-                    }
-                    Err(_) => {
-                        warn!(
-                            target: "assistd::presence",
-                            timeout_secs = self.timeouts.presence_wake_load_secs,
-                            "llama-server /models/load timed out during wake; transition aborted"
-                        );
-                        return Err(anyhow!(
-                            "llama-server /models/load timed out after {}s during wake",
-                            self.timeouts.presence_wake_load_secs
-                        ));
-                    }
-                }
+                self.control
+                    .load_model(&self.model.name)
+                    .await
+                    .with_context(|| {
+                        format!("llama-server /models/load failed for {}", self.model.name)
+                    })?;
             }
             PresenceState::Sleeping => {
                 let (inner_tx, inner_rx) = watch::channel(false);
                 *self.current_inner_shutdown.lock() = Some(inner_tx);
 
-                let cold_budget = Duration::from_secs(self.timeouts.presence_wake_cold_start_secs);
-                let service = match timeout(
-                    cold_budget,
-                    LlamaService::start(self.llama_server.clone(), self.model.clone(), inner_rx),
-                )
-                .await
-                {
-                    Ok(Ok(svc)) => svc,
-                    Ok(Err(e)) => {
-                        warn!(
-                            target: "assistd::presence",
-                            "wake cold-start failed: {e}"
-                        );
-                        return Err(anyhow!(e))
-                            .context("llama-server cold-start failed during wake");
-                    }
-                    Err(_) => {
-                        warn!(
-                            target: "assistd::presence",
-                            timeout_secs = self.timeouts.presence_wake_cold_start_secs,
-                            "llama-server cold-start timed out during wake; transition aborted"
-                        );
-                        return Err(anyhow!(
-                            "llama-server cold-start timed out after {}s during wake",
-                            self.timeouts.presence_wake_cold_start_secs
-                        ));
-                    }
-                };
+                let service =
+                    LlamaService::start(self.llama_server.clone(), self.model.clone(), inner_rx)
+                        .await
+                        .map_err(|e| {
+                            warn!(target: "assistd::presence", "wake cold-start failed: {e}");
+                            anyhow!(e)
+                        })
+                        .context("llama-server cold-start failed during wake")?;
 
                 *self.llama.lock().await = Some(service);
 
-                match timeout(load_budget, self.control.load_model(&self.model.name)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        return Err(e).with_context(|| {
-                            format!("llama-server /models/load failed for {}", self.model.name)
-                        });
-                    }
-                    Err(_) => {
-                        warn!(
-                            target: "assistd::presence",
-                            timeout_secs = self.timeouts.presence_wake_load_secs,
-                            "llama-server /models/load timed out during wake; transition aborted"
-                        );
-                        return Err(anyhow!(
-                            "llama-server /models/load timed out after {}s during wake",
-                            self.timeouts.presence_wake_load_secs
-                        ));
-                    }
-                }
+                self.control
+                    .load_model(&self.model.name)
+                    .await
+                    .with_context(|| {
+                        format!("llama-server /models/load failed for {}", self.model.name)
+                    })?;
             }
             PresenceState::Active => unreachable!("short-circuited above"),
         }
 
-        const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
-        if let Err(e) = self
-            .control
-            .wait_for_loaded(&self.model.name, load_budget, LOAD_POLL_INTERVAL)
-            .await
-        {
-            warn!(
-                target: "assistd::presence",
-                model = %self.model.name,
-                timeout_secs = self.timeouts.presence_wake_load_secs,
-                "llama-server did not flip {} to loaded within budget: {e}",
-                self.model.name
-            );
-            return Err(anyhow!(
-                "llama-server did not finish loading {} within {}s during wake",
-                self.model.name,
-                self.timeouts.presence_wake_load_secs
-            ));
-        }
+        self.await_model_loaded().await?;
 
         *self.state.lock() = PresenceState::Active;
         let _ = self.state_tx.send(PresenceState::Active);
@@ -760,6 +695,55 @@ impl PresenceManager {
         );
         Ok(())
     }
+
+    /// Waits for the model to report `loaded`, gated on llama-server
+    /// liveness rather than a wall-clock budget.
+    ///
+    /// A healthy-but-slow load — cold page cache, first-run weight
+    /// download — runs as long as it needs: the supervisor keeps the
+    /// readiness watch on [`ReadyState::Ready`] for the whole duration.
+    /// A supervisor restart or `Degraded` transition (the router process
+    /// dying under us) aborts the wait immediately instead of waiting
+    /// out a timeout. `ready_timeout_secs` serves only as a last-ditch
+    /// backstop against a router that stays alive but never finishes the
+    /// load.
+    async fn await_model_loaded(&self) -> Result<()> {
+        const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+        let mut ready_rx = {
+            let guard = self.llama.lock().await;
+            guard
+                .as_ref()
+                .map(LlamaService::subscribe_ready)
+                .context("llama-server handle missing while loading model")?
+        };
+
+        let backstop = Duration::from_secs(self.llama_server.ready_timeout_secs);
+        tokio::select! {
+            res = self
+                .control
+                .wait_for_loaded(&self.model.name, backstop, LOAD_POLL_INTERVAL) =>
+            {
+                res.with_context(|| {
+                    format!(
+                        "llama-server did not finish loading {} within the {}s backstop",
+                        self.model.name, self.llama_server.ready_timeout_secs
+                    )
+                })
+            }
+            () = wait_until_not_ready(&mut ready_rx) => Err(anyhow!(
+                "llama-server left the ready state while loading {}",
+                self.model.name
+            )),
+        }
+    }
+}
+
+/// Resolves once the supervisor's readiness watch reports a state other
+/// than [`ReadyState::Ready`], or the watch closes. Used to race the
+/// model-load poll against the router process dying.
+async fn wait_until_not_ready(rx: &mut watch::Receiver<ReadyState>) {
+    let _ = rx.wait_for(|s| *s != ReadyState::Ready).await;
 }
 
 /// Period between model-load progress `Event::Status` emissions. Chosen so

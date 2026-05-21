@@ -1,7 +1,6 @@
 use crate::defaults::{
     DEFAULT_TIMEOUT_DISPATCH_ENVELOPE_SECS, DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS,
-    DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS, DEFAULT_TIMEOUT_PRESENCE_WAKE_COLD_START_SECS,
-    DEFAULT_TIMEOUT_PRESENCE_WAKE_LOAD_SECS, DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS,
+    DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS, DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,17 +19,6 @@ pub struct TimeoutsConfig {
     /// HTTP call. Default: 10s.
     #[serde(default = "default_presence_drowse_secs")]
     pub presence_drowse_secs: u64,
-    /// Cap on the `control.load_model()` HTTP call inside
-    /// `PresenceManager::wake`, applied to both the warm-wake
-    /// (Drowsy → Active) load and the post-cold-start load. Default: 10s.
-    #[serde(default = "default_presence_wake_load_secs")]
-    pub presence_wake_load_secs: u64,
-    /// Cap on `LlamaService::start` inside `PresenceManager::wake`
-    /// (Sleeping → Active); covers spawn + first `/health = 200`.
-    /// Cold starts download weights from HuggingFace on first run, so
-    /// the budget is generous. Default: 60s.
-    #[serde(default = "default_presence_wake_cold_start_secs")]
-    pub presence_wake_cold_start_secs: u64,
     /// Outer envelope on `AppState::dispatch`. Strictly a safety valve
     /// so a stuck connection cannot wedge a daemon-side connection
     /// task forever. Stream-level inactivity timeouts catch the
@@ -49,8 +37,6 @@ impl Default for TimeoutsConfig {
         Self {
             presence_sleep_secs: default_presence_sleep_secs(),
             presence_drowse_secs: default_presence_drowse_secs(),
-            presence_wake_load_secs: default_presence_wake_load_secs(),
-            presence_wake_cold_start_secs: default_presence_wake_cold_start_secs(),
             dispatch_envelope_secs: default_dispatch_envelope_secs(),
             stream_inactivity_secs: default_stream_inactivity_secs(),
         }
@@ -63,14 +49,6 @@ fn default_presence_sleep_secs() -> u64 {
 
 fn default_presence_drowse_secs() -> u64 {
     DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS
-}
-
-fn default_presence_wake_load_secs() -> u64 {
-    DEFAULT_TIMEOUT_PRESENCE_WAKE_LOAD_SECS
-}
-
-fn default_presence_wake_cold_start_secs() -> u64 {
-    DEFAULT_TIMEOUT_PRESENCE_WAKE_COLD_START_SECS
 }
 
 fn default_dispatch_envelope_secs() -> u64 {
