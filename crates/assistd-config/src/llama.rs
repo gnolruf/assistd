@@ -17,8 +17,12 @@ pub struct LlamaServerConfig {
     /// llama.cpp clamps to the model's actual layer count.
     #[serde(default = "default_gpu_layers")]
     pub gpu_layers: u32,
-    /// Timeout in seconds for the health check to succeed after spawning
-    /// llama-server. First-time HuggingFace downloads may need several minutes.
+    /// Backstop, in seconds, for two waits that are otherwise gated on
+    /// process liveness, not a clock: `/health` returning 200 after
+    /// spawn, and the model finishing its load afterwards. Neither trips
+    /// while llama-server is alive and progressing; this is only the
+    /// last-ditch cap. First-time HuggingFace downloads may need several
+    /// minutes — raise it on a slow connection.
     #[serde(default = "default_ready_timeout_secs")]
     pub ready_timeout_secs: u64,
     /// Optional alias passed as `--alias`. Useful when llama-server reports

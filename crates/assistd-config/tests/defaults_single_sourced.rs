@@ -148,14 +148,6 @@ fn timeouts_defaults_match_constants() {
     assert_eq!(c.presence_sleep_secs, DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS);
     assert_eq!(c.presence_drowse_secs, DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS);
     assert_eq!(
-        c.presence_wake_load_secs,
-        DEFAULT_TIMEOUT_PRESENCE_WAKE_LOAD_SECS
-    );
-    assert_eq!(
-        c.presence_wake_cold_start_secs,
-        DEFAULT_TIMEOUT_PRESENCE_WAKE_COLD_START_SECS
-    );
-    assert_eq!(
         c.dispatch_envelope_secs,
         DEFAULT_TIMEOUT_DISPATCH_ENVELOPE_SECS
     );

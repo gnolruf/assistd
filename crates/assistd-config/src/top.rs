@@ -477,12 +477,6 @@ impl Config {
         if t.presence_drowse_secs == 0 {
             errors.push("timeouts.presence_drowse_secs must be greater than 0".into());
         }
-        if t.presence_wake_load_secs == 0 {
-            errors.push("timeouts.presence_wake_load_secs must be greater than 0".into());
-        }
-        if t.presence_wake_cold_start_secs == 0 {
-            errors.push("timeouts.presence_wake_cold_start_secs must be greater than 0".into());
-        }
         if t.dispatch_envelope_secs == 0 {
             errors.push("timeouts.dispatch_envelope_secs must be greater than 0".into());
         }
