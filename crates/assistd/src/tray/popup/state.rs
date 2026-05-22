@@ -189,12 +189,13 @@ impl PopupTracker {
     /// caller can decide whether to push it onto the watch.
     pub fn ingest(&mut self, ev: &Event, cfg: &TrayPopupConfig) -> PopupState {
         match ev {
-            Event::Delta { id, text } => {
+            Event::Delta { id, .. } => {
+                // Body text comes exclusively from LastDelta (the
+                // daemon's coalesced snapshot); appending the raw Delta
+                // here too would double-count tokens already in it.
                 self.bring_turn_to_front(id);
                 self.in_flight.insert(id.clone());
-                let turn = self.turns.entry(id.clone()).or_default();
-                turn.body.push_str(text);
-                turn.activity = Some(TurnActivity::Streaming);
+                self.turns.entry(id.clone()).or_default().activity = Some(TurnActivity::Streaming);
             }
             Event::LastDelta { id, text } => {
                 // Server-coalesced cumulative snapshot — overwrite, don't append.
@@ -461,14 +462,37 @@ mod tests {
     }
 
     #[test]
-    fn tracker_accumulates_delta_text_until_last_delta_overwrites() {
+    fn tracker_body_comes_only_from_last_delta() {
+        // Raw Delta events are in-flight / activity signals only; the
+        // body is owned by LastDelta, the daemon's coalesced snapshot.
         let mut t = PopupTracker::default();
         t.ingest(&delta("a", "hello "), &cfg());
         t.ingest(&delta("a", "world"), &cfg());
-        let s = t.snapshot(&cfg());
-        assert_eq!(s.body, "hello world");
-        t.ingest(&last_delta("a", "completely fresh body"), &cfg());
-        assert_eq!(t.snapshot(&cfg()).body, "completely fresh body");
+        assert_eq!(
+            t.snapshot(&cfg()).body,
+            "",
+            "Delta must not populate the body"
+        );
+        t.ingest(&last_delta("a", "the coalesced reply"), &cfg());
+        assert_eq!(t.snapshot(&cfg()).body, "the coalesced reply");
+    }
+
+    #[test]
+    fn tracker_interleaved_last_delta_and_delta_does_not_double_count() {
+        // Regression: on the real bus the daemon emits LastDelta
+        // (coalesced) and socket.rs tees the raw Delta for the same
+        // token. Appending the Delta on top of the snapshot used to
+        // duplicate tokens, so the popup body read e.g. "AA" / "ABCDD".
+        let mut t = PopupTracker::default();
+        t.ingest(&last_delta("a", "A"), &cfg());
+        t.ingest(&delta("a", "A"), &cfg());
+        assert_eq!(t.snapshot(&cfg()).body, "A");
+        t.ingest(&delta("a", "B"), &cfg());
+        t.ingest(&delta("a", "C"), &cfg());
+        assert_eq!(t.snapshot(&cfg()).body, "A", "raw deltas must not append");
+        t.ingest(&last_delta("a", "ABCD"), &cfg());
+        t.ingest(&delta("a", "D"), &cfg());
+        assert_eq!(t.snapshot(&cfg()).body, "ABCD");
     }
 
     #[test]

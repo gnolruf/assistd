@@ -212,28 +212,14 @@ pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
     let driver_task = tokio::spawn(driver_run(state_tx, driver_rx, place_tx, driver_cfg));
 
     let app_id = assistd_config::defaults::DEFAULT_TRAY_POPUP_APP_ID.to_string();
-    let (gui_event_tx, gui_event_rx) = std::sync::mpsc::channel::<DriverInput>();
-
-    // Bridge std mpsc → driver mpsc on a dedicated tokio task. We can't
-    // call `driver_tx.send` from inside the GUI thread directly without
-    // borrowing the tokio runtime, so a small forwarder loop is the
-    // simplest correct option.
-    let bridge_tx = driver_tx.clone();
-    let bridge_task = tokio::task::spawn_blocking(move || {
-        while let Ok(msg) = gui_event_rx.recv() {
-            if bridge_tx.send(msg).is_err() {
-                break;
-            }
-        }
-    });
-    // We don't store bridge_task; it terminates when the GUI thread
-    // closes its sender (on shutdown) which happens when the OS thread
-    // joins.
-    drop(bridge_task);
 
     let width = popup_cfg.width;
     let height = popup_cfg.height;
     let gui_state_rx = state_rx.clone();
+    // The GUI thread reports focus-lost / first-paint straight onto the
+    // driver channel: `UnboundedSender::send` is a plain non-async call
+    // with no runtime requirement, so no std-mpsc bridge task is needed.
+    let gui_event_tx = driver_tx.clone();
     // Capture the workspace runtime handle before crossing the
     // thread boundary; window::run uses it to spawn the egui waker.
     let runtime = tokio::runtime::Handle::current();

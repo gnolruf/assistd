@@ -3,19 +3,18 @@
 //! Renders two labels — body and footer — from the latest
 //! [`PopupState`] snapshot held in a `watch::Receiver`. The GUI
 //! thread owns the entire eframe event loop; it sends focus-lost and
-//! first-paint events back to the tokio-side driver via a `std`
-//! mpsc, and observes the `visible` flag on the watch to toggle the
-//! viewport between shown and hidden.
+//! first-paint events back to the tokio-side driver over the driver's
+//! `UnboundedSender`, and observes the `visible` flag on the watch to
+//! toggle the viewport between shown and hidden.
 //!
 //! A small tokio task ([`wake_egui_on_state_change`]) runs on the
 //! workspace runtime and calls `ctx.request_repaint()` whenever the
 //! watch updates, so content changes don't have to wait for a stray
 //! OS input event to wake the egui loop.
 
-use std::sync::mpsc::Sender;
-
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, ViewportBuilder, ViewportCommand};
 use tokio::runtime::Handle;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
 use super::state::{PopupActivity, PopupState};
@@ -31,7 +30,7 @@ use super::visibility::DriverInput;
 /// runtime from inside the eframe creator closure.
 pub fn run(
     state_rx: watch::Receiver<PopupState>,
-    event_tx: Sender<DriverInput>,
+    event_tx: UnboundedSender<DriverInput>,
     app_id: &str,
     width: u32,
     height: u32,
@@ -115,7 +114,7 @@ async fn wake_egui_on_state_change(mut rx: watch::Receiver<PopupState>, ctx: egu
 /// renders the three labels.
 struct PopupApp {
     state_rx: watch::Receiver<PopupState>,
-    event_tx: Sender<DriverInput>,
+    event_tx: UnboundedSender<DriverInput>,
     last_visible: bool,
     /// True once the popup has organically gained input focus (i.e.
     /// the user clicked it). Until that happens, focus-lost events
@@ -138,7 +137,7 @@ struct PopupApp {
 }
 
 impl PopupApp {
-    fn new(state_rx: watch::Receiver<PopupState>, event_tx: Sender<DriverInput>) -> Self {
+    fn new(state_rx: watch::Receiver<PopupState>, event_tx: UnboundedSender<DriverInput>) -> Self {
         Self {
             state_rx,
             event_tx,
