@@ -16,21 +16,21 @@ members = [
 default-members = ["crates/assistd"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-assistd-config = { version = "0.1", path = "crates/assistd-config" }
-assistd-core   = { version = "0.1", path = "crates/assistd-core" }
-assistd-embed  = { version = "0.1", path = "crates/assistd-embed" }
-assistd-ipc    = { version = "0.1", path = "crates/assistd-ipc" }
-assistd-llm    = { version = "0.1", path = "crates/assistd-llm" }
-assistd-mcp    = { version = "0.1", path = "crates/assistd-mcp" }
-assistd-memory = { version = "0.1", path = "crates/assistd-memory" }
-assistd-voice  = { version = "0.1", path = "crates/assistd-voice" }
-assistd-tools  = { version = "0.1", path = "crates/assistd-tools" }
-assistd-wm     = { version = "0.1", path = "crates/assistd-wm" }
+assistd-config = { version = "1.0", path = "crates/assistd-config" }
+assistd-core   = { version = "1.0", path = "crates/assistd-core" }
+assistd-embed  = { version = "1.0", path = "crates/assistd-embed" }
+assistd-ipc    = { version = "1.0", path = "crates/assistd-ipc" }
+assistd-llm    = { version = "1.0", path = "crates/assistd-llm" }
+assistd-mcp    = { version = "1.0", path = "crates/assistd-mcp" }
+assistd-memory = { version = "1.0", path = "crates/assistd-memory" }
+assistd-voice  = { version = "1.0", path = "crates/assistd-voice" }
+assistd-tools  = { version = "1.0", path = "crates/assistd-tools" }
+assistd-wm     = { version = "1.0", path = "crates/assistd-wm" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

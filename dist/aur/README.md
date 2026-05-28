@@ -15,7 +15,7 @@ so the two cannot be installed at the same time.
 From the workspace root:
 
 ```bash
-cd dist/aur/assistd-git          # or dist/aur/assistd once v0.1.0 is tagged
+cd dist/aur/assistd-git          # or dist/aur/assistd once v1.0.0 is tagged
 makepkg -si                      # build, install, and (with -i) install
 ```
 
@@ -81,16 +81,16 @@ makepkg --printsrcinfo > .SRCINFO
 
 # Commit and push
 git add PKGBUILD .SRCINFO assistd.install
-git commit -m "Initial upload: assistd-git 0.1.0.rNN.gXXXXXXX-1"
+git commit -m "Initial upload: assistd-git 1.0.0.rNN.gXXXXXXX-1"
 git push origin master
 ```
 
-Repeat for `assistd` after tagging `v0.1.0`:
+Repeat for `assistd` after tagging `v1.0.0`:
 
 ```bash
 cd /path/to/assistd
-git tag v0.1.0
-git push origin v0.1.0
+git tag v1.0.0
+git push origin v1.0.0
 
 # Then update the assistd PKGBUILD's sha256sums and publish:
 cd dist/aur/assistd
@@ -122,4 +122,4 @@ For `assistd-git` (continuous):
 The AUR's `-git` convention separates stable releases from rolling
 HEAD builds. `yay -S assistd` always pins to a known tag; `yay -S
 assistd-git` always tracks `main`. Users opt in deliberately. Splitting
-also lets us publish today (via `-git`) before `v0.1.0` is tagged.
+also lets us publish today (via `-git`) before `v1.0.0` is tagged.

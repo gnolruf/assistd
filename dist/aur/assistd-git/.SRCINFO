@@ -1,6 +1,6 @@
 pkgbase = assistd-git
 	pkgdesc = A local-model agent daemon for Linux (LLM + voice + tools + WM integration) - git HEAD
-	pkgver = 0.1.0.r246.g9199320
+	pkgver = 1.0.0.r246.g9199320
 	pkgrel = 1
 	url = https://github.com/gnolruf/assistd
 	install = assistd.install
@@ -29,7 +29,7 @@ pkgbase = assistd-git
 	optdepends = wayland: tray-popup GUI on Wayland (dlopened at runtime)
 	optdepends = libglvnd: tray-popup GUI OpenGL renderer (dlopened at runtime)
 	optdepends = fontconfig: tray-popup GUI text rendering (dlopened at runtime)
-	provides = assistd=0.1.0.r246.g9199320
+	provides = assistd=1.0.0.r246.g9199320
 	conflicts = assistd
 	options = !lto
 	backup = etc/assistd/config.toml

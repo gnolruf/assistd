@@ -2,7 +2,7 @@
 
 pkgname=assistd-git
 _pkgname=assistd
-pkgver=0.1.0.r246.g9199320
+pkgver=1.0.0.r246.g9199320
 pkgrel=1
 pkgdesc="A local-model agent daemon for Linux (LLM + voice + tools + WM integration) - git HEAD"
 arch=('x86_64')
@@ -53,7 +53,7 @@ pkgver() {
     git describe --long --tags \
       | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
   else
-    printf "0.1.0.r%s.g%s" \
+    printf "1.0.0.r%s.g%s" \
       "$(git rev-list --count HEAD)" \
       "$(git rev-parse --short HEAD)"
   fi
