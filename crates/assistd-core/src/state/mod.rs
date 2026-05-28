@@ -132,6 +132,7 @@ impl AppState {
             Request::GetListenState { id } => self.handle_get_listen_state(id, tx).await,
             Request::VoiceToggle { id } => self.handle_voice_toggle(id, tx).await,
             Request::VoiceSkip { id } => self.handle_voice_skip(id, tx).await,
+            Request::InterruptTurn { id } => self.handle_interrupt_turn(id, tx).await,
             Request::GetVoiceState { id } => self.handle_get_voice_state(id, tx).await,
             Request::MemorySave { id, key, value } => {
                 self.handle_memory_save(id, key, value, tx).await

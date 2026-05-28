@@ -6,16 +6,25 @@
 //! - daemon events (from the tray's subscribe loop), and a Disconnect
 //!   signal that re-uses the same mpsc for compactness;
 //! - explicit `Show` commands (tray-icon left-click + wake-on events);
-//! - GUI events (focus lost, first paint after a show);
+//! - explicit `Dismiss` commands (popup close button) which hide the
+//!   popup *and* fire a one-shot `InterruptTurn` IPC to abort the
+//!   current generation and stop any TTS playback;
+//! - GUI events (first paint after a show);
 //! - a 250 ms timer that drives the auto-hide check.
+//!
+//! The popup is sticky and does not self-dismiss on focus loss, so
+//! workspace switches and clicks into other windows leave it on screen.
+//! Dismissal comes from either the auto-hide timer or an explicit
+//! `Dismiss`.
 
 use std::time::{Duration, Instant};
 
 use assistd_config::TrayPopupConfig;
-use assistd_ipc::Event;
+use assistd_ipc::{Event, IpcClient, Request};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio::time::interval;
+use uuid::Uuid;
 
 use super::state::{PopupState, PopupTracker};
 
@@ -33,8 +42,11 @@ pub enum DriverInput {
     /// Tray-icon left-click or a wake-on event matched. The popup
     /// should become visible (resetting the auto-hide timer).
     Show,
-    /// GUI thread reports focus lost — popup should hide.
-    FocusLost,
+    /// User-driven dismissal from the popup's close button. The driver
+    /// hides the popup and fires a fire-and-forget `InterruptTurn`
+    /// IPC, which cancels the in-flight LLM turn and drops any pending
+    /// TTS audio on the daemon side.
+    Dismiss,
     /// GUI thread finished its first paint after a Show. Kept as a
     /// signal in case the driver ever needs to act on the
     /// compositor-aware moment; `place_floating` handles the
@@ -58,11 +70,16 @@ pub struct PlaceRequest;
 /// One placement per wake is sufficient because
 /// [`assistd_wm::WindowManager::place_floating`] waits for and
 /// retries against the matching window-event internally.
+///
+/// `ipc` is used only on `DriverInput::Dismiss` to fire a one-shot
+/// `InterruptTurn` to the daemon. Failures (daemon down, socket
+/// missing) are logged and swallowed; the popup still hides.
 pub async fn run(
     state_tx: watch::Sender<PopupState>,
     mut rx: UnboundedReceiver<DriverInput>,
     place_tx: UnboundedSender<PlaceRequest>,
     cfg: TrayPopupConfig,
+    ipc: IpcClient,
 ) {
     let mut tracker = PopupTracker::default();
     let mut visible = false;
@@ -118,11 +135,12 @@ pub async fn run(
                             let _ = place_tx.send(PlaceRequest);
                         }
                     }
-                    DriverInput::FocusLost => {
+                    DriverInput::Dismiss => {
                         if visible {
                             visible = false;
                             push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
                         }
+                        spawn_interrupt(ipc.clone());
                     }
                     DriverInput::Mapped => {}
                 }
@@ -169,6 +187,27 @@ fn push_with_visibility(tx: &watch::Sender<PopupState>, mut snap: PopupState, vi
     });
 }
 
+/// Fire-and-forget `InterruptTurn` IPC. Detached so the driver loop
+/// never blocks on a daemon that is slow to respond (or absent
+/// entirely — the popup still hides). Failures land at warn-level.
+fn spawn_interrupt(ipc: IpcClient) {
+    tokio::spawn(async move {
+        let req = Request::InterruptTurn {
+            id: Uuid::new_v4().to_string(),
+        };
+        match ipc.one_shot(req).await {
+            Ok(stream) => {
+                if let Err(e) = stream.collect().await {
+                    tracing::warn!(target: "tray", "popup dismiss: interrupt_turn stream: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(target: "tray", "popup dismiss: interrupt_turn send failed: {e}");
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +221,15 @@ mod tests {
         }
     }
 
+    /// IPC client pointed at a non-existent socket so tests never make
+    /// network/IPC calls. The driver only uses the client from a
+    /// `Dismiss` arm, which the existing tests don't exercise; failed
+    /// connect attempts on a path that doesn't exist are still cheap
+    /// and the tests aren't asserting on the result anyway.
+    fn dummy_ipc() -> IpcClient {
+        IpcClient::with_path("/tmp/assistd-popup-tests-nonexistent.sock")
+    }
+
     async fn drain_watch(rx: &mut watch::Receiver<PopupState>) -> PopupState {
         rx.changed().await.expect("watch sender alive");
         rx.borrow_and_update().clone()
@@ -193,7 +241,7 @@ mod tests {
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, mut place_rx) = mpsc::unbounded_channel();
 
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000)));
+        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000), dummy_ipc()));
         in_tx.send(DriverInput::Show).expect("send");
         let s = drain_watch(&mut state_rx).await;
         assert!(s.visible);
@@ -207,31 +255,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn focus_lost_hides_the_popup() {
-        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
-        let (in_tx, in_rx) = mpsc::unbounded_channel();
-        let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000)));
-
-        in_tx.send(DriverInput::Show).expect("send");
-        let visible_state = drain_watch(&mut state_rx).await;
-        assert!(visible_state.visible);
-        in_tx.send(DriverInput::FocusLost).expect("send");
-        let hidden_state = drain_watch(&mut state_rx).await;
-        assert!(!hidden_state.visible);
-
-        in_tx.send(DriverInput::Shutdown).expect("send");
-        handle.await.expect("driver join");
-    }
-
-    #[tokio::test]
     async fn body_updates_while_visible_reset_the_auto_hide_timer() {
         // Sanity check: incoming Events refresh last_activity, so a
         // 1s auto-hide doesn't fire while events keep arriving.
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(1_000)));
+        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(1_000), dummy_ipc()));
 
         in_tx.send(DriverInput::Show).expect("send");
         let _ = drain_watch(&mut state_rx).await;
@@ -261,7 +291,7 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(500)));
+        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(500), dummy_ipc()));
 
         in_tx.send(DriverInput::Show).expect("send");
         let _ = drain_watch(&mut state_rx).await;
@@ -312,7 +342,7 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, popup_cfg));
+        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, popup_cfg, dummy_ipc()));
 
         in_tx
             .send(DriverInput::Event(Box::new(Event::ListenState {
@@ -343,7 +373,7 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(500)));
+        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(500), dummy_ipc()));
 
         in_tx.send(DriverInput::Show).expect("send");
         let _ = drain_watch(&mut state_rx).await;
@@ -399,7 +429,7 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000)));
+        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000), dummy_ipc()));
 
         in_tx
             .send(DriverInput::Event(Box::new(Event::ToolCall {

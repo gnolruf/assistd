@@ -67,6 +67,11 @@ impl AppState {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let _cancel_on_return = cancel.clone().drop_guard();
+        // Publish the token so an external `InterruptTurn` can reach it.
+        // The slot is held only while this turn is in flight; we clear
+        // it before releasing `agent_turn_lock` so the next queued turn
+        // starts with an empty slot.
+        *self.runtime.current_cancel.lock().await = Some(cancel.clone());
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
@@ -86,7 +91,8 @@ impl AppState {
         let start_epoch = self.subsystems.voice_output.current_epoch();
         let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
-        self.clone()
+        let done_emitted = self
+            .clone()
             .drive_event_loop(
                 id.clone(),
                 llm_rx,
@@ -101,9 +107,10 @@ impl AppState {
             .await;
 
         let gen_result = generator.await;
+        *self.runtime.current_cancel.lock().await = None;
         drop(_agent_guard);
 
-        self.finalize_turn(turn_id, gen_result, speech_handle, &tx, id)
+        self.finalize_turn(turn_id, gen_result, speech_handle, &tx, id, done_emitted)
             .await
     }
 
@@ -266,6 +273,17 @@ impl AppState {
                                     "voice_output.speak failed; sentence dropped"
                                 );
                             }
+                            // `speak()` synthesises then enqueues; if a
+                            // skip fired mid-synthesis the controller's
+                            // playback.clear() already ran, then this
+                            // call appended the just-synthesised PCM
+                            // *after* the clear. Re-check the epoch and
+                            // cancel again so the late-arriving audio
+                            // doesn't leak through.
+                            if matches!(ctrl.should_speak(start_epoch), SpeakDecision::DropForSkip)
+                            {
+                                ctrl.inner().cancel().await;
+                            }
                         }
                         SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {
                             // TTS toggled off, or skipped: drain the channel
@@ -292,6 +310,12 @@ impl AppState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Returns `true` when the loop emitted a terminal `Event::Done`
+    /// from the LLM stream. Returns `false` when the loop broke early
+    /// (cancelled turn, client gone, llm_rx dropped before
+    /// `LlmEvent::Done`). The caller uses this in
+    /// [`Self::finalize_turn`] to decide whether to emit a synthetic
+    /// `Done` so the IPC client never hangs.
     async fn drive_event_loop(
         self: Arc<Self>,
         id: String,
@@ -303,13 +327,14 @@ impl AppState {
         turn_id: Option<TurnId>,
         title_user_text: String,
         current_session: Arc<SessionId>,
-    ) {
+    ) -> bool {
         let mut awaiting_tool_result = false;
 
         let mut assistant_accum = String::new();
 
         let mut client_alive = true;
         let mut first_sentence_emitted = false;
+        let mut done_emitted = false;
 
         let events_bus = self.runtime.events_bus().clone();
         // Backdate so the first Delta emits without waiting a window.
@@ -470,6 +495,7 @@ impl AppState {
                         current_session.clone(),
                         title_user_text.clone(),
                     );
+                    done_emitted = true;
                     (Event::Done { id: id.clone() }, sentences)
                 }
             };
@@ -500,6 +526,7 @@ impl AppState {
                 break;
             }
         }
+        done_emitted
     }
 
     async fn finalize_turn(
@@ -509,6 +536,7 @@ impl AppState {
         speech_handle: JoinHandle<()>,
         tx: &mpsc::Sender<Event>,
         id: String,
+        done_emitted: bool,
     ) -> Result<()> {
         // Every exit path lands an ended_at timestamp on the turn row.
         if let Some(t) = turn_id {
@@ -527,7 +555,17 @@ impl AppState {
         let _ = speech_handle.await;
 
         match gen_result {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => {
+                // Cancellation (e.g. `Request::InterruptTurn`) makes
+                // `Agent::run_turn` return `Ok(())` mid-stream without
+                // emitting a `LlmEvent::Done`. The IPC contract still
+                // requires a terminal event per request, so synthesise
+                // one here when the event loop never observed Done.
+                if !done_emitted {
+                    let _ = tx.send(Event::Done { id }).await;
+                }
+                Ok(())
+            }
             Ok(Err(e)) => {
                 let _ = tx
                     .send(Event::Error {

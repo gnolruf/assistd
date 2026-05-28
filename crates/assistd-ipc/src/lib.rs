@@ -203,6 +203,13 @@ pub enum Request {
     /// and any pending sentences for the active query. Does not change
     /// the enabled flag. Emits `VoiceOutputState` + `Done`.
     VoiceSkip { id: String },
+    /// Interrupt the in-flight LLM turn (if any) and stop any TTS
+    /// playback associated with it. The daemon cancels the agent loop
+    /// — the originating `Query` connection observes a final `Done`
+    /// — and drains the TTS queue. Idempotent: with no turn in flight
+    /// it is a no-op apart from the TTS skip. Emits `Done` to the
+    /// caller.
+    InterruptTurn { id: String },
     /// Report whether TTS is currently enabled. Emits `VoiceOutputState`
     /// + `Done` with no state change.
     GetVoiceState { id: String },
@@ -366,6 +373,7 @@ impl Request {
             | Request::GetListenState { id }
             | Request::VoiceToggle { id }
             | Request::VoiceSkip { id }
+            | Request::InterruptTurn { id }
             | Request::GetVoiceState { id }
             | Request::MemorySave { id, .. }
             | Request::MemoryLoad { id, .. }
@@ -403,6 +411,7 @@ impl Request {
             Request::GetListenState { .. } => "get_listen_state",
             Request::VoiceToggle { .. } => "voice_toggle",
             Request::VoiceSkip { .. } => "voice_skip",
+            Request::InterruptTurn { .. } => "interrupt_turn",
             Request::GetVoiceState { .. } => "get_voice_state",
             Request::MemorySave { .. } => "memory_save",
             Request::MemoryLoad { .. } => "memory_load",
@@ -1369,6 +1378,17 @@ mod tests {
         assert_eq!(json, r#"{"type":"voice_skip","id":"vs-1"}"#);
         let parsed: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn interrupt_turn_request_roundtrip() {
+        let req = Request::InterruptTurn { id: "it-1".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"interrupt_turn","id":"it-1"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.kind(), "interrupt_turn");
+        assert_eq!(req.id(), "it-1");
     }
 
     #[test]

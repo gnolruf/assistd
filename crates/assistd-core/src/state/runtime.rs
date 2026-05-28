@@ -12,6 +12,7 @@ use assistd_ipc::Event;
 use assistd_memory::{BranchId, SessionId};
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 /// Slow subscribers that fall more than this many events behind
@@ -93,6 +94,15 @@ pub struct RuntimeState {
     /// race PTT-start by stuffing in a foreign join handle.
     pub(in crate::state) warmup_handle:
         Arc<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>>,
+    /// Cancellation handle for the currently-running agent turn, if
+    /// any. `handle_query` installs its token here after acquiring
+    /// `agent_turn_lock` and clears the slot before releasing the
+    /// lock, so at most one token is ever present. A
+    /// [`Request::InterruptTurn`](assistd_ipc::Request::InterruptTurn)
+    /// dispatch takes the token out and calls `cancel()`, which
+    /// unblocks the agent's `select!` against this same token and
+    /// shuts the turn down on the next await point.
+    pub(in crate::state) current_cancel: Arc<Mutex<Option<CancellationToken>>>,
     events_bus: broadcast::Sender<Event>,
 }
 
@@ -106,6 +116,7 @@ impl RuntimeState {
             agent_turn_lock: Arc::new(Mutex::new(())),
             persistence_tracker: TaskTracker::new(),
             warmup_handle: Arc::new(Mutex::new(None)),
+            current_cancel: Arc::new(Mutex::new(None)),
             events_bus,
         }
     }

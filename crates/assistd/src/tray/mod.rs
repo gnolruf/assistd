@@ -68,8 +68,10 @@ pub async fn run(args: TrayArgs) -> Result<()> {
         );
     }
 
+    let ipc = IpcClient::new();
+
     #[cfg(feature = "tray-popup")]
-    let popup_handle = popup::spawn(&config).await?;
+    let popup_handle = popup::spawn(&config, ipc.clone()).await?;
     #[cfg(feature = "tray-popup")]
     let popup_sink = popup_handle.as_ref().map(|h| h.sink.clone());
     #[cfg(not(feature = "tray-popup"))]
@@ -86,7 +88,6 @@ pub async fn run(args: TrayArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to register StatusNotifierItem on DBus: {e}"))?;
     tracing::info!(target: "tray", "tray icon registered on DBus");
 
-    let ipc = IpcClient::new();
     let subscribe_handle = handle.clone();
     let subscribe_ipc = ipc.clone();
     // Move popup_sink into the subscribe task — it's not used after the

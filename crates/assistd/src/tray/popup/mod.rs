@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle as ThreadJoinHandle;
 
 use assistd_config::{Config, TrayPopupConfig};
-use assistd_ipc::Event;
+use assistd_ipc::{Event, IpcClient};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -135,7 +135,10 @@ impl PopupHandle {
 /// disabled by config; otherwise builds the WM backend, spawns the
 /// driver task, the placement worker, and the GUI thread, and returns
 /// a [`PopupHandle`] the tray can shut down at exit.
-pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
+///
+/// `ipc` is handed to the driver so the close-button dismiss path
+/// can fire `Request::InterruptTurn` at the daemon.
+pub async fn spawn(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupHandle>> {
     if !cfg.tray.popup.enabled {
         tracing::info!(target: "tray", "popup: disabled by config");
         return Ok(None);
@@ -209,7 +212,7 @@ pub async fn spawn(cfg: &Config) -> anyhow::Result<Option<PopupHandle>> {
     ));
 
     let driver_cfg = popup_cfg.clone();
-    let driver_task = tokio::spawn(driver_run(state_tx, driver_rx, place_tx, driver_cfg));
+    let driver_task = tokio::spawn(driver_run(state_tx, driver_rx, place_tx, driver_cfg, ipc));
 
     let app_id = assistd_config::defaults::DEFAULT_TRAY_POPUP_APP_ID.to_string();
 

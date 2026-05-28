@@ -2,10 +2,16 @@
 //!
 //! Renders two labels — body and footer — from the latest
 //! [`PopupState`] snapshot held in a `watch::Receiver`. The GUI
-//! thread owns the entire eframe event loop; it sends focus-lost and
-//! first-paint events back to the tokio-side driver over the driver's
+//! thread owns the entire eframe event loop; it sends the first-paint
+//! Mapped event back to the tokio-side driver over the driver's
 //! `UnboundedSender`, and observes the `visible` flag on the watch to
 //! toggle the viewport between shown and hidden.
+//!
+//! The popup is intentionally a notification surface: it does not
+//! dismiss itself when input focus moves to another window, and the
+//! placement command (see `assistd_wm::criteria`) makes the window
+//! sticky so it persists across workspace switches. Dismissal is
+//! driven entirely by the driver's auto-hide timer.
 //!
 //! A small tokio task ([`wake_egui_on_state_change`]) runs on the
 //! workspace runtime and calls `ctx.request_repaint()` whenever the
@@ -109,20 +115,14 @@ async fn wake_egui_on_state_change(mut rx: watch::Receiver<PopupState>, ctx: egu
     ctx.request_repaint();
 }
 
-/// eframe `App` for the popup. Visibility transitions, focus tracking,
-/// and the first-paint Mapped signal live in `logic`; `ui` only
-/// renders the three labels.
+/// eframe `App` for the popup. Visibility transitions and the
+/// first-paint Mapped signal live in `logic`; `ui` only renders the
+/// three labels. The popup deliberately ignores focus changes — see
+/// the module-level comment for why.
 struct PopupApp {
     state_rx: watch::Receiver<PopupState>,
     event_tx: UnboundedSender<DriverInput>,
     last_visible: bool,
-    /// True once the popup has organically gained input focus (i.e.
-    /// the user clicked it). Until that happens, focus-lost events
-    /// don't dismiss the popup — a notification-style window that
-    /// never grabbed focus has nothing to lose, and treating the
-    /// brief initial focus dance as dismissal would hide the popup
-    /// the moment the user resumes typing in their terminal.
-    has_been_focused: bool,
     awaiting_first_paint: bool,
     /// True until `logic` runs for the first time. Used to force a
     /// `Visible(false)` viewport command on startup so the popup never
@@ -142,7 +142,6 @@ impl PopupApp {
             state_rx,
             event_tx,
             last_visible: false,
-            has_been_focused: false,
             awaiting_first_paint: false,
             first_frame: true,
             current: PopupState::default(),
@@ -159,30 +158,12 @@ impl eframe::App for PopupApp {
             ctx.send_viewport_cmd(ViewportCommand::Visible(self.current.visible));
             if self.current.visible && visibility_changed {
                 self.awaiting_first_paint = true;
-                // Each new show starts the focus tracker over; the
-                // popup hasn't organically gained focus yet.
-                self.has_been_focused = false;
             }
             self.last_visible = self.current.visible;
             self.first_frame = false;
         }
 
         if self.current.visible {
-            // Default to false on unknown so we don't pretend to be
-            // focused before we've actually observed it. The popup
-            // never auto-grabs focus (no ViewportCommand::Focus on
-            // show) so users can keep typing in their terminal while
-            // it surfaces.
-            let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
-            if focused {
-                self.has_been_focused = true;
-            } else if self.has_been_focused {
-                // We had focus, now we don't — treat as user-driven
-                // dismissal.
-                let _ = self.event_tx.send(DriverInput::FocusLost);
-                self.has_been_focused = false;
-            }
-
             if self.awaiting_first_paint {
                 self.awaiting_first_paint = false;
                 let _ = self.event_tx.send(DriverInput::Mapped);
@@ -197,14 +178,22 @@ impl eframe::App for PopupApp {
             return;
         }
         ui.vertical(|ui| {
-            if let Some((label, color)) = activity_label(&self.current.activity) {
-                ui.label(
-                    RichText::new(label)
-                        .color(color)
-                        .font(FontId::new(11.0, FontFamily::Proportional)),
-                );
-                ui.add_space(2.0);
-            }
+            ui.horizontal(|ui| {
+                let header = activity_label(&self.current.activity);
+                if let Some((label, color)) = header.as_ref() {
+                    ui.label(
+                        RichText::new(label)
+                            .color(*color)
+                            .font(FontId::new(11.0, FontFamily::Proportional)),
+                    );
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if close_button(ui).clicked() {
+                        let _ = self.event_tx.send(DriverInput::Dismiss);
+                    }
+                });
+            });
+            ui.add_space(2.0);
             if self.current.body.is_empty() {
                 ui.label(
                     RichText::new("(no reply yet)")
@@ -238,17 +227,38 @@ impl eframe::App for PopupApp {
     }
 }
 
+/// Render the top-right close button. Returns the egui [`Response`] so
+/// the caller can detect clicks. Uses U+00D7 MULTIPLICATION SIGN (the
+/// Latin-1 "×") rather than U+2715 / U+2717: the bundled default eframe
+/// font (Ubuntu-Light) ships Latin-1 supplement but not Dingbats, so
+/// the dingbat "✕" rendered as the tofu fallback box.
+fn close_button(ui: &mut egui::Ui) -> egui::Response {
+    let btn = egui::Button::new(
+        RichText::new("\u{00D7}")
+            .color(Color32::GRAY)
+            .font(FontId::new(14.0, FontFamily::Proportional)),
+    )
+    .frame(false);
+    ui.add(btn).on_hover_text("Close (interrupts the agent)")
+}
+
 /// Map [`PopupActivity`] to the one-line status header rendered above
 /// the body. Returns `None` when the popup should be header-less (the
 /// idle case — the body already conveys "last completed turn").
+///
+/// The leading marker is U+00B7 MIDDLE DOT (Latin-1 supplement) rather
+/// than U+25CF BLACK CIRCLE: the default eframe font doesn't cover
+/// Geometric Shapes, so the original "●" rendered as a tofu box.
 fn activity_label(activity: &PopupActivity) -> Option<(String, Color32)> {
     match activity {
         PopupActivity::Idle => None,
-        PopupActivity::Streaming => Some(("● replying…".into(), Color32::LIGHT_GREEN)),
-        PopupActivity::Thinking => Some(("● thinking…".into(), Color32::YELLOW)),
+        PopupActivity::Streaming => Some(("\u{00B7} replying…".into(), Color32::LIGHT_GREEN)),
+        PopupActivity::Thinking => Some(("\u{00B7} thinking…".into(), Color32::YELLOW)),
         PopupActivity::RunningTool { name } => {
-            Some((format!("● running {name}…"), Color32::LIGHT_BLUE))
+            Some((format!("\u{00B7} running {name}…"), Color32::LIGHT_BLUE))
         }
-        PopupActivity::Listening => Some(("● listening…".into(), Color32::from_rgb(255, 140, 0))),
+        PopupActivity::Listening => {
+            Some(("\u{00B7} listening…".into(), Color32::from_rgb(255, 140, 0)))
+        }
     }
 }

@@ -197,6 +197,28 @@ impl AppState {
         Ok(())
     }
 
+    /// Interrupt the in-flight LLM turn (if any) and drop any pending
+    /// TTS audio. The agent loop is cancelled by flipping the per-turn
+    /// `CancellationToken` published in `runtime.current_cancel`; on
+    /// the next await point inside `Agent::run_turn` the select arm
+    /// fires and `handle_query` proceeds to its `Done` path on the
+    /// originating connection. The TTS skip drains queued sentences so
+    /// playback stops at the current chunk boundary.
+    ///
+    /// Idempotent: with no turn in flight, this is just a TTS skip.
+    pub(super) async fn handle_interrupt_turn(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        if let Some(token) = self.runtime.current_cancel.lock().await.take() {
+            token.cancel();
+        }
+        self.subsystems.voice_output.skip().await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
     /// Report whether TTS is currently enabled.
     pub(super) async fn handle_get_voice_state(
         self: Arc<Self>,
