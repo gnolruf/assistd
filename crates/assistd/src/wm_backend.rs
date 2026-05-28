@@ -1,9 +1,4 @@
-//! Shared window-manager backend construction.
-//!
-//! The daemon ([`crate::wm_init`]) and the tray popup
-//! ([`crate::tray::popup`]) both resolve the configured compositor and
-//! start the matching `assistd-wm` backend. The logic lives here so the
-//! two feature-gated call sites can't drift.
+//! Shared window-manager backend construction for daemon and tray popup.
 
 use std::sync::Arc;
 
@@ -11,17 +6,12 @@ use assistd_config::{CompositorType, Config, compositor::detect_from_env};
 use assistd_wm::{I3Backend, NoWindowManager, SwayBackend, WindowManager, WmHandle};
 use tokio::sync::watch;
 
-/// A started window-manager backend: the trait object callers issue
-/// operations through, plus the supervisor handle used to shut it down.
-/// `handle` is `None` when no compositor backend connected, in which
-/// case `manager` is a [`NoWindowManager`] that rejects every operation.
 pub struct WmBackend {
     pub manager: Arc<dyn WindowManager>,
     pub handle: Option<WmHandle>,
 }
 
 impl WmBackend {
-    /// A disconnected backend: every window operation fails fast.
     fn disconnected() -> Self {
         Self {
             manager: Arc::new(NoWindowManager),
@@ -30,12 +20,8 @@ impl WmBackend {
     }
 }
 
-/// Resolve the configured compositor (explicit or auto-detected) and
-/// start the matching backend.
-///
-/// Falls back to a disconnected [`WmBackend`] when no supported
-/// compositor is found or the backend fails to connect, so callers can
-/// degrade gracefully instead of aborting startup.
+/// Resolve the configured compositor and start its backend, falling
+/// back to a disconnected [`WmBackend`] when none is available.
 pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) -> WmBackend {
     let resolved = match config.compositor.compositor_type {
         CompositorType::Auto => match detect_from_env(

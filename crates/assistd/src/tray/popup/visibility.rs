@@ -1,21 +1,4 @@
-//! Popup driver: a single tokio task that owns the [`PopupTracker`],
-//! the visibility state machine, and the `watch::Sender` the GUI
-//! thread reads from.
-//!
-//! Inputs:
-//! - daemon events (from the tray's subscribe loop), and a Disconnect
-//!   signal that re-uses the same mpsc for compactness;
-//! - explicit `Show` commands (tray-icon left-click + wake-on events);
-//! - explicit `Dismiss` commands (popup close button) which hide the
-//!   popup *and* fire a one-shot `InterruptTurn` IPC to abort the
-//!   current generation and stop any TTS playback;
-//! - GUI events (first paint after a show);
-//! - a 250 ms timer that drives the auto-hide check.
-//!
-//! The popup is sticky and does not self-dismiss on focus loss, so
-//! workspace switches and clicks into other windows leave it on screen.
-//! Dismissal comes from either the auto-hide timer or an explicit
-//! `Dismiss`.
+//! Popup driver task: visibility state machine plus event ingestion.
 
 use std::time::{Duration, Instant};
 
@@ -28,52 +11,19 @@ use uuid::Uuid;
 
 use super::state::{PopupState, PopupTracker};
 
-/// One input to the driver loop. Bundled into a single enum so the
-/// driver can select! over a single mpsc and a single ticker without
-/// fanning to many receivers. The `Event` variant is boxed because
-/// `assistd_ipc::Event` is ~230 bytes and dominates the enum size
-/// otherwise.
 #[derive(Debug)]
 pub enum DriverInput {
-    /// New IPC event from the daemon's broadcast bus.
     Event(Box<Event>),
-    /// IPC connection down — subscribe loop is in backoff or restart.
     Disconnected,
-    /// Tray-icon left-click or a wake-on event matched. The popup
-    /// should become visible (resetting the auto-hide timer).
     Show,
-    /// User-driven dismissal from the popup's close button. The driver
-    /// hides the popup and fires a fire-and-forget `InterruptTurn`
-    /// IPC, which cancels the in-flight LLM turn and drops any pending
-    /// TTS audio on the daemon side.
     Dismiss,
-    /// GUI thread finished its first paint after a Show. Kept as a
-    /// signal in case the driver ever needs to act on the
-    /// compositor-aware moment; `place_floating` handles the
-    /// map-time race against the compositor internally, so for now
-    /// the driver doesn't need to react.
     Mapped,
-    /// Cooperative shutdown.
     Shutdown,
 }
 
-/// Request sent to the placement worker. The worker holds the
-/// criteria + anchor; the request itself is a unit value because all
-/// the popup ever asks for is "place me now."
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaceRequest;
 
-/// Run the driver loop until a [`DriverInput::Shutdown`] arrives or
-/// all senders are dropped. Pushes a new [`PopupState`] onto the
-/// `watch` whenever the visible content changes; sends a single
-/// [`PlaceRequest`] onto `place_tx` when the popup becomes visible.
-/// One placement per wake is sufficient because
-/// [`assistd_wm::WindowManager::place_floating`] waits for and
-/// retries against the matching window-event internally.
-///
-/// `ipc` is used only on `DriverInput::Dismiss` to fire a one-shot
-/// `InterruptTurn` to the daemon. Failures (daemon down, socket
-/// missing) are logged and swallowed; the popup still hides.
 pub async fn run(
     state_tx: watch::Sender<PopupState>,
     mut rx: UnboundedReceiver<DriverInput>,
@@ -109,15 +59,10 @@ pub async fn run(
                         if visible {
                             last_activity = Instant::now();
                         }
-                        // Held-open → idle transition: restart the
-                        // auto-hide countdown from this instant so the
-                        // popup lingers for the full auto_hide_ms after
-                        // the agent finishes, regardless of how long
-                        // the busy stretch was. Same treatment for the
-                        // speaking → silent edge: TTS playback can
-                        // extend well past the turn's `Done`, and we
-                        // want the auto-hide window to start fresh
-                        // when the voice actually stops.
+                        // Restart the auto-hide countdown on each
+                        // held-open → idle edge (busy and speaking)
+                        // so the popup lingers for the full window
+                        // after the agent actually stops working.
                         let is_busy = tracker.is_busy();
                         let is_speaking = tracker.is_speaking();
                         if (was_busy && !is_busy) || (was_speaking && !is_speaking) {
@@ -149,13 +94,6 @@ pub async fn run(
                 if !visible {
                     continue;
                 }
-                // Pin the popup open while a turn is in flight — the
-                // gap between a ToolCall and its ToolResult is silent
-                // on the wire but the agent is still working, so an
-                // auto-hide here would dismiss the popup mid-tool-call.
-                // Same treatment while TTS is playing back: the user is
-                // listening to the response and shouldn't lose the
-                // activity surface mid-sentence.
                 if tracker.is_busy() || tracker.is_speaking() {
                     continue;
                 }
@@ -175,8 +113,6 @@ pub async fn run(
 
 fn push_with_visibility(tx: &watch::Sender<PopupState>, mut snap: PopupState, visible: bool) {
     snap.visible = visible;
-    // send_if_modified avoids waking the GUI thread when nothing the
-    // user can see actually changed.
     tx.send_if_modified(|cur| {
         if *cur != snap {
             *cur = snap;
@@ -187,9 +123,6 @@ fn push_with_visibility(tx: &watch::Sender<PopupState>, mut snap: PopupState, vi
     });
 }
 
-/// Fire-and-forget `InterruptTurn` IPC. Detached so the driver loop
-/// never blocks on a daemon that is slow to respond (or absent
-/// entirely — the popup still hides). Failures land at warn-level.
 fn spawn_interrupt(ipc: IpcClient) {
     tokio::spawn(async move {
         let req = Request::InterruptTurn {
@@ -221,11 +154,6 @@ mod tests {
         }
     }
 
-    /// IPC client pointed at a non-existent socket so tests never make
-    /// network/IPC calls. The driver only uses the client from a
-    /// `Dismiss` arm, which the existing tests don't exercise; failed
-    /// connect attempts on a path that doesn't exist are still cheap
-    /// and the tests aren't asserting on the result anyway.
     fn dummy_ipc() -> IpcClient {
         IpcClient::with_path("/tmp/assistd-popup-tests-nonexistent.sock")
     }
@@ -256,8 +184,6 @@ mod tests {
 
     #[tokio::test]
     async fn body_updates_while_visible_reset_the_auto_hide_timer() {
-        // Sanity check: incoming Events refresh last_activity, so a
-        // 1s auto-hide doesn't fire while events keep arriving.
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
@@ -286,8 +212,6 @@ mod tests {
 
     #[tokio::test]
     async fn in_flight_turn_pins_popup_open_past_auto_hide() {
-        // While a turn is in flight, the popup must stay visible past
-        // auto_hide_ms — even when no events arrive — until Done.
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
@@ -304,8 +228,6 @@ mod tests {
             .expect("send");
         let _ = drain_watch(&mut state_rx).await;
 
-        // Quiet stretch comfortably longer than auto_hide_ms (500ms);
-        // the in-flight turn must hold the popup open.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert!(
             state_rx.borrow().visible,
@@ -317,8 +239,6 @@ mod tests {
             .expect("send");
         let _ = drain_watch(&mut state_rx).await;
 
-        // After Done, the auto-hide window starts fresh from this
-        // moment; wait it out and confirm the popup closes.
         tokio::time::sleep(Duration::from_millis(900)).await;
         assert!(
             !state_rx.borrow().visible,
@@ -331,9 +251,6 @@ mod tests {
 
     #[tokio::test]
     async fn listening_swaps_in_the_longer_auto_hide_window() {
-        // With listening active, auto-hide uses listen_auto_hide_ms
-        // instead of the shorter default — so the popup outlives the
-        // regular timeout but still dismisses eventually.
         let popup_cfg = TrayPopupConfig {
             auto_hide_ms: 500,
             listen_auto_hide_ms: 2000,
@@ -353,7 +270,6 @@ mod tests {
         in_tx.send(DriverInput::Show).expect("send");
         let _ = drain_watch(&mut state_rx).await;
 
-        // Past the short timeout, well under the listen-extended one.
         tokio::time::sleep(Duration::from_millis(900)).await;
         assert!(
             state_rx.borrow().visible,
@@ -366,10 +282,6 @@ mod tests {
 
     #[tokio::test]
     async fn speaking_pins_popup_past_done_then_auto_hides_after_silence() {
-        // After Done, TTS playback can run for seconds. While
-        // SpeakingState{true} is in flight, the popup must stay open
-        // past auto_hide_ms; once SpeakingState{false} arrives, the
-        // auto-hide countdown starts fresh from that instant.
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
@@ -378,7 +290,6 @@ mod tests {
         in_tx.send(DriverInput::Show).expect("send");
         let _ = drain_watch(&mut state_rx).await;
 
-        // Turn starts, finishes, but TTS is mid-playback.
         in_tx
             .send(DriverInput::Event(Box::new(Event::LastDelta {
                 id: "a".into(),
@@ -397,14 +308,12 @@ mod tests {
             .expect("send");
         let _ = drain_watch(&mut state_rx).await;
 
-        // Past the short auto-hide; speaking should hold the popup.
         tokio::time::sleep(Duration::from_millis(900)).await;
         assert!(
             state_rx.borrow().visible,
             "popup should stay visible while TTS is playing"
         );
 
-        // Playback ends — auto-hide starts fresh from this moment.
         in_tx
             .send(DriverInput::Event(Box::new(Event::SpeakingState {
                 id: "a".into(),
@@ -424,8 +333,6 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_event_only_pushes_when_state_changed() {
-        // The driver's send_if_modified means watch only wakes when the
-        // visible snapshot actually differs.
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();

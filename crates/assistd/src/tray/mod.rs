@@ -1,21 +1,4 @@
-//! `assistd tray`: a long-lived StatusNotifierItem client that
-//! subscribes to the daemon's broadcast bus and reflects daemon state
-//! as an icon in Waybar / i3status-rust / KDE / GNOME-with-AppIndicator.
-//!
-//! Three tasks make up the runtime:
-//!
-//! - the ksni service, owning the [`TrayItem`] and answering DBus
-//!   property/menu queries;
-//! - the [`subscribe`] loop, holding a passive `Request::Subscribe`
-//!   on the daemon socket and pushing event updates into the tray
-//!   through `Handle::update`;
-//! - the [`menu::run_actions`] task, draining the mpsc channel that
-//!   menu activate callbacks feed and issuing one-shot
-//!   `Request::SetPresence` calls.
-//!
-//! The tray never auto-spawns the daemon — it stays in the
-//! `Disconnected` icon variant until the user starts `assistd daemon`
-//! separately, then reconnects on the next backoff tick.
+//! `assistd tray`: StatusNotifierItem client mirroring daemon state.
 
 use std::path::PathBuf;
 
@@ -35,7 +18,6 @@ mod subscribe;
 
 use menu::TrayItem;
 
-/// Arguments for the `tray` subcommand.
 #[derive(Args)]
 pub struct TrayArgs {
     /// Path to config file [default: `~/.config/assistd/config.toml`]
@@ -43,12 +25,6 @@ pub struct TrayArgs {
     pub config: Option<PathBuf>,
 }
 
-/// Launch the tray and run until SIGINT/SIGTERM or a `Quit` menu click.
-///
-/// # Errors
-///
-/// Returns an error if config loading fails, the session DBus is
-/// unavailable, or the ksni service cannot register on DBus.
 pub async fn run(args: TrayArgs) -> Result<()> {
     init_tracing();
 
@@ -90,8 +66,6 @@ pub async fn run(args: TrayArgs) -> Result<()> {
 
     let subscribe_handle = handle.clone();
     let subscribe_ipc = ipc.clone();
-    // Move popup_sink into the subscribe task — it's not used after the
-    // activate-callback was built above, so we don't need a clone.
     let subscribe_task =
         tokio::spawn(
             async move { subscribe::run(subscribe_handle, subscribe_ipc, popup_sink).await },
@@ -111,9 +85,6 @@ pub async fn run(args: TrayArgs) -> Result<()> {
     Ok(())
 }
 
-/// Build the optional ksni-activate callback from the popup sink, when
-/// the popup feature is on. Without the feature, returns `None` so the
-/// tray-icon left-click does nothing.
 #[cfg(feature = "tray-popup")]
 fn build_activate_callback(sink: &Option<popup::PopupSink>) -> Option<menu::ActivateCallback> {
     let sink = sink.as_ref()?.clone();
@@ -128,8 +99,6 @@ fn build_activate_callback(_sink: &Option<()>) -> Option<menu::ActivateCallback>
     None
 }
 
-/// Block until any of: Ctrl-C, SIGTERM, or the menu-action task
-/// finishing (which happens when the user clicks Quit).
 async fn wait_for_shutdown(action_task: tokio::task::JoinHandle<Result<()>>) {
     let mut sigterm = match signal(SignalKind::terminate()) {
         Ok(s) => s,

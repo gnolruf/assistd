@@ -38,25 +38,13 @@ pub fn format_criteria_clause(c: &PlacementCriteria) -> String {
     }
 }
 
-/// Build the `floating enable, resize set W H, move position X Y,
-/// sticky enable` payload for the configured anchor, given the focused
-/// workspace's pixel rect.
+/// Build the `floating enable, resize, move position, sticky enable`
+/// payload for the configured anchor on the focused workspace.
 ///
-/// We use an explicit pixel position (`move position {X}px {Y}px`)
-/// rather than `move position 100 ppt 100 ppt, move left Wpx` because
-/// i3 silently clamps off-screen ppt-based positions to keep some
-/// portion of the window visible. With clamping in play, the
-/// `move position` becomes a near-no-op and the chained `move left`
-/// then walks the window leftward by `W` pixels on each placement —
-/// the popup ends up further off-screen with every wake event.
-///
-/// Pixel coordinates are output-relative (no `absolute` keyword) so
-/// multi-monitor setups continue to anchor the popup to whichever
-/// output the focused workspace currently lives on.
-///
-/// `sticky enable` keeps the floating popup visible on every workspace
-/// of its output, so switching workspaces (mod+N on i3, swaymsg
-/// workspace N on sway) doesn't take it away from the user.
+/// Uses explicit pixel positions (`move position {X}px {Y}px`) because
+/// i3's ppt-based positioning silently clamps off-screen values, which
+/// makes a follow-up `move left Wpx` walk the popup further off-screen
+/// on every wake.
 pub fn format_place_floating_pixels(
     c: &PlacementCriteria,
     anchor: PlacementAnchor,

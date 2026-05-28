@@ -203,12 +203,8 @@ pub enum Request {
     /// and any pending sentences for the active query. Does not change
     /// the enabled flag. Emits `VoiceOutputState` + `Done`.
     VoiceSkip { id: String },
-    /// Interrupt the in-flight LLM turn (if any) and stop any TTS
-    /// playback associated with it. The daemon cancels the agent loop
-    /// — the originating `Query` connection observes a final `Done`
-    /// — and drains the TTS queue. Idempotent: with no turn in flight
-    /// it is a no-op apart from the TTS skip. Emits `Done` to the
-    /// caller.
+    /// Cancel the in-flight agent turn (if any) and drop queued TTS
+    /// audio. Idempotent. Emits `Done`.
     InterruptTurn { id: String },
     /// Report whether TTS is currently enabled. Emits `VoiceOutputState`
     /// + `Done` with no state change.
@@ -488,12 +484,8 @@ pub enum Event {
     /// / `VoiceSkip` / `GetVoiceState`. Skip leaves the flag unchanged
     /// (true if synthesis was on before the skip).
     VoiceOutputState { id: String, enabled: bool },
-    /// TTS playback state for a turn. Emitted onto the broadcast bus
-    /// when a turn's speech worker enqueues its first sentence
-    /// (`speaking: true`) and again once the playback queue drains
-    /// (`speaking: false`). Turns with synthesis disabled or no spoken
-    /// sentences emit nothing. `id` echoes the originating turn id so
-    /// passive subscribers can correlate with `Delta` / `LastDelta`.
+    /// TTS playback state for a turn: `speaking: true` on the first
+    /// enqueued sentence, `false` once the playback queue drains.
     SpeakingState { id: String, speaking: bool },
     /// One semantic-search hit emitted by `MemorySemanticSearch`. The
     /// daemon emits zero or more of these ranked by cosine similarity

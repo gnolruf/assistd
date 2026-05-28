@@ -1,18 +1,4 @@
-//! Floating activity popup spawned alongside the tray icon (feature
-//! `tray-popup`). Subscribes to the same daemon event stream as the
-//! tray, renders a small borderless window near the system-tray
-//! corner, and delegates placement to the compositor through
-//! `assistd-wm`.
-//!
-//! Spawned from [`crate::tray::run`] when the feature is enabled. Owns:
-//!
-//! - the watch channel the GUI thread reads from;
-//! - a driver tokio task that ingests events, runs the visibility
-//!   state machine, and pushes new snapshots;
-//! - the WM backend + placement worker task that turns "popup just
-//!   became visible" into a `floating enable, resize set, move
-//!   position …` IPC sequence on i3 / sway;
-//! - the dedicated OS thread that runs the eframe event loop.
+//! Floating activity popup spawned alongside the tray icon.
 
 use std::sync::Arc;
 use std::thread::JoinHandle as ThreadJoinHandle;
@@ -36,10 +22,7 @@ use wm_bridge::{
     WmBackendBundle, anchor_from_config, build_wm_backend, place_worker, popup_criteria,
 };
 
-/// Hook handed to the tray's subscribe loop. The subscribe loop calls
-/// [`PopupSink::ingest`] after pushing each event into the tray icon's
-/// `TrayItem`; it's a no-op when the popup feature is disabled at the
-/// call site (we return `None` from [`spawn`] in that path).
+/// Hook the tray's subscribe loop calls into for each daemon event.
 #[derive(Clone)]
 pub struct PopupSink {
     driver_tx: UnboundedSender<DriverInput>,
@@ -49,10 +32,8 @@ pub struct PopupSink {
 }
 
 impl PopupSink {
-    /// Forward a daemon event into the driver task and, if the event
-    /// matches a configured wake rule, also send a `Show`. The event
-    /// is boxed because `assistd_ipc::Event` is ~230 bytes and would
-    /// dominate the [`DriverInput`] enum size otherwise.
+    /// Forward an event into the driver, plus a `Show` when the event
+    /// matches a configured wake rule.
     pub fn ingest(&self, ev: &Event) {
         if self.matches_wake_rule(ev) {
             let _ = self.driver_tx.send(DriverInput::Show);
@@ -62,13 +43,10 @@ impl PopupSink {
             .send(DriverInput::Event(Box::new(ev.clone())));
     }
 
-    /// Tell the popup the daemon socket dropped.
     pub fn set_disconnected(&self) {
         let _ = self.driver_tx.send(DriverInput::Disconnected);
     }
 
-    /// Sender exposed so the tray-icon menu code can hand it to
-    /// `TrayItem` for the left-click handler.
     pub fn show_sender(&self) -> UnboundedSender<DriverInput> {
         self.driver_tx.clone()
     }
@@ -85,8 +63,7 @@ impl PopupSink {
     }
 }
 
-/// Live popup. Holds every spawned task/thread; [`PopupHandle::shutdown`]
-/// drains them in the right order.
+/// Owns every task and thread the popup spawned.
 pub struct PopupHandle {
     pub sink: PopupSink,
     driver_task: JoinHandle<()>,
@@ -97,22 +74,12 @@ pub struct PopupHandle {
 }
 
 impl PopupHandle {
-    /// Shut everything down cooperatively: tell the driver to quit
-    /// (which drops the watch sender, which wakes the egui-waker
-    /// task, which sends `ViewportCommand::Close` to the GUI thread).
-    /// Then drain the placement worker, join the GUI thread, and
-    /// stop the WM backend.
     pub async fn shutdown(mut self) {
         let _ = self.sink.driver_tx.send(DriverInput::Shutdown);
         let _ = self.driver_task.await;
-        // Dropping the senders inside the sink lets the place worker
-        // observe EOF and exit.
         drop(self.sink);
         let _ = self.place_task.await;
         if let Some(t) = self.gui_thread.take() {
-            // std::thread::join blocks; offload to spawn_blocking so
-            // the tokio worker stays available for the egui-waker
-            // task that's busy sending Close to the GUI loop.
             let join = tokio::task::spawn_blocking(move || t.join()).await;
             match join {
                 Ok(Ok(())) => {}
@@ -131,13 +98,7 @@ impl PopupHandle {
     }
 }
 
-/// Spawn the popup subsystem. Returns `Ok(None)` when the popup is
-/// disabled by config; otherwise builds the WM backend, spawns the
-/// driver task, the placement worker, and the GUI thread, and returns
-/// a [`PopupHandle`] the tray can shut down at exit.
-///
-/// `ipc` is handed to the driver so the close-button dismiss path
-/// can fire `Request::InterruptTurn` at the daemon.
+/// Spawn the popup subsystem; `Ok(None)` when disabled by config.
 pub async fn spawn(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupHandle>> {
     if !cfg.tray.popup.enabled {
         tracing::info!(target: "tray", "popup: disabled by config");
@@ -155,18 +116,9 @@ pub async fn spawn(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupH
 
     let anchor = anchor_from_config(&popup_cfg);
 
-    // Compute a best-effort initial position so eframe creates the
-    // window at the configured corner from the very first map — this
-    // is what kills the brief "popup flashes in the centre" on the
-    // first wake. Ask the WM backend for the focused output's scale
-    // and scale the configured size by it (a configured 360×120 popup
-    // becomes 420×140 physical at scale 1.17). On sway this comes
-    // straight from the compositor's output IPC reply; on i3 the
-    // backend cascades through `WINIT_X11_SCALE_FACTOR`, `Xft.dpi` in
-    // xrdb, and RandR-derived DPI to match what winit will apply
-    // to the popup window. The actual rect snap via `place_floating`
-    // then locks in the precise pixel position once the window is
-    // mapped, so any residual error here is invisible.
+    // Pre-position the window so it never flashes in the centre before
+    // place_floating snaps it. Scale by the focused output's DPI so the
+    // size matches what winit will apply.
     let scale = match manager.focused_output_scale().await {
         Ok(s) => {
             tracing::info!(target: "tray", "popup: focused-output scale = {s:.4}");
@@ -219,12 +171,7 @@ pub async fn spawn(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupH
     let width = popup_cfg.width;
     let height = popup_cfg.height;
     let gui_state_rx = state_rx.clone();
-    // The GUI thread reports focus-lost / first-paint straight onto the
-    // driver channel: `UnboundedSender::send` is a plain non-async call
-    // with no runtime requirement, so no std-mpsc bridge task is needed.
     let gui_event_tx = driver_tx.clone();
-    // Capture the workspace runtime handle before crossing the
-    // thread boundary; window::run uses it to spawn the egui waker.
     let runtime = tokio::runtime::Handle::current();
     let gui_thread = std::thread::Builder::new()
         .name("assistd-popup-gui".into())
@@ -288,7 +235,6 @@ mod tests {
         let scaled = scale_anchor_size(a, 1.1666666);
         assert_eq!(scaled.width, 420);
         assert_eq!(scaled.height, 140);
-        // Offsets and corner are not touched.
         assert_eq!(scaled.offset_x, -10);
         assert_eq!(scaled.offset_y, -30);
         assert_eq!(scaled.corner, AnchorCorner::BottomRight);

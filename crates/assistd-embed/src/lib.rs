@@ -8,31 +8,12 @@
     )
 )]
 
-//! Embedding subsystem: a dedicated llama-server instance that serves
-//! `/v1/embeddings`, plus the [`Embedder`] trait callers depend on.
+//! Embedding subsystem: a dedicated llama-server `/v1/embeddings`
+//! instance plus the [`Embedder`] trait callers depend on.
 //!
-//! Topology rationale (vs. swapping models on the chat router):
-//! - The chat server runs in **router mode** with on-demand model load/unload
-//!   driven by the presence state machine. Toggling `--embedding` per request
-//!   would require server-level reconfiguration that llama.cpp doesn't
-//!   support at runtime.
-//! - The embedding model is small enough (~30-300 MB Q4) to keep resident
-//!   on CPU 24/7 without VRAM pressure.
-//! - Embedding stays available when the chat router is `Drowsy` /
-//!   `Sleeping`, so semantic retrieval keeps working in low-power states.
-//!
-//! Public surface:
-//! - [`Embedder`] - trait `AppState`/tools hold as `Arc<dyn Embedder>`.
-//! - [`NoEmbedder`] - successful-no-op fallback used when the subsystem is
-//!   disabled in config or fails to start (mirrors `NoMemoryStore` /
-//!   `NoVoiceOutput`).
-//! - [`LlamaEmbedder`] - concrete HTTP client for an `/v1/embeddings`
-//!   endpoint.
-//! - [`server::EmbedService`] - supervised process lifecycle.
-//!
-//! The background [`spawn_embedder_task`] worker is added in a follow-up
-//! commit alongside the `assistd-memory` `WriteOp` variants it dispatches
-//! into.
+//! Runs separately from the chat router so embeddings stay available
+//! while the router is `Drowsy` / `Sleeping`. The embedding model is
+//! small enough (~30-300 MB Q4) to keep CPU-resident.
 
 pub mod client;
 pub mod embedder_task;

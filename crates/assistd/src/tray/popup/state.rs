@@ -1,11 +1,4 @@
-//! Popup data model: rendered fields, per-turn coalescing, and the
-//! small argument-summarizer that turns a `ToolCall`'s JSON args into a
-//! one-line footer.
-//!
-//! The tracker is deliberately ignorant of the GUI layer; the daemon
-//! event stream lands here, the rendered string fields land in the
-//! shared [`PopupState`] snapshot, and the eframe app just reads the
-//! latest snapshot on each repaint.
+//! Popup data model and per-turn coalescing.
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,55 +6,29 @@ use assistd_config::TrayPopupConfig;
 use assistd_ipc::Event;
 use serde_json::Value;
 
-/// Snapshot pushed through the `watch` channel to the GUI thread. The
-/// GUI side reads this each repaint; tracker mutations on the tokio
-/// side push a new snapshot only when something visible actually
-/// changed.
+/// Snapshot pushed through the `watch` channel to the GUI thread.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PopupState {
-    /// Last N codepoints of the in-flight (or last-completed) turn's
-    /// reply text, after coalescing. May be empty when no turn has
-    /// produced any output yet.
     pub body: String,
-    /// Most recent tool invocation for the active turn, rendered as
-    /// `<fully-qualified-tool-name>` + a one-line arg summary.
     pub footer: Option<ToolCallLine>,
-    /// What the agent / daemon is currently doing, rendered as a small
-    /// status indicator above the body. Driven by the most recent event
-    /// for the displayed turn plus the daemon's listening flag.
     pub activity: PopupActivity,
-    /// Whether the GUI should show the window right now. The visibility
-    /// state machine owns this flag; the tracker leaves it untouched
-    /// when ingesting events.
     pub visible: bool,
 }
 
 /// Coarse activity classification rendered as a one-line status above
-/// the popup body. Distinct from raw event kind so the GUI can show a
-/// stable label across an event burst (e.g. `Streaming` covers both
-/// `Delta` and `LastDelta`).
+/// the popup body.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PopupActivity {
-    /// No turn in flight and listener not active — popup is just
-    /// surfacing the last completed turn.
     #[default]
     Idle,
-    /// Agent is producing reply text right now.
     Streaming,
-    /// Agent is between text chunks: reasoning, planning the next tool
-    /// call, or waiting for the LLM to start the next round after a
-    /// tool result landed.
     Thinking,
-    /// Agent has dispatched a tool and is waiting for it to return.
-    /// `name` is the fully-qualified tool name.
-    RunningTool { name: String },
-    /// Daemon's continuous listener is on and no turn is in flight; the
-    /// user can speak without pressing a key.
+    RunningTool {
+        name: String,
+    },
     Listening,
 }
 
-/// Per-turn activity kind we last observed, used by the snapshot to
-/// derive [`PopupActivity`] for the displayed turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TurnActivity {
     Streaming,
@@ -70,23 +37,12 @@ enum TurnActivity {
     Finished,
 }
 
-/// Footer row rendered under the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallLine {
-    /// Fully-qualified tool name, exactly as it appeared on the wire
-    /// (e.g. `mcp__filesystem__read_text_file` or a native name like
-    /// `bash`). The IPC payload already prefixes MCP tools, so we
-    /// render it verbatim.
     pub name: String,
-    /// Compact one-line summary of the tool's arguments. Newlines and
-    /// control characters are flattened to spaces and the result is
-    /// truncated to a configured maximum.
     pub args_summary: String,
 }
 
-/// Per-turn working state. The popup may display content from a
-/// single turn even after it terminates, so we retain `body`, `footer`
-/// and `activity` until the *next* turn's first event lands.
 #[derive(Debug, Clone, Default)]
 struct TurnState {
     body: String,
@@ -95,38 +51,17 @@ struct TurnState {
 }
 
 /// Tracks every signal the popup cares about and produces a
-/// [`PopupState`] snapshot on demand. Owned by the popup driver task
-/// (one task, single-threaded ingestion — no internal locking needed).
+/// [`PopupState`] snapshot on demand.
 #[derive(Debug, Default)]
 pub struct PopupTracker {
-    /// Turns we've seen at least one event for. Keyed by IPC request
-    /// id. Pruned on `Done` / `Error` only if it isn't the displayed
-    /// turn — see [`PopupTracker::ingest`].
     turns: HashMap<String, TurnState>,
-    /// Turn ids that haven't yet received a `Done` / `Error`. Used so
-    /// `set_disconnected` can drop in-flight turns whose ids may no
-    /// longer map to live turns on the daemon after a restart.
     in_flight: HashSet<String>,
-    /// IPC id of the turn whose body/footer the popup is currently
-    /// showing. Switches on the first event of a new turn so concurrent
-    /// queries don't trample each other.
     displayed: Option<String>,
-    /// Whether the daemon's continuous listener is on. Tracked from
-    /// `ListenState` events so the visibility driver can extend the
-    /// auto-hide window when the user can verbally reply without
-    /// pressing a key.
     listening: bool,
-    /// Turn ids whose TTS playback is currently in flight. Tracked
-    /// from `SpeakingState` events so the visibility driver can pin
-    /// the popup open while the agent is speaking, even after the
-    /// underlying turn has emitted `Done`.
     speaking: HashSet<String>,
 }
 
 impl PopupTracker {
-    /// Build a `PopupState` from the current tracker. The truncation
-    /// cap is applied here so the GUI never sees more body text than
-    /// the user configured.
     pub fn snapshot(&self, cfg: &TrayPopupConfig) -> PopupState {
         let displayed_id = self.displayed.as_deref();
         let displayed = displayed_id.and_then(|id| self.turns.get(id));
@@ -143,31 +78,18 @@ impl PopupTracker {
         }
     }
 
-    /// Whether any turn is still in flight on the daemon side. The
-    /// visibility driver consults this to keep the popup pinned open
-    /// while the agent is mid-response — including the gap between a
-    /// `ToolCall` and the corresponding `ToolResult`, where no events
-    /// arrive but the agent is still busy.
     pub fn is_busy(&self) -> bool {
         !self.in_flight.is_empty()
     }
 
-    /// Whether the daemon's continuous listener is currently active.
-    /// Used by the driver to swap in the longer hands-free auto-hide
-    /// window.
     pub fn is_listening(&self) -> bool {
         self.listening
     }
 
-    /// Whether any turn's TTS playback is currently in flight. The
-    /// visibility driver pins the popup open while this is true so the
-    /// activity surface stays visible for the whole spoken response.
     pub fn is_speaking(&self) -> bool {
         !self.speaking.is_empty()
     }
 
-    /// Forget per-turn state — any in-flight turn id we remembered no
-    /// longer maps to a live turn on the daemon side after a restart.
     pub fn set_disconnected(&mut self) {
         self.turns.clear();
         self.in_flight.clear();
@@ -186,9 +108,6 @@ impl PopupTracker {
                 Some(TurnActivity::RunningTool(name)) => {
                     PopupActivity::RunningTool { name: name.clone() }
                 }
-                // No per-turn signal yet but the turn is still live — the
-                // model has accepted the request and is presumably
-                // composing its first response.
                 Some(TurnActivity::Finished) | None => PopupActivity::Thinking,
             };
         }
@@ -198,20 +117,16 @@ impl PopupTracker {
         PopupActivity::Idle
     }
 
-    /// Apply one daemon event. Returns the latest snapshot so the
-    /// caller can decide whether to push it onto the watch.
     pub fn ingest(&mut self, ev: &Event, cfg: &TrayPopupConfig) -> PopupState {
         match ev {
             Event::Delta { id, .. } => {
-                // Body text comes exclusively from LastDelta (the
-                // daemon's coalesced snapshot); appending the raw Delta
-                // here too would double-count tokens already in it.
+                // LastDelta carries the full coalesced body; appending
+                // the raw Delta on top would double-count tokens.
                 self.bring_turn_to_front(id);
                 self.in_flight.insert(id.clone());
                 self.turns.entry(id.clone()).or_default().activity = Some(TurnActivity::Streaming);
             }
             Event::LastDelta { id, text } => {
-                // Server-coalesced cumulative snapshot — overwrite, don't append.
                 self.bring_turn_to_front(id);
                 self.in_flight.insert(id.clone());
                 let turn = self.turns.entry(id.clone()).or_default();
@@ -235,18 +150,12 @@ impl PopupTracker {
                 turn.activity = Some(TurnActivity::RunningTool(name.clone()));
             }
             Event::ToolResult { id, .. } => {
-                // Tool came back; the agent is now planning the next
-                // step. Surface that as "thinking" until the next
-                // Delta / ToolCall arrives.
                 self.bring_turn_to_front(id);
                 self.in_flight.insert(id.clone());
                 self.turns.entry(id.clone()).or_default().activity = Some(TurnActivity::Thinking);
             }
             Event::Done { id } | Event::Error { id, .. } => {
                 self.in_flight.remove(id);
-                // Keep the displayed turn's content around so the popup
-                // doesn't blank out when a turn finishes. Non-displayed
-                // turns are dropped.
                 if self.displayed.as_deref() != Some(id.as_str()) {
                     self.turns.remove(id);
                 } else if let Some(turn) = self.turns.get_mut(id) {
@@ -268,11 +177,6 @@ impl PopupTracker {
         self.snapshot(cfg)
     }
 
-    /// Switch the displayed turn to `id` and drop any older
-    /// already-terminated turn we were holding onto. If the previous
-    /// displayed turn is still in flight, keep it in `turns` — it may
-    /// matter again later (rare, but possible if the daemon
-    /// interleaves two long-running turns).
     fn bring_turn_to_front(&mut self, id: &str) {
         if self.displayed.as_deref() != Some(id)
             && let Some(prev) = self.displayed.take()
@@ -284,15 +188,9 @@ impl PopupTracker {
     }
 }
 
-/// Cap on the footer argument summary independently of the body
-/// truncation. ~80 chars fits one wrapped line at the default popup
-/// width without intruding on the body area.
 const FOOTER_ARGS_MAX_CHARS: usize = 80;
 
-/// Render a `serde_json::Value` as a single-line, ≤`max_chars`-codepoint
-/// preview. Newlines and control characters become single spaces;
-/// objects render as flat `key=value` pairs; arrays render as their
-/// length only when long.
+/// Single-line, ≤`max_chars`-codepoint preview of a JSON value.
 pub fn summarize_args(v: &Value, max_chars: usize) -> String {
     let raw = match v {
         Value::Null => String::new(),
@@ -326,8 +224,6 @@ fn value_inline(v: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => {
-            // Keep simple strings unquoted; quote when they'd otherwise
-            // ambiguate with the surrounding `k=v k=v` rendering.
             if s.chars().any(|c| c.is_whitespace() || c == '=') {
                 format!("\"{s}\"")
             } else {
@@ -339,9 +235,6 @@ fn value_inline(v: &Value) -> String {
     }
 }
 
-/// Replace every whitespace / control character with a single space
-/// and collapse repeated spaces. Used so a JSON `command` arg
-/// containing `\n` doesn't break the popup's one-line footer.
 fn flatten_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_space = false;
@@ -362,9 +255,6 @@ fn flatten_whitespace(s: &str) -> String {
     out
 }
 
-/// Truncate to the last `max` codepoints, prepending an ellipsis when
-/// the original was longer. Operates on chars (not bytes) so we never
-/// split a multibyte codepoint.
 fn truncate_chars_from_end(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -377,9 +267,6 @@ fn truncate_chars_from_end(s: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-/// Truncate to the first `max` codepoints, appending an ellipsis when
-/// the original was longer. Used for argument summaries — the keys are
-/// usually meaningful and the value tail rarely is.
 fn truncate_chars_from_start(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -403,8 +290,6 @@ mod tests {
     #[test]
     fn summarize_args_object_renders_key_equals_value() {
         let s = summarize_args(&json!({"a": 1, "b": "two"}), 100);
-        // serde_json preserves insertion order for objects, which
-        // matches what the daemon sends.
         assert!(s.contains("a=1"), "missing a=1: {s}");
         assert!(s.contains("b=two"), "missing b=two: {s}");
     }
@@ -426,7 +311,7 @@ mod tests {
     fn summarize_args_truncates_to_max_chars() {
         let long = "x".repeat(1000);
         let s = summarize_args(&json!({"a": long}), 30);
-        assert_eq!(s.chars().count(), 31); // 30 chars + 1 ellipsis
+        assert_eq!(s.chars().count(), 31);
         assert!(s.ends_with('…'));
     }
 
@@ -450,11 +335,8 @@ mod tests {
 
     #[test]
     fn truncate_chars_from_end_preserves_unicode_codepoints() {
-        // Each emoji is multiple bytes; chars-based truncation must
-        // not split them.
         let s = "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀";
         let truncated = truncate_chars_from_end(s, 3);
-        // 3 emoji + 1 ellipsis
         assert_eq!(truncated.chars().count(), 4);
     }
 
@@ -483,8 +365,6 @@ mod tests {
 
     #[test]
     fn tracker_body_comes_only_from_last_delta() {
-        // Raw Delta events are in-flight / activity signals only; the
-        // body is owned by LastDelta, the daemon's coalesced snapshot.
         let mut t = PopupTracker::default();
         t.ingest(&delta("a", "hello "), &cfg());
         t.ingest(&delta("a", "world"), &cfg());
@@ -499,10 +379,6 @@ mod tests {
 
     #[test]
     fn tracker_interleaved_last_delta_and_delta_does_not_double_count() {
-        // Regression: on the real bus the daemon emits LastDelta
-        // (coalesced) and socket.rs tees the raw Delta for the same
-        // token. Appending the Delta on top of the snapshot used to
-        // duplicate tokens, so the popup body read e.g. "AA" / "ABCDD".
         let mut t = PopupTracker::default();
         t.ingest(&last_delta("a", "A"), &cfg());
         t.ingest(&delta("a", "A"), &cfg());
@@ -555,7 +431,7 @@ mod tests {
         let mut narrow = cfg();
         narrow.truncate_chars = 50;
         let s = t.snapshot(&narrow);
-        assert_eq!(s.body.chars().count(), 51); // 50 chars + 1 ellipsis
+        assert_eq!(s.body.chars().count(), 51);
         assert!(s.body.starts_with('…'));
     }
 
@@ -563,9 +439,6 @@ mod tests {
     fn tracker_ignores_unrelated_event_kinds() {
         let mut t = PopupTracker::default();
         let before = t.snapshot(&cfg());
-        // Pick an event kind the popup deliberately has no rendering
-        // for (Capabilities reply); it should leave both content and
-        // activity untouched.
         t.ingest(
             &Event::Capabilities {
                 id: "a".into(),
@@ -626,8 +499,6 @@ mod tests {
         assert!(t.is_listening());
         assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Listening);
 
-        // While a turn is in flight, the per-turn activity takes
-        // precedence over the listening flag.
         t.ingest(&delta("a", "hi"), &cfg());
         assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Streaming);
         t.ingest(&done("a"), &cfg());
@@ -658,7 +529,6 @@ mod tests {
         );
         assert!(t.is_speaking());
 
-        // Second concurrent turn starts speaking; flag stays on.
         t.ingest(
             &Event::SpeakingState {
                 id: "b".into(),
@@ -668,7 +538,6 @@ mod tests {
         );
         assert!(t.is_speaking());
 
-        // Turn 'a' finishes — 'b' still speaking, so flag stays on.
         t.ingest(
             &Event::SpeakingState {
                 id: "a".into(),
