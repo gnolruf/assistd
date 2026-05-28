@@ -1,0 +1,7 @@
+*/pkg/
+*/src/
+*/cargo-home/
+*/*.tar.zst
+*/*.tar.gz
+*/*.tar.xz
+*/*.log
