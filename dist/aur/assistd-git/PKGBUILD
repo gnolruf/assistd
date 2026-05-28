@@ -8,10 +8,8 @@ pkgdesc="A local-model agent daemon for Linux (LLM + voice + tools + WM integrat
 arch=('x86_64')
 url="https://github.com/gnolruf/assistd"
 license=('Apache-2.0')
-# Disable makepkg's LTO injection. cargo manages its own LTO via the
-# release profile, and makepkg's -flto produces slim LTO objects in
-# C-dep static libs (libsqlite3-sys, whisper-rs-sys, ...) that rust-lld
-# cannot resolve.
+# cargo handles its own LTO; makepkg's -flto leaves slim-LTO bitcode in
+# C-dep static libs that rust-lld can't resolve.
 options=('!lto')
 depends=(
   'alsa-lib'
@@ -72,21 +70,16 @@ build() {
   export CARGO_HOME="$srcdir/cargo-home"
   export CARGO_TARGET_DIR=target
 
-  # Force a portable whisper.cpp build matching Arch's x86-64-v3 baseline
-  # (Haswell+: AVX, AVX2, FMA). whisper-rs-sys/build.rs forwards any
-  # GGML_* / CMAKE_* env var to cmake as a -D define. Upstream default
-  # GGML_NATIVE=ON would inject -march=native and tie the binary to the
-  # build host's CPU (SIGILL on older hardware).
+  # x86-64-v3 baseline. Upstream GGML_NATIVE=ON would inject -march=native
+  # and tie the binary to the build host's CPU.
   export GGML_NATIVE=OFF
   export GGML_AVX=ON
   export GGML_AVX2=ON
   export GGML_FMA=ON
 
-  # Workaround: whisper.cpp's AVX repack.cpp has const-correctness issues
-  # that GCC >= 15 rejects as hard errors. Downgrade to a warning so the
-  # bundled whisper.cpp builds. Drop this once whisper-rs-sys bumps to a
-  # whisper.cpp release that fixes the const cast in
-  # ggml/src/ggml-cpu/arch/x86/repack.cpp.
+  # TODO: drop once whisper-rs-sys bumps to a whisper.cpp with the const
+  # cast in ggml/src/ggml-cpu/arch/x86/repack.cpp fixed. GCC >= 15 rejects
+  # the current code as a hard error.
   export CXXFLAGS="${CXXFLAGS:-} -fpermissive"
 
   cargo build --release --frozen --locked
@@ -102,7 +95,6 @@ package() {
   sed 's|%h/.cargo/bin/assistd|/usr/bin/assistd|' \
     dist/systemd/assistd.service \
     | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/assistd.service"
-
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
 
   install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
