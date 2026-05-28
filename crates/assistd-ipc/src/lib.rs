@@ -125,6 +125,7 @@ pub enum EventKind {
     Presence,
     ListenState,
     VoiceState,
+    SpeakingState,
     Done,
     Error,
     LastDelta,
@@ -478,6 +479,13 @@ pub enum Event {
     /// / `VoiceSkip` / `GetVoiceState`. Skip leaves the flag unchanged
     /// (true if synthesis was on before the skip).
     VoiceOutputState { id: String, enabled: bool },
+    /// TTS playback state for a turn. Emitted onto the broadcast bus
+    /// when a turn's speech worker enqueues its first sentence
+    /// (`speaking: true`) and again once the playback queue drains
+    /// (`speaking: false`). Turns with synthesis disabled or no spoken
+    /// sentences emit nothing. `id` echoes the originating turn id so
+    /// passive subscribers can correlate with `Delta` / `LastDelta`.
+    SpeakingState { id: String, speaking: bool },
     /// One semantic-search hit emitted by `MemorySemanticSearch`. The
     /// daemon emits zero or more of these ranked by cosine similarity
     /// (best-first), then a terminal `Done`. `content` is the *full*
@@ -663,6 +671,7 @@ impl Event {
             | Event::Transcription { id, .. }
             | Event::ListenState { id, .. }
             | Event::VoiceOutputState { id, .. }
+            | Event::SpeakingState { id, .. }
             | Event::SemanticHit { id, .. }
             | Event::MemoryValue { id, .. }
             | Event::MemoryKeys { id, .. }
@@ -695,6 +704,7 @@ impl Event {
             Event::Presence { .. } => EventKind::Presence,
             Event::VoiceState { .. } => EventKind::VoiceState,
             Event::ListenState { .. } => EventKind::ListenState,
+            Event::SpeakingState { .. } => EventKind::SpeakingState,
             Event::Done { .. } => EventKind::Done,
             Event::Error { .. } => EventKind::Error,
             Event::LastDelta { .. } => EventKind::LastDelta,
@@ -1386,6 +1396,32 @@ mod tests {
     }
 
     #[test]
+    fn speaking_state_event_roundtrip() {
+        let evt = Event::SpeakingState {
+            id: "q-1".into(),
+            speaking: true,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"speaking_state","id":"q-1","speaking":true}"#
+        );
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn speaking_state_is_bus_eligible_and_not_terminal() {
+        let evt = Event::SpeakingState {
+            id: "q-1".into(),
+            speaking: false,
+        };
+        assert!(!evt.is_terminal());
+        assert_eq!(evt.id(), "q-1");
+        assert_eq!(evt.kind(), Some(EventKind::SpeakingState));
+    }
+
+    #[test]
     fn voice_output_state_is_not_terminal() {
         let evt = Event::VoiceOutputState {
             id: "vt-1".into(),
@@ -1532,6 +1568,7 @@ mod tests {
             EventKind::Presence,
             EventKind::ListenState,
             EventKind::VoiceState,
+            EventKind::SpeakingState,
             EventKind::Done,
             EventKind::Error,
             EventKind::LastDelta,

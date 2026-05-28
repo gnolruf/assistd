@@ -134,6 +134,7 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                     if enabled { "on" } else { "off" }
                 )?;
             }
+            Event::SpeakingState { .. } => {}
             Event::Status {
                 severity,
                 component,

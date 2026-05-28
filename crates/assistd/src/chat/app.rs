@@ -769,6 +769,7 @@ impl App {
             Event::VoiceOutputState { enabled, .. } => {
                 self.voice_output_enabled = enabled;
             }
+            Event::SpeakingState { .. } => {}
             Event::Capabilities {
                 vision, model_name, ..
             } => {

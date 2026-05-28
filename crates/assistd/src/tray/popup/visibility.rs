@@ -68,6 +68,7 @@ pub async fn run(
     let mut visible = false;
     let mut last_activity = Instant::now();
     let mut was_busy = false;
+    let mut was_speaking = false;
     let auto_hide_default = Duration::from_millis(cfg.auto_hide_ms);
     let auto_hide_listening = Duration::from_millis(cfg.listen_auto_hide_ms);
     let mut ticker = interval(Duration::from_millis(250));
@@ -83,6 +84,7 @@ pub async fn run(
                     DriverInput::Disconnected => {
                         tracker.set_disconnected();
                         was_busy = false;
+                        was_speaking = false;
                         push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
                     }
                     DriverInput::Event(ev) => {
@@ -94,12 +96,18 @@ pub async fn run(
                         // auto-hide countdown from this instant so the
                         // popup lingers for the full auto_hide_ms after
                         // the agent finishes, regardless of how long
-                        // the busy stretch was.
+                        // the busy stretch was. Same treatment for the
+                        // speaking → silent edge: TTS playback can
+                        // extend well past the turn's `Done`, and we
+                        // want the auto-hide window to start fresh
+                        // when the voice actually stops.
                         let is_busy = tracker.is_busy();
-                        if was_busy && !is_busy {
+                        let is_speaking = tracker.is_speaking();
+                        if (was_busy && !is_busy) || (was_speaking && !is_speaking) {
                             last_activity = Instant::now();
                         }
                         was_busy = is_busy;
+                        was_speaking = is_speaking;
                         push_with_visibility(&state_tx, snap, visible);
                     }
                     DriverInput::Show => {
@@ -127,7 +135,10 @@ pub async fn run(
                 // gap between a ToolCall and its ToolResult is silent
                 // on the wire but the agent is still working, so an
                 // auto-hide here would dismiss the popup mid-tool-call.
-                if tracker.is_busy() {
+                // Same treatment while TTS is playing back: the user is
+                // listening to the response and shouldn't lose the
+                // activity surface mid-sentence.
+                if tracker.is_busy() || tracker.is_speaking() {
                     continue;
                 }
                 let auto_hide = if tracker.is_listening() {
@@ -317,6 +328,64 @@ mod tests {
         assert!(
             state_rx.borrow().visible,
             "listening should extend the auto-hide window"
+        );
+
+        in_tx.send(DriverInput::Shutdown).expect("send");
+        handle.await.expect("driver join");
+    }
+
+    #[tokio::test]
+    async fn speaking_pins_popup_past_done_then_auto_hides_after_silence() {
+        // After Done, TTS playback can run for seconds. While
+        // SpeakingState{true} is in flight, the popup must stay open
+        // past auto_hide_ms; once SpeakingState{false} arrives, the
+        // auto-hide countdown starts fresh from that instant.
+        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
+        let (in_tx, in_rx) = mpsc::unbounded_channel();
+        let (place_tx, _place_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(500)));
+
+        in_tx.send(DriverInput::Show).expect("send");
+        let _ = drain_watch(&mut state_rx).await;
+
+        // Turn starts, finishes, but TTS is mid-playback.
+        in_tx
+            .send(DriverInput::Event(Box::new(Event::LastDelta {
+                id: "a".into(),
+                text: "hi".into(),
+            })))
+            .expect("send");
+        let _ = drain_watch(&mut state_rx).await;
+        in_tx
+            .send(DriverInput::Event(Box::new(Event::SpeakingState {
+                id: "a".into(),
+                speaking: true,
+            })))
+            .expect("send");
+        in_tx
+            .send(DriverInput::Event(Box::new(Event::Done { id: "a".into() })))
+            .expect("send");
+        let _ = drain_watch(&mut state_rx).await;
+
+        // Past the short auto-hide; speaking should hold the popup.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        assert!(
+            state_rx.borrow().visible,
+            "popup should stay visible while TTS is playing"
+        );
+
+        // Playback ends — auto-hide starts fresh from this moment.
+        in_tx
+            .send(DriverInput::Event(Box::new(Event::SpeakingState {
+                id: "a".into(),
+                speaking: false,
+            })))
+            .expect("send");
+        let _ = drain_watch(&mut state_rx).await;
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        assert!(
+            !state_rx.borrow().visible,
+            "popup should auto-hide after TTS finishes"
         );
 
         in_tx.send(DriverInput::Shutdown).expect("send");

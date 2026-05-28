@@ -116,6 +116,11 @@ pub struct PopupTracker {
     /// auto-hide window when the user can verbally reply without
     /// pressing a key.
     listening: bool,
+    /// Turn ids whose TTS playback is currently in flight. Tracked
+    /// from `SpeakingState` events so the visibility driver can pin
+    /// the popup open while the agent is speaking, even after the
+    /// underlying turn has emitted `Done`.
+    speaking: HashSet<String>,
 }
 
 impl PopupTracker {
@@ -154,6 +159,13 @@ impl PopupTracker {
         self.listening
     }
 
+    /// Whether any turn's TTS playback is currently in flight. The
+    /// visibility driver pins the popup open while this is true so the
+    /// activity surface stays visible for the whole spoken response.
+    pub fn is_speaking(&self) -> bool {
+        !self.speaking.is_empty()
+    }
+
     /// Forget per-turn state — any in-flight turn id we remembered no
     /// longer maps to a live turn on the daemon side after a restart.
     pub fn set_disconnected(&mut self) {
@@ -161,6 +173,7 @@ impl PopupTracker {
         self.in_flight.clear();
         self.displayed = None;
         self.listening = false;
+        self.speaking.clear();
     }
 
     fn activity(&self, displayed: Option<&TurnState>, in_flight: bool) -> PopupActivity {
@@ -242,6 +255,13 @@ impl PopupTracker {
             }
             Event::ListenState { active, .. } => {
                 self.listening = *active;
+            }
+            Event::SpeakingState { id, speaking } => {
+                if *speaking {
+                    self.speaking.insert(id.clone());
+                } else {
+                    self.speaking.remove(id);
+                }
             }
             _ => {}
         }
@@ -622,6 +642,65 @@ mod tests {
         );
         assert!(!t.is_listening());
         assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Idle);
+    }
+
+    #[test]
+    fn tracker_tracks_speaking_state_per_turn() {
+        let mut t = PopupTracker::default();
+        assert!(!t.is_speaking());
+
+        t.ingest(
+            &Event::SpeakingState {
+                id: "a".into(),
+                speaking: true,
+            },
+            &cfg(),
+        );
+        assert!(t.is_speaking());
+
+        // Second concurrent turn starts speaking; flag stays on.
+        t.ingest(
+            &Event::SpeakingState {
+                id: "b".into(),
+                speaking: true,
+            },
+            &cfg(),
+        );
+        assert!(t.is_speaking());
+
+        // Turn 'a' finishes — 'b' still speaking, so flag stays on.
+        t.ingest(
+            &Event::SpeakingState {
+                id: "a".into(),
+                speaking: false,
+            },
+            &cfg(),
+        );
+        assert!(t.is_speaking());
+
+        t.ingest(
+            &Event::SpeakingState {
+                id: "b".into(),
+                speaking: false,
+            },
+            &cfg(),
+        );
+        assert!(!t.is_speaking());
+    }
+
+    #[test]
+    fn tracker_disconnect_clears_speaking_state() {
+        let mut t = PopupTracker::default();
+        t.ingest(
+            &Event::SpeakingState {
+                id: "a".into(),
+                speaking: true,
+            },
+            &cfg(),
+        );
+        assert!(t.is_speaking());
+        t.set_disconnected();
+        assert!(!t.is_speaking());
     }
 
     #[test]

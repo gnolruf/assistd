@@ -104,6 +104,7 @@ fn subscribe_filter() -> SubscribeFilter {
             EventKind::Error,
             EventKind::Presence,
             EventKind::ListenState,
+            EventKind::SpeakingState,
         ],
     }
 }
@@ -223,9 +224,12 @@ mod tests {
             assert!(f.kinds.contains(&k), "filter missing {k:?}");
         }
         // Popup-only needs: server-coalesced reply text + tool
-        // results. No-ops on TrayTracker; the popup tracker uses them.
+        // results + TTS playback boundaries. No-ops on TrayTracker; the
+        // popup tracker uses them to pin the window open while audio
+        // plays.
         assert!(f.kinds.contains(&EventKind::LastDelta));
         assert!(f.kinds.contains(&EventKind::ToolResult));
+        assert!(f.kinds.contains(&EventKind::SpeakingState));
     }
 
     #[test]

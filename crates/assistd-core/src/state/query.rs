@@ -84,7 +84,7 @@ impl AppState {
         };
         let (speech_tx, speech_rx) = mpsc::channel::<String>(32);
         let start_epoch = self.subsystems.voice_output.current_epoch();
-        let speech_handle = self.spawn_speech_worker(start_epoch, speech_rx);
+        let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
         self.clone()
             .drive_event_loop(
@@ -233,16 +233,31 @@ impl AppState {
 
     fn spawn_speech_worker(
         &self,
+        id: String,
         start_epoch: u64,
         mut speech_rx: mpsc::Receiver<String>,
     ) -> JoinHandle<()> {
         let ctrl = self.subsystems.voice_output.clone();
+        let events_bus = self.runtime.events_bus().clone();
         tokio::spawn(
             async move {
+                // Emit SpeakingState{true} on the first sentence we
+                // actually play; flip back to false after wait_idle.
+                // Turns that never play a sentence (TTS off, skipped,
+                // empty reply) emit nothing — passive subscribers like
+                // the tray popup only care about audible playback.
+                let mut emitted_start = false;
                 while let Some(sentence) = speech_rx.recv().await {
                     match ctrl.should_speak(start_epoch) {
                         SpeakDecision::Speak => {
                             let preview: String = sentence.chars().take(60).collect();
+                            if !emitted_start {
+                                let _ = events_bus.send(Event::SpeakingState {
+                                    id: id.clone(),
+                                    speaking: true,
+                                });
+                                emitted_start = true;
+                            }
                             if let Err(e) = ctrl.inner().speak(sentence).await {
                                 tracing::warn!(
                                     target: "assistd::voice",
@@ -264,6 +279,12 @@ impl AppState {
                         error = %e,
                         "voice_output.wait_idle failed (non-fatal)"
                     );
+                }
+                if emitted_start {
+                    let _ = events_bus.send(Event::SpeakingState {
+                        id,
+                        speaking: false,
+                    });
                 }
             }
             .in_current_span(),
