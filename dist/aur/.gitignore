@@ -1,0 +1,16 @@
+# makepkg build artifacts and outputs.
+# We ignore the directories themselves so git doesn't descend into them
+# (any nested .gitignore inside, e.g. each cargo dep's, can't re-include
+# files when the parent directory is excluded).
+*/pkg/
+*/src/
+*/cargo-home/
+*/*.pkg.tar.zst
+*/*.tar.gz
+*/*.tar.xz
+*/*.tar.zst
+*/*.log
+
+# Bare git clone makepkg creates for `source=("$_pkgname::git+...")`.
+# The directory is named after $_pkgname, so add a line per -git package.
+/assistd-git/assistd/

@@ -191,7 +191,7 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
 name = "assistd-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assistd-config",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-config"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assistd-config",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-embed"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assistd-config",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-ipc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "serde",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-llm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assistd-config",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assistd-tools",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-memory"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-tools"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assistd-config",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-voice"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assistd-config",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-wm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
