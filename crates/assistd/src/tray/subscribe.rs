@@ -1,14 +1,4 @@
 //! Long-lived passive subscription to the daemon's broadcast bus.
-//!
-//! Connects, seeds the current presence and listening state, then
-//! pumps events into the [`TrayItem`] through `Handle::update` for as
-//! long as the daemon is reachable. On any disconnect — clean EOF or
-//! I/O error — flips the tray to `Disconnected` and retries with
-//! exponential backoff (1, 2, 4, … s, capped at 60 s).
-//!
-//! When the popup feature is on, a [`PopupSink`](super::popup::PopupSink)
-//! also forwarded every event (plus `Disconnected` transitions) so the
-//! popup driver can update its content and apply its wake-on rules.
 
 use std::time::Duration;
 
@@ -23,16 +13,11 @@ use super::menu::TrayItem;
 #[cfg(feature = "tray-popup")]
 use super::popup::PopupSink;
 
-/// Optional popup hook handed to the subscribe loop. Cloned by the
-/// caller into [`run`]; `None` in builds without the popup feature
-/// (or when the popup is disabled in config).
 #[cfg(feature = "tray-popup")]
 pub type OptionalPopup = Option<PopupSink>;
 #[cfg(not(feature = "tray-popup"))]
 pub type OptionalPopup = Option<()>;
 
-/// Run the reconnect loop forever. Returns only if the ksni handle has
-/// shut down (signalling app exit).
 pub async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: OptionalPopup) {
     let mut attempt: u32 = 0;
     loop {
@@ -61,11 +46,8 @@ pub async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: OptionalPopup)
     }
 }
 
-/// Why a single subscribe attempt returned.
 enum ExitReason {
-    /// ksni told us the service is gone — quit the loop.
     ServiceShutdown,
-    /// The daemon closed cleanly; reconnect after the usual backoff.
     DaemonClosed,
 }
 
@@ -89,9 +71,6 @@ async fn try_once(
     pump_events(handle, stream, popup).await
 }
 
-/// Build the filter requested from the daemon. Extracted into a
-/// helper so a unit test can verify both tray-only and popup-relevant
-/// kinds are present.
 fn subscribe_filter() -> SubscribeFilter {
     SubscribeFilter {
         kinds: vec![
@@ -104,6 +83,7 @@ fn subscribe_filter() -> SubscribeFilter {
             EventKind::Error,
             EventKind::Presence,
             EventKind::ListenState,
+            EventKind::SpeakingState,
         ],
     }
 }
@@ -136,10 +116,6 @@ type PopupSinkRef = PopupSink;
 #[cfg(not(feature = "tray-popup"))]
 type PopupSinkRef = ();
 
-/// Subscribe is passive — it doesn't replay the daemon's current
-/// presence or listening state. Run a pair of one-shot probes against
-/// fresh connections so the tray icon reflects reality immediately
-/// after a reconnect.
 async fn seed_initial_state(
     handle: &Handle<TrayItem>,
     ipc: &IpcClient,
@@ -195,9 +171,6 @@ where
     handle.update(f).await
 }
 
-/// Exponential backoff capped at 60 s. Mirrors the shape used in
-/// `assistd-llm`'s llama-server supervisor without taking a dependency
-/// on it — the workspace's three-use rule says inline.
 fn backoff_delay(attempt: u32) -> Duration {
     const CAP_SECS: u64 = 60;
     let secs = 1u64.checked_shl(attempt).unwrap_or(CAP_SECS).min(CAP_SECS);
@@ -211,7 +184,6 @@ mod tests {
     #[test]
     fn subscribe_filter_lists_tray_and_popup_event_kinds() {
         let f = subscribe_filter();
-        // Tray-icon needs (presence priority machine).
         for k in [
             EventKind::Delta,
             EventKind::ToolCall,
@@ -222,10 +194,9 @@ mod tests {
         ] {
             assert!(f.kinds.contains(&k), "filter missing {k:?}");
         }
-        // Popup-only needs: server-coalesced reply text + tool
-        // results. No-ops on TrayTracker; the popup tracker uses them.
         assert!(f.kinds.contains(&EventKind::LastDelta));
         assert!(f.kinds.contains(&EventKind::ToolResult));
+        assert!(f.kinds.contains(&EventKind::SpeakingState));
     }
 
     #[test]

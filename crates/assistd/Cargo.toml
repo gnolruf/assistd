@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 default = ["daemon", "client", "chat", "tray", "tray-popup"]
 daemon = [
+    "dep:assistd-config",
     "dep:assistd-core",
     "dep:assistd-embed",
     "dep:assistd-llm",

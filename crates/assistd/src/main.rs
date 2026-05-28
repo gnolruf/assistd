@@ -41,6 +41,8 @@ mod voice_ctl;
 mod voice_init;
 #[cfg(feature = "daemon")]
 mod voice_probe;
+#[cfg(any(feature = "daemon", feature = "tray-popup"))]
+mod wm_backend;
 #[cfg(feature = "daemon")]
 mod wm_init;
 

@@ -1,5 +1,4 @@
-//! Handlers for the voice-input (PTT, continuous listen) and
-//! voice-output (TTS toggle/skip) variants of `Request`.
+//! Voice-input (PTT, listen) and voice-output (TTS) request handlers.
 
 use super::AppState;
 use anyhow::Result;
@@ -9,11 +8,6 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 impl AppState {
-    /// Begin a push-to-talk recording. Returns immediately on success
-    /// so the CLI client exits cleanly; the daemon holds the capture
-    /// session open until a matching `PttStop` arrives on a separate
-    /// connection. Rejects when continuous listening currently owns
-    /// the mic; the two modes can't share one cpal stream.
     pub(super) async fn handle_ptt_start(
         self: Arc<Self>,
         id: String,
@@ -56,9 +50,6 @@ impl AppState {
         }
     }
 
-    /// Enable continuous listening. Rejects if PTT currently holds the
-    /// mic; the two modes are mutually exclusive because cpal cannot
-    /// share one input stream.
     pub(super) async fn handle_listen_start(
         self: Arc<Self>,
         id: String,
@@ -96,7 +87,6 @@ impl AppState {
         }
     }
 
-    /// Disable continuous listening. Idempotent.
     pub(super) async fn handle_listen_stop(
         self: Arc<Self>,
         id: String,
@@ -125,8 +115,6 @@ impl AppState {
         }
     }
 
-    /// Flip continuous listening state. Routes to start or stop
-    /// depending on the current value of `listener.is_active()`.
     pub(super) async fn handle_listen_toggle(
         self: Arc<Self>,
         id: String,
@@ -139,7 +127,6 @@ impl AppState {
         }
     }
 
-    /// Report whether continuous listening is currently active.
     pub(super) async fn handle_get_listen_state(
         self: Arc<Self>,
         id: String,
@@ -156,10 +143,6 @@ impl AppState {
         Ok(())
     }
 
-    /// Flip TTS on/off at runtime. Off cancels currently-queued audio;
-    /// on is a pure flag flip. Subsequent sentences from the in-flight
-    /// query speak again as soon as the toggle returns. Emits the
-    /// post-toggle `VoiceOutputState` + `Done`.
     pub(super) async fn handle_voice_toggle(
         self: Arc<Self>,
         id: String,
@@ -177,10 +160,6 @@ impl AppState {
         Ok(())
     }
 
-    /// Abort the current TTS response: drops queued audio and any
-    /// pending sentences for active speech workers. Does not start
-    /// recording. Emits `VoiceOutputState` + `Done`; the enabled flag
-    /// is unchanged.
     pub(super) async fn handle_voice_skip(
         self: Arc<Self>,
         id: String,
@@ -197,7 +176,21 @@ impl AppState {
         Ok(())
     }
 
-    /// Report whether TTS is currently enabled.
+    /// Cancel the in-flight agent turn (if any) and drop queued TTS
+    /// audio. Idempotent.
+    pub(super) async fn handle_interrupt_turn(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<()> {
+        if let Some(token) = self.runtime.current_cancel.lock().await.take() {
+            token.cancel();
+        }
+        self.subsystems.voice_output.skip().await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
     pub(super) async fn handle_get_voice_state(
         self: Arc<Self>,
         id: String,
@@ -213,10 +206,6 @@ impl AppState {
         Ok(())
     }
 
-    /// End the push-to-talk recording, transcribe, and (if the
-    /// transcription has content) dispatch it internally as a Query
-    /// so the streaming LLM response flows back on the same
-    /// connection before the terminal `Done`.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_ptt_stop(
         self: Arc<Self>,
@@ -288,7 +277,6 @@ impl AppState {
             .await;
 
         if text.trim().is_empty() {
-            // VAD trimmed to silence; don't dispatch an empty user message.
             let _ = tx.send(Event::Done { id }).await;
             return Ok(());
         }

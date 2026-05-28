@@ -125,6 +125,7 @@ pub enum EventKind {
     Presence,
     ListenState,
     VoiceState,
+    SpeakingState,
     Done,
     Error,
     LastDelta,
@@ -202,6 +203,9 @@ pub enum Request {
     /// and any pending sentences for the active query. Does not change
     /// the enabled flag. Emits `VoiceOutputState` + `Done`.
     VoiceSkip { id: String },
+    /// Cancel the in-flight agent turn (if any) and drop queued TTS
+    /// audio. Idempotent. Emits `Done`.
+    InterruptTurn { id: String },
     /// Report whether TTS is currently enabled. Emits `VoiceOutputState`
     /// + `Done` with no state change.
     GetVoiceState { id: String },
@@ -365,6 +369,7 @@ impl Request {
             | Request::GetListenState { id }
             | Request::VoiceToggle { id }
             | Request::VoiceSkip { id }
+            | Request::InterruptTurn { id }
             | Request::GetVoiceState { id }
             | Request::MemorySave { id, .. }
             | Request::MemoryLoad { id, .. }
@@ -402,6 +407,7 @@ impl Request {
             Request::GetListenState { .. } => "get_listen_state",
             Request::VoiceToggle { .. } => "voice_toggle",
             Request::VoiceSkip { .. } => "voice_skip",
+            Request::InterruptTurn { .. } => "interrupt_turn",
             Request::GetVoiceState { .. } => "get_voice_state",
             Request::MemorySave { .. } => "memory_save",
             Request::MemoryLoad { .. } => "memory_load",
@@ -478,6 +484,9 @@ pub enum Event {
     /// / `VoiceSkip` / `GetVoiceState`. Skip leaves the flag unchanged
     /// (true if synthesis was on before the skip).
     VoiceOutputState { id: String, enabled: bool },
+    /// TTS playback state for a turn: `speaking: true` on the first
+    /// enqueued sentence, `false` once the playback queue drains.
+    SpeakingState { id: String, speaking: bool },
     /// One semantic-search hit emitted by `MemorySemanticSearch`. The
     /// daemon emits zero or more of these ranked by cosine similarity
     /// (best-first), then a terminal `Done`. `content` is the *full*
@@ -663,6 +672,7 @@ impl Event {
             | Event::Transcription { id, .. }
             | Event::ListenState { id, .. }
             | Event::VoiceOutputState { id, .. }
+            | Event::SpeakingState { id, .. }
             | Event::SemanticHit { id, .. }
             | Event::MemoryValue { id, .. }
             | Event::MemoryKeys { id, .. }
@@ -695,6 +705,7 @@ impl Event {
             Event::Presence { .. } => EventKind::Presence,
             Event::VoiceState { .. } => EventKind::VoiceState,
             Event::ListenState { .. } => EventKind::ListenState,
+            Event::SpeakingState { .. } => EventKind::SpeakingState,
             Event::Done { .. } => EventKind::Done,
             Event::Error { .. } => EventKind::Error,
             Event::LastDelta { .. } => EventKind::LastDelta,
@@ -1362,6 +1373,17 @@ mod tests {
     }
 
     #[test]
+    fn interrupt_turn_request_roundtrip() {
+        let req = Request::InterruptTurn { id: "it-1".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"type":"interrupt_turn","id":"it-1"}"#);
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+        assert_eq!(req.kind(), "interrupt_turn");
+        assert_eq!(req.id(), "it-1");
+    }
+
+    #[test]
     fn get_voice_state_request_roundtrip() {
         let req = Request::GetVoiceState { id: "vg-1".into() };
         let json = serde_json::to_string(&req).unwrap();
@@ -1383,6 +1405,32 @@ mod tests {
         );
         let parsed: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn speaking_state_event_roundtrip() {
+        let evt = Event::SpeakingState {
+            id: "q-1".into(),
+            speaking: true,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"speaking_state","id":"q-1","speaking":true}"#
+        );
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, evt);
+    }
+
+    #[test]
+    fn speaking_state_is_bus_eligible_and_not_terminal() {
+        let evt = Event::SpeakingState {
+            id: "q-1".into(),
+            speaking: false,
+        };
+        assert!(!evt.is_terminal());
+        assert_eq!(evt.id(), "q-1");
+        assert_eq!(evt.kind(), Some(EventKind::SpeakingState));
     }
 
     #[test]
@@ -1532,6 +1580,7 @@ mod tests {
             EventKind::Presence,
             EventKind::ListenState,
             EventKind::VoiceState,
+            EventKind::SpeakingState,
             EventKind::Done,
             EventKind::Error,
             EventKind::LastDelta,

@@ -85,6 +85,7 @@ pub async fn run(action: PttAction) -> Result<()> {
             Event::Presence { .. } => {}
             Event::ListenState { .. } => {}
             Event::VoiceOutputState { .. } => {}
+            Event::SpeakingState { .. } => {}
             Event::Status {
                 severity,
                 component,

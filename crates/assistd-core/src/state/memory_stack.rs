@@ -1,9 +1,4 @@
-//! `MemoryStack` groups the persistence + embedding handles that the
-//! daemon wires together at startup.
-//!
-//! Added in Step 2 but not yet referenced by [`AppState`]; the
-//! `#[allow(dead_code)]` annotation keeps clippy quiet until Step 3
-//! flips the field set.
+//! `MemoryStack`: persistence and embedding handles owned by `AppState`.
 
 use assistd_config::EmbeddingConfig;
 use assistd_embed::{EmbedJob, Embedder, NoEmbedder};
@@ -28,8 +23,6 @@ pub struct MemoryStack {
 
 impl MemoryStack {
     /// Construct a stack with every store wired to its no-op placeholder.
-    /// Matches the post-`AppState::new` defaults today's daemon then
-    /// overrides via chained `with_*` calls.
     pub fn disabled(embedding_cfg: EmbeddingConfig) -> Self {
         let memory: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
         let conversations: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
@@ -48,19 +41,12 @@ impl MemoryStack {
         }
     }
 
-    /// Set the memory backend. Rebuilds [`Self::memory_ops`] so the
-    /// combined façade reflects the new handle; both `with_memory` and
-    /// [`Self::with_conversations`] enforce this invariant so callers
-    /// can chain them in any order.
     pub fn with_memory(mut self, m: Arc<dyn MemoryStore>) -> Self {
         self.memory = m.clone();
         self.memory_ops = Arc::new(MemoryOps::new(m, self.conversations.clone()));
         self
     }
 
-    /// Set the conversation store. Rebuilds [`Self::memory_ops`] in
-    /// lockstep with [`Self::with_memory`]; see the cross-update test
-    /// below.
     pub fn with_conversations(mut self, c: Arc<dyn ConversationStore>) -> Self {
         self.conversations = c.clone();
         self.memory_ops = Arc::new(MemoryOps::new(self.memory.clone(), c));

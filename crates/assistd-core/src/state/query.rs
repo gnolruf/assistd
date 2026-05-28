@@ -1,11 +1,4 @@
-//! `handle_query`: the main per-turn driver. Re-probes vision, decodes
-//! attachments, wakes presence, runs the agent loop, streams events
-//! back through the IPC channel, and finalizes persistence.
-//!
-//! The work is split into eight named phases below so the orchestrator
-//! reads as a sequence of preconditions, side-effects, and cleanup
-//! rather than one 500-line block. Helpers stay on `impl AppState` so
-//! the per-substruct field paths remain at one indentation level.
+//! `handle_query`: per-turn agent loop driver.
 
 use super::AppState;
 use super::context::combine_context_blocks;
@@ -24,25 +17,16 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 
-/// Caps the per-turn `Event::LastDelta` republish rate so a fast
-/// token stream doesn't flood passive subscribers.
 const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
 
-/// The two presence-side guards that must outlive the entire turn
-/// (including post-Done audio playback). The agent-turn lock is held
-/// separately because it's released as soon as the LLM stream ends —
-/// concurrent queries shouldn't wait for audio.
 struct QueryGuards {
     _request: RequestGuard,
     _stream: LlmStreamGuard,
 }
 
 impl AppState {
-    /// Handle a single user query: wake the daemon if needed, run the agent
-    /// loop, stream events back through `tx`, and persist the turn.
-    ///
-    /// This is the primary entry point for all LLM-backed queries, including
-    /// those dispatched internally by [`Self::handle_ptt_stop`].
+    /// Handle a single user query: wake the daemon if needed, run the
+    /// agent loop, stream events through `tx`, and persist the turn.
     pub async fn handle_query(
         self: Arc<Self>,
         id: String,
@@ -67,6 +51,9 @@ impl AppState {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let _cancel_on_return = cancel.clone().drop_guard();
+        // Publish the token so `Request::InterruptTurn` can reach it
+        // while this turn holds `agent_turn_lock`.
+        *self.runtime.current_cancel.lock().await = Some(cancel.clone());
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
@@ -84,9 +71,10 @@ impl AppState {
         };
         let (speech_tx, speech_rx) = mpsc::channel::<String>(32);
         let start_epoch = self.subsystems.voice_output.current_epoch();
-        let speech_handle = self.spawn_speech_worker(start_epoch, speech_rx);
+        let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
-        self.clone()
+        let done_emitted = self
+            .clone()
             .drive_event_loop(
                 id.clone(),
                 llm_rx,
@@ -101,9 +89,10 @@ impl AppState {
             .await;
 
         let gen_result = generator.await;
+        *self.runtime.current_cancel.lock().await = None;
         drop(_agent_guard);
 
-        self.finalize_turn(turn_id, gen_result, speech_handle, &tx, id)
+        self.finalize_turn(turn_id, gen_result, speech_handle, &tx, id, done_emitted)
             .await
     }
 
@@ -233,16 +222,26 @@ impl AppState {
 
     fn spawn_speech_worker(
         &self,
+        id: String,
         start_epoch: u64,
         mut speech_rx: mpsc::Receiver<String>,
     ) -> JoinHandle<()> {
         let ctrl = self.subsystems.voice_output.clone();
+        let events_bus = self.runtime.events_bus().clone();
         tokio::spawn(
             async move {
+                let mut emitted_start = false;
                 while let Some(sentence) = speech_rx.recv().await {
                     match ctrl.should_speak(start_epoch) {
                         SpeakDecision::Speak => {
                             let preview: String = sentence.chars().take(60).collect();
+                            if !emitted_start {
+                                let _ = events_bus.send(Event::SpeakingState {
+                                    id: id.clone(),
+                                    speaking: true,
+                                });
+                                emitted_start = true;
+                            }
                             if let Err(e) = ctrl.inner().speak(sentence).await {
                                 tracing::warn!(
                                     target: "assistd::voice",
@@ -251,11 +250,15 @@ impl AppState {
                                     "voice_output.speak failed; sentence dropped"
                                 );
                             }
+                            // `speak()` may append PCM after a mid-synthesis
+                            // skip already cleared the queue; re-check the
+                            // epoch so the late audio doesn't play.
+                            if matches!(ctrl.should_speak(start_epoch), SpeakDecision::DropForSkip)
+                            {
+                                ctrl.inner().cancel().await;
+                            }
                         }
-                        SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {
-                            // TTS toggled off, or skipped: drain the channel
-                            // without speaking.
-                        }
+                        SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {}
                     }
                 }
                 if let Err(e) = ctrl.inner().wait_idle().await {
@@ -264,6 +267,12 @@ impl AppState {
                         error = %e,
                         "voice_output.wait_idle failed (non-fatal)"
                     );
+                }
+                if emitted_start {
+                    let _ = events_bus.send(Event::SpeakingState {
+                        id,
+                        speaking: false,
+                    });
                 }
             }
             .in_current_span(),
@@ -282,13 +291,14 @@ impl AppState {
         turn_id: Option<TurnId>,
         title_user_text: String,
         current_session: Arc<SessionId>,
-    ) {
+    ) -> bool {
         let mut awaiting_tool_result = false;
 
         let mut assistant_accum = String::new();
 
         let mut client_alive = true;
         let mut first_sentence_emitted = false;
+        let mut done_emitted = false;
 
         let events_bus = self.runtime.events_bus().clone();
         // Backdate so the first Delta emits without waiting a window.
@@ -302,8 +312,6 @@ impl AppState {
                     Ok(Some(ev)) => ev,
                     Ok(None) => break,
                     Err(_) => {
-                        // Idle timeout: flush partial sentence (if any)
-                        // without disturbing fence state.
                         if let Some(partial) = sentence_buf.flush_idle()
                             && speech_tx.send(partial).await.is_err()
                         {
@@ -340,17 +348,13 @@ impl AppState {
                         sentences,
                     )
                 }
-                LlmEvent::ReasoningDelta { text } => {
-                    // Reasoning is ephemeral display-only: never
-                    // persisted to history, never fed to TTS.
-                    (
-                        Event::ReasoningDelta {
-                            id: id.clone(),
-                            text,
-                        },
-                        Vec::new(),
-                    )
-                }
+                LlmEvent::ReasoningDelta { text } => (
+                    Event::ReasoningDelta {
+                        id: id.clone(),
+                        text,
+                    },
+                    Vec::new(),
+                ),
                 LlmEvent::ToolCall {
                     id: call_id,
                     name,
@@ -449,6 +453,7 @@ impl AppState {
                         current_session.clone(),
                         title_user_text.clone(),
                     );
+                    done_emitted = true;
                     (Event::Done { id: id.clone() }, sentences)
                 }
             };
@@ -479,6 +484,7 @@ impl AppState {
                 break;
             }
         }
+        done_emitted
     }
 
     async fn finalize_turn(
@@ -488,8 +494,8 @@ impl AppState {
         speech_handle: JoinHandle<()>,
         tx: &mpsc::Sender<Event>,
         id: String,
+        done_emitted: bool,
     ) -> Result<()> {
-        // Every exit path lands an ended_at timestamp on the turn row.
         if let Some(t) = turn_id {
             let conv = self.memory.conversations.clone();
             self.runtime.persistence_tracker.spawn(async move {
@@ -506,7 +512,14 @@ impl AppState {
         let _ = speech_handle.await;
 
         match gen_result {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => {
+                // A cancelled turn returns Ok(()) without a LlmEvent::Done;
+                // the IPC contract still requires a terminal event.
+                if !done_emitted {
+                    let _ = tx.send(Event::Done { id }).await;
+                }
+                Ok(())
+            }
             Ok(Err(e)) => {
                 let _ = tx
                     .send(Event::Error {

@@ -38,20 +38,13 @@ pub fn format_criteria_clause(c: &PlacementCriteria) -> String {
     }
 }
 
-/// Build the `floating enable, resize set W H, move position X Y` payload
-/// for the configured anchor, given the focused workspace's pixel rect.
+/// Build the `floating enable, resize, move position, sticky enable`
+/// payload for the configured anchor on the focused workspace.
 ///
-/// We use an explicit pixel position (`move position {X}px {Y}px`)
-/// rather than `move position 100 ppt 100 ppt, move left Wpx` because
-/// i3 silently clamps off-screen ppt-based positions to keep some
-/// portion of the window visible. With clamping in play, the
-/// `move position` becomes a near-no-op and the chained `move left`
-/// then walks the window leftward by `W` pixels on each placement —
-/// the popup ends up further off-screen with every wake event.
-///
-/// Pixel coordinates are output-relative (no `absolute` keyword) so
-/// multi-monitor setups continue to anchor the popup to whichever
-/// output the focused workspace currently lives on.
+/// Uses explicit pixel positions (`move position {X}px {Y}px`) because
+/// i3's ppt-based positioning silently clamps off-screen values, which
+/// makes a follow-up `move left Wpx` walk the popup further off-screen
+/// on every wake.
 pub fn format_place_floating_pixels(
     c: &PlacementCriteria,
     anchor: PlacementAnchor,
@@ -61,7 +54,7 @@ pub fn format_place_floating_pixels(
     let (x, y) = compute_target_position(anchor, workspace);
     format!(
         "{prefix} floating enable, {prefix} resize set {} {}, \
-         {prefix} move position {} px {} px",
+         {prefix} move position {} px {} px, {prefix} sticky enable",
         anchor.width, anchor.height, x, y,
     )
 }
@@ -210,7 +203,8 @@ mod tests {
             concat!(
                 r#"[title="^dev.assistd.popup$"] floating enable, "#,
                 r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
-                r#"[title="^dev.assistd.popup$"] move position 1550 px 905 px"#,
+                r#"[title="^dev.assistd.popup$"] move position 1550 px 905 px, "#,
+                r#"[title="^dev.assistd.popup$"] sticky enable"#,
             )
         );
     }
@@ -228,7 +222,8 @@ mod tests {
             concat!(
                 r#"[title="^dev.assistd.popup$"] floating enable, "#,
                 r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
-                r#"[title="^dev.assistd.popup$"] move position 1550 px 10 px"#,
+                r#"[title="^dev.assistd.popup$"] move position 1550 px 10 px, "#,
+                r#"[title="^dev.assistd.popup$"] sticky enable"#,
             )
         );
     }
@@ -245,7 +240,8 @@ mod tests {
             concat!(
                 r#"[title="^dev.assistd.popup$"] floating enable, "#,
                 r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
-                r#"[title="^dev.assistd.popup$"] move position 10 px 10 px"#,
+                r#"[title="^dev.assistd.popup$"] move position 10 px 10 px, "#,
+                r#"[title="^dev.assistd.popup$"] sticky enable"#,
             )
         );
     }
@@ -263,7 +259,8 @@ mod tests {
             concat!(
                 r#"[title="^dev.assistd.popup$"] floating enable, "#,
                 r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
-                r#"[title="^dev.assistd.popup$"] move position 10 px 925 px"#,
+                r#"[title="^dev.assistd.popup$"] move position 10 px 925 px, "#,
+                r#"[title="^dev.assistd.popup$"] sticky enable"#,
             )
         );
     }
@@ -281,7 +278,8 @@ mod tests {
             concat!(
                 r#"[title="^dev.assistd.popup$"] floating enable, "#,
                 r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
-                r#"[title="^dev.assistd.popup$"] move position 780 px 467 px"#,
+                r#"[title="^dev.assistd.popup$"] move position 780 px 467 px, "#,
+                r#"[title="^dev.assistd.popup$"] sticky enable"#,
             )
         );
     }

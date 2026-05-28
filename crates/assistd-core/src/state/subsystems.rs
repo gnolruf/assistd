@@ -1,9 +1,5 @@
-//! `Subsystems` groups the LLM-, voice-, presence-, tools-, and
-//! window-manager handles that AppState routes requests through.
-//!
-//! Substructs are added in this step but not yet wired into
-//! [`AppState`]; the `#[allow(dead_code)]` annotation keeps clippy
-//! quiet until Step 3 flips the field set.
+//! `Subsystems`: LLM, voice, presence, tools, and WM handles owned by
+//! `AppState`.
 
 use crate::PresenceManager;
 use assistd_llm::LlmBackend;
@@ -12,16 +8,11 @@ use assistd_voice::{ContinuousListener, VoiceInput, VoiceOutputController};
 use assistd_wm::{NoWindowManager, WindowManager};
 use std::sync::Arc;
 
-/// One MCP server that failed to start or complete tool discovery during
-/// daemon boot. Retained on [`Subsystems`] so the daemon can surface the
-/// failure to connected clients via `Event::Status` instead of leaving
-/// users to discover broken servers only when the model invokes a tool.
+/// One MCP server that failed to start during daemon boot, surfaced
+/// to clients via `Event::Status`.
 #[derive(Debug, Clone)]
 pub struct McpStartupFailure {
-    /// Configured server name (matches `mcp.servers[].name`).
     pub server_name: String,
-    /// Human-readable reason for the failure, suitable for the TUI to
-    /// render verbatim (e.g. `"binary not found at /usr/bin/foo-mcp"`).
     pub reason: String,
 }
 
@@ -34,15 +25,10 @@ pub struct Subsystems {
     pub voice_output: Arc<VoiceOutputController>,
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<crate::VisionRevalidator>>,
-    /// MCP servers that failed at boot. Empty in the happy path.
     pub mcp_startup_failures: Vec<McpStartupFailure>,
 }
 
 impl Subsystems {
-    /// Construct a `Subsystems` with all required backends supplied.
-    /// `window_manager` defaults to [`NoWindowManager`] and
-    /// `vision_revalidator` to `None`; use the `with_*` builders to
-    /// attach those.
     pub fn new(
         llm: Arc<dyn LlmBackend>,
         presence: Arc<PresenceManager>,
