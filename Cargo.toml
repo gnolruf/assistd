@@ -34,7 +34,7 @@ assistd-wm     = { version = "1.0", path = "crates/assistd-wm" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.52.2", default-features = false }
+tokio = { version = "1.52.3", default-features = false }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -44,7 +44,7 @@ toml = "1.1.2"
 clap = { version = "4.6.1", features = ["derive"] }
 uuid = { version = "1.23.1", features = ["v4"] }
 async-trait = "0.1"
-reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
 libc = "0.2.186"
 rustix = { version = "1", features = ["stdio", "process"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
