@@ -42,8 +42,7 @@ makedepends=(
 backup=('etc/assistd/config.toml')
 install=assistd.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# TODO: replace SKIP with `updpkgsums` output once v$pkgver is tagged upstream.
-sha256sums=('SKIP')
+sha256sums=('6253dc8fa36c66c0d883f89346176ad59e037ce97cc0a77a0c14e5fa80aec341')
 
 prepare() {
   cd "$pkgname-$pkgver"
