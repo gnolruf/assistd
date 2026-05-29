@@ -58,10 +58,10 @@ regex = "1"
 tempfile = "3"
 base64 = "0.22"
 infer = "0.19"
-shlex = "1"
+shlex = "2"
 which = "8.0.2"
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
-ratatui-image = { version = "10.0.8", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "11.0.2", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 rusqlite = { version = "0.37", features = ["bundled", "blob"] }
 tokio-rusqlite = "0.7"
