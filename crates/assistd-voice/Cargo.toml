@@ -62,7 +62,7 @@ futures-util = { workspace = true, optional = true }
 
 cpal = { version = "0.17.3", optional = true }
 ringbuf = { version = "0.5", optional = true }
-rubato = { version = "2.0", optional = true }
+rubato = { version = "3.0", optional = true }
 
 webrtc-vad = { version = "0.4", optional = true }
 
