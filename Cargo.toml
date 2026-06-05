@@ -42,7 +42,7 @@ anyhow = "1"
 thiserror = "2.0.18"
 toml = "1.1.2"
 clap = { version = "4.6.1", features = ["derive"] }
-uuid = { version = "1.23.1", features = ["v4"] }
+uuid = { version = "1.23.2", features = ["v4"] }
 async-trait = "0.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
 libc = "0.2.186"
@@ -61,7 +61,7 @@ infer = "0.19"
 shlex = "2"
 which = "8.0.2"
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
-ratatui-image = { version = "11.0.2", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "11.0.3", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 rusqlite = { version = "0.37", features = ["bundled", "blob"] }
 tokio-rusqlite = "0.7"
