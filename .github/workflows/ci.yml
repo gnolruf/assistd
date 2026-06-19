@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Reads channel + components from rust-toolchain.toml so CI tracks
       # the pinned toolchain instead of silently drifting to whatever
