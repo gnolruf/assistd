@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, Stream, StreamConfig, StreamError};
+use cpal::{Device, Error as CpalError, SampleFormat, Stream, StreamConfig};
 use ringbuf::HeapRb;
 use ringbuf::traits::{Producer, Split};
 use thiserror::Error;
@@ -249,7 +249,7 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     );
 }
 
-fn name_of(device: &Device) -> Result<String, cpal::DeviceNameError> {
+fn name_of(device: &Device) -> Result<String, CpalError> {
     device.description().map(|d| {
         d.driver()
             .map(str::to_string)
@@ -287,7 +287,7 @@ fn build_stream(
     producer: RbProd,
     overrun: Arc<AtomicU64>,
 ) -> Result<Stream, AudioCaptureError> {
-    let err_cb = |e: StreamError| {
+    let err_cb = |e: CpalError| {
         warn!(target: "assistd::voice::mic", "cpal stream error: {e}");
     };
 
@@ -296,7 +296,7 @@ fn build_stream(
             let state = CallbackState::new(producer, channels, overrun);
             device
                 .build_input_stream(
-                    config,
+                    *config,
                     move |data: &[f32], _| state.push_f32(data),
                     err_cb,
                     None,
@@ -307,7 +307,7 @@ fn build_stream(
             let state = CallbackState::new(producer, channels, overrun);
             device
                 .build_input_stream(
-                    config,
+                    *config,
                     move |data: &[i16], _| state.push_i16(data),
                     err_cb,
                     None,
@@ -318,7 +318,7 @@ fn build_stream(
             let state = CallbackState::new(producer, channels, overrun);
             device
                 .build_input_stream(
-                    config,
+                    *config,
                     move |data: &[u16], _| state.push_u16(data),
                     err_cb,
                     None,
