@@ -57,7 +57,7 @@ global-hotkey = "0.8"
 regex = "1"
 tempfile = "3"
 base64 = "0.22"
-infer = "0.19"
+infer = "0.22"
 shlex = "2"
 which = "8.0.2"
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
