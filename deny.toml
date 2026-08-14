@@ -111,6 +111,15 @@ skip = [
     # quantette → icy_sixel path it also pulls is on rand 0.9.
     { name = "rand", version = "0.8" },
     { name = "rand_core", version = "0.6" },
+    # The workspace is on base64 0.23; reqwest's hyper-util is still on
+    # 0.22. Resolves when hyper-util bumps.
+    { name = "base64", version = "0.22" },
+    # assistd-voice drives capture through cpal 0.18 directly, while
+    # rodio 0.22 (playback) is still on cpal 0.17.
+    { name = "cpal", version = "0.17" },
+    # The workspace is on shlex 2; bindgen (whisper-rs-sys) and cc both
+    # still pull shlex 1 as a build dependency.
+    { name = "shlex", version = "1" },
 ]
 
 # ---------------------------------------------------------------------------
