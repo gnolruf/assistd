@@ -380,12 +380,6 @@ async fn handle_connection(
         }
     };
 
-    // The reader owns the last `ConfirmRouter` handle, and the router
-    // holds a clone of the event sender — so `forward_fut` cannot see
-    // end-of-stream while the reader is alive. Racing the reader
-    // against dispatch (instead of joining on the forwarder) drops the
-    // reader as soon as dispatch finishes, which closes the channel and
-    // lets the forwarder drain and exit.
     let dispatch_and_read = async {
         tokio::pin!(dispatch_fut);
         tokio::pin!(read_fut);
@@ -393,14 +387,8 @@ async fn handle_connection(
             res = &mut dispatch_fut => res,
             () = &mut read_fut => dispatch_fut.await,
         }
-    };
+    }
 
-    // Subscribe dispatches never emit a terminal event, so during
-    // shutdown drain they would sit out the whole grace period and get
-    // aborted. Cancel them as soon as drain starts instead; dropping
-    // the dispatch closes the event channel, the forwarder flushes what
-    // is buffered, and the client sees a clean EOF. Query streams keep
-    // running so the grace period can do its job.
     let mut drain = drain;
     let dispatch_and_read = async move {
         if is_subscribe {
