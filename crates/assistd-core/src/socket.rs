@@ -167,6 +167,7 @@ where
     let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
     let mut connections: JoinSet<()> = JoinSet::new();
     let mut fd_exhausted = false;
+    let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
 
     tokio::pin!(shutdown);
     loop {
@@ -186,8 +187,10 @@ where
                             fd_exhausted = false;
                         }
                         let conn_state = state.clone();
+                        let conn_drain = drain_rx.clone();
                         connections.spawn(async move {
-                            if let Err(e) = handle_connection(stream, conn_state).await {
+                            if let Err(e) = handle_connection(stream, conn_state, conn_drain).await
+                            {
                                 error!("connection error: {e}");
                             }
                         });
@@ -221,6 +224,7 @@ where
     }
 
     drop(listener);
+    let _ = drain_tx.send(true);
 
     let in_flight = connections.len();
     if in_flight == 0 {
@@ -254,7 +258,11 @@ where
     Ok(())
 }
 
-async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(), SocketError> {
+async fn handle_connection(
+    stream: UnixStream,
+    state: Arc<AppState>,
+    drain: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), SocketError> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
@@ -318,7 +326,6 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
         Ok::<_, SocketError>(write_half)
     };
 
-    let router_for_reader = router.clone();
     let read_fut = async move {
         let mut buf = String::new();
         loop {
@@ -355,7 +362,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
                 Ok(Request::ConfirmResponse {
                     confirm_id, allow, ..
                 }) => {
-                    if let Err(reason) = router_for_reader.route_response(&confirm_id, allow) {
+                    if let Err(reason) = router.route_response(&confirm_id, allow) {
                         warn!(confirm_id = %confirm_id, reason, "unmatched ConfirmResponse");
                     }
                 }
@@ -373,16 +380,30 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>) -> Result<(
         }
     };
 
-    let (dispatch_res, forward_res, _) = async {
-        let read_handle = tokio::spawn(read_fut);
-        let (d, f) = tokio::join!(dispatch_fut, forward_fut);
-        drop(router);
-        read_handle.abort();
-        let _ = read_handle.await;
-        (d, f, ())
-    }
-    .instrument(span)
-    .await;
+    let dispatch_and_read = async {
+        tokio::pin!(dispatch_fut);
+        tokio::pin!(read_fut);
+        tokio::select! {
+            res = &mut dispatch_fut => res,
+            () = &mut read_fut => dispatch_fut.await,
+        }
+    };
+
+    let mut drain = drain;
+    let dispatch_and_read = async move {
+        if is_subscribe {
+            tokio::select! {
+                res = dispatch_and_read => res,
+                _ = drain.wait_for(|draining| *draining) => Ok(()),
+            }
+        } else {
+            dispatch_and_read.await
+        }
+    };
+
+    let (dispatch_res, forward_res) = async { tokio::join!(dispatch_and_read, forward_fut) }
+        .instrument(span)
+        .await;
 
     if let Err(e) = dispatch_res {
         error!("dispatch error: {e:#}");
@@ -1524,6 +1545,85 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn client_sees_eof_promptly_after_terminal_event() {
+        with_server(test_state(), |path| async move {
+            let stream = UnixStream::connect(&path).await.unwrap();
+            let (read, mut write) = stream.into_split();
+            write
+                .write_all(br#"{"type":"query","id":"eof-1","text":"ping"}"#)
+                .await
+                .unwrap();
+            write.write_all(b"\n").await.unwrap();
+            write.shutdown().await.unwrap();
+
+            let mut reader = BufReader::new(read);
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).await.unwrap();
+                assert!(n > 0, "connection closed before terminal event");
+                let ev: Event = serde_json::from_str(line.trim()).unwrap();
+                if ev.is_terminal() {
+                    break;
+                }
+            }
+
+            let mut line = String::new();
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("connection stayed open after terminal event")
+            .unwrap();
+            assert_eq!(n, 0, "expected EOF after terminal event, got {line:?}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_idle_subscriber_without_waiting_out_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assistd.sock");
+        let (tx, rx) = oneshot::channel::<()>();
+        let server_path = path.clone();
+        // Default grace is 5s; an idle subscriber must not hold the
+        // drain for that long.
+        let state = test_state();
+        let server = tokio::spawn(async move {
+            serve_at(&server_path, state, async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+        });
+        wait_for_listener(&path).await;
+
+        let (_write, mut reader) = open_subscribe_stream(
+            &path,
+            r#"{"type":"subscribe","id":"sub-drain","filter":{"kinds":[]}}"#,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        tx.send(()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("server held by idle subscriber past drain")
+            .unwrap();
+
+        let mut line = String::new();
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            reader.read_line(&mut line),
+        )
+        .await
+        .expect("subscriber not released on shutdown")
+        .unwrap();
+        assert_eq!(n, 0, "expected clean EOF on shutdown, got {line:?}");
     }
 
     #[tokio::test]
