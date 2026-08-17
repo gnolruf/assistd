@@ -387,7 +387,7 @@ async fn handle_connection(
             res = &mut dispatch_fut => res,
             () = &mut read_fut => dispatch_fut.await,
         }
-    }
+    };
 
     let mut drain = drain;
     let dispatch_and_read = async move {
