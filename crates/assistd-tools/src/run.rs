@@ -270,7 +270,7 @@ mod tests {
         r.register(ScreenshotCommand::default());
         r.register(WebCommand::new());
         r.register(BashCommand::default());
-        r.register(WmCommand::new(Arc::new(NoWindowManager)));
+        r.register(WmCommand::for_test(Arc::new(NoWindowManager)));
         Arc::new(r)
     }
 

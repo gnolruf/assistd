@@ -2,10 +2,8 @@
 //! a configurable policy (denylist, destructive-pattern confirmation,
 //! timeout) and optionally wrapped in a bubblewrap sandbox.
 //!
-//! The spawn pattern (`kill_on_drop(true)` + `process_group(0)` on Unix)
-//! mirrors `assistd-llm/src/llama_server/process.rs`: any mid-command
-//! daemon shutdown kills the whole process group, preventing grandchild
-//! leaks if the script itself forked.
+//! Spawn, output capture, and timeout live in [`crate::exec`], shared
+//! with `wm open` (which uses that module's detached counterpart).
 //!
 //! ## Policy layering
 //!
@@ -31,52 +29,29 @@
 //! real defense; the pattern checks are a backstop that catches the
 //! *obvious* cases the user expects blocked.
 
-use std::ffi::OsStr;
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
-use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command as ProcCommand;
-use tokio::sync::Notify;
-use tokio::time::timeout;
 use tracing::warn;
 
-use crate::chain::PIPE_BUF_MAX;
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::exec::{POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT, supervise};
 use crate::policy::{
-    ConfirmationGate, ConfirmationRequest, ResolvedSandboxMode, SandboxInfo, matches_denylist,
+    ConfirmationGate, ConfirmationRequest, SandboxAccess, SandboxInfo, matches_denylist,
     matches_destructive,
 };
 
-/// Exit code for policy denial. POSIX "command found but not executable" is
-/// the closest semantic match to "we recognize the command but refuse it".
-const POLICY_DENIED_EXIT: i32 = 126;
-
-/// Exit code for timeout (128 + SIGKILL=9). The process group is killed
-/// when the `tokio::time::timeout` future fires and the `tokio::Child`
-/// handle's `kill_on_drop(true)` destructor runs.
-const TIMEOUT_EXIT: i32 = 137;
-
-/// Max bytes captured from the child's stdout or stderr while it runs.
-/// Mirrors the chain executor's `PIPE_BUF_MAX` so a runaway script (e.g.
-/// `bash "yes"`) can't balloon daemon memory before the timeout fires.
-/// Applied per-stream: stdout and stderr are bounded independently.
-const OUTPUT_BUF_MAX: usize = PIPE_BUF_MAX;
-
-/// Exit code returned when a bash script exceeds [`OUTPUT_BUF_MAX`] on
-/// either pipe. Matches the chain executor's pipe-overflow exit so `||`
-/// fallbacks behave the same regardless of where the overflow happened.
-const OUTPUT_OVERFLOW_EXIT: i32 = 141;
-
-/// Bash-policy bundle: timeout, denylist substrings, tokenized destructive
-/// patterns. Caller (e.g. `assistd-core::build_tools`) shlex-tokenizes
-/// the config's destructive patterns once at startup and passes the result
-/// here as `Vec<Vec<String>>` to avoid re-parsing on every invocation.
+/// Policy bundle for the commands that spawn subprocesses: timeout,
+/// denylist substrings, tokenized destructive patterns. Caller (e.g.
+/// `assistd-core::build_tools`) shlex-tokenizes the config's destructive
+/// patterns once at startup and passes the result here as
+/// `Vec<Vec<String>>` to avoid re-parsing on every invocation.
+///
+/// Shared with [`crate::commands::WmCommand`], whose `open` subcommand
+/// spawns model-chosen argv and is gated by the same `[tools.bash]`
+/// policy.
 #[derive(Debug, Clone)]
 pub struct BashPolicyCfg {
     pub timeout: Duration,
@@ -209,20 +184,14 @@ impl Command for BashCommand {
             }
         }
 
-        let start = Instant::now();
-        let mut cmd = build_command(&self.sandbox, &script);
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CommandOutput::failed(
-                    127,
+        let cmd = self
+            .sandbox
+            .command(SandboxAccess::Default, "bash", ["-c", script.as_str()]);
+        supervise("bash", cmd, &input.stdin, self.cfg.timeout)
+            .await
+            .or_else(|e| {
+                Ok(CommandOutput::failed(
+                    SPAWN_FAILED_EXIT,
                     error_line(
                         "bash",
                         format_args!("spawn failed: {e}"),
@@ -230,231 +199,15 @@ impl Command for BashCommand {
                         "bash and (if configured) bwrap are on PATH",
                     )
                     .into_bytes(),
-                ));
-            }
-        };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            if !input.stdin.is_empty() {
-                let _ = stdin.write_all(&input.stdin).await;
-            }
-            // Drop closes the pipe, signaling EOF to the child.
-            drop(stdin);
-        }
-
-        // Drive the child's stdout/stderr ourselves rather than letting
-        // `wait_with_output()` collect them into unbounded Vecs. Without
-        // this, a script like `yes` would buffer tens of GB in-process
-        // before the chain executor's PIPE_BUF_MAX check ever fires; that
-        // check only runs *after* this function returns.
-        let stdout_pipe = child.stdout.take().expect("stdout was piped");
-        let stderr_pipe = child.stderr.take().expect("stderr was piped");
-        let overflow = Arc::new(Notify::new());
-        let stdout_task = tokio::spawn(read_capped(stdout_pipe, OUTPUT_BUF_MAX, overflow.clone()));
-        let stderr_task = tokio::spawn(read_capped(stderr_pipe, OUTPUT_BUF_MAX, overflow.clone()));
-
-        // On timeout or overflow, the tokio::Child is killed; readers see
-        // EOF as the kernel closes the pipes and the reader tasks join.
-        let outcome = tokio::select! {
-            res = timeout(self.cfg.timeout, child.wait()) => match res {
-                Ok(Ok(status)) => WaitOutcome::Exited(status),
-                Ok(Err(e)) => WaitOutcome::WaitErr(e),
-                Err(_) => WaitOutcome::Timeout,
-            },
-            _ = overflow.notified() => WaitOutcome::Overflow,
-        };
-
-        if matches!(outcome, WaitOutcome::Timeout | WaitOutcome::Overflow) {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-        }
-
-        let (stdout, stdout_overflowed) = stdout_task.await.unwrap_or_default();
-        let (stderr_bytes, stderr_overflowed) = stderr_task.await.unwrap_or_default();
-
-        // The reader closes its pipe on overflow, which can SIGPIPE the
-        // child; that race makes `child.wait()` ready at the same time as
-        // the overflow notify, and `select!` picks pseudo-randomly. The
-        // bool returned by `read_capped` is the source of truth — if
-        // either stream overflowed, force the Overflow outcome regardless
-        // of which select branch won.
-        let outcome = if stdout_overflowed || stderr_overflowed {
-            WaitOutcome::Overflow
-        } else {
-            outcome
-        };
-
-        match outcome {
-            WaitOutcome::Exited(status) => {
-                // `ExitStatus::code()` returns `None` when the child was
-                // killed by a signal. Encode signal death as `128 + signum`
-                // (the POSIX convention bash itself uses) so a segfault
-                // surfaces as 139 rather than masquerading as our timeout
-                // sentinel 137. Non-unix or truly indeterminate cases fall
-                // back to 1.
-                let exit_code = status
-                    .code()
-                    .or_else(|| signal_exit_code(&status))
-                    .unwrap_or(1);
-                Ok(CommandOutput {
-                    stdout,
-                    stderr: stderr_bytes,
-                    exit_code,
-                    attachments: Vec::new(),
-                })
-            }
-            WaitOutcome::WaitErr(e) => Ok(CommandOutput::failed(
-                1,
-                error_line(
-                    "bash",
-                    format_args!("wait failed: {e}"),
-                    "Try",
-                    "re-running the command",
-                )
-                .into_bytes(),
-            )),
-            WaitOutcome::Timeout => {
-                // AC #2: exact one-line format including the `[exit:N | Ms]`
-                // suffix inline. This is a deliberate divergence from the
-                // `error_line` / presentation-footer convention because
-                // the acceptance criterion pins the exact form.
-                let elapsed = start.elapsed();
-                let secs = self.cfg.timeout.as_secs();
-                let elapsed_secs = elapsed.as_secs_f64();
-                let msg = format!(
-                    "[error] bash: timed out after {secs}s [exit:{TIMEOUT_EXIT} | {elapsed_secs:.1}s]\n"
-                );
-                Ok(CommandOutput::failed(TIMEOUT_EXIT, msg.into_bytes()))
-            }
-            WaitOutcome::Overflow => {
-                let overflow_msg = error_line(
-                    "bash",
-                    format_args!("output exceeded {OUTPUT_BUF_MAX} bytes; child killed"),
-                    "Try",
-                    "redirect to a file or pipe through head/wc -l to shrink the stream",
-                )
-                .into_bytes();
-                let mut merged_stderr = stderr_bytes;
-                merged_stderr.extend_from_slice(&overflow_msg);
-                Ok(CommandOutput {
-                    stdout,
-                    stderr: merged_stderr,
-                    exit_code: OUTPUT_OVERFLOW_EXIT,
-                    attachments: Vec::new(),
-                })
-            }
-        }
-    }
-}
-
-enum WaitOutcome {
-    Exited(std::process::ExitStatus),
-    WaitErr(std::io::Error),
-    Timeout,
-    Overflow,
-}
-
-#[cfg(unix)]
-fn signal_exit_code(status: &std::process::ExitStatus) -> Option<i32> {
-    status.signal().map(|s| 128 + s)
-}
-
-#[cfg(not(unix))]
-fn signal_exit_code(_status: &std::process::ExitStatus) -> Option<i32> {
-    None
-}
-
-/// Read bytes from `reader` into a `Vec` capped at `limit`. Returns the
-/// captured bytes and an `overflowed` flag: `true` iff the cap was hit.
-/// On overflow the excess is dropped, `overflow` is signalled (to wake
-/// the main `select!`), and the function returns. EOF and read errors
-/// return `(buf, false)` without signalling.
-///
-/// The bool is the authoritative overflow signal — the `Notify` is only
-/// an "wake up early" hint. The main task always checks this flag after
-/// joining, because closing the pipe on return may SIGPIPE the child and
-/// make `child.wait()` race the notify.
-async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
-    mut reader: R,
-    limit: usize,
-    overflow: Arc<Notify>,
-) -> (Vec<u8>, bool) {
-    let mut buf: Vec<u8> = Vec::new();
-    let mut tmp = [0u8; 8192];
-    loop {
-        match reader.read(&mut tmp).await {
-            Ok(0) => return (buf, false),
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-                if buf.len() > limit {
-                    buf.truncate(limit);
-                    overflow.notify_one();
-                    return (buf, true);
-                }
-            }
-            Err(_) => return (buf, false),
-        }
-    }
-}
-
-/// Default bubblewrap flags applied before any user `bwrap_extra_args`.
-/// Read-only root, writable `$HOME` + `/tmp`, standard `/dev` and `/proc`,
-/// isolated pid/ipc/uts namespaces, dies with the daemon. Crucially *not*
-/// `--unshare-net`: the assistant legitimately needs curl/pip/etc., so
-/// network isolation is opt-in via `bwrap_extra_args`.
-fn default_bwrap_flags() -> Vec<String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    vec![
-        "--ro-bind".into(),
-        "/".into(),
-        "/".into(),
-        "--bind".into(),
-        home.clone(),
-        home.clone(),
-        "--bind".into(),
-        "/tmp".into(),
-        "/tmp".into(),
-        "--dev".into(),
-        "/dev".into(),
-        "--proc".into(),
-        "/proc".into(),
-        "--tmpfs".into(),
-        "/run".into(),
-        "--unshare-pid".into(),
-        "--unshare-ipc".into(),
-        "--unshare-uts".into(),
-        "--new-session".into(),
-        "--die-with-parent".into(),
-        "--setenv".into(),
-        "HOME".into(),
-        home,
-        "--setenv".into(),
-        "PATH".into(),
-        "/usr/local/bin:/usr/bin:/bin".into(),
-    ]
-}
-
-fn build_command(sandbox: &SandboxInfo, script: &str) -> ProcCommand {
-    match &sandbox.mode {
-        ResolvedSandboxMode::None => {
-            let mut cmd = ProcCommand::new("bash");
-            cmd.arg("-c").arg(script);
-            cmd
-        }
-        ResolvedSandboxMode::Bwrap { path } => {
-            let mut cmd = ProcCommand::new(path);
-            cmd.args(default_bwrap_flags().iter().map(OsStr::new));
-            cmd.args(sandbox.extra_args.iter().map(OsStr::new));
-            cmd.arg("--");
-            cmd.arg("bash").arg("-c").arg(script);
-            cmd
-        }
+                ))
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exec::{OUTPUT_BUF_MAX, OUTPUT_OVERFLOW_EXIT};
     use crate::policy::{AlwaysAllowGate, DenyAllGate};
 
     fn bash_with_cfg(cfg: BashPolicyCfg, gate: Arc<dyn ConfirmationGate>) -> BashCommand {

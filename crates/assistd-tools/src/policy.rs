@@ -16,12 +16,14 @@
 //! the real defense; the bwrap sandbox is.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use async_trait::async_trait;
+use tokio::process::Command as ProcCommand;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -349,6 +351,21 @@ pub struct SandboxInfo {
     pub extra_args: Vec<String>,
 }
 
+/// Session resources a sandboxed command needs beyond the default
+/// profile. Selecting a variant is the only way to widen the sandbox
+/// from inside the workspace; anything else goes through the operator's
+/// `bwrap_extra_args`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxAccess {
+    /// The default profile. `/run` is a fresh tmpfs, so the compositor
+    /// and D-Bus session sockets are unreachable. Used by `bash`.
+    Default,
+    /// Additionally bind `$XDG_RUNTIME_DIR` back over the `/run` tmpfs.
+    /// Used by `wm open`, which launches GUI applications: without the
+    /// Wayland and D-Bus sockets they fail to start at all.
+    Session,
+}
+
 impl SandboxInfo {
     /// Convenience constructor for tests that don't care about sandboxing.
     pub fn none() -> Arc<Self> {
@@ -356,6 +373,107 @@ impl SandboxInfo {
             mode: ResolvedSandboxMode::None,
             extra_args: Vec::new(),
         })
+    }
+
+    /// Build the [`ProcCommand`] that runs `program` with `args`, wrapped
+    /// in bubblewrap when the resolved mode is
+    /// [`ResolvedSandboxMode::Bwrap`].
+    ///
+    /// Flag order is load-bearing: the default profile first, then the
+    /// `access` binds (which must land *after* `--tmpfs /run` to be
+    /// visible), then the operator's `extra_args` so they always win.
+    pub fn command<I, S>(&self, access: SandboxAccess, program: &str, args: I) -> ProcCommand
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        match &self.mode {
+            ResolvedSandboxMode::None => {
+                let mut cmd = ProcCommand::new(program);
+                cmd.args(args);
+                cmd
+            }
+            ResolvedSandboxMode::Bwrap { path } => {
+                let mut cmd = ProcCommand::new(path);
+                cmd.args(default_bwrap_flags().iter().map(OsStr::new));
+                if access == SandboxAccess::Session {
+                    cmd.args(session_bind_flags().iter().map(OsStr::new));
+                }
+                cmd.args(self.extra_args.iter().map(OsStr::new));
+                cmd.arg("--");
+                cmd.arg(program).args(args);
+                cmd
+            }
+        }
+    }
+}
+
+/// Default bubblewrap flags applied before any user `bwrap_extra_args`.
+/// Read-only root, writable `$HOME` + `/tmp`, standard `/dev` and `/proc`,
+/// isolated pid/ipc/uts namespaces, dies with the daemon. Crucially *not*
+/// `--unshare-net`: the assistant legitimately needs curl/pip/etc., so
+/// network isolation is opt-in via `bwrap_extra_args`.
+fn default_bwrap_flags() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    vec![
+        "--ro-bind".into(),
+        "/".into(),
+        "/".into(),
+        "--bind".into(),
+        home.clone(),
+        home.clone(),
+        "--bind".into(),
+        "/tmp".into(),
+        "/tmp".into(),
+        "--dev".into(),
+        "/dev".into(),
+        "--proc".into(),
+        "/proc".into(),
+        "--tmpfs".into(),
+        "/run".into(),
+        "--unshare-pid".into(),
+        "--unshare-ipc".into(),
+        "--unshare-uts".into(),
+        "--new-session".into(),
+        "--die-with-parent".into(),
+        "--setenv".into(),
+        "HOME".into(),
+        home,
+        "--setenv".into(),
+        "PATH".into(),
+        "/usr/local/bin:/usr/bin:/bin".into(),
+    ]
+}
+
+/// Bind flags for [`SandboxAccess::Session`], re-exposing the compositor
+/// and D-Bus session sockets that the default profile's `--tmpfs /run`
+/// hides.
+///
+/// Returns empty when `XDG_RUNTIME_DIR` is unset or does not name a
+/// directory: `bwrap` aborts on a missing bind source, so a stale value
+/// would take every launch down with it rather than merely leaving the
+/// sandbox tight.
+fn session_bind_flags() -> Vec<String> {
+    session_bind_flags_in(std::env::var("XDG_RUNTIME_DIR").ok())
+}
+
+/// Inner form of [`session_bind_flags`] that takes the `XDG_RUNTIME_DIR`
+/// value explicitly, so tests can exercise the unset and stale-path
+/// branches without mutating the global process environment (which would
+/// race with parallel tests).
+fn session_bind_flags_in(runtime_dir: Option<String>) -> Vec<String> {
+    match runtime_dir {
+        Some(dir) if std::path::Path::new(&dir).is_dir() => {
+            vec!["--bind".into(), dir.clone(), dir]
+        }
+        _ => {
+            warn!(
+                target: "assistd::policy",
+                "XDG_RUNTIME_DIR is unset or not a directory; sandboxed launches will have \
+                 no compositor or D-Bus session socket"
+            );
+            Vec::new()
+        }
     }
 }
 
@@ -605,6 +723,84 @@ mod tests {
         assert!(matches_destructive("shutdown -h now", &prefixes).is_some());
         // "shutdown" inside a quoted arg doesn't anchor at a command slot.
         assert!(matches_destructive("echo 'shutdown'", &prefixes).is_none());
+    }
+
+    fn bwrap_sandbox(extra_args: Vec<String>) -> SandboxInfo {
+        SandboxInfo {
+            mode: ResolvedSandboxMode::Bwrap {
+                path: PathBuf::from("/usr/bin/bwrap"),
+            },
+            extra_args,
+        }
+    }
+
+    fn argv_of(cmd: &tokio::process::Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn unsandboxed_command_passes_argv_through_verbatim() {
+        let info = SandboxInfo {
+            mode: ResolvedSandboxMode::None,
+            extra_args: Vec::new(),
+        };
+        let cmd = info.command(SandboxAccess::Default, "firefox", ["--new-window", "a b"]);
+        assert_eq!(cmd.as_std().get_program(), "firefox");
+        assert_eq!(argv_of(&cmd), vec!["--new-window", "a b"]);
+    }
+
+    #[test]
+    fn bwrap_command_puts_program_after_the_separator() {
+        let info = bwrap_sandbox(vec!["--unshare-net".into()]);
+        let cmd = info.command(SandboxAccess::Default, "firefox", ["--new-window"]);
+        assert_eq!(cmd.as_std().get_program(), "/usr/bin/bwrap");
+        let argv = argv_of(&cmd);
+        let sep = argv.iter().position(|a| a == "--").expect("separator");
+        assert_eq!(&argv[sep + 1..], &["firefox", "--new-window"]);
+        // Operator extra args are the last thing before `--`, so they
+        // override anything in the default profile.
+        assert_eq!(argv[sep - 1], "--unshare-net");
+    }
+
+    #[test]
+    fn default_access_leaves_the_run_tmpfs_empty() {
+        let info = bwrap_sandbox(Vec::new());
+        let argv = argv_of(&info.command(SandboxAccess::Default, "bash", ["-c", "true"]));
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+        assert!(
+            runtime_dir.is_empty() || !argv.contains(&runtime_dir),
+            "default profile must not bind the session runtime dir: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn session_bind_lands_after_the_run_tmpfs() {
+        // Order matters: a bind listed before `--tmpfs /run` would be
+        // shadowed by the tmpfs and the socket would be invisible.
+        let dir = std::env::temp_dir();
+        let dir_str = dir.to_string_lossy().into_owned();
+        let flags = session_bind_flags_in(Some(dir_str.clone()));
+        assert_eq!(flags, vec!["--bind".to_string(), dir_str.clone(), dir_str]);
+
+        let profile = default_bwrap_flags();
+        let tmpfs = profile
+            .iter()
+            .position(|f| f == "--tmpfs")
+            .expect("default profile mounts a tmpfs");
+        assert_eq!(profile[tmpfs + 1], "/run");
+    }
+
+    #[test]
+    fn session_bind_is_skipped_when_runtime_dir_is_unusable() {
+        assert!(session_bind_flags_in(None).is_empty());
+        assert!(
+            session_bind_flags_in(Some("/nonexistent/assistd-runtime-dir".into())).is_empty(),
+            "a stale XDG_RUNTIME_DIR must not be passed to bwrap, which aborts on a \
+             missing bind source"
+        );
     }
 
     #[test]

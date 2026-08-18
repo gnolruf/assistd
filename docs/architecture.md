@@ -163,9 +163,13 @@ trait definitions and a complete worked example of adding your own.
 
 Policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`)
 intercept the dangerous paths: `bash` runs through a sandbox
-(bubblewrap by default) with a destructive-pattern denylist; `write`
-restricts targets to a configured allowlist; `see` and `screenshot`
-no-op when the loaded model has no vision projector.
+(bubblewrap by default) with a destructive-pattern denylist; `wm open`
+spawns model-chosen argv and so shares that same `[tools.bash]` policy,
+widened only by a bind of `$XDG_RUNTIME_DIR` so a launched GUI
+application can reach the compositor, and left running once it survives
+a startup probe; `write` restricts targets to a
+configured allowlist; `see` and `screenshot` no-op when the loaded
+model has no vision projector.
 
 ### Memory (`assistd-memory` + `assistd-embed`)
 

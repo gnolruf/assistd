@@ -7,7 +7,10 @@
 //! - `wm move <class> <workspace>` - move window to workspace
 //! - `wm open <app> [args...]` - launch a process (does not go through
 //!   the WindowManager; i3/sway/hyprland don't spawn processes, they
-//!   only manage already-mapped windows)
+//!   only manage already-mapped windows). The argv comes from the model,
+//!   so it runs under the same policy as `bash`: denylist,
+//!   destructive-pattern confirmation, and bubblewrap. The launched
+//!   application is left running once it survives a startup probe.
 //! - `wm active` - class of the focused window
 //! - `wm resize <class> <grow|shrink> <px>` - width-only resize
 //! - `wm list` - TSV `<class>\t<workspace>\t<title>`
@@ -26,16 +29,21 @@
 //! every subcommand short-circuits with `[error] wm: compositor not
 //! connected. …` so the LLM gets one uniform error to recover from.
 
-use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::process::Command as ProcCommand;
+use tracing::warn;
 
 use assistd_wm::{Layout, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::commands::bash::BashPolicyCfg;
+use crate::exec::{POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT, spawn_detached};
+use crate::policy::{
+    ConfirmationGate, ConfirmationRequest, SandboxAccess, SandboxInfo, matches_denylist,
+    matches_destructive,
+};
 
 /// Pick the `(label, hint)` pair attached to a [`WmError`] for the
 /// `[error] wm: …. <label>: <hint>` line the LLM sees. The variant
@@ -68,12 +76,46 @@ const SUMMARY: &str = "manage windows and workspaces (focus, move, open, list, w
 /// `wm <subcommand> [args]`: drive the active window manager from the LLM's `run` tool.
 pub struct WmCommand {
     wm: Arc<dyn WindowManager>,
+    cfg: Arc<BashPolicyCfg>,
+    sandbox: Arc<SandboxInfo>,
+    gate: Arc<dyn ConfirmationGate>,
 }
 
 impl WmCommand {
     /// Construct a `WmCommand` backed by the given [`WindowManager`] implementation.
-    pub fn new(wm: Arc<dyn WindowManager>) -> Self {
-        Self { wm }
+    ///
+    /// `cfg`, `sandbox`, and `gate` are the same values handed to
+    /// [`crate::commands::BashCommand`]. `wm open` spawns argv the model
+    /// chose, so it is gated by the identical `[tools.bash]` policy
+    /// rather than a parallel one that could drift out of step.
+    pub fn new(
+        wm: Arc<dyn WindowManager>,
+        cfg: Arc<BashPolicyCfg>,
+        sandbox: Arc<SandboxInfo>,
+        gate: Arc<dyn ConfirmationGate>,
+    ) -> Self {
+        Self {
+            wm,
+            cfg,
+            sandbox,
+            gate,
+        }
+    }
+}
+
+#[cfg(test)]
+impl WmCommand {
+    /// Test-only constructor: default policy (no denylist, no destructive
+    /// patterns), no sandbox, allow-all gate. Production paths always go
+    /// through [`WmCommand::new`] with the daemon's real config.
+    pub(crate) fn for_test(wm: Arc<dyn WindowManager>) -> Self {
+        use crate::policy::AlwaysAllowGate;
+        Self::new(
+            wm,
+            Arc::new(BashPolicyCfg::default()),
+            SandboxInfo::none(),
+            Arc::new(AlwaysAllowGate),
+        )
     }
 }
 
@@ -99,7 +141,7 @@ impl Command for WmCommand {
          Subcommands:\n  \
            focus <id>                             focus the window with this con_id\n  \
            move <id> <workspace>                  move window to workspace\n  \
-           open <app> [args...]                   launch an application\n  \
+           open <app> [args...]                   launch an application (policy-gated)\n  \
            active                                 TSV: id, app of the focused window\n  \
            resize <id> <grow|shrink> <px>         width-only resize\n  \
            list                                   TSV: id, app, workspace, title\n  \
@@ -136,7 +178,7 @@ impl Command for WmCommand {
         match sub {
             "focus" => handle_focus(self.wm.as_ref(), rest).await,
             "move" => handle_move(self.wm.as_ref(), rest).await,
-            "open" => handle_open(rest).await,
+            "open" => self.open(rest).await,
             "active" => handle_active(self.wm.as_ref()).await,
             "resize" => handle_resize(self.wm.as_ref(), rest).await,
             "list" => handle_list(self.wm.as_ref()).await,
@@ -259,44 +301,107 @@ async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandO
 const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
     \n\
     Launch an application. <app> is resolved through PATH; remaining \
-    arguments are forwarded to the spawned process. The child is \
-    detached: stdin/stdout/stderr are nulled and the daemon does not \
-    wait for it to exit.\n";
+    arguments are forwarded to the spawned process.\n\
+    \n\
+    Runs under the same policy as `bash`: denylist, destructive-pattern \
+    confirmation, and the bubblewrap sandbox (widened only to reach the \
+    compositor and D-Bus session sockets).\n\
+    \n\
+    The application is briefly watched, then left running. If it exits \
+    during that window its exit code and output are returned, which is \
+    how a failed launch surfaces; if it is still alive, exit 0 with no \
+    output means the launch succeeded. Stdin is not forwarded, and no \
+    timeout applies once it is running.\n";
 
-async fn handle_open(args: &[String]) -> Result<CommandOutput> {
-    if args.is_empty() {
-        return Ok(help_output(OPEN_HELP.to_string()));
+impl WmCommand {
+    async fn open(&self, args: &[String]) -> Result<CommandOutput> {
+        let Some((app, extra)) = args.split_first() else {
+            return Ok(help_output(OPEN_HELP.to_string()));
+        };
+        let argv = args.join(" ");
+
+        if let Some(pat) = matches_denylist(&argv, &self.cfg.denylist) {
+            warn!(
+                target: "assistd::policy",
+                argv = %argv,
+                matched = %pat,
+                "wm open denied by denylist"
+            );
+            return Ok(CommandOutput::failed(
+                POLICY_DENIED_EXIT,
+                error_line(
+                    NAME,
+                    format_args!("open denied by policy. Matched denylist pattern: {pat}"),
+                    "Try",
+                    "a non-destructive alternative",
+                )
+                .into_bytes(),
+            ));
+        }
+
+        if let Some(matched) = matches_destructive_argv(args, &self.cfg.destructive_patterns) {
+            let pattern_display = matched.join(" ");
+            let approved = self
+                .gate
+                .confirm(ConfirmationRequest {
+                    tool: NAME.to_string(),
+                    script: argv.clone(),
+                    matched_pattern: pattern_display.clone(),
+                })
+                .await;
+            if !approved {
+                return Ok(CommandOutput::failed(
+                    POLICY_DENIED_EXIT,
+                    error_line(
+                        NAME,
+                        format_args!(
+                            "open cancelled by user. Matched destructive pattern: {pattern_display}"
+                        ),
+                        "Try",
+                        "a different approach",
+                    )
+                    .into_bytes(),
+                ));
+            }
+        }
+
+        let cmd = self.sandbox.command(SandboxAccess::Session, app, extra);
+        spawn_detached(NAME, cmd).await.or_else(|e| {
+            let line = if e.kind() == std::io::ErrorKind::NotFound {
+                error_line(
+                    NAME,
+                    format_args!("open: binary '{app}' not found on PATH"),
+                    "Check",
+                    format_args!("which {app}"),
+                )
+            } else {
+                error_line(
+                    NAME,
+                    format_args!("open '{app}' failed: {e}"),
+                    "Try",
+                    "a different binary or absolute path",
+                )
+            };
+            Ok(CommandOutput::failed(SPAWN_FAILED_EXIT, line.into_bytes()))
+        })
     }
-    let app = &args[0];
-    let extra = &args[1..];
-    let mut cmd = ProcCommand::new(app);
-    cmd.args(extra)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    match cmd.spawn() {
-        Ok(_child) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("open: binary '{app}' not found on PATH"),
-                "Check",
-                format_args!("which {app}"),
-            )
-            .into_bytes(),
-        )),
-        Err(e) => Ok(CommandOutput::failed(
-            1,
-            error_line(
-                NAME,
-                format_args!("open '{app}' failed: {e}"),
-                "Try",
-                "a different binary or absolute path",
-            )
-            .into_bytes(),
-        )),
-    }
+}
+
+/// Destructive-pattern match over `wm open`'s argv.
+///
+/// Two passes, because argv is not a shell script. The joined form
+/// anchors ordinary invocations (`wm open rm -rf ~`), while re-checking
+/// each argument on its own catches a script smuggled into a single word
+/// (`wm open bash -c "rm -rf ~"`) — joined, that word's tokens sit mid-line
+/// with no command anchor in front of them, so the first pass misses it.
+fn matches_destructive_argv<'a>(
+    argv: &[String],
+    prefixes: &'a [Vec<String>],
+) -> Option<&'a [String]> {
+    matches_destructive(&argv.join(" "), prefixes).or_else(|| {
+        argv.iter()
+            .find_map(|arg| matches_destructive(arg, prefixes))
+    })
 }
 
 async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
@@ -552,6 +657,7 @@ async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::{AlwaysAllowGate, DenyAllGate};
     use assistd_wm::{
         FocusedWindowContext, Layout, NoWindowManager, OutputInfo, ResizeDir, Window, WindowId,
         WmResult, WorkspaceId, WorkspaceInfo,
@@ -702,7 +808,7 @@ mod tests {
     }
 
     async fn run_wm(wm: Arc<dyn WindowManager>, args: &[&str]) -> CommandOutput {
-        WmCommand::new(wm)
+        WmCommand::for_test(wm)
             .run(CommandInput {
                 args: args.iter().map(|s| s.to_string()).collect(),
                 stdin: Vec::new(),
@@ -886,13 +992,186 @@ mod tests {
             &["open", "definitely-not-a-real-binary-xyzzy-12345"],
         )
         .await;
-        assert_eq!(out.exit_code, 1);
+        assert_eq!(out.exit_code, SPAWN_FAILED_EXIT);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             stderr.contains("[error] wm: open: binary 'definitely-not-a-real-binary-xyzzy-12345' not found on PATH"),
             "{stderr}"
         );
         assert!(stderr.contains("Check:"), "{stderr}");
+    }
+
+    fn policed_wm(cfg: BashPolicyCfg, gate: Arc<dyn ConfirmationGate>) -> WmCommand {
+        WmCommand::new(
+            Arc::new(StubWm::connected()),
+            Arc::new(cfg),
+            SandboxInfo::none(),
+            gate,
+        )
+    }
+
+    async fn run_open(cmd: &WmCommand, args: &[&str]) -> CommandOutput {
+        let mut argv = vec!["open".to_string()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        cmd.run(CommandInput {
+            args: argv,
+            stdin: Vec::new(),
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_captures_child_output() {
+        let out = run_wm(Arc::new(StubWm::connected()), &["open", "echo", "hi"]).await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, b"hi\n");
+    }
+
+    #[tokio::test]
+    async fn open_surfaces_nonzero_child_exit() {
+        let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
+        let out = run_open(&cmd, &["false"]).await;
+        assert_eq!(out.exit_code, 1);
+    }
+
+    #[tokio::test]
+    async fn open_denylist_blocks_before_spawn() {
+        let cmd = policed_wm(
+            BashPolicyCfg {
+                denylist: vec!["rm -rf /".into()],
+                ..Default::default()
+            },
+            Arc::new(AlwaysAllowGate),
+        );
+        let out = run_open(&cmd, &["bash", "-c", "rm -rf /"]).await;
+        assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("denylist pattern: rm -rf /"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn open_destructive_argv_consults_gate() {
+        let cmd = policed_wm(
+            BashPolicyCfg {
+                destructive_patterns: vec![vec!["rm".into(), "-rf".into()]],
+                ..Default::default()
+            },
+            Arc::new(DenyAllGate),
+        );
+        let out = run_open(&cmd, &["rm", "-rf", "/tmp/whatever"]).await;
+        assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Matched destructive pattern: rm -rf"),
+            "{stderr}"
+        );
+    }
+
+    /// The regression this whole gate exists for: `wm open bash -c "…"`
+    /// used to spawn unsandboxed argv with no policy at all. The script
+    /// lives inside a single argument, so it only matches once each
+    /// argument is checked on its own.
+    #[tokio::test]
+    async fn open_destructive_inside_bash_c_argument_consults_gate() {
+        let cmd = policed_wm(
+            BashPolicyCfg {
+                destructive_patterns: vec![vec!["rm".into(), "-rf".into()]],
+                ..Default::default()
+            },
+            Arc::new(DenyAllGate),
+        );
+        let out = run_open(&cmd, &["bash", "-c", "rm -rf /tmp/whatever"]).await;
+        assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    }
+
+    #[tokio::test]
+    async fn open_gate_approval_lets_the_process_run() {
+        let cmd = policed_wm(
+            BashPolicyCfg {
+                destructive_patterns: vec![vec!["true".into()]],
+                ..Default::default()
+            },
+            Arc::new(AlwaysAllowGate),
+        );
+        let out = run_open(&cmd, &["true"]).await;
+        assert_eq!(out.exit_code, 0);
+    }
+
+    /// The point of the detached path: an application that outlives the
+    /// startup probe keeps running, and the launch reports success rather
+    /// than blocking the turn or being killed.
+    #[tokio::test]
+    async fn open_leaves_a_surviving_process_running() {
+        let marker = std::env::temp_dir().join(format!("assistd-wm-open-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+
+        let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
+        let started = std::time::Instant::now();
+        let out = run_open(
+            &cmd,
+            &[
+                "bash",
+                "-c",
+                &format!("sleep 1; touch {}", marker.display()),
+            ],
+        )
+        .await;
+
+        assert_eq!(out.exit_code, 0, "surviving launch should report success");
+        assert!(out.stdout.is_empty());
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(900),
+            "launch should return on the probe, not on the child exiting"
+        );
+        assert!(!marker.exists(), "child should not have finished yet");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(
+            marker.exists(),
+            "detached child must keep running after the launch returned"
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[tokio::test]
+    async fn open_reports_a_failed_startup_with_its_output() {
+        let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
+        let out = run_open(&cmd, &["bash", "-c", "echo boom >&2; exit 3"]).await;
+        assert_eq!(out.exit_code, 3);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("boom"),
+            "startup failure must surface the child's stderr"
+        );
+    }
+
+    /// Policy is scoped to `open`; the compositor subcommands must not
+    /// start consulting the gate or the denylist.
+    #[tokio::test]
+    async fn non_open_subcommands_skip_the_gate() {
+        struct PanicGate;
+        #[async_trait]
+        impl ConfirmationGate for PanicGate {
+            async fn confirm(&self, _r: ConfirmationRequest) -> bool {
+                panic!("wm policy must only gate `open`");
+            }
+        }
+        let cmd = policed_wm(
+            BashPolicyCfg {
+                denylist: vec!["focus".into()],
+                destructive_patterns: vec![vec!["focus".into()]],
+                ..Default::default()
+            },
+            Arc::new(PanicGate),
+        );
+        let out = cmd
+            .run(CommandInput {
+                args: vec!["focus".into(), "42".into()],
+                stdin: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
     }
 
     #[tokio::test]
