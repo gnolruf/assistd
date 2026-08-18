@@ -8,13 +8,12 @@
 //!   failed startup, then leaves it running. Used by `wm open`, whose
 //!   contract is "launch this and leave the window open".
 //!
-//! [`supervise`]'s spawn pattern (`kill_on_drop(true)` +
-//! `process_group(0)` on Unix) mirrors
-//! `assistd-llm/src/llama_server/process.rs`: any mid-command daemon
-//! shutdown kills the whole process group, preventing grandchild leaks if
-//! the child itself forked. [`spawn_detached`] deliberately drops
-//! `kill_on_drop`; bubblewrap's `--die-with-parent` is what bounds a
-//! launched application's lifetime to the daemon's.
+//! [`supervise`] takes the whole process group down with it
+//! (`kill_on_drop` + `process_group(0)`, as in
+//! `assistd-llm/src/llama_server/process.rs`), so a forked grandchild
+//! can't leak. [`spawn_detached`] cannot do that and stay useful;
+//! bubblewrap's `--die-with-parent` bounds a launched application
+//! instead.
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -39,15 +38,13 @@ pub(crate) const POLICY_DENIED_EXIT: i32 = 126;
 /// permission denied, sandbox helper absent).
 pub(crate) const SPAWN_FAILED_EXIT: i32 = 127;
 
-/// Exit code for timeout (128 + SIGKILL=9). The process group is killed
-/// when the `tokio::time::timeout` future fires and the `tokio::Child`
-/// handle's `kill_on_drop(true)` destructor runs.
+/// Exit code for timeout: 128 + SIGKILL, the convention bash uses.
 pub(crate) const TIMEOUT_EXIT: i32 = 137;
 
-/// Max bytes captured from the child's stdout or stderr while it runs.
-/// Mirrors the chain executor's `PIPE_BUF_MAX` so a runaway child (e.g.
-/// `bash "yes"`) can't balloon daemon memory before the timeout fires.
-/// Applied per-stream: stdout and stderr are bounded independently.
+/// Max bytes captured per stream while a supervised child runs. The chain
+/// executor's own `PIPE_BUF_MAX` check only runs *after* this module
+/// returns, so without a cap here a runaway script balloons daemon memory
+/// before the timeout ever fires.
 pub(crate) const OUTPUT_BUF_MAX: usize = PIPE_BUF_MAX;
 
 /// Exit code returned when a child exceeds [`OUTPUT_BUF_MAX`] on either
@@ -56,24 +53,20 @@ pub(crate) const OUTPUT_BUF_MAX: usize = PIPE_BUF_MAX;
 pub(crate) const OUTPUT_OVERFLOW_EXIT: i32 = 141;
 
 /// How long [`spawn_detached`] watches a child before declaring it
-/// launched. Long enough to catch the failures that are all fast — exec
-/// error, a rejected bwrap flag, `cannot open display`, a missing shared
-/// library, a crash on bad arguments — and short enough that a successful
-/// launch doesn't stall the agent turn. An application that fails *slowly*
-/// is not observable this way, and is reported as a successful launch.
+/// launched. The failures worth catching are all fast — exec error, a
+/// rejected bwrap flag, `cannot open display`, a crash on bad arguments.
+/// One that fails slowly is reported as a successful launch.
 const STARTUP_PROBE: Duration = Duration::from_millis(300);
 
-/// Cap on output captured from a detached launch, far below
-/// [`OUTPUT_BUF_MAX`]. The only output that matters on this path is what
-/// a failed launch prints in its first moments, and the readers hold this
-/// buffer for as long as a surviving application runs — so the cap bounds
-/// what the daemon retains per launched application, not just per call.
+/// Cap on output captured from a detached launch. Far below
+/// [`OUTPUT_BUF_MAX`] because the readers hold this buffer for as long as
+/// the application runs: it bounds what the daemon retains per launched
+/// application, not merely per call.
 const STARTUP_OUTPUT_MAX: usize = 64 * 1024;
 
-/// Bound on how long [`spawn_detached`] waits for the output pipes to
-/// reach EOF after a child has already exited. Normally instant; a
-/// launcher that forked before exiting leaves the write end open in a
-/// grandchild, and waiting on that would hang the tool call forever.
+/// Bound on waiting for the output pipes to reach EOF after a child has
+/// exited. Normally instant, but a launcher that forks and exits leaves
+/// the write end open in a grandchild, which would never EOF.
 const POST_EXIT_DRAIN: Duration = Duration::from_millis(100);
 
 /// Spawn `cmd`, write `stdin` to it, and collect its output under `limit`.
@@ -105,19 +98,15 @@ pub(crate) async fn supervise(
         drop(pipe);
     }
 
-    // Drive the child's stdout/stderr ourselves rather than letting
-    // `wait_with_output()` collect them into unbounded Vecs. Without
-    // this, a script like `yes` would buffer tens of GB in-process
-    // before the chain executor's PIPE_BUF_MAX check ever fires; that
-    // check only runs *after* this function returns.
+    // Read the pipes ourselves; `wait_with_output()` would collect them
+    // into unbounded Vecs, and `yes` buffers tens of GB before the
+    // timeout fires.
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
     let overflow = Arc::new(Notify::new());
     let stdout_task = tokio::spawn(read_capped(stdout_pipe, OUTPUT_BUF_MAX, overflow.clone()));
     let stderr_task = tokio::spawn(read_capped(stderr_pipe, OUTPUT_BUF_MAX, overflow.clone()));
 
-    // On timeout or overflow, the tokio::Child is killed; readers see
-    // EOF as the kernel closes the pipes and the reader tasks join.
     let outcome = tokio::select! {
         res = timeout(limit, child.wait()) => match res {
             Ok(Ok(status)) => WaitOutcome::Exited(status),
@@ -135,12 +124,9 @@ pub(crate) async fn supervise(
     let (stdout, stdout_overflowed) = stdout_task.await.unwrap_or_default();
     let (stderr_bytes, stderr_overflowed) = stderr_task.await.unwrap_or_default();
 
-    // The reader closes its pipe on overflow, which can SIGPIPE the
-    // child; that race makes `child.wait()` ready at the same time as
-    // the overflow notify, and `select!` picks pseudo-randomly. The
-    // bool returned by `read_capped` is the source of truth — if
-    // either stream overflowed, force the Overflow outcome regardless
-    // of which select branch won.
+    // Closing a pipe on overflow can SIGPIPE the child, making
+    // `child.wait()` ready alongside the overflow notify; `select!` then
+    // picks pseudo-randomly. The reader's bool is the source of truth.
     let outcome = if stdout_overflowed || stderr_overflowed {
         WaitOutcome::Overflow
     } else {
@@ -149,12 +135,9 @@ pub(crate) async fn supervise(
 
     Ok(match outcome {
         WaitOutcome::Exited(status) => {
-            // `ExitStatus::code()` returns `None` when the child was
-            // killed by a signal. Encode signal death as `128 + signum`
-            // (the POSIX convention bash itself uses) so a segfault
-            // surfaces as 139 rather than masquerading as our timeout
-            // sentinel 137. Non-unix or truly indeterminate cases fall
-            // back to 1.
+            // `code()` is `None` for signal death; encoding it as
+            // 128 + signum keeps a segfault reading as 139 instead of
+            // masquerading as the 137 timeout sentinel.
             let exit_code = status
                 .code()
                 .or_else(|| signal_exit_code(&status))
@@ -177,10 +160,8 @@ pub(crate) async fn supervise(
             .into_bytes(),
         ),
         WaitOutcome::Timeout => {
-            // AC #2: exact one-line format including the `[exit:N | Ms]`
-            // suffix inline. This is a deliberate divergence from the
-            // `error_line` / presentation-footer convention because
-            // the acceptance criterion pins the exact form.
+            // Built inline rather than through `error_line`: the
+            // elapsed-time suffix has no place in that helper's shape.
             let secs = limit.as_secs();
             let elapsed_secs = start.elapsed().as_secs_f64();
             let msg = format!(
@@ -235,11 +216,9 @@ pub(crate) async fn spawn_detached(
 
     let mut child = cmd.spawn()?;
 
-    // The readers outlive this call on the detached path, by design: a
-    // long-lived application must never block writing to a full pipe, and
-    // must never be SIGPIPE'd by us closing the read end. They capture the
-    // first `STARTUP_OUTPUT_MAX` bytes, discard the rest, and end at EOF
-    // when the application exits.
+    // The readers outlive this call by design: a long-lived application
+    // must never block on a full pipe, nor be SIGPIPE'd by us closing the
+    // read end. They end at EOF when it exits.
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
@@ -256,16 +235,15 @@ pub(crate) async fn spawn_detached(
     ));
 
     let Ok(waited) = timeout(STARTUP_PROBE, child.wait()).await else {
-        // Survived the probe. Dropping the handle neither kills nor
-        // orphans it: tokio's reaper collects it when it eventually exits.
+        // Neither kills nor orphans it: tokio's reaper collects the
+        // process when it eventually exits.
         drop(child);
         return Ok(CommandOutput::ok(Vec::new()));
     };
 
-    // Exited during the probe. Both joins normally return the instant the
-    // pipes hit EOF; the bound covers a surviving grandchild holding the
-    // write end open, in which case the readers stay detached and we take
-    // whatever they captured so far.
+    // Exited during the probe. If a grandchild holds the write end open
+    // the joins never finish, so the readers stay detached and we take
+    // whatever they captured.
     let _ = timeout(POST_EXIT_DRAIN, async {
         let _ = stdout_task.await;
         let _ = stderr_task.await;
@@ -299,10 +277,10 @@ pub(crate) async fn spawn_detached(
 
 /// Read `reader` to EOF, keeping only the first `limit` bytes in `sink`.
 ///
-/// Unlike [`read_capped`], hitting the cap does not stop the read: the
-/// excess is discarded and draining continues. On the detached path
-/// returning early would leave a long-lived application blocked on a full
-/// pipe, or kill it with SIGPIPE once the read end closed.
+/// Unlike [`read_capped`], the cap does not stop the read — the excess is
+/// discarded and draining continues. Returning early would leave a
+/// long-lived application blocked on a full pipe, or SIGPIPE it once the
+/// read end closed.
 async fn drain_into<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     limit: usize,
@@ -340,16 +318,12 @@ fn signal_exit_code(_status: &std::process::ExitStatus) -> Option<i32> {
     None
 }
 
-/// Read bytes from `reader` into a `Vec` capped at `limit`. Returns the
-/// captured bytes and an `overflowed` flag: `true` iff the cap was hit.
-/// On overflow the excess is dropped, `overflow` is signalled (to wake
-/// the main `select!`), and the function returns. EOF and read errors
-/// return `(buf, false)` without signalling.
+/// Read `reader` into a `Vec` capped at `limit`, returning the bytes and
+/// whether the cap was hit. Hitting it closes the pipe and signals
+/// `overflow` to wake the caller's `select!`.
 ///
-/// The bool is the authoritative overflow signal — the `Notify` is only
-/// an "wake up early" hint. The main task always checks this flag after
-/// joining, because closing the pipe on return may SIGPIPE the child and
-/// make `child.wait()` race the notify.
+/// The returned flag is authoritative, not the `Notify`: closing the pipe
+/// may SIGPIPE the child and make `child.wait()` race the notification.
 async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     limit: usize,

@@ -483,7 +483,7 @@ fn session_bind_flags_in(runtime_dir: Option<String>) -> Vec<String> {
 /// Behaviour by `request`:
 /// - `None` → always returns [`ResolvedSandboxMode::None`].
 /// - `Auto` → returns `Bwrap` if `bwrap` is found on `PATH`; otherwise
-///   logs a `warn!` and returns `None` (degraded mode per the AC).
+///   logs a `warn!` and returns `None`, running degraded.
 /// - `Bwrap` → returns `Bwrap` if found; otherwise returns an error so
 ///   daemon startup fails fast.
 pub fn probe_sandbox(

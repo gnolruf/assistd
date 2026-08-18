@@ -252,10 +252,9 @@ mod tests {
         assert_eq!(out.stdout, b"HELLO");
     }
 
-    /// Acceptance for AC #2: a timed-out bash script returns exit 137 with
-    /// the byte-exact message format `[error] bash: timed out after 30s
-    /// [exit:137 | 30.0s]`. The timeout is parameterized to 100ms for
-    /// test speed, but the format is otherwise identical.
+    /// A timed-out script returns exit 137 with the byte-exact message
+    /// `[error] bash: timed out after 30s [exit:137 | 30.0s]`. The
+    /// timeout is 100ms here for speed; the format is unchanged.
     #[tokio::test]
     async fn bash_timeout_returns_137_with_ac_format() {
         let cfg = BashPolicyCfg {
@@ -312,8 +311,8 @@ mod tests {
         );
     }
 
-    /// Acceptance for AC #1: a script matching a denylist pattern is
-    /// rejected before spawn, with the byte-exact error message
+    /// A script matching a denylist pattern is rejected before spawn,
+    /// with the byte-exact error message
     /// `[error] bash: command denied by policy. Matched denylist pattern:
     /// rm -rf /. Try: a non-destructive alternative\n`.
     #[tokio::test]

@@ -390,10 +390,10 @@ impl WmCommand {
 /// Destructive-pattern match over `wm open`'s argv.
 ///
 /// Two passes, because argv is not a shell script. The joined form
-/// anchors ordinary invocations (`wm open rm -rf ~`), while re-checking
-/// each argument on its own catches a script smuggled into a single word
-/// (`wm open bash -c "rm -rf ~"`) — joined, that word's tokens sit mid-line
-/// with no command anchor in front of them, so the first pass misses it.
+/// anchors ordinary invocations (`wm open rm -rf ~`); re-checking each
+/// argument alone catches a script smuggled into one word
+/// (`wm open bash -c "rm -rf ~"`), whose tokens sit mid-line with no
+/// command anchor for the first pass to find.
 fn matches_destructive_argv<'a>(
     argv: &[String],
     prefixes: &'a [Vec<String>],
@@ -854,9 +854,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_window_manager_short_circuits_on_focus() {
-        // Ensures the production `NoWindowManager` produces the same
-        // behavior as the StubWm disconnected path; this is the gate
-        // for the "mock mode" acceptance criterion.
+        // The production `NoWindowManager` must behave exactly as the
+        // StubWm disconnected path does.
         let out = run_wm(Arc::new(NoWindowManager), &["focus", "42"]).await;
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1068,10 +1067,8 @@ mod tests {
         );
     }
 
-    /// The regression this whole gate exists for: `wm open bash -c "…"`
-    /// used to spawn unsandboxed argv with no policy at all. The script
-    /// lives inside a single argument, so it only matches once each
-    /// argument is checked on its own.
+    /// A script passed as one argument still has to reach the gate; it
+    /// only matches once each argument is checked on its own.
     #[tokio::test]
     async fn open_destructive_inside_bash_c_argument_consults_gate() {
         let cmd = policed_wm(
@@ -1098,9 +1095,8 @@ mod tests {
         assert_eq!(out.exit_code, 0);
     }
 
-    /// The point of the detached path: an application that outlives the
-    /// startup probe keeps running, and the launch reports success rather
-    /// than blocking the turn or being killed.
+    /// An application outliving the startup probe keeps running, and the
+    /// launch reports success rather than blocking the turn.
     #[tokio::test]
     async fn open_leaves_a_surviving_process_running() {
         let marker = std::env::temp_dir().join(format!("assistd-wm-open-{}", std::process::id()));
@@ -1145,8 +1141,8 @@ mod tests {
         );
     }
 
-    /// Policy is scoped to `open`; the compositor subcommands must not
-    /// start consulting the gate or the denylist.
+    /// Policy is scoped to `open`; the compositor subcommands never
+    /// consult the gate or the denylist.
     #[tokio::test]
     async fn non_open_subcommands_skip_the_gate() {
         struct PanicGate;
