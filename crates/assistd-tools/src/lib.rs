@@ -22,6 +22,7 @@ pub mod attachment;
 pub mod chain;
 pub mod command;
 pub mod commands;
+mod exec;
 pub mod memory;
 pub mod memory_tools;
 pub mod policy;
@@ -37,8 +38,8 @@ pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
 pub use memory_tools::{RecallTool, RememberTool, ReminisceTool};
 pub use policy::{
     AlwaysAllowGate, CONFIRM_ROUTER, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
-    DenyAllGate, IpcConfirmationGate, ResolvedSandboxMode, SandboxInfo, SandboxRequest,
-    matches_denylist, matches_destructive, probe_sandbox,
+    DenyAllGate, IpcConfirmationGate, ResolvedSandboxMode, SandboxAccess, SandboxInfo,
+    SandboxRequest, matches_denylist, matches_destructive, probe_sandbox,
 };
 pub use presentation::{PresentResult, present};
 pub use run::RunTool;

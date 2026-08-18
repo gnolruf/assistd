@@ -220,7 +220,7 @@ commands.register(SeeCommand::new(vision_gate.clone()));
 commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
 commands.register(WebCommand::new());
 commands.register(BashCommand::new(bash_cfg, sandbox, confirmation_gate));
-commands.register(WmCommand::new(window_manager));
+commands.register(WmCommand::new(window_manager, bash_cfg, sandbox, confirmation_gate));
 ```
 
 You'll also need the import at the top of the file. The simple

@@ -97,10 +97,11 @@ use tracing::warn;
 /// - `overflow_dir` is owned so the caller chooses the path; kept as a
 ///   distinct field for future call sites that need a different spill
 ///   directory.
-/// - `confirmation_gate` is consulted by destructive bash commands. The
-///   daemon passes an `IpcConfirmationGate` that forwards prompts to the
-///   active IPC client (the TUI is one such client) and falls through to
-///   deny when no router is in scope.
+/// - `confirmation_gate` is consulted by the destructive commands that
+///   spawn subprocesses (`bash` and `wm open`, which share one policy).
+///   The daemon passes an `IpcConfirmationGate` that forwards prompts to
+///   the active IPC client (the TUI is one such client) and falls through
+///   to deny when no router is in scope.
 /// - `vision_gate` is a shared, runtime-mutable flag (see
 ///   [`assistd_tools::VisionGate`]) initialised from a `/props` probe of
 ///   the running llama-server. When the gate reports `supported = false`,
@@ -231,8 +232,17 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     commands.register(SeeCommand::new(vision_gate.clone()));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
     commands.register(WebCommand::new());
-    commands.register(BashCommand::new(bash_cfg, sandbox, confirmation_gate));
-    commands.register(WmCommand::new(window_manager));
+    commands.register(BashCommand::new(
+        bash_cfg.clone(),
+        sandbox.clone(),
+        confirmation_gate.clone(),
+    ));
+    commands.register(WmCommand::new(
+        window_manager,
+        bash_cfg,
+        sandbox,
+        confirmation_gate,
+    ));
 
     let mut tools = ToolRegistry::new();
     tools.register(RunTool::new(

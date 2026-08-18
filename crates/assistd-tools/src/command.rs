@@ -380,7 +380,7 @@ mod tests {
             (
                 "wm",
                 rt.block_on(run_cmd(
-                    WmCommand::new(StdArc::new(NoWindowManager)),
+                    WmCommand::for_test(StdArc::new(NoWindowManager)),
                     vec!["focus".into(), "Firefox".into()],
                 )),
             ),
@@ -430,7 +430,7 @@ mod tests {
         reg.register(ScreenshotCommand::default());
         reg.register(WebCommand::new());
         reg.register(BashCommand::default());
-        reg.register(WmCommand::new(StdArc::new(NoWindowManager)));
+        reg.register(WmCommand::for_test(StdArc::new(NoWindowManager)));
         assert_eq!(reg.len(), 11);
         for (name, summary) in reg.sorted_summaries() {
             assert!(!summary.is_empty(), "{name} has empty summary");

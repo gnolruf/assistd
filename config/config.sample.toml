@@ -317,7 +317,14 @@ hotkey = "Super+Escape"
 # tools.bash.sandbox = "auto" to benefit from it.
 
 [tools.bash]
-# Subprocess timeout in seconds. Must be > 0. Exceeding the timeout
+# This section governs every command that spawns a real subprocess:
+# `bash` itself and `wm open`, which launches argv the model chose. Both
+# run through the same denylist, destructive-pattern confirmation, and
+# sandbox; there is no separate policy for `wm open` to drift out of step
+# with. The timeout below is the one setting that does not apply to it:
+# a launched application is meant to outlive the tool call.
+
+# Subprocess timeout in seconds. Applies to `bash` only. Must be > 0. Exceeding the timeout
 # kills the process group and returns exit 137 with the message
 #   [error] bash: timed out after 30s [exit:137 | 30.0s]
 # timeout_secs = 30
@@ -377,6 +384,12 @@ hotkey = "Super+Escape"
 # Crucially NOT --unshare-net: network is available by default because the
 # assistant legitimately needs curl/pip/etc. Opt into network isolation via:
 #   bwrap_extra_args = ["--unshare-net"]
+#
+# `wm open` uses this same profile plus `--bind $XDG_RUNTIME_DIR` over the
+# /run tmpfs: without the compositor and D-Bus session sockets a GUI
+# application cannot start at all. It is skipped, with a warning, when
+# XDG_RUNTIME_DIR is unset or stale. Note that --die-with-parent is what
+# bounds a launched application's lifetime: it exits with the daemon.
 # bwrap_extra_args = []
 
 [tools.write]
