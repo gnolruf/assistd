@@ -12,9 +12,13 @@
 //! Circuit breaker: synthesis failures are timestamped in a small
 //! ringbuffer. After 3 failures within 60 seconds the service flips
 //! to [`ReadyState::Degraded`] and subsequent speak() calls become
-//! no-ops (logged once). This is the practical interpretation of
-//! "restarted on crash" for the per-utterance design; a missing
-//! binary or broken audio device shouldn't spam the logs forever.
+//! no-ops (logged once). Once `FAILURE_WINDOW` has elapsed since the
+//! last failure the breaker goes half-open: one utterance is let
+//! through, and it either re-arms the service or re-opens the
+//! breaker. This is the practical interpretation of "restarted on
+//! crash" for the per-utterance design; a missing binary or broken
+//! audio device shouldn't spam the logs forever, but it also
+//! shouldn't take down speech until the next daemon restart.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -68,9 +72,6 @@ impl PiperVoiceOutput {
     /// failure here is reported as `PiperError`; the daemon's startup
     /// logic then logs a warning and substitutes `NoVoiceOutput`.
     pub async fn start(cfg: SynthesisConfig) -> Result<Self, PiperError> {
-        // Fail-fast on a missing binary so the error is "binary not
-        // found" rather than the more confusing "spawn: file not
-        // found" surfaced after voice download.
         which::which(&cfg.binary_path).map_err(|_| PiperError::BinaryMissing {
             binary: cfg.binary_path.clone(),
         })?;
@@ -103,19 +104,6 @@ impl PiperVoiceOutput {
         let synth = Arc::new(OneShotSynth::new(runtime.clone()));
         let playback = Arc::new(RodioPlaybackWorker::start(cfg.output_device.as_deref())?);
 
-        // Health-check + pre-warm: the synth call exercises the full
-        // spawn → ONNX → drain → exit path, warming OS file cache for
-        // the binary, .onnx, .onnx.json, and espeak data. Per-process
-        // ONNX session warmth can't be shared (each synthesize() spawns
-        // a fresh subprocess), so this is the practical ceiling on
-        // pre-warm. Surfaces missing-model / corrupt-binary errors at
-        // startup rather than on the first user-facing utterance.
-        //
-        // We deliberately don't enqueue a silent buffer through rodio
-        // here as an additional warm: rodio 0.22's `Player::clear()`
-        // can stall under some cpal backends when called immediately
-        // after a very short buffer hasn't been picked up yet, and the
-        // playback warmth amortises on the first real utterance anyway.
         synth.health_check().await?;
         tracing::info!(
             target: "assistd::voice::piper",
@@ -125,11 +113,7 @@ impl PiperVoiceOutput {
         Ok(Self {
             synth,
             playback,
-            state: Arc::new(Mutex::new(CircuitState {
-                ready: ReadyState::Ready,
-                recent_failures: VecDeque::with_capacity(FAILURE_THRESHOLD),
-                logged_degraded: false,
-            })),
+            state: Arc::new(Mutex::new(CircuitState::new())),
         })
     }
 
@@ -137,31 +121,64 @@ impl PiperVoiceOutput {
     pub fn ready_state(&self) -> ReadyState {
         self.state.lock().ready.clone()
     }
+}
 
-    fn record_success(&self) {
-        let mut s = self.state.lock();
-        s.recent_failures.clear();
-        // Re-arming after a transient flap is intentional: a transient
-        // stutter shouldn't permanently disable speech.
-        if matches!(s.ready, ReadyState::Degraded { .. }) {
-            tracing::info!(target: "assistd::voice::piper", "piper recovered from degraded");
-            s.ready = ReadyState::Ready;
-            s.logged_degraded = false;
+impl CircuitState {
+    fn new() -> Self {
+        Self {
+            ready: ReadyState::Ready,
+            recent_failures: VecDeque::with_capacity(FAILURE_THRESHOLD),
+            logged_degraded: false,
         }
     }
 
-    fn record_failure(&self, err: &PiperError) {
-        let mut s = self.state.lock();
+    fn admit(&mut self) -> bool {
+        let ReadyState::Degraded { reason } = &self.ready else {
+            return true;
+        };
+        let cooled = self
+            .recent_failures
+            .back()
+            .is_none_or(|last| last.elapsed() > FAILURE_WINDOW);
+        if cooled {
+            self.recent_failures.clear();
+            return true;
+        }
+        if !self.logged_degraded {
+            tracing::warn!(
+                target: "assistd::voice::piper",
+                %reason,
+                "piper degraded; dropping speak() request"
+            );
+            self.logged_degraded = true;
+        }
+        false
+    }
+
+    fn record_success(&mut self) {
+        self.recent_failures.clear();
+        // Re-arming after a transient flap is intentional: a transient
+        // stutter shouldn't permanently disable speech.
+        if matches!(self.ready, ReadyState::Degraded { .. }) {
+            tracing::info!(target: "assistd::voice::piper", "piper recovered from degraded");
+            self.ready = ReadyState::Ready;
+            self.logged_degraded = false;
+        }
+    }
+
+    fn record_failure(&mut self, err: &PiperError) {
         let now = Instant::now();
-        while let Some(&front) = s.recent_failures.front() {
+        while let Some(&front) = self.recent_failures.front() {
             if now.duration_since(front) > FAILURE_WINDOW {
-                s.recent_failures.pop_front();
+                self.recent_failures.pop_front();
             } else {
                 break;
             }
         }
-        s.recent_failures.push_back(now);
-        if s.recent_failures.len() >= FAILURE_THRESHOLD && matches!(s.ready, ReadyState::Ready) {
+        self.recent_failures.push_back(now);
+        if self.recent_failures.len() >= FAILURE_THRESHOLD
+            && matches!(self.ready, ReadyState::Ready)
+        {
             let reason = err.to_string();
             tracing::warn!(
                 target: "assistd::voice::piper",
@@ -170,8 +187,7 @@ impl PiperVoiceOutput {
                 window_secs = FAILURE_WINDOW.as_secs(),
                 "piper synthesis repeatedly failed; entering degraded state"
             );
-            s.ready = ReadyState::Degraded { reason };
-            s.logged_degraded = true;
+            self.ready = ReadyState::Degraded { reason };
         }
     }
 }
@@ -179,18 +195,8 @@ impl PiperVoiceOutput {
 #[async_trait]
 impl VoiceOutput for PiperVoiceOutput {
     async fn speak(&self, text: String) -> Result<()> {
-        {
-            let s = self.state.lock();
-            if let ReadyState::Degraded { ref reason } = s.ready {
-                if !s.logged_degraded {
-                    tracing::warn!(
-                        target: "assistd::voice::piper",
-                        %reason,
-                        "piper degraded; dropping speak() request"
-                    );
-                }
-                return Ok(());
-            }
+        if !self.state.lock().admit() {
+            return Ok(());
         }
 
         if text.trim().is_empty() {
@@ -205,10 +211,7 @@ impl VoiceOutput for PiperVoiceOutput {
                     error = %e,
                     "piper synthesis failed"
                 );
-                self.record_failure(&e);
-                // Surface the failure so the caller (the speech worker
-                // in state.rs) can log it loudly and a degradation
-                // shows up before the breaker trips.
+                self.state.lock().record_failure(&e);
                 return Err(anyhow::Error::new(e)).context("piper synthesis failed");
             }
         };
@@ -219,24 +222,15 @@ impl VoiceOutput for PiperVoiceOutput {
                 error = %e,
                 "piper playback enqueue failed"
             );
-            self.record_failure(&e);
+            self.state.lock().record_failure(&e);
             return Err(anyhow::Error::new(e)).context("piper playback enqueue failed");
         }
 
-        // Don't drain here; that would force every utterance to wait
-        // for the previous one to finish playing before its synth
-        // could start, opening a ~50–250 ms audible gap between
-        // sentences. Sequential `speak` calls append to the same FIFO
-        // and play back-to-back. Callers await drain via `wait_idle()`.
-        self.record_success();
+        self.state.lock().record_success();
         Ok(())
     }
 
     async fn wait_idle(&self) -> Result<()> {
-        // Skip the drain entirely when degraded; there's nothing to
-        // wait for and `playback.drain()` would still happily block
-        // for any in-flight non-piper PCM, but in practice a degraded
-        // service has no inflight work, so this is safe.
         {
             let s = self.state.lock();
             if matches!(s.ready, ReadyState::Degraded { .. }) {
@@ -249,16 +243,108 @@ impl VoiceOutput for PiperVoiceOutput {
                 error = %e,
                 "piper playback drain failed"
             );
-            // Don't trip the breaker on a drain failure; drain is
-            // an end-of-stream best-effort, not synth.
             return Ok(());
         }
         Ok(())
     }
 
     async fn cancel(&self) {
-        // Drop everything currently queued. Used for "shut up" /
-        // barge-in; the next speak() starts fresh.
         self.playback.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err() -> PiperError {
+        PiperError::Degraded("spawn failed".to_string())
+    }
+
+    fn trip(state: &mut CircuitState) {
+        for _ in 0..FAILURE_THRESHOLD {
+            state.record_failure(&err());
+        }
+    }
+
+    fn age_failures(state: &mut CircuitState, by: Duration) {
+        for at in &mut state.recent_failures {
+            *at = at.checked_sub(by).expect("test clock underflow");
+        }
+    }
+
+    #[test]
+    fn threshold_failures_trip_the_breaker() {
+        let mut state = CircuitState::new();
+        state.record_failure(&err());
+        state.record_failure(&err());
+        assert!(state.admit(), "below threshold stays admitting");
+
+        state.record_failure(&err());
+        assert!(matches!(state.ready, ReadyState::Degraded { .. }));
+        assert!(!state.admit(), "tripped breaker drops utterances");
+    }
+
+    #[test]
+    fn failures_outside_the_window_do_not_accumulate() {
+        let mut state = CircuitState::new();
+        state.record_failure(&err());
+        state.record_failure(&err());
+        age_failures(&mut state, FAILURE_WINDOW + Duration::from_secs(1));
+
+        state.record_failure(&err());
+        assert!(matches!(state.ready, ReadyState::Ready));
+        assert_eq!(state.recent_failures.len(), 1);
+    }
+
+    #[test]
+    fn degraded_drop_is_logged_exactly_once() {
+        let mut state = CircuitState::new();
+        trip(&mut state);
+        assert!(!state.logged_degraded, "tripping must not consume the log");
+
+        assert!(!state.admit());
+        assert!(state.logged_degraded, "first dropped speak() logs");
+        assert!(!state.admit());
+    }
+
+    #[test]
+    fn half_open_probe_admits_after_the_window_cools() {
+        let mut state = CircuitState::new();
+        trip(&mut state);
+        assert!(!state.admit());
+
+        age_failures(&mut state, FAILURE_WINDOW + Duration::from_secs(1));
+        assert!(state.admit(), "cooled breaker admits a probe");
+        assert!(
+            matches!(state.ready, ReadyState::Degraded { .. }),
+            "probe alone does not re-arm; only its success does"
+        );
+    }
+
+    #[test]
+    fn successful_probe_rearms_the_service() {
+        let mut state = CircuitState::new();
+        trip(&mut state);
+        age_failures(&mut state, FAILURE_WINDOW + Duration::from_secs(1));
+        assert!(state.admit());
+
+        state.record_success();
+        assert!(matches!(state.ready, ReadyState::Ready));
+        assert!(!state.logged_degraded);
+        assert!(state.admit());
+    }
+
+    #[test]
+    fn failed_probe_reopens_the_breaker() {
+        let mut state = CircuitState::new();
+        trip(&mut state);
+        assert!(!state.admit());
+        age_failures(&mut state, FAILURE_WINDOW + Duration::from_secs(1));
+        assert!(state.admit());
+
+        state.record_failure(&err());
+        assert!(matches!(state.ready, ReadyState::Degraded { .. }));
+        assert!(!state.admit(), "a failed probe keeps the breaker open");
     }
 }
