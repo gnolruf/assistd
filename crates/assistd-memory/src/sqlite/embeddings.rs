@@ -570,12 +570,14 @@ fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
         // skip rather than poison the heap.
         return None;
     }
-    let mut sum = 0.0f32;
-    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
-        let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        sum += f * query[i];
-    }
-    Some(sum)
+    let (words, _) = bytes.as_chunks::<4>();
+    Some(
+        words
+            .iter()
+            .zip(query)
+            .map(|(w, q)| f32::from_le_bytes(*w) * q)
+            .sum(),
+    )
 }
 
 /// Encode an `f32` slice as a LE-packed `Vec<u8>` for storage. Used by
@@ -1060,10 +1062,8 @@ mod tests {
     fn vector_to_blob_round_trips() {
         let v = vec![0.5f32, -0.25, 0.125, 1e-6];
         let b = vector_to_blob(&v);
-        let mut decoded = Vec::with_capacity(v.len());
-        for chunk in b.chunks_exact(4) {
-            decoded.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
+        let (words, _) = b.as_chunks::<4>();
+        let decoded: Vec<f32> = words.iter().copied().map(f32::from_le_bytes).collect();
         assert_eq!(decoded, v);
     }
 

@@ -168,10 +168,8 @@ impl OneShotSynth {
             return Err(PiperError::OddPcmLength { bytes: pcm.len() });
         }
 
-        let samples: Vec<i16> = pcm
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let (words, _) = pcm.as_chunks::<2>();
+        let samples: Vec<i16> = words.iter().copied().map(i16::from_le_bytes).collect();
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "piper_synth_done",
