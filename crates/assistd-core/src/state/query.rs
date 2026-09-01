@@ -201,10 +201,6 @@ impl AppState {
         }
     }
 
-    /// The handle aborts on drop: if `handle_query` itself is dropped
-    /// (the dispatch envelope firing, or the connection tearing down)
-    /// the turn must not stay resident running a tool with nobody
-    /// awaiting it and `agent_turn_lock` already released.
     fn spawn_agent_task(
         &self,
         text: String,
