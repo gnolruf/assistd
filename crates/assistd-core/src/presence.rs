@@ -539,34 +539,12 @@ impl PresenceManager {
         let _inflight = self.inflight.write().await;
 
         let started = Instant::now();
-        // Flip inner-shutdown to trigger supervisor teardown.
-        let tx = self.current_inner_shutdown.lock().take();
-        if let Some(tx) = tx {
-            let _ = tx.send(true);
-        }
-
         let service = self.llama.lock().await.take();
-        if let Some(service) = service {
-            let budget = Duration::from_secs(self.timeouts.presence_sleep_secs);
-            match timeout(budget, service.shutdown()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    return Err(anyhow::Error::new(e))
-                        .context("llama-server shutdown during sleep");
-                }
-                Err(_) => {
-                    warn!(
-                        target: "assistd::presence",
-                        timeout_secs = self.timeouts.presence_sleep_secs,
-                        "llama-server shutdown timed out during sleep; transition aborted"
-                    );
-                    return Err(anyhow!(
-                        "llama-server shutdown timed out after {}s during sleep",
-                        self.timeouts.presence_sleep_secs
-                    ));
-                }
-            }
-        }
+        // Committing `Sleeping` is unconditional: the teardown signal cannot
+        // be recalled, so an unclean shutdown is reported to the caller
+        // rather than leaving the manager claiming a service it no longer
+        // holds.
+        let outcome = self.teardown_llama(service).await;
 
         *self.state.lock() = PresenceState::Sleeping;
         let _ = self.state_tx.send(PresenceState::Sleeping);
@@ -577,7 +555,39 @@ impl PresenceManager {
             duration_ms = started.elapsed().as_millis() as u64,
             "transitioned {prior:?} → Sleeping"
         );
-        Ok(())
+        outcome
+    }
+
+    /// Flips the current epoch's inner-shutdown watch and joins the
+    /// supervisor, bounded by `presence_sleep_secs`. Consumes both the
+    /// watch sender and `service` on every path, so the caller is left free
+    /// to commit `Sleeping` whatever the result.
+    async fn teardown_llama(&self, service: Option<LlamaService>) -> Result<()> {
+        let tx = self.current_inner_shutdown.lock().take();
+        if let Some(tx) = tx {
+            let _ = tx.send(true);
+        }
+
+        let Some(service) = service else {
+            return Ok(());
+        };
+
+        let budget = Duration::from_secs(self.timeouts.presence_sleep_secs);
+        match timeout(budget, service.shutdown()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(anyhow::Error::new(e)).context("llama-server shutdown failed"),
+            Err(_) => {
+                warn!(
+                    target: "assistd::presence",
+                    timeout_secs = self.timeouts.presence_sleep_secs,
+                    "llama-server shutdown timed out; the child may outlive the daemon"
+                );
+                Err(anyhow!(
+                    "llama-server shutdown timed out after {}s",
+                    self.timeouts.presence_sleep_secs
+                ))
+            }
+        }
     }
 
     /// `Active → Drowsy`. Idempotent from `Drowsy`. Errors from `Sleeping`.
@@ -649,40 +659,10 @@ impl PresenceManager {
 
         let started = Instant::now();
         match prior {
-            PresenceState::Drowsy => {
-                self.control
-                    .load_model(&self.model.name)
-                    .await
-                    .with_context(|| {
-                        format!("llama-server /models/load failed for {}", self.model.name)
-                    })?;
-            }
-            PresenceState::Sleeping => {
-                let (inner_tx, inner_rx) = watch::channel(false);
-                *self.current_inner_shutdown.lock() = Some(inner_tx);
-
-                let service =
-                    LlamaService::start(self.llama_server.clone(), self.model.clone(), inner_rx)
-                        .await
-                        .map_err(|e| {
-                            warn!(target: "assistd::presence", "wake cold-start failed: {e}");
-                            anyhow!(e)
-                        })
-                        .context("llama-server cold-start failed during wake")?;
-
-                *self.llama.lock().await = Some(service);
-
-                self.control
-                    .load_model(&self.model.name)
-                    .await
-                    .with_context(|| {
-                        format!("llama-server /models/load failed for {}", self.model.name)
-                    })?;
-            }
+            PresenceState::Drowsy => self.load_model_and_wait().await?,
+            PresenceState::Sleeping => self.cold_start().await?,
             PresenceState::Active => unreachable!("short-circuited above"),
         }
-
-        self.await_model_loaded().await?;
 
         *self.state.lock() = PresenceState::Active;
         let _ = self.state_tx.send(PresenceState::Active);
@@ -694,6 +674,59 @@ impl PresenceManager {
             "transitioned {prior:?} → Active"
         );
         Ok(())
+    }
+
+    /// `Sleeping → Active`: spawns a supervisor, publishes the handle so the
+    /// GPU monitor can attribute the child's VRAM while its weights load,
+    /// then loads the model.
+    ///
+    /// A failure after the handle is published rolls the child back out.
+    /// Leaving it in the slot while the manager is still `Sleeping` would
+    /// strand a llama-server that `sleep()` — a no-op from `Sleeping` — could
+    /// never kill, and that the next wake would orphan by spawning a second
+    /// child on the same port.
+    async fn cold_start(&self) -> Result<()> {
+        let (inner_tx, inner_rx) = watch::channel(false);
+        *self.current_inner_shutdown.lock() = Some(inner_tx);
+
+        let service = match LlamaService::start(
+            self.llama_server.clone(),
+            self.model.clone(),
+            inner_rx,
+        )
+        .await
+        {
+            Ok(service) => service,
+            Err(e) => {
+                *self.current_inner_shutdown.lock() = None;
+                warn!(target: "assistd::presence", "wake cold-start failed: {e}");
+                return Err(anyhow!(e)).context("llama-server cold-start failed during wake");
+            }
+        };
+
+        *self.llama.lock().await = Some(service);
+
+        let loaded = self.load_model_and_wait().await;
+        if loaded.is_err() {
+            let service = self.llama.lock().await.take();
+            if let Err(e) = self.teardown_llama(service).await {
+                warn!(
+                    target: "assistd::presence",
+                    error = %e,
+                    "teardown after a failed cold start was unclean"
+                );
+            }
+        }
+        loaded
+    }
+
+    async fn load_model_and_wait(&self) -> Result<()> {
+        self.control
+            .load_model(&self.model.name)
+            .await
+            .with_context(|| format!("llama-server /models/load failed for {}", self.model.name))?;
+
+        self.await_model_loaded().await
     }
 
     /// Waits for the model to report `loaded`, gated on llama-server

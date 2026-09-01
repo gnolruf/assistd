@@ -129,6 +129,18 @@ async fn wait_for_pid_gone(pid: u32, timeout: Duration) -> bool {
     false
 }
 
+async fn wait_for_port_closed(port: u16, timeout: Duration) -> bool {
+    let addr = format!("127.0.0.1:{port}");
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if tokio::net::TcpStream::connect(&addr).await.is_err() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
 async fn get_counters(port: u16) -> (u32, u32, Option<String>) {
     let url = format!("http://127.0.0.1:{port}/debug/counters");
     let body = reqwest::get(&url)
@@ -301,6 +313,79 @@ async fn wake_from_sleeping_cold_starts_and_returns_active() {
     assert!(pid_alive(pid_after));
 
     m.sleep().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_wake_leaves_nothing_behind_for_sleep_to_miss() {
+    let _g = MODE_LOCK.lock().await;
+    init_tracing();
+    let port = grab_port().await;
+    let (m, _shutdown) = new_active_manager(port).await;
+    let pid_before = m.llama_pid().await.expect("child running");
+
+    m.sleep().await.unwrap();
+    assert!(wait_for_pid_gone(pid_before, Duration::from_secs(5)).await);
+
+    // The child spawns and reports healthy, then /models/load 500s.
+    set_mode("load-failure");
+    m.wake()
+        .await
+        .expect_err("wake must fail when /models/load errors");
+
+    assert_eq!(m.state(), PresenceState::Sleeping);
+    assert!(
+        m.llama_pid().await.is_none(),
+        "a failed wake must not leave a handle the Sleeping manager cannot reach"
+    );
+    assert!(
+        wait_for_port_closed(port, Duration::from_secs(5)).await,
+        "the child started by the failed wake must be torn down, not stranded"
+    );
+
+    // Sleep stays a no-op, and the next wake gets the port to itself.
+    m.sleep().await.expect("sleep after a failed wake");
+    set_mode("normal");
+    m.wake().await.expect("wake after a failed wake");
+    assert_eq!(m.state(), PresenceState::Active);
+
+    m.sleep().await.unwrap();
+}
+
+#[tokio::test]
+async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
+    let _g = MODE_LOCK.lock().await;
+    init_tracing();
+    let port = grab_port().await;
+    // The child outlives SIGTERM by longer than sleep's shutdown budget, so
+    // the join times out rather than completing.
+    set_mode("slow-term=3");
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let timeouts = TimeoutsConfig {
+        presence_sleep_secs: 1,
+        ..TimeoutsConfig::default()
+    };
+    let m = PresenceManager::new_active(server_spec(port), model_spec(), timeouts, shutdown_rx)
+        .await
+        .expect("cold-start wake failed");
+    let pid = m.llama_pid().await.expect("child running");
+
+    m.sleep()
+        .await
+        .expect_err("sleep must report a shutdown it could not join");
+
+    assert_eq!(
+        m.state(),
+        PresenceState::Sleeping,
+        "the teardown signal cannot be recalled, so the state must follow it"
+    );
+    assert!(
+        m.llama_pid().await.is_none(),
+        "an Active manager with an empty slot can never be woken or slept again"
+    );
+    assert!(
+        wait_for_pid_gone(pid, Duration::from_secs(10)).await,
+        "the child should still wind down after the budget expires"
+    );
 }
 
 #[tokio::test]
