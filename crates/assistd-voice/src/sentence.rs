@@ -186,16 +186,10 @@ impl SentenceBuffer {
                 self.in_code_fence = !self.in_code_fence;
                 self.pending.truncate(self.pending.len() - 3);
                 if opening {
-                    // Treat the fence opener as a paragraph break so
-                    // anything in `buf` is flushed first; preserves
-                    // ordering between the prelude and any synthetic
-                    // "Code block ..." phrase emitted on close.
                     self.flush_buf_to_out(out);
                     self.capturing_lang = matches!(self.mode, CodeBlockMode::Summarize);
                     self.lang_buf.clear();
                 } else {
-                    // Closing fence: the pending pre-fence prefix is
-                    // discarded along with the fenced content.
                     self.pending.clear();
                     if matches!(self.mode, CodeBlockMode::Summarize) {
                         let phrase = if self.lang_buf.is_empty() {
@@ -214,9 +208,6 @@ impl SentenceBuffer {
 
         if self.in_code_fence {
             if self.capturing_lang {
-                // Whitespace ends the lang tag; non-whitespace ASCII
-                // chars (within cap) form it. Anything else stops
-                // capture without recording.
                 if ch.is_whitespace() {
                     self.capturing_lang = false;
                 } else if self.lang_buf.len() < MAX_LANG_LEN
@@ -224,8 +215,6 @@ impl SentenceBuffer {
                 {
                     self.lang_buf.push(ch);
                 } else {
-                    // Reject this char (e.g. punctuation or oversize);
-                    // stop capturing but keep what we have.
                     self.capturing_lang = false;
                 }
             }
@@ -233,14 +222,11 @@ impl SentenceBuffer {
             return;
         }
 
-        // Stray backticks (1 or 2) without a third → flush as content.
         if !self.pending.is_empty() {
             let pending = std::mem::take(&mut self.pending);
             self.buf.push_str(&strip_inline(&pending));
         }
 
-        // Drop heading `#` and blockquote `>` only when at the start
-        // of a logical line.
         let at_line_start = self.buf.is_empty() || self.buf.ends_with('\n');
         if (ch == '#' || ch == '>') && at_line_start {
             return;
@@ -249,9 +235,6 @@ impl SentenceBuffer {
         self.scan_boundaries(out);
     }
 
-    /// Drain whatever's in `buf` as a single sentence (postprocessed).
-    /// Used at fence-open so any prelude is spoken in order, before the
-    /// synthetic "Code block..." phrase that may follow on close.
     fn flush_buf_to_out(&mut self, out: &mut Vec<String>) {
         if self.buf.trim().is_empty() {
             self.buf.clear();
@@ -310,7 +293,6 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
             let next = match bytes.get(i + 1).copied() {
                 Some(b) => b,
                 None => {
-                    // No follow-up byte yet; defer.
                     i += 1;
                     continue;
                 }
@@ -349,8 +331,6 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
             if succ.is_ascii_uppercase() || succ.is_ascii_digit() {
                 return Some(j);
             }
-            // Newline immediately after counts as a paragraph-style
-            // break even without an uppercase successor.
             if next == b'\n' {
                 return Some(j);
             }
@@ -360,7 +340,11 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
 
     // 4. Length safety net.
     if buf.len() >= max_len {
-        if let Some(ws) = buf[..max_len].rfind(char::is_whitespace) {
+        let mut window = max_len;
+        while !buf.is_char_boundary(window) {
+            window -= 1;
+        }
+        if let Some(ws) = buf[..window].rfind(char::is_whitespace) {
             let mut idx = ws + 1;
             while !buf.is_char_boundary(idx) && idx < buf.len() {
                 idx += 1;
@@ -393,7 +377,6 @@ fn find_bullet_marker(buf: &str) -> Option<usize> {
     None
 }
 
-/// True when the period at `bytes[i]` ends a known abbreviation token.
 fn is_abbreviation_at(buf: &str, i: usize) -> bool {
     let bytes = buf.as_bytes();
     let mut start = i;
@@ -411,8 +394,6 @@ fn is_abbreviation_at(buf: &str, i: usize) -> bool {
         .any(|abbr| stem.eq_ignore_ascii_case(abbr) || stem.ends_with(&format!(".{abbr}")))
 }
 
-/// Strip markdown decorations from a chunk that's about to be spoken.
-/// Inline transformations only; no boundary detection.
 fn postprocess_for_speech(s: &str) -> String {
     let s = strip_links(s);
     let s = strip_emphasis(&s);
@@ -426,7 +407,6 @@ fn strip_inline(s: &str) -> String {
 }
 
 fn strip_links(s: &str) -> String {
-    // Manual scan to avoid regex dep; small O(n) state machine.
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -455,7 +435,7 @@ fn strip_links(s: &str) -> String {
                     out.push_str(&text);
                     continue;
                 } else {
-                    // Malformed; emit literally.
+                    // Malformed, emit literally
                     out.push('[');
                     out.push_str(&text);
                     out.push_str("](");
@@ -500,12 +480,6 @@ fn replace_urls(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        // `i` is always at a UTF-8 char boundary on entry: 0 on the
-        // first iteration, advanced by `ch.len_utf8()` in the default
-        // branch, or set to `j` in the URL branch (which only stops on
-        // ASCII whitespace, guaranteed to land on a char boundary
-        // because continuation bytes have the high bit set and so
-        // can't compare equal to an ASCII whitespace byte).
         let scheme = if s[i..].starts_with("https://") {
             Some(8)
         } else if s[i..].starts_with("http://") {
@@ -514,11 +488,6 @@ fn replace_urls(s: &str) -> String {
             None
         };
         if let Some(skip) = scheme {
-            // Word-boundary check: must be at start or preceded by a
-            // non-alphanumeric ASCII byte. Multi-byte UTF-8 lead bytes
-            // (≥ 0xC0) report `is_ascii_alphanumeric() == false`, which
-            // is the behaviour we want; a Unicode letter shouldn't
-            // glue onto an English-only `https://` either way.
             let prev_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
             if prev_ok {
                 let mut j = i + skip;
@@ -530,10 +499,6 @@ fn replace_urls(s: &str) -> String {
                 continue;
             }
         }
-        // Default: copy one char and advance by its UTF-8 length. The
-        // previous version did `s.as_bytes()[i] as char` + `i += 1`,
-        // which corrupted multi-byte characters and panicked on the
-        // next slice when `i` landed inside a continuation sequence.
         let ch = s[i..]
             .chars()
             .next()
@@ -667,10 +632,6 @@ mod tests {
         assert!(!joined.contains("example.com"), "got {joined:?}");
     }
 
-    /// Regression: `replace_urls` previously walked the input
-    /// byte-by-byte and panicked when the cursor landed inside a
-    /// multi-byte UTF-8 character (e.g. the curly apostrophe `’`,
-    /// 3 bytes). Common in real LLM output (`That’s`, `it’s`, …).
     #[test]
     fn handles_multibyte_chars_around_no_url() {
         let mut b = SentenceBuffer::new(400);
@@ -939,19 +900,15 @@ mod tests {
 
     #[test]
     fn force_flushes_pathological_no_boundary_input() {
-        // Defensive ceiling: if a delta of pure non-boundary chars (no
+        // If a delta of pure non-boundary chars (no
         // whitespace, no terminator, no paragraph break) somehow grows
         // beyond 4*max_len, force_flush_if_oversize must emit it as a
         // single synthetic sentence rather than allow unbounded growth.
-        // Use small max_len so the test stays fast and deterministic.
         let mut b = SentenceBuffer::new(50);
         // 50 * 4 = 200; push 600 chars of pure ASCII letters with no
         // boundary chars at all.
         let blob: String = std::iter::repeat_n('a', 600).collect();
         let out = b.push(&blob);
-        // The length safety net + force flush should both fire to keep
-        // memory bounded. Concretely, we expect at least one sentence
-        // emitted, the buffer drained or close to it, and no panic.
         assert!(
             !out.is_empty(),
             "expected force-flushed sentence(s), got nothing"
@@ -998,5 +955,24 @@ mod tests {
             s2.iter().any(|x| x.contains("Code block in python")),
             "expected summary on close: {s2:?}"
         );
+    }
+
+    #[test]
+    fn length_safety_net_handles_multibyte_chars() {
+        let mut b = SentenceBuffer::new(50);
+        let blob: String = std::iter::repeat_n('\u{1F600}', 13).collect();
+        let out = b.push(&blob);
+        let combined = out.join("") + &b.finish().unwrap_or_default();
+        assert_eq!(combined.matches('\u{1F600}').count(), 13);
+    }
+
+    #[test]
+    fn length_safety_net_splits_multibyte_words_on_whitespace() {
+        let mut b = SentenceBuffer::new(50);
+        let blob: String = std::iter::repeat_n("\u{1F600}\u{1F600} ", 20).collect();
+        let out = b.push(&blob);
+        assert!(!out.is_empty());
+        let combined = out.join("") + &b.finish().unwrap_or_default();
+        assert_eq!(combined.matches('\u{1F600}').count(), 40);
     }
 }
