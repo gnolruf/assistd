@@ -10,6 +10,7 @@
 //!   crash-after=<secs>  - bind, serve 200 OK, then `exit(0)` after N seconds
 //!   bind-fail           - immediately exit(1) without binding
 //!   load-failure        - /models/load returns 500 (for wake-failure tests)
+//!   slow-term=<secs>    - serve normally, then exit N seconds after SIGTERM
 //!
 //! Endpoints:
 //!   GET  /health                - 200 {"status":"ok"} (or 503 in never-ready)
@@ -41,6 +42,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
@@ -50,12 +52,17 @@ enum Mode {
     CrashAfter(u64),
     BindFail,
     LoadFailure,
+    SlowTerm(u64),
 }
 
 fn parse_mode(s: &str) -> Option<Mode> {
     if let Some(rest) = s.strip_prefix("crash-after=") {
         let secs: u64 = rest.parse().ok()?;
         return Some(Mode::CrashAfter(secs));
+    }
+    if let Some(rest) = s.strip_prefix("slow-term=") {
+        let secs: u64 = rest.parse().ok()?;
+        return Some(Mode::SlowTerm(secs));
     }
     match s {
         "normal" => Some(Mode::Normal),
@@ -152,6 +159,18 @@ async fn main() -> ExitCode {
         });
         tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
         eprintln!("fake_llama_server: crash-after elapsed; exiting 0");
+        return ExitCode::SUCCESS;
+    }
+
+    if let Mode::SlowTerm(secs) = args.mode {
+        let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let state = state.clone();
+        tokio::spawn(async move {
+            serve_loop(listener, Mode::Normal, state).await;
+        });
+        term.recv().await;
+        eprintln!("fake_llama_server: SIGTERM received; exiting in {secs}s");
+        tokio::time::sleep(Duration::from_secs(secs)).await;
         return ExitCode::SUCCESS;
     }
 
