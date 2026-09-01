@@ -148,8 +148,8 @@ impl LlmHealthProbe for PresenceLlmHealthProbe {
     }
 }
 
-/// Bumps the shared count on construction and decrements on drop. 
-/// Held by LLM query handlers for the duration of their streaming lifetime 
+/// Bumps the shared count on construction and decrements on drop.
+/// Held by LLM query handlers for the duration of their streaming lifetime
 /// so the voice transcriber can decide whether to queue briefly or fall back
 /// to CPU. Does not block sleep/drowse, unlike [`RequestGuard`]; that
 /// is how the two signals differ.
