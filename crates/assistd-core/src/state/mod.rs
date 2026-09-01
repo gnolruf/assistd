@@ -191,7 +191,7 @@ mod tests {
     use assistd_memory::ConversationStore;
     use assistd_tools::{CommandRegistry, RunTool, commands::EchoCommand};
     use parking_lot::Mutex as StdMutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn clean_generated_title_strips_quotes_and_first_lines_only() {
@@ -1225,6 +1225,154 @@ mod tests {
                 "truncated": false,
             }))
         }
+    }
+
+    /// A tool that never returns. `dropped` flips when the invocation
+    /// future is torn down, which is how the tests below prove the
+    /// agent task actually stopped instead of being left detached.
+    struct HangingTool {
+        entered: Arc<tokio::sync::Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl assistd_tools::Tool for HangingTool {
+        fn name(&self) -> &str {
+            "hang"
+        }
+        fn description(&self) -> &str {
+            "never returns"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn invoke(&self, _args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+            let _flag = DropFlag(self.dropped.clone());
+            self.entered.notify_one();
+            std::future::pending::<()>().await;
+            unreachable!("hanging tool must never resolve")
+        }
+    }
+
+    fn state_with_hanging_tool(
+        cfg: Config,
+        entered: Arc<tokio::sync::Notify>,
+        dropped: Arc<AtomicBool>,
+    ) -> Arc<AppState> {
+        let backend = ToolCallBackend::new(
+            "",
+            "done.",
+            vec![StepOutcome::ToolCalls(vec![ToolCall {
+                id: "c1".into(),
+                name: "hang".into(),
+                arguments: serde_json::json!({}),
+            }])],
+        );
+        let mut tools = ToolRegistry::new();
+        tools.register(HangingTool { entered, dropped });
+        Arc::new(AppState::new(
+            cfg,
+            backend,
+            PresenceManager::stub(PresenceState::Active),
+            Arc::new(tools),
+            Arc::new(assistd_voice::NoVoiceInput::new()),
+            Arc::new(assistd_voice::NoContinuousListener::new()),
+            VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
+        ))
+    }
+
+    #[tokio::test]
+    async fn interrupt_turn_preempts_hung_tool() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let state = state_with_hanging_tool(Config::default(), entered.clone(), dropped.clone());
+
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        let query = tokio::spawn(state.clone().dispatch(
+            Request::Query {
+                id: "q".into(),
+                text: "go".into(),
+                attachments: Vec::new(),
+            },
+            tx,
+        ));
+
+        entered.notified().await;
+
+        let (itx, irx) = mpsc::channel::<Event>(8);
+        state
+            .clone()
+            .dispatch(Request::InterruptTurn { id: "int".into() }, itx)
+            .await
+            .unwrap();
+        let _ = collect_events(irx).await;
+
+        tokio::time::timeout(Duration::from_secs(5), query)
+            .await
+            .expect("InterruptTurn did not preempt the hung tool")
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "hung tool kept running after the turn was interrupted"
+        );
+        let events = collect_events(rx).await;
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Done { .. })),
+            "interrupted turn never sent a terminal event: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_envelope_timeout_tears_down_hung_tool() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut cfg = Config::default();
+        cfg.timeouts.dispatch_envelope_secs = 1;
+        let state = state_with_hanging_tool(cfg, entered.clone(), dropped.clone());
+
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            state.clone().dispatch(
+                Request::Query {
+                    id: "q".into(),
+                    text: "go".into(),
+                    attachments: Vec::new(),
+                },
+                tx,
+            ),
+        )
+        .await
+        .expect("dispatch envelope did not fire")
+        .unwrap();
+
+        let events = collect_events(rx).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Error { message, .. } if message.contains("envelope"))),
+            "expected an envelope-timeout error: {events:?}"
+        );
+
+        // The handler is gone; the agent task must not still be
+        // holding the turn open behind it.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("agent task outlived the dropped dispatch handler");
     }
 
     #[tokio::test]
