@@ -148,10 +148,9 @@ impl LlmHealthProbe for PresenceLlmHealthProbe {
     }
 }
 
-/// RAII counter for "an LLM stream is currently running". Bumps the
-/// shared count on construction and decrements on drop. Held by LLM
-/// query handlers for the duration of their streaming lifetime so the
-/// voice transcriber can decide whether to queue briefly or fall back
+/// Bumps the shared count on construction and decrements on drop. 
+/// Held by LLM query handlers for the duration of their streaming lifetime 
+/// so the voice transcriber can decide whether to queue briefly or fall back
 /// to CPU. Does not block sleep/drowse, unlike [`RequestGuard`]; that
 /// is how the two signals differ.
 pub struct LlmStreamGuard {
@@ -164,7 +163,7 @@ impl Drop for LlmStreamGuard {
     }
 }
 
-/// RAII marker for "a wake transition is in progress". Constructed at
+/// Marker for "a wake transition is in progress". Constructed at
 /// the top of [`PresenceManager::wake`] after the short-circuit check;
 /// cleared on drop so every return path (`?`-propagated error, panic,
 /// success) leaves `wake_started` back at `None`.
@@ -443,8 +442,6 @@ impl PresenceManager {
                 spawn_load_progress_emitter(Arc::clone(self), request_id.clone(), tx.clone());
             let result = self.ensure_active().await;
             progress_task.abort();
-            // Best-effort: wait for the abort to settle so we don't
-            // race with task drop. JoinError on Cancelled is expected.
             let _ = progress_task.await;
             result?;
         }
@@ -540,10 +537,6 @@ impl PresenceManager {
 
         let started = Instant::now();
         let service = self.llama.lock().await.take();
-        // Committing `Sleeping` is unconditional: the teardown signal cannot
-        // be recalled, so an unclean shutdown is reported to the caller
-        // rather than leaving the manager claiming a service it no longer
-        // holds.
         let outcome = self.teardown_llama(service).await;
 
         *self.state.lock() = PresenceState::Sleeping;
@@ -558,10 +551,6 @@ impl PresenceManager {
         outcome
     }
 
-    /// Flips the current epoch's inner-shutdown watch and joins the
-    /// supervisor, bounded by `presence_sleep_secs`. Consumes both the
-    /// watch sender and `service` on every path, so the caller is left free
-    /// to commit `Sleeping` whatever the result.
     async fn teardown_llama(&self, service: Option<LlamaService>) -> Result<()> {
         let tx = self.current_inner_shutdown.lock().take();
         if let Some(tx) = tx {
@@ -679,12 +668,6 @@ impl PresenceManager {
     /// `Sleeping → Active`: spawns a supervisor, publishes the handle so the
     /// GPU monitor can attribute the child's VRAM while its weights load,
     /// then loads the model.
-    ///
-    /// A failure after the handle is published rolls the child back out.
-    /// Leaving it in the slot while the manager is still `Sleeping` would
-    /// strand a llama-server that `sleep()` — a no-op from `Sleeping` — could
-    /// never kill, and that the next wake would orphan by spawning a second
-    /// child on the same port.
     async fn cold_start(&self) -> Result<()> {
         let (inner_tx, inner_rx) = watch::channel(false);
         *self.current_inner_shutdown.lock() = Some(inner_tx);
@@ -729,17 +712,6 @@ impl PresenceManager {
         self.await_model_loaded().await
     }
 
-    /// Waits for the model to report `loaded`, gated on llama-server
-    /// liveness rather than a wall-clock budget.
-    ///
-    /// A healthy-but-slow load — cold page cache, first-run weight
-    /// download — runs as long as it needs: the supervisor keeps the
-    /// readiness watch on [`ReadyState::Ready`] for the whole duration.
-    /// A supervisor restart or `Degraded` transition (the router process
-    /// dying under us) aborts the wait immediately instead of waiting
-    /// out a timeout. `ready_timeout_secs` serves only as a last-ditch
-    /// backstop against a router that stays alive but never finishes the
-    /// load.
     async fn await_model_loaded(&self) -> Result<()> {
         const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -772,18 +744,11 @@ impl PresenceManager {
     }
 }
 
-/// Resolves once the supervisor's readiness watch reports a state other
-/// than [`ReadyState::Ready`], or the watch closes. Used to race the
-/// model-load poll against the router process dying.
 async fn wait_until_not_ready(rx: &mut watch::Receiver<ReadyState>) {
     let _ = rx.wait_for(|s| *s != ReadyState::Ready).await;
 }
 
-/// Period between model-load progress `Event::Status` emissions. Chosen so
-/// short wakes (already-Active fast path, sub-second drowse-to-active model
-/// reloads) emit nothing while a multi-minute cold-start gets ~1 update
-/// every 3s — enough for the TUI to update an elapsed-time indicator
-/// without flooding the channel.
+/// Period between model-load progress `Event::Status` emissions.
 const LOAD_PROGRESS_INTERVAL: Duration = Duration::from_secs(3);
 
 fn spawn_load_progress_emitter(
@@ -812,7 +777,6 @@ fn spawn_load_progress_emitter(
                 .await
                 .is_err()
             {
-                // Client disconnected; nothing left to report progress to.
                 return;
             }
         }
@@ -931,8 +895,6 @@ mod tests {
         let m = PresenceManager::stub(PresenceState::Active);
         let mut rx = m.subscribe();
         m.sleep().await.unwrap();
-        // `borrow()` returns the latest value even if the initial one was
-        // missed; the broadcast inside `sleep` must have overwritten it.
         assert_eq!(*rx.borrow_and_update(), PresenceState::Sleeping);
     }
 
