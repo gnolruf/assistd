@@ -14,18 +14,30 @@ const POLICY_DENIED_EXIT: i32 = 126;
 /// Write-command policy, constructed by `assistd-core::build_tools` from
 /// `config.tools.write` at daemon startup. Path strings are canonicalized
 /// once here; runtime checks are fast `Path::starts_with` comparisons.
-#[derive(Debug, Clone, Default)]
+///
+/// The allowlist is non-empty by construction: a policy with no permitted
+/// prefixes would gate nothing, so that state is not representable.
+#[derive(Debug, Clone)]
 pub struct WritePolicyCfg {
-    /// Absolute, canonicalized path prefixes under which the `write` command
-    /// is permitted. Non-existent entries are filtered out by the caller
-    /// before this struct is constructed.
-    pub writable_paths: Vec<PathBuf>,
+    first: PathBuf,
+    rest: Vec<PathBuf>,
 }
 
 impl WritePolicyCfg {
-    /// Construct a policy with the given canonicalized writable path prefixes.
-    pub fn new(writable_paths: Vec<PathBuf>) -> Self {
-        Self { writable_paths }
+    /// Construct a policy from canonicalized writable path prefixes, or
+    /// `None` if none were given.
+    pub fn new(writable_paths: Vec<PathBuf>) -> Option<Self> {
+        let mut prefixes = writable_paths.into_iter();
+        let first = prefixes.next()?;
+        Some(Self {
+            first,
+            rest: prefixes.collect(),
+        })
+    }
+
+    /// The permitted path prefixes, in configuration order.
+    pub fn prefixes(&self) -> impl Iterator<Item = &PathBuf> {
+        std::iter::once(&self.first).chain(&self.rest)
     }
 }
 
@@ -57,12 +69,14 @@ impl WriteCommand {
         Self { cfg }
     }
 
-    /// Test-only constructor: permits writes anywhere. Never used in
-    /// production; `build_tools` always passes an allowlist.
+    /// Test-only constructor: allowlists the filesystem root, so any
+    /// absolute path is writable. Never used in production.
     #[cfg(test)]
     pub fn permissive_for_tests() -> Self {
         Self {
-            cfg: Arc::new(WritePolicyCfg::default()),
+            cfg: Arc::new(
+                WritePolicyCfg::new(vec![PathBuf::from("/")]).expect("non-empty allowlist"),
+            ),
         }
     }
 }
@@ -107,74 +121,62 @@ impl Command for WriteCommand {
             input.stdin
         };
 
-        // Empty allowlist short-circuits to "write anywhere" only in the test
-        // constructor; production always has at least one entry (config
-        // validation rejects empty lists).
-        let write_target: PathBuf = if self.cfg.writable_paths.is_empty() {
-            PathBuf::from(&raw_path)
-        } else {
-            // Read $HOME once here so `resolve_for_allowlist`/`expand_tilde`
-            // stay pure: passing `home` as an arg avoids touching process-
-            // global env from the hot path and makes both functions
-            // trivially unit-testable without env mutation.
-            let home = std::env::var("HOME").ok();
-            match resolve_for_allowlist(&raw_path, home.as_deref()) {
-                Ok(resolved) => {
-                    if !self
-                        .cfg
-                        .writable_paths
-                        .iter()
-                        .any(|prefix| resolved.starts_with(prefix))
-                    {
-                        return Ok(CommandOutput::failed(
-                            POLICY_DENIED_EXIT,
-                            error_line(
-                                "write",
-                                format_args!("{raw_path}: path not in writable allowlist"),
-                                "Check",
-                                "[tools.write] writable_paths in config",
-                            )
-                            .into_bytes(),
-                        ));
-                    }
-                    resolved
-                }
-                Err(PathResolveError::Relative) => {
+        let home = std::env::var("HOME").ok();
+        let write_target: PathBuf = match resolve_for_allowlist(&raw_path, home.as_deref()) {
+            Ok(resolved) => {
+                if !self
+                    .cfg
+                    .prefixes()
+                    .any(|prefix| resolved.starts_with(prefix))
+                {
                     return Ok(CommandOutput::failed(
                         POLICY_DENIED_EXIT,
                         error_line(
                             "write",
-                            format_args!("{raw_path}: relative paths not permitted"),
-                            "Try",
-                            "an absolute path under an allowlisted directory",
-                        )
-                        .into_bytes(),
-                    ));
-                }
-                Err(PathResolveError::HomeNotSet) => {
-                    return Ok(CommandOutput::failed(
-                        POLICY_DENIED_EXIT,
-                        error_line(
-                            "write",
-                            format_args!("{raw_path}: cannot expand ~ ($HOME not set)"),
-                            "Try",
-                            "writing an explicit absolute path instead of ~",
-                        )
-                        .into_bytes(),
-                    ));
-                }
-                Err(PathResolveError::AnchorMissing(anchor)) => {
-                    return Ok(CommandOutput::failed(
-                        POLICY_DENIED_EXIT,
-                        error_line(
-                            "write",
-                            format_args!("{raw_path}: cannot resolve ancestor {anchor}"),
+                            format_args!("{raw_path}: path not in writable allowlist"),
                             "Check",
-                            "that the directory exists or widen [tools.write] writable_paths",
+                            "[tools.write] writable_paths in config",
                         )
                         .into_bytes(),
                     ));
                 }
+                resolved
+            }
+            Err(PathResolveError::Relative) => {
+                return Ok(CommandOutput::failed(
+                    POLICY_DENIED_EXIT,
+                    error_line(
+                        "write",
+                        format_args!("{raw_path}: relative paths not permitted"),
+                        "Try",
+                        "an absolute path under an allowlisted directory",
+                    )
+                    .into_bytes(),
+                ));
+            }
+            Err(PathResolveError::HomeNotSet) => {
+                return Ok(CommandOutput::failed(
+                    POLICY_DENIED_EXIT,
+                    error_line(
+                        "write",
+                        format_args!("{raw_path}: cannot expand ~ ($HOME not set)"),
+                        "Try",
+                        "writing an explicit absolute path instead of ~",
+                    )
+                    .into_bytes(),
+                ));
+            }
+            Err(PathResolveError::AnchorMissing(anchor)) => {
+                return Ok(CommandOutput::failed(
+                    POLICY_DENIED_EXIT,
+                    error_line(
+                        "write",
+                        format_args!("{raw_path}: cannot resolve ancestor {anchor}"),
+                        "Check",
+                        "that the directory exists or widen [tools.write] writable_paths",
+                    )
+                    .into_bytes(),
+                ));
             }
         };
 
@@ -197,24 +199,6 @@ enum PathResolveError {
     AnchorMissing(String),
 }
 
-/// Turn a raw user-supplied path into an absolute, symlink-resolved path
-/// suitable for `starts_with` comparison against the (already-canonicalized)
-/// writable-paths allowlist.
-///
-/// Steps:
-/// 1. Expand leading `~` / `~/` via `$HOME`.
-/// 2. Reject relative paths; the daemon's cwd is not a meaningful anchor.
-/// 3. Lexically collapse `..` / `.` components so that a lexical path like
-///    `/tmp/../etc/passwd` normalizes to `/etc/passwd` *before* touching
-///    disk.
-/// 4. Find the deepest existing ancestor and canonicalize only that
-///    (handles symlinks in the real prefix). Rejoin the non-existent tail.
-///
-/// This is a write-time check: there is a TOCTOU window between this
-/// resolution and the subsequent `tokio::fs::write`. A hostile caller who
-/// can create symlinks under an allowlisted directory could swap one in
-/// between check and write to redirect output. The v1 trust model is
-/// "LLM-as-user", so this is accepted.
 fn resolve_for_allowlist(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
     let expanded = expand_tilde(raw, home)?;
     if !expanded.is_absolute() {
@@ -227,14 +211,6 @@ fn resolve_for_allowlist(raw: &str, home: Option<&str>) -> Result<PathBuf, PathR
     Ok(canonical_anchor.join(tail))
 }
 
-/// Expand a leading `~` (with or without trailing slash) using the supplied
-/// `home`. `~user` is not supported; expand to `home` regardless of user,
-/// which is fine since in the single-user trust model the only `~` the LLM
-/// should emit is the running user's.
-///
-/// `home` is taken as a parameter rather than read from `$HOME` here so the
-/// function is pure: callers read the env once at the boundary, and tests
-/// can supply a literal value without mutating process-global state.
 fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
     if let Some(rest) = raw.strip_prefix("~/") {
         let home = home.ok_or(PathResolveError::HomeNotSet)?;
@@ -265,7 +241,7 @@ pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
                 _ => {
                     // Leading `..` on a relative path: keep, since the
                     // caller (above) already rejects relatives. Still
-                    // preserve for completeness.
+                    // preserve for completeness
                     out.push(comp);
                 }
             },
@@ -279,10 +255,6 @@ pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
     result
 }
 
-/// Walk backward until we find an existing ancestor of `path`. Returns the
-/// existing anchor and the non-existent tail rejoined to it by the caller.
-/// Guaranteed to terminate because `/` always exists (on Unix, which is
-/// the only platform this crate targets).
 fn split_at_existing(path: &Path) -> (PathBuf, PathBuf) {
     let mut anchor = path.to_path_buf();
     let mut tail = PathBuf::new();
@@ -291,16 +263,11 @@ fn split_at_existing(path: &Path) -> (PathBuf, PathBuf) {
             return (anchor, tail);
         }
         let Some(parent) = anchor.parent() else {
-            // Shouldn't happen on absolute paths (we eventually hit /),
-            // but guard defensively: return the original path as anchor
-            // and let the caller's canonicalize fail explicitly.
             return (path.to_path_buf(), PathBuf::new());
         };
         let Some(file_name) = anchor.file_name() else {
             return (anchor, tail);
         };
-        // Avoid pushing onto an empty PathBuf, which inserts a stray separator
-        // and yields trailing-slash paths that tokio::fs::write rejects with EISDIR.
         let new_tail = if tail.as_os_str().is_empty() {
             PathBuf::from(file_name)
         } else {
@@ -323,7 +290,12 @@ mod tests {
             .iter()
             .map(|p| std::fs::canonicalize(p.as_ref()).expect("canonicalize tempdir"))
             .collect();
-        Arc::new(WritePolicyCfg::new(abs))
+        Arc::new(WritePolicyCfg::new(abs).expect("non-empty allowlist"))
+    }
+
+    #[test]
+    fn empty_allowlist_yields_no_policy() {
+        assert!(WritePolicyCfg::new(Vec::new()).is_none());
     }
 
     #[tokio::test]
@@ -406,11 +378,8 @@ mod tests {
         assert!(content.is_empty());
     }
 
-    /// Acceptance for AC #3: `write /etc/passwd "oops"` is rejected when
-    /// `/etc` is not in the writable-path allowlist, with a convention-
-    /// compliant `[error]` line citing the config key.
     #[tokio::test]
-    async fn ac3_write_rejected_outside_allowlist() {
+    async fn write_rejected_outside_allowlist() {
         let dir = tempdir().unwrap();
         let cmd = WriteCommand::new(cfg_from(&[dir.path()]));
         let out = cmd
@@ -446,8 +415,6 @@ mod tests {
         assert_eq!(out.exit_code, 0);
     }
 
-    /// `/tmp/<tmpdir>/../../etc/passwd` must normalize before the allowlist
-    /// check so dot-dot tricks cannot escape the allowed prefix.
     #[tokio::test]
     async fn write_allowlist_resolves_dotdot() {
         let dir = tempdir().unwrap();
@@ -479,10 +446,6 @@ mod tests {
         assert!(stderr.contains("relative paths not permitted"), "{stderr}");
     }
 
-    /// Tilde expansion should resolve `~/foo` to `<home>/foo` before the
-    /// allowlist match. Exercised against `resolve_for_allowlist` directly
-    /// with an explicit `home` so the test never mutates the process-global
-    /// `$HOME` (which would race with parallel tests under `cargo test`).
     #[test]
     fn write_allowlist_expands_tilde() {
         let dir = tempdir().unwrap();
@@ -495,18 +458,12 @@ mod tests {
         assert_eq!(resolved, expected);
     }
 
-    /// `expand_tilde` should fail with `HomeNotSet` when no home value is
-    /// provided. This is the failure path the production code surfaces as
-    /// exit-126 with the "$HOME not set" message.
     #[test]
     fn expand_tilde_without_home_errors() {
         let err = expand_tilde("~/foo", None).expect_err("missing home should error");
         assert!(matches!(err, PathResolveError::HomeNotSet));
     }
 
-    /// A path like `/tmp/<dir>/newsub/file.txt` where `newsub` doesn't exist
-    /// yet must still resolve: we walk backward to `<dir>`, canonicalize it,
-    /// and rejoin the non-existent tail.
     #[tokio::test]
     async fn write_allowlist_handles_nonexistent_parent() {
         let dir = tempdir().unwrap();
@@ -526,8 +483,6 @@ mod tests {
         assert_ne!(out.exit_code, 126, "{:?}", out.stderr);
     }
 
-    /// Pre-allowlist behaviour: writing to a path whose parent dir is
-    /// missing still surfaces a navigational I/O error with exit 1.
     #[tokio::test]
     async fn unwritable_path_exits_1() {
         let dir = tempdir().unwrap();

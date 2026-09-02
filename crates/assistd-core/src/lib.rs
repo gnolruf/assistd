@@ -205,13 +205,12 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
             }
         }
     }
-    if writable_paths.is_empty() {
-        anyhow::bail!(
+    let write_cfg = Arc::new(WritePolicyCfg::new(writable_paths).ok_or_else(|| {
+        anyhow::anyhow!(
             "tools.write.writable_paths contains no resolvable directories; \
              fix ~/.config/assistd/config.toml"
-        );
-    }
-    let write_cfg = Arc::new(WritePolicyCfg::new(writable_paths));
+        )
+    })?);
 
     let screenshot_cfg = Arc::new(ScreenshotPolicyCfg {
         backend: match config.tools.screenshot.backend {
