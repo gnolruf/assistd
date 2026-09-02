@@ -162,7 +162,6 @@ impl Agent {
                             })
                             .await;
 
-                        // Probe is guaranteed Some by the match guard.
                         let probe = health.expect("health Some by guard");
                         let wait_result = tokio::select! {
                             biased;
@@ -274,14 +273,9 @@ impl Agent {
                                 cancelled = cancel.is_cancelled(),
                                 "stopping mid-call (client gone or explicit cancel) without dispatch"
                             );
-                            results.push(ToolResultPayload {
-                                call_id: call.id,
-                                name: call.name,
-                                content: "[error] run: agent turn cancelled before dispatch.\n\
-                                           [exit:-1 | 0ms]"
-                                    .to_string(),
-                                attachments: Vec::new(),
-                            });
+                            let (payload, _) =
+                                cancelled_tool_result(&call, "cancelled before dispatch");
+                            results.push(payload);
                             break;
                         }
 
@@ -293,8 +287,25 @@ impl Agent {
                             })
                             .await;
 
-                        let (payload, raw_result) =
-                            dispatch_tool_call(tools, &call, iteration).await;
+                        let dispatched = tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => None,
+                            r = dispatch_tool_call(tools, &call, iteration) => Some(r),
+                        };
+
+                        let (payload, raw_result) = match dispatched {
+                            Some(r) => r,
+                            None => {
+                                warn!(
+                                    target: "assistd::agent",
+                                    iteration,
+                                    tool = %call.name,
+                                    "cancellation fired during tool dispatch; abandoning tool"
+                                );
+                                cancelled_tool_result(&call, "cancelled during dispatch")
+                            }
+                        };
+                        let cancelled_mid_dispatch = cancel.is_cancelled();
 
                         let _ = tx
                             .send(LlmEvent::ToolResult {
@@ -305,6 +316,10 @@ impl Agent {
                             .await;
 
                         results.push(payload);
+
+                        if cancelled_mid_dispatch {
+                            break;
+                        }
                     }
                     backend
                         .push_tool_results(results)
@@ -327,6 +342,28 @@ impl Agent {
         let _ = tx.send(LlmEvent::Done).await;
         Ok(())
     }
+}
+
+fn cancelled_tool_result(call: &ToolCall, reason: &str) -> (ToolResultPayload, Value) {
+    let content = format!(
+        "[error] {}: agent turn {reason}.\n[exit:-1 | 0ms]",
+        call.name
+    );
+    let raw = serde_json::json!({
+        "output": content,
+        "exit_code": -1,
+        "duration_ms": 0,
+        "truncated": false,
+    });
+    (
+        ToolResultPayload {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            content,
+            attachments: Vec::new(),
+        },
+        raw,
+    )
 }
 
 async fn dispatch_tool_call(
@@ -838,16 +875,6 @@ mod tests {
 
     #[tokio::test]
     async fn agent_loop_routes_remember_then_recall() {
-        // Drive the full loop through the same `RememberTool` /
-        // `RecallTool` impls the daemon registers, against a real
-        // SQLite-backed `MemoryOps`. Remember on the first step, recall
-        // on the second, then assert both calls were routed and that
-        // the save landed in the underlying store. With the embedding
-        // subsystem disabled (NoEmbedder/NoSemanticStore + empty model
-        // name), recall short-circuits to the `(no memories)` sentinel;
-        // the agent-loop wiring is what's under test here, not the
-        // semantic round-trip (which is exercised in the embedder
-        // integration tests).
         use assistd_memory::{
             ConversationStore, MemoryStore, SqliteConversationStore, SqliteHandle,
             SqliteMemoryStore,
@@ -941,12 +968,6 @@ mod tests {
         assert_eq!(pushed[1][0].content, "(no memories)");
     }
 
-    /// Fake `Tool` shaped like `McpToolAdapter`: returns the exact
-    /// envelope the live adapter produces (`type` / `output` /
-    /// `exit_code` / `duration_ms` / `truncated`) so the agent loop
-    /// dispatch path is exercised end-to-end without bringing
-    /// `assistd-mcp` in as a dev-dep. Carries a fixed scripted result
-    /// so the test can assert what flowed back to the model.
     struct FakeMcpTool {
         name: String,
         result: Value,
@@ -1044,12 +1065,6 @@ mod tests {
         );
     }
 
-    /// Acceptance: when the MCP adapter returns its error envelope
-    /// (`exit_code: -1`, convention-compliant `output` line), the
-    /// agent loop threads it back to the model unchanged so the
-    /// recovery hint survives. Without this, a brittle catch-all
-    /// elsewhere in the dispatch path would clobber the line and the
-    /// model would lose the actionable next step.
     #[tokio::test]
     async fn agent_loop_propagates_mcp_error_envelope_to_next_step() {
         let mut tools = ToolRegistry::new();
@@ -1132,9 +1147,80 @@ mod tests {
         );
     }
 
-    /// Mock probe that lets a test script the wait_for_ready outcome.
-    /// Used to drive the replay-on-ServerRestarting path without
-    /// standing up a real PresenceManager.
+    #[tokio::test]
+    async fn cancellation_during_hung_tool_preempts_dispatch() {
+        struct HangingTool {
+            entered: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl assistd_tools::Tool for HangingTool {
+            fn name(&self) -> &str {
+                "run"
+            }
+            fn description(&self) -> &str {
+                "never returns"
+            }
+            fn parameters_schema(&self) -> Value {
+                serde_json::json!({"type":"object"})
+            }
+            async fn invoke(&self, _args: Value) -> anyhow::Result<Value> {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+                unreachable!("hanging tool must never resolve")
+            }
+        }
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let mut reg = ToolRegistry::new();
+        reg.register(HangingTool {
+            entered: entered.clone(),
+        });
+        let backend = MockBackend::with(vec![
+            StepOutcome::ToolCalls(vec![call("c-1", "hang")]),
+            // Reaching this outcome would mean the loop iterated past
+            // the cancellation point.
+            StepOutcome::ToolCalls(vec![call("c-2", "echo b")]),
+        ]);
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(16);
+        let token = CancellationToken::new();
+        let token_for_kicker = token.clone();
+        tokio::spawn(async move {
+            entered.notified().await;
+            token_for_kicker.cancel();
+        });
+
+        let agent = Agent::new(backend.clone(), Arc::new(reg), 10, None);
+        let turn = agent.run_turn("go".into(), Vec::new(), tx, token);
+        tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+            .await
+            .expect("cancellation did not preempt hung tool")
+            .unwrap();
+
+        assert_eq!(
+            backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "loop iterated past the cancellation point"
+        );
+
+        let events = collect(&mut rx).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::ToolResult { id, .. } if id == "c-1")),
+            "abandoned tool call left without a ToolResult event: {events:?}"
+        );
+
+        let pushed = backend.pushed_results.lock();
+        assert_eq!(pushed.len(), 1, "cancelled call was not answered");
+        assert_eq!(pushed[0].len(), 1);
+        assert_eq!(pushed[0][0].call_id, "c-1");
+        assert!(
+            pushed[0][0].content.contains("cancelled during dispatch"),
+            "unexpected cancelled payload: {:?}",
+            pushed[0][0].content
+        );
+    }
+
     struct MockProbe {
         pid: StdMutex<Option<u32>>,
         state: StdMutex<assistd_llm::ReadyState>,
@@ -1182,10 +1268,6 @@ mod tests {
         }
     }
 
-    /// Mock backend that injects errors before falling through to the
-    /// existing outcome queue. Used to exercise error-handling paths
-    /// (server-restart replay, terminal failures) without needing a
-    /// real LlamaChatClient.
     struct ErrorInjectingBackend {
         errors: StdMutex<Vec<LlmError>>,
         outcomes: StdMutex<Vec<StepOutcome>>,

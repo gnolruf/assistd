@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
 const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -206,7 +207,7 @@ impl AppState {
         attachments: Vec<Attachment>,
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> JoinHandle<Result<()>> {
+    ) -> AbortOnDropHandle<Result<()>> {
         let llm = self.subsystems.llm.clone();
         let tools = self.subsystems.tools.clone();
         let max_iterations = self.config.agent.max_iterations;
@@ -214,10 +215,10 @@ impl AppState {
             crate::presence::PresenceLlmHealthProbe::new(self.subsystems.presence.clone()),
         ));
         let agent = Agent::new(llm, tools, max_iterations, health);
-        tokio::spawn(
+        AbortOnDropHandle::new(tokio::spawn(
             async move { agent.run_turn(text, attachments, llm_tx, cancel).await }
                 .in_current_span(),
-        )
+        ))
     }
 
     fn spawn_speech_worker(
