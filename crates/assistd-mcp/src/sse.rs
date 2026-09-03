@@ -3,17 +3,20 @@
 //! Wire shape per the MCP HTTP+SSE binding:
 //!   * Client opens `GET <base_url>` with `Accept: text/event-stream`.
 //!     The server's first SSE event is `event: endpoint\ndata: <url>`,
-//!     telling the client which URL to POST requests to. (Servers that
-//!     don't emit this event are assumed to accept POSTs at `base_url`.)
+//!     telling the client which URL to POST requests to; that URL is
+//!     usually a relative reference and is resolved against `base_url`.
+//!     (Servers that don't emit this event are assumed to accept POSTs
+//!     at `base_url`.)
 //!   * Client POSTs JSON-RPC requests to that URL. Server returns 202.
 //!   * Server replies arrive over the SSE stream as
 //!     `event: message\ndata: <json-rpc-response>`.
 //!
 //! Two background tasks per server:
 //!   * SSE reader: long-lived GET, parses event stream, hands JSON-RPC
-//!     responses to the [`Correlator`]. A `read_timeout` on the underlying
-//!     `reqwest::Client` flips the connection unhealthy if the server
-//!     stalls (no events, no SSE comments) for that long.
+//!     responses to the [`Correlator`]. It runs on its own
+//!     `reqwest::Client` carrying only a `read_timeout`, so the stream
+//!     is bounded by server silence rather than by elapsed time; the
+//!     POST client keeps the total `request_timeout`.
 //!   * Ping task: sends JSON-RPC `ping` every `ping_interval`. If the
 //!     response doesn't arrive within `request_timeout`, signals the
 //!     read loop to drop the connection. Catches the case where the
@@ -100,6 +103,10 @@ impl SseMcpClient {
             .timeout(cfg.request_timeout)
             .build()?;
 
+        let stream_http = reqwest::Client::builder()
+            .read_timeout(cfg.read_timeout)
+            .build()?;
+
         let correlator = Arc::new(Correlator::new());
         let post_url = Arc::new(RwLock::new(None));
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -117,7 +124,7 @@ impl SseMcpClient {
         });
 
         let reader = ReadLoop {
-            http: http.clone(),
+            http: stream_http,
             base_url: base_url.clone(),
             headers: headers.clone(),
             correlator: correlator.clone(),
@@ -436,6 +443,7 @@ impl ReadLoop {
                         handle_event(
                             event,
                             &correlator,
+                            &base_url,
                             &post_url,
                             &mut endpoint_ready_tx,
                             &label,
@@ -471,17 +479,21 @@ fn closed_err() -> RpcError {
     }
 }
 
+fn resolve_endpoint(base_url: &Url, data: &str) -> Result<Url, url::ParseError> {
+    base_url.join(data.trim())
+}
+
 async fn handle_event(
     event: SseEvent,
     correlator: &Arc<Correlator>,
+    base_url: &Url,
     post_url: &Arc<RwLock<Option<Url>>>,
     endpoint_ready_tx: &mut Option<oneshot::Sender<()>>,
     label: &str,
 ) {
     match event.event_type.as_str() {
-        "endpoint" => {
-            let resolved = Url::parse(&event.data).ok();
-            if let Some(url) = resolved {
+        "endpoint" => match resolve_endpoint(base_url, &event.data) {
+            Ok(url) => {
                 debug!(
                     target: "assistd::mcp",
                     server = %label,
@@ -493,7 +505,15 @@ async fn handle_event(
                     let _ = tx.send(());
                 }
             }
-        }
+            Err(e) => {
+                warn!(
+                    target: "assistd::mcp",
+                    server = %label,
+                    "unusable SSE endpoint event `{}`: {e}",
+                    event.data,
+                );
+            }
+        },
         "message" | "" => {
             // Default event type per the SSE spec is "message".
             match serde_json::from_str::<Response>(&event.data) {
@@ -782,6 +802,37 @@ mod tests {
         let events = drive(&mut p, &[b"data\ndata: rest\n\n"]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "\nrest");
+    }
+
+    #[test]
+    fn relative_endpoint_resolved_against_base() {
+        let base = Url::parse("http://127.0.0.1:8931/sse").unwrap();
+        let url = resolve_endpoint(&base, "/messages?sessionId=abc").unwrap();
+        assert_eq!(url.as_str(), "http://127.0.0.1:8931/messages?sessionId=abc");
+    }
+
+    #[test]
+    fn path_relative_endpoint_resolved_against_base_directory() {
+        let base = Url::parse("http://example.com/mcp/sse").unwrap();
+        let url = resolve_endpoint(&base, "messages/?session_id=1").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://example.com/mcp/messages/?session_id=1"
+        );
+    }
+
+    #[test]
+    fn absolute_endpoint_replaces_base() {
+        let base = Url::parse("http://127.0.0.1:8931/sse").unwrap();
+        let url = resolve_endpoint(&base, "https://other.example/post").unwrap();
+        assert_eq!(url.as_str(), "https://other.example/post");
+    }
+
+    #[test]
+    fn endpoint_payload_is_trimmed() {
+        let base = Url::parse("http://127.0.0.1:8931/sse").unwrap();
+        let url = resolve_endpoint(&base, " /messages\r").unwrap();
+        assert_eq!(url.as_str(), "http://127.0.0.1:8931/messages");
     }
 
     #[test]
