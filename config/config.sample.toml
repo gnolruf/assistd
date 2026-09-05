@@ -533,7 +533,11 @@ hotkey = "Super+Escape"
 # presence_sleep_secs = 30           # presence.sleep: SIGTERM grace + slack
 # presence_drowse_secs = 10          # POST /models/unload
 # dispatch_envelope_secs = 600       # outer cap on a single dispatch call
-# stream_inactivity_secs = 30        # SSE per-chunk no-bytes deadline
+# stream_inactivity_secs = 30        # SSE gap between chunks, once streaming
+#
+# The wait for the *first* SSE byte is prompt prefill, not a stall, and
+# is bounded by chat.request_timeout_secs instead. Raise that one if a
+# large model on CPU-offloaded experts needs longer to reach first token.
 #
 # Waking from Sleeping (spawn llama-server) and loading model weights
 # are not on a wall-clock budget: a slow load runs to completion as long
