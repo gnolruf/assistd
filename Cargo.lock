@@ -387,6 +387,7 @@ dependencies = [
  "parking_lot",
  "regex",
  "reqwest",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "shlex 2.0.1",
