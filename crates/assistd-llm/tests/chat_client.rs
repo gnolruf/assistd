@@ -620,6 +620,39 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
 }
 
 #[tokio::test]
+async fn slow_first_token_is_not_treated_as_a_stall() {
+    // Headers land, then the server prefills in silence. The 1s
+    // inter-chunk deadline must not police that window; only
+    // `chat.request_timeout_secs` bounds the wait for the first byte.
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::StallAfterDeltas(Vec::new()))
+        .await;
+    let (port, _server) = spawn_fake(script).await;
+
+    let mut spec = chat_spec(port);
+    spec.timeouts.stream_inactivity_secs = 1;
+    spec.chat.request_timeout_secs = 4;
+    let client = build_client(&spec);
+
+    let (tx, mut rx) = mpsc::channel(32);
+    let started = std::time::Instant::now();
+    let res = tokio::time::timeout(Duration::from_secs(15), client.generate("hi".into(), tx))
+        .await
+        .expect("generate must return within outer 15s budget");
+    assert!(
+        res.is_err(),
+        "a first byte that never arrives is still an error"
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(3),
+        "generate returned after {elapsed:?}; the inter-chunk deadline fired before the first byte"
+    );
+    assert!(drain(&mut rx).await.is_empty());
+}
+
+#[tokio::test]
 async fn mid_stream_drop_after_deltas_emits_done() {
     let script = Script::new();
     script

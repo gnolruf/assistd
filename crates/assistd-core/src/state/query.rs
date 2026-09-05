@@ -84,14 +84,17 @@ impl AppState {
                 sentence_buf,
                 partial_flush,
                 turn_id,
-                title_user_text,
-                current_session,
             )
             .await;
 
         let gen_result = generator.await;
         *self.runtime.current_cancel.lock().await = None;
         drop(_agent_guard);
+
+        if done_emitted && matches!(&gen_result, Ok(Ok(()))) {
+            self.clone()
+                .spawn_session_title_generation(current_session, title_user_text);
+        }
 
         self.finalize_turn(turn_id, gen_result, speech_handle, &tx, id, done_emitted)
             .await
@@ -290,8 +293,6 @@ impl AppState {
         mut sentence_buf: SentenceBuffer,
         partial_flush: Option<Duration>,
         turn_id: Option<TurnId>,
-        title_user_text: String,
-        current_session: Arc<SessionId>,
     ) -> bool {
         let mut awaiting_tool_result = false;
 
@@ -450,10 +451,6 @@ impl AppState {
                             PersistedMessage::assistant_text(final_text),
                         );
                     }
-                    self.clone().spawn_session_title_generation(
-                        current_session.clone(),
-                        title_user_text.clone(),
-                    );
                     done_emitted = true;
                     (Event::Done { id: id.clone() }, sentences)
                 }

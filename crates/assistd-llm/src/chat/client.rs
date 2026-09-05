@@ -187,10 +187,13 @@ impl LlamaChatClient {
         let mut reader = SseLineReader::new();
         let mut accum = StreamAccum::default();
         let mut saw_done = false;
-        let inactivity = Duration::from_secs(self.timeouts.stream_inactivity_secs);
+        let first_byte = Duration::from_secs(self.chat.request_timeout_secs);
+        let inter_chunk = Duration::from_secs(self.timeouts.stream_inactivity_secs);
+        let mut saw_bytes = false;
 
         loop {
-            let chunk = match timeout(inactivity, response.chunk()).await {
+            let deadline = if saw_bytes { inter_chunk } else { first_byte };
+            let chunk = match timeout(deadline, response.chunk()).await {
                 Ok(Ok(Some(c))) => c,
                 Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
@@ -203,7 +206,8 @@ impl LlamaChatClient {
                 Err(_) => {
                     warn!(
                         target: "assistd::chat",
-                        timeout_secs = self.timeouts.stream_inactivity_secs,
+                        timeout_secs = deadline.as_secs(),
+                        phase = if saw_bytes { "inter_chunk" } else { "first_byte" },
                         bytes_so_far = accum.text.len(),
                         tool_call_builders = accum.tool_calls.len(),
                         "SSE stream inactive past deadline; aborting read"
@@ -216,11 +220,12 @@ impl LlamaChatClient {
                         accum,
                         ChatClientError::Sse(format!(
                             "no bytes received for {}s",
-                            self.timeouts.stream_inactivity_secs
+                            deadline.as_secs()
                         )),
                     );
                 }
             };
+            saw_bytes = true;
             reader.feed(&chunk);
 
             loop {
@@ -335,11 +340,6 @@ impl LlamaChatClient {
                 accum.tool_calls.len()
             );
         }
-        // Flush any dangling tag-prefix the splitter held back. In
-        // practice this only fires if the stream ends mid-tag (rare:
-        // models close their `</think>` before stopping), and we
-        // classify the residual according to the splitter's current
-        // state rather than swallowing it.
         if let Some(seg) = accum.splitter.finish() {
             match seg {
                 Segment::Reasoning(s) => {
@@ -450,11 +450,6 @@ impl LlmBackend for LlamaChatClient {
     async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         for r in results {
-            // `[tool:<name>]\n<body>`: the prefix is the truncator's
-            // pair-detection anchor (see TOOL_RESULT_PREFIX) and gives
-            // the model a stable header it can visually spot in replayed
-            // history. Attachments (if any) ride along as multimodal
-            // content parts.
             let content = format!("[tool:{}]\n{}", r.name, r.content);
             if r.attachments.is_empty() {
                 conv.push_user(content);
@@ -513,23 +508,6 @@ impl LlmBackend for LlamaChatClient {
             }
             StreamOutcome::PreEmitError(e) => Err(LlmError::Chat(e)),
             StreamOutcome::ServerRestart { accum, pre_emit } => {
-                // Crash detected. The conversation state on this side
-                // is already clean (we never reached `commit_step`),
-                // but we may have streamed partial bytes to the client;
-                // the agent loop's Status emission tells the client to
-                // bracket those before the replay's deltas arrive.
-                //
-                // Important: we do NOT roll back the user message on
-                // pre_emit, even though `PreEmitError` does. The user
-                // push happens once before the agent loop iterates;
-                // rolling it back here would mean the replay's
-                // re-rendered wire payload has no user prompt at the
-                // tail and the model would see an empty turn.
-                //
-                // We also preserve the transient context (skip
-                // `consume_transient_context`) so the replay sees the
-                // same retrieval block it would have seen on the
-                // original attempt.
                 let bytes_so_far = accum.text.len();
                 let tool_builders = accum.tool_calls.len();
                 drop(accum);
@@ -575,9 +553,6 @@ impl LlmBackend for LlamaChatClient {
                     });
                 }
                 HistoryRole::Tool => {
-                    // Tool results round-trip as Role::User with the
-                    // [tool:<name>]\n prefix the truncator depends on
-                    // for tool-call/result pair detection.
                     let name = entry.tool_name.unwrap_or_default();
                     let tagged = format!("[tool:{name}]\n{}", entry.content);
                     msgs.push(Message {
@@ -599,11 +574,6 @@ impl LlmBackend for LlamaChatClient {
         Ok(conv.truncate_to_last_real_user())
     }
 
-    /// Stateless completion. Builds a one-message wire payload directly
-    /// (skipping `self.conv` entirely) so the daemon's title-generation
-    /// hook can summarise without polluting the user's chat history.
-    /// The drained `mpsc::Receiver` collects deltas locally; the caller
-    /// only sees the final concatenated text.
     async fn complete_oneshot(&self, prompt: String) -> LlmResult<String> {
         let body_bytes = {
             let payload = wire::ChatRequest {
@@ -674,9 +644,6 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::
             .and_then(|v| v.as_str())
             .ok_or_else(|| LlmError::ToolCallParse("history tool_call missing name".into()))?
             .to_string();
-        // arguments is stored verbatim as JSON. It may be either a
-        // JSON-encoded string or an object; store the literal string
-        // so the wire payload matches what the model originally emitted.
         let arguments = match entry.get("arguments") {
             Some(Value::String(s)) => s.clone(),
             Some(other) => other.to_string(),
@@ -692,15 +659,6 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::
 }
 
 /// Translate a completed stream into conversation commits + [`StepOutcome`].
-///
-/// On `finish_reason: "tool_calls"` (or an inferred tool-call outcome,
-/// non-empty builders even without an explicit reason) we drop any
-/// accumulated narrative text. Inline `<think>...</think>` blocks are
-/// already stripped upstream by [`ThinkSplitter`] (their bytes go to
-/// `LlmEvent::ReasoningDelta` and never enter `accum.text`), so this
-/// drop-on-tool-calls behaviour is now belt-and-suspenders for any
-/// remaining mid-stream narration the model emitted as visible text
-/// before deciding to call a tool.
 fn commit_step(conv: &mut Conversation, accum: StreamAccum) -> LlmResult<StepOutcome> {
     let wants_tool_calls =
         accum.finish_reason.as_deref() == Some("tool_calls") && !accum.tool_calls.is_empty();
@@ -803,12 +761,6 @@ impl StreamAccum {
         }
     }
 
-    /// Turn the builder map into `(records, parsed_calls)`:
-    /// - `records` go into conversation history (arguments verbatim)
-    /// - `parsed_calls` are what the agent loop dispatches (arguments as
-    ///   `Value`). We parse arguments here so a malformed call surfaces
-    ///   as an `Err` from `step` rather than propagating garbage into
-    ///   tool dispatch.
     fn finalize_tool_calls(self) -> LlmResult<(Vec<ToolCallRecord>, Vec<ToolCall>)> {
         let mut records = Vec::with_capacity(self.tool_calls.len());
         let mut parsed = Vec::with_capacity(self.tool_calls.len());

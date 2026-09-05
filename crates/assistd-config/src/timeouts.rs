@@ -25,9 +25,12 @@ pub struct TimeoutsConfig {
     /// granular case. Default: 600s (10 min).
     #[serde(default = "default_dispatch_envelope_secs")]
     pub dispatch_envelope_secs: u64,
-    /// Per-chunk inactivity deadline on the SSE byte read in
-    /// `LlamaChatClient::stream_openai`. If the model emits no bytes
-    /// for this long, the call errors out instead of hanging. Default: 30s.
+    /// Inactivity deadline between SSE chunks in
+    /// `LlamaChatClient::stream_openai`, applied once the stream has
+    /// produced its first byte. If the model then goes quiet for this
+    /// long, the call errors out instead of hanging. The wait for the
+    /// first byte is prompt prefill rather than a stall and is bounded
+    /// by `chat.request_timeout_secs`. Default: 30s.
     #[serde(default = "default_stream_inactivity_secs")]
     pub stream_inactivity_secs: u64,
 }
