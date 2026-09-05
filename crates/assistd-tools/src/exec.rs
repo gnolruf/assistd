@@ -8,10 +8,11 @@
 //!   failed startup, then leaves it running. Used by `wm open`, whose
 //!   contract is "launch this and leave the window open".
 //!
-//! [`supervise`] takes the whole process group down with it
-//! (`kill_on_drop` + `process_group(0)`, as in
-//! `assistd-llm/src/llama_server/process.rs`), so a forked grandchild
-//! can't leak. [`spawn_detached`] cannot do that and stay useful;
+//! [`supervise`] puts the child in its own process group
+//! (`process_group(0)`) and signals that whole group on timeout or
+//! overflow, as in `assistd-llm/src/llama_server/process.rs`, so a
+//! forked grandchild can't leak. [`spawn_detached`] cannot do that and
+//! stay useful;
 //! bubblewrap's `--die-with-parent` bounds a launched application
 //! instead.
 
@@ -94,13 +95,9 @@ pub(crate) async fn supervise(
         if !stdin.is_empty() {
             let _ = pipe.write_all(stdin).await;
         }
-        // Drop closes the pipe, signaling EOF to the child.
         drop(pipe);
     }
 
-    // Read the pipes ourselves; `wait_with_output()` would collect them
-    // into unbounded Vecs, and `yes` buffers tens of GB before the
-    // timeout fires.
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
     let overflow = Arc::new(Notify::new());
@@ -117,16 +114,13 @@ pub(crate) async fn supervise(
     };
 
     if matches!(outcome, WaitOutcome::Timeout | WaitOutcome::Overflow) {
-        let _ = child.start_kill();
+        kill_group(&mut child);
         let _ = child.wait().await;
     }
 
     let (stdout, stdout_overflowed) = stdout_task.await.unwrap_or_default();
     let (stderr_bytes, stderr_overflowed) = stderr_task.await.unwrap_or_default();
 
-    // Closing a pipe on overflow can SIGPIPE the child, making
-    // `child.wait()` ready alongside the overflow notify; `select!` then
-    // picks pseudo-randomly. The reader's bool is the source of truth.
     let outcome = if stdout_overflowed || stderr_overflowed {
         WaitOutcome::Overflow
     } else {
@@ -135,9 +129,6 @@ pub(crate) async fn supervise(
 
     Ok(match outcome {
         WaitOutcome::Exited(status) => {
-            // `code()` is `None` for signal death; encoding it as
-            // 128 + signum keeps a segfault reading as 139 instead of
-            // masquerading as the 137 timeout sentinel.
             let exit_code = status
                 .code()
                 .or_else(|| signal_exit_code(&status))
@@ -160,8 +151,6 @@ pub(crate) async fn supervise(
             .into_bytes(),
         ),
         WaitOutcome::Timeout => {
-            // Built inline rather than through `error_line`: the
-            // elapsed-time suffix has no place in that helper's shape.
             let secs = limit.as_secs();
             let elapsed_secs = start.elapsed().as_secs_f64();
             let msg = format!(
@@ -275,12 +264,6 @@ pub(crate) async fn spawn_detached(
     })
 }
 
-/// Read `reader` to EOF, keeping only the first `limit` bytes in `sink`.
-///
-/// Unlike [`read_capped`], the cap does not stop the read — the excess is
-/// discarded and draining continues. Returning early would leave a
-/// long-lived application blocked on a full pipe, or SIGPIPE it once the
-/// read end closed.
 async fn drain_into<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     limit: usize,
@@ -301,6 +284,21 @@ async fn drain_into<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
+#[cfg(unix)]
+fn kill_group(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id()
+        && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
+    {
+        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+    }
+    let _ = child.start_kill();
+}
+
+#[cfg(not(unix))]
+fn kill_group(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+}
+
 enum WaitOutcome {
     Exited(std::process::ExitStatus),
     WaitErr(std::io::Error),
@@ -318,12 +316,6 @@ fn signal_exit_code(_status: &std::process::ExitStatus) -> Option<i32> {
     None
 }
 
-/// Read `reader` into a `Vec` capped at `limit`, returning the bytes and
-/// whether the cap was hit. Hitting it closes the pipe and signals
-/// `overflow` to wake the caller's `select!`.
-///
-/// The returned flag is authoritative, not the `Notify`: closing the pipe
-/// may SIGPIPE the child and make `child.wait()` race the notification.
 async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     limit: usize,

@@ -18,8 +18,8 @@
 //! 3. **Sandbox wrap**: if the resolved sandbox mode is `Bwrap`, prefix
 //!    the argv with `bwrap <default-flags> <extra-args> -- bash -c <script>`.
 //! 4. **Timeout**: the spawn itself is wrapped in `tokio::time::timeout`.
-//!    Exceeding the limit kills the process group (via `kill_on_drop`)
-//!    and returns `exit 137` with the AC-specified format.
+//!    Exceeding the limit SIGKILLs the child's process group and returns
+//!    `exit 137` with the AC-specified format.
 //!
 //! ## Honest scope note
 //!
@@ -529,6 +529,99 @@ mod tests {
         assert_eq!(
             out.exit_code, 139,
             "SIGSEGV should surface as 128+11=139, not the timeout sentinel"
+        );
+    }
+
+    /// Poll `kill -0` until `pid` is gone, up to two seconds. Returns
+    /// whether it exited; a SIGKILL'd orphan reparents to init and is
+    /// reaped within a few milliseconds.
+    #[cfg(unix)]
+    async fn waited_for_exit(pid: &str) -> bool {
+        for _ in 0..40 {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !alive {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Run `script` (which must write a background child's PID to
+    /// `pidfile`) and return the output plus that PID. The whole call is
+    /// bounded: an un-killed grandchild holds the output pipe open, so
+    /// without the group kill `supervise` never reaches EOF and hangs for
+    /// as long as the orphan lives.
+    #[cfg(unix)]
+    async fn run_leaving_background_child(
+        cfg: BashPolicyCfg,
+        script: impl Fn(&std::path::Path) -> String,
+    ) -> (CommandOutput, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("child.pid");
+        let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
+        let out = tokio::time::timeout(
+            Duration::from_secs(10),
+            cmd.run(CommandInput {
+                args: vec![script(&pidfile)],
+                stdin: Vec::new(),
+            }),
+        )
+        .await
+        .expect("bash did not return: a grandchild kept the output pipe open")
+        .unwrap();
+        let pid = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(!pid.is_empty(), "script did not record a background PID");
+        (out, pid)
+    }
+
+    /// A timed-out script must take its whole process group down, not
+    /// just the `bash` group leader. `sleep 300 &` outlives a
+    /// leader-only SIGKILL, reparents to init, and keeps the inherited
+    /// stdout pipe open.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_backgrounded_grandchild() {
+        let cfg = BashPolicyCfg {
+            timeout: Duration::from_millis(200),
+            ..Default::default()
+        };
+        let (out, pid) = run_leaving_background_child(cfg, |pidfile| {
+            format!("sleep 300 & echo $! > {}; wait", pidfile.display())
+        })
+        .await;
+        assert_eq!(out.exit_code, 137);
+        assert!(
+            waited_for_exit(&pid).await,
+            "grandchild {pid} survived the timeout"
+        );
+    }
+
+    /// Same requirement on the overflow path: the flood (`yes`) dies of
+    /// SIGPIPE once we drop the read end, but a quiet background child
+    /// only dies if the group is signalled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_overflow_kills_backgrounded_grandchild() {
+        let cfg = BashPolicyCfg {
+            timeout: Duration::from_secs(30),
+            ..Default::default()
+        };
+        let (out, pid) = run_leaving_background_child(cfg, |pidfile| {
+            format!("sleep 300 & echo $! > {}; yes", pidfile.display())
+        })
+        .await;
+        assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
+        assert!(
+            waited_for_exit(&pid).await,
+            "grandchild {pid} survived the overflow kill"
         );
     }
 

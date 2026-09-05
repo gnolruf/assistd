@@ -24,6 +24,7 @@ infer = { workspace = true }
 shlex = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
+rustix = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
