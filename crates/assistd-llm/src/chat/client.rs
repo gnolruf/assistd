@@ -586,7 +586,7 @@ impl LlmBackend for LlamaChatClient {
                 }],
                 stream: true,
                 temperature: self.chat.temperature,
-                max_tokens: self.chat.max_response_tokens,
+                max_tokens: self.chat.max_summary_tokens,
                 top_p: self.chat.top_p,
                 top_k: self.chat.top_k,
                 min_p: self.chat.min_p,
@@ -597,15 +597,26 @@ impl LlmBackend for LlamaChatClient {
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
 
+        // The collector has to run *while* the stream is producing:
+        // `stream_openai` awaits every send, so leaving the receiver idle
+        // until afterwards wedges the whole task the moment the response
+        // outgrows the channel — which any reasoning model does.
         let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
-        let outcome = self.stream_openai(body_bytes, &tx).await;
-        drop(tx);
-        let mut buf = String::new();
-        while let Some(ev) = rx.recv().await {
-            if let LlmEvent::Delta { text } = ev {
-                buf.push_str(&text);
+        let stream = async {
+            let outcome = self.stream_openai(body_bytes, &tx).await;
+            drop(tx);
+            outcome
+        };
+        let collect = async {
+            let mut buf = String::new();
+            while let Some(ev) = rx.recv().await {
+                if let LlmEvent::Delta { text } = ev {
+                    buf.push_str(&text);
+                }
             }
-        }
+            buf
+        };
+        let (outcome, buf) = tokio::join!(stream, collect);
         match outcome {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)
@@ -659,17 +670,30 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::
 }
 
 /// Translate a completed stream into conversation commits + [`StepOutcome`].
+///
+/// Accumulated tool calls decide the outcome on their own; `finish_reason`
+/// only gets logged when it disagrees. Gating on `finish_reason ==
+/// "tool_calls"` used to drop calls that arrived alongside a `"stop"`,
+/// which ends the turn silently right where the tool call should have
+/// run — indistinguishable, from the client, from the model choosing to
+/// stop talking. A truncated call is caught by `finalize_tool_calls`
+/// instead and surfaces as a visible parse error.
 fn commit_step(conv: &mut Conversation, accum: StreamAccum) -> LlmResult<StepOutcome> {
-    let wants_tool_calls =
-        accum.finish_reason.as_deref() == Some("tool_calls") && !accum.tool_calls.is_empty();
-    if wants_tool_calls || (!accum.tool_calls.is_empty() && accum.finish_reason.is_none()) {
-        let (records, parsed) = accum.finalize_tool_calls()?;
-        conv.push_assistant_with_tool_calls(None, records);
-        Ok(StepOutcome::ToolCalls(parsed))
-    } else {
+    if accum.tool_calls.is_empty() {
         conv.push_assistant(accum.text);
-        Ok(StepOutcome::Final)
+        return Ok(StepOutcome::Final);
     }
+    if !matches!(accum.finish_reason.as_deref(), None | Some("tool_calls")) {
+        warn!(
+            target: "assistd::chat",
+            finish_reason = accum.finish_reason.as_deref().unwrap_or("<none>"),
+            tool_calls = accum.tool_calls.len(),
+            "finish_reason disagrees with emitted tool calls; running them anyway"
+        );
+    }
+    let (records, parsed) = accum.finalize_tool_calls()?;
+    conv.push_assistant_with_tool_calls(None, records);
+    Ok(StepOutcome::ToolCalls(parsed))
 }
 
 #[async_trait]

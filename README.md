@@ -11,8 +11,9 @@ for context-aware behavior.
 - **Local-first.** `llama-server` runs as a child process; everything
   (text, voice, images) stays on the machine.
 - **Tools and pipelines.** A single `run` tool exposes shell-shaped
-  commands (`cat`, `grep`, `wc`, `bash`, `see`, `screenshot`, `web`,
-  `wm`, …) the model composes with `|`, `&&`, `;`. Adding your own is
+  commands (`cat`, `grep`, `wc`, `head`, `tail`, `sort`, `uniq`, `bash`,
+  `see`, `screenshot`, `web`, `wm`, …) the model composes with `|`,
+  `&&`, `;`, plus `~` and glob expansion. Adding your own is
   a single Rust file plus one registration line — see
   [docs/tools.md](docs/tools.md).
 - **Voice in/out.** Push-to-talk and continuous listening via

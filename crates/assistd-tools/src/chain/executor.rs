@@ -12,7 +12,8 @@ use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 
-use super::Chain;
+use super::expand::expand_args;
+use super::{Chain, Word};
 use crate::command::{CommandInput, CommandOutput, CommandRegistry, error_line};
 
 /// Maximum bytes we buffer between pipe stages. Prevents one command
@@ -109,11 +110,11 @@ pub fn execute<'a>(
 }
 
 async fn run_command(
-    argv: &[String],
+    words: &[Word],
     registry: &CommandRegistry,
     stdin: Vec<u8>,
 ) -> Result<CommandOutput> {
-    let name = argv.first().map(|s| s.as_str()).unwrap_or_default();
+    let name = words.first().map(|w| w.text.as_str()).unwrap_or_default();
     if name.is_empty() {
         return Ok(CommandOutput::failed(
             2,
@@ -135,7 +136,7 @@ async fn run_command(
 
     let out = cmd
         .run(CommandInput {
-            args: argv[1..].to_vec(),
+            args: expand_args(&words[1..]),
             stdin,
         })
         .await?;

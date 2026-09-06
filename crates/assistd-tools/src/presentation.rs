@@ -5,8 +5,10 @@
 //!   bytes to the model.
 //! - Overflow spill: line/byte-truncates the body, writes the raw stdout to a
 //!   temp file under `overflow_dir`, and appends exploration hints.
-//! - `[stderr]` attachment on non-zero exit so the model sees *why* a command
-//!   failed.
+//! - `[stderr]` attachment whenever a stage wrote to it, so the model sees
+//!   *why* a command failed. Keying this off the exit code hid the common
+//!   pipeline case: `find . | head` reports the exit code of `head`, so a
+//!   failing `find` left the model an empty, successful-looking result.
 //! - `[exit:N | Mms]` metadata footer on every successful presentation so the
 //!   model can distinguish a cache hit from a timeout.
 //!
@@ -95,7 +97,7 @@ pub fn present(
             label,
             human_size(out.stdout.len()),
         );
-        if out.exit_code != 0 && !stderr_raw.is_empty() {
+        if !stderr_raw.is_empty() {
             body.push('\n');
             body.push_str("[stderr] ");
             body.push_str(stderr_raw.trim_end_matches('\n'));
@@ -158,7 +160,7 @@ pub fn present(
             body.push_str(&format!("cat {display} | tail 100\n"));
         }
     }
-    if out.exit_code != 0 && !stderr_raw.is_empty() {
+    if !stderr_raw.is_empty() {
         body.push_str("[stderr] ");
         body.push_str(stderr_raw.trim_end_matches('\n'));
         body.push('\n');
@@ -478,11 +480,14 @@ mod tests {
     }
 
     #[test]
-    fn present_skips_stderr_marker_on_zero_exit_even_if_stderr_present() {
+    fn present_shows_stderr_on_zero_exit() {
+        // A pipeline reports its last stage's exit code, so an earlier
+        // stage that failed shows up only here. Suppressing the marker
+        // on exit 0 turned `find . | head` into a silent empty success.
         let dir = tempdir().unwrap();
         let out = CommandOutput {
-            stdout: b"ok\n".to_vec(),
-            stderr: b"warning\n".to_vec(),
+            stdout: Vec::new(),
+            stderr: b"[error] unknown command: find. Available: cat, ls\n".to_vec(),
             exit_code: 0,
             attachments: Vec::new(),
         };
@@ -493,8 +498,12 @@ mod tests {
             &counter,
             Duration::from_millis(1),
         );
-        assert!(!r.output.contains("[stderr]"));
-        assert!(r.output.ends_with("[exit:0 | 1ms]"));
+        assert!(
+            r.output.contains("[stderr] [error] unknown command: find"),
+            "{}",
+            r.output
+        );
+        assert!(r.output.ends_with("[exit:0 | 1ms]"), "{}", r.output);
     }
 
     #[test]

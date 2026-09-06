@@ -383,6 +383,7 @@ dependencies = [
  "assistd-wm",
  "async-trait",
  "base64 0.23.1",
+ "glob",
  "infer",
  "parking_lot",
  "regex",

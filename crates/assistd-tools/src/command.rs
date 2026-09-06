@@ -279,8 +279,9 @@ mod tests {
     #[test]
     fn every_registered_command_emits_convention_compliant_error() {
         use crate::commands::{
-            BashCommand, CatCommand, GrepCommand, LsCommand, ScreenshotCommand, SeeCommand,
-            WcCommand, WebCommand, WmCommand, WriteCommand,
+            BashCommand, CatCommand, GrepCommand, HeadCommand, LsCommand, ScreenshotCommand,
+            SeeCommand, SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WmCommand,
+            WriteCommand,
         };
         use assistd_wm::NoWindowManager;
         use std::sync::Arc as StdArc;
@@ -343,6 +344,19 @@ mod tests {
                 )),
             ),
             ("wc", rt.block_on(run_cmd(WcCommand, vec!["-q".into()]))),
+            (
+                "head",
+                rt.block_on(run_cmd(HeadCommand, vec!["-n".into(), "lots".into()])),
+            ),
+            (
+                "tail",
+                rt.block_on(run_cmd(TailCommand, vec!["notes.md".into()])),
+            ),
+            ("sort", rt.block_on(run_cmd(SortCommand, vec!["-q".into()]))),
+            (
+                "uniq",
+                rt.block_on(run_cmd(UniqCommand, vec!["notes.md".into()])),
+            ),
             (
                 "web",
                 rt.block_on(run_cmd(
@@ -414,8 +428,9 @@ mod tests {
     #[test]
     fn every_registered_command_has_nonempty_help_and_summary() {
         use crate::commands::{
-            BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, ScreenshotCommand,
-            SeeCommand, WcCommand, WebCommand, WmCommand, WriteCommand,
+            BashCommand, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
+            ScreenshotCommand, SeeCommand, SortCommand, TailCommand, UniqCommand, WcCommand,
+            WebCommand, WmCommand, WriteCommand,
         };
         use assistd_wm::NoWindowManager;
         use std::sync::Arc as StdArc;
@@ -424,6 +439,10 @@ mod tests {
         reg.register(LsCommand);
         reg.register(GrepCommand);
         reg.register(WcCommand);
+        reg.register(HeadCommand);
+        reg.register(TailCommand);
+        reg.register(SortCommand);
+        reg.register(UniqCommand);
         reg.register(EchoCommand);
         reg.register(WriteCommand::permissive_for_tests());
         reg.register(SeeCommand::default());
@@ -431,7 +450,7 @@ mod tests {
         reg.register(WebCommand::new());
         reg.register(BashCommand::default());
         reg.register(WmCommand::for_test(StdArc::new(NoWindowManager)));
-        assert_eq!(reg.len(), 11);
+        assert_eq!(reg.len(), 15);
         for (name, summary) in reg.sorted_summaries() {
             assert!(!summary.is_empty(), "{name} has empty summary");
             assert!(

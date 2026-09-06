@@ -74,9 +74,11 @@ fn build_description(registry: &CommandRegistry) -> String {
     let mut s = String::with_capacity(1024);
     s.push_str(
         "Execute a shell-style command in the daemon's working directory. \
-         Supports pipelines (|), and/or (&&, ||), and sequencing (;). \
-         Redirections (>, <), env expansion ($VAR), and backgrounding (&) \
-         are NOT supported; use `bash \"…\"` for a real shell when needed. \
+         Supports pipelines (|), and/or (&&, ||), sequencing (;), `~` and \
+         globs (*, ?, []) on unquoted arguments; quote an argument to pass \
+         it through literally. Redirections (>, <), env expansion ($VAR), \
+         and backgrounding (&) are NOT supported; use `bash \"…\"` for a \
+         real shell when needed. \
          Large outputs are truncated; the truncation notice includes a \
          `Full output: /tmp/assistd-output/cmd-N.txt` path that subsequent \
          `run` calls can grep/cat to read the full content.\n\n\
@@ -257,13 +259,17 @@ mod tests {
     /// Level-0 description tests that need to verify every command
     /// name flows into the LLM-facing schema.
     fn full_registry() -> Arc<CommandRegistry> {
-        use crate::commands::WmCommand;
+        use crate::commands::{HeadCommand, SortCommand, TailCommand, UniqCommand, WmCommand};
         use assistd_wm::NoWindowManager;
         let mut r = CommandRegistry::new();
         r.register(CatCommand);
         r.register(LsCommand);
         r.register(GrepCommand);
         r.register(WcCommand);
+        r.register(HeadCommand);
+        r.register(TailCommand);
+        r.register(SortCommand);
+        r.register(UniqCommand);
         r.register(EchoCommand);
         r.register(WriteCommand::permissive_for_tests());
         r.register(SeeCommand::default());
@@ -390,6 +396,74 @@ mod tests {
         let attachments = result["attachments"].as_array().expect("attachments");
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0]["mime"], "image/png");
+    }
+
+    /// The pipelines the model actually writes: flags on the built-in
+    /// commands, a glob, and the stream filters composed end to end.
+    /// Regression guard for the era when every one of these forced a
+    /// fallback to `bash`.
+    #[test]
+    fn run_composes_flags_globs_and_stream_filters() {
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.log"), b"ERROR one\ninfo\n").unwrap();
+        std::fs::write(tmp.path().join("b.log"), b"ERROR two\nERROR three\n").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"ERROR ignored\n").unwrap();
+        let tool = tool_with(dir.path(), full_registry());
+        let root = tmp.path().to_string_lossy().into_owned();
+
+        // A glob feeds two files into grep, which labels its output.
+        let globbed = invoke(&tool, &format!("grep ERROR {root}/*.log | wc -l"));
+        assert_eq!(globbed["exit_code"], 0, "{globbed}");
+        assert_eq!(globbed["stdout"], "3\n");
+
+        // -r walks the directory instead, and numbers the hits.
+        let recursive = invoke(&tool, &format!("grep -rn ERROR {root} | wc -l"));
+        assert_eq!(recursive["exit_code"], 0, "{recursive}");
+        assert_eq!(recursive["stdout"], "4\n");
+
+        // The frequency idiom, start to finish.
+        std::fs::write(tmp.path().join("hits.txt"), b"b\na\nb\n").unwrap();
+        let freq = invoke(
+            &tool,
+            &format!("cat {root}/hits.txt | sort | uniq -c | sort -nr | head -1"),
+        );
+        assert_eq!(freq["stdout"], "2\tb\n", "{freq}");
+
+        // cat -n numbers, tail slices, ls -a survives its flags.
+        let numbered = invoke(&tool, &format!("cat -n {root}/b.log | tail -1"));
+        assert_eq!(numbered["stdout"], "2\tERROR three\n");
+        // a.log, b.log, notes.txt, hits.txt.
+        let listed = invoke(&tool, &format!("ls -la {root} | wc -l"));
+        assert_eq!(listed["exit_code"], 0, "{listed}");
+        assert_eq!(listed["stdout"], "4\n");
+    }
+
+    /// A failing stage followed by a succeeding one reports the exit
+    /// code of the last stage, per Unix. The failure is then only
+    /// visible in stderr, so the model has to be shown it — otherwise
+    /// `find . | head` reads as "ran fine, found nothing".
+    #[test]
+    fn run_surfaces_a_failed_stage_behind_a_successful_one() {
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), full_registry());
+        let result = invoke(&tool, "find . -name Cargo.toml | head -3");
+        assert_eq!(result["exit_code"], 0, "{result}");
+        let output = result["output"].as_str().unwrap();
+        assert!(
+            output.contains("[stderr] [error] unknown command: find"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn run_quoted_glob_reaches_the_command_literally() {
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), registry());
+        // Quoted, so the regex must not be mistaken for a file pattern.
+        let result = invoke(&tool, "echo 'a*b' | grep 'a\\*b'");
+        assert_eq!(result["exit_code"], 0, "{result}");
+        assert_eq!(result["stdout"], "a*b\n");
     }
 
     #[test]
@@ -750,6 +824,10 @@ mod tests {
             "ls",
             "grep",
             "wc",
+            "head",
+            "tail",
+            "sort",
+            "uniq",
             "echo",
             "write",
             "see",
@@ -829,6 +907,10 @@ mod tests {
             "ls",
             "grep",
             "wc",
+            "head",
+            "tail",
+            "sort",
+            "uniq",
             "echo",
             "write",
             "see",

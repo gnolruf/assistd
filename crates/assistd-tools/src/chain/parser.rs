@@ -11,7 +11,7 @@
 //! cmd     := WORD+
 //! ```
 
-use super::Chain;
+use super::{Chain, Word};
 use thiserror::Error;
 
 /// Error returned by [`parse_chain`] when the input cannot be parsed.
@@ -33,7 +33,7 @@ pub enum ParseError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
-    Word(String),
+    Word(Word),
     Pipe, // |
     Or,   // ||
     And,  // &&
@@ -130,18 +130,21 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
 /// - Single quotes `'…'`: everything up to the next `'` is literal. No
 ///   escapes (bash-compatible).
 /// - Double quotes `"…"`: everything up to the next unescaped `"` is
-///   literal; `\` escapes the following character.
+///   literal. `\` escapes only `"` and `\`; before anything else it is
+///   itself literal, as in bash.
 /// - Unquoted chars: stop on whitespace or the start of an operator
 ///   (`|`, `&`, `;`). Backslash outside quotes is treated as literal.
-fn read_word(input: &str, start: usize) -> Result<(String, usize), ParseError> {
+fn read_word(input: &str, start: usize) -> Result<(Word, usize), ParseError> {
     let bytes = input.as_bytes();
     let mut buf = String::new();
+    let mut quoted = false;
     let mut i = start;
 
     while i < bytes.len() {
         let c = bytes[i];
         match c {
             b'\'' => {
+                quoted = true;
                 i += 1;
                 let begin = i;
                 while i < bytes.len() && bytes[i] != b'\'' {
@@ -154,18 +157,20 @@ fn read_word(input: &str, start: usize) -> Result<(String, usize), ParseError> {
                 i += 1; // consume closing '
             }
             b'"' => {
+                quoted = true;
                 i += 1;
                 while i < bytes.len() && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                        // Escape the next byte verbatim.
-                        let next = bytes[i + 1] as char;
-                        buf.push(next);
+                    // A backslash only guards a quote or another
+                    // backslash. Consuming it before anything else
+                    // would silently turn the regex "\d+" into "d+".
+                    if bytes[i] == b'\\' && matches!(bytes.get(i + 1), Some(b'"' | b'\\')) {
+                        buf.push(bytes[i + 1] as char);
                         i += 2;
-                    } else {
-                        let ch = input[i..].chars().next().unwrap();
-                        buf.push(ch);
-                        i += ch.len_utf8();
+                        continue;
                     }
+                    let ch = input[i..].chars().next().unwrap();
+                    buf.push(ch);
+                    i += ch.len_utf8();
                 }
                 if i >= bytes.len() {
                     return Err(ParseError::UnterminatedQuote);
@@ -182,7 +187,7 @@ fn read_word(input: &str, start: usize) -> Result<(String, usize), ParseError> {
         }
     }
 
-    Ok((buf, i))
+    Ok((Word { text: buf, quoted }, i))
 }
 
 struct Parser {
@@ -262,7 +267,7 @@ impl Parser {
     }
 
     fn parse_cmd(&mut self) -> Result<Chain, ParseError> {
-        let mut argv: Vec<String> = Vec::new();
+        let mut argv: Vec<Word> = Vec::new();
         while let Some(Token::Word(_)) = self.peek() {
             if let Some(Token::Word(w)) = self.bump() {
                 argv.push(w);
@@ -295,7 +300,15 @@ mod tests {
     use super::*;
 
     fn cmd(args: &[&str]) -> Chain {
-        Chain::Command(args.iter().map(|s| s.to_string()).collect())
+        Chain::Command(args.iter().copied().map(Word::bare).collect())
+    }
+
+    fn bare(text: &str) -> Token {
+        Token::Word(Word::bare(text))
+    }
+
+    fn quoted(text: &str) -> Token {
+        Token::Word(Word::quoted(text))
     }
 
     // -- tokenizer ----------------------------------------------------------
@@ -303,10 +316,7 @@ mod tests {
     #[test]
     fn tokenize_plain_words() {
         let t = tokenize("cat log.txt").unwrap();
-        assert_eq!(
-            t,
-            vec![Token::Word("cat".into()), Token::Word("log.txt".into())]
-        );
+        assert_eq!(t, vec![bare("cat"), bare("log.txt")]);
     }
 
     #[test]
@@ -314,13 +324,7 @@ mod tests {
         let t = tokenize("a && b || c").unwrap();
         assert_eq!(
             t,
-            vec![
-                Token::Word("a".into()),
-                Token::And,
-                Token::Word("b".into()),
-                Token::Or,
-                Token::Word("c".into()),
-            ]
+            vec![bare("a"), Token::And, bare("b"), Token::Or, bare("c"),]
         );
     }
 
@@ -329,44 +333,40 @@ mod tests {
         let t = tokenize("a | b || c").unwrap();
         assert_eq!(
             t,
-            vec![
-                Token::Word("a".into()),
-                Token::Pipe,
-                Token::Word("b".into()),
-                Token::Or,
-                Token::Word("c".into()),
-            ]
+            vec![bare("a"), Token::Pipe, bare("b"), Token::Or, bare("c"),]
         );
     }
 
     #[test]
     fn tokenize_single_quotes_preserve_operators() {
         let t = tokenize("echo 'a|b'").unwrap();
-        assert_eq!(
-            t,
-            vec![Token::Word("echo".into()), Token::Word("a|b".into())]
-        );
+        assert_eq!(t, vec![bare("echo"), quoted("a|b")]);
     }
 
     #[test]
     fn tokenize_double_quotes_preserve_operators() {
         let t = tokenize("echo \"a|b\"").unwrap();
-        assert_eq!(
-            t,
-            vec![Token::Word("echo".into()), Token::Word("a|b".into())]
-        );
+        assert_eq!(t, vec![bare("echo"), quoted("a|b")]);
     }
 
     #[test]
     fn tokenize_double_quote_escape() {
         let t = tokenize("echo \"he said \\\"hi\\\"\"").unwrap();
-        assert_eq!(
-            t,
-            vec![
-                Token::Word("echo".into()),
-                Token::Word("he said \"hi\"".into())
-            ]
-        );
+        assert_eq!(t, vec![bare("echo"), quoted("he said \"hi\"")]);
+    }
+
+    #[test]
+    fn tokenize_double_quotes_keep_regex_backslashes() {
+        // The pattern the model actually writes must survive intact;
+        // eating the backslash here silently changes what grep matches.
+        let t = tokenize(r#"grep "\d+\s""#).unwrap();
+        assert_eq!(t, vec![bare("grep"), quoted(r"\d+\s")]);
+    }
+
+    #[test]
+    fn tokenize_double_quote_escapes_only_quote_and_backslash() {
+        let t = tokenize(r#"echo "a\\b""#).unwrap();
+        assert_eq!(t, vec![bare("echo"), quoted(r"a\b")]);
     }
 
     #[test]
@@ -523,10 +523,36 @@ mod tests {
     // -- snapshot of acceptance-criteria AST shape --------------------------
 
     #[test]
+    fn quoting_is_recorded_on_the_word() {
+        // The executor reads this flag to decide whether a word is a
+        // glob to expand or a literal (a regex, a path with a `*`).
+        let c = parse_chain("grep '.*ERROR' log.txt").unwrap();
+        assert_eq!(
+            c,
+            Chain::Command(vec![
+                Word::bare("grep"),
+                Word::quoted(".*ERROR"),
+                Word::bare("log.txt"),
+            ])
+        );
+    }
+
+    #[test]
+    fn partially_quoted_word_counts_as_quoted() {
+        // `--flag="a b"` glues an unquoted prefix onto a quoted tail;
+        // treating the whole word as quoted is the safe reading.
+        let c = parse_chain("echo pre\"fix\"").unwrap();
+        assert_eq!(
+            c,
+            Chain::Command(vec![Word::bare("echo"), Word::quoted("prefix")])
+        );
+    }
+
+    #[test]
     fn snapshot_acceptance_strings() {
         assert_eq!(
-            format!("{:?}", parse_chain("cat notes.md").unwrap()),
-            r#"Command(["cat", "notes.md"])"#
+            parse_chain("cat notes.md").unwrap(),
+            cmd(&["cat", "notes.md"])
         );
         let piped = format!(
             "{:?}",

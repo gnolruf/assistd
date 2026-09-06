@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
-use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent, StepOutcome};
+use assistd_llm::{LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -830,6 +830,18 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
 /// first, then one or more tool_call deltas with accumulating `arguments`,
 /// terminated by a finish_reason chunk.
 fn tool_call_frames(call_id: &str, name: &str, arg_chunks: &[&str]) -> Vec<String> {
+    tool_call_frames_finishing(call_id, name, arg_chunks, "tool_calls")
+}
+
+/// Same, but with a caller-chosen `finish_reason` on the terminating
+/// chunk. Some llama.cpp template/parser paths report `"stop"` even when
+/// the model emitted tool calls.
+fn tool_call_frames_finishing(
+    call_id: &str,
+    name: &str,
+    arg_chunks: &[&str],
+    finish_reason: &str,
+) -> Vec<String> {
     let mut frames = Vec::new();
     frames.push("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n".to_string());
     let head = format!(
@@ -845,9 +857,10 @@ fn tool_call_frames(call_id: &str, name: &str, arg_chunks: &[&str]) -> Vec<Strin
             encoded
         ));
     }
-    frames.push(
-        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n".to_string(),
-    );
+    frames.push(format!(
+        "data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":{}}}]}}\n\n",
+        serde_json::to_string(finish_reason).unwrap()
+    ));
     frames.push("data: [DONE]\n\n".to_string());
     frames
 }
@@ -881,6 +894,71 @@ async fn step_with_stop_finish_reason_returns_final() {
     assert!(
         captured[0].body.get("tools").is_none(),
         "request should not carry tools when argument is empty"
+    );
+}
+
+/// Regression: a tool call arriving with `finish_reason: "stop"` must
+/// still run. Dropping it ends the turn silently at exactly the point
+/// the tool would have run, which reads to the user as the response
+/// being cut off mid-sentence.
+#[tokio::test]
+async fn step_runs_tool_calls_reported_with_stop_finish_reason() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::RawFrames(tool_call_frames_finishing(
+            "call-7",
+            "run",
+            &[r#"{"command":"ls /tmp"}"#],
+            "stop",
+        )))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client
+        .push_user("list /tmp".into(), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let outcome = client.step(Vec::new(), tx).await.unwrap();
+    match outcome {
+        StepOutcome::ToolCalls(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "run");
+            assert_eq!(calls[0].arguments["command"], "ls /tmp");
+        }
+        other => panic!("expected the tool call to run, got {other:?}"),
+    }
+}
+
+/// A `"length"` cutoff mid-arguments must surface as a parse error the
+/// agent loop can report, never as a silent `Final`.
+#[tokio::test]
+async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::RawFrames(tool_call_frames_finishing(
+            "call-8",
+            "run",
+            &[r#"{"command":"ls /t"#],
+            "length",
+        )))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client
+        .push_user("list /tmp".into(), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let err = client
+        .step(Vec::new(), tx)
+        .await
+        .expect_err("truncated arguments must not be swallowed");
+    assert!(
+        matches!(err, LlmError::ToolCallParse(_)),
+        "expected a tool-call parse error, got {err:?}"
     );
 }
 
@@ -1048,4 +1126,51 @@ async fn request_timeout_surfaces_as_error() {
     let (tx, _rx) = mpsc::channel(32);
     let result = client.generate("hi".into(), tx).await;
     assert!(result.is_err());
+}
+
+/// Regression: `complete_oneshot` awaits every send into a bounded
+/// channel, so the collector has to run concurrently. Draining only
+/// after the stream finished wedged the task forever once the response
+/// outgrew the channel — which is every response from a reasoning
+/// model, and it leaked the llama-server slot with it.
+#[tokio::test]
+async fn complete_oneshot_survives_a_response_larger_than_the_channel() {
+    let script = Script::new();
+    let deltas: Vec<String> = (0..500).map(|i| format!("tok{i} ")).collect();
+    script.push_stream(StreamResponse::Deltas(deltas)).await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    let text = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.complete_oneshot("title?".into()),
+    )
+    .await
+    .expect("complete_oneshot must not deadlock")
+    .expect("stream completes");
+    assert!(text.starts_with("tok0 "), "{text:.40}");
+    assert!(text.trim_end().ends_with("tok499"), "{text:.40}");
+}
+
+/// The one-shot path is for short answers (session titles), so it must
+/// not inherit the full per-response budget: a thinking model spent 8k
+/// tokens deliberating over a six-word title.
+#[tokio::test]
+async fn complete_oneshot_uses_the_summary_budget() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::Deltas(vec!["A Short Title".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let cfg = chat_spec(port);
+    let client = build_client(&cfg);
+    client.complete_oneshot("title?".into()).await.unwrap();
+
+    let captured = script.captured().await;
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].body["max_tokens"], cfg.chat.max_summary_tokens,
+        "one-shot should use max_summary_tokens, not max_response_tokens"
+    );
 }

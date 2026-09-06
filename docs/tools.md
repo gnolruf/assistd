@@ -19,7 +19,7 @@ what you're building.
 | **What the LLM sees** | The catalog summary baked into the `run` tool's description (your command appears as one of the verbs the model can compose with `\|`, `&&`, `;`). | A standalone OpenAI-style tool with its own JSON schema. |
 | **I/O shape** | Bytes in (stdin), bytes out (stdout + stderr + `exit_code`), participates in pipes. | JSON in, JSON out. |
 | **Use when** | Your capability is shell-shaped: takes args + maybe stdin, produces text or attachments, composes naturally with `cat`, `grep`, `wc`, etc. | Your capability has structured arguments (objects, arrays), is stateful, or doesn't fit a `argv + stdin → stdout` model. |
-| **Examples in tree** | `cat`, `ls`, `grep`, `wc`, `bash`, `see`, `screenshot`, `wm`, `web`, `write`. | `remember`, `recall`, `reminisce`, MCP-adapted tools. |
+| **Examples in tree** | `cat`, `ls`, `grep`, `wc`, `head`, `tail`, `sort`, `uniq`, `bash`, `see`, `screenshot`, `wm`, `web`, `write`. | `remember`, `recall`, `reminisce`, MCP-adapted tools. |
 
 **Rule of thumb:** start with `Command`. It's smaller, gets pipe
 composition for free, and the LLM is already trained on shell
@@ -414,6 +414,9 @@ links to the canonical implementation.
 - [`crates/assistd-tools/src/run.rs`](../crates/assistd-tools/src/run.rs)
   — the `RunTool` itself: parsing, presentation, overflow handling.
 - [`crates/assistd-tools/src/chain/`](../crates/assistd-tools/src/chain/)
-  — the pipeline parser and executor your `Command` plugs into.
+  — the pipeline parser, word expander and executor your `Command`
+  plugs into. Note that `args` reach your `run` already tilde- and
+  glob-expanded, so one written word can arrive as several arguments;
+  quoted words are passed through verbatim.
 - [`crates/assistd-tools/src/memory_tools.rs`](../crates/assistd-tools/src/memory_tools.rs)
   — three real `Tool` implementations to study before you write one.
