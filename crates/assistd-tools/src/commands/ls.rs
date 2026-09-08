@@ -64,7 +64,7 @@ impl Command for LsCommand {
             Err(msg) => {
                 return Ok(CommandOutput::failed(
                     2,
-                    error_line("ls", msg, "Use", "ls (no args) for supported flags").into_bytes(),
+                    error_line("ls", msg, "Use", "ls -al PATH").into_bytes(),
                 ));
             }
         };
@@ -85,7 +85,7 @@ impl Command for LsCommand {
                     if !show_hidden && name.starts_with('.') {
                         continue;
                     }
-                    let (kind, size) = match entry.path().symlink_metadata() {
+                    let (kind, size) = match tokio::fs::symlink_metadata(entry.path()).await {
                         Ok(md) => {
                             let ft = md.file_type();
                             let kind = if ft.is_symlink() {
@@ -128,7 +128,7 @@ mod tests {
         LsCommand
             .run(CommandInput {
                 args: args.iter().map(|s| s.to_string()).collect(),
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .expect("ls runs")
@@ -149,7 +149,7 @@ mod tests {
         let out = LsCommand
             .run(CommandInput {
                 args: vec![dir.path().to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -230,7 +230,7 @@ mod tests {
         let out = LsCommand
             .run(CommandInput {
                 args: vec![dir.path().to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -245,7 +245,7 @@ mod tests {
         let out = LsCommand
             .run(CommandInput {
                 args: vec!["/definitely/not/here".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();

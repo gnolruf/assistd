@@ -43,14 +43,16 @@ fn parse_flags(argv: &[String]) -> Result<Flags, String> {
 }
 
 fn numeric_key(line: &[u8]) -> i64 {
-    let text = String::from_utf8_lossy(line);
-    let trimmed = text.trim_start();
-    let digits: String = trimmed
-        .char_indices()
-        .take_while(|(i, c)| c.is_ascii_digit() || (*i == 0 && *c == '-'))
-        .map(|(_, c)| c)
-        .collect();
-    digits.parse().unwrap_or(i64::MIN)
+    let trimmed = line.trim_ascii_start();
+    let len = trimmed
+        .iter()
+        .enumerate()
+        .take_while(|(i, b)| b.is_ascii_digit() || (*i == 0 && **b == b'-'))
+        .count();
+    std::str::from_utf8(&trimmed[..len])
+        .ok()
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(i64::MIN)
 }
 
 #[async_trait]
@@ -90,14 +92,17 @@ impl Command for SortCommand {
             }
         };
 
-        let mut lines: Vec<&[u8]> = input.stdin.split(|b| *b == b'\n').collect();
+        let Some(stdin) = input.stdin else {
+            return Ok(CommandOutput::usage(self.help()));
+        };
+        let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
         if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
         if flags.numeric {
-            lines.sort_by_key(|l| numeric_key(l));
+            lines.sort_by_cached_key(|l| numeric_key(l));
         } else if flags.fold_case {
-            lines.sort_by_key(|l| l.to_ascii_lowercase());
+            lines.sort_by_cached_key(|l| l.to_ascii_lowercase());
         } else {
             lines.sort_unstable();
         }
@@ -105,7 +110,7 @@ impl Command for SortCommand {
             lines.reverse();
         }
 
-        let mut out = Vec::with_capacity(input.stdin.len());
+        let mut out = Vec::with_capacity(stdin.len());
         for line in lines {
             out.extend_from_slice(line);
             out.push(b'\n');
@@ -122,7 +127,7 @@ mod tests {
         SortCommand
             .run(CommandInput {
                 args: args.iter().map(|s| s.to_string()).collect(),
-                stdin: stdin.to_vec(),
+                stdin: Some(stdin.to_vec()),
             })
             .await
             .expect("run returns Ok")
@@ -176,6 +181,19 @@ mod tests {
     #[tokio::test]
     async fn empty_stdin_is_empty_output() {
         assert!(run_sort(&[], b"").await.stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_stdin_emits_usage() {
+        let out = SortCommand
+            .run(CommandInput {
+                args: Vec::new(),
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: sort"), "{out:?}");
     }
 
     #[tokio::test]

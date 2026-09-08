@@ -66,10 +66,15 @@ impl Command for WcCommand {
             }
         }
 
-        let lines = input.stdin.iter().filter(|b| **b == b'\n').count();
-        let text = std::str::from_utf8(&input.stdin).unwrap_or("");
-        let words = text.split_whitespace().count();
-        let bytes = input.stdin.len();
+        let Some(stdin) = input.stdin else {
+            return Ok(CommandOutput::usage(self.help()));
+        };
+        let lines = stdin.iter().filter(|b| **b == b'\n').count();
+        let words = stdin
+            .split(u8::is_ascii_whitespace)
+            .filter(|w| !w.is_empty())
+            .count();
+        let bytes = stdin.len();
 
         let show_all = !selected.any();
         let counts = [
@@ -110,7 +115,7 @@ mod tests {
         let out = WcCommand
             .run(CommandInput {
                 args: vec!["-l".into()],
-                stdin: b"a\nb\nc\n".to_vec(),
+                stdin: Some(b"a\nb\nc\n".to_vec()),
             })
             .await
             .unwrap();
@@ -123,7 +128,7 @@ mod tests {
         let out = WcCommand
             .run(CommandInput {
                 args: Vec::new(),
-                stdin: b"hello world\nagain\n".to_vec(),
+                stdin: Some(b"hello world\nagain\n".to_vec()),
             })
             .await
             .unwrap();
@@ -135,7 +140,7 @@ mod tests {
         WcCommand
             .run(CommandInput {
                 args: args.iter().map(|s| s.to_string()).collect(),
-                stdin: stdin.to_vec(),
+                stdin: Some(stdin.to_vec()),
             })
             .await
             .expect("run returns Ok")
@@ -149,6 +154,24 @@ mod tests {
     #[tokio::test]
     async fn wc_c_counts_bytes() {
         assert_eq!(run_wc(&["-c"], b"abc\n").await.stdout, b"4\n");
+    }
+
+    #[tokio::test]
+    async fn wc_no_stdin_emits_usage() {
+        let out = WcCommand
+            .run(CommandInput {
+                args: Vec::new(),
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: wc"), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn wc_counts_words_in_non_utf8_input() {
+        assert_eq!(run_wc(&["-w"], b"a \xff b\n").await.stdout, b"3\n");
     }
 
     #[tokio::test]

@@ -31,6 +31,8 @@
 //! non-zero `exit_code` without context; if a subprocess or downstream
 //! library emitted stderr, forward it so the LLM can see *why*.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -80,9 +82,11 @@ pub struct CommandInput {
     /// Positional arguments **after** argv[0]. The command's own name
     /// is not included here; the registry has already resolved it.
     pub args: Vec<String>,
-    /// Bytes piped in from the previous chain stage (or empty for the
-    /// first command in a pipeline).
-    pub stdin: Vec<u8>,
+    /// Bytes piped in from the previous chain stage. `None` when the
+    /// command is not on the right of a pipe, so a filter can tell
+    /// "nothing was piped" (reply with usage) from "the upstream stage
+    /// produced nothing" (an empty result).
+    pub stdin: Option<Vec<u8>>,
 }
 
 /// A side-channel payload a command can attach alongside its stdout. The
@@ -132,6 +136,27 @@ impl CommandOutput {
             attachments: Vec::new(),
         }
     }
+
+    /// Construct the reply to a call with insufficient arguments: the
+    /// usage text on stdout with exit 2, so it reads as help rather
+    /// than a failure.
+    pub fn usage(help: String) -> Self {
+        Self {
+            stdout: help.into_bytes(),
+            exit_code: 2,
+            ..Self::default()
+        }
+    }
+
+    /// Append `next`'s streams and attachments to this output and adopt
+    /// its exit code: the shape `&&`, `||` and `;` produce.
+    pub fn then(mut self, next: Self) -> Self {
+        self.stdout.extend(next.stdout);
+        self.stderr.extend(next.stderr);
+        self.attachments.extend(next.attachments);
+        self.exit_code = next.exit_code;
+        self
+    }
 }
 
 /// A single internal command (`cat`, `grep`, `bash`, …).
@@ -160,10 +185,10 @@ pub trait Command: Send + Sync + 'static {
     async fn run(&self, input: CommandInput) -> Result<CommandOutput>;
 }
 
-/// Lookup table of registered commands.
+/// Lookup table of registered commands, keyed by name.
 #[derive(Default)]
 pub struct CommandRegistry {
-    commands: Vec<Box<dyn Command>>,
+    commands: BTreeMap<String, Box<dyn Command>>,
 }
 
 impl CommandRegistry {
@@ -174,15 +199,12 @@ impl CommandRegistry {
 
     /// Register a command by value.
     pub fn register<C: Command>(&mut self, cmd: C) {
-        self.commands.push(Box::new(cmd));
+        self.commands.insert(cmd.name().to_string(), Box::new(cmd));
     }
 
     /// Look up a registered command by its `name()`.
     pub fn get(&self, name: &str) -> Option<&dyn Command> {
-        self.commands
-            .iter()
-            .find(|c| c.name() == name)
-            .map(|c| c.as_ref())
+        self.commands.get(name).map(|c| c.as_ref())
     }
 
     /// Number of registered commands.
@@ -199,22 +221,17 @@ impl CommandRegistry {
     /// "Available: …" line in the unknown-command error so there's a
     /// single source of truth.
     pub fn sorted_names(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.commands.iter().map(|c| c.name()).collect();
-        v.sort_unstable();
-        v
+        self.commands.keys().map(String::as_str).collect()
     }
 
     /// `(name, summary)` pairs, sorted alphabetically by name. Consumed
     /// by `RunTool::new` to build the dynamic Level-0 description the
     /// LLM sees in its tool schema.
     pub fn sorted_summaries(&self) -> Vec<(&str, &'static str)> {
-        let mut v: Vec<(&str, &'static str)> = self
-            .commands
-            .iter()
+        self.commands
+            .values()
             .map(|c| (c.name(), c.summary()))
-            .collect();
-        v.sort_unstable_by_key(|(n, _)| *n);
-        v
+            .collect()
     }
 }
 
@@ -294,12 +311,9 @@ mod tests {
         }
 
         async fn run_cmd<C: Command>(cmd: C, args: Vec<String>) -> CommandOutput {
-            cmd.run(CommandInput {
-                args,
-                stdin: Vec::new(),
-            })
-            .await
-            .expect("run returns Ok on handled failures")
+            cmd.run(CommandInput { args, stdin: None })
+                .await
+                .expect("run returns Ok on handled failures")
         }
 
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -427,29 +441,7 @@ mod tests {
     /// description is the contract the LLM actually consumes.
     #[test]
     fn every_registered_command_has_nonempty_help_and_summary() {
-        use crate::commands::{
-            BashCommand, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
-            ScreenshotCommand, SeeCommand, SortCommand, TailCommand, UniqCommand, WcCommand,
-            WebCommand, WmCommand, WriteCommand,
-        };
-        use assistd_wm::NoWindowManager;
-        use std::sync::Arc as StdArc;
-        let mut reg = CommandRegistry::new();
-        reg.register(CatCommand);
-        reg.register(LsCommand);
-        reg.register(GrepCommand);
-        reg.register(WcCommand);
-        reg.register(HeadCommand);
-        reg.register(TailCommand);
-        reg.register(SortCommand);
-        reg.register(UniqCommand);
-        reg.register(EchoCommand);
-        reg.register(WriteCommand::permissive_for_tests());
-        reg.register(SeeCommand::default());
-        reg.register(ScreenshotCommand::default());
-        reg.register(WebCommand::new());
-        reg.register(BashCommand::default());
-        reg.register(WmCommand::for_test(StdArc::new(NoWindowManager)));
+        let reg = crate::commands::test_registry();
         assert_eq!(reg.len(), 15);
         for (name, summary) in reg.sorted_summaries() {
             assert!(!summary.is_empty(), "{name} has empty summary");
@@ -481,7 +473,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec![],
-                stdin: vec![],
+                stdin: None,
             })
             .await
             .unwrap();

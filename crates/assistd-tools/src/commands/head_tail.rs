@@ -58,11 +58,12 @@ fn count_error(cmd: &str, e: CountError) -> CommandOutput {
 }
 
 fn first_lines(stdin: &[u8], count: usize) -> Vec<u8> {
-    stdin
+    let end: usize = stdin
         .split_inclusive(|b| *b == b'\n')
         .take(count)
-        .collect::<Vec<_>>()
-        .concat()
+        .map(<[u8]>::len)
+        .sum();
+    stdin[..end].to_vec()
 }
 
 fn last_lines(stdin: &[u8], count: usize) -> Vec<u8> {
@@ -92,9 +93,10 @@ impl Command for HeadCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        match parse_line_count("head", &input.args) {
-            Ok(n) => Ok(CommandOutput::ok(first_lines(&input.stdin, n))),
-            Err(e) => Ok(count_error("head", e)),
+        match (parse_line_count("head", &input.args), input.stdin) {
+            (Err(e), _) => Ok(count_error("head", e)),
+            (Ok(_), None) => Ok(CommandOutput::usage(self.help())),
+            (Ok(n), Some(stdin)) => Ok(CommandOutput::ok(first_lines(&stdin, n))),
         }
     }
 }
@@ -121,9 +123,10 @@ impl Command for TailCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        match parse_line_count("tail", &input.args) {
-            Ok(n) => Ok(CommandOutput::ok(last_lines(&input.stdin, n))),
-            Err(e) => Ok(count_error("tail", e)),
+        match (parse_line_count("tail", &input.args), input.stdin) {
+            (Err(e), _) => Ok(count_error("tail", e)),
+            (Ok(_), None) => Ok(CommandOutput::usage(self.help())),
+            (Ok(n), Some(stdin)) => Ok(CommandOutput::ok(last_lines(&stdin, n))),
         }
     }
 }
@@ -135,7 +138,7 @@ mod tests {
     async fn run(cmd: impl Command, args: &[&str], stdin: &[u8]) -> CommandOutput {
         cmd.run(CommandInput {
             args: args.iter().map(|s| s.to_string()).collect(),
-            stdin: stdin.to_vec(),
+            stdin: Some(stdin.to_vec()),
         })
         .await
         .expect("run returns Ok")
@@ -184,6 +187,25 @@ mod tests {
     async fn empty_stdin_is_empty_output() {
         assert!(run(HeadCommand, &[], b"").await.stdout.is_empty());
         assert!(run(TailCommand, &[], b"").await.stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_stdin_emits_usage() {
+        for (cmd, name) in [
+            (&HeadCommand as &dyn Command, "head"),
+            (&TailCommand, "tail"),
+        ] {
+            let out = cmd
+                .run(CommandInput {
+                    args: vec!["-n".into(), "2".into()],
+                    stdin: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(out.exit_code, 2, "{name}");
+            let usage = format!("usage: {name}");
+            assert!(out.stdout.starts_with(usage.as_bytes()), "{name}: {out:?}");
+        }
     }
 
     #[tokio::test]

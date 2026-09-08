@@ -66,12 +66,7 @@ impl Command for WebCommand {
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         if input.args.is_empty() {
-            return Ok(CommandOutput {
-                stdout: self.help().into_bytes(),
-                stderr: Vec::new(),
-                exit_code: 2,
-                attachments: Vec::new(),
-            });
+            return Ok(CommandOutput::usage(self.help()));
         }
         if input.args.len() != 1 {
             return Ok(CommandOutput::failed(
@@ -199,7 +194,7 @@ mod tests {
         let out = WebCommand::new()
             .run(CommandInput {
                 args: vec![format!("http://{addr}/")],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -213,7 +208,7 @@ mod tests {
         let out = WebCommand::new()
             .run(CommandInput {
                 args: vec![format!("http://{addr}/")],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -228,7 +223,7 @@ mod tests {
         let out = WebCommand::new()
             .run(CommandInput {
                 args: vec!["file:///etc/passwd".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -246,7 +241,7 @@ mod tests {
         let out = WebCommand::new()
             .run(CommandInput {
                 args: Vec::new(),
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -259,7 +254,7 @@ mod tests {
         let out = WebCommand::with_timeout(Duration::from_millis(200))
             .run(CommandInput {
                 args: vec!["http://127.0.0.1:1/".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();

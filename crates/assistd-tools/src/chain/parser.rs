@@ -11,6 +11,9 @@
 //! cmd     := WORD+
 //! ```
 
+use std::iter::Peekable;
+use std::vec::IntoIter;
+
 use super::{Chain, Word};
 use thiserror::Error;
 
@@ -22,9 +25,9 @@ pub enum ParseError {
     #[error("unterminated quoted string")]
     UnterminatedQuote,
     #[error("unexpected operator '{0}' at start of expression")]
-    UnexpectedOperator(String),
+    UnexpectedOperator(&'static str),
     #[error("trailing operator '{0}'")]
-    TrailingOperator(String),
+    TrailingOperator(&'static str),
     #[error("empty command between operators")]
     EmptyCommand,
     #[error("{0}")]
@@ -34,20 +37,24 @@ pub enum ParseError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
     Word(Word),
-    Pipe, // |
-    Or,   // ||
-    And,  // &&
-    Seq,  // ;
+    Op(Op),
 }
 
-impl Token {
-    fn op_str(&self) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Pipe,
+    Or,
+    And,
+    Seq,
+}
+
+impl Op {
+    fn as_str(self) -> &'static str {
         match self {
-            Token::Pipe => Some("|"),
-            Token::Or => Some("||"),
-            Token::And => Some("&&"),
-            Token::Seq => Some(";"),
-            Token::Word(_) => None,
+            Op::Pipe => "|",
+            Op::Or => "||",
+            Op::And => "&&",
+            Op::Seq => ";",
         }
     }
 }
@@ -63,12 +70,10 @@ pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
     if tokens.is_empty() {
         return Err(ParseError::Empty);
     }
-    let mut p = Parser { tokens, pos: 0 };
-    let chain = p.parse_seq()?;
-    if p.pos != p.tokens.len() {
-        return Err(ParseError::Empty);
+    Parser {
+        tokens: tokens.into_iter().peekable(),
     }
-    Ok(chain)
+    .parse_seq()
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
@@ -84,17 +89,17 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
         }
         match c {
             b'|' => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
-                    out.push(Token::Or);
+                if bytes.get(i + 1) == Some(&b'|') {
+                    out.push(Token::Op(Op::Or));
                     i += 2;
                 } else {
-                    out.push(Token::Pipe);
+                    out.push(Token::Op(Op::Pipe));
                     i += 1;
                 }
             }
             b'&' => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'&' {
-                    out.push(Token::And);
+                if bytes.get(i + 1) == Some(&b'&') {
+                    out.push(Token::Op(Op::And));
                     i += 2;
                 } else {
                     return Err(ParseError::Unsupported(
@@ -103,7 +108,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 }
             }
             b';' => {
-                out.push(Token::Seq);
+                out.push(Token::Op(Op::Seq));
                 i += 1;
             }
             b'>' | b'<' => {
@@ -153,7 +158,7 @@ fn read_word(input: &str, start: usize) -> Result<(Word, usize), ParseError> {
                 if i >= bytes.len() {
                     return Err(ParseError::UnterminatedQuote);
                 }
-                buf.push_str(std::str::from_utf8(&bytes[begin..i]).unwrap_or(""));
+                buf.push_str(&input[begin..i]);
                 i += 1; // consume closing '
             }
             b'"' => {
@@ -191,37 +196,27 @@ fn read_word(input: &str, start: usize) -> Result<(Word, usize), ParseError> {
 }
 
 struct Parser {
-    tokens: Vec<Token>,
-    pos: usize,
+    tokens: Peekable<IntoIter<Token>>,
 }
 
-impl Parser {
-    fn peek(&self) -> Option<&Token> {
-        self.tokens.get(self.pos)
-    }
+type ParseFn = fn(&mut Parser) -> Result<Chain, ParseError>;
 
-    fn bump(&mut self) -> Option<Token> {
-        let t = self.tokens.get(self.pos).cloned();
-        if t.is_some() {
-            self.pos += 1;
+impl Parser {
+    fn peek_op(&mut self) -> Option<Op> {
+        match self.tokens.peek() {
+            Some(Token::Op(op)) => Some(*op),
+            _ => None,
         }
-        t
     }
 
     fn parse_seq(&mut self) -> Result<Chain, ParseError> {
         let mut left = self.parse_andor()?;
-        while let Some(Token::Seq) = self.peek() {
-            self.bump();
-            if self.peek().is_none() {
-                return Ok(left);
+        while self.peek_op() == Some(Op::Seq) {
+            self.tokens.next();
+            if self.tokens.peek().is_none() {
+                break;
             }
-            if matches!(
-                self.peek(),
-                Some(Token::Pipe | Token::Or | Token::And | Token::Seq)
-            ) {
-                return Err(ParseError::EmptyCommand);
-            }
-            let right = self.parse_andor()?;
+            let right = self.operand(Op::Seq, Self::parse_andor)?;
             left = Chain::Seq(Box::new(left), Box::new(right));
         }
         Ok(left)
@@ -229,69 +224,46 @@ impl Parser {
 
     fn parse_andor(&mut self) -> Result<Chain, ParseError> {
         let mut left = self.parse_pipe()?;
-        loop {
-            match self.peek() {
-                Some(Token::And) => {
-                    self.bump();
-                    let right = self.parse_pipe_require("&&")?;
-                    left = Chain::And(Box::new(left), Box::new(right));
-                }
-                Some(Token::Or) => {
-                    self.bump();
-                    let right = self.parse_pipe_require("||")?;
-                    left = Chain::Or(Box::new(left), Box::new(right));
-                }
-                _ => break,
-            }
+        while let Some(op @ (Op::And | Op::Or)) = self.peek_op() {
+            self.tokens.next();
+            let right = self.operand(op, Self::parse_pipe)?;
+            let join = if op == Op::And { Chain::And } else { Chain::Or };
+            left = join(Box::new(left), Box::new(right));
         }
         Ok(left)
     }
 
     fn parse_pipe(&mut self) -> Result<Chain, ParseError> {
         let mut left = self.parse_cmd()?;
-        while let Some(Token::Pipe) = self.peek() {
-            self.bump();
-            let right = self.parse_cmd_require("|")?;
+        while self.peek_op() == Some(Op::Pipe) {
+            self.tokens.next();
+            let right = self.operand(Op::Pipe, Self::parse_cmd)?;
             left = Chain::Pipe(Box::new(left), Box::new(right));
         }
         Ok(left)
     }
 
-    /// Like [`parse_pipe`], but treat missing RHS as `TrailingOperator`.
-    fn parse_pipe_require(&mut self, op: &str) -> Result<Chain, ParseError> {
-        match self.peek() {
-            None => Err(ParseError::TrailingOperator(op.into())),
-            Some(tok) if tok.op_str().is_some() => Err(ParseError::EmptyCommand),
-            _ => self.parse_pipe(),
+    /// Parse the right-hand side of `op`, which must begin with a word.
+    fn operand(&mut self, op: Op, parse: ParseFn) -> Result<Chain, ParseError> {
+        match self.tokens.peek() {
+            None => Err(ParseError::TrailingOperator(op.as_str())),
+            Some(Token::Op(_)) => Err(ParseError::EmptyCommand),
+            Some(Token::Word(_)) => parse(self),
         }
     }
 
     fn parse_cmd(&mut self) -> Result<Chain, ParseError> {
-        let mut argv: Vec<Word> = Vec::new();
-        while let Some(Token::Word(_)) = self.peek() {
-            if let Some(Token::Word(w)) = self.bump() {
-                argv.push(w);
-            }
+        let mut argv = Vec::new();
+        while let Some(Token::Word(w)) = self.tokens.next_if(|t| matches!(t, Token::Word(_))) {
+            argv.push(w);
         }
         if argv.is_empty() {
-            match self.peek() {
-                Some(tok) if tok.op_str().is_some() => {
-                    return Err(ParseError::UnexpectedOperator(
-                        tok.op_str().unwrap().to_string(),
-                    ));
-                }
-                _ => return Err(ParseError::Empty),
-            }
+            return Err(match self.peek_op() {
+                Some(op) => ParseError::UnexpectedOperator(op.as_str()),
+                None => ParseError::Empty,
+            });
         }
         Ok(Chain::Command(argv))
-    }
-
-    fn parse_cmd_require(&mut self, op: &str) -> Result<Chain, ParseError> {
-        match self.peek() {
-            None => Err(ParseError::TrailingOperator(op.into())),
-            Some(tok) if tok.op_str().is_some() => Err(ParseError::EmptyCommand),
-            _ => self.parse_cmd(),
-        }
     }
 }
 
@@ -311,6 +283,10 @@ mod tests {
         Token::Word(Word::quoted(text))
     }
 
+    fn op(op: Op) -> Token {
+        Token::Op(op)
+    }
+
     // -- tokenizer ----------------------------------------------------------
 
     #[test]
@@ -324,7 +300,7 @@ mod tests {
         let t = tokenize("a && b || c").unwrap();
         assert_eq!(
             t,
-            vec![bare("a"), Token::And, bare("b"), Token::Or, bare("c"),]
+            vec![bare("a"), op(Op::And), bare("b"), op(Op::Or), bare("c")]
         );
     }
 
@@ -333,7 +309,7 @@ mod tests {
         let t = tokenize("a | b || c").unwrap();
         assert_eq!(
             t,
-            vec![bare("a"), Token::Pipe, bare("b"), Token::Or, bare("c"),]
+            vec![bare("a"), op(Op::Pipe), bare("b"), op(Op::Or), bare("c")]
         );
     }
 
@@ -491,18 +467,9 @@ mod tests {
 
     #[test]
     fn parse_trailing_operator_is_error() {
-        assert_eq!(
-            parse_chain("a |"),
-            Err(ParseError::TrailingOperator("|".into()))
-        );
-        assert_eq!(
-            parse_chain("a &&"),
-            Err(ParseError::TrailingOperator("&&".into()))
-        );
-        assert_eq!(
-            parse_chain("a ||"),
-            Err(ParseError::TrailingOperator("||".into()))
-        );
+        assert_eq!(parse_chain("a |"), Err(ParseError::TrailingOperator("|")));
+        assert_eq!(parse_chain("a &&"), Err(ParseError::TrailingOperator("&&")));
+        assert_eq!(parse_chain("a ||"), Err(ParseError::TrailingOperator("||")));
     }
 
     #[test]

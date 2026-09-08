@@ -13,7 +13,7 @@ use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_
 /// - `-n` prefix each output line with its 1-based number
 pub struct CatCommand;
 
-/// Recognized `cat` flags, split out of argv by [`partition_flags`].
+/// Recognized `cat` flags, split out of argv by [`parse_flags`].
 #[derive(Default)]
 struct Flags {
     metadata_only: bool,
@@ -45,13 +45,24 @@ impl Command for CatCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        let (flags, files) = partition_flags(&input.args);
+        let (flags, files) = match parse_flags(&input.args) {
+            Ok(v) => v,
+            Err(msg) => {
+                return Ok(CommandOutput::failed(
+                    2,
+                    error_line("cat", msg, "Use", "cat -b FILE or cat -n FILE").into_bytes(),
+                ));
+            }
+        };
 
         if files.is_empty() {
+            let Some(stdin) = input.stdin else {
+                return Ok(CommandOutput::usage(self.help()));
+            };
             if flags.metadata_only {
-                return Ok(CommandOutput::ok(describe(&input.stdin, None)));
+                return Ok(CommandOutput::ok(describe(&stdin, None)));
             }
-            return Ok(CommandOutput::ok(number_if(input.stdin, &flags)));
+            return Ok(CommandOutput::ok(number_if(stdin, &flags)));
         }
 
         let mut out = Vec::new();
@@ -108,21 +119,23 @@ fn number_if(bytes: Vec<u8>, flags: &Flags) -> Vec<u8> {
     out
 }
 
-fn partition_flags(argv: &[String]) -> (Flags, Vec<String>) {
+fn parse_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
     let mut flags = Flags::default();
     let mut files = Vec::with_capacity(argv.len());
-    for a in argv {
-        match a.as_str() {
-            "-b" => flags.metadata_only = true,
-            "-n" => flags.number_lines = true,
-            "-bn" | "-nb" => {
-                flags.metadata_only = true;
-                flags.number_lines = true;
+    for arg in argv {
+        let Some(letters) = arg.strip_prefix('-').filter(|l| !l.is_empty()) else {
+            files.push(arg.clone());
+            continue;
+        };
+        for ch in letters.chars() {
+            match ch {
+                'b' => flags.metadata_only = true,
+                'n' => flags.number_lines = true,
+                other => return Err(format!("unknown flag '-{other}'")),
             }
-            _ => files.push(a.clone()),
         }
     }
-    (flags, files)
+    Ok((flags, files))
 }
 
 /// `Some(mime)` if the bytes look binary, `None` if they're plausibly
@@ -187,6 +200,37 @@ mod tests {
     ];
 
     #[tokio::test]
+    async fn cat_no_args_and_no_stdin_emits_usage() {
+        let out = CatCommand
+            .run(CommandInput {
+                args: Vec::new(),
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: cat"), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn cat_unknown_flag_errors() {
+        let out = CatCommand
+            .run(CommandInput {
+                args: vec!["-q".into(), "notes.md".into()],
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[error] cat: unknown flag '-q'"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: "), "{stderr}");
+    }
+
+    #[tokio::test]
     async fn cat_reads_text_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("hello.txt");
@@ -194,7 +238,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -215,7 +259,7 @@ mod tests {
                     a.to_string_lossy().into_owned(),
                     b.to_string_lossy().into_owned(),
                 ],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -227,7 +271,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec!["/nonexistent/path/xyz".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -254,7 +298,7 @@ mod tests {
                     a.to_string_lossy().into_owned(),
                     b.to_string_lossy().into_owned(),
                 ],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -267,7 +311,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec!["-n".into()],
-                stdin: b"alpha\nbeta\n".to_vec(),
+                stdin: Some(b"alpha\nbeta\n".to_vec()),
             })
             .await
             .unwrap();
@@ -279,7 +323,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: Vec::new(),
-                stdin: b"from stdin".to_vec(),
+                stdin: Some(b"from stdin".to_vec()),
             })
             .await
             .unwrap();
@@ -294,7 +338,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -318,7 +362,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -339,7 +383,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec!["-b".into(), path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -360,7 +404,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec!["-b".into(), path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();

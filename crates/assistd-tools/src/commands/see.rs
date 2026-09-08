@@ -82,12 +82,7 @@ impl Command for SeeCommand {
             ));
         }
         if input.args.is_empty() {
-            return Ok(CommandOutput {
-                stdout: self.help().into_bytes(),
-                stderr: Vec::new(),
-                exit_code: 2,
-                attachments: Vec::new(),
-            });
+            return Ok(CommandOutput::usage(self.help()));
         }
         if input.args.len() != 1 {
             return Ok(CommandOutput::failed(
@@ -184,7 +179,7 @@ mod tests {
         let out = SeeCommand::default()
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -208,7 +203,7 @@ mod tests {
         let out = SeeCommand::default()
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -227,7 +222,7 @@ mod tests {
         let out = SeeCommand::default()
             .run(CommandInput {
                 args: vec!["/nonexistent/image.png".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -246,7 +241,7 @@ mod tests {
         let out = SeeCommand::default()
             .run(CommandInput {
                 args: Vec::new(),
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -258,7 +253,7 @@ mod tests {
         let out = SeeCommand::default()
             .run(CommandInput {
                 args: vec!["a.png".into(), "b.png".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -281,7 +276,7 @@ mod tests {
         let out = SeeCommand::new(VisionGate::new(false))
             .run(CommandInput {
                 args: vec!["/tmp/some-image.png".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();

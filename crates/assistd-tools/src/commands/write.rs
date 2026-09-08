@@ -107,18 +107,13 @@ impl Command for WriteCommand {
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         if input.args.is_empty() {
-            return Ok(CommandOutput {
-                stdout: self.help().into_bytes(),
-                stderr: Vec::new(),
-                exit_code: 2,
-                attachments: Vec::new(),
-            });
+            return Ok(CommandOutput::usage(self.help()));
         }
         let raw_path = input.args[0].clone();
         let content: Vec<u8> = if input.args.len() > 1 {
             input.args[1..].join(" ").into_bytes()
         } else {
-            input.stdin
+            input.stdin.unwrap_or_default()
         };
 
         let home = std::env::var("HOME").ok();
@@ -305,7 +300,7 @@ mod tests {
         let out = WriteCommand::new(cfg_from(&[dir.path()]))
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: b"hi there\n".to_vec(),
+                stdin: Some(b"hi there\n".to_vec()),
             })
             .await
             .unwrap();
@@ -325,7 +320,7 @@ mod tests {
                     "hello".into(),
                     "world".into(),
                 ],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -341,7 +336,7 @@ mod tests {
         let out = WriteCommand::new(cfg_from(&[dir.path()]))
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned(), "args".into()],
-                stdin: b"stdin".to_vec(),
+                stdin: Some(b"stdin".to_vec()),
             })
             .await
             .unwrap();
@@ -355,7 +350,7 @@ mod tests {
         let out = WriteCommand::permissive_for_tests()
             .run(CommandInput {
                 args: Vec::new(),
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -369,7 +364,7 @@ mod tests {
         let out = WriteCommand::new(cfg_from(&[dir.path()]))
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -385,7 +380,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["/etc/passwd".into(), "oops".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -408,7 +403,7 @@ mod tests {
         let out = WriteCommand::new(cfg_from(&[dir.path()]))
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned(), "ok".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -422,7 +417,7 @@ mod tests {
         let out = WriteCommand::new(cfg_from(&[dir.path()]))
             .run(CommandInput {
                 args: vec![tricky, "oops".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -437,7 +432,7 @@ mod tests {
         let out = WriteCommand::new(cfg_from(&[dir.path()]))
             .run(CommandInput {
                 args: vec!["relative.txt".into(), "hi".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -475,7 +470,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec![target.to_string_lossy().into_owned(), "hi".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -494,7 +489,7 @@ mod tests {
                     format!("{}/definitely/not/a/writable/path", dir.path().display()),
                     "hi".into(),
                 ],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();

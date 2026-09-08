@@ -97,12 +97,7 @@ impl Command for GrepCommand {
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         if input.args.is_empty() {
-            return Ok(CommandOutput {
-                stdout: self.help().into_bytes(),
-                stderr: Vec::new(),
-                exit_code: 2,
-                attachments: Vec::new(),
-            });
+            return Ok(CommandOutput::usage(self.help()));
         }
         let (flags, positional) = match parse_flags(&input.args) {
             Ok(v) => v,
@@ -115,12 +110,7 @@ impl Command for GrepCommand {
             }
         };
         if positional.is_empty() {
-            return Ok(CommandOutput {
-                stdout: self.help().into_bytes(),
-                stderr: Vec::new(),
-                exit_code: 2,
-                attachments: Vec::new(),
-            });
+            return Ok(CommandOutput::usage(self.help()));
         }
 
         let pattern = &positional[0];
@@ -145,7 +135,10 @@ impl Command for GrepCommand {
 
         let paths = &positional[1..];
         if paths.is_empty() {
-            return Ok(search_stdin(&re, &flags, input.stdin));
+            return Ok(match input.stdin {
+                Some(stdin) => search_stdin(&re, &flags, stdin),
+                None => CommandOutput::usage(self.help()),
+            });
         }
 
         let targets = match collect_targets(paths, flags.recursive).await {
@@ -336,10 +329,23 @@ mod tests {
         GrepCommand
             .run(CommandInput {
                 args: args.iter().map(|s| s.to_string()).collect(),
-                stdin: stdin.to_vec(),
+                stdin: Some(stdin.to_vec()),
             })
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pattern_without_files_or_stdin_emits_usage() {
+        let out = GrepCommand
+            .run(CommandInput {
+                args: vec!["ERROR".into()],
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: grep"), "{out:?}");
     }
 
     #[tokio::test]

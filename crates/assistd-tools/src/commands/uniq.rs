@@ -56,27 +56,19 @@ impl Command for UniqCommand {
             }
         }
 
-        let mut lines: Vec<&[u8]> = input.stdin.split(|b| *b == b'\n').collect();
+        let Some(stdin) = input.stdin else {
+            return Ok(CommandOutput::usage(self.help()));
+        };
+        let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
         // `split` on newline-terminated input leaves a trailing empty
         // element that is not a line; blank lines in the middle are.
         if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
 
-        let mut out = Vec::with_capacity(input.stdin.len());
-        let mut run: Option<(&[u8], usize)> = None;
-        for line in lines {
-            match run {
-                Some((prev, n)) if prev == line => run = Some((prev, n + 1)),
-                Some((prev, n)) => {
-                    emit(&mut out, prev, n, count_runs);
-                    run = Some((line, 1));
-                }
-                None => run = Some((line, 1)),
-            }
-        }
-        if let Some((prev, n)) = run {
-            emit(&mut out, prev, n, count_runs);
+        let mut out = Vec::with_capacity(stdin.len());
+        for run in lines.chunk_by(|a, b| a == b) {
+            emit(&mut out, run[0], run.len(), count_runs);
         }
         Ok(CommandOutput::ok(out))
     }
@@ -98,7 +90,7 @@ mod tests {
         UniqCommand
             .run(CommandInput {
                 args: args.iter().map(|s| s.to_string()).collect(),
-                stdin: stdin.to_vec(),
+                stdin: Some(stdin.to_vec()),
             })
             .await
             .expect("run returns Ok")
@@ -126,6 +118,19 @@ mod tests {
     #[tokio::test]
     async fn empty_stdin_is_empty_output() {
         assert!(run_uniq(&[], b"").await.stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_stdin_emits_usage() {
+        let out = UniqCommand
+            .run(CommandInput {
+                args: Vec::new(),
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: uniq"), "{out:?}");
     }
 
     #[tokio::test]

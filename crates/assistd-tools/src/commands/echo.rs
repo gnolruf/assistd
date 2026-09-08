@@ -79,7 +79,7 @@ impl Command for EchoCommand {
         "usage: echo [-ne] [ARGS...]\n\
          \n\
          Write the argument list joined by single spaces, followed by a \
-         newline. With no arguments, emits a bare newline.\n\
+         newline.\n\
          \n\
          Flags:\n  \
            -n  omit the trailing newline\n  \
@@ -92,6 +92,9 @@ impl Command for EchoCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+        if input.args.is_empty() {
+            return Ok(CommandOutput::usage(self.help()));
+        }
         let (flags, words) = split_flags(&input.args);
         let joined = words.join(" ");
         let mut out = if flags.escapes {
@@ -114,7 +117,7 @@ mod tests {
         EchoCommand
             .run(CommandInput {
                 args: args.iter().map(|s| s.to_string()).collect(),
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .expect("run returns Ok")
@@ -128,8 +131,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn echo_no_args_is_bare_newline() {
-        assert_eq!(run_echo(&[]).await.stdout, b"\n");
+    async fn echo_no_args_emits_usage() {
+        let out = run_echo(&[]).await;
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: echo"), "{out:?}");
     }
 
     #[tokio::test]

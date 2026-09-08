@@ -157,7 +157,7 @@ pub fn present(
             let display = p.display();
             body.push_str(&format!("Full output: {display}\n"));
             body.push_str(&format!("Explore: cat {display} | grep\n"));
-            body.push_str(&format!("cat {display} | tail 100\n"));
+            body.push_str(&format!("cat {display} | tail -n 100\n"));
         }
     }
     if !stderr_raw.is_empty() {
@@ -557,7 +557,7 @@ mod tests {
                 .contains(&format!("Full output: {}", overflow_path.display()))
         );
         assert!(r.output.contains("Explore: cat "));
-        assert!(r.output.contains("| tail 100"));
+        assert!(r.output.contains("| tail -n 100"));
         assert!(r.output.ends_with("[exit:0 | 9ms]"));
     }
 

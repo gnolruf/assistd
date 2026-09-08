@@ -98,7 +98,9 @@ impl Command for UppercaseCommand {
                 .into_bytes(),
             ));
         }
-        let mut out = input.stdin;
+        let Some(mut out) = input.stdin else {
+            return Ok(CommandOutput::usage(self.help()));
+        };
         out.make_ascii_uppercase();
         Ok(CommandOutput::ok(out))
     }
@@ -113,7 +115,7 @@ mod tests {
         let out = UppercaseCommand
             .run(CommandInput {
                 args: Vec::new(),
-                stdin: b"Hello, World!".to_vec(),
+                stdin: Some(b"Hello, World!".to_vec()),
             })
             .await
             .unwrap();
@@ -126,7 +128,7 @@ mod tests {
         let out = UppercaseCommand
             .run(CommandInput {
                 args: Vec::new(),
-                stdin: "café".as_bytes().to_vec(),
+                stdin: Some("café".as_bytes().to_vec()),
             })
             .await
             .unwrap();
@@ -140,7 +142,7 @@ mod tests {
         let out = UppercaseCommand
             .run(CommandInput {
                 args: vec!["FILE".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
