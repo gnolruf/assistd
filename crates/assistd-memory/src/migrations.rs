@@ -14,7 +14,7 @@
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
-/// V1: full MVP schema. Tables in order:
+/// V1: full MVP schema:
 /// - `schema_migrations` - version log for future upgrades.
 /// - `sessions` - one row per daemon process (uuid PK), carries a
 ///   nullable `title` (filled asynchronously by an LLM-summarisation
@@ -153,44 +153,17 @@ CREATE TABLE embeddings (
 CREATE INDEX idx_embeddings_model ON embeddings(model);
 "#;
 
-/// Every migration in order; the index of an entry plus one is the
-/// `user_version` a database carries once that step has been applied.
-const MIGRATION_SQL: [&str; 1] = [V1_SQL];
-
 /// Build the full migration set. `'static` because the SQL is embedded
 /// in the binary; rusqlite_migration just needs read access.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(MIGRATION_SQL.iter().copied().map(M::up).collect())
+    Migrations::new(vec![M::up(V1_SQL)])
 }
-
-/// Highest `user_version` written by the pre-squash migration set. Those
-/// four incremental steps produced exactly the schema [`V1_SQL`] now
-/// creates in one shot, so a database stamped anywhere in `2..=4` is
-/// already current and only its version counter disagrees.
-const LEGACY_SQUASHED_VERSION: u32 = 4;
 
 /// Apply all pending migrations to `conn`. Idempotent: re-running on an
 /// already-current DB is a no-op (rusqlite_migration consults the
 /// internal `user_version` pragma + our `schema_migrations` table).
 pub fn run(conn: &mut Connection) -> Result<(), rusqlite_migration::Error> {
-    reconcile_squashed_version(conn)?;
     migrations().to_latest(conn)
-}
-
-/// Stamp a pre-squash database back down to the current migration count.
-///
-/// Collapsing the original four migrations into a single `V1` left every
-/// database created before the squash stamped ahead of the definition
-/// list, which `to_latest` rejects as `DatabaseTooFarAhead` — silently
-/// costing the daemon its whole persistence layer. The schemas are
-/// identical, so rewriting the counter is the entire repair.
-fn reconcile_squashed_version(conn: &Connection) -> Result<(), rusqlite_migration::Error> {
-    let current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    let target = MIGRATION_SQL.len() as u32;
-    if current > target && current <= LEGACY_SQUASHED_VERSION {
-        conn.pragma_update(None, "user_version", target)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -272,45 +245,5 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
-    }
-
-    fn user_version(conn: &Connection) -> u32 {
-        conn.query_row("PRAGMA user_version", [], |r| r.get(0))
-            .expect("read user_version")
-    }
-
-    #[test]
-    fn pre_squash_database_is_adopted() {
-        // A DB written before the four migrations were collapsed already
-        // has the V1 schema but is stamped at 4. Without reconciliation
-        // `to_latest` fails with DatabaseTooFarAhead and the daemon
-        // silently loses every conversation.
-        let mut conn = open_in_memory();
-        run(&mut conn).expect("first run");
-        conn.pragma_update(None, "user_version", LEGACY_SQUASHED_VERSION)
-            .expect("stamp legacy version");
-
-        run(&mut conn).expect("legacy DB adopted");
-        assert_eq!(user_version(&conn), MIGRATION_SQL.len() as u32);
-    }
-
-    #[test]
-    fn version_beyond_the_squashed_range_is_left_alone() {
-        // A version we never wrote means the DB came from a newer build.
-        // Reconciling it would run this build's schema against unknown
-        // tables, so the error must stand.
-        let mut conn = open_in_memory();
-        run(&mut conn).expect("first run");
-        conn.pragma_update(None, "user_version", LEGACY_SQUASHED_VERSION + 1)
-            .expect("stamp future version");
-
-        assert!(run(&mut conn).is_err(), "future DB must not be adopted");
-    }
-
-    #[test]
-    fn fresh_database_lands_on_the_migration_count() {
-        let mut conn = open_in_memory();
-        run(&mut conn).expect("first run");
-        assert_eq!(user_version(&conn), MIGRATION_SQL.len() as u32);
     }
 }
