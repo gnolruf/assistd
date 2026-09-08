@@ -74,9 +74,11 @@ fn build_description(registry: &CommandRegistry) -> String {
     let mut s = String::with_capacity(1024);
     s.push_str(
         "Execute a shell-style command in the daemon's working directory. \
-         Supports pipelines (|), and/or (&&, ||), and sequencing (;). \
-         Redirections (>, <), env expansion ($VAR), and backgrounding (&) \
-         are NOT supported; use `bash \"…\"` for a real shell when needed. \
+         Supports pipelines (|), and/or (&&, ||), sequencing (;), `~` and \
+         globs (*, ?, []) on unquoted arguments; quote an argument to pass \
+         it through literally. Redirections (>, <), env expansion ($VAR), \
+         and backgrounding (&) are NOT supported; use `bash \"…\"` for a \
+         real shell when needed. \
          Large outputs are truncated; the truncation notice includes a \
          `Full output: /tmp/assistd-output/cmd-N.txt` path that subsequent \
          `run` calls can grep/cat to read the full content.\n\n\
@@ -85,14 +87,7 @@ fn build_description(registry: &CommandRegistry) -> String {
     let pairs = registry.sorted_summaries();
     let name_width = pairs.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     for (name, summary) in pairs {
-        s.push_str("  ");
-        s.push_str(name);
-        for _ in name.len()..name_width {
-            s.push(' ');
-        }
-        s.push_str(": ");
-        s.push_str(summary);
-        s.push('\n');
+        s.push_str(&format!("  {name:<name_width$}: {summary}\n"));
     }
     s.push_str(
         "\nCall a command with no (or insufficient) arguments to see its \
@@ -144,59 +139,28 @@ impl Tool for RunTool {
         tracing::Span::current().record("cmd", cmd_token);
 
         let start = Instant::now();
-        let chain = match parse_chain(command) {
-            Ok(c) => c,
-            Err(e) => {
-                let stderr = parse_error_line(&e).into_bytes();
-                let failed = CommandOutput::failed(2, stderr);
-                let r = present(failed, &self.spec, &self.counter, start.elapsed());
-                return Ok(build_result(r));
-            }
+        let out = match parse_chain(command) {
+            Ok(chain) => execute(&chain, &self.registry, None).await?,
+            Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
-        let out = execute(&chain, &self.registry, Vec::new()).await?;
-        let duration = start.elapsed();
-
-        let r = present(out, &self.spec, &self.counter, duration);
+        let r = present(out, &self.spec, &self.counter, start.elapsed());
         Ok(build_result(r))
     }
 }
 
 /// Translate a [`ParseError`] into a convention-compliant stderr line.
-/// Each variant gets a targeted recovery hint.
+/// The error's own message is the what-clause; each variant adds a
+/// targeted recovery hint.
 fn parse_error_line(e: &ParseError) -> String {
-    match e {
-        ParseError::Empty => error_line("parse", "empty command", "Use", "run <cmd>"),
-        ParseError::UnterminatedQuote => error_line(
-            "parse",
-            "unterminated quoted string",
-            "Check",
-            "match all \" pairs",
-        ),
-        ParseError::UnexpectedOperator(s) => error_line(
-            "parse",
-            format_args!("unexpected operator '{s}' at start of expression"),
-            "Try",
-            "put a command before the operator",
-        ),
-        ParseError::TrailingOperator(s) => error_line(
-            "parse",
-            format_args!("trailing operator '{s}'"),
-            "Try",
-            "add a command after the operator",
-        ),
-        ParseError::EmptyCommand => error_line(
-            "parse",
-            "empty command between operators",
-            "Try",
-            "add a command between operators",
-        ),
-        ParseError::Unsupported(m) => error_line(
-            "parse",
-            *m,
-            "Use",
-            "bash \"...\" for unsupported shell features",
-        ),
-    }
+    let (hint, recovery) = match e {
+        ParseError::Empty => ("Use", "run <cmd>"),
+        ParseError::UnterminatedQuote => ("Check", "match all \" pairs"),
+        ParseError::UnexpectedOperator(_) => ("Try", "put a command before the operator"),
+        ParseError::TrailingOperator(_) => ("Try", "add a command after the operator"),
+        ParseError::EmptyCommand => ("Try", "add a command between operators"),
+        ParseError::Unsupported(_) => ("Use", "bash \"...\" for unsupported shell features"),
+    };
+    error_line("parse", e, hint, recovery)
 }
 
 fn build_result(r: PresentResult) -> Value {
@@ -234,8 +198,8 @@ mod tests {
     use crate::ToolRegistry;
     use crate::command::{Command, CommandInput, CommandOutput};
     use crate::commands::{
-        BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, ScreenshotCommand,
-        SeeCommand, WcCommand, WebCommand, WriteCommand,
+        BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
+        WebCommand, WriteCommand,
     };
     use async_trait::async_trait;
     use regex::Regex;
@@ -253,25 +217,8 @@ mod tests {
         Arc::new(r)
     }
 
-    /// Full registry matching the daemon's production set. Used by
-    /// Level-0 description tests that need to verify every command
-    /// name flows into the LLM-facing schema.
     fn full_registry() -> Arc<CommandRegistry> {
-        use crate::commands::WmCommand;
-        use assistd_wm::NoWindowManager;
-        let mut r = CommandRegistry::new();
-        r.register(CatCommand);
-        r.register(LsCommand);
-        r.register(GrepCommand);
-        r.register(WcCommand);
-        r.register(EchoCommand);
-        r.register(WriteCommand::permissive_for_tests());
-        r.register(SeeCommand::default());
-        r.register(ScreenshotCommand::default());
-        r.register(WebCommand::new());
-        r.register(BashCommand::default());
-        r.register(WmCommand::for_test(Arc::new(NoWindowManager)));
-        Arc::new(r)
+        Arc::new(crate::commands::test_registry())
     }
 
     fn tool_with_dir(dir: &Path) -> RunTool {
@@ -390,6 +337,74 @@ mod tests {
         let attachments = result["attachments"].as_array().expect("attachments");
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0]["mime"], "image/png");
+    }
+
+    /// The pipelines the model actually writes: flags on the built-in
+    /// commands, a glob, and the stream filters composed end to end.
+    /// Regression guard for the era when every one of these forced a
+    /// fallback to `bash`.
+    #[test]
+    fn run_composes_flags_globs_and_stream_filters() {
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.log"), b"ERROR one\ninfo\n").unwrap();
+        std::fs::write(tmp.path().join("b.log"), b"ERROR two\nERROR three\n").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"ERROR ignored\n").unwrap();
+        let tool = tool_with(dir.path(), full_registry());
+        let root = tmp.path().to_string_lossy().into_owned();
+
+        // A glob feeds two files into grep, which labels its output.
+        let globbed = invoke(&tool, &format!("grep ERROR {root}/*.log | wc -l"));
+        assert_eq!(globbed["exit_code"], 0, "{globbed}");
+        assert_eq!(globbed["stdout"], "3\n");
+
+        // -r walks the directory instead, and numbers the hits.
+        let recursive = invoke(&tool, &format!("grep -rn ERROR {root} | wc -l"));
+        assert_eq!(recursive["exit_code"], 0, "{recursive}");
+        assert_eq!(recursive["stdout"], "4\n");
+
+        // The frequency idiom, start to finish.
+        std::fs::write(tmp.path().join("hits.txt"), b"b\na\nb\n").unwrap();
+        let freq = invoke(
+            &tool,
+            &format!("cat {root}/hits.txt | sort | uniq -c | sort -nr | head -1"),
+        );
+        assert_eq!(freq["stdout"], "2\tb\n", "{freq}");
+
+        // cat -n numbers, tail slices, ls -a survives its flags.
+        let numbered = invoke(&tool, &format!("cat -n {root}/b.log | tail -1"));
+        assert_eq!(numbered["stdout"], "2\tERROR three\n");
+        // a.log, b.log, notes.txt, hits.txt.
+        let listed = invoke(&tool, &format!("ls -la {root} | wc -l"));
+        assert_eq!(listed["exit_code"], 0, "{listed}");
+        assert_eq!(listed["stdout"], "4\n");
+    }
+
+    /// A failing stage followed by a succeeding one reports the exit
+    /// code of the last stage, per Unix. The failure is then only
+    /// visible in stderr, so the model has to be shown it — otherwise
+    /// `find . | head` reads as "ran fine, found nothing".
+    #[test]
+    fn run_surfaces_a_failed_stage_behind_a_successful_one() {
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), full_registry());
+        let result = invoke(&tool, "find . -name Cargo.toml | head -3");
+        assert_eq!(result["exit_code"], 0, "{result}");
+        let output = result["output"].as_str().unwrap();
+        assert!(
+            output.contains("[stderr] [error] unknown command: find"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn run_quoted_glob_reaches_the_command_literally() {
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), registry());
+        // Quoted, so the regex must not be mistaken for a file pattern.
+        let result = invoke(&tool, "echo 'a*b' | grep 'a\\*b'");
+        assert_eq!(result["exit_code"], 0, "{result}");
+        assert_eq!(result["stdout"], "a*b\n");
     }
 
     #[test]
@@ -546,7 +561,7 @@ mod tests {
         }
         async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(
-                format!("{}\n", input.stdin.len()).into_bytes(),
+                format!("{}\n", input.stdin.map_or(0, |s| s.len())).into_bytes(),
             ))
         }
     }
@@ -636,7 +651,7 @@ mod tests {
         assert!(output.contains("--- output truncated (5000 lines,"));
         assert!(output.contains(&format!("Full output: {path}")));
         assert!(output.contains(&format!("Explore: cat {path} | grep")));
-        assert!(output.contains(&format!("cat {path} | tail 100")));
+        assert!(output.contains(&format!("cat {path} | tail -n 100")));
         assert_footer(output, 0);
     }
 
@@ -660,6 +675,32 @@ mod tests {
         let followup = invoke(&tool, &format!("cat {path} | grep \"line 4242\""));
         assert_eq!(followup["exit_code"], 0);
         assert_eq!(followup["stdout"].as_str().unwrap(), "line 4242\n");
+    }
+
+    /// The tail hint in the overflow banner must be runnable as printed;
+    /// `tail` rejects a bare count, so the banner has to spell `-n`.
+    #[test]
+    fn run_overflow_tail_hint_runs_as_printed() {
+        use crate::commands::TailCommand;
+        let mut reg = CommandRegistry::new();
+        reg.register(Lines(5000));
+        reg.register(CatCommand);
+        reg.register(TailCommand);
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), Arc::new(reg));
+
+        let first = invoke(&tool, "lines");
+        let output = first["output"].as_str().unwrap();
+        let hint = output
+            .lines()
+            .find(|l| l.contains("| tail"))
+            .expect("tail hint in banner");
+
+        let followup = invoke(&tool, hint);
+        assert_eq!(followup["exit_code"], 0, "{followup}");
+        let stdout = followup["stdout"].as_str().unwrap();
+        assert_eq!(stdout.lines().count(), 100);
+        assert!(stdout.ends_with("line 5000\n"));
     }
 
     #[test]
@@ -750,6 +791,10 @@ mod tests {
             "ls",
             "grep",
             "wc",
+            "head",
+            "tail",
+            "sort",
+            "uniq",
             "echo",
             "write",
             "see",
@@ -829,6 +874,10 @@ mod tests {
             "ls",
             "grep",
             "wc",
+            "head",
+            "tail",
+            "sort",
+            "uniq",
             "echo",
             "write",
             "see",

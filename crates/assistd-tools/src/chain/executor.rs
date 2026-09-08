@@ -12,7 +12,8 @@ use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 
-use super::Chain;
+use super::expand::expand_args;
+use super::{Chain, Word};
 use crate::command::{CommandInput, CommandOutput, CommandRegistry, error_line};
 
 /// Maximum bytes we buffer between pipe stages. Prevents one command
@@ -30,90 +31,54 @@ pub const PIPE_BUF_MAX: usize = 10 * 1024 * 1024;
 pub fn execute<'a>(
     chain: &'a Chain,
     registry: &'a CommandRegistry,
-    stdin: Vec<u8>,
+    stdin: Option<Vec<u8>>,
 ) -> Pin<Box<dyn Future<Output = Result<CommandOutput>> + Send + 'a>> {
     Box::pin(async move {
         match chain {
             Chain::Command(argv) => run_command(argv, registry, stdin).await,
             Chain::Pipe(l, r) => {
-                let left = execute(l, registry, stdin).await?;
-                if left.stdout.len() > PIPE_BUF_MAX {
-                    return Ok(CommandOutput {
-                        stdout: Vec::new(),
-                        stderr: merge(
-                            left.stderr,
-                            error_line(
-                                "pipe",
-                                format_args!("stage output exceeded {PIPE_BUF_MAX} bytes"),
-                                "Try",
-                                "pipe through wc -l or head first to shrink the stream",
-                            )
-                            .into_bytes(),
-                        ),
-                        exit_code: 141,
-                        attachments: left.attachments,
-                    });
+                let mut left = execute(l, registry, stdin).await?;
+                let piped = std::mem::take(&mut left.stdout);
+                if piped.len() > PIPE_BUF_MAX {
+                    let overflow = CommandOutput::failed(
+                        141,
+                        error_line(
+                            "pipe",
+                            format_args!("stage output exceeded {PIPE_BUF_MAX} bytes"),
+                            "Try",
+                            "pipe through wc -l or head first to shrink the stream",
+                        )
+                        .into_bytes(),
+                    );
+                    return Ok(left.then(overflow));
                 }
-                let left_attachments = left.attachments;
-                let right = execute(r, registry, left.stdout).await?;
-                Ok(CommandOutput {
-                    stdout: right.stdout,
-                    stderr: merge(left.stderr, right.stderr),
-                    exit_code: right.exit_code,
-                    attachments: concat_attachments(left_attachments, right.attachments),
-                })
+                let right = execute(r, registry, Some(piped)).await?;
+                Ok(left.then(right))
             }
-            Chain::And(l, r) => {
+            Chain::And(l, r) | Chain::Or(l, r) => {
                 let left = execute(l, registry, stdin.clone()).await?;
-                if left.exit_code == 0 {
-                    let left_attachments = left.attachments;
-                    let right = execute(r, registry, stdin).await?;
-                    Ok(CommandOutput {
-                        stdout: merge(left.stdout, right.stdout),
-                        stderr: merge(left.stderr, right.stderr),
-                        exit_code: right.exit_code,
-                        attachments: concat_attachments(left_attachments, right.attachments),
-                    })
-                } else {
-                    Ok(left)
+                let run_right = matches!(chain, Chain::And(..)) == (left.exit_code == 0);
+                if !run_right {
+                    return Ok(left);
                 }
-            }
-            Chain::Or(l, r) => {
-                let left = execute(l, registry, stdin.clone()).await?;
-                if left.exit_code != 0 {
-                    let left_attachments = left.attachments;
-                    let right = execute(r, registry, stdin).await?;
-                    Ok(CommandOutput {
-                        stdout: merge(left.stdout, right.stdout),
-                        stderr: merge(left.stderr, right.stderr),
-                        exit_code: right.exit_code,
-                        attachments: concat_attachments(left_attachments, right.attachments),
-                    })
-                } else {
-                    Ok(left)
-                }
+                let right = execute(r, registry, stdin).await?;
+                Ok(left.then(right))
             }
             Chain::Seq(l, r) => {
                 let left = execute(l, registry, stdin.clone()).await?;
-                let left_attachments = left.attachments;
                 let right = execute(r, registry, stdin).await?;
-                Ok(CommandOutput {
-                    stdout: merge(left.stdout, right.stdout),
-                    stderr: merge(left.stderr, right.stderr),
-                    exit_code: right.exit_code,
-                    attachments: concat_attachments(left_attachments, right.attachments),
-                })
+                Ok(left.then(right))
             }
         }
     })
 }
 
 async fn run_command(
-    argv: &[String],
+    words: &[Word],
     registry: &CommandRegistry,
-    stdin: Vec<u8>,
+    stdin: Option<Vec<u8>>,
 ) -> Result<CommandOutput> {
-    let name = argv.first().map(|s| s.as_str()).unwrap_or_default();
+    let name = words.first().map(|w| w.text.as_str()).unwrap_or_default();
     if name.is_empty() {
         return Ok(CommandOutput::failed(
             2,
@@ -135,7 +100,7 @@ async fn run_command(
 
     let out = cmd
         .run(CommandInput {
-            args: argv[1..].to_vec(),
+            args: expand_args(&words[1..]),
             stdin,
         })
         .await?;
@@ -170,19 +135,6 @@ fn prefix_stderr(name: &str, raw: &[u8]) -> Vec<u8> {
         }
     }
     out
-}
-
-fn merge(mut a: Vec<u8>, b: Vec<u8>) -> Vec<u8> {
-    a.extend_from_slice(&b);
-    a
-}
-
-fn concat_attachments(
-    mut a: Vec<crate::command::Attachment>,
-    b: Vec<crate::command::Attachment>,
-) -> Vec<crate::command::Attachment> {
-    a.extend(b);
-    a
 }
 
 #[cfg(test)]
@@ -255,7 +207,7 @@ mod tests {
             "usage: echo_stdin".to_string()
         }
         async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-            Ok(CommandOutput::ok(input.stdin))
+            Ok(CommandOutput::ok(input.stdin.unwrap_or_default()))
         }
     }
 
@@ -273,7 +225,12 @@ mod tests {
             "usage: lc".to_string()
         }
         async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-            let n = input.stdin.iter().filter(|b| **b == b'\n').count();
+            let n = input
+                .stdin
+                .unwrap_or_default()
+                .iter()
+                .filter(|b| **b == b'\n')
+                .count();
             Ok(CommandOutput::ok(format!("{n}\n").into_bytes()))
         }
     }
@@ -309,7 +266,7 @@ mod tests {
         r.register(Stub::new("emit", b"a\nb\nc\n".to_vec(), 0));
         r.register(LineCount);
         let chain = parse_chain("emit | lc").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert_eq!(out.stdout, b"3\n");
         assert_eq!(out.exit_code, 0);
     }
@@ -321,7 +278,7 @@ mod tests {
         r.register(Echo);
         r.register(LineCount);
         let chain = parse_chain("emit | echo_stdin | lc").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert_eq!(out.stdout, b"3\n");
     }
 
@@ -341,7 +298,7 @@ mod tests {
             f
         };
         let chain = parse_chain("ok && right").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert!(*ok_flag.lock());
         assert!(*right_flag.lock());
         assert_eq!(out.exit_code, 0);
@@ -359,7 +316,7 @@ mod tests {
             f
         };
         let chain = parse_chain("bad && right").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert!(!*right_flag.lock(), "right must not run");
         assert_eq!(out.exit_code, 1);
     }
@@ -370,7 +327,7 @@ mod tests {
         r.register(Stub::new("bad", b"boom".to_vec(), 2));
         r.register(Stub::new("recover", b"ok".to_vec(), 0));
         let chain = parse_chain("bad || recover").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"boomok");
     }
@@ -386,7 +343,7 @@ mod tests {
             f
         };
         let chain = parse_chain("good || right").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert!(!*right_flag.lock());
         assert_eq!(out.stdout, b"g");
     }
@@ -397,7 +354,7 @@ mod tests {
         r.register(Stub::new("first", b"a\n".to_vec(), 5));
         r.register(Stub::new("second", b"b\n".to_vec(), 0));
         let chain = parse_chain("first ; second").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"a\nb\n");
     }
@@ -406,7 +363,7 @@ mod tests {
     async fn unknown_command_returns_127_with_available_list() {
         let r = registry();
         let chain = parse_chain("nope").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert_eq!(out.exit_code, 127);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("[error] unknown command: nope"), "{stderr}");
@@ -419,7 +376,7 @@ mod tests {
         let mut r = CommandRegistry::new();
         r.register(Stub::new("fallback", b"rescued\n".to_vec(), 0));
         let chain = parse_chain("nope || fallback").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert_eq!(out.exit_code, 0);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("rescued"), "{stdout}");
@@ -435,7 +392,7 @@ mod tests {
             f
         };
         let chain = parse_chain("nope && right").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert!(!*right_flag.lock(), "right must not run");
         assert_eq!(out.exit_code, 127);
     }
@@ -444,7 +401,7 @@ mod tests {
     async fn empty_stdin_through_lc_is_zero() {
         let r = registry();
         let chain = parse_chain("echo_stdin | lc").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert_eq!(out.stdout, b"0\n");
         assert_eq!(out.exit_code, 0);
     }
@@ -455,7 +412,7 @@ mod tests {
         r.register(Flood(PIPE_BUF_MAX + 1024));
         r.register(LineCount);
         let chain = parse_chain("flood | lc").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert_eq!(out.exit_code, 141);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("[error] pipe: "), "{stderr}");
@@ -482,7 +439,7 @@ mod tests {
             f
         };
         let chain = parse_chain("a && b | lc || d").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert!(!*d_flag.lock());
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"1\n");
@@ -509,7 +466,7 @@ mod tests {
         let mut r = CommandRegistry::new();
         r.register(Err1);
         let chain = parse_chain("boom").unwrap();
-        let out = execute(&chain, &r, Vec::new()).await.unwrap();
+        let out = execute(&chain, &r, None).await.unwrap();
         assert_eq!(out.exit_code, 1);
         assert_eq!(out.stderr, b"[boom]\tsomething went wrong\n");
     }

@@ -14,7 +14,7 @@
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
-/// V1: full MVP schema. Tables in order:
+/// V1: full MVP schema:
 /// - `schema_migrations` - version log for future upgrades.
 /// - `sessions` - one row per daemon process (uuid PK), carries a
 ///   nullable `title` (filled asynchronously by an LLM-summarisation

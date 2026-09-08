@@ -312,7 +312,10 @@ pub trait LlmBackend: Send + Sync + 'static {
 
     /// Used by the daemon's title-generation hook so the
     /// summarisation prompt cannot leak into the user's chat history.
-    /// Returns the model's final text concatenated.
+    /// Returns the model's final text concatenated; reasoning output is
+    /// discarded. Answers here are short by construction, so
+    /// implementations budget them from `chat.max_summary_tokens`
+    /// rather than the full per-response allowance.
     async fn complete_oneshot(&self, _prompt: String) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),

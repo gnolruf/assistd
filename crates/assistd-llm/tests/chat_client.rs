@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
-use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent, StepOutcome};
+use assistd_llm::{LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -513,20 +513,10 @@ async fn http_500_returns_server_error() {
 
 #[tokio::test]
 async fn conv_lock_does_not_block_during_streaming() {
-    // Regression for the conv-mutex scope fix in `generate`: while one
-    // call is streaming, a concurrent `set_transient_context` (which
-    // takes the lock) must complete promptly rather than serializing
-    // behind the in-flight stream. Before the fix, the second call
-    // waited for the full stream to finish.
     use assistd_llm::LlmBackend;
     use std::time::Instant;
 
     let script = Script::new();
-    // One slow stream: large number of small frames separated by
-    // `[DONE]` arrival via DropAfterDeltas would only produce one
-    // outgoing frame. Use the standard Deltas with many entries; the
-    // fake server writes them as fast as it can but the client still
-    // has to await each chunk through the SSE parser.
     let many: Vec<String> = (0..200).map(|i| format!("d{i}")).collect();
     script.push_stream(StreamResponse::Deltas(many)).await;
     let (port, _server) = spawn_fake(script).await;
@@ -534,7 +524,6 @@ async fn conv_lock_does_not_block_during_streaming() {
     let client = Arc::new(build_client(&chat_spec(port)));
     let (tx, mut rx) = mpsc::channel(1024);
 
-    // Kick off the slow generate.
     let gen_client = client.clone();
     let stream_task = tokio::spawn(async move { gen_client.generate("first".into(), tx).await });
 
@@ -545,10 +534,6 @@ async fn conv_lock_does_not_block_during_streaming() {
             .expect("at least a few deltas should arrive");
     }
 
-    // Now: while the stream is still running, take the lock for a
-    // separate operation. With the lock-scope fix, this completes in
-    // milliseconds. Without it, this would block until the stream
-    // finishes, which we cap with an outer timeout.
     let started = Instant::now();
     tokio::time::timeout(
         Duration::from_secs(2),
@@ -573,9 +558,6 @@ async fn conv_lock_does_not_block_during_streaming() {
 
 #[tokio::test]
 async fn stalled_stream_aborts_within_inactivity_timeout() {
-    // Server emits a couple of deltas then goes quiet on the socket.
-    // With `stream_inactivity_secs = 1`, the client should error within
-    // ~1s rather than hanging forever.
     let script = Script::new();
     script
         .push_stream(StreamResponse::StallAfterDeltas(vec![
@@ -592,11 +574,6 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
 
     let (tx, mut rx) = mpsc::channel(32);
     let started = std::time::Instant::now();
-    // The mid-stream timeout is folded into PartialAfterEmit because we
-    // already forwarded "hello"/" " deltas, so generate() returns Ok
-    // with a Done event. The signal is the latency: it must complete
-    // well under the test's outer 5s budget, near the configured 1s
-    // inactivity deadline.
     let res = tokio::time::timeout(Duration::from_secs(5), client.generate("hi".into(), tx))
         .await
         .expect("generate must return within outer 5s budget");
@@ -621,9 +598,6 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
 
 #[tokio::test]
 async fn slow_first_token_is_not_treated_as_a_stall() {
-    // Headers land, then the server prefills in silence. The 1s
-    // inter-chunk deadline must not police that window; only
-    // `chat.request_timeout_secs` bounds the wait for the first byte.
     let script = Script::new();
     script
         .push_stream(StreamResponse::StallAfterDeltas(Vec::new()))
@@ -825,11 +799,16 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
 // Agent-loop step API
 // ---------------------------------------------------------------------------
 
-/// Frame the `tool_calls` path as a sequence of SSE payloads suitable for
-/// `StreamResponse::RawFrames`. Matches llama.cpp's typical shape: role
-/// first, then one or more tool_call deltas with accumulating `arguments`,
-/// terminated by a finish_reason chunk.
 fn tool_call_frames(call_id: &str, name: &str, arg_chunks: &[&str]) -> Vec<String> {
+    tool_call_frames_finishing(call_id, name, arg_chunks, "tool_calls")
+}
+
+fn tool_call_frames_finishing(
+    call_id: &str,
+    name: &str,
+    arg_chunks: &[&str],
+    finish_reason: &str,
+) -> Vec<String> {
     let mut frames = Vec::new();
     frames.push("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n".to_string());
     let head = format!(
@@ -845,9 +824,10 @@ fn tool_call_frames(call_id: &str, name: &str, arg_chunks: &[&str]) -> Vec<Strin
             encoded
         ));
     }
-    frames.push(
-        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n".to_string(),
-    );
+    frames.push(format!(
+        "data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":{}}}]}}\n\n",
+        serde_json::to_string(finish_reason).unwrap()
+    ));
     frames.push("data: [DONE]\n\n".to_string());
     frames
 }
@@ -881,6 +861,65 @@ async fn step_with_stop_finish_reason_returns_final() {
     assert!(
         captured[0].body.get("tools").is_none(),
         "request should not carry tools when argument is empty"
+    );
+}
+
+#[tokio::test]
+async fn step_runs_tool_calls_reported_with_stop_finish_reason() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::RawFrames(tool_call_frames_finishing(
+            "call-7",
+            "run",
+            &[r#"{"command":"ls /tmp"}"#],
+            "stop",
+        )))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client
+        .push_user("list /tmp".into(), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let outcome = client.step(Vec::new(), tx).await.unwrap();
+    match outcome {
+        StepOutcome::ToolCalls(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "run");
+            assert_eq!(calls[0].arguments["command"], "ls /tmp");
+        }
+        other => panic!("expected the tool call to run, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::RawFrames(tool_call_frames_finishing(
+            "call-8",
+            "run",
+            &[r#"{"command":"ls /t"#],
+            "length",
+        )))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client
+        .push_user("list /tmp".into(), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let err = client
+        .step(Vec::new(), tx)
+        .await
+        .expect_err("truncated arguments must not be swallowed");
+    assert!(
+        matches!(err, LlmError::ToolCallParse(_)),
+        "expected a tool-call parse error, got {err:?}"
     );
 }
 
@@ -921,9 +960,6 @@ async fn step_parses_tool_call_across_argument_chunks() {
     assert_eq!(calls[0].name, "run");
     assert_eq!(calls[0].arguments["command"], "ls /tmp");
 
-    // No visible text deltas for a tool-calls-only step; Qwen3-style
-    // <think> blocks would have been emitted via `content`, but none
-    // appeared in our scripted frames.
     let events = drain(&mut rx).await;
     assert!(
         !events.iter().any(|e| matches!(e, LlmEvent::Delta { .. })),
@@ -1048,4 +1084,43 @@ async fn request_timeout_surfaces_as_error() {
     let (tx, _rx) = mpsc::channel(32);
     let result = client.generate("hi".into(), tx).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn complete_oneshot_survives_a_response_larger_than_the_channel() {
+    let script = Script::new();
+    let deltas: Vec<String> = (0..500).map(|i| format!("tok{i} ")).collect();
+    script.push_stream(StreamResponse::Deltas(deltas)).await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    let text = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.complete_oneshot("title?".into()),
+    )
+    .await
+    .expect("complete_oneshot must not deadlock")
+    .expect("stream completes");
+    assert!(text.starts_with("tok0 "), "{text:.40}");
+    assert!(text.trim_end().ends_with("tok499"), "{text:.40}");
+}
+
+#[tokio::test]
+async fn complete_oneshot_uses_the_summary_budget() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::Deltas(vec!["A Short Title".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let cfg = chat_spec(port);
+    let client = build_client(&cfg);
+    client.complete_oneshot("title?".into()).await.unwrap();
+
+    let captured = script.captured().await;
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].body["max_tokens"], cfg.chat.max_summary_tokens,
+        "one-shot should use max_summary_tokens, not max_response_tokens"
+    );
 }

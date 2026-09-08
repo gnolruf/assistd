@@ -157,9 +157,10 @@ Three additional `Tool`s sit alongside `run`: `remember`, `recall`,
 `reminisce`. They don't fit the shell mold, so they're regular
 LLM-facing tools with their own JSON schemas.
 
-Built-in commands: `bash`, `cat`, `echo`, `grep`, `ls`, `screenshot`,
-`see`, `wc`, `web`, `wm`, `write`. See [tools.md](tools.md) for the
-trait definitions and a complete worked example of adding your own.
+Built-in commands: `bash`, `cat`, `echo`, `grep`, `head`, `ls`,
+`screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`,
+`write`. See [tools.md](tools.md) for the trait definitions and a
+complete worked example of adding your own.
 
 Policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`)
 intercept the dangerous paths: `bash` runs through a sandbox

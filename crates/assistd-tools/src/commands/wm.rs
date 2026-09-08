@@ -158,7 +158,7 @@ impl Command for WmCommand {
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         if input.args.is_empty() {
-            return Ok(help_output(self.help()));
+            return Ok(CommandOutput::usage(self.help()));
         }
         if !self.wm.is_connected() {
             return Ok(CommandOutput::failed(
@@ -199,17 +199,6 @@ impl Command for WmCommand {
     }
 }
 
-/// Stdout-help with exit 2, matching the convention used by other
-/// commands that have argument-required modes (grep, write, …).
-fn help_output(text: String) -> CommandOutput {
-    CommandOutput {
-        stdout: text.into_bytes(),
-        stderr: Vec::new(),
-        exit_code: 2,
-        attachments: Vec::new(),
-    }
-}
-
 // --------- subcommand handlers ---------
 
 const FOCUS_HELP: &str = "usage: wm focus <id>\n\
@@ -220,7 +209,7 @@ const FOCUS_HELP: &str = "usage: wm focus <id>\n\
 
 async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.is_empty() {
-        return Ok(help_output(FOCUS_HELP.to_string()));
+        return Ok(CommandOutput::usage(FOCUS_HELP.to_string()));
     }
     let id_arg = &args[0];
     let id: WindowId = match id_arg.parse() {
@@ -269,7 +258,7 @@ const MOVE_HELP: &str = "usage: wm move <id> <workspace>\n\
 
 async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.len() < 2 {
-        return Ok(help_output(MOVE_HELP.to_string()));
+        return Ok(CommandOutput::usage(MOVE_HELP.to_string()));
     }
     let id_arg = &args[0];
     let workspace_arg = &args[1];
@@ -316,7 +305,7 @@ const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
 impl WmCommand {
     async fn open(&self, args: &[String]) -> Result<CommandOutput> {
         let Some((app, extra)) = args.split_first() else {
-            return Ok(help_output(OPEN_HELP.to_string()));
+            return Ok(CommandOutput::usage(OPEN_HELP.to_string()));
         };
         let argv = args.join(" ");
 
@@ -433,7 +422,7 @@ const RESIZE_HELP: &str = "usage: wm resize <id> <grow|shrink> <px>\n\
 
 async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.len() < 3 {
-        return Ok(help_output(RESIZE_HELP.to_string()));
+        return Ok(CommandOutput::usage(RESIZE_HELP.to_string()));
     }
     let id_arg = &args[0];
     let id: WindowId = match id_arg.parse() {
@@ -618,7 +607,7 @@ const LAYOUT_HELP: &str = "usage: wm layout <default|tabbed|stacking|splith|spli
 
 async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.is_empty() {
-        return Ok(help_output(LAYOUT_HELP.to_string()));
+        return Ok(CommandOutput::usage(LAYOUT_HELP.to_string()));
     }
     let raw = args[0].as_str();
     let layout: Layout = match raw.parse() {
@@ -811,7 +800,7 @@ mod tests {
         WmCommand::for_test(wm)
             .run(CommandInput {
                 args: args.iter().map(|s| s.to_string()).collect(),
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap()
@@ -1014,7 +1003,7 @@ mod tests {
         argv.extend(args.iter().map(|s| s.to_string()));
         cmd.run(CommandInput {
             args: argv,
-            stdin: Vec::new(),
+            stdin: None,
         })
         .await
         .unwrap()
@@ -1163,7 +1152,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["focus".into(), "42".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();

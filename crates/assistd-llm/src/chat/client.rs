@@ -586,7 +586,7 @@ impl LlmBackend for LlamaChatClient {
                 }],
                 stream: true,
                 temperature: self.chat.temperature,
-                max_tokens: self.chat.max_response_tokens,
+                max_tokens: self.chat.max_summary_tokens,
                 top_p: self.chat.top_p,
                 top_k: self.chat.top_k,
                 min_p: self.chat.min_p,
@@ -598,14 +598,21 @@ impl LlmBackend for LlamaChatClient {
         };
 
         let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
-        let outcome = self.stream_openai(body_bytes, &tx).await;
-        drop(tx);
-        let mut buf = String::new();
-        while let Some(ev) = rx.recv().await {
-            if let LlmEvent::Delta { text } = ev {
-                buf.push_str(&text);
+        let stream = async {
+            let outcome = self.stream_openai(body_bytes, &tx).await;
+            drop(tx);
+            outcome
+        };
+        let collect = async {
+            let mut buf = String::new();
+            while let Some(ev) = rx.recv().await {
+                if let LlmEvent::Delta { text } = ev {
+                    buf.push_str(&text);
+                }
             }
-        }
+            buf
+        };
+        let (outcome, buf) = tokio::join!(stream, collect);
         match outcome {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)
@@ -658,18 +665,22 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::
     Ok(out)
 }
 
-/// Translate a completed stream into conversation commits + [`StepOutcome`].
 fn commit_step(conv: &mut Conversation, accum: StreamAccum) -> LlmResult<StepOutcome> {
-    let wants_tool_calls =
-        accum.finish_reason.as_deref() == Some("tool_calls") && !accum.tool_calls.is_empty();
-    if wants_tool_calls || (!accum.tool_calls.is_empty() && accum.finish_reason.is_none()) {
-        let (records, parsed) = accum.finalize_tool_calls()?;
-        conv.push_assistant_with_tool_calls(None, records);
-        Ok(StepOutcome::ToolCalls(parsed))
-    } else {
+    if accum.tool_calls.is_empty() {
         conv.push_assistant(accum.text);
-        Ok(StepOutcome::Final)
+        return Ok(StepOutcome::Final);
     }
+    if !matches!(accum.finish_reason.as_deref(), None | Some("tool_calls")) {
+        warn!(
+            target: "assistd::chat",
+            finish_reason = accum.finish_reason.as_deref().unwrap_or("<none>"),
+            tool_calls = accum.tool_calls.len(),
+            "finish_reason disagrees with emitted tool calls; running them anyway"
+        );
+    }
+    let (records, parsed) = accum.finalize_tool_calls()?;
+    conv.push_assistant_with_tool_calls(None, records);
+    Ok(StepOutcome::ToolCalls(parsed))
 }
 
 #[async_trait]

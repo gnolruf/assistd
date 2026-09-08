@@ -3,11 +3,22 @@ use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
 
-/// `cat [FILE]...`: concatenate files, or echo stdin if no files given.
-/// Binary files are rejected so their raw bytes don't pollute the model's
-/// context window; pair with `see` (images) or `cat -b` (metadata-only)
-/// to inspect them safely.
+/// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if no files
+/// given. Binary files are rejected so their raw bytes don't pollute the
+/// model's context window; pair with `see` (images) or `cat -b`
+/// (metadata-only) to inspect them safely.
+///
+/// Flags:
+/// - `-b` print metadata (mime, size) instead of content
+/// - `-n` prefix each output line with its 1-based number
 pub struct CatCommand;
+
+/// Recognized `cat` flags, split out of argv by [`parse_flags`].
+#[derive(Default)]
+struct Flags {
+    metadata_only: bool,
+    number_lines: bool,
+}
 
 #[async_trait]
 impl Command for CatCommand {
@@ -16,30 +27,42 @@ impl Command for CatCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "read text files or stdin; binary rejected (see `see`, `cat -b`)"
+        "read text files or stdin (-n numbers lines); binary rejected"
     }
 
     fn help(&self) -> String {
-        "usage: cat [-b] [FILE]...\n\
+        "usage: cat [-bn] [FILE]...\n\
          \n\
          Concatenate files, or echo stdin if no files given. Binary files \
          are rejected so their raw bytes don't pollute the model's context.\n\
          \n\
          Flags:\n  \
-           -b  print metadata (mime, size) instead of content (safe for binary files)\n\
+           -b  print metadata (mime, size) instead of content (safe for binary files)\n  \
+           -n  prefix each output line with its 1-based line number\n\
          \n\
          For image files, use `see PATH` to attach them as a vision input.\n"
             .to_string()
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        let (metadata_only, files) = partition_flags(&input.args);
+        let (flags, files) = match parse_flags(&input.args) {
+            Ok(v) => v,
+            Err(msg) => {
+                return Ok(CommandOutput::failed(
+                    2,
+                    error_line("cat", msg, "Use", "cat -b FILE or cat -n FILE").into_bytes(),
+                ));
+            }
+        };
 
         if files.is_empty() {
-            if metadata_only {
-                return Ok(CommandOutput::ok(describe(&input.stdin, None)));
+            let Some(stdin) = input.stdin else {
+                return Ok(CommandOutput::usage(self.help()));
+            };
+            if flags.metadata_only {
+                return Ok(CommandOutput::ok(describe(&stdin, None)));
             }
-            return Ok(CommandOutput::ok(input.stdin));
+            return Ok(CommandOutput::ok(number_if(stdin, &flags)));
         }
 
         let mut out = Vec::new();
@@ -54,7 +77,7 @@ impl Command for CatCommand {
                 }
             };
 
-            if metadata_only {
+            if flags.metadata_only {
                 out.extend_from_slice(&describe(&bytes, Some(path)));
                 continue;
             }
@@ -80,24 +103,39 @@ impl Command for CatCommand {
             }
             out.extend_from_slice(&bytes);
         }
-        Ok(CommandOutput::ok(out))
+        Ok(CommandOutput::ok(number_if(out, &flags)))
     }
 }
 
-/// Split `argv` into `(metadata_only, paths)`. `-b` is the only flag
-/// recognized; anything else starting with `-` is treated as a path to
-/// stay consistent with how the chain executor quotes arguments.
-fn partition_flags(argv: &[String]) -> (bool, Vec<String>) {
-    let mut metadata_only = false;
+fn number_if(bytes: Vec<u8>, flags: &Flags) -> Vec<u8> {
+    if !flags.number_lines {
+        return bytes;
+    }
+    let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 16);
+    for (i, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        out.extend_from_slice(format!("{}\t", i + 1).as_bytes());
+        out.extend_from_slice(line);
+    }
+    out
+}
+
+fn parse_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
+    let mut flags = Flags::default();
     let mut files = Vec::with_capacity(argv.len());
-    for a in argv {
-        if a == "-b" {
-            metadata_only = true;
-        } else {
-            files.push(a.clone());
+    for arg in argv {
+        let Some(letters) = arg.strip_prefix('-').filter(|l| !l.is_empty()) else {
+            files.push(arg.clone());
+            continue;
+        };
+        for ch in letters.chars() {
+            match ch {
+                'b' => flags.metadata_only = true,
+                'n' => flags.number_lines = true,
+                other => return Err(format!("unknown flag '-{other}'")),
+            }
         }
     }
-    (metadata_only, files)
+    Ok((flags, files))
 }
 
 /// `Some(mime)` if the bytes look binary, `None` if they're plausibly
@@ -118,9 +156,6 @@ pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Render `<mime>\n<size> bytes\n` (with optional path prefix for
-/// multi-file metadata listings). Used by `cat -b` and by the binary
-/// error message via `human_size`.
 fn describe(bytes: &[u8], path: Option<&str>) -> Vec<u8> {
     let mime = infer::get(bytes)
         .map(|t| t.mime_type().to_string())
@@ -165,6 +200,37 @@ mod tests {
     ];
 
     #[tokio::test]
+    async fn cat_no_args_and_no_stdin_emits_usage() {
+        let out = CatCommand
+            .run(CommandInput {
+                args: Vec::new(),
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: cat"), "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn cat_unknown_flag_errors() {
+        let out = CatCommand
+            .run(CommandInput {
+                args: vec!["-q".into(), "notes.md".into()],
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 2);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[error] cat: unknown flag '-q'"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Use: "), "{stderr}");
+    }
+
+    #[tokio::test]
     async fn cat_reads_text_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("hello.txt");
@@ -172,7 +238,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -193,7 +259,7 @@ mod tests {
                     a.to_string_lossy().into_owned(),
                     b.to_string_lossy().into_owned(),
                 ],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -205,7 +271,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec!["/nonexistent/path/xyz".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -219,11 +285,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cat_n_numbers_lines_across_files() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, b"one\ntwo\n").unwrap();
+        std::fs::write(&b, b"three\n").unwrap();
+        let out = CatCommand
+            .run(CommandInput {
+                args: vec![
+                    "-n".into(),
+                    a.to_string_lossy().into_owned(),
+                    b.to_string_lossy().into_owned(),
+                ],
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, b"1\tone\n2\ttwo\n3\tthree\n");
+    }
+
+    #[tokio::test]
+    async fn cat_n_numbers_stdin() {
+        let out = CatCommand
+            .run(CommandInput {
+                args: vec!["-n".into()],
+                stdin: Some(b"alpha\nbeta\n".to_vec()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, b"1\talpha\n2\tbeta\n");
+    }
+
+    #[tokio::test]
     async fn cat_no_args_echoes_stdin() {
         let out = CatCommand
             .run(CommandInput {
                 args: Vec::new(),
-                stdin: b"from stdin".to_vec(),
+                stdin: Some(b"from stdin".to_vec()),
             })
             .await
             .unwrap();
@@ -238,7 +338,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -262,7 +362,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec![path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -283,7 +383,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec!["-b".into(), path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -304,7 +404,7 @@ mod tests {
         let out = CatCommand
             .run(CommandInput {
                 args: vec!["-b".into(), path.to_string_lossy().into_owned()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();

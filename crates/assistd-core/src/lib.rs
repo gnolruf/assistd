@@ -76,9 +76,9 @@ use assistd_memory::SemanticStore;
 use assistd_tools::{
     ConfirmationGate, MemoryOps, RecallTool, RememberTool, ReminisceTool, RunTool, SandboxRequest,
     commands::{
-        BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, LsCommand,
-        ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WcCommand,
-        WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
+        BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
+        ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
+        TailCommand, UniqCommand, WcCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
     },
     probe_sandbox,
 };
@@ -226,6 +226,10 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     commands.register(LsCommand);
     commands.register(GrepCommand);
     commands.register(WcCommand);
+    commands.register(HeadCommand);
+    commands.register(TailCommand);
+    commands.register(SortCommand);
+    commands.register(UniqCommand);
     commands.register(EchoCommand);
     commands.register(WriteCommand::new(write_cfg));
     commands.register(SeeCommand::new(vision_gate.clone()));

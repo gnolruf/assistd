@@ -794,7 +794,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["--bogus-flag".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -1181,7 +1181,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["--full".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();

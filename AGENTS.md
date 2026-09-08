@@ -89,7 +89,7 @@ and data-flow walkthrough.
 | `assistd-llm`    | `LlmBackend` trait, `LlamaChatClient` (HTTP/SSE to `llama-server`), and the child-process supervisor with health probes, restart-on-crash, and vision-capability detection. |
 | `assistd-mcp`    | MCP client (stdio + SSE transports), supervisor with reconnect/backoff, and `McpToolAdapter` which exposes discovered tools through the `Tool` trait under `mcp__<server>__<tool>`. |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore` (K/V facts), `ConversationStore` (transcripts with branching/undo), `SemanticStore` (embedding-indexed chunks). Uses `tokio-rusqlite` + `rusqlite_migration`. |
-| `assistd-tools`  | `Tool` and `Command` traits, registries, the single `RunTool` the model sees, all built-in commands (`bash`, `cat`, `echo`, `grep`, `ls`, `screenshot`, `see`, `wc`, `web`, `wm`, `write`), and the policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`). |
+| `assistd-tools`  | `Tool` and `Command` traits, registries, the single `RunTool` the model sees, all built-in commands (`bash`, `cat`, `echo`, `grep`, `head`, `ls`, `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`, `write`), and the policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`). |
 | `assistd-voice`  | `VoiceInput` (Whisper STT via `whisper-rs`, push-to-talk and VAD continuous modes), `VoiceOutput` (Piper TTS streamed sentence-by-sentence), adaptive `SpeakDecision`. Feature-gated (`whisper`, `mic`, `listen`, `tts`, `cuda`). |
 | `assistd-wm`     | `WindowManager` trait with i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager` fallback. Backs both the system-prompt active-window injection and the `wm` command. Feature-gated per compositor. |
 

@@ -47,7 +47,7 @@ fn no_sandbox() -> Arc<SandboxInfo> {
 fn input(script: &str) -> CommandInput {
     CommandInput {
         args: vec![script.to_string()],
-        stdin: Vec::new(),
+        stdin: None,
     }
 }
 

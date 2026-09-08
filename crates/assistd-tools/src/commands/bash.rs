@@ -130,12 +130,7 @@ impl Command for BashCommand {
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         if input.args.is_empty() {
-            return Ok(CommandOutput {
-                stdout: self.help().into_bytes(),
-                stderr: Vec::new(),
-                exit_code: 2,
-                attachments: Vec::new(),
-            });
+            return Ok(CommandOutput::usage(self.help()));
         }
         let script = input.args.join(" ");
 
@@ -187,20 +182,25 @@ impl Command for BashCommand {
         let cmd = self
             .sandbox
             .command(SandboxAccess::Default, "bash", ["-c", script.as_str()]);
-        supervise("bash", cmd, &input.stdin, self.cfg.timeout)
-            .await
-            .or_else(|e| {
-                Ok(CommandOutput::failed(
-                    SPAWN_FAILED_EXIT,
-                    error_line(
-                        "bash",
-                        format_args!("spawn failed: {e}"),
-                        "Check",
-                        "bash and (if configured) bwrap are on PATH",
-                    )
-                    .into_bytes(),
-                ))
-            })
+        supervise(
+            "bash",
+            cmd,
+            input.stdin.as_deref().unwrap_or_default(),
+            self.cfg.timeout,
+        )
+        .await
+        .or_else(|e| {
+            Ok(CommandOutput::failed(
+                SPAWN_FAILED_EXIT,
+                error_line(
+                    "bash",
+                    format_args!("spawn failed: {e}"),
+                    "Check",
+                    "bash and (if configured) bwrap are on PATH",
+                )
+                .into_bytes(),
+            ))
+        })
     }
 }
 
@@ -219,7 +219,7 @@ mod tests {
         let out = BashCommand::default()
             .run(CommandInput {
                 args: vec!["echo hi".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -232,7 +232,7 @@ mod tests {
         let out = BashCommand::default()
             .run(CommandInput {
                 args: vec!["exit 3".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -244,7 +244,7 @@ mod tests {
         let out = BashCommand::default()
             .run(CommandInput {
                 args: vec!["tr a-z A-Z".into()],
-                stdin: b"hello".to_vec(),
+                stdin: Some(b"hello".to_vec()),
             })
             .await
             .unwrap();
@@ -265,7 +265,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["sleep 5".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -283,7 +283,7 @@ mod tests {
         let out = BashCommand::default()
             .run(CommandInput {
                 args: Vec::new(),
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -298,7 +298,7 @@ mod tests {
         let out = BashCommand::default()
             .run(CommandInput {
                 args: vec!["assistd-definitely-not-a-real-binary-xyz".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -325,7 +325,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["rm -rf /".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -347,7 +347,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["MKFS.ext4 /dev/sda1".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -367,7 +367,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["true".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -391,7 +391,7 @@ mod tests {
                 // Use /tmp/nonexistent so that even if the gate is buggy
                 // and allows execution, no real data is lost.
                 args: vec!["rm -rf /tmp/this-directory-does-not-exist-XYZ".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -428,7 +428,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["echo \"rm -rf\"".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -453,7 +453,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["yes".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -483,7 +483,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["yes 1>&2".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -504,7 +504,7 @@ mod tests {
             .run(CommandInput {
                 // ~50 KiB, comfortably below 10 MiB.
                 args: vec!["printf '%.0sx' {1..51200}".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -522,7 +522,7 @@ mod tests {
         let out = BashCommand::default()
             .run(CommandInput {
                 args: vec!["kill -SEGV $$".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
@@ -568,7 +568,7 @@ mod tests {
             Duration::from_secs(10),
             cmd.run(CommandInput {
                 args: vec![script(&pidfile)],
-                stdin: Vec::new(),
+                stdin: None,
             }),
         )
         .await
@@ -637,7 +637,7 @@ mod tests {
         let out = cmd
             .run(CommandInput {
                 args: vec!["echo sandboxed".into()],
-                stdin: Vec::new(),
+                stdin: None,
             })
             .await
             .unwrap();
