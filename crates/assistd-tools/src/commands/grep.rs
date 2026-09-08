@@ -156,8 +156,6 @@ impl Command for GrepCommand {
     }
 }
 
-/// Search the piped-in bytes. Stdin has no path to label lines with, so
-/// this is the one source that never carries a `PATH:` prefix.
 fn search_stdin(re: &Regex, flags: &Flags, stdin: Vec<u8>) -> CommandOutput {
     let Ok(text) = std::str::from_utf8(&stdin) else {
         return CommandOutput::failed(
@@ -203,8 +201,6 @@ async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> Command
         }
         total += count;
     }
-    // With a label the per-file `PATH:count` lines above are the whole
-    // answer; without one, `-c` reports the single bare total.
     let stdout = if flags.count_only && !label_lines {
         format!("{total}\n").into_bytes()
     } else {
@@ -213,9 +209,6 @@ async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> Command
     outcome(total, stdout)
 }
 
-/// Append every matching line to `out` and return how many matched.
-/// `label` is the `PATH:` prefix, present only when more than one file
-/// is in play. Counting mode collects nothing.
 fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Vec<u8>) -> usize {
     let mut count = 0;
     for (i, line) in text.split_inclusive('\n').enumerate() {
@@ -272,11 +265,6 @@ impl TargetError {
     }
 }
 
-/// Resolve command-line paths to the files to search. Directories are
-/// descended only under `-r`; symlinks are never followed, so a cycle
-/// can't hang the walk. Entries that disappear or refuse access
-/// mid-descent are skipped, while a path named on the command line that
-/// cannot be stat'd is returned as an error.
 async fn collect_targets(paths: &[String], recursive: bool) -> Result<Vec<PathBuf>, TargetError> {
     let mut targets = Vec::with_capacity(paths.len());
     for raw in paths {

@@ -14,8 +14,6 @@ use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_
 ///   only format this command emits
 pub struct LsCommand;
 
-/// Split `argv` into `(show_hidden, path)`. Returns the offending flag
-/// on an unrecognized one so the caller can build the error line.
 fn parse_args(argv: &[String]) -> Result<(bool, &str), String> {
     let mut show_hidden = false;
     let mut path = None;

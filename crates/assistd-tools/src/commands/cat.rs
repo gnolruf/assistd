@@ -96,8 +96,6 @@ impl Command for CatCommand {
     }
 }
 
-/// Prefix every line with `<n>\t` when `-n` was given. Numbering spans
-/// the concatenation, matching `cat -n a b`.
 fn number_if(bytes: Vec<u8>, flags: &Flags) -> Vec<u8> {
     if !flags.number_lines {
         return bytes;
@@ -110,9 +108,6 @@ fn number_if(bytes: Vec<u8>, flags: &Flags) -> Vec<u8> {
     out
 }
 
-/// Split `argv` into `(flags, paths)`. Anything starting with `-` that
-/// isn't a recognized flag is treated as a path to stay consistent with
-/// how the chain executor quotes arguments.
 fn partition_flags(argv: &[String]) -> (Flags, Vec<String>) {
     let mut flags = Flags::default();
     let mut files = Vec::with_capacity(argv.len());
@@ -148,9 +143,6 @@ pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Render `<mime>\n<size> bytes\n` (with optional path prefix for
-/// multi-file metadata listings). Used by `cat -b` and by the binary
-/// error message via `human_size`.
 fn describe(bytes: &[u8], path: Option<&str>) -> Vec<u8> {
     let mime = infer::get(bytes)
         .map(|t| t.mime_type().to_string())

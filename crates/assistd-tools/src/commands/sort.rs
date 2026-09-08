@@ -42,9 +42,6 @@ fn parse_flags(argv: &[String]) -> Result<Flags, String> {
     Ok(flags)
 }
 
-/// Leading integer of a line, used as the `-n` sort key. Lines without
-/// one sort before every numbered line, matching coreutils' treatment of
-/// non-numeric input as zero-or-less.
 fn numeric_key(line: &[u8]) -> i64 {
     let text = String::from_utf8_lossy(line);
     let trimmed = text.trim_start();
@@ -94,8 +91,6 @@ impl Command for SortCommand {
         };
 
         let mut lines: Vec<&[u8]> = input.stdin.split(|b| *b == b'\n').collect();
-        // `split` on newline-terminated input leaves a trailing empty
-        // element that is not a line; blank lines in the middle are.
         if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }

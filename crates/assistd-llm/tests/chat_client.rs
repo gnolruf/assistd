@@ -513,20 +513,10 @@ async fn http_500_returns_server_error() {
 
 #[tokio::test]
 async fn conv_lock_does_not_block_during_streaming() {
-    // Regression for the conv-mutex scope fix in `generate`: while one
-    // call is streaming, a concurrent `set_transient_context` (which
-    // takes the lock) must complete promptly rather than serializing
-    // behind the in-flight stream. Before the fix, the second call
-    // waited for the full stream to finish.
     use assistd_llm::LlmBackend;
     use std::time::Instant;
 
     let script = Script::new();
-    // One slow stream: large number of small frames separated by
-    // `[DONE]` arrival via DropAfterDeltas would only produce one
-    // outgoing frame. Use the standard Deltas with many entries; the
-    // fake server writes them as fast as it can but the client still
-    // has to await each chunk through the SSE parser.
     let many: Vec<String> = (0..200).map(|i| format!("d{i}")).collect();
     script.push_stream(StreamResponse::Deltas(many)).await;
     let (port, _server) = spawn_fake(script).await;
@@ -534,7 +524,6 @@ async fn conv_lock_does_not_block_during_streaming() {
     let client = Arc::new(build_client(&chat_spec(port)));
     let (tx, mut rx) = mpsc::channel(1024);
 
-    // Kick off the slow generate.
     let gen_client = client.clone();
     let stream_task = tokio::spawn(async move { gen_client.generate("first".into(), tx).await });
 
@@ -545,10 +534,6 @@ async fn conv_lock_does_not_block_during_streaming() {
             .expect("at least a few deltas should arrive");
     }
 
-    // Now: while the stream is still running, take the lock for a
-    // separate operation. With the lock-scope fix, this completes in
-    // milliseconds. Without it, this would block until the stream
-    // finishes, which we cap with an outer timeout.
     let started = Instant::now();
     tokio::time::timeout(
         Duration::from_secs(2),
@@ -573,9 +558,6 @@ async fn conv_lock_does_not_block_during_streaming() {
 
 #[tokio::test]
 async fn stalled_stream_aborts_within_inactivity_timeout() {
-    // Server emits a couple of deltas then goes quiet on the socket.
-    // With `stream_inactivity_secs = 1`, the client should error within
-    // ~1s rather than hanging forever.
     let script = Script::new();
     script
         .push_stream(StreamResponse::StallAfterDeltas(vec![
@@ -592,11 +574,6 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
 
     let (tx, mut rx) = mpsc::channel(32);
     let started = std::time::Instant::now();
-    // The mid-stream timeout is folded into PartialAfterEmit because we
-    // already forwarded "hello"/" " deltas, so generate() returns Ok
-    // with a Done event. The signal is the latency: it must complete
-    // well under the test's outer 5s budget, near the configured 1s
-    // inactivity deadline.
     let res = tokio::time::timeout(Duration::from_secs(5), client.generate("hi".into(), tx))
         .await
         .expect("generate must return within outer 5s budget");
@@ -621,9 +598,6 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
 
 #[tokio::test]
 async fn slow_first_token_is_not_treated_as_a_stall() {
-    // Headers land, then the server prefills in silence. The 1s
-    // inter-chunk deadline must not police that window; only
-    // `chat.request_timeout_secs` bounds the wait for the first byte.
     let script = Script::new();
     script
         .push_stream(StreamResponse::StallAfterDeltas(Vec::new()))
@@ -825,17 +799,10 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
 // Agent-loop step API
 // ---------------------------------------------------------------------------
 
-/// Frame the `tool_calls` path as a sequence of SSE payloads suitable for
-/// `StreamResponse::RawFrames`. Matches llama.cpp's typical shape: role
-/// first, then one or more tool_call deltas with accumulating `arguments`,
-/// terminated by a finish_reason chunk.
 fn tool_call_frames(call_id: &str, name: &str, arg_chunks: &[&str]) -> Vec<String> {
     tool_call_frames_finishing(call_id, name, arg_chunks, "tool_calls")
 }
 
-/// Same, but with a caller-chosen `finish_reason` on the terminating
-/// chunk. Some llama.cpp template/parser paths report `"stop"` even when
-/// the model emitted tool calls.
 fn tool_call_frames_finishing(
     call_id: &str,
     name: &str,
@@ -897,10 +864,6 @@ async fn step_with_stop_finish_reason_returns_final() {
     );
 }
 
-/// Regression: a tool call arriving with `finish_reason: "stop"` must
-/// still run. Dropping it ends the turn silently at exactly the point
-/// the tool would have run, which reads to the user as the response
-/// being cut off mid-sentence.
 #[tokio::test]
 async fn step_runs_tool_calls_reported_with_stop_finish_reason() {
     let script = Script::new();
@@ -931,8 +894,6 @@ async fn step_runs_tool_calls_reported_with_stop_finish_reason() {
     }
 }
 
-/// A `"length"` cutoff mid-arguments must surface as a parse error the
-/// agent loop can report, never as a silent `Final`.
 #[tokio::test]
 async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
     let script = Script::new();
@@ -999,9 +960,6 @@ async fn step_parses_tool_call_across_argument_chunks() {
     assert_eq!(calls[0].name, "run");
     assert_eq!(calls[0].arguments["command"], "ls /tmp");
 
-    // No visible text deltas for a tool-calls-only step; Qwen3-style
-    // <think> blocks would have been emitted via `content`, but none
-    // appeared in our scripted frames.
     let events = drain(&mut rx).await;
     assert!(
         !events.iter().any(|e| matches!(e, LlmEvent::Delta { .. })),
@@ -1128,11 +1086,6 @@ async fn request_timeout_surfaces_as_error() {
     assert!(result.is_err());
 }
 
-/// Regression: `complete_oneshot` awaits every send into a bounded
-/// channel, so the collector has to run concurrently. Draining only
-/// after the stream finished wedged the task forever once the response
-/// outgrew the channel — which is every response from a reasoning
-/// model, and it leaked the llama-server slot with it.
 #[tokio::test]
 async fn complete_oneshot_survives_a_response_larger_than_the_channel() {
     let script = Script::new();
@@ -1152,9 +1105,6 @@ async fn complete_oneshot_survives_a_response_larger_than_the_channel() {
     assert!(text.trim_end().ends_with("tok499"), "{text:.40}");
 }
 
-/// The one-shot path is for short answers (session titles), so it must
-/// not inherit the full per-response budget: a thinking model spent 8k
-/// tokens deliberating over a six-word title.
 #[tokio::test]
 async fn complete_oneshot_uses_the_summary_budget() {
     let script = Script::new();

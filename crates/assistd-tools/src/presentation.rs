@@ -481,9 +481,6 @@ mod tests {
 
     #[test]
     fn present_shows_stderr_on_zero_exit() {
-        // A pipeline reports its last stage's exit code, so an earlier
-        // stage that failed shows up only here. Suppressing the marker
-        // on exit 0 turned `find . | head` into a silent empty success.
         let dir = tempdir().unwrap();
         let out = CommandOutput {
             stdout: Vec::new(),
@@ -508,8 +505,6 @@ mod tests {
 
     #[test]
     fn present_stderr_survives_with_nonempty_stdout() {
-        // Acceptance: stderr is never silently dropped even when stdout is
-        // non-empty.
         let dir = tempdir().unwrap();
         let out = CommandOutput {
             stdout: b"stdout content\n".to_vec(),

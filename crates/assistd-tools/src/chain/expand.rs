@@ -48,9 +48,6 @@ fn expand_tilde(text: &str) -> String {
     }
 }
 
-/// `Some(paths)` when `pattern` is a glob that matched at least one
-/// entry, `None` when it holds no metacharacters, is malformed, or
-/// matched nothing.
 fn expand_glob(pattern: &str) -> Option<Vec<String>> {
     if !pattern.contains(['*', '?', '[']) {
         return None;

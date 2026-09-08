@@ -22,10 +22,6 @@ struct CountError {
     recovery: String,
 }
 
-/// Parse the line count out of argv. Accepts `-n N`, `-nN` and the bare
-/// `-N` shorthand. A non-flag argument is rejected rather than ignored:
-/// silently reading empty stdin because a filename was mistaken for a
-/// flag is the worst failure this command has.
 fn parse_line_count(cmd: &str, argv: &[String]) -> Result<usize, CountError> {
     let mut count = DEFAULT_LINES;
     let mut i = 0;

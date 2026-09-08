@@ -17,9 +17,6 @@ struct Flags {
     escapes: bool,
 }
 
-/// Split leading `-n` / `-e` / `-E` flags off the argument list. Like
-/// bash's builtin, the first argument that isn't one of those ends flag
-/// parsing, so `echo -n -- -e` still prints `-- -e`.
 fn split_flags(argv: &[String]) -> (Flags, &[String]) {
     let mut flags = Flags::default();
     let mut i = 0;
@@ -42,8 +39,6 @@ fn split_flags(argv: &[String]) -> (Flags, &[String]) {
     (flags, &argv[i..])
 }
 
-/// Resolve the backslash escapes `-e` enables. An unrecognized escape
-/// keeps both characters, matching bash rather than swallowing input.
 fn unescape(text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     let mut chars = text.chars();

@@ -597,10 +597,6 @@ impl LlmBackend for LlamaChatClient {
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
 
-        // The collector has to run *while* the stream is producing:
-        // `stream_openai` awaits every send, so leaving the receiver idle
-        // until afterwards wedges the whole task the moment the response
-        // outgrows the channel — which any reasoning model does.
         let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
         let stream = async {
             let outcome = self.stream_openai(body_bytes, &tx).await;
@@ -669,15 +665,6 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::
     Ok(out)
 }
 
-/// Translate a completed stream into conversation commits + [`StepOutcome`].
-///
-/// Accumulated tool calls decide the outcome on their own; `finish_reason`
-/// only gets logged when it disagrees. Gating on `finish_reason ==
-/// "tool_calls"` used to drop calls that arrived alongside a `"stop"`,
-/// which ends the turn silently right where the tool call should have
-/// run — indistinguishable, from the client, from the model choosing to
-/// stop talking. A truncated call is caught by `finalize_tool_calls`
-/// instead and surfaces as a visible parse error.
 fn commit_step(conv: &mut Conversation, accum: StreamAccum) -> LlmResult<StepOutcome> {
     if accum.tool_calls.is_empty() {
         conv.push_assistant(accum.text);
