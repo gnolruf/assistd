@@ -41,7 +41,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::info;
 use uuid::Uuid;
 
-use self::app::{App, ChatEvent};
+use self::app::{App, ChatEvent, WireStream};
 
 /// Arguments for the `chat` subcommand.
 #[derive(Args)]
@@ -375,7 +375,12 @@ async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Reque
         if ev.is_terminal() {
             break;
         }
-        let _ = chat_tx.send(ChatEvent::Wire(ev)).await;
+        let _ = chat_tx
+            .send(ChatEvent::Wire {
+                stream: WireStream::Status,
+                event: ev,
+            })
+            .await;
     }
 }
 

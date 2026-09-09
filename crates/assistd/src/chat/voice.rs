@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use super::app::ChatEvent;
+use super::app::{ChatEvent, WireStream};
 use crate::hotkey;
 use crate::ipc_voice_proxy::IpcVoiceProxy;
 
@@ -92,11 +92,18 @@ pub async fn spawn(
 }
 
 /// Forward each `Event` produced by the proxy onto the chat reducer's
-/// channel as `ChatEvent::Wire`. Exits when the proxy drops its sender
-/// (process shutdown).
+/// channel. Tagged [`WireStream::Reply`]: the daemon dispatches the
+/// transcribed utterance as a query and streams the answer back on this
+/// same connection, so these events own the output pane exactly as a
+/// typed query's do. Exits when the proxy drops its sender (process
+/// shutdown).
 async fn bridge_events(mut event_rx: mpsc::Receiver<Event>, chat_tx: mpsc::Sender<ChatEvent>) {
     while let Some(ev) = event_rx.recv().await {
-        if chat_tx.send(ChatEvent::Wire(ev)).await.is_err() {
+        let tagged = ChatEvent::Wire {
+            stream: WireStream::Reply,
+            event: ev,
+        };
+        if chat_tx.send(tagged).await.is_err() {
             break;
         }
     }

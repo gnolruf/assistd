@@ -85,14 +85,34 @@ pub struct AttachLoadedPayload {
     pub protocol: Option<StatefulProtocol>,
 }
 
+/// Which of the TUI's concurrent daemon connections an event arrived
+/// on. Several run at once — the query dialog, a branch command, the
+/// presence poll, the F2 cycle — and all of them funnel into one
+/// reducer, so the tag says which slice of `App` state a stream is
+/// allowed to retire. Untagged, a status-stream `Done` closes the
+/// visible reply mid-stream and a branch-stream failure never releases
+/// the in-flight branch slot.
+#[derive(Debug, Clone, Copy)]
+pub enum WireStream {
+    /// A `Query` dialog, or a push-to-talk turn the daemon
+    /// auto-dispatched. Owns the assistant message, [`App::generating`]
+    /// and the query writer.
+    Reply,
+    /// `/fork`, `/switch`, `/undo`, `/new`, `/resume` and the startup
+    /// resume. Owns the in-flight branch op and its buffered rows.
+    Branch,
+    /// Presence/voice polls and the F2 cycle. Indicator state only.
+    Status,
+}
+
 pub enum ChatEvent {
     /// Streaming event from the daemon over IPC. Includes both
     /// query-response events (Delta/ToolCall/ToolResult/Done) and
     /// status-poll events (Presence/VoiceState/ListenState/...).
-    Wire(Event),
+    Wire { stream: WireStream, event: Event },
     /// The wire connection ended in an unexpected way (I/O error,
     /// daemon closed mid-stream without `Done`).
-    WireError(String),
+    WireError { stream: WireStream, message: String },
     /// `/attach <path>` finished reading + validating the file. Carries
     /// everything the App needs to update the UI.
     AttachLoaded(Box<AttachLoadedPayload>),
@@ -103,8 +123,16 @@ pub enum ChatEvent {
 impl std::fmt::Debug for ChatEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChatEvent::Wire(ev) => f.debug_tuple("Wire").field(ev).finish(),
-            ChatEvent::WireError(msg) => f.debug_tuple("WireError").field(msg).finish(),
+            ChatEvent::Wire { stream, event } => f
+                .debug_struct("Wire")
+                .field("stream", stream)
+                .field("event", event)
+                .finish(),
+            ChatEvent::WireError { stream, message } => f
+                .debug_struct("WireError")
+                .field("stream", stream)
+                .field("message", message)
+                .finish(),
             ChatEvent::AttachLoaded(p) => f
                 .debug_struct("AttachLoaded")
                 .field("path", &p.path)
@@ -200,12 +228,14 @@ pub struct App {
     picker: Option<Picker>,
     /// Daemon connection factory.
     ipc: Arc<IpcClient>,
-    /// Sender into the active query's bidirectional dialog connection.
-    /// The query-driver task owns the read half + the write half; this
-    /// `mpsc::Sender` lets the modal handler enqueue a
-    /// `Request::ConfirmResponse` for the writer task to forward.
-    /// `None` between queries.
-    active_writer: Option<mpsc::Sender<Request>>,
+    /// The reply turn that currently owns the output pane. `None`
+    /// between turns.
+    active_reply: Option<ActiveReply>,
+    /// A spoken utterance transcribed while another turn still owned
+    /// the pane. Held back until that turn finishes, so the spoken line
+    /// is drawn above its own answer instead of splicing into the
+    /// running reply.
+    queued_transcription: Option<QueuedTranscription>,
     /// Tracks an in-flight branch command so [`Self::on_wire_event`]
     /// can route `BranchInfo` / `BranchSwitched` / `HistoryEntry` /
     /// `UndoApplied` events into the right rendering path. Cleared on
@@ -242,6 +272,27 @@ pub struct App {
     /// per-item flag still tracks individual Tab toggles so flipping
     /// verbose off restores the previous fine-grained state.
     pub verbose: bool,
+}
+
+/// The reply turn that owns the output pane: the open assistant block,
+/// [`App::generating`], and the throughput meter. Two reply streams can
+/// be live at once — a push-to-talk turn dispatched while a typed query
+/// is still streaming — but the daemon runs one agent turn at a time
+/// behind its turn lock, so the pane is handed from one to the next
+/// rather than shared.
+struct ActiveReply {
+    /// Request id the daemon echoes on every event of this turn.
+    id: String,
+    /// Write half of the turn's dialog connection, used to answer a
+    /// `ConfirmRequest`. `None` for a push-to-talk turn, whose
+    /// connection belongs to `IpcVoiceProxy`.
+    writer: Option<mpsc::Sender<Request>>,
+}
+
+/// A transcribed utterance waiting for the pane to come free.
+struct QueuedTranscription {
+    id: String,
+    text: String,
 }
 
 /// Which branch slash-command is currently in flight, if any. Used to
@@ -319,7 +370,8 @@ impl App {
             pending_attachments: Vec::new(),
             picker,
             ipc,
-            active_writer: None,
+            active_reply: None,
+            queued_transcription: None,
             in_flight_branch_op: None,
             branches_buffer: Vec::new(),
             chat_tx,
@@ -363,7 +415,11 @@ impl App {
     }
 
     fn send_confirm_response(&self, confirm_id: &str, allow: bool) {
-        let Some(writer) = self.active_writer.clone() else {
+        let Some(writer) = self
+            .active_reply
+            .as_ref()
+            .and_then(|reply| reply.writer.clone())
+        else {
             tracing::warn!(
                 confirm_id,
                 "no active query writer to forward ConfirmResponse"
@@ -642,7 +698,12 @@ impl App {
                 Ok(mut stream) => {
                     while let Ok(Some(ev)) = stream.next_event().await {
                         let terminal = ev.is_terminal();
-                        let _ = chat_tx.send(ChatEvent::Wire(ev)).await;
+                        let _ = chat_tx
+                            .send(ChatEvent::Wire {
+                                stream: WireStream::Status,
+                                event: ev,
+                            })
+                            .await;
                         if terminal {
                             break;
                         }
@@ -650,7 +711,10 @@ impl App {
                 }
                 Err(e) => {
                     let _ = chat_tx
-                        .send(ChatEvent::WireError(format!("cycle: {e}")))
+                        .send(ChatEvent::WireError {
+                            stream: WireStream::Status,
+                            message: format!("cycle: {e}"),
+                        })
                         .await;
                 }
             }
@@ -660,11 +724,14 @@ impl App {
     /// Reducer entry point for everything the event loop pumps in.
     pub fn on_chat_event(&mut self, ev: ChatEvent) {
         match ev {
-            ChatEvent::Wire(event) => self.on_wire_event(event),
-            ChatEvent::WireError(msg) => {
-                self.output.push_error(&format!("[wire error] {msg}"));
-                self.generating = false;
-                self.active_writer = None;
+            ChatEvent::Wire { stream, event } => self.on_wire_event(stream, event),
+            ChatEvent::WireError { stream, message } => {
+                self.output.push_error(&format!("[wire error] {message}"));
+                match stream {
+                    WireStream::Reply => self.finish_reply(Instant::now()),
+                    WireStream::Branch => self.fail_branch_op(),
+                    WireStream::Status => {}
+                }
             }
             ChatEvent::AttachLoaded(payload) => {
                 let AttachLoadedPayload {
@@ -693,7 +760,10 @@ impl App {
         }
     }
 
-    fn on_wire_event(&mut self, ev: Event) {
+    fn on_wire_event(&mut self, stream: WireStream, ev: Event) {
+        if matches!(stream, WireStream::Reply) && !self.accept_reply_event(&ev) {
+            return;
+        }
         let now = Instant::now();
         match ev {
             Event::Delta { text, .. } => {
@@ -756,11 +826,7 @@ impl App {
                 if text.trim().is_empty() {
                     self.set_notice("no speech detected");
                 } else {
-                    self.output.push_user(&text);
-                    self.output.reset_scroll();
-                    self.output.begin_assistant();
-                    self.throughput.reset();
-                    self.generating = true;
+                    self.begin_voice_turn(&text);
                 }
             }
             Event::ListenState { active, .. } => {
@@ -892,28 +958,18 @@ impl App {
                     }
                 }
             }
-            Event::Done { .. } => {
-                self.throughput.on_done(now);
-                self.output.finish_thinking();
-                self.output.finish_assistant();
-                self.generating = false;
-                self.active_writer = None;
-                self.last_thinking_seconds = None;
-                if let Some(BranchOp::ResumePicker) = self.in_flight_branch_op {
-                    self.open_branch_picker();
-                }
-                self.in_flight_branch_op = None;
-            }
+            Event::Done { .. } => match stream {
+                WireStream::Reply => self.finish_reply(now),
+                WireStream::Branch => self.finish_branch_op(),
+                WireStream::Status => {}
+            },
             Event::Error { message, .. } => {
-                self.throughput.on_done(now);
-                self.output.finish_thinking();
-                self.output.finish_assistant();
                 self.output.push_error(&message);
-                self.generating = false;
-                self.active_writer = None;
-                self.last_thinking_seconds = None;
-                self.in_flight_branch_op = None;
-                self.branches_buffer.clear();
+                match stream {
+                    WireStream::Reply => self.finish_reply(now),
+                    WireStream::Branch => self.fail_branch_op(),
+                    WireStream::Status => {}
+                }
             }
             Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
@@ -923,6 +979,86 @@ impl App {
             | Event::ReindexProgress { .. }
             | Event::LastDelta { .. } => {}
         }
+    }
+
+    fn accept_reply_event(&mut self, ev: &Event) -> bool {
+        let Some(id) = turn_scoped_id(ev) else {
+            return true;
+        };
+        match self.active_reply.as_ref().map(|reply| reply.id == id) {
+            Some(true) => true,
+            Some(false) => {
+                self.defer_reply_event(id, ev);
+                false
+            }
+            None => {
+                self.active_reply = Some(ActiveReply {
+                    id: id.to_string(),
+                    writer: None,
+                });
+                if let Some(queued) = self.queued_transcription.take() {
+                    if queued.id == id {
+                        self.begin_voice_turn(&queued.text);
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    fn defer_reply_event(&mut self, id: &str, ev: &Event) {
+        match ev {
+            Event::Transcription { text, .. } => {
+                self.queued_transcription = Some(QueuedTranscription {
+                    id: id.to_string(),
+                    text: text.clone(),
+                });
+            }
+            Event::Error { message, .. } => {
+                self.set_notice(message);
+                self.drop_queued_transcription(id);
+            }
+            Event::Done { .. } => self.drop_queued_transcription(id),
+            _ => {}
+        }
+    }
+
+    fn drop_queued_transcription(&mut self, id: &str) {
+        if self
+            .queued_transcription
+            .as_ref()
+            .is_some_and(|q| q.id == id)
+        {
+            self.queued_transcription = None;
+        }
+    }
+
+    fn begin_voice_turn(&mut self, text: &str) {
+        self.output.push_user(text);
+        self.output.reset_scroll();
+        self.output.begin_assistant();
+        self.throughput.reset();
+        self.generating = true;
+    }
+
+    fn finish_reply(&mut self, now: Instant) {
+        self.throughput.on_done(now);
+        self.output.finish_thinking();
+        self.output.finish_assistant();
+        self.generating = false;
+        self.active_reply = None;
+        self.last_thinking_seconds = None;
+    }
+
+    fn finish_branch_op(&mut self) {
+        if let Some(BranchOp::ResumePicker) = self.in_flight_branch_op.take() {
+            self.open_branch_picker();
+        }
+    }
+
+    fn fail_branch_op(&mut self) {
+        self.in_flight_branch_op = None;
+        self.branches_buffer.clear();
     }
 
     /// Advance the spinner and expire stale notices. Also bumps the
@@ -1170,7 +1306,10 @@ impl App {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = chat_tx
-                        .send(ChatEvent::WireError(format!("branch connect: {e}")))
+                        .send(ChatEvent::WireError {
+                            stream: WireStream::Branch,
+                            message: format!("branch connect: {e}"),
+                        })
                         .await;
                     return;
                 }
@@ -1179,22 +1318,31 @@ impl App {
                 match stream.next_event().await {
                     Ok(Some(ev)) => {
                         let terminal = ev.is_terminal();
-                        let _ = chat_tx.send(ChatEvent::Wire(ev)).await;
+                        let _ = chat_tx
+                            .send(ChatEvent::Wire {
+                                stream: WireStream::Branch,
+                                event: ev,
+                            })
+                            .await;
                         if terminal {
                             return;
                         }
                     }
                     Ok(None) => {
                         let _ = chat_tx
-                            .send(ChatEvent::WireError(
-                                "daemon closed branch stream mid-flight".into(),
-                            ))
+                            .send(ChatEvent::WireError {
+                                stream: WireStream::Branch,
+                                message: "daemon closed branch stream mid-flight".into(),
+                            })
                             .await;
                         return;
                     }
                     Err(e) => {
                         let _ = chat_tx
-                            .send(ChatEvent::WireError(format!("branch read: {e}")))
+                            .send(ChatEvent::WireError {
+                                stream: WireStream::Branch,
+                                message: format!("branch read: {e}"),
+                            })
                             .await;
                         return;
                     }
@@ -1295,9 +1443,12 @@ impl App {
         let chat_tx = self.chat_tx.clone();
 
         let (writer_tx, mut writer_rx) = mpsc::channel::<Request>(8);
-        self.active_writer = Some(writer_tx);
-
         let req_id = Uuid::new_v4().to_string();
+        self.active_reply = Some(ActiveReply {
+            id: req_id.clone(),
+            writer: Some(writer_tx),
+        });
+
         let req = if attachments.is_empty() {
             Request::query(req_id, text)
         } else {
@@ -1317,57 +1468,85 @@ impl App {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = chat_tx
-                        .send(ChatEvent::WireError(format!("query connect: {e}")))
+                        .send(ChatEvent::WireError {
+                            stream: WireStream::Reply,
+                            message: format!("query connect: {e}"),
+                        })
                         .await;
                     return;
                 }
             };
 
+            let mut writer_open = true;
             loop {
                 tokio::select! {
                     maybe = conn.next_event() => {
                         match maybe {
                             Ok(Some(ev)) => {
                                 let terminal = ev.is_terminal();
-                                let _ = chat_tx.send(ChatEvent::Wire(ev)).await;
+                                let _ = chat_tx
+                                    .send(ChatEvent::Wire {
+                                        stream: WireStream::Reply,
+                                        event: ev,
+                                    })
+                                    .await;
                                 if terminal {
                                     return;
                                 }
                             }
                             Ok(None) => {
                                 let _ = chat_tx
-                                    .send(ChatEvent::WireError(
-                                        "daemon closed connection mid-stream".into(),
-                                    ))
+                                    .send(ChatEvent::WireError {
+                                        stream: WireStream::Reply,
+                                        message: "daemon closed connection mid-stream".into(),
+                                    })
                                     .await;
                                 return;
                             }
                             Err(e) => {
                                 let _ = chat_tx
-                                    .send(ChatEvent::WireError(format!("read: {e}")))
+                                    .send(ChatEvent::WireError {
+                                        stream: WireStream::Reply,
+                                        message: format!("read: {e}"),
+                                    })
                                     .await;
                                 return;
                             }
                         }
                     }
-                    maybe_out = writer_rx.recv() => {
+                    maybe_out = writer_rx.recv(), if writer_open => {
                         match maybe_out {
                             Some(req) => {
                                 if let Err(e) = conn.send(req).await {
                                     let _ = chat_tx
-                                        .send(ChatEvent::WireError(format!("write: {e}")))
+                                        .send(ChatEvent::WireError {
+                                            stream: WireStream::Reply,
+                                            message: format!("write: {e}"),
+                                        })
                                         .await;
                                     return;
                                 }
                             }
-                            None => {
-                                std::future::pending::<()>().await;
-                            }
+                            None => writer_open = false,
                         }
                     }
                 }
             }
         });
+    }
+}
+
+fn turn_scoped_id(ev: &Event) -> Option<&str> {
+    match ev {
+        Event::Delta { id, .. }
+        | Event::ReasoningDelta { id, .. }
+        | Event::ToolCall { id, .. }
+        | Event::ToolResult { id, .. }
+        | Event::ConfirmRequest { id, .. }
+        | Event::Done { id, .. }
+        | Event::Error { id, .. } => Some(id),
+        Event::Transcription { id, text } => (!text.trim().is_empty()).then_some(id.as_str()),
+        _ => None,
     }
 }
 
@@ -1436,6 +1615,7 @@ fn human_size_short(n: usize) -> String {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     fn test_sleep_cfg() -> SleepConfig {
         let mut cfg = assistd_core::Config::default().sleep;
@@ -1449,11 +1629,19 @@ mod tests {
     }
 
     fn test_app_with(vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
-        let (tx, rx) = mpsc::channel::<ChatEvent>(16);
         // Bogus socket path; these tests never open a real connection.
-        let ipc = Arc::new(IpcClient::with_path(std::path::PathBuf::from(
-            "/tmp/assistd-test-nonexistent.sock",
-        )));
+        test_app_at(
+            std::path::PathBuf::from("/tmp/assistd-test-nonexistent.sock"),
+            vision_enabled,
+        )
+    }
+
+    fn test_app_at(
+        socket: std::path::PathBuf,
+        vision_enabled: bool,
+    ) -> (App, mpsc::Receiver<ChatEvent>) {
+        let (tx, rx) = mpsc::channel::<ChatEvent>(16);
+        let ipc = Arc::new(IpcClient::with_path(socket));
         let app = App::new(
             ipc,
             tx,
@@ -1480,11 +1668,86 @@ mod tests {
         Event::Done { id: "r".into() }
     }
 
+    fn delta_for(id: &str, text: &str) -> Event {
+        Event::Delta {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+
+    fn transcription_for(id: &str, text: &str) -> Event {
+        Event::Transcription {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+
+    fn rendered(app: &mut App) -> Vec<String> {
+        let (lines, _) = app.output.render_view(80, 80);
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    fn line_index(lines: &[String], needle: &str) -> usize {
+        lines
+            .iter()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} missing from {lines:#?}"))
+    }
+
+    fn start_typed_turn(app: &mut App, id: &str, prompt: &str) {
+        app.begin_submit(prompt, &[]);
+        app.active_reply = Some(ActiveReply {
+            id: id.into(),
+            writer: None,
+        });
+    }
+
+    fn reply(event: Event) -> ChatEvent {
+        ChatEvent::Wire {
+            stream: WireStream::Reply,
+            event,
+        }
+    }
+
+    fn status(event: Event) -> ChatEvent {
+        ChatEvent::Wire {
+            stream: WireStream::Status,
+            event,
+        }
+    }
+
+    /// Accept one dialog connection, read its request line, then stream
+    /// `events` back. The delay before the first write gives the query
+    /// driver time to observe its closed writer channel while nothing is
+    /// readable, which is the state the pre-fix driver parked in forever.
+    async fn mock_daemon(
+        socket: std::path::PathBuf,
+        events: Vec<Event>,
+    ) -> tokio::task::JoinHandle<()> {
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            for ev in events {
+                let mut out = serde_json::to_string(&ev).unwrap();
+                out.push('\n');
+                write.write_all(out.as_bytes()).await.unwrap();
+            }
+        })
+    }
+
     #[test]
     fn delta_keeps_generating_true() {
         let (mut app, _rx) = test_app();
         app.generating = true;
-        app.on_chat_event(ChatEvent::Wire(delta("hi")));
+        app.on_chat_event(reply(delta("hi")));
         assert!(app.generating);
     }
 
@@ -1492,17 +1755,141 @@ mod tests {
     fn done_clears_generating() {
         let (mut app, _rx) = test_app();
         app.generating = true;
-        app.on_chat_event(ChatEvent::Wire(delta("hi")));
-        app.on_chat_event(ChatEvent::Wire(done()));
+        app.on_chat_event(reply(delta("hi")));
+        app.on_chat_event(reply(done()));
         assert!(!app.generating);
     }
 
     #[test]
-    fn wire_error_clears_generating() {
+    fn reply_wire_error_clears_generating() {
         let (mut app, _rx) = test_app();
         app.generating = true;
-        app.on_chat_event(ChatEvent::WireError("boom".into()));
+        app.on_chat_event(ChatEvent::WireError {
+            stream: WireStream::Reply,
+            message: "boom".into(),
+        });
         assert!(!app.generating);
+    }
+
+    #[test]
+    fn branch_wire_error_releases_the_in_flight_op() {
+        let (mut app, _rx) = test_app();
+        app.generating = true;
+        app.in_flight_branch_op = Some(BranchOp::Fork);
+        app.on_chat_event(ChatEvent::WireError {
+            stream: WireStream::Branch,
+            message: "branch connect: no such file".into(),
+        });
+        assert!(app.in_flight_branch_op.is_none());
+        assert!(app.generating, "a branch failure must not end the reply");
+    }
+
+    #[test]
+    fn status_stream_done_does_not_end_the_reply() {
+        let (mut app, _rx) = test_app();
+        app.generating = true;
+        app.on_chat_event(reply(delta("hi")));
+        app.on_chat_event(status(done()));
+        assert!(app.generating);
+        app.on_chat_event(reply(done()));
+        assert!(!app.generating);
+    }
+
+    #[test]
+    fn voice_turn_spoken_over_a_typed_reply_waits_its_turn() {
+        let (mut app, _rx) = test_app();
+        start_typed_turn(&mut app, "typed", "typed question");
+        app.on_chat_event(reply(delta_for("typed", "typed ")));
+
+        // The user speaks while the typed reply is still streaming; the
+        // daemon transcribes it, then blocks on its agent-turn lock.
+        app.on_chat_event(reply(transcription_for("voice", "spoken question")));
+        app.on_chat_event(reply(delta_for("typed", "answer")));
+        let lines = rendered(&mut app);
+        assert!(
+            lines.iter().any(|l| l.contains("typed answer")),
+            "the transcript must not split the typed block: {lines:#?}",
+        );
+
+        app.on_chat_event(reply(Event::Done { id: "typed".into() }));
+        assert!(!app.generating);
+
+        // Only now does the voice turn run, and it opens with its own
+        // transcript rather than appending to the finished reply.
+        app.on_chat_event(reply(delta_for("voice", "spoken answer")));
+        assert!(app.generating);
+        let lines = rendered(&mut app);
+        let typed = line_index(&lines, "typed answer");
+        let spoken_q = line_index(&lines, "spoken question");
+        let spoken_a = line_index(&lines, "spoken answer");
+        assert!(typed < spoken_q, "transcript must not split the reply");
+        assert!(spoken_q < spoken_a);
+
+        app.on_chat_event(reply(Event::Done { id: "voice".into() }));
+        assert!(!app.generating);
+    }
+
+    #[test]
+    fn another_turns_terminal_events_leave_the_owner_alone() {
+        let (mut app, _rx) = test_app();
+        start_typed_turn(&mut app, "typed", "typed question");
+        app.on_chat_event(reply(delta_for("typed", "half ")));
+
+        app.on_chat_event(reply(Event::Done { id: "other".into() }));
+        assert!(app.generating, "a foreign Done must not end the reply");
+        app.on_chat_event(reply(Event::Error {
+            id: "other".into(),
+            message: "voice turn rejected".into(),
+        }));
+        assert!(app.generating, "a foreign Error must not end the reply");
+        assert!(app.notice().is_some(), "but it is still surfaced");
+
+        app.on_chat_event(reply(delta_for("typed", "written")));
+        let lines = rendered(&mut app);
+        assert!(
+            lines.iter().any(|l| l.contains("half written")),
+            "the owner's block stayed open: {lines:#?}",
+        );
+    }
+
+    #[test]
+    fn a_transcript_is_dropped_when_its_turn_never_runs() {
+        let (mut app, _rx) = test_app();
+        start_typed_turn(&mut app, "typed", "typed question");
+        app.on_chat_event(reply(transcription_for("voice", "spoken question")));
+        app.on_chat_event(reply(Event::Error {
+            id: "voice".into(),
+            message: "no capacity".into(),
+        }));
+        app.on_chat_event(reply(Event::Done { id: "typed".into() }));
+
+        app.on_chat_event(reply(delta_for("later", "unrelated")));
+        let lines = rendered(&mut app);
+        assert!(
+            !lines.iter().any(|l| l.contains("spoken question")),
+            "a turn that never ran must not replay its transcript: {lines:#?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn query_driver_outlives_its_writer_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("mock.sock");
+        let server = mock_daemon(socket.clone(), vec![delta("hi"), done()]).await;
+
+        let (mut app, mut rx) = test_app_at(socket, true);
+        app.spawn_query("hi".into(), Vec::new());
+        app.active_reply = None;
+
+        let mut terminal = false;
+        while !terminal {
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(ChatEvent::Wire { event, .. })) => terminal = event.is_terminal(),
+                Ok(other) => panic!("unexpected chat event: {other:?}"),
+                Err(_) => panic!("query driver stalled once the writer channel closed"),
+            }
+        }
+        server.await.unwrap();
     }
 
     #[test]
@@ -1585,12 +1972,12 @@ mod tests {
     fn presence_event_updates_state() {
         let (mut app, _rx) = test_app();
         assert_eq!(app.presence_state, None);
-        app.on_chat_event(ChatEvent::Wire(Event::Presence {
+        app.on_chat_event(status(Event::Presence {
             id: "p".into(),
             state: PresenceState::Drowsy,
         }));
         assert_eq!(app.presence_state, Some(PresenceState::Drowsy));
-        app.on_chat_event(ChatEvent::Wire(Event::Presence {
+        app.on_chat_event(status(Event::Presence {
             id: "p".into(),
             state: PresenceState::Active,
         }));
@@ -1642,13 +2029,13 @@ mod tests {
     #[test]
     fn tool_call_then_result_creates_one_block_with_command() {
         let (mut app, _rx) = test_app();
-        app.on_chat_event(ChatEvent::Wire(Event::ToolCall {
+        app.on_chat_event(reply(Event::ToolCall {
             id: "c1".into(),
             name: "run".into(),
             args: serde_json::json!({"command": "ls /tmp"}),
         }));
         assert!(app.pending_tool_call.is_some());
-        app.on_chat_event(ChatEvent::Wire(Event::ToolResult {
+        app.on_chat_event(reply(Event::ToolResult {
             id: "c1".into(),
             name: "run".into(),
             result: serde_json::json!({
@@ -1671,7 +2058,7 @@ mod tests {
     #[test]
     fn confirm_request_event_opens_modal() {
         let (mut app, _rx) = test_app();
-        app.on_chat_event(ChatEvent::Wire(Event::ConfirmRequest {
+        app.on_chat_event(reply(Event::ConfirmRequest {
             id: "r".into(),
             confirm_id: "c-xyz".into(),
             tool: "bash".into(),
@@ -1688,7 +2075,7 @@ mod tests {
     fn capabilities_event_updates_vision_and_model_name() {
         let (mut app, _rx) = test_app_with(false);
         assert!(!app.vision_enabled);
-        app.on_chat_event(ChatEvent::Wire(Event::Capabilities {
+        app.on_chat_event(status(Event::Capabilities {
             id: "c".into(),
             vision: true,
             model_name: "Qwen".into(),
