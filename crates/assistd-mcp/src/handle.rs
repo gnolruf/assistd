@@ -21,9 +21,7 @@ use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::backoff::{
-    MAX_CONSECUTIVE_FAILURES, MIN_HEALTHY_SECONDS, UNHEALTHY_RETRY_INTERVAL, backoff_delay,
-};
+use crate::backoff::{RESTART_WINDOW, RestartDecision, RestartPolicy, UNHEALTHY_RETRY_INTERVAL};
 use crate::error::McpError;
 use crate::sse::{SseConfig, SseLifeline, SseMcpClient};
 use crate::stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
@@ -257,7 +255,7 @@ impl Supervisor {
             "MCP supervisor running",
         );
 
-        let mut consecutive_failures: u32 = 0;
+        let mut policy = RestartPolicy::default();
         let mut current_lifeline: Option<Lifeline> = Some(initial_lifeline);
         let mut session_start = Instant::now();
 
@@ -273,9 +271,7 @@ impl Supervisor {
                             "MCP server transport died",
                         );
                         lifeline.shutdown().await;
-                        if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
-                            consecutive_failures = 0;
-                        }
+                        policy.record_session_end(ran_for);
                         let _ = health_tx.send(HealthState::Restarting);
                         switch.swap(None).await;
                     }
@@ -298,27 +294,39 @@ impl Supervisor {
                 }
             }
 
-            let unhealthy = consecutive_failures >= MAX_CONSECUTIVE_FAILURES;
-            let delay = if unhealthy {
-                error!(
-                    target: "assistd::mcp",
-                    server = %name,
-                    attempts = consecutive_failures,
-                    retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
-                    "MCP server reached {MAX_CONSECUTIVE_FAILURES} consecutive failures; marking unhealthy and retrying at slow cadence",
-                );
-                let _ = health_tx.send(HealthState::Unhealthy);
-                UNHEALTHY_RETRY_INTERVAL
-            } else {
-                let d = backoff_delay(consecutive_failures);
-                warn!(
-                    target: "assistd::mcp",
-                    server = %name,
-                    attempt = consecutive_failures + 1,
-                    cap = MAX_CONSECUTIVE_FAILURES,
-                    "restarting MCP server in {d:?}",
-                );
-                d
+            let delay = match policy.next_restart(Instant::now()) {
+                RestartDecision::Backoff { delay, failures } => {
+                    warn!(
+                        target: "assistd::mcp",
+                        server = %name,
+                        failures,
+                        "restarting MCP server in {delay:?}",
+                    );
+                    delay
+                }
+                RestartDecision::ConsecutiveCapReached { failures } => {
+                    error!(
+                        target: "assistd::mcp",
+                        server = %name,
+                        failures,
+                        retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
+                        "MCP server failed {failures} times in a row; marking unhealthy and retrying at slow cadence",
+                    );
+                    let _ = health_tx.send(HealthState::Unhealthy);
+                    UNHEALTHY_RETRY_INTERVAL
+                }
+                RestartDecision::WindowCapReached { restarts } => {
+                    error!(
+                        target: "assistd::mcp",
+                        server = %name,
+                        restarts,
+                        window_secs = RESTART_WINDOW.as_secs(),
+                        retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
+                        "MCP server restarted {restarts} times in the rolling window; marking unhealthy and retrying at slow cadence",
+                    );
+                    let _ = health_tx.send(HealthState::Unhealthy);
+                    UNHEALTHY_RETRY_INTERVAL
+                }
             };
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
@@ -328,7 +336,6 @@ impl Supervisor {
 
             match spawn_transport(&transport_cfg).await {
                 Ok(instance) => {
-                    consecutive_failures = 0;
                     session_start = Instant::now();
                     switch.swap(Some(instance.client)).await;
                     let _ = health_tx.send(HealthState::Healthy);
@@ -336,11 +343,10 @@ impl Supervisor {
                     current_lifeline = Some(instance.lifeline);
                 }
                 Err(e) => {
-                    consecutive_failures += 1;
+                    policy.record_spawn_failure();
                     warn!(
                         target: "assistd::mcp",
                         server = %name,
-                        attempt = consecutive_failures,
                         error = %e,
                         "MCP server restart failed",
                     );
