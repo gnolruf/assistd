@@ -194,9 +194,7 @@ enum Lifeline {
 impl Lifeline {
     async fn wait(&mut self) {
         match self {
-            Lifeline::Stdio(c) => {
-                let _ = c.wait_for_exit().await;
-            }
+            Lifeline::Stdio(c) => c.wait_for_death().await,
             Lifeline::Sse(s) => s.wait_for_disconnect().await,
         }
     }

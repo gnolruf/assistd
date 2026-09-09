@@ -181,3 +181,70 @@ async fn server_crash_short_circuits_subsequent_calls() {
 
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
+    // A stdio server can lose its read loop (over-long line, read
+    // error) while the process itself keeps running. The supervisor
+    // must treat that as death rather than leaving the server
+    // `Healthy` and every later call to time out against a socket
+    // nobody reads from.
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
+        .await
+        .expect("server should start");
+
+    let tools = adapt_handle_as_tools(&handle, "mcp__fake")
+        .await
+        .expect("discovery should succeed");
+    let echo = tools
+        .iter()
+        .find(|t| t.name() == "mcp__fake__echo")
+        .expect("echo present");
+    let flood = tools
+        .iter()
+        .find(|t| t.name() == "mcp__fake__flood_stdout")
+        .expect("flood_stdout present");
+
+    let mut watch_health = handle.watch_health();
+
+    // Kills the read loop; the child stays alive and keeps reading stdin.
+    let _ = flood.invoke(json!({})).await;
+
+    let flipped = tokio::time::timeout(Duration::from_secs(5), async {
+        while watch_health.changed().await.is_ok() {
+            if *watch_health.borrow_and_update() != HealthState::Healthy {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        flipped,
+        "supervisor must leave Healthy when the read loop dies under a live child"
+    );
+
+    let recovered = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if *watch_health.borrow_and_update() == HealthState::Healthy {
+                return true;
+            }
+            if watch_health.changed().await.is_err() {
+                return false;
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(recovered, "supervisor must restart the server");
+
+    let post = tokio::time::timeout(Duration::from_secs(5), echo.invoke(json!({"msg": "after"})))
+        .await
+        .expect("post-restart invoke must not hang")
+        .expect("post-restart invoke should succeed");
+    assert_eq!(post["output"], "echo:after");
+
+    handle.shutdown().await;
+}

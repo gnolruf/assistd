@@ -8,14 +8,14 @@
 //! see [`StdioMcpClient::from_streams`].
 
 use std::collections::HashMap;
-use std::process::{ExitStatus, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -29,7 +29,8 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const CLIENT_NAME: &str = "assistd";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// MCP servers that emit a single line larger than this are protocol-violating.
-/// Capping prevents an upstream bug or a hostile server from leaking memory.
+/// The reader stops at the cap rather than buffering the whole line, so an
+/// upstream bug or a hostile server cannot exhaust memory.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 /// Per-server stdio transport configuration.
@@ -68,8 +69,8 @@ pub struct StdioMcpClient {
 impl StdioMcpClient {
     /// Spawn an MCP server child process and bring up the transport.
     /// Returns the client (an `Arc<dyn McpClient>` once cast) and a
-    /// `ChildLifeline` whose `wait_for_exit()` future fires when the
-    /// child exits; used by the per-server supervisor.
+    /// `ChildLifeline` whose `wait_for_death()` future fires when the
+    /// transport stops working; used by the per-server supervisor.
     pub async fn spawn(cfg: StdioConfig) -> Result<(Arc<Self>, ChildLifeline), McpError> {
         let mut cmd = Command::new(&cfg.command);
         cmd.args(&cfg.args)
@@ -168,7 +169,7 @@ impl StdioMcpClient {
             TransportHandles {
                 read_task: Some(read_task),
                 write_task: Some(write_task),
-                read_done: Some(read_done_rx),
+                read_done: read_done_rx,
             },
         ))
     }
@@ -330,7 +331,7 @@ fn parse_content_entry(entry: Value) -> Result<ToolResult, McpError> {
 }
 
 /// Owns the spawned child plus its background I/O tasks. Awaiting
-/// [`Self::wait_for_exit`] returns when the child terminates.
+/// [`Self::wait_for_death`] returns when the transport stops working.
 pub struct ChildLifeline {
     pub label: String,
     child: Option<tokio::process::Child>,
@@ -344,15 +345,33 @@ impl ChildLifeline {
         self.child.as_ref().and_then(|c| c.id())
     }
 
-    /// Block until the child exits naturally. Returns whatever
-    /// `Child::wait` returns. The supervisor races this against the
-    /// shared shutdown signal.
-    pub async fn wait_for_exit(&mut self) -> std::io::Result<ExitStatus> {
+    /// Block until the transport is dead: either the child exits or
+    /// its stdout read loop stops. A live child whose read loop has
+    /// ended can never answer another request -- every call would write
+    /// to stdin and then time out -- so both count as death. The
+    /// supervisor races this against the shared shutdown signal.
+    pub async fn wait_for_death(&mut self) {
         let child = self
             .child
             .as_mut()
-            .expect("wait_for_exit called after shutdown");
-        child.wait().await
+            .expect("wait_for_death called after shutdown");
+        let read_done = &mut self
+            .transport
+            .as_mut()
+            .expect("wait_for_death called after shutdown")
+            .read_done;
+        tokio::select! {
+            status = child.wait() => debug!(
+                target: "assistd::mcp",
+                server = %self.label,
+                "MCP child exited: {status:?}",
+            ),
+            _ = read_done => debug!(
+                target: "assistd::mcp",
+                server = %self.label,
+                "MCP read loop ended while the child was still alive",
+            ),
+        }
     }
 
     /// Send SIGTERM to the child's process group, wait `term_timeout`,
@@ -408,9 +427,10 @@ impl ChildLifeline {
 pub struct TransportHandles {
     read_task: Option<JoinHandle<()>>,
     write_task: Option<JoinHandle<()>>,
-    /// Fires when the read loop terminates (EOF or error). Lets a test
-    /// or the supervisor detect transport death without owning the child.
-    pub read_done: Option<oneshot::Receiver<()>>,
+    /// Fires when the read loop terminates (EOF, read error, or an
+    /// over-long line). Lets a test or the supervisor detect transport
+    /// death without owning the child.
+    pub read_done: oneshot::Receiver<()>,
 }
 
 impl TransportHandles {
@@ -434,10 +454,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
     done_tx: oneshot::Sender<()>,
 ) {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
+    let mut line = Vec::new();
     loop {
         line.clear();
-        let n = match reader.read_line(&mut line).await {
+        let read = (&mut reader)
+            .take(MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut line)
+            .await;
+        let n = match read {
             Ok(n) => n,
             Err(e) => {
                 warn!(
@@ -452,26 +476,25 @@ async fn read_loop<R: AsyncRead + Unpin>(
             debug!(target: "assistd::mcp", server = %label, "MCP stdout EOF");
             break;
         }
-        if line.len() > MAX_LINE_BYTES {
+        if n > MAX_LINE_BYTES {
             warn!(
                 target: "assistd::mcp",
                 server = %label,
-                bytes = line.len(),
                 "MCP stdout line over {MAX_LINE_BYTES} bytes; dropping connection",
             );
             break;
         }
-        let trimmed = line.trim_end_matches(['\n', '\r']);
-        if trimmed.is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_str::<Response>(trimmed) {
+        match serde_json::from_slice::<Response>(&line) {
             Ok(resp) => correlator.deliver(resp),
             Err(e) => {
                 warn!(
                     target: "assistd::mcp",
                     server = %label,
-                    "MCP stdout JSON parse error: {e}; line: {trimmed}",
+                    "MCP stdout JSON parse error: {e}; line: {}",
+                    String::from_utf8_lossy(&line).trim(),
                 );
             }
         }
@@ -745,6 +768,33 @@ mod tests {
         assert!(msg.contains("timed out"), "{msg}");
         handles.shutdown_and_join().await;
         let _ = silent.await;
+    }
+
+    #[tokio::test]
+    async fn oversize_line_ends_the_read_loop_without_waiting_for_a_newline() {
+        let (client_write, _server_read) = duplex(8192);
+        let (mut server_write, client_read) = duplex(8192);
+        let (_client, mut handles) = StdioMcpClient::from_streams(
+            client_read,
+            client_write,
+            "flood".into(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        let flood = tokio::spawn(async move {
+            let chunk = vec![b'x'; 64 * 1024];
+            while server_write.write_all(&chunk).await.is_ok() {}
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), &mut handles.read_done)
+            .await
+            .expect("read loop must stop at the line cap, not buffer until a newline")
+            .expect("read loop signals termination");
+
+        flood.abort();
+        handles.shutdown_and_join().await;
     }
 
     #[tokio::test]

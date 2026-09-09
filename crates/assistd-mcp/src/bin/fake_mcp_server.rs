@@ -7,10 +7,13 @@
 //! discovery + invocation path:
 //!   * `initialize` → returns capabilities + protocol version.
 //!   * `notifications/initialized` → ignored (no response).
-//!   * `tools/list` → returns two tools: `echo` and `crash_me`.
+//!   * `tools/list` → returns `echo`, `crash_me` and `flood_stdout`.
 //!   * `tools/call` for `echo` → returns the input under `text`.
 //!   * `tools/call` for `crash_me` → exits the process (used to
 //!     simulate a server crash mid-session).
+//!   * `tools/call` for `flood_stdout` → emits one line past the
+//!     transport's line cap and keeps running (used to simulate a dead
+//!     read loop under a live child).
 //!
 //! Built as a regular `[[bin]]` of `assistd-mcp` so the integration
 //! test can locate it under `target/<profile>/fake_mcp_server` via the
@@ -84,6 +87,11 @@ fn main() {
                             "name": "crash_me",
                             "description": "exits the server process",
                             "inputSchema": {"type": "object", "properties": {}}
+                        },
+                        {
+                            "name": "flood_stdout",
+                            "description": "writes one oversized line and stays alive",
+                            "inputSchema": {"type": "object", "properties": {}}
                         }
                     ]
                 }
@@ -114,6 +122,16 @@ fn main() {
                     "crash_me" => {
                         // Goodbye, cruel daemon.
                         std::process::exit(0);
+                    }
+                    // Overshoot the client's 1 MiB line cap by less than a
+                    // pipe buffer, so the write completes and this process
+                    // stays alive and readable after the client gives up.
+                    "flood_stdout" => {
+                        let mut junk = vec![b'x'; 1024 * 1024 + 1024];
+                        junk.push(b'\n');
+                        let _ = out.write_all(&junk);
+                        let _ = out.flush();
+                        continue;
                     }
                     other => json!({
                         "jsonrpc": "2.0",
