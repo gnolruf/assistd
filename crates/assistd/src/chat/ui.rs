@@ -342,6 +342,16 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 
     let reversed = Style::default().add_modifier(Modifier::REVERSED);
     let mut left_spans: Vec<Span> = Vec::new();
+    if let Some(title) = app.session_title.as_deref() {
+        left_spans.push(Span::styled(
+            truncate_title(title),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::REVERSED),
+        ));
+        left_spans.push(Span::styled(" │ ", reversed));
+    }
     left_spans.push(Span::styled(format!("model: {}", app.model_name), reversed));
     if let Some((dot, label)) = presence_dot(app.presence_state) {
         left_spans.push(Span::raw(" "));
@@ -445,6 +455,17 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 
     let para = Paragraph::new(Line::from(spans));
     frame.render_widget(para, area);
+}
+
+/// Keep a generated title from crowding the rest of the status bar on a
+/// narrow terminal.
+fn truncate_title(title: &str) -> String {
+    const MAX_CHARS: usize = 32;
+    if title.chars().count() <= MAX_CHARS {
+        return title.to_string();
+    }
+    let head: String = title.chars().take(MAX_CHARS - 1).collect();
+    format!("{}…", head.trim_end())
 }
 
 fn presence_dot(s: Option<PresenceState>) -> Option<(Color, &'static str)> {

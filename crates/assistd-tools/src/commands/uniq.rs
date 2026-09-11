@@ -2,9 +2,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::commands::collect_input;
 
-/// `uniq [-c]`: collapse runs of identical adjacent lines read from
-/// stdin. Only *adjacent* duplicates collapse, so the usual spelling is
+/// `uniq [-c] [FILE]...`: collapse runs of identical adjacent lines
+/// from the named files, or from stdin when none are given. Only
+/// *adjacent* duplicates collapse, so the usual spelling is
 /// `sort | uniq`.
 ///
 /// Flags:
@@ -18,46 +20,51 @@ impl Command for UniqCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "collapse adjacent duplicate lines of stdin (-c to count)"
+        "collapse adjacent duplicate lines of FILE or stdin (-c to count)"
     }
 
     fn help(&self) -> String {
-        "usage: uniq [-c]\n\
+        "usage: uniq [-c] [FILE]...\n\
          \n\
-         Collapse runs of identical adjacent lines read from stdin. Only \
-         adjacent duplicates collapse, so pipe sorted input in: \
-         `cat FILE | sort | uniq`.\n\
+         Collapse runs of identical adjacent lines from the named files, \
+         or from stdin when none are given. Only adjacent duplicates \
+         collapse, so sort first: `sort FILE | uniq`.\n\
          \n\
          Flags:\n  \
            -c  prefix each line with its repeat count and a tab\n\
          \n\
          The `-c` output is `<count>\\t<line>`, which `sort -nr` orders \
-         by frequency.\n"
+         by frequency. Binary files are refused — use `cat -b FILE` for \
+         those.\n"
             .to_string()
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         let mut count_runs = false;
+        let mut files = Vec::new();
         for arg in &input.args {
             match arg.as_str() {
                 "-c" => count_runs = true,
-                other => {
+                flag if flag.starts_with('-') && flag.len() > 1 => {
                     return Ok(CommandOutput::failed(
                         2,
                         error_line(
                             "uniq",
-                            format_args!("unexpected argument: {other}"),
+                            format_args!("unknown flag '{flag}'"),
                             "Use",
-                            "uniq or uniq -c (stdin only)",
+                            "uniq or uniq -c",
                         )
                         .into_bytes(),
                     ));
                 }
+                file => files.push(file.to_string()),
             }
         }
 
-        let Some(stdin) = input.stdin else {
-            return Ok(CommandOutput::usage(self.help()));
+        let stdin = match collect_input("uniq", &files, input.stdin).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(CommandOutput::usage(self.help())),
+            Err(failure) => return Ok(failure),
         };
         let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
         // `split` on newline-terminated input leaves a trailing empty
@@ -140,12 +147,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unexpected_argument_errors() {
-        let out = run_uniq(&["notes.md"], b"a\n").await;
+    async fn named_file_is_read_instead_of_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("lines.txt");
+        std::fs::write(&f, b"a\na\nb\n").unwrap();
+        let out = run_uniq(&["-c", f.to_str().unwrap()], b"ignored\n").await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, b"2\ta\n1\tb\n");
+    }
+
+    #[tokio::test]
+    async fn unknown_flag_still_errors() {
+        let out = run_uniq(&["-q"], b"a\n").await;
         assert_eq!(out.exit_code, 2);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.contains("[error] uniq: unexpected argument: notes.md"),
+            stderr.contains("[error] uniq: unknown flag '-q'"),
             "{stderr}"
         );
         assert!(stderr.contains("Use: uniq or uniq -c"), "{stderr}");

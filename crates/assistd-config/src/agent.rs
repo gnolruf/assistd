@@ -8,9 +8,12 @@ use serde::{Deserialize, Serialize};
 pub struct AgentConfig {
     /// Maximum number of LLM invocations per user turn. Caps runaway
     /// loops where the model keeps calling tools without resolving the
-    /// user's query. Default 20, higher than a multi-tool agent because
-    /// each `run` call is cheap and composable (pipes replace what
-    /// would be multiple tool calls in other systems).
+    /// user's query, and is currently the only bound on total turn
+    /// duration. Higher than a multi-tool agent because each `run` call
+    /// is cheap and composable (pipes replace what would be multiple
+    /// tool calls in other systems). History is re-budgeted every
+    /// iteration, so raising this trades a hard stop for more
+    /// summarization, not context overflow.
     #[serde(default = "default_agent_max_iterations")]
     pub max_iterations: u32,
 }

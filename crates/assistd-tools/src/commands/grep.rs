@@ -68,7 +68,7 @@ impl Command for GrepCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "filter lines matching a pattern (supports -i, -v, -c, -n, -r)"
+        "filter lines matching an ERE regex (quote it: \"a|b\"); -i, -v, -c, -n, -r"
     }
 
     fn help(&self) -> String {
@@ -76,6 +76,12 @@ impl Command for GrepCommand {
          \n\
          Print lines matching the regex PATTERN, read from the named \
          paths or from stdin when none are given.\n\
+         \n\
+         PATTERN is Rust/ERE regex, not BRE: alternation is `a|b` and \
+         groups are `(a)b`, so quote the pattern to keep `|` from \
+         starting a pipeline (`grep \"Command|Tool\" FILE`). The BRE \
+         spellings `\\|`, `\\(`, `\\+` match those characters \
+         literally here.\n\
          \n\
          Flags:\n  \
            -i  case-insensitive\n  \
@@ -136,7 +142,7 @@ impl Command for GrepCommand {
         let paths = &positional[1..];
         if paths.is_empty() {
             return Ok(match input.stdin {
-                Some(stdin) => search_stdin(&re, &flags, stdin),
+                Some(stdin) => annotate_dialect(search_stdin(&re, &flags, stdin), pattern),
                 None => CommandOutput::usage(self.help()),
             });
         }
@@ -145,7 +151,10 @@ impl Command for GrepCommand {
             Ok(t) => t,
             Err(e) => return Ok(CommandOutput::failed(2, e.error_line().into_bytes())),
         };
-        Ok(search_files(&re, &flags, &targets).await)
+        Ok(annotate_dialect(
+            search_files(&re, &flags, &targets).await,
+            pattern,
+        ))
     }
 }
 
@@ -222,6 +231,34 @@ fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Ve
         out.extend_from_slice(line.as_bytes());
     }
     count
+}
+
+/// BRE metacharacters spelled with a backslash. Rust's regex crate
+/// reads each as the literal character, so a pattern carrying one
+/// usually came from a caller writing GNU `grep` syntax.
+const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"];
+
+/// A zero-match result is the only moment a dialect mismatch is visible,
+/// so that is where the explanation goes. Output and exit code are
+/// untouched; only stderr gains a line.
+fn annotate_dialect(mut out: CommandOutput, pattern: &str) -> CommandOutput {
+    if out.exit_code != 1 || !out.stderr.is_empty() {
+        return out;
+    }
+    let Some(found) = BRE_ESCAPES.iter().find(|e| pattern.contains(**e)) else {
+        return out;
+    };
+    out.stderr = error_line(
+        "grep",
+        format_args!(
+            "no matches; `{found}` matches those characters literally here \
+             (PATTERN is Rust/ERE regex, not BRE)"
+        ),
+        "Use",
+        "unescaped ERE metachars in a quoted pattern, e.g. grep \"a|b\" FILE",
+    )
+    .into_bytes();
+    out
 }
 
 fn outcome(count: usize, stdout: Vec<u8>) -> CommandOutput {
@@ -333,6 +370,37 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn quoted_alternation_matches_without_escapes() {
+        let out = run_grep(
+            &["Command|Tool"],
+            b"a Command here\nnothing\na Tool there\n",
+        )
+        .await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "a Command here\na Tool there\n"
+        );
+        assert!(out.stderr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bre_escape_that_matches_nothing_explains_the_dialect() {
+        let out = run_grep(&[r"Command\|Tool"], b"a Command here\na Tool there\n").await;
+        assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(r"`\|`"), "{stderr}");
+        assert!(stderr.contains("Use: "), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn bre_escape_that_does_match_stays_quiet() {
+        let out = run_grep(&[r"a\|b"], b"literal a|b line\n").await;
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stderr.is_empty(), "{:?}", out.stderr);
     }
 
     #[tokio::test]

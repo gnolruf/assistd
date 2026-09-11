@@ -94,7 +94,8 @@ pub async fn run(action: PttAction) -> Result<()> {
             } => {
                 eprintln!("[{severity} {component}: {message}]");
             }
-            Event::SemanticHit { .. }
+            Event::SessionTitle { .. }
+            | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }
             | Event::MemoryRow { .. }

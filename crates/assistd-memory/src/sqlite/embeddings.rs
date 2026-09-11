@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use super::connection::SqliteHandle;
-use super::conversations::PersistedRole;
+use super::conversations::{PersistedRole, SessionId};
 
 /// One conversation-chunk hit, hydrated with the *full* parent message
 /// content (chunks may cut mid-sentence; for the LLM-facing surface we
@@ -63,11 +63,17 @@ pub trait SemanticStore: Send + Sync + 'static {
     /// Top-K conversation chunks ranked by cosine. `query_vector` must
     /// already be L2-normalised (consumers go through `LlamaEmbedder`
     /// which normalises before returning).
+    ///
+    /// `exclude_session` drops one session's chunks before ranking, so
+    /// callers searching for *other* conversations still get `top_k`
+    /// hits rather than a list padded with the dialogue they are
+    /// already holding in context.
     async fn nearest_chunks(
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
         model: &str,
+        exclude_session: Option<&SessionId>,
     ) -> Result<Vec<EmbeddingHit>>;
 
     /// Top-K saved memories ranked by cosine. Same normalisation
@@ -140,6 +146,7 @@ impl SemanticStore for NoSemanticStore {
         _q: Vec<f32>,
         _k: usize,
         _model: &str,
+        _exclude_session: Option<&SessionId>,
     ) -> Result<Vec<EmbeddingHit>> {
         Ok(Vec::new())
     }
@@ -204,21 +211,29 @@ impl SemanticStore for SqliteSemanticStore {
         query_vector: Vec<f32>,
         top_k: usize,
         model: &str,
+        exclude_session: Option<&SessionId>,
     ) -> Result<Vec<EmbeddingHit>> {
         if top_k == 0 || query_vector.is_empty() {
             return Ok(Vec::new());
         }
         let model = model.to_string();
+        let excluded = exclude_session.map(|s| s.0.clone());
         let q = query_vector;
         let ranked: Vec<(i64, f32)> = self
             .handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
+                // Filtering before the cosine scan (rather than after
+                // ranking) keeps a full `top_k` of other-session hits.
                 let mut stmt = c.prepare(
-                    "SELECT conversation_chunk_id, vector FROM embeddings WHERE model = ?1",
+                    "SELECT e.conversation_chunk_id, e.vector
+                     FROM embeddings e
+                     JOIN conversation_chunks cc ON cc.id = e.conversation_chunk_id
+                     JOIN conversations conv ON conv.id = cc.conversation_id
+                     WHERE e.model = ?1 AND (?2 IS NULL OR conv.session_id <> ?2)",
                 )?;
                 let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(top_k + 1);
-                let mut rows = stmt.query(rusqlite::params![model])?;
+                let mut rows = stmt.query(rusqlite::params![model, excluded])?;
                 while let Some(row) = rows.next()? {
                     let chunk_id: i64 = row.get(0)?;
                     let bytes: Vec<u8> = row.get(1)?;
@@ -657,7 +672,7 @@ mod tests {
         let (handle, _w) = fresh().await;
         let s = SqliteSemanticStore::new(handle);
         let hits = s
-            .nearest_chunks(unit_vec(0.0), 5, "test-model")
+            .nearest_chunks(unit_vec(0.0), 5, "test-model", None)
             .await
             .unwrap();
         assert!(hits.is_empty());
@@ -698,7 +713,7 @@ mod tests {
         let _c3 = insert_chunk_with_vec(&handle, conv_id, 2, &unit_vec(1.5), "m").await;
 
         let s = SqliteSemanticStore::new(handle);
-        let hits = s.nearest_chunks(unit_vec(0.0), 3, "m").await.unwrap();
+        let hits = s.nearest_chunks(unit_vec(0.0), 3, "m", None).await.unwrap();
         assert_eq!(hits.len(), 3);
         // Best-first.
         assert!(hits[0].similarity > hits[1].similarity);
@@ -737,8 +752,55 @@ mod tests {
             insert_chunk_with_vec(&handle, conv_id, i, &unit_vec((i as f32) * 0.1), "m").await;
         }
         let s = SqliteSemanticStore::new(handle);
-        let hits = s.nearest_chunks(unit_vec(0.0), 3, "m").await.unwrap();
+        let hits = s.nearest_chunks(unit_vec(0.0), 3, "m", None).await.unwrap();
         assert_eq!(hits.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn nearest_chunks_can_exclude_one_session() {
+        let (handle, _w) = fresh().await;
+        let mut conv_ids = Vec::new();
+        for session in ["past", "current"] {
+            let (tx, rx) = oneshot::channel();
+            handle
+                .writer()
+                .send(WriteOp::BeginSession {
+                    session_id: session.into(),
+                    daemon_pid: 0,
+                    ack: tx,
+                })
+                .await
+                .unwrap();
+            rx.await.unwrap().unwrap();
+            let (tx, rx) = oneshot::channel();
+            handle
+                .writer()
+                .send(WriteOp::AppendMessage {
+                    session_id: session.into(),
+                    turn_id: None,
+                    msg: PersistedMessage::user(session),
+                    ack: tx,
+                })
+                .await
+                .unwrap();
+            conv_ids.push(rx.await.unwrap().unwrap());
+        }
+        // The current session holds the closer match, so excluding it
+        // has to change the result rather than just trim the tail.
+        insert_chunk_with_vec(&handle, conv_ids[0], 0, &unit_vec(0.4), "m").await;
+        insert_chunk_with_vec(&handle, conv_ids[1], 0, &unit_vec(0.0), "m").await;
+
+        let s = SqliteSemanticStore::new(handle);
+        let all = s.nearest_chunks(unit_vec(0.0), 5, "m", None).await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        let current = SessionId("current".into());
+        let others = s
+            .nearest_chunks(unit_vec(0.0), 5, "m", Some(&current))
+            .await
+            .unwrap();
+        assert_eq!(others.len(), 1);
+        assert_eq!(others[0].session_id, "past");
     }
 
     #[tokio::test]
@@ -771,7 +833,7 @@ mod tests {
         let s = SqliteSemanticStore::new(handle);
         // Query with the new model name; old-model rows must not appear.
         let hits = s
-            .nearest_chunks(unit_vec(0.0), 5, "new-model")
+            .nearest_chunks(unit_vec(0.0), 5, "new-model", None)
             .await
             .unwrap();
         assert!(hits.is_empty());
@@ -852,7 +914,7 @@ mod tests {
     async fn no_semantic_store_returns_empty() {
         let s = NoSemanticStore;
         assert!(
-            s.nearest_chunks(vec![1.0], 5, "m")
+            s.nearest_chunks(vec![1.0], 5, "m", None)
                 .await
                 .unwrap()
                 .is_empty()

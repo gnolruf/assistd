@@ -2,8 +2,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::commands::collect_input;
 
-/// `sort [-fnr]`: sort the lines read from stdin.
+/// `sort [-fnr] [FILE]...`: sort the lines of the named files, or of
+/// stdin when none are given.
 ///
 /// Flags:
 /// - `-n` compare by leading integer instead of bytes
@@ -24,11 +26,13 @@ struct Flags {
     fold_case: bool,
 }
 
-fn parse_flags(argv: &[String]) -> Result<Flags, String> {
+fn parse_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
     let mut flags = Flags::default();
+    let mut files = Vec::new();
     for arg in argv {
         let Some(rest) = arg.strip_prefix('-').filter(|r| !r.is_empty()) else {
-            return Err(format!("unexpected argument: {arg}"));
+            files.push(arg.clone());
+            continue;
         };
         for ch in rest.chars() {
             match ch {
@@ -39,7 +43,7 @@ fn parse_flags(argv: &[String]) -> Result<Flags, String> {
             }
         }
     }
-    Ok(flags)
+    Ok((flags, files))
 }
 
 fn numeric_key(line: &[u8]) -> i64 {
@@ -62,27 +66,30 @@ impl Command for SortCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "sort stdin lines (-n numeric, -r reverse, -f fold case)"
+        "sort lines of FILE or stdin (-n numeric, -r reverse, -f fold case)"
     }
 
     fn help(&self) -> String {
-        "usage: sort [-fnr]\n\
+        "usage: sort [-fnr] [FILE]...\n\
          \n\
-         Sort the lines read from stdin and write them back out, one per \
-         line. Ordering is byte-wise (`LC_ALL=C sort`).\n\
+         Sort the lines of the named files, or of stdin when none are \
+         given, and write them back out one per line. Ordering is \
+         byte-wise (`LC_ALL=C sort`).\n\
          \n\
          Flags:\n  \
            -n  compare by leading integer instead of bytes\n  \
            -r  reverse the result\n  \
            -f  fold case, so `Beta` and `beta` sort together\n\
          \n\
-         Reads stdin only; pipe a file in with `cat FILE | sort`.\n"
+         Several files sort together as one stream, exactly as \
+         `cat FILE... | sort` would. Binary files are refused — use \
+         `cat -b FILE` for those.\n"
             .to_string()
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        let flags = match parse_flags(&input.args) {
-            Ok(f) => f,
+        let (flags, files) = match parse_flags(&input.args) {
+            Ok(v) => v,
             Err(msg) => {
                 return Ok(CommandOutput::failed(
                     2,
@@ -92,8 +99,10 @@ impl Command for SortCommand {
             }
         };
 
-        let Some(stdin) = input.stdin else {
-            return Ok(CommandOutput::usage(self.help()));
+        let stdin = match collect_input("sort", &files, input.stdin).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(CommandOutput::usage(self.help())),
+            Err(failure) => return Ok(failure),
         };
         let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
         if lines.last().is_some_and(|l| l.is_empty()) {
@@ -209,11 +218,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filename_argument_errors() {
-        let out = run_sort(&["notes.md"], b"a\n").await;
-        assert_eq!(out.exit_code, 2);
+    async fn named_files_sort_as_one_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, b"pear\nfig\n").unwrap();
+        std::fs::write(&b, b"apple\n").unwrap();
+        let out = run_sort(&[a.to_str().unwrap(), b.to_str().unwrap()], b"ignored\n").await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, b"apple\nfig\npear\n");
+    }
+
+    #[tokio::test]
+    async fn missing_file_reports_navigation_error() {
+        let out = run_sort(&["/nope/missing.txt"], b"").await;
+        assert_eq!(out.exit_code, 1);
         assert!(
-            String::from_utf8_lossy(&out.stderr).contains("unexpected argument: notes.md"),
+            String::from_utf8_lossy(&out.stderr).contains("[error] sort: file not found"),
             "{out:?}"
         );
     }

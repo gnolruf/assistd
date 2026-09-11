@@ -126,6 +126,7 @@ pub enum EventKind {
     ListenState,
     VoiceState,
     SpeakingState,
+    SessionTitle,
     Done,
     Error,
     LastDelta,
@@ -487,6 +488,15 @@ pub enum Event {
     /// TTS playback state for a turn: `speaking: true` on the first
     /// enqueued sentence, `false` once the playback queue drains.
     SpeakingState { id: String, speaking: bool },
+    /// The daemon generated (or loaded) a display title for a session.
+    /// Broadcast so clients can label the conversation without polling;
+    /// generation happens in the background after the first turn of an
+    /// untitled session, so this arrives well after that turn's `Done`.
+    SessionTitle {
+        id: String,
+        session_id: String,
+        title: String,
+    },
     /// One semantic-search hit emitted by `MemorySemanticSearch`. The
     /// daemon emits zero or more of these ranked by cosine similarity
     /// (best-first), then a terminal `Done`. `content` is the *full*
@@ -673,6 +683,7 @@ impl Event {
             | Event::ListenState { id, .. }
             | Event::VoiceOutputState { id, .. }
             | Event::SpeakingState { id, .. }
+            | Event::SessionTitle { id, .. }
             | Event::SemanticHit { id, .. }
             | Event::MemoryValue { id, .. }
             | Event::MemoryKeys { id, .. }
@@ -706,6 +717,7 @@ impl Event {
             Event::VoiceState { .. } => EventKind::VoiceState,
             Event::ListenState { .. } => EventKind::ListenState,
             Event::SpeakingState { .. } => EventKind::SpeakingState,
+            Event::SessionTitle { .. } => EventKind::SessionTitle,
             Event::Done { .. } => EventKind::Done,
             Event::Error { .. } => EventKind::Error,
             Event::LastDelta { .. } => EventKind::LastDelta,
@@ -1581,6 +1593,7 @@ mod tests {
             EventKind::ListenState,
             EventKind::VoiceState,
             EventKind::SpeakingState,
+            EventKind::SessionTitle,
             EventKind::Done,
             EventKind::Error,
             EventKind::LastDelta,
@@ -1679,6 +1692,14 @@ mod tests {
                     active: false,
                 },
                 EventKind::ListenState,
+            ),
+            (
+                Event::SessionTitle {
+                    id: "q".into(),
+                    session_id: "s".into(),
+                    title: "cats and dogs".into(),
+                },
+                EventKind::SessionTitle,
             ),
             (Event::Done { id: "q".into() }, EventKind::Done),
             (

@@ -85,7 +85,7 @@ use assistd_tools::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
 /// Subsystem handles the daemon injects into [`build_tools`]. Bundled
@@ -131,6 +131,9 @@ pub struct BuildToolsDeps<'a> {
     pub semantic: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
     pub embedding_model: String,
+    /// Live view of the active session, so `reminisce` can leave the
+    /// conversation already in context out of its results.
+    pub current_session: watch::Receiver<Arc<assistd_memory::SessionId>>,
     pub window_manager: Arc<dyn WindowManager>,
     pub mcp_tools: Vec<Box<dyn assistd_tools::Tool>>,
 }
@@ -150,6 +153,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
         semantic,
         embed_tx,
         embedding_model,
+        current_session,
         window_manager,
         mcp_tools,
     } = deps;
@@ -259,7 +263,12 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
         semantic.clone(),
         embedding_model.clone(),
     ));
-    tools.register(ReminisceTool::new(embedder, semantic, embedding_model));
+    tools.register(ReminisceTool::new(
+        embedder,
+        semantic,
+        embedding_model,
+        current_session,
+    ));
 
     for t in mcp_tools {
         tools.register_boxed(t);

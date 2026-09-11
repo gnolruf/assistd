@@ -2,8 +2,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::commands::collect_input;
 
-/// `wc [-lwc]`: count what stdin holds. With no flags the output is
+/// `wc [-lwc] [FILE]...`: count what the named files, or stdin, hold.
+/// With no flags the output is
 /// `<lines> <words> <bytes>`; each flag narrows it to that one count.
 /// Flags can be combined, and the selected counts print in the
 /// canonical lines-words-bytes order regardless of how they were given.
@@ -31,30 +33,36 @@ impl Command for WcCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "count lines/words/bytes on stdin (-l, -w, -c to pick one)"
+        "count lines/words/bytes of FILE or stdin (-l, -w, -c to pick one)"
     }
 
     fn help(&self) -> String {
-        "usage: wc [-lwc]\n\
+        "usage: wc [-lwc] [FILE]...\n\
          \n\
-         Count newlines, whitespace-separated words, and bytes read from \
-         stdin. With no flags the output is `<lines> <words> <bytes>` on \
-         one line; with flags, only the counts you ask for, always in \
-         that order.\n\
+         Count newlines, whitespace-separated words, and bytes in the \
+         named files, or in stdin when none are given. With no flags the \
+         output is `<lines> <words> <bytes>` on one line; with flags, \
+         only the counts you ask for, always in that order.\n\
          \n\
          Flags:\n  \
            -l  print the line count\n  \
            -w  print the word count\n  \
-           -c  print the byte count\n"
+           -c  print the byte count\n\
+         \n\
+         Several files count as one stream, exactly as \
+         `cat FILE... | wc` would; there is no per-file breakdown. \
+         Binary files are refused — use `cat -b FILE` for those.\n"
             .to_string()
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
         let mut selected = Selected::default();
+        let mut files = Vec::new();
         for arg in &input.args {
             let letters = arg.strip_prefix('-').filter(|l| !l.is_empty());
             let Some(letters) = letters else {
-                return Ok(unsupported(arg));
+                files.push(arg.clone());
+                continue;
             };
             for c in letters.chars() {
                 match c {
@@ -66,8 +74,10 @@ impl Command for WcCommand {
             }
         }
 
-        let Some(stdin) = input.stdin else {
-            return Ok(CommandOutput::usage(self.help()));
+        let stdin = match collect_input("wc", &files, input.stdin).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(CommandOutput::usage(self.help())),
+            Err(failure) => return Ok(failure),
         };
         let lines = stdin.iter().filter(|b| **b == b'\n').count();
         let words = stdin
@@ -196,11 +206,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wc_positional_argument_errors() {
-        let out = run_wc(&["notes.md"], b"").await;
-        assert_eq!(out.exit_code, 2);
+    async fn named_files_count_as_one_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, b"one two\n").unwrap();
+        std::fs::write(&b, b"three\n").unwrap();
+        let out = run_wc(
+            &["-l", a.to_str().unwrap(), b.to_str().unwrap()],
+            b"ignored\n",
+        )
+        .await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2");
+    }
+
+    #[tokio::test]
+    async fn missing_file_reports_navigation_error() {
+        let out = run_wc(&["/nope/missing.txt"], b"").await;
+        assert_eq!(out.exit_code, 1);
         assert!(
-            String::from_utf8_lossy(&out.stderr).contains("'notes.md' not supported"),
+            String::from_utf8_lossy(&out.stderr).contains("[error] wc: file not found"),
             "{out:?}"
         );
     }

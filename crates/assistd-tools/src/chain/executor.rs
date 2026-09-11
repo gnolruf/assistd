@@ -98,12 +98,15 @@ async fn run_command(
         return Ok(CommandOutput::failed(127, msg.into_bytes()));
     };
 
-    let out = cmd
-        .run(CommandInput {
-            args: expand_args(&words[1..]),
-            stdin,
-        })
-        .await?;
+    // Every command answers `--help`, including the ones whose no-arg
+    // form does real work (`ls`, `echo`) and so never reaches their own
+    // usage text.
+    let args = expand_args(&words[1..]);
+    if args.iter().any(|a| a == "--help") {
+        return Ok(CommandOutput::usage(cmd.help()));
+    }
+
+    let out = cmd.run(CommandInput { args, stdin }).await?;
 
     let stderr = if out.stderr.is_empty() {
         Vec::new()

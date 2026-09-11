@@ -186,6 +186,13 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let mcp_tools = std::mem::take(&mut mcp.tools);
     let mcp_startup_failures = mcp.startup_failures.clone();
 
+    // Built before the tool registry so `reminisce` can hold a live
+    // view of the active session.
+    let conversation_ctx = Arc::new(assistd_core::ConversationContext::from_arc(
+        session_id_for_state,
+        branch_id_for_state,
+    ));
+
     let tools = assistd_core::build_tools(assistd_core::BuildToolsDeps {
         config: &config,
         overflow_dir: overflow_dir.clone(),
@@ -196,6 +203,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         semantic: semantic_store.clone(),
         embed_tx: embed_tx.clone(),
         embedding_model: embedding_model_name,
+        current_session: conversation_ctx.session_updates(),
         window_manager: window_manager.clone(),
         mcp_tools,
     })?;
@@ -229,10 +237,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let continuous_start_on_launch = config.voice.continuous.start_on_launch;
 
     let embedding_cfg_for_state = config.embedding.clone();
-    let conversation_ctx = Arc::new(assistd_core::ConversationContext::from_arc(
-        session_id_for_state,
-        branch_id_for_state,
-    ));
     let chat: Arc<dyn assistd_llm::LlmBackend> = Arc::new(chat);
 
     replay_history(chat.as_ref(), resumed_history).await;

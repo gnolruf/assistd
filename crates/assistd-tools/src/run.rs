@@ -20,7 +20,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
 use crate::Tool;
-use crate::chain::{ParseError, execute, parse_chain};
+use crate::chain::{ParseError, Redirection, execute, parse_chain};
 use crate::command::{Attachment, CommandOutput, CommandRegistry, error_line};
 use crate::presentation::{PresentResult, PresentSpec, present};
 use assistd_config::ToolsOutputConfig;
@@ -76,7 +76,8 @@ fn build_description(registry: &CommandRegistry) -> String {
         "Execute a shell-style command in the daemon's working directory. \
          Supports pipelines (|), and/or (&&, ||), sequencing (;), `~` and \
          globs (*, ?, []) on unquoted arguments; quote an argument to pass \
-         it through literally. Redirections (>, <), env expansion ($VAR), \
+         it through literally, including a `|` that belongs to the \
+         argument rather than the pipeline (`grep \"a|b\" f.txt`). Redirections (>, <), env expansion ($VAR), \
          and backgrounding (&) are NOT supported; use `bash \"…\"` for a \
          real shell when needed. \
          Large outputs are truncated; the truncation notice includes a \
@@ -91,7 +92,9 @@ fn build_description(registry: &CommandRegistry) -> String {
     }
     s.push_str(
         "\nCall a command with no (or insufficient) arguments to see its \
-         usage (exit code 2, stdout). Errors in real calls exit with a \
+         usage (exit code 2, stdout); `<cmd> --help` prints the same \
+         text and works for commands like `ls` and `echo` whose bare \
+         form does real work. Errors in real calls exit with a \
          `[<name>]\\t` stderr prefix, distinct from help on stdout. Each \
          error line follows `[error] <cmd>: <what-went-wrong>. <Hint>: \
          <recovery>` where `<Hint>` is one of `Use:` / `Try:` / `Check:` / \
@@ -159,6 +162,21 @@ fn parse_error_line(e: &ParseError) -> String {
         ParseError::TrailingOperator(_) => ("Try", "add a command after the operator"),
         ParseError::EmptyCommand => ("Try", "add a command between operators"),
         ParseError::Unsupported(_) => ("Use", "bash \"...\" for unsupported shell features"),
+        ParseError::UnquotedAlternation => (
+            "Use",
+            "a quoted ERE pattern, as in `grep \"TODO|FIXME\" FILE`",
+        ),
+        ParseError::Redirection(r) => match r {
+            Redirection::Output | Redirection::Append => {
+                ("Use", "write PATH, as in `<cmd> | write /tmp/out.txt`")
+            }
+            Redirection::Input => ("Use", "a pipe, as in `cat FILE | <cmd>`"),
+            Redirection::HereDoc => ("Use", "a pipe, as in `echo TEXT | <cmd>`"),
+            Redirection::Stderr => (
+                "Try",
+                "dropping it — stderr is already in this result — or bash \"...\" to reshape it",
+            ),
+        },
     };
     error_line("parse", e, hint, recovery)
 }
@@ -418,6 +436,72 @@ mod tests {
         let result = invoke(&tool, &cmd);
         assert_eq!(result["exit_code"], 0);
         assert_eq!(result["stdout"], "2\n");
+    }
+
+    #[test]
+    fn help_flag_works_even_where_bare_calls_do_work() {
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), full_registry());
+        for (cmd, usage) in [
+            ("ls --help", "usage: ls"),
+            ("echo --help", "usage: echo"),
+            ("grep --help", "usage: grep"),
+        ] {
+            let result = invoke(&tool, cmd);
+            assert_eq!(result["exit_code"], 2, "{cmd}: {result}");
+            assert!(
+                result["stdout"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with(usage),
+                "{cmd}: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn unquoted_bre_alternation_names_the_quoting_fix() {
+        let dir = fresh_dir();
+        let tool = tool_with(dir.path(), full_registry());
+        let result = invoke(&tool, r"grep -r TODO\|FIXME AGENTS.md");
+        assert_eq!(result["exit_code"], 2, "{result}");
+        let stderr = result["stderr"].as_str().unwrap_or_default();
+        assert!(stderr.contains("outside quotes"), "{stderr}");
+        assert!(stderr.contains(r#"grep "TODO|FIXME" FILE"#), "{stderr}");
+    }
+
+    #[test]
+    fn run_head_reads_a_named_file() {
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("log.txt");
+        std::fs::write(&path, b"one\ntwo\nthree\nfour\n").unwrap();
+        let tool = tool_with(dir.path(), full_registry());
+
+        // The spelling the model reaches for first, end to end through
+        // the parser and executor.
+        let result = invoke(&tool, &format!("head -n 2 {}", path.to_string_lossy()));
+        assert_eq!(result["exit_code"], 0, "{result}");
+        assert_eq!(result["stdout"], "one\ntwo\n");
+
+        // The pipeline spelling keeps working.
+        let piped = invoke(
+            &tool,
+            &format!("cat {} | head -n 2", path.to_string_lossy()),
+        );
+        assert_eq!(piped["stdout"], "one\ntwo\n");
+    }
+
+    #[test]
+    fn run_wc_counts_a_named_file() {
+        let dir = fresh_dir();
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("log.txt");
+        std::fs::write(&path, b"a\nb\nc\n").unwrap();
+        let tool = tool_with_dir(dir.path());
+        let result = invoke(&tool, &format!("wc -l {}", path.to_string_lossy()));
+        assert_eq!(result["exit_code"], 0, "{result}");
+        assert_eq!(result["stdout"], "3\n");
     }
 
     #[test]
@@ -807,7 +891,7 @@ mod tests {
         }
         // Summary text from a representative command should appear.
         assert!(
-            desc.contains("filter lines matching a pattern"),
+            desc.contains("filter lines matching an ERE regex"),
             "description missing grep summary: {desc}"
         );
         // Level-1 discovery hint tells the LLM how to drill in.

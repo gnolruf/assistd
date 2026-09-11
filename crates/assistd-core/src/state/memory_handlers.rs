@@ -39,7 +39,7 @@ impl AppState {
         match self
             .memory
             .semantic
-            .nearest_chunks(vec, limit, &model)
+            .nearest_chunks(vec, limit, &model, None)
             .await
         {
             Ok(hits) => {

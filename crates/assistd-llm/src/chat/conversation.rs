@@ -17,10 +17,11 @@ use super::error::ChatClientError;
 use super::wire;
 
 const SUMMARY_PREFIX: &str = "[Conversation summary] ";
-/// Tool-result user messages carry this prefix so (1) the model can
-/// distinguish tool output from genuine user speech when history is
-/// replayed, (2) the truncator can pair the result with its assistant
-/// `tool_calls` predecessor and drop both atomically.
+/// Tool results that carry images stay on the user role, because chat
+/// templates render image parts only on user turns. This prefix marks
+/// those so the model can still tell them from genuine user speech and
+/// the truncator can pair them with their assistant `tool_calls`
+/// predecessor. Text-only results use [`Role::Tool`] instead.
 pub const TOOL_RESULT_PREFIX: &str = "[tool:";
 const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
 /// Conservative per-image token weight for budget math. Real usage
@@ -34,6 +35,9 @@ pub enum Role {
     System,
     User,
     Assistant,
+    /// Output of a tool the assistant called, answering one entry of the
+    /// preceding assistant message's `tool_calls`.
+    Tool,
 }
 
 impl Role {
@@ -43,6 +47,7 @@ impl Role {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
+            Role::Tool => "tool",
         }
     }
 }
@@ -70,9 +75,13 @@ pub struct Message {
     /// see on its next turn.
     pub attachments: Vec<Attachment>,
     /// Non-empty only on assistant messages that requested tool calls.
-    /// When present, the outgoing wire message is rendered with
-    /// `content: null` (or omitted) and a `tool_calls` array.
+    /// When present, the outgoing wire message renders its narration (if
+    /// any) as `content` plus a `tool_calls` array.
     pub tool_calls: Vec<ToolCallRecord>,
+    /// Set only on [`Role::Tool`] messages: the id of the assistant tool
+    /// call this message answers. Chat templates use it to line the
+    /// result up with its call.
+    pub tool_call_id: Option<String>,
 }
 
 /// Summarizer trait so unit tests can inject a fake without spinning up
@@ -152,6 +161,7 @@ impl Conversation {
             content,
             attachments: Vec::new(),
             tool_calls: Vec::new(),
+            tool_call_id: None,
         });
     }
 
@@ -165,6 +175,7 @@ impl Conversation {
             content,
             attachments,
             tool_calls: Vec::new(),
+            tool_call_id: None,
         });
     }
 
@@ -175,14 +186,16 @@ impl Conversation {
             content,
             attachments: Vec::new(),
             tool_calls: Vec::new(),
+            tool_call_id: None,
         });
     }
 
     /// Append an assistant turn that requested tool calls. `content` is the
-    /// assistant's narration (typically empty; models usually emit tool
-    /// calls without accompanying text when `finish_reason: "tool_calls"`).
-    /// `calls` must be non-empty; on the wire the message will render with
-    /// `content` omitted and `tool_calls: [...]` populated.
+    /// assistant's narration — the text it streamed to the user before
+    /// calling the tool. Keeping it means the model can see what it
+    /// already said on the next iteration instead of repeating itself.
+    /// `calls` must be non-empty; on the wire the message renders with
+    /// `tool_calls: [...]` and `content` omitted when narration is absent.
     pub fn push_assistant_with_tool_calls(
         &mut self,
         content: Option<String>,
@@ -197,6 +210,22 @@ impl Conversation {
             content: content.unwrap_or_default(),
             attachments: Vec::new(),
             tool_calls: calls,
+            tool_call_id: None,
+        });
+    }
+
+    /// Append the output of one tool call as an OpenAI `role: "tool"`
+    /// message. Routing results here rather than onto the user role is
+    /// what keeps the model reading them as its own tool's output: a
+    /// user turn reads as the person speaking again, and the model
+    /// answers it by re-introducing what it is about to do.
+    pub fn push_tool_result(&mut self, call_id: String, content: String) {
+        self.messages.push(Message {
+            role: Role::Tool,
+            content,
+            attachments: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call_id),
         });
     }
 
@@ -227,7 +256,7 @@ impl Conversation {
     pub fn truncate_to_last_real_user(&mut self) -> usize {
         let mut last_real_user = None;
         for (i, m) in self.messages.iter().enumerate().rev() {
-            if matches!(m.role, Role::User) && !m.content.starts_with(TOOL_RESULT_PREFIX) {
+            if m.role == Role::User && !Self::is_tool_result(m) {
                 last_real_user = Some(i);
                 break;
             }
@@ -264,8 +293,8 @@ impl Conversation {
     /// are rendered as a multimodal `content` array (text part + one
     /// `image_url` part per attachment); text-only messages stay as plain
     /// strings for compatibility with non-vision models. Assistant messages
-    /// carrying `tool_calls` render with `content: null` (omitted) and a
-    /// populated `tool_calls` array.
+    /// carrying `tool_calls` render with a populated `tool_calls` array and
+    /// their narration as `content`, omitted entirely when there is none.
     pub fn as_wire_messages(&self) -> Vec<wire::ChatMessage<'_>> {
         let mut out = Vec::with_capacity(self.messages.len() + 2);
         if !self.system_prompt.is_empty() {
@@ -289,10 +318,9 @@ impl Conversation {
         }
         for m in &self.messages {
             if !m.tool_calls.is_empty() {
-                // Assistant-with-tool_calls: omit content entirely (the
-                // OpenAI spec allows null/absent; some templates require
-                // absent). Any accompanying narration is dropped at
-                // commit time, so `m.content` is usually empty here.
+                // Narration-free tool calls omit `content` entirely: the
+                // OpenAI spec allows null/absent and some chat templates
+                // require absent rather than empty.
                 let specs: Vec<wire::ToolCallSpec<'_>> = m
                     .tool_calls
                     .iter()
@@ -307,9 +335,18 @@ impl Conversation {
                     .collect();
                 out.push(wire::ChatMessage {
                     role: m.role.as_wire(),
-                    content: None,
+                    content: (!m.content.is_empty()).then(|| wire::ContentBody::Text(&m.content)),
                     tool_calls: Some(specs),
                     tool_call_id: None,
+                });
+                continue;
+            }
+            if m.role == Role::Tool {
+                out.push(wire::ChatMessage {
+                    role: m.role.as_wire(),
+                    content: Some(wire::ContentBody::Text(&m.content)),
+                    tool_calls: None,
+                    tool_call_id: m.tool_call_id.as_deref(),
                 });
                 continue;
             }
@@ -392,6 +429,7 @@ impl Conversation {
             content: format!("{SUMMARY_PREFIX}{body}"),
             attachments: Vec::new(),
             tool_calls: Vec::new(),
+            tool_call_id: None,
         };
 
         let drop_end = preserve_from;
@@ -428,14 +466,12 @@ impl Conversation {
         }
     }
 
-    /// Remove `idx` and, if it's half of a tool-call/result pair, the
-    /// matching sibling. Handles two shapes:
-    /// 1. Assistant-with-tool_calls at `idx` → also drop the immediately
-    ///    following tool-result user message (if present).
-    /// 2. Tool-result user message at `idx` → also drop the immediately
-    ///    preceding assistant-with-tool_calls (if present). This direction
-    ///    only fires if callers hit it directly; `first_droppable_index`
-    ///    always returns the assistant half first.
+    /// Remove `idx` and, when it is an assistant-with-tool_calls, every
+    /// tool result that immediately follows it — one per call the
+    /// message requested — so the wire payload never carries a
+    /// `tool_calls` message without its results.
+    /// `first_droppable_index` always returns the assistant half first,
+    /// so the reverse direction never needs handling.
     fn drop_with_pair(&mut self, idx: usize) {
         if idx >= self.messages.len() {
             return;
@@ -445,13 +481,22 @@ impl Conversation {
             Some(m) if m.role == Role::Assistant && !m.tool_calls.is_empty()
         );
         self.messages.remove(idx);
-        if drop_trailing_result
-            && idx < self.messages.len()
-            && self.messages[idx].role == Role::User
-            && self.messages[idx].content.starts_with(TOOL_RESULT_PREFIX)
+        while drop_trailing_result
+            && self
+                .messages
+                .get(idx)
+                .map(Self::is_tool_result)
+                .unwrap_or(false)
         {
             self.messages.remove(idx);
         }
+    }
+
+    /// Both shapes a tool result can take: the [`Role::Tool`] message
+    /// text-only results use, and the prefixed user message an
+    /// image-carrying result still rides in.
+    fn is_tool_result(m: &Message) -> bool {
+        m.role == Role::Tool || (m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX))
     }
 
     fn summary_insertion_index(&self) -> usize {
@@ -487,7 +532,7 @@ impl Conversation {
                     }
                     pairs_seen += 1;
                 }
-                Role::System => {
+                Role::System | Role::Tool => {
                     idx = prev;
                 }
             }
@@ -500,7 +545,7 @@ impl Conversation {
             && self
                 .messages
                 .get(idx)
-                .map(|m| m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX))
+                .map(Self::is_tool_result)
                 .unwrap_or(false)
         {
             idx -= 1;
@@ -735,12 +780,14 @@ mod tests {
                 content: "loaded user".into(),
                 attachments: Vec::new(),
                 tool_calls: Vec::new(),
+                tool_call_id: None,
             },
             Message {
                 role: Role::Assistant,
                 content: "loaded assistant".into(),
                 attachments: Vec::new(),
                 tool_calls: Vec::new(),
+                tool_call_id: None,
             },
         ]);
         let wire = c.as_wire_messages();
@@ -1078,6 +1125,96 @@ mod tests {
             "content key must be omitted: {json}"
         );
         assert_eq!(json["tool_calls"][0]["function"]["name"], "run");
+    }
+
+    #[test]
+    fn as_wire_messages_keeps_narration_alongside_tool_calls() {
+        let mut c = Conversation::new(String::new());
+        c.push_user("do it".into());
+        c.push_assistant_with_tool_calls(
+            Some("Got it, listing the directory.".into()),
+            vec![mk_call("call-1", r#"{"command":"ls"}"#)],
+        );
+        let wire = c.as_wire_messages();
+        let json = serde_json::to_value(&wire[1]).unwrap();
+        assert_eq!(json["content"], "Got it, listing the directory.");
+        assert_eq!(json["tool_calls"][0]["function"]["name"], "run");
+    }
+
+    #[test]
+    fn tool_results_render_on_the_tool_role_with_their_call_id() {
+        let mut c = Conversation::new(String::new());
+        c.push_user("do it".into());
+        c.push_assistant_with_tool_calls(None, vec![mk_call("call-1", r#"{"command":"ls"}"#)]);
+        c.push_tool_result("call-1".into(), "a\nb\n[exit:0 | 1ms]".into());
+        let wire = c.as_wire_messages();
+        let json = serde_json::to_value(&wire[2]).unwrap();
+        assert_eq!(json["role"], "tool");
+        assert_eq!(json["tool_call_id"], "call-1");
+        assert_eq!(json["content"], "a\nb\n[exit:0 | 1ms]");
+        assert!(json.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn dropping_a_tool_call_message_drops_all_of_its_results() {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("first question".into());
+        c.push_assistant_with_tool_calls(None, vec![mk_call("c-1", "{}"), mk_call("c-2", "{}")]);
+        c.push_tool_result("c-1".into(), "one".into());
+        c.push_tool_result("c-2".into(), "two".into());
+        c.push_assistant("answer".into());
+        c.push_user("second question".into());
+
+        let (chat, model) = spec(20, 1, 10_000);
+        c.truncate_to_budget(&chat, &model);
+
+        for (i, m) in c.messages.iter().enumerate() {
+            if m.role == Role::Tool {
+                assert!(
+                    c.messages[..i]
+                        .iter()
+                        .any(|p| p.role == Role::Assistant && !p.tool_calls.is_empty()),
+                    "tool result at {i} lost its call"
+                );
+            }
+        }
+        assert_eq!(c.messages.last().unwrap().content, "second question");
+    }
+
+    #[test]
+    fn tool_results_do_not_count_as_preserved_turns() {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("real question with enough length to count".into());
+        for i in 0..6 {
+            c.push_assistant_with_tool_calls(None, vec![mk_call(&format!("c-{i}"), "{}")]);
+            c.push_tool_result(format!("c-{i}"), format!("output {i} with padding"));
+        }
+        c.push_assistant("done".into());
+
+        // Two preserved pairs must reach past the tool traffic to real
+        // turns rather than stopping at the last two tool results.
+        let idx = c.first_preserved_index(2);
+        let preserved = &c.messages[idx..];
+        assert!(
+            preserved
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .count()
+                >= 2,
+            "expected assistant turns in the preserved tail, got {preserved:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_to_last_real_user_skips_tool_role_results() {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("real q".into());
+        c.push_assistant_with_tool_calls(None, vec![mk_call("c-1", "{}")]);
+        c.push_tool_result("c-1".into(), "output".into());
+        c.push_assistant("final".into());
+        let removed = c.truncate_to_last_real_user();
+        assert_eq!(removed, 4);
+        assert!(c.messages.is_empty());
     }
 
     #[test]

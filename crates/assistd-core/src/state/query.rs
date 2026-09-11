@@ -92,8 +92,11 @@ impl AppState {
         drop(_agent_guard);
 
         if done_emitted && matches!(&gen_result, Ok(Ok(()))) {
-            self.clone()
-                .spawn_session_title_generation(current_session, title_user_text);
+            self.clone().spawn_session_title_generation(
+                id.clone(),
+                current_session,
+                title_user_text,
+            );
         }
 
         self.finalize_turn(turn_id, gen_result, speech_handle, &tx, id, done_emitted)

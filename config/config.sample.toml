@@ -302,9 +302,17 @@ hotkey = "Super+Escape"
 # Maximum number of LLM invocations per user turn. The agent loop sends
 # the `run` tool schema to the model, executes any requested commands,
 # and iterates until the model returns plain text, or until this cap
-# is hit. 20 is deliberately generous: each `run` call is cheap and
-# pipelines reduce the number of round-trips needed for most queries.
-# max_iterations = 20
+# is hit. Each `run` call is cheap and pipelines reduce the number of
+# round-trips needed for most queries, so this can be generous.
+#
+# The request history is re-budgeted (summarized down to
+# chat.max_history_tokens) on every iteration, not just at turn start,
+# so raising this does not overflow the context window. What it does
+# cost is wall-clock: each iteration is a full LLM invocation, and this
+# cap is currently the only bound on how long a single turn can run.
+# Raise it if agentic turns get cut off mid-task; lower it if a runaway
+# turn ties up the GPU for too long.
+# max_iterations = 50
 
 # ---------------------------------------------------------------------------
 # Tool execution safety

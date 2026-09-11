@@ -43,7 +43,7 @@ impl AppState {
         let hits = self
             .memory
             .semantic
-            .nearest_chunks(vec, top_k, &model)
+            .nearest_chunks(vec, top_k, &model, None)
             .await?;
         if hits.is_empty() {
             return Ok(None);

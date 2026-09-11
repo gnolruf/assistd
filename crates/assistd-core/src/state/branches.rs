@@ -176,12 +176,16 @@ impl AppState {
     }
 
     /// Background hook: if `session` has no `title` yet, ask the LLM
-    /// for a short summary of `user_text` and write it back via
-    /// `set_session_title`. Spawns onto `persistence_tracker` so daemon
-    /// shutdown drains the task; survives `complete_oneshot` failures
-    /// silently because a missing title is a UX downgrade, not a bug.
+    /// for a short summary of `user_text`, write it back via
+    /// `set_session_title`, and broadcast it as [`Event::SessionTitle`]
+    /// so connected clients can label the conversation. Spawns onto
+    /// `persistence_tracker` so daemon shutdown drains the task;
+    /// survives `complete_oneshot` failures without failing the turn
+    /// because a missing title is a UX downgrade, not a bug. The next
+    /// turn of a still-untitled session tries again.
     pub(super) fn spawn_session_title_generation(
         self: Arc<Self>,
+        id: String,
         session: Arc<SessionId>,
         user_text: String,
     ) {
@@ -205,7 +209,12 @@ impl AppState {
                 Reply with only the title — no quotes, no punctuation, no leading verbs \
                 like \"chat about\". Conversation:\n\n{trimmed}"
             );
-            let raw = match self.subsystems.llm.complete_oneshot(prompt).await {
+            let raw = match self
+                .subsystems
+                .llm
+                .complete_oneshot(prompt, assistd_llm::Thinking::Disabled)
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::debug!(
@@ -218,6 +227,11 @@ impl AppState {
             };
             let title = clean_generated_title(&raw);
             if title.is_empty() {
+                tracing::debug!(
+                    target: "assistd::chat",
+                    raw_len = raw.len(),
+                    "title generation produced no usable text; session stays untitled"
+                );
                 return;
             }
             if let Err(e) = self
@@ -231,7 +245,13 @@ impl AppState {
                     error = %e,
                     "set_session_title failed"
                 );
+                return;
             }
+            let _ = self.runtime.events_bus().send(Event::SessionTitle {
+                id,
+                session_id: session.0.clone(),
+                title,
+            });
         });
     }
 
