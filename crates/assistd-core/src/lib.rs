@@ -46,11 +46,11 @@ pub use recovery::{Component, RecoverySeverity, install_panic_hook, spawn_superv
 
 pub use assistd_config as config;
 pub use assistd_config::{
-    AgentConfig, BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config,
-    ConfigError, ContinuousListenConfig, DaemonConfig, LlamaServerConfig, McpConfig,
-    McpServerConfig, McpTransport, ModelConfig, PresenceConfig, RemoteConfig, ScreenshotBackend,
-    SleepConfig, SynthesisConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
-    ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig,
+    BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config, ConfigError,
+    ContinuousListenConfig, DaemonConfig, LlamaServerConfig, McpConfig, McpServerConfig,
+    McpTransport, ModelConfig, PresenceConfig, RemoteConfig, ScreenshotBackend, SleepConfig,
+    SynthesisConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScreenshotConfig,
+    ToolsWriteConfig, VoiceConfig,
 };
 
 pub use assistd_ipc as ipc;

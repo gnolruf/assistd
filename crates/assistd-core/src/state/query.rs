@@ -216,11 +216,10 @@ impl AppState {
     ) -> AbortOnDropHandle<Result<()>> {
         let llm = self.subsystems.llm.clone();
         let tools = self.subsystems.tools.clone();
-        let max_iterations = self.config.agent.max_iterations;
         let health: Option<Arc<dyn assistd_llm::LlmHealthProbe>> = Some(Arc::new(
             crate::presence::PresenceLlmHealthProbe::new(self.subsystems.presence.clone()),
         ));
-        let agent = Agent::new(llm, tools, max_iterations, health);
+        let agent = Agent::new(llm, tools, health);
         AbortOnDropHandle::new(tokio::spawn(
             async move { agent.run_turn(text, attachments, llm_tx, cancel).await }
                 .in_current_span(),

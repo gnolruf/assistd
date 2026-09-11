@@ -19,7 +19,6 @@
 //! `#[serde(default = "…")]` helpers in each section module reference
 //! those constants so tests and config defaults can't drift apart.
 
-pub mod agent;
 pub mod chat;
 pub mod compositor;
 pub mod daemon;
@@ -40,7 +39,6 @@ pub mod top;
 pub mod tray;
 pub mod voice;
 
-pub use agent::AgentConfig;
 pub use chat::ChatConfig;
 pub use compositor::{CompositorConfig, CompositorType};
 pub use daemon::DaemonConfig;
