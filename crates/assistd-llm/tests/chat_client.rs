@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
-use assistd_llm::{LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome};
+use assistd_llm::{LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome, Thinking};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -803,6 +803,23 @@ fn tool_call_frames(call_id: &str, name: &str, arg_chunks: &[&str]) -> Vec<Strin
     tool_call_frames_finishing(call_id, name, arg_chunks, "tool_calls")
 }
 
+fn tool_call_frames_with_narration(
+    narration: &str,
+    call_id: &str,
+    name: &str,
+    arg_chunks: &[&str],
+) -> Vec<String> {
+    let mut frames = tool_call_frames(call_id, name, arg_chunks);
+    frames.insert(
+        1,
+        format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
+            serde_json::to_string(narration).unwrap()
+        ),
+    );
+    frames
+}
+
 fn tool_call_frames_finishing(
     call_id: &str,
     name: &str,
@@ -1039,27 +1056,89 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
     assert_eq!(tool_calls[0]["id"], "call-7");
     assert_eq!(tool_calls[0]["function"]["name"], "run");
 
-    // The tool result should be routed as a user message with the
-    // [tool:run] prefix (per the design: user-role routing for tool
-    // results instead of the OpenAI tool role).
-    let tool_result_user = messages
+    // The result rides back on the OpenAI tool role, carrying the id of
+    // the call it answers — not as a second user turn.
+    let tool_result = messages
         .iter()
         .rev()
-        .find(|m| {
-            m["role"] == "user"
-                && m["content"]
-                    .as_str()
-                    .map(|s| s.starts_with("[tool:run]"))
-                    .unwrap_or(false)
-        })
-        .expect("tool result user message");
+        .find(|m| m["role"] == "tool")
+        .expect("tool-role result message");
+    assert_eq!(tool_result["tool_call_id"], "call-7");
     assert!(
-        tool_result_user["content"]
+        tool_result["content"]
             .as_str()
             .unwrap()
             .contains("[exit:0 | 2ms]"),
         "expected footer: {:?}",
-        tool_result_user["content"]
+        tool_result["content"]
+    );
+    assert!(
+        !messages.iter().any(|m| m["role"] == "user"
+            && m["content"]
+                .as_str()
+                .map(|s| s.starts_with("[tool:"))
+                .unwrap_or(false)),
+        "a text-only tool result must not reach the model as user speech"
+    );
+}
+
+#[tokio::test]
+async fn narration_before_a_tool_call_stays_in_history() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::RawFrames(tool_call_frames_with_narration(
+            "Got it, I'll run a test.",
+            "call-9",
+            "run",
+            &[r#"{"command":"echo hi"}"#],
+        )))
+        .await;
+    script
+        .push_stream(StreamResponse::Deltas(vec!["done".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client
+        .push_user("please echo hi".into(), Vec::new())
+        .await
+        .unwrap();
+
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {"name":"run","parameters":{"type":"object"},"strict":true}
+    })];
+    let (tx1, mut rx1) = mpsc::channel(32);
+    let outcome1 = client.step(tools.clone(), tx1).await.unwrap();
+    let calls = match outcome1 {
+        StepOutcome::ToolCalls(c) => c,
+        _ => panic!("expected ToolCalls"),
+    };
+    drain(&mut rx1).await;
+
+    client
+        .push_tool_results(vec![assistd_llm::ToolResultPayload {
+            call_id: calls[0].id.clone(),
+            name: "run".into(),
+            content: "hi\n[exit:0 | 2ms]".into(),
+            attachments: Vec::new(),
+        }])
+        .await
+        .unwrap();
+
+    let (tx2, mut rx2) = mpsc::channel(32);
+    client.step(tools, tx2).await.unwrap();
+    drain(&mut rx2).await;
+
+    let captured = script.captured().await;
+    let messages = captured[1].body["messages"].as_array().unwrap();
+    let assistant_with_calls = messages
+        .iter()
+        .find(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
+        .expect("assistant message with tool_calls");
+    assert_eq!(
+        assistant_with_calls["content"], "Got it, I'll run a test.",
+        "pre-tool-call narration must survive into the next request"
     );
 }
 
@@ -1096,13 +1175,45 @@ async fn complete_oneshot_survives_a_response_larger_than_the_channel() {
     let client = build_client(&chat_spec(port));
     let text = tokio::time::timeout(
         Duration::from_secs(10),
-        client.complete_oneshot("title?".into()),
+        client.complete_oneshot("title?".into(), Thinking::Enabled),
     )
     .await
     .expect("complete_oneshot must not deadlock")
     .expect("stream completes");
     assert!(text.starts_with("tok0 "), "{text:.40}");
     assert!(text.trim_end().ends_with("tok499"), "{text:.40}");
+}
+
+#[tokio::test]
+async fn complete_oneshot_disables_thinking_when_asked() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::Deltas(vec!["A Short Title".into()]))
+        .await;
+    script
+        .push_stream(StreamResponse::Deltas(vec!["Another Title".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client
+        .complete_oneshot("title?".into(), Thinking::Disabled)
+        .await
+        .unwrap();
+    client
+        .complete_oneshot("title?".into(), Thinking::Enabled)
+        .await
+        .unwrap();
+
+    let captured = script.captured().await;
+    assert_eq!(
+        captured[0].body["chat_template_kwargs"]["enable_thinking"], false,
+        "Thinking::Disabled must ask the chat template to skip reasoning"
+    );
+    assert!(
+        captured[1].body.get("chat_template_kwargs").is_none(),
+        "Thinking::Enabled must leave the request untouched"
+    );
 }
 
 #[tokio::test]
@@ -1115,7 +1226,10 @@ async fn complete_oneshot_uses_the_summary_budget() {
 
     let cfg = chat_spec(port);
     let client = build_client(&cfg);
-    client.complete_oneshot("title?".into()).await.unwrap();
+    client
+        .complete_oneshot("title?".into(), Thinking::Enabled)
+        .await
+        .unwrap();
 
     let captured = script.captured().await;
     assert_eq!(captured.len(), 1);

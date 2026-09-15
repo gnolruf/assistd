@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::{Config, SleepConfig};
-use assistd_ipc::{Event, IpcClient, Request};
+use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream};
 use crossterm::{cursor, execute, terminal};
@@ -144,6 +144,8 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     let _polling_handle =
         spawn_status_polling(ipc.clone(), chat_tx.clone(), shutdown_tx.subscribe());
+    let _title_handle =
+        spawn_title_subscription(ipc.clone(), chat_tx.clone(), shutdown_tx.subscribe());
 
     let run_result = run_tui(TuiContext {
         ipc: ipc.clone(),
@@ -360,6 +362,60 @@ fn spawn_status_polling(
             }
         }
     })
+}
+
+/// Session titles are generated in the background, long after the turn
+/// that triggered them has closed its dialog connection, so they reach
+/// the TUI over the daemon's broadcast bus instead. Reconnects on a
+/// fixed delay: a missing title is cosmetic, so there's nothing to gain
+/// from backing off aggressively.
+fn spawn_title_subscription(
+    ipc: Arc<IpcClient>,
+    chat_tx: mpsc::Sender<ChatEvent>,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                () = pump_titles(&ipc, &chat_tx) => {
+                    tokio::select! {
+                        _ = shutdown.changed() => break,
+                        _ = tokio::time::sleep(RECONNECT_DELAY) => {}
+                    }
+                }
+            }
+        }
+    })
+}
+
+async fn pump_titles(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
+    let req = Request::Subscribe {
+        id: Uuid::new_v4().to_string(),
+        filter: SubscribeFilter {
+            kinds: vec![EventKind::SessionTitle],
+        },
+    };
+    let mut stream = match ipc.one_shot(req).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("session-title subscribe failed: {e}");
+            return;
+        }
+    };
+    while let Ok(Some(ev)) = stream.next_event().await {
+        if chat_tx
+            .send(ChatEvent::Wire {
+                stream: WireStream::Status,
+                event: ev,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
 }
 
 async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Request) {

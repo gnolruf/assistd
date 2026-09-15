@@ -266,6 +266,12 @@ pub struct App {
     /// the rewrap picks up the new header text. `None` when no
     /// thinking block is live; cleared on `Done`/`Error`.
     last_thinking_seconds: Option<u64>,
+    /// Title of the active conversation, rendered at the head of the
+    /// status bar. Arrives as `Event::SessionTitle` once the daemon has
+    /// summarised the session's first turn, and is replaced (or
+    /// cleared) whenever `/switch`, `/resume` or `/new` moves the
+    /// daemon to a different session.
+    pub session_title: Option<String>,
     /// Verbose-rendering toggle, flipped by Ctrl+O. When `true`, the
     /// output pane force-expands every Thinking and Tool block in
     /// scrollback regardless of their per-item `expanded` flag. The
@@ -379,6 +385,7 @@ impl App {
             slash_dismissed: false,
             picker_modal: None,
             last_thinking_seconds: None,
+            session_title: None,
             verbose: false,
         }
     }
@@ -889,30 +896,43 @@ impl App {
                 fork_point_seq,
                 session_title,
                 ..
-            } => match self.in_flight_branch_op {
-                Some(BranchOp::Switch) => {
-                    self.output.clear();
-                    let msg = match session_title.as_deref().map(str::trim) {
-                        Some(t) if !t.is_empty() => {
-                            format!("[switched to conversation '{t}' on branch '{name}']")
-                        }
-                        _ => format!("[switched to new conversation on branch '{name}']"),
-                    };
-                    self.output.push_info(&msg);
+            } => {
+                // Always reports the now-active session, so it is also
+                // how the status bar learns a switch changed (or
+                // cleared) the title.
+                self.session_title = session_title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string);
+                match self.in_flight_branch_op {
+                    Some(BranchOp::Switch) => {
+                        self.output.clear();
+                        let msg = match session_title.as_deref().map(str::trim) {
+                            Some(t) if !t.is_empty() => {
+                                format!("[switched to conversation '{t}' on branch '{name}']")
+                            }
+                            _ => format!("[switched to new conversation on branch '{name}']"),
+                        };
+                        self.output.push_info(&msg);
+                    }
+                    Some(BranchOp::Resume) | Some(BranchOp::New) => {
+                        self.output.clear();
+                    }
+                    _ => {
+                        let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
+                            (Some(p), Some(seq)) => {
+                                format!("[forked from '{p}'@seq{seq} into '{name}']")
+                            }
+                            _ => format!("[branch '{name}' is now active]"),
+                        };
+                        self.output.push_info(&detail);
+                    }
                 }
-                Some(BranchOp::Resume) | Some(BranchOp::New) => {
-                    self.output.clear();
-                }
-                _ => {
-                    let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
-                        (Some(p), Some(seq)) => {
-                            format!("[forked from '{p}'@seq{seq} into '{name}']")
-                        }
-                        _ => format!("[branch '{name}' is now active]"),
-                    };
-                    self.output.push_info(&detail);
-                }
-            },
+            }
+            Event::SessionTitle { title, .. } => {
+                self.session_title = Some(title);
+            }
             Event::HistoryEntry {
                 role,
                 content,
@@ -1782,6 +1802,18 @@ mod tests {
         });
         assert!(app.in_flight_branch_op.is_none());
         assert!(app.generating, "a branch failure must not end the reply");
+    }
+
+    #[test]
+    fn session_title_event_lands_in_the_status_bar() {
+        let (mut app, _rx) = test_app();
+        assert!(app.session_title.is_none());
+        app.on_chat_event(status(Event::SessionTitle {
+            id: "q-1".into(),
+            session_id: "s-1".into(),
+            title: "Cats And Dogs".into(),
+        }));
+        assert_eq!(app.session_title.as_deref(), Some("Cats And Dogs"));
     }
 
     #[test]

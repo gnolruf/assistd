@@ -130,6 +130,16 @@ pub enum LlmError {
 /// over `anyhow::Error` so callers can pattern-match.
 pub type LlmResult<T> = std::result::Result<T, LlmError>;
 
+/// Whether a request lets a reasoning model produce its `<think>`
+/// block. Reasoning is discarded by one-shot callers, so a model that
+/// spends the whole token budget thinking returns nothing at all;
+/// [`Thinking::Disabled`] asks the chat template to skip it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Thinking {
+    Enabled,
+    Disabled,
+}
+
 /// Events streamed from a backend to the caller during generation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LlmEvent {
@@ -315,8 +325,10 @@ pub trait LlmBackend: Send + Sync + 'static {
     /// Returns the model's final text concatenated; reasoning output is
     /// discarded. Answers here are short by construction, so
     /// implementations budget them from `chat.max_summary_tokens`
-    /// rather than the full per-response allowance.
-    async fn complete_oneshot(&self, _prompt: String) -> LlmResult<String> {
+    /// rather than the full per-response allowance — which is why
+    /// callers wanting an answer rather than a train of thought pass
+    /// [`Thinking::Disabled`].
+    async fn complete_oneshot(&self, _prompt: String, _thinking: Thinking) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),
         ))

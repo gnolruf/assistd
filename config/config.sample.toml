@@ -298,14 +298,6 @@ hotkey = "Super+Escape"
 # final Done event before the daemon exits.
 # shutdown_grace_secs = 5
 
-[agent]
-# Maximum number of LLM invocations per user turn. The agent loop sends
-# the `run` tool schema to the model, executes any requested commands,
-# and iterates until the model returns plain text, or until this cap
-# is hit. 20 is deliberately generous: each `run` call is cheap and
-# pipelines reduce the number of round-trips needed for most queries.
-# max_iterations = 20
-
 # ---------------------------------------------------------------------------
 # Tool execution safety
 # ---------------------------------------------------------------------------

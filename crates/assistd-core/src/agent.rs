@@ -32,6 +32,17 @@ use tracing::{debug, info, instrument, warn};
 /// hopeless and surface to the user.
 const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 
+/// Consecutive identical tool calls (same name and arguments) after
+/// which the model is treated as stuck. The loop then withdraws the
+/// tool schema and asks the model to answer from what it already has.
+const DUPLICATE_CALL_LIMIT: usize = 3;
+
+/// Hard ceiling on tool-calling steps per turn. Stuck turns are caught
+/// far earlier by [`DUPLICATE_CALL_LIMIT`]; this only bounds a turn
+/// that keeps making *different* calls without ever answering, so it
+/// sits well above anything a legitimate task needs.
+const MAX_TOOL_STEPS: u32 = 200;
+
 /// Long-lived agent dependencies. One `Agent` is constructed per
 /// daemon (or per test) and reused across many turns; only the
 /// per-turn input (user text, attachments, channels) varies between
@@ -45,22 +56,19 @@ const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
-    max_iterations: u32,
     health: Option<Arc<dyn LlmHealthProbe>>,
 }
 
 impl Agent {
-    /// Construct a new `Agent` with the given backend, tool registry, and iteration cap.
+    /// Construct a new `Agent` with the given backend and tool registry.
     pub fn new(
         backend: Arc<dyn LlmBackend>,
         tools: Arc<ToolRegistry>,
-        max_iterations: u32,
         health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Self {
         Self {
             backend,
             tools,
-            max_iterations,
             health,
         }
     }
@@ -76,8 +84,10 @@ impl Agent {
     ///    [`LlmEvent::ToolResult`], and collect a [`ToolResultPayload`].
     ///    After the loop, push the collected results back with
     ///    `backend.push_tool_results(...)` and go to step 2.
-    /// 5. If `max_iterations` is exhausted, emit a user-visible error delta
-    ///    and [`LlmEvent::Done`].
+    /// 5. If the model repeats the same call [`DUPLICATE_CALL_LIMIT`]
+    ///    times in a row, or the turn reaches [`MAX_TOOL_STEPS`], emit a
+    ///    [`LlmEvent::Status`], withdraw the tool schema, and run one
+    ///    more step so the model answers from what it has gathered.
     ///
     /// Cancellation: if `tx` is closed (client disconnected) between
     /// iterations, the loop returns `Ok(())` without running further tool
@@ -102,16 +112,18 @@ impl Agent {
     ) -> Result<()> {
         let backend = &self.backend;
         let tools = &self.tools;
-        let max_iterations = self.max_iterations;
         let health = self.health.as_ref();
 
         backend
             .push_user(user_text, user_attachments)
             .await
             .map_err(anyhow::Error::new)?;
-        let schemas = tools.openai_schemas();
+        let mut schemas = tools.openai_schemas();
+        let mut tools_withdrawn = false;
+        let mut streak = CallStreak::default();
+        let mut iteration: u32 = 0;
 
-        for iteration in 0..max_iterations {
+        loop {
             if tx.is_closed() || cancel.is_cancelled() {
                 debug!(
                     target: "assistd::agent",
@@ -262,9 +274,28 @@ impl Agent {
                     let _ = tx.send(LlmEvent::Done).await;
                     return Ok(());
                 }
+                StepOutcome::ToolCalls(calls) if tools_withdrawn => {
+                    warn!(
+                        target: "assistd::agent",
+                        iteration,
+                        "model requested tools after they were withdrawn; ending turn"
+                    );
+                    let results = calls
+                        .iter()
+                        .map(|call| cancelled_tool_result(call, "ended; tools are unavailable").0)
+                        .collect();
+                    backend
+                        .push_tool_results(results)
+                        .await
+                        .map_err(anyhow::Error::new)?;
+                    let _ = tx.send(LlmEvent::Done).await;
+                    return Ok(());
+                }
                 StepOutcome::ToolCalls(calls) => {
                     let mut results = Vec::with_capacity(calls.len());
+                    let mut stuck = false;
                     for call in calls {
+                        stuck |= streak.record(&call) >= DUPLICATE_CALL_LIMIT;
                         if tx.is_closed() || cancel.is_cancelled() {
                             debug!(
                                 target: "assistd::agent",
@@ -325,22 +356,102 @@ impl Agent {
                         .push_tool_results(results)
                         .await
                         .map_err(anyhow::Error::new)?;
+
+                    iteration += 1;
+                    let exhausted = if stuck {
+                        Some(ToolBudgetExhausted::Repeating)
+                    } else if iteration >= MAX_TOOL_STEPS {
+                        Some(ToolBudgetExhausted::StepCeiling)
+                    } else {
+                        None
+                    };
+                    if let Some(why) = exhausted {
+                        crate::recovery_event!(
+                            crate::RecoverySeverity::Warning,
+                            crate::Component::Agent,
+                            "tools_withdrawn",
+                            iteration = iteration,
+                            reason = %why.reason(),
+                            "withdrawing tools; asking model to answer from what it has"
+                        );
+                        let _ = tx
+                            .send(LlmEvent::Status {
+                                severity: crate::RecoverySeverity::Warning.as_str().to_string(),
+                                component: crate::Component::Agent.as_str().to_string(),
+                                event: "tools_withdrawn".to_string(),
+                                message: format!(
+                                    "Agent stopped using tools ({}); answering with what it has",
+                                    why.reason()
+                                ),
+                            })
+                            .await;
+                        if let Err(e) = backend.set_transient_context(why.model_note()).await {
+                            warn!(
+                                target: "assistd::agent",
+                                error = %e,
+                                "set_transient_context failed; answering without the note"
+                            );
+                        }
+                        schemas = Vec::new();
+                        tools_withdrawn = true;
+                    }
                 }
             }
         }
+    }
+}
 
-        warn!(
-            target: "assistd::agent",
-            max_iterations,
-            "agent turn exceeded max iterations; giving up"
-        );
-        let _ = tx
-            .send(LlmEvent::Delta {
-                text: format!("\n[agent exceeded max_iterations={max_iterations}; stopping]\n"),
-            })
-            .await;
-        let _ = tx.send(LlmEvent::Done).await;
-        Ok(())
+/// Why the loop stopped offering tools to the model for the rest of
+/// the turn.
+#[derive(Debug, Clone, Copy)]
+enum ToolBudgetExhausted {
+    Repeating,
+    StepCeiling,
+}
+
+impl ToolBudgetExhausted {
+    fn reason(self) -> String {
+        match self {
+            Self::Repeating => {
+                format!("the same tool call was repeated {DUPLICATE_CALL_LIMIT} times in a row")
+            }
+            Self::StepCeiling => {
+                format!("the turn reached its ceiling of {MAX_TOOL_STEPS} tool steps")
+            }
+        }
+    }
+
+    fn model_note(self) -> String {
+        format!(
+            "Tool access for this turn has been withdrawn because {}. Do not request \
+             any more tool calls. Answer the user now using what you have already \
+             learned, and say plainly which parts you could not finish.",
+            self.reason()
+        )
+    }
+}
+
+/// Tracks how many times in a row the model has issued the same tool
+/// call, so a stuck loop is caught by content rather than by count.
+#[derive(Default)]
+struct CallStreak {
+    last: Option<(String, Value)>,
+    count: usize,
+}
+
+impl CallStreak {
+    fn record(&mut self, call: &ToolCall) -> usize {
+        let same = self
+            .last
+            .as_ref()
+            .is_some_and(|(name, args)| *name == call.name && *args == call.arguments);
+        if same {
+            self.count += 1;
+        } else {
+            self.last = Some((call.name.clone(), call.arguments.clone()));
+            self.count = 1;
+        }
+        self.count
     }
 }
 
@@ -522,6 +633,10 @@ mod tests {
         /// Optional artificial delay inside `step` so cancellation
         /// tests can fire while the step is still pending.
         slow_step: StdMutex<Option<std::time::Duration>>,
+        /// Number of tool schemas offered on each completed `step`, so
+        /// tests can see when the loop withdrew tools.
+        step_tool_counts: StdMutex<Vec<usize>>,
+        transient_notes: StdMutex<Vec<String>>,
     }
 
     impl MockBackend {
@@ -533,6 +648,8 @@ mod tests {
                 pushed_results: StdMutex::new(Vec::new()),
                 step_calls: std::sync::atomic::AtomicUsize::new(0),
                 slow_step: StdMutex::new(None),
+                step_tool_counts: StdMutex::new(Vec::new()),
+                transient_notes: StdMutex::new(Vec::new()),
             })
         }
 
@@ -572,7 +689,7 @@ mod tests {
 
         async fn step(
             &self,
-            _tools: Vec<Value>,
+            tools: Vec<Value>,
             tx: mpsc::Sender<LlmEvent>,
         ) -> assistd_llm::LlmResult<StepOutcome> {
             self.step_calls
@@ -581,6 +698,7 @@ mod tests {
             if let Some(d) = delay {
                 tokio::time::sleep(d).await;
             }
+            self.step_tool_counts.lock().push(tools.len());
             let outcome = {
                 let mut q = self.outcomes.lock();
                 if q.is_empty() {
@@ -593,6 +711,11 @@ mod tests {
                 let _ = tx.send(LlmEvent::Delta { text: "ok".into() }).await;
             }
             Ok(outcome)
+        }
+
+        async fn set_transient_context(&self, text: String) -> assistd_llm::LlmResult<()> {
+            self.transient_notes.lock().push(text);
+            Ok(())
         }
     }
 
@@ -630,7 +753,7 @@ mod tests {
         let backend = MockBackend::with(vec![StepOutcome::Final]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn(
                 "what is 2+2?".into(),
                 Vec::new(),
@@ -654,7 +777,7 @@ mod tests {
         ]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn("say hello".into(), Vec::new(), tx, CancellationToken::new())
             .await
             .unwrap();
@@ -706,7 +829,7 @@ mod tests {
         let tools = Arc::new(tools);
 
         let (tx, mut rx) = mpsc::channel(16);
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn("how many?".into(), Vec::new(), tx, CancellationToken::new())
             .await
             .unwrap();
@@ -727,35 +850,114 @@ mod tests {
         );
     }
 
+    fn withdrawn_status(events: &[LlmEvent]) -> bool {
+        events
+            .iter()
+            .any(|e| matches!(e, LlmEvent::Status { event, .. } if event == "tools_withdrawn"))
+    }
+
     #[tokio::test]
-    async fn exceeds_max_iterations_emits_error_delta_and_done() {
-        // Keep requesting tool calls forever.
-        let outcomes: Vec<StepOutcome> = (0..10)
-            .map(|i| {
-                StepOutcome::ToolCalls(vec![call(&format!("c-{i}"), &format!("echo iter{i}"))])
-            })
+    async fn repeated_identical_calls_withdraw_tools_then_answer() {
+        // Same command every step; once the queue drains the mock
+        // answers with text, standing in for a model that honours the
+        // withdrawn tool schema.
+        let outcomes: Vec<StepOutcome> = (0..DUPLICATE_CALL_LIMIT)
+            .map(|i| StepOutcome::ToolCalls(vec![call(&format!("c-{i}"), "echo same")]))
             .collect();
         let backend = MockBackend::with(outcomes);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(64);
-        Agent::new(backend, tools, 3, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn("loop it".into(), Vec::new(), tx, CancellationToken::new())
             .await
             .unwrap();
         let events = collect(&mut rx).await;
 
-        let delta_text: String = events
-            .iter()
-            .filter_map(|e| match e {
-                LlmEvent::Delta { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            delta_text.contains("max_iterations=3"),
-            "expected cap message: {delta_text:?}"
-        );
+        assert!(withdrawn_status(&events), "expected tools_withdrawn status");
         assert!(matches!(events.last(), Some(LlmEvent::Done)));
+        // Three dispatched duplicates, then one tool-less answer step.
+        assert_eq!(backend.pushed_results.lock().len(), DUPLICATE_CALL_LIMIT);
+        assert_eq!(*backend.step_tool_counts.lock(), vec![1, 1, 1, 0]);
+        let notes = backend.transient_notes.lock();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].contains("repeated"),
+            "note should say why: {notes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_calls_are_not_treated_as_repeats() {
+        let outcomes: Vec<StepOutcome> = (0..5)
+            .map(|i| StepOutcome::ToolCalls(vec![call(&format!("c-{i}"), &format!("echo {i}"))]))
+            .collect();
+        let backend = MockBackend::with(outcomes);
+        let tools = tools_with_echo();
+        let (tx, mut rx) = mpsc::channel(64);
+        Agent::new(backend.clone(), tools, None)
+            .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let events = collect(&mut rx).await;
+
+        assert!(!withdrawn_status(&events));
+        assert_eq!(backend.pushed_results.lock().len(), 5);
+        assert!(backend.transient_notes.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn step_ceiling_withdraws_tools_then_answer() {
+        let outcomes: Vec<StepOutcome> = (0..MAX_TOOL_STEPS + 10)
+            .map(|i| StepOutcome::ToolCalls(vec![call(&format!("c-{i}"), &format!("echo {i}"))]))
+            .collect();
+        let backend = MockBackend::with(outcomes);
+        let tools = tools_with_echo();
+        let (tx, mut rx) = mpsc::channel(64);
+        let agent = Agent::new(backend.clone(), tools, None);
+        let turn = agent.run_turn("go".into(), Vec::new(), tx, CancellationToken::new());
+        let (result, events) = tokio::join!(turn, collect(&mut rx));
+        result.unwrap();
+
+        assert!(withdrawn_status(&events));
+        assert!(matches!(events.last(), Some(LlmEvent::Done)));
+        let counts = backend.step_tool_counts.lock();
+        assert_eq!(counts.len(), MAX_TOOL_STEPS as usize + 1);
+        assert_eq!(counts.last(), Some(&0));
+        let notes = backend.transient_notes.lock();
+        assert!(
+            notes[0].contains("ceiling"),
+            "note should say why: {notes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_request_after_withdrawal_ends_turn_with_synthetic_results() {
+        let outcomes: Vec<StepOutcome> = (0..4)
+            .map(|i| StepOutcome::ToolCalls(vec![call(&format!("c-{i}"), "echo same")]))
+            .collect();
+        let backend = MockBackend::with(outcomes);
+        let tools = tools_with_echo();
+        let (tx, mut rx) = mpsc::channel(64);
+        Agent::new(backend.clone(), tools, None)
+            .run_turn("loop it".into(), Vec::new(), tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let events = collect(&mut rx).await;
+
+        assert!(matches!(events.last(), Some(LlmEvent::Done)));
+        let pushed = backend.pushed_results.lock();
+        assert_eq!(pushed.len(), DUPLICATE_CALL_LIMIT + 1);
+        assert!(
+            pushed[DUPLICATE_CALL_LIMIT][0]
+                .content
+                .contains("tools are unavailable"),
+            "expected synthetic result: {:?}",
+            pushed[DUPLICATE_CALL_LIMIT][0].content
+        );
+        assert_eq!(
+            backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
+            DUPLICATE_CALL_LIMIT + 1
+        );
     }
 
     #[tokio::test]
@@ -770,7 +972,7 @@ mod tests {
         ]);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(16);
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
             .await
             .unwrap();
@@ -812,7 +1014,7 @@ mod tests {
             StepOutcome::Final,
         ]);
         let (tx, mut rx) = mpsc::channel(16);
-        Agent::new(backend.clone(), reg, 10, None)
+        Agent::new(backend.clone(), reg, None)
             .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
             .await
             .unwrap();
@@ -840,7 +1042,7 @@ mod tests {
         drop(rx);
         // Channel is closed from the start, so the very first is_closed
         // check bails the loop before any step runs.
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
             .await
             .unwrap();
@@ -862,7 +1064,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<LlmEvent>(16);
         let token = CancellationToken::new();
         token.cancel();
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn("go".into(), Vec::new(), tx, token)
             .await
             .unwrap();
@@ -922,7 +1124,7 @@ mod tests {
         ]);
 
         let (tx, mut rx) = mpsc::channel(32);
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn(
                 "I prefer vim over emacs".into(),
                 Vec::new(),
@@ -1027,7 +1229,7 @@ mod tests {
         ]);
 
         let (tx, mut rx) = mpsc::channel(32);
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn(
                 "what's on my calendar tomorrow?".into(),
                 Vec::new(),
@@ -1091,7 +1293,7 @@ mod tests {
             StepOutcome::Final,
         ]);
         let (tx, mut rx) = mpsc::channel(16);
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn(
                 "what's on my calendar?".into(),
                 Vec::new(),
@@ -1136,7 +1338,7 @@ mod tests {
             token_for_kicker.cancel();
         });
         let started = std::time::Instant::now();
-        Agent::new(backend.clone(), tools, 10, None)
+        Agent::new(backend.clone(), tools, None)
             .run_turn("go".into(), Vec::new(), tx, token)
             .await
             .unwrap();
@@ -1189,7 +1391,7 @@ mod tests {
             token_for_kicker.cancel();
         });
 
-        let agent = Agent::new(backend.clone(), Arc::new(reg), 10, None);
+        let agent = Agent::new(backend.clone(), Arc::new(reg), None);
         let turn = agent.run_turn("go".into(), Vec::new(), tx, token);
         tokio::time::timeout(std::time::Duration::from_secs(5), turn)
             .await
@@ -1340,7 +1542,7 @@ mod tests {
         let probe = MockProbe::ready_with_wait_ok(123);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(32);
-        Agent::new(backend.clone(), tools, 10, Some(probe.clone()))
+        Agent::new(backend.clone(), tools, Some(probe.clone()))
             .run_turn("hello".into(), Vec::new(), tx, CancellationToken::new())
             .await
             .expect("replay should succeed");
@@ -1381,7 +1583,7 @@ mod tests {
         let probe = MockProbe::ready_with_wait_ok(123);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(32);
-        let result = Agent::new(backend.clone(), tools, 10, Some(probe))
+        let result = Agent::new(backend.clone(), tools, Some(probe))
             .run_turn("hello".into(), Vec::new(), tx, CancellationToken::new())
             .await;
         assert!(result.is_err(), "second ServerRestarting must be terminal");
@@ -1410,7 +1612,7 @@ mod tests {
         let probe = MockProbe::ready_with_wait_err(assistd_llm::HealthWaitError::Degraded);
         let tools = tools_with_echo();
         let (tx, mut rx) = mpsc::channel(32);
-        let result = Agent::new(backend.clone(), tools, 10, Some(probe))
+        let result = Agent::new(backend.clone(), tools, Some(probe))
             .run_turn("hello".into(), Vec::new(), tx, CancellationToken::new())
             .await;
         assert!(result.is_err(), "Degraded probe must surface as error");

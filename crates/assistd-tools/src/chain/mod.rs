@@ -10,7 +10,7 @@ pub mod parser;
 
 pub use executor::{PIPE_BUF_MAX, execute};
 pub use expand::expand_args;
-pub use parser::{ParseError, parse_chain};
+pub use parser::{ParseError, Redirection, parse_chain};
 
 /// One argv entry as written on the command line, plus whether any part
 /// of it was quoted.

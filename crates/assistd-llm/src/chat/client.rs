@@ -35,7 +35,7 @@ use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
     HistoryEntry, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult,
-    ReadyState, StepOutcome, ToolCall, ToolResultPayload,
+    ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -392,6 +392,7 @@ impl LlmBackend for LlamaChatClient {
                 presence_penalty: self.chat.presence_penalty,
                 tools: None,
                 tool_choice: None,
+                chat_template_kwargs: None,
             };
             match serde_json::to_vec(&payload) {
                 Ok(b) => b,
@@ -450,10 +451,12 @@ impl LlmBackend for LlamaChatClient {
     async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         for r in results {
-            let content = format!("[tool:{}]\n{}", r.name, r.content);
             if r.attachments.is_empty() {
-                conv.push_user(content);
+                conv.push_tool_result(r.call_id, r.content);
             } else {
+                // Image parts only render on a user turn, so a result
+                // carrying one keeps the tagged user-message shape.
+                let content = format!("[tool:{}]\n{}", r.name, r.content);
                 conv.push_user_with_attachments(content, r.attachments);
             }
         }
@@ -484,6 +487,7 @@ impl LlmBackend for LlamaChatClient {
                 presence_penalty: self.chat.presence_penalty,
                 tools: if has_tools { Some(tools) } else { None },
                 tool_choice: if has_tools { Some("auto") } else { None },
+                chat_template_kwargs: None,
             };
             match serde_json::to_vec(&payload) {
                 Ok(b) => b,
@@ -536,12 +540,14 @@ impl LlmBackend for LlamaChatClient {
                     content: entry.content,
                     attachments: Vec::new(),
                     tool_calls: Vec::new(),
+                    tool_call_id: None,
                 }),
                 HistoryRole::User => msgs.push(Message {
                     role: Role::User,
                     content: entry.content,
                     attachments: Vec::new(),
                     tool_calls: Vec::new(),
+                    tool_call_id: None,
                 }),
                 HistoryRole::Assistant => {
                     let calls = parse_tool_calls(&entry.tool_calls_json)?;
@@ -550,18 +556,32 @@ impl LlmBackend for LlamaChatClient {
                         content: entry.content,
                         attachments: Vec::new(),
                         tool_calls: calls,
+                        tool_call_id: None,
                     });
                 }
-                HistoryRole::Tool => {
-                    let name = entry.tool_name.unwrap_or_default();
-                    let tagged = format!("[tool:{name}]\n{}", entry.content);
-                    msgs.push(Message {
-                        role: Role::User,
-                        content: tagged,
+                // A row with no call id predates tool-role routing (or
+                // was written by the vision path); replaying it as a
+                // tool message would leave the template without the id
+                // it needs, so those keep the tagged user shape.
+                HistoryRole::Tool => match entry.tool_call_id {
+                    Some(call_id) => msgs.push(Message {
+                        role: Role::Tool,
+                        content: entry.content,
                         attachments: Vec::new(),
                         tool_calls: Vec::new(),
-                    });
-                }
+                        tool_call_id: Some(call_id),
+                    }),
+                    None => {
+                        let name = entry.tool_name.unwrap_or_default();
+                        msgs.push(Message {
+                            role: Role::User,
+                            content: format!("[tool:{name}]\n{}", entry.content),
+                            attachments: Vec::new(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
+                        });
+                    }
+                },
             }
         }
         let mut conv = self.conv.lock().await;
@@ -574,7 +594,7 @@ impl LlmBackend for LlamaChatClient {
         Ok(conv.truncate_to_last_real_user())
     }
 
-    async fn complete_oneshot(&self, prompt: String) -> LlmResult<String> {
+    async fn complete_oneshot(&self, prompt: String, thinking: Thinking) -> LlmResult<String> {
         let body_bytes = {
             let payload = wire::ChatRequest {
                 model: self.model.name.as_str(),
@@ -593,6 +613,12 @@ impl LlmBackend for LlamaChatClient {
                 presence_penalty: self.chat.presence_penalty,
                 tools: None,
                 tool_choice: None,
+                chat_template_kwargs: match thinking {
+                    Thinking::Enabled => None,
+                    Thinking::Disabled => Some(wire::ChatTemplateKwargs {
+                        enable_thinking: false,
+                    }),
+                },
             };
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
@@ -665,7 +691,7 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::
     Ok(out)
 }
 
-fn commit_step(conv: &mut Conversation, accum: StreamAccum) -> LlmResult<StepOutcome> {
+fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<StepOutcome> {
     if accum.tool_calls.is_empty() {
         conv.push_assistant(accum.text);
         return Ok(StepOutcome::Final);
@@ -678,8 +704,12 @@ fn commit_step(conv: &mut Conversation, accum: StreamAccum) -> LlmResult<StepOut
             "finish_reason disagrees with emitted tool calls; running them anyway"
         );
     }
+    let narration = std::mem::take(&mut accum.text);
     let (records, parsed) = accum.finalize_tool_calls()?;
-    conv.push_assistant_with_tool_calls(None, records);
+    conv.push_assistant_with_tool_calls(
+        (!narration.trim().is_empty()).then_some(narration),
+        records,
+    );
     Ok(StepOutcome::ToolCalls(parsed))
 }
 
@@ -717,6 +747,7 @@ impl Summarizer for LlamaChatClient {
             presence_penalty: None,
             tools: None,
             tool_choice: None,
+            chat_template_kwargs: None,
         };
 
         let mut response = self.client.post(&url).json(&payload).send().await?;

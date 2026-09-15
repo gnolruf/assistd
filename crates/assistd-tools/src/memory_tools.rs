@@ -15,19 +15,21 @@
 //! That is the AC #2 contract for "duplicate memories are not
 //! re-inserted"; the LLM is nudged toward stable snake_case keys via
 //! the [`RememberTool::description`] examples, and the
-//! `^[a-z0-9._]+$` validator below rejects whitespace/uppercase so two
+//! `^[a-z0-9._-]+$` validator below rejects whitespace/uppercase so two
 //! turns about the same concept don't drift onto different keys.
+//! Hyphens are allowed alongside underscores and dots so ISO dates
+//! (`log.2026-09-11`) can be keys without a second spelling.
 
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use assistd_embed::{EmbedJob, Embedder};
-use assistd_memory::SemanticStore;
+use assistd_memory::{SemanticStore, SessionId};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::Tool;
 use crate::memory::MemoryOps;
@@ -37,8 +39,10 @@ use crate::memory::MemoryOps;
 /// context small. 50 is plenty for a single user's preferences.
 const RECALL_LIMIT: usize = 50;
 
-/// Validation regex for memory keys.
-const KEY_PATTERN: &str = r"^[a-z0-9._]+$";
+/// Validation regex for memory keys. Hyphens are in the class for the
+/// sake of dates (`standup.2026-09-11`); whitespace and uppercase stay
+/// out so the same concept keeps one spelling.
+const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
@@ -77,7 +81,8 @@ impl Tool for RememberTool {
          value=\"vim\"); \"my name is Ben\" -> remember(key=\"user.name\", \
          value=\"Ben\"); \"I work in PST\" -> remember(key=\"user.timezone\", \
          value=\"PST\"). Use snake_case keys with optional dots for \
-         namespacing (e.g. user.name, editor_preference, project.assistd.dir). \
+         namespacing and hyphens where they read naturally (e.g. \
+         user.name, editor_preference, standup.2026-09-11). \
          Calling remember with an existing key overwrites the previous \
          value. Do NOT call this for ephemeral context within a single \
          conversation; only durable user-facts."
@@ -92,8 +97,8 @@ impl Tool for RememberTool {
                     "type": "string",
                     "description": "snake_case identifier with optional dot \
                                     namespacing (e.g. user.name, \
-                                    editor_preference). Must match \
-                                    ^[a-z0-9._]+$."
+                                    editor_preference, standup.2026-09-11). \
+                                    Must match ^[a-z0-9._-]+$."
                 },
                 "value": {
                     "type": "string",
@@ -307,19 +312,26 @@ pub struct ReminisceTool {
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
     embedding_model: String,
+    current_session: watch::Receiver<Arc<SessionId>>,
 }
 
 impl ReminisceTool {
-    /// Construct a `ReminisceTool` with the given embedder, semantic store, and model name.
+    /// Construct a `ReminisceTool` with the given embedder, semantic
+    /// store, and model name. `current_session` tracks the session the
+    /// daemon is in — its dialogue is already in the model's context,
+    /// so it is excluded from results; the receiver keeps that accurate
+    /// across `/switch` and `/new`.
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
         embedding_model: String,
+        current_session: watch::Receiver<Arc<SessionId>>,
     ) -> Self {
         Self {
             embedder,
             semantic,
             embedding_model,
+            current_session,
         }
     }
 }
@@ -331,9 +343,10 @@ impl Tool for ReminisceTool {
     }
 
     fn description(&self) -> &str {
-        "Search past conversation history (across sessions) for messages \
-         similar in meaning to a query. Complement to `recall`: `recall` \
-         looks up *saved facts* (key/value), `reminisce` searches *past \
+        "Search *earlier* conversations — every session except the one \
+         in progress, which is already in context — for messages similar \
+         in meaning to a query. Complement to `recall`: `recall` looks \
+         up *saved facts* (key/value), `reminisce` searches *past \
          dialogue text*; use it when the user references something they \
          'discussed before' or 'worked on last month'. Robust to \
          paraphrase: a query like \"that rust project we discussed\" will \
@@ -405,9 +418,10 @@ impl Tool for ReminisceTool {
                 }));
             }
         };
+        let current = self.current_session.borrow().clone();
         let hits = self
             .semantic
-            .nearest_chunks(vec, limit as usize, &self.embedding_model)
+            .nearest_chunks(vec, limit as usize, &self.embedding_model, Some(&current))
             .await?;
 
         let output = if hits.is_empty() {
@@ -477,6 +491,106 @@ mod tests {
 
     fn no_semantic() -> Arc<dyn SemanticStore> {
         Arc::new(NoSemanticStore)
+    }
+
+    struct FixedEmbedder;
+
+    #[async_trait]
+    impl Embedder for FixedEmbedder {
+        async fn embed(&self, _text: String) -> Result<Vec<f32>> {
+            Ok(vec![1.0])
+        }
+        fn model(&self) -> &str {
+            "m"
+        }
+        fn dim(&self) -> usize {
+            1
+        }
+    }
+
+    /// Records the session `reminisce` asked to leave out.
+    #[derive(Default)]
+    struct ExclusionSpy {
+        excluded: parking_lot::Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl SemanticStore for ExclusionSpy {
+        async fn nearest_chunks(
+            &self,
+            _q: Vec<f32>,
+            _k: usize,
+            _model: &str,
+            exclude_session: Option<&SessionId>,
+        ) -> Result<Vec<assistd_memory::EmbeddingHit>> {
+            *self.excluded.lock() = exclude_session.map(|s| s.0.clone());
+            Ok(Vec::new())
+        }
+        async fn nearest_memories(
+            &self,
+            _q: Vec<f32>,
+            _k: usize,
+            _model: &str,
+        ) -> Result<Vec<assistd_memory::MemoryHit>> {
+            Ok(Vec::new())
+        }
+        async fn count_for_model(&self, _model: &str) -> Result<(i64, i64)> {
+            Ok((0, 0))
+        }
+        async fn count_stale(&self, _current: &str) -> Result<(i64, Vec<String>)> {
+            Ok((0, Vec::new()))
+        }
+        async fn memories_missing_embedding(&self, _c: &str) -> Result<Vec<(i64, String)>> {
+            Ok(Vec::new())
+        }
+        async fn chunks_missing_embedding(&self, _c: &str) -> Result<Vec<(i64, String)>> {
+            Ok(Vec::new())
+        }
+        async fn store_chunk_embedding(
+            &self,
+            _chunk_id: i64,
+            _model: String,
+            _dim: i64,
+            _vector: Vec<u8>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn store_memory_embedding(
+            &self,
+            _memory_id: i64,
+            _model: String,
+            _dim: i64,
+            _vector: Vec<u8>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn reminisce_excludes_the_session_in_progress() {
+        let spy = Arc::new(ExclusionSpy::default());
+        let first = Arc::new(SessionId::new());
+        let (session_tx, session_rx) = watch::channel(first.clone());
+        let tool = ReminisceTool::new(
+            Arc::new(FixedEmbedder),
+            spy.clone(),
+            "m".to_string(),
+            session_rx,
+        );
+
+        tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
+            .await
+            .unwrap();
+        assert_eq!(spy.excluded.lock().as_deref(), Some(first.0.as_str()));
+
+        // `/new` and `/switch` move the daemon to another session; the
+        // tool must follow rather than pin the one it was built with.
+        let second = Arc::new(SessionId::new());
+        session_tx.send_replace(second.clone());
+        tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
+            .await
+            .unwrap();
+        assert_eq!(spy.excluded.lock().as_deref(), Some(second.0.as_str()));
     }
 
     /// Stand up a SQLite-backed `MemoryOps` in a tempdir. The writer
@@ -550,7 +664,7 @@ mod tests {
     async fn remember_rejects_invalid_key() {
         let (ops, _w) = fresh_ops().await;
         let tool = RememberTool::new(ops, closed_embed_tx());
-        for bad in ["has spaces", "Editor_Pref", "trailing!", ""] {
+        for bad in ["has spaces", "Editor_Pref", "trailing!", "slash/ed", ""] {
             let err = tool
                 .invoke(json!({"key": bad, "value": "x"}))
                 .await
@@ -560,6 +674,18 @@ mod tests {
                 msg.contains("key") || msg.contains("required"),
                 "expected a key/required error for {bad:?}, got: {msg}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn remember_accepts_hyphenated_and_dotted_keys() {
+        let (ops, _w) = fresh_ops().await;
+        let tool = RememberTool::new(ops.clone(), closed_embed_tx());
+        for key in ["standup.2026-09-11", "project.assistd-tools.dir"] {
+            tool.invoke(json!({"key": key, "value": "noted"}))
+                .await
+                .unwrap_or_else(|e| panic!("{key} should be a valid key: {e}"));
+            assert_eq!(ops.load(key).await.unwrap().as_deref(), Some("noted"));
         }
     }
 
@@ -634,6 +760,7 @@ mod tests {
             no_embedder(),
             no_semantic(),
             String::new(),
+            watch::channel(Arc::new(SessionId::new())).1,
         ));
         let schemas = reg.openai_schemas();
         assert_eq!(schemas.len(), 3);

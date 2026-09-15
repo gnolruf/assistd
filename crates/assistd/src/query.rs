@@ -143,7 +143,8 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             } => {
                 eprintln!("[{severity} {component}: {message}]");
             }
-            Event::SemanticHit { .. }
+            Event::SessionTitle { .. }
+            | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }
             | Event::MemoryRow { .. }

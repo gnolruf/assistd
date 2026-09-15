@@ -2,8 +2,9 @@
 
 use assistd_ipc::Event;
 use assistd_memory::{BranchId, SessionId};
+use parking_lot::Mutex as StdMutex;
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -12,6 +13,10 @@ const EVENTS_BUS_CAPACITY: usize = 256;
 /// Active (session, branch) pointer shared by every persistence write site.
 pub struct ConversationContext {
     inner: tokio::sync::RwLock<ConversationContextInner>,
+    /// Broadcasts the active session so holders that cannot await the
+    /// lock — the `reminisce` tool, which excludes the conversation
+    /// already in context — can read it synchronously.
+    session: watch::Sender<Arc<SessionId>>,
 }
 
 #[derive(Clone)]
@@ -22,21 +27,25 @@ struct ConversationContextInner {
 
 impl ConversationContext {
     pub fn new(session_id: SessionId, branch_id: BranchId) -> Self {
-        Self {
-            inner: tokio::sync::RwLock::new(ConversationContextInner {
-                session_id: Arc::new(session_id),
-                branch_id,
-            }),
-        }
+        Self::from_arc(Arc::new(session_id), branch_id)
     }
 
     pub fn from_arc(session_id: Arc<SessionId>, branch_id: BranchId) -> Self {
+        let (session, _) = watch::channel(session_id.clone());
         Self {
             inner: tokio::sync::RwLock::new(ConversationContextInner {
                 session_id,
                 branch_id,
             }),
+            session,
         }
+    }
+
+    /// Watch the active session id. The current value is readable
+    /// synchronously via `borrow()`, and updates land on every
+    /// `/switch` or `/new`.
+    pub fn session_updates(&self) -> watch::Receiver<Arc<SessionId>> {
+        self.session.subscribe()
     }
 
     pub async fn current(&self) -> (Arc<SessionId>, BranchId) {
@@ -46,8 +55,9 @@ impl ConversationContext {
 
     pub async fn replace(&self, session_id: Arc<SessionId>, branch_id: BranchId) {
         let mut g = self.inner.write().await;
-        g.session_id = session_id;
+        g.session_id = session_id.clone();
         g.branch_id = branch_id;
+        self.session.send_replace(session_id);
     }
 }
 
@@ -67,6 +77,12 @@ pub struct RuntimeState {
     /// Cancellation token for the currently-running agent turn, taken
     /// by `Request::InterruptTurn` to abort the turn on its next await.
     pub(in crate::state) current_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    /// Tail of the persistence write chain: the completion signal of the
+    /// most recently queued message. Each new write takes it (a
+    /// synchronous swap, so the order is fixed at call time rather than
+    /// by the scheduler) and awaits it before touching the store, which
+    /// is what keeps `seq` in the order the daemon emitted the messages.
+    pub(in crate::state) persist_chain: StdMutex<Option<oneshot::Receiver<()>>>,
     events_bus: broadcast::Sender<Event>,
 }
 
@@ -79,6 +95,7 @@ impl RuntimeState {
             persistence_tracker: TaskTracker::new(),
             warmup_handle: Arc::new(Mutex::new(None)),
             current_cancel: Arc::new(Mutex::new(None)),
+            persist_chain: StdMutex::new(None),
             events_bus,
         }
     }

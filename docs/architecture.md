@@ -135,9 +135,15 @@ One per-query state machine, single-threaded per turn. The loop:
    (`StepOutcome::ToolCalls` → step 4).
 4. For each tool call: `tools.get(name).invoke(arguments)`. Emit
    `Event::ToolCall` before, `Event::ToolResult` after. Push results
-   back via `backend.push_tool_results(...)`.
-5. Loop back to step 2 until the model emits text or hits the
-   per-turn step cap (`agent.max_steps_per_turn` in the config).
+   back via `backend.push_tool_results(...)`, which appends them as
+   OpenAI `role: "tool"` messages carrying the id of the call they
+   answer. A result carrying an image is the one exception: chat
+   templates render image parts only on user turns, so those ride
+   back as a user message tagged `[tool:<name>]`.
+5. Loop back to step 2 until the model emits text. If the model
+   repeats the same call several times in a row, or the turn runs
+   past a hard-coded step ceiling, the loop withdraws the tool schema
+   and lets the model answer from what it has already gathered.
 
 The loop does not parallelize tool calls. Tools execute serially, and
 their results land in the conversation in the order the model

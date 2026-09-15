@@ -92,8 +92,11 @@ impl AppState {
         drop(_agent_guard);
 
         if done_emitted && matches!(&gen_result, Ok(Ok(()))) {
-            self.clone()
-                .spawn_session_title_generation(current_session, title_user_text);
+            self.clone().spawn_session_title_generation(
+                id.clone(),
+                current_session,
+                title_user_text,
+            );
         }
 
         self.finalize_turn(turn_id, gen_result, speech_handle, &tx, id, done_emitted)
@@ -213,11 +216,10 @@ impl AppState {
     ) -> AbortOnDropHandle<Result<()>> {
         let llm = self.subsystems.llm.clone();
         let tools = self.subsystems.tools.clone();
-        let max_iterations = self.config.agent.max_iterations;
         let health: Option<Arc<dyn assistd_llm::LlmHealthProbe>> = Some(Arc::new(
             crate::presence::PresenceLlmHealthProbe::new(self.subsystems.presence.clone()),
         ));
-        let agent = Agent::new(llm, tools, max_iterations, health);
+        let agent = Agent::new(llm, tools, health);
         AbortOnDropHandle::new(tokio::spawn(
             async move { agent.run_turn(text, attachments, llm_tx, cancel).await }
                 .in_current_span(),

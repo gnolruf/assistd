@@ -7,10 +7,11 @@
 //! accepts both shapes; a vision-capable model + mmproj is required for
 //! the `image_url` parts to actually reach the projector.
 //!
-//! Tool-calling shape: when an assistant message carries `tool_calls`, the
-//! `content` field must be absent (`None`). Some llama.cpp Jinja templates
-//! reject `"content": null` but accept an omitted key; `skip_serializing_if`
-//! takes care of that.
+//! Tool-calling shape: an assistant message carrying `tool_calls` keeps
+//! whatever narration the model streamed before the call as `content`, and
+//! omits the field entirely when there was none. Some llama.cpp Jinja
+//! templates reject `"content": null` but accept an omitted key;
+//! `skip_serializing_if` takes care of that.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +42,19 @@ pub struct ChatRequest<'a> {
     /// `"auto"` lets the model decide; `"none"` forces a text reply.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<&'a str>,
+    /// Extra variables handed to llama.cpp's Jinja chat template
+    /// (`--jinja`). Omitted unless a caller needs one, so requests stay
+    /// byte-identical for servers running a template that ignores them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<ChatTemplateKwargs>,
+}
+
+/// Chat-template variables. `enable_thinking: false` is the convention
+/// reasoning models (Qwen3, DeepSeek-R1) use to skip the `<think>`
+/// block; templates without the variable ignore it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatTemplateKwargs {
+    pub enable_thinking: bool,
 }
 
 /// One message in the outgoing `messages` array.
@@ -223,6 +237,7 @@ mod tests {
             presence_penalty: None,
             tools: None,
             tool_choice: None,
+            chat_template_kwargs: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["model"], "local");
@@ -270,6 +285,7 @@ mod tests {
             presence_penalty: None,
             tools: None,
             tool_choice: None,
+            chat_template_kwargs: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         let content = &json["messages"][0]["content"];
@@ -303,6 +319,7 @@ mod tests {
             presence_penalty: None,
             tools: Some(tools),
             tool_choice: Some("auto"),
+            chat_template_kwargs: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["tool_choice"], "auto");

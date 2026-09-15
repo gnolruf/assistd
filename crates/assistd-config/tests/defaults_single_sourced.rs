@@ -187,12 +187,6 @@ fn tools_bash_defaults_match_constants() {
 }
 
 #[test]
-fn agent_defaults_match_constants() {
-    let c = AgentConfig::default();
-    assert_eq!(c.max_iterations, DEFAULT_AGENT_MAX_ITERATIONS);
-}
-
-#[test]
 fn synthesis_defaults_match_constants() {
     let c = SynthesisConfig::default();
     assert_eq!(c.enabled, DEFAULT_PIPER_ENABLED);

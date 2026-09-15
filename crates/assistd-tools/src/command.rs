@@ -56,6 +56,16 @@ pub fn error_line(
 pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
     use std::io::ErrorKind;
     match e.kind() {
+        // A path still carrying glob metacharacters got here because the
+        // expander found nothing to match and passed the pattern through
+        // (POSIX behaviour). Saying "file not found" sends the caller
+        // looking for a file it never asked for.
+        ErrorKind::NotFound if has_glob_meta(path) => error_line(
+            cmd,
+            format_args!("no file matches {path}"),
+            "Try",
+            format_args!("ls {} to see what is there", glob_parent(path)),
+        ),
         ErrorKind::NotFound => error_line(
             cmd,
             format_args!("file not found: {path}"),
@@ -74,6 +84,24 @@ pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
             "Try",
             "a different path or check with ls",
         ),
+    }
+}
+
+fn has_glob_meta(path: &str) -> bool {
+    path.contains(['*', '?', '['])
+}
+
+/// Longest leading directory of `pattern` that precedes the first
+/// metacharacter, so the hint points at a directory the caller can
+/// actually list.
+fn glob_parent(pattern: &str) -> &str {
+    let head = pattern
+        .find(['*', '?', '['])
+        .map_or(pattern, |i| &pattern[..i]);
+    match head.rfind('/') {
+        Some(0) => "/",
+        Some(cut) => &head[..cut],
+        None => ".",
     }
 }
 
@@ -255,6 +283,25 @@ mod tests {
         async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(Vec::new()))
         }
+    }
+
+    #[test]
+    fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let line = io_error_nav("ls", "/tmp/*.db-shm", &e);
+        assert!(line.contains("no file matches /tmp/*.db-shm"), "{line}");
+        assert!(line.contains("Try: ls /tmp"), "{line}");
+
+        let plain = io_error_nav("ls", "/tmp/notes.txt", &e);
+        assert!(plain.contains("file not found: /tmp/notes.txt"), "{plain}");
+    }
+
+    #[test]
+    fn glob_parent_stops_at_the_first_metacharacter() {
+        assert_eq!(glob_parent("/tmp/*.db-shm"), "/tmp");
+        assert_eq!(glob_parent("docs/*.md"), "docs");
+        assert_eq!(glob_parent("/a*/b*"), "/");
+        assert_eq!(glob_parent("*.rs"), ".");
     }
 
     #[test]

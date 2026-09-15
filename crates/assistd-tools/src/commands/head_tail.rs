@@ -1,19 +1,22 @@
-//! `head` and `tail`: take lines from one end of stdin. They share a
-//! flag parser because the only thing that differs between them is which
-//! end of the stream they keep.
+//! `head` and `tail`: take lines from one end of a file or stdin. They
+//! share a flag parser because the only thing that differs between them
+//! is which end of the stream they keep.
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::commands::collect_input;
 
 /// Lines emitted when no count flag is given, matching coreutils.
 const DEFAULT_LINES: usize = 10;
 
-/// `head [-n N]`: emit the first `N` lines read from stdin.
+/// `head [-n N] [FILE]...`: emit the first `N` lines of the named
+/// files, or of stdin when none are given.
 pub struct HeadCommand;
 
-/// `tail [-n N]`: emit the last `N` lines read from stdin.
+/// `tail [-n N] [FILE]...`: emit the last `N` lines of the named
+/// files, or of stdin when none are given.
 pub struct TailCommand;
 
 /// Why an argument list could not be read as a line count.
@@ -22,16 +25,18 @@ struct CountError {
     recovery: String,
 }
 
-fn parse_line_count(cmd: &str, argv: &[String]) -> Result<usize, CountError> {
+/// Split argv into the line count and the files to read. A bare `-`
+/// means stdin, as in coreutils, so it is not taken for a flag.
+fn parse_args(cmd: &str, argv: &[String]) -> Result<(usize, Vec<String>), CountError> {
     let mut count = DEFAULT_LINES;
+    let mut files = Vec::new();
     let mut i = 0;
     while i < argv.len() {
         let arg = &argv[i];
-        let Some(rest) = arg.strip_prefix('-') else {
-            return Err(CountError {
-                what: format!("unexpected argument: {arg}"),
-                recovery: format!("cat {arg} | {cmd}"),
-            });
+        let Some(rest) = arg.strip_prefix('-').filter(|r| !r.is_empty()) else {
+            files.push(arg.clone());
+            i += 1;
+            continue;
         };
         let digits = match rest.strip_prefix('n') {
             Some("") => {
@@ -50,7 +55,7 @@ fn parse_line_count(cmd: &str, argv: &[String]) -> Result<usize, CountError> {
         })?;
         i += 1;
     }
-    Ok(count)
+    Ok((count, files))
 }
 
 fn count_error(cmd: &str, e: CountError) -> CommandOutput {
@@ -78,26 +83,34 @@ impl Command for HeadCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "emit the first N lines of stdin (default 10; -n N to change)"
+        "emit the first N lines of FILE or stdin (default 10; -n N to change)"
     }
 
     fn help(&self) -> String {
         format!(
-            "usage: head [-n N]\n\
+            "usage: head [-n N] [FILE]...\n\
              \n\
-             Emit the first N lines read from stdin, {DEFAULT_LINES} by \
-             default. `-n N`, `-nN` and `-N` are all accepted.\n\
+             Emit the first N lines of the named files, or of stdin when \
+             none are given, {DEFAULT_LINES} by default. `-n N`, `-nN` \
+             and `-N` are all accepted.\n\
              \n\
-             Reads stdin only; pipe a file in with `cat FILE | head`.\n"
+             Several files concatenate, exactly as `cat FILE... | head` \
+             would; there are no `==> FILE <==` banners. Binary files are \
+             refused — use `cat -b FILE` for those.\n"
         )
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        match (parse_line_count("head", &input.args), input.stdin) {
-            (Err(e), _) => Ok(count_error("head", e)),
-            (Ok(_), None) => Ok(CommandOutput::usage(self.help())),
-            (Ok(n), Some(stdin)) => Ok(CommandOutput::ok(first_lines(&stdin, n))),
-        }
+        let (count, files) = match parse_args("head", &input.args) {
+            Ok(v) => v,
+            Err(e) => return Ok(count_error("head", e)),
+        };
+        let data = match collect_input("head", &files, input.stdin).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(CommandOutput::usage(self.help())),
+            Err(failure) => return Ok(failure),
+        };
+        Ok(CommandOutput::ok(first_lines(&data, count)))
     }
 }
 
@@ -108,26 +121,34 @@ impl Command for TailCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "emit the last N lines of stdin (default 10; -n N to change)"
+        "emit the last N lines of FILE or stdin (default 10; -n N to change)"
     }
 
     fn help(&self) -> String {
         format!(
-            "usage: tail [-n N]\n\
+            "usage: tail [-n N] [FILE]...\n\
              \n\
-             Emit the last N lines read from stdin, {DEFAULT_LINES} by \
-             default. `-n N`, `-nN` and `-N` are all accepted.\n\
+             Emit the last N lines of the named files, or of stdin when \
+             none are given, {DEFAULT_LINES} by default. `-n N`, `-nN` \
+             and `-N` are all accepted.\n\
              \n\
-             Reads stdin only; pipe a file in with `cat FILE | tail`.\n"
+             Several files concatenate, exactly as `cat FILE... | tail` \
+             would; there are no `==> FILE <==` banners. Binary files are \
+             refused — use `cat -b FILE` for those.\n"
         )
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        match (parse_line_count("tail", &input.args), input.stdin) {
-            (Err(e), _) => Ok(count_error("tail", e)),
-            (Ok(_), None) => Ok(CommandOutput::usage(self.help())),
-            (Ok(n), Some(stdin)) => Ok(CommandOutput::ok(last_lines(&stdin, n))),
-        }
+        let (count, files) = match parse_args("tail", &input.args) {
+            Ok(v) => v,
+            Err(e) => return Ok(count_error("tail", e)),
+        };
+        let data = match collect_input("tail", &files, input.stdin).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(CommandOutput::usage(self.help())),
+            Err(failure) => return Ok(failure),
+        };
+        Ok(CommandOutput::ok(last_lines(&data, count)))
     }
 }
 
@@ -209,15 +230,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filename_argument_points_at_the_pipe() {
-        let out = run(HeadCommand, &["notes.md"], FIVE).await;
-        assert_eq!(out.exit_code, 2);
+    async fn named_files_are_read_and_beat_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, b"one\ntwo\n").unwrap();
+        std::fs::write(&b, b"three\nfour\n").unwrap();
+
+        let out = run(HeadCommand, &[a.to_str().unwrap()], b"ignored\n").await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, b"one\ntwo\n");
+
+        // Several files concatenate, so `head -2` of the pair is the
+        // first two lines overall, not two lines per file.
+        let both = run(
+            HeadCommand,
+            &["-2", a.to_str().unwrap(), b.to_str().unwrap()],
+            b"",
+        )
+        .await;
+        assert_eq!(both.stdout, b"one\ntwo\n");
+        let tail = run(
+            TailCommand,
+            &["-2", a.to_str().unwrap(), b.to_str().unwrap()],
+            b"",
+        )
+        .await;
+        assert_eq!(tail.stdout, b"three\nfour\n");
+    }
+
+    #[tokio::test]
+    async fn missing_file_reports_navigation_error() {
+        let out = run(HeadCommand, &["/nope/missing.txt"], b"").await;
+        assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.contains("[error] head: unexpected argument: notes.md"),
+            stderr.contains("[error] head: file not found: /nope/missing.txt"),
             "{stderr}"
         );
-        assert!(stderr.contains("Use: cat notes.md | head"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn binary_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("blob.bin");
+        std::fs::write(&bin, b"\x00\x01\x02binary\x00").unwrap();
+        let out = run(TailCommand, &[bin.to_str().unwrap()], b"").await;
+        assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("[error] tail: binary"), "{stderr}");
+        assert!(stderr.contains("Use: cat -b "), "{stderr}");
     }
 
     #[tokio::test]

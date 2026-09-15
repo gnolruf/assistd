@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::AgentConfig;
 use crate::chat::ChatConfig;
 use crate::compositor::CompositorConfig;
 use crate::daemon::DaemonConfig;
@@ -36,8 +35,6 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
-    #[serde(default)]
-    pub agent: AgentConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
     #[serde(default)]
@@ -321,10 +318,6 @@ impl Config {
         }
         if self.tools.screenshot.timeout_secs == 0 {
             errors.push("tools.screenshot.timeout_secs must be greater than 0".into());
-        }
-
-        if self.agent.max_iterations == 0 {
-            errors.push("agent.max_iterations must be greater than 0".into());
         }
 
         if self.memory.enabled && self.memory.db_path.is_empty() {

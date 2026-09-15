@@ -32,6 +32,39 @@ pub enum ParseError {
     EmptyCommand,
     #[error("{0}")]
     Unsupported(&'static str),
+    #[error("{0} is not supported")]
+    Redirection(Redirection),
+    #[error(
+        "'\\|' outside quotes: the '|' opened a pipeline and the '\\' stayed \
+         on the previous word"
+    )]
+    UnquotedAlternation,
+}
+
+/// Which redirection the line asked for. Kept apart from
+/// [`ParseError::Unsupported`] because the way out differs per shape:
+/// output goes through `write`, input through a pipe, and stderr is
+/// already in the result the caller gets back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Redirection {
+    Output,
+    Append,
+    Input,
+    HereDoc,
+    Stderr,
+}
+
+impl std::fmt::Display for Redirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Redirection::Output => "output redirection ('>')",
+            Redirection::Append => "append redirection ('>>')",
+            Redirection::Input => "input redirection ('<')",
+            Redirection::HereDoc => "here-document / here-string ('<<', '<<<')",
+            Redirection::Stderr => "stderr redirection ('2>', '2>&1', '&>')",
+        };
+        f.write_str(s)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +126,15 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                     out.push(Token::Op(Op::Or));
                     i += 2;
                 } else {
+                    // `a\|b` unquoted: the word keeps the backslash and
+                    // the pipe splits the line, so a BRE-style
+                    // alternation silently becomes two commands. Catch
+                    // it here rather than let the second half surface as
+                    // `unknown command`.
+                    if matches!(out.last(), Some(Token::Word(w)) if !w.quoted && w.text.ends_with('\\'))
+                    {
+                        return Err(ParseError::UnquotedAlternation);
+                    }
                     out.push(Token::Op(Op::Pipe));
                     i += 1;
                 }
@@ -101,6 +143,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 if bytes.get(i + 1) == Some(&b'&') {
                     out.push(Token::Op(Op::And));
                     i += 2;
+                } else if bytes.get(i + 1) == Some(&b'>') {
+                    return Err(ParseError::Redirection(Redirection::Stderr));
                 } else {
                     return Err(ParseError::Unsupported(
                         "'&' (background) not supported; only '&&' is",
@@ -112,9 +156,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 i += 1;
             }
             b'>' | b'<' => {
-                return Err(ParseError::Unsupported(
-                    "redirection ('>', '<') not supported; use 'write' for output",
-                ));
+                return Err(ParseError::Redirection(redirection_kind(&out, bytes, i)));
             }
             _ => {
                 let (word, next) = read_word(input, i)?;
@@ -125,6 +167,24 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
     }
 
     Ok(out)
+}
+
+/// Classify the redirection starting at `i`. A bare `2` (or `1`) token
+/// immediately before `>` is the file-descriptor prefix of a stderr
+/// redirect — the tokenizer has already pushed it as a word by the time
+/// the operator is seen, so the lookback happens here.
+fn redirection_kind(out: &[Token], bytes: &[u8], i: usize) -> Redirection {
+    let fd_prefixed = matches!(
+        out.last(),
+        Some(Token::Word(w)) if !w.quoted && matches!(w.text.as_str(), "1" | "2")
+    );
+    match bytes[i] {
+        b'>' if fd_prefixed => Redirection::Stderr,
+        b'>' if bytes.get(i + 1) == Some(&b'>') => Redirection::Append,
+        b'>' => Redirection::Output,
+        _ if bytes.get(i + 1) == Some(&b'<') => Redirection::HereDoc,
+        _ => Redirection::Input,
+    }
 }
 
 /// Read a single shell-style word starting at byte offset `start`.
@@ -332,6 +392,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_keeps_a_quoted_pipe_inside_one_command() {
+        let chain = parse_chain(r#"grep "Command|Tool" docs/tools.md | wc -l"#).unwrap();
+        assert_eq!(
+            chain,
+            Chain::Pipe(
+                Box::new(Chain::Command(vec![
+                    Word::bare("grep"),
+                    Word::quoted("Command|Tool"),
+                    Word::bare("docs/tools.md"),
+                ])),
+                Box::new(cmd(&["wc", "-l"])),
+            )
+        );
+    }
+
+    #[test]
     fn tokenize_double_quotes_keep_regex_backslashes() {
         // The pattern the model actually writes must survive intact;
         // eating the backslash here silently changes what grep matches.
@@ -367,15 +443,41 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_catches_unquoted_bre_alternation() {
+        assert_eq!(
+            tokenize(r"grep -r TODO\|FIXME AGENTS.md"),
+            Err(ParseError::UnquotedAlternation)
+        );
+        // Quoted patterns are the caller's business, pipe and all.
+        assert!(tokenize(r#"grep -r "TODO\|FIXME" AGENTS.md"#).is_ok());
+        assert!(tokenize(r"ls | grep x").is_ok());
+    }
+
+    #[test]
     fn tokenize_rejects_redirection() {
-        assert!(matches!(
-            tokenize("echo hi > out"),
-            Err(ParseError::Unsupported(_))
-        ));
-        assert!(matches!(
-            tokenize("cat < in"),
-            Err(ParseError::Unsupported(_))
-        ));
+        for (line, expected) in [
+            ("echo hi > out", Redirection::Output),
+            ("echo hi >> out", Redirection::Append),
+            ("cat < in", Redirection::Input),
+            ("cat <<< text", Redirection::HereDoc),
+            ("wm list 2>&1", Redirection::Stderr),
+            ("grep x f 2>/dev/null", Redirection::Stderr),
+            ("ls &> out", Redirection::Stderr),
+        ] {
+            assert_eq!(
+                tokenize(line),
+                Err(ParseError::Redirection(expected)),
+                "wrong classification for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_fd_prefix_is_not_a_stderr_redirect() {
+        assert_eq!(
+            tokenize(r#"echo "2" > out"#),
+            Err(ParseError::Redirection(Redirection::Output))
+        );
     }
 
     // -- parser -------------------------------------------------------------

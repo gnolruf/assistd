@@ -54,6 +54,8 @@ impl RecoverySeverity {
 /// string so log filters and dashboards can rely on a fixed vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Component {
+    /// Per-turn agent loop (tool dispatch, runaway detection).
+    Agent,
     /// llama-server lifecycle, restarts, in-flight crash detection.
     Llm,
     /// MCP transport / supervisor.
@@ -84,6 +86,7 @@ impl Component {
     /// Returns the canonical lowercase wire string for this component identifier.
     pub fn as_str(self) -> &'static str {
         match self {
+            Component::Agent => "agent",
             Component::Llm => "llm",
             Component::Mcp => "mcp",
             Component::Voice => "voice",

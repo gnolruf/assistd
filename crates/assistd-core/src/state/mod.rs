@@ -522,6 +522,94 @@ mod tests {
         );
     }
 
+    /// Backend that answers the title-generation one-shot with a fixed
+    /// string and records the [`Thinking`] mode it was asked for.
+    struct TitlingBackend {
+        thinking: parking_lot::Mutex<Option<assistd_llm::Thinking>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for TitlingBackend {
+        async fn generate(
+            &self,
+            _prompt: String,
+            _tx: mpsc::Sender<LlmEvent>,
+        ) -> assistd_llm::LlmResult<()> {
+            unimplemented!("uses step path")
+        }
+        async fn push_user(
+            &self,
+            _text: String,
+            _attachments: Vec<assistd_tools::Attachment>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+        async fn push_tool_results(
+            &self,
+            _results: Vec<ToolResultPayload>,
+        ) -> assistd_llm::LlmResult<()> {
+            Ok(())
+        }
+        async fn step(
+            &self,
+            _tools: Vec<serde_json::Value>,
+            _tx: mpsc::Sender<LlmEvent>,
+        ) -> assistd_llm::LlmResult<StepOutcome> {
+            Ok(StepOutcome::Final)
+        }
+        async fn complete_oneshot(
+            &self,
+            _prompt: String,
+            thinking: assistd_llm::Thinking,
+        ) -> assistd_llm::LlmResult<String> {
+            *self.thinking.lock() = Some(thinking);
+            Ok("Cats And Dogs".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_turn_broadcasts_a_generated_session_title() {
+        let backend = Arc::new(TitlingBackend {
+            thinking: parking_lot::Mutex::new(None),
+        });
+        let state = state_with_echo_tools(backend.clone());
+        let mut bus = state.runtime.subscribe_events();
+
+        let (tx, rx) = mpsc::channel::<Event>(16);
+        state
+            .clone()
+            .dispatch(
+                Request::Query {
+                    id: "req-title".into(),
+                    text: "tell me about cats".into(),
+                    attachments: Vec::new(),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        collect_events(rx).await;
+
+        let title = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match bus.recv().await.expect("bus stays open") {
+                    Event::SessionTitle { id, title, .. } => return (id, title),
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("SessionTitle should reach the bus after the turn");
+
+        assert_eq!(title.0, "req-title");
+        assert_eq!(title.1, "Cats And Dogs");
+        assert_eq!(
+            *backend.thinking.lock(),
+            Some(assistd_llm::Thinking::Disabled),
+            "title generation must not spend its budget on reasoning"
+        );
+    }
+
     /// Mock VoiceInput driven by a script of canned start/stop
     /// outcomes, used to exercise the PttStart / PttStop handlers
     /// without touching cpal or whisper.
