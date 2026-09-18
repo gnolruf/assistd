@@ -38,15 +38,14 @@ impl WhisperTranscriber {
     pub fn builder() -> WhisperTranscriberBuilder {
         WhisperTranscriberBuilder::default()
     }
-
-    /// Whether inference runs on a GPU-backed whisper context.
-    pub fn is_gpu(&self) -> bool {
-        self.is_gpu
-    }
 }
 
 #[async_trait]
 impl Transcriber for WhisperTranscriber {
+    fn is_gpu(&self) -> bool {
+        self.is_gpu
+    }
+
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
         if pcm_i16_16k_mono.is_empty() {
             return Err(TranscriptionError::EmptyAudio);

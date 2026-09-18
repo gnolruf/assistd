@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use assistd_config::{CompositorType, Config, compositor::detect_from_env};
+use assistd_config::{
+    CompositorType, Config,
+    compositor::{SessionEnv, detect_from_env},
+};
 use assistd_wm::{I3Backend, NoWindowManager, SwayBackend, WindowManager, WmHandle};
 use tokio::sync::watch;
 
@@ -24,12 +27,7 @@ impl WmBackend {
 /// when none is available.
 pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) -> WmBackend {
     let resolved = match config.compositor.compositor_type {
-        CompositorType::Auto => match detect_from_env(
-            std::env::var_os("SWAYSOCK").is_some(),
-            std::env::var_os("I3SOCK").is_some(),
-            std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
-            std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-        ) {
+        CompositorType::Auto => match detect_from_env(&SessionEnv::from_process()) {
             Some(c) => {
                 tracing::info!(target: "assistd::wm", "auto-detected compositor = {c:?}");
                 c

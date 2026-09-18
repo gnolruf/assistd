@@ -14,6 +14,14 @@ pub struct ModelConfig {
     pub context_length: NonZeroU32,
 }
 
+impl ModelConfig {
+    /// Context length less a 10% margin, since the bytes/4 token
+    /// heuristic under-counts relative to the real tokenizer.
+    pub fn context_budget(&self) -> u32 {
+        (u64::from(self.context_length.get()) * 9 / 10) as u32
+    }
+}
+
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {

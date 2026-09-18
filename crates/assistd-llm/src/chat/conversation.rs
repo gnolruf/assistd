@@ -569,9 +569,7 @@ fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
 }
 
 fn effective_budget(chat: &ChatConfig, model: &ModelConfig) -> u32 {
-    chat.max_history_tokens
-        .get()
-        .min(chat.effective_context_budget(model))
+    chat.max_history_tokens.get().min(model.context_budget())
 }
 
 fn serialize_tail(messages: &[Message]) -> String {

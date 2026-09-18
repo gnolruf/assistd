@@ -21,6 +21,11 @@ pub trait Transcriber: Send + Sync + 'static {
     fn subscribe_state(&self) -> Option<watch::Receiver<VoiceCaptureState>> {
         None
     }
+
+    /// Whether inference runs on a GPU, and so competes with the LLM for it.
+    fn is_gpu(&self) -> bool {
+        false
+    }
 }
 
 /// Errors surfaced by a [`Transcriber`] implementation.
@@ -111,7 +116,6 @@ pub type CpuFallbackFactory = Arc<
 /// A CPU-backed primary, or fallback disabled, runs directly.
 pub struct QueuedTranscriber {
     primary: Arc<dyn Transcriber>,
-    primary_is_gpu: bool,
     cpu: Arc<OnceCell<Arc<dyn Transcriber>>>,
     cpu_factory: CpuFallbackFactory,
     busy: Arc<dyn BusyProbe>,
@@ -120,10 +124,9 @@ pub struct QueuedTranscriber {
 }
 
 impl QueuedTranscriber {
-    /// `primary_is_gpu = false` disables the queue-and-fallback path.
+    /// A CPU-backed `primary` disables the queue-and-fallback path.
     pub fn new(
         primary: Arc<dyn Transcriber>,
-        primary_is_gpu: bool,
         cpu_factory: CpuFallbackFactory,
         busy: Arc<dyn BusyProbe>,
         cfg: QueueConfig,
@@ -131,7 +134,6 @@ impl QueuedTranscriber {
         let (state_tx, _) = watch::channel(VoiceCaptureState::Idle);
         Self {
             primary,
-            primary_is_gpu,
             cpu: Arc::new(OnceCell::new()),
             cpu_factory,
             busy,
@@ -144,7 +146,7 @@ impl QueuedTranscriber {
 #[async_trait]
 impl Transcriber for QueuedTranscriber {
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
-        if !self.primary_is_gpu || !self.cfg.cpu_fallback_enabled {
+        if !self.primary.is_gpu() || !self.cfg.cpu_fallback_enabled {
             let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
             let result = self.primary.transcribe(pcm_i16_16k_mono).await;
             let _ = self.state_tx.send(VoiceCaptureState::Idle);
@@ -217,14 +219,25 @@ impl Transcriber for QueuedTranscriber {
 #[cfg(any(test, feature = "test-support"))]
 pub struct StubTranscriber {
     text: String,
+    gpu: bool,
     calls: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl StubTranscriber {
     pub fn with_text(text: impl Into<String>) -> Arc<Self> {
+        Self::build(text, false)
+    }
+
+    /// A stub that reports itself as GPU-backed.
+    pub fn on_gpu(text: impl Into<String>) -> Arc<Self> {
+        Self::build(text, true)
+    }
+
+    fn build(text: impl Into<String>, gpu: bool) -> Arc<Self> {
         Arc::new(Self {
             text: text.into(),
+            gpu,
             calls: std::sync::atomic::AtomicUsize::new(0),
         })
     }
@@ -240,6 +253,10 @@ impl Transcriber for StubTranscriber {
     async fn transcribe(&self, _pcm: &[i16]) -> Result<String, TranscriptionError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(self.text.clone())
+    }
+
+    fn is_gpu(&self) -> bool {
+        self.gpu
     }
 }
 
@@ -303,12 +320,11 @@ mod tests {
 
     #[tokio::test]
     async fn queued_uses_primary_when_busy_probe_idle() {
-        let primary = StubTranscriber::with_text("GPU");
+        let primary = StubTranscriber::on_gpu("GPU");
         let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         let q = QueuedTranscriber::new(
             primary.clone() as Arc<dyn Transcriber>,
-            true,
             cpu_factory_for(cpu.clone()),
             probe,
             default_cfg(),
@@ -321,13 +337,12 @@ mod tests {
 
     #[tokio::test]
     async fn queued_falls_back_to_cpu_on_timeout() {
-        let primary = StubTranscriber::with_text("GPU");
+        let primary = StubTranscriber::on_gpu("GPU");
         let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         probe.set_idle(false);
         let q = QueuedTranscriber::new(
             primary.clone() as Arc<dyn Transcriber>,
-            true,
             cpu_factory_for(cpu.clone()),
             probe,
             default_cfg(),
@@ -340,13 +355,12 @@ mod tests {
 
     #[tokio::test]
     async fn queued_falls_back_to_cpu_on_foreign_gpu() {
-        let primary = StubTranscriber::with_text("GPU");
+        let primary = StubTranscriber::on_gpu("GPU");
         let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         probe.set_foreign(true);
         let q = QueuedTranscriber::new(
             primary.clone() as Arc<dyn Transcriber>,
-            true,
             cpu_factory_for(cpu.clone()),
             probe,
             default_cfg(),
@@ -358,13 +372,12 @@ mod tests {
 
     #[tokio::test]
     async fn queued_falls_back_to_cpu_when_presence_not_active() {
-        let primary = StubTranscriber::with_text("GPU");
+        let primary = StubTranscriber::on_gpu("GPU");
         let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         probe.set_active(false);
         let q = QueuedTranscriber::new(
             primary.clone() as Arc<dyn Transcriber>,
-            true,
             cpu_factory_for(cpu.clone()),
             probe,
             default_cfg(),
@@ -382,7 +395,6 @@ mod tests {
         probe.set_idle(false); // would normally force fallback
         let q = QueuedTranscriber::new(
             primary.clone() as Arc<dyn Transcriber>,
-            /* primary_is_gpu = */ false,
             cpu_factory_for(cpu.clone()),
             probe,
             default_cfg(),
@@ -394,13 +406,12 @@ mod tests {
 
     #[tokio::test]
     async fn queued_skips_queue_when_fallback_disabled() {
-        let primary = StubTranscriber::with_text("GPU");
+        let primary = StubTranscriber::on_gpu("GPU");
         let cpu = StubTranscriber::with_text("CPU");
         let probe = ScriptedProbe::new();
         probe.set_idle(false);
         let q = QueuedTranscriber::new(
             primary.clone() as Arc<dyn Transcriber>,
-            true,
             cpu_factory_for(cpu.clone()),
             probe,
             QueueConfig {
@@ -433,7 +444,7 @@ mod tests {
         // A watch channel collapses same-tick updates, so the Queued
         // edge is not observable; only Transcribing-while-held and the
         // final Idle are asserted.
-        let primary = StubTranscriber::with_text("GPU");
+        let primary = StubTranscriber::on_gpu("GPU");
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let cpu: Arc<GatedTranscriber> = Arc::new(GatedTranscriber {
@@ -454,7 +465,6 @@ mod tests {
 
         let q = Arc::new(QueuedTranscriber::new(
             primary as Arc<dyn Transcriber>,
-            true,
             factory,
             probe,
             default_cfg(),

@@ -88,7 +88,6 @@ async fn init_input(
         );
         Arc::new(QueuedTranscriber::new(
             primary.clone(),
-            true,
             cpu_factory,
             probe,
             queue_cfg,
