@@ -27,6 +27,7 @@ pub mod handle;
 pub mod health_route;
 pub mod jsonrpc;
 pub mod prompt;
+mod protocol;
 pub mod sse;
 pub mod stdio;
 
@@ -167,25 +168,6 @@ fn tool_result_to_json(r: ToolResult, duration_ms: u128) -> Value {
     }
 }
 
-/// [`Tool`] entries for every tool `client` exposes, named
-/// `<name_prefix>__<tool>`, without a health gate.
-pub async fn adapt_client_as_tools(
-    client: Arc<dyn McpClient>,
-    name_prefix: &str,
-) -> Result<Vec<Box<dyn Tool>>> {
-    let schemas = client.list_tools().await?;
-    let mut out: Vec<Box<dyn Tool>> = Vec::with_capacity(schemas.len());
-    for schema in schemas {
-        let registry_name = registry_name(name_prefix, &schema.name);
-        out.push(Box::new(McpToolAdapter::new(
-            client.clone(),
-            schema,
-            registry_name,
-        )));
-    }
-    Ok(out)
-}
-
 /// [`Tool`] entries for every tool the server exposes, named
 /// `<name_prefix>__<tool>` and gated on the supervisor's health.
 pub async fn adapt_handle_as_tools(
@@ -205,6 +187,21 @@ pub async fn adapt_handle_as_tools(
         out.push(Box::new(routed));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+async fn adapt_client_as_tools(
+    client: Arc<dyn McpClient>,
+    name_prefix: &str,
+) -> Result<Vec<Box<dyn Tool>>> {
+    let schemas = client.list_tools().await?;
+    Ok(schemas
+        .into_iter()
+        .map(|schema| {
+            let name = registry_name(name_prefix, &schema.name);
+            Box::new(McpToolAdapter::new(client.clone(), schema, name)) as Box<dyn Tool>
+        })
+        .collect())
 }
 
 fn registry_name(prefix: &str, server_native: &str) -> String {

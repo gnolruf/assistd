@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use rusqlite::OptionalExtension;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_rusqlite::Connection;
@@ -390,21 +391,12 @@ async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
 
 async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String>> {
     conn.call(move |c| -> rusqlite::Result<_> {
-        let result = c
-            .query_row(
-                "DELETE FROM memories WHERE id = ?1 RETURNING key",
-                rusqlite::params![id],
-                |r| r.get::<_, String>(0),
-            )
-            .map(Some)
-            .or_else(|e| {
-                if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            })?;
-        Ok(result)
+        c.query_row(
+            "DELETE FROM memories WHERE id = ?1 RETURNING key",
+            rusqlite::params![id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
     })
     .await
     .context("delete_memory_by_id")
@@ -625,13 +617,11 @@ async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Resu
                 rusqlite::params![src.0],
                 |r| r.get(0),
             )?;
-            let fork_point_seq: Option<i64> = tx
-                .query_row(
-                    "SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1",
-                    rusqlite::params![src.0],
-                    |r| r.get(0),
-                )
-                .ok();
+            let fork_point_seq: Option<i64> = tx.query_row(
+                "SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1",
+                rusqlite::params![src.0],
+                |r| r.get(0),
+            )?;
             tx.execute(
                 "INSERT INTO branches (session_id, name, parent_branch_id, fork_point_seq, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -655,16 +645,13 @@ async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Resu
 async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutcome> {
     conn.call(move |c| -> rusqlite::Result<_> {
         let tx = c.transaction()?;
-        let last_turn: Option<i64> = tx
-            .query_row(
-                "SELECT MAX(c.turn_id)
-                 FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
-                 WHERE bm.branch_id = ?1 AND c.turn_id IS NOT NULL",
-                rusqlite::params![branch.0],
-                |r| r.get::<_, Option<i64>>(0),
-            )
-            .ok()
-            .flatten();
+        let last_turn: Option<i64> = tx.query_row(
+            "SELECT MAX(c.turn_id)
+             FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
+             WHERE bm.branch_id = ?1 AND c.turn_id IS NOT NULL",
+            rusqlite::params![branch.0],
+            |r| r.get(0),
+        )?;
         let Some(turn_id) = last_turn else {
             tx.commit()?;
             return Ok(UndoOutcome::default());
@@ -675,7 +662,7 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
                 rusqlite::params![turn_id],
                 |r| r.get(0),
             )
-            .ok();
+            .optional()?;
 
         // Captured before the delete: these are the orphan candidates.
         let target_conv_ids: Vec<i64> = {

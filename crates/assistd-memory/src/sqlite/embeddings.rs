@@ -7,7 +7,7 @@
 //! winners; that is ample for a single user's history.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -177,30 +177,23 @@ impl SemanticStore for SqliteSemanticStore {
         let model = model.to_string();
         let excluded = exclude_session.map(|s| s.0.clone());
         let q = query_vector;
-        let ranked: Vec<(i64, f32)> = self
+        let ranked = self
             .handle
             .conn()
-            .call(move |c| -> rusqlite::Result<_> {
+            .call(move |c| {
                 // Filter before ranking so the excluded session doesn't
                 // eat into `top_k`.
-                let mut stmt = c.prepare(
+                scan_top_k(
+                    c,
                     "SELECT e.conversation_chunk_id, e.vector
                      FROM embeddings e
                      JOIN conversation_chunks cc ON cc.id = e.conversation_chunk_id
                      JOIN conversations conv ON conv.id = cc.conversation_id
                      WHERE e.model = ?1 AND (?2 IS NULL OR conv.session_id <> ?2)",
-                )?;
-                let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(top_k + 1);
-                let mut rows = stmt.query(rusqlite::params![model, excluded])?;
-                while let Some(row) = rows.next()? {
-                    let chunk_id: i64 = row.get(0)?;
-                    let bytes: Vec<u8> = row.get(1)?;
-                    let Some(sim) = score_against(&q, &bytes) else {
-                        continue;
-                    };
-                    push_top_k(&mut heap, top_k, chunk_id, sim);
-                }
-                Ok(heap_to_sorted(heap))
+                    rusqlite::params![model, excluded],
+                    &q,
+                    top_k,
+                )
             })
             .await
             .context("nearest_chunks: scan embeddings")?;
@@ -208,13 +201,13 @@ impl SemanticStore for SqliteSemanticStore {
             return Ok(Vec::new());
         }
         let chunk_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
-        let sims: std::collections::HashMap<i64, f32> = ranked.iter().copied().collect();
-        let placeholders = vec!["?"; chunk_ids.len()].join(",");
+        let sims: HashMap<i64, f32> = ranked.iter().copied().collect();
         let sql = format!(
             "SELECT cc.id, c.id, c.session_id, c.timestamp, c.role, c.content
              FROM conversation_chunks cc
              JOIN conversations c ON c.id = cc.conversation_id
-             WHERE cc.id IN ({placeholders})"
+             WHERE cc.id IN ({})",
+            placeholders(chunk_ids.len())
         );
         let chunk_ids_for_query = chunk_ids.clone();
         let raw: Vec<(i64, i64, String, String, String, String)> = self
@@ -222,12 +215,8 @@ impl SemanticStore for SqliteSemanticStore {
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(&sql)?;
-                let params: Vec<&dyn rusqlite::ToSql> = chunk_ids_for_query
-                    .iter()
-                    .map(|id| id as &dyn rusqlite::ToSql)
-                    .collect();
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(params), |row| {
+                    .query_map(rusqlite::params_from_iter(chunk_ids_for_query), |row| {
                         Ok((
                             row.get::<_, i64>(0)?,
                             row.get::<_, i64>(1)?,
@@ -242,7 +231,7 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .context("nearest_chunks: hydrate winners")?;
-        let by_id: std::collections::HashMap<i64, (i64, String, String, String, String)> = raw
+        let by_id: HashMap<i64, (i64, String, String, String, String)> = raw
             .into_iter()
             .map(|(cc_id, c_id, sess, ts, role, content)| (cc_id, (c_id, sess, ts, role, content)))
             .collect();
@@ -277,23 +266,17 @@ impl SemanticStore for SqliteSemanticStore {
         }
         let model = model.to_string();
         let q = query_vector;
-        let ranked: Vec<(i64, f32)> = self
+        let ranked = self
             .handle
             .conn()
-            .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt =
-                    c.prepare("SELECT memory_id, vector FROM memory_embeddings WHERE model = ?1")?;
-                let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(top_k + 1);
-                let mut rows = stmt.query(rusqlite::params![model])?;
-                while let Some(row) = rows.next()? {
-                    let memory_id: i64 = row.get(0)?;
-                    let bytes: Vec<u8> = row.get(1)?;
-                    let Some(sim) = score_against(&q, &bytes) else {
-                        continue;
-                    };
-                    push_top_k(&mut heap, top_k, memory_id, sim);
-                }
-                Ok(heap_to_sorted(heap))
+            .call(move |c| {
+                scan_top_k(
+                    c,
+                    "SELECT memory_id, vector FROM memory_embeddings WHERE model = ?1",
+                    rusqlite::params![model],
+                    &q,
+                    top_k,
+                )
             })
             .await
             .context("nearest_memories: scan memory_embeddings")?;
@@ -301,21 +284,19 @@ impl SemanticStore for SqliteSemanticStore {
             return Ok(Vec::new());
         }
         let memory_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
-        let sims: std::collections::HashMap<i64, f32> = ranked.iter().copied().collect();
-        let placeholders = vec!["?"; memory_ids.len()].join(",");
-        let sql = format!("SELECT id, key, value FROM memories WHERE id IN ({placeholders})");
+        let sims: HashMap<i64, f32> = ranked.iter().copied().collect();
+        let sql = format!(
+            "SELECT id, key, value FROM memories WHERE id IN ({})",
+            placeholders(memory_ids.len())
+        );
         let memory_ids_for_query = memory_ids.clone();
         let raw: Vec<(i64, String, String)> = self
             .handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(&sql)?;
-                let params: Vec<&dyn rusqlite::ToSql> = memory_ids_for_query
-                    .iter()
-                    .map(|id| id as &dyn rusqlite::ToSql)
-                    .collect();
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(params), |row| {
+                    .query_map(rusqlite::params_from_iter(memory_ids_for_query), |row| {
                         Ok((
                             row.get::<_, i64>(0)?,
                             row.get::<_, String>(1)?,
@@ -327,7 +308,7 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .context("nearest_memories: hydrate winners")?;
-        let by_id: std::collections::HashMap<i64, (String, String)> = raw
+        let by_id: HashMap<i64, (String, String)> = raw
             .into_iter()
             .map(|(id, key, value)| (id, (key, value)))
             .collect();
@@ -373,8 +354,7 @@ impl SemanticStore for SqliteSemanticStore {
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut total: i64 = 0;
-                let mut models: std::collections::BTreeSet<String> =
-                    std::collections::BTreeSet::new();
+                let mut models = BTreeSet::new();
                 let sql = "SELECT model, count(*)
                            FROM embeddings WHERE model != ?1 GROUP BY model
                            UNION ALL
@@ -505,6 +485,30 @@ impl Ord for HeapEntry {
             None => Ordering::Equal,
         }
     }
+}
+
+fn scan_top_k(
+    c: &rusqlite::Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+    query: &[f32],
+    top_k: usize,
+) -> rusqlite::Result<Vec<(i64, f32)>> {
+    let mut stmt = c.prepare(sql)?;
+    let mut heap = BinaryHeap::with_capacity(top_k + 1);
+    let mut rows = stmt.query(params)?;
+    while let Some(row) = rows.next()? {
+        let rowid: i64 = row.get(0)?;
+        let bytes: Vec<u8> = row.get(1)?;
+        if let Some(sim) = score_against(query, &bytes) {
+            push_top_k(&mut heap, top_k, rowid, sim);
+        }
+    }
+    Ok(heap_to_sorted(heap))
+}
+
+fn placeholders(n: usize) -> String {
+    vec!["?"; n].join(",")
 }
 
 fn push_top_k(heap: &mut BinaryHeap<HeapEntry>, k: usize, rowid: i64, sim: f32) {

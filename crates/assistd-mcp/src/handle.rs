@@ -241,21 +241,11 @@ impl Supervisor {
                         let _ = health_tx.send(HealthState::Restarting);
                         switch.swap(None).await;
                     }
-                    _ = supervisor_shutdown_rx.changed() => {
-                        if *supervisor_shutdown_rx.borrow() {
-                            info!(target: "assistd::mcp", server = %name, "supervisor shutdown (handle.shutdown)");
-                            switch.swap(None).await;
-                            lifeline.shutdown().await;
-                            return;
-                        }
-                    }
-                    _ = external_shutdown_rx.changed() => {
-                        if *external_shutdown_rx.borrow() {
-                            info!(target: "assistd::mcp", server = %name, "supervisor shutdown (daemon-wide)");
-                            switch.swap(None).await;
-                            lifeline.shutdown().await;
-                            return;
-                        }
+                    reason = shutdown_reason(&mut supervisor_shutdown_rx, &mut external_shutdown_rx) => {
+                        info!(target: "assistd::mcp", server = %name, reason, "supervisor shutdown");
+                        switch.swap(None).await;
+                        lifeline.shutdown().await;
+                        return;
                     }
                 }
             }
@@ -296,8 +286,7 @@ impl Supervisor {
             };
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = supervisor_shutdown_rx.changed() => return,
-                _ = external_shutdown_rx.changed() => return,
+                _ = shutdown_reason(&mut supervisor_shutdown_rx, &mut external_shutdown_rx) => return,
             }
 
             match spawn_transport(&transport_cfg).await {
@@ -319,6 +308,18 @@ impl Supervisor {
                 }
             }
         }
+    }
+}
+
+/// Resolves when either shutdown watch turns true or its sender is
+/// gone.
+async fn shutdown_reason(
+    handle: &mut watch::Receiver<bool>,
+    daemon: &mut watch::Receiver<bool>,
+) -> &'static str {
+    tokio::select! {
+        _ = handle.wait_for(|v| *v) => "handle.shutdown",
+        _ = daemon.wait_for(|v| *v) => "daemon-wide",
     }
 }
 

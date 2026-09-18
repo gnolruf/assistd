@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -512,13 +513,13 @@ impl ConversationStore for SqliteConversationStore {
             .handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
-                Ok(c.query_row(
+                c.query_row(
                     "SELECT current_branch_id FROM sessions WHERE id = ?1",
                     rusqlite::params![session_id],
                     |r| r.get::<_, Option<i64>>(0),
                 )
-                .ok()
-                .flatten())
+                .optional()
+                .map(Option::flatten)
             })
             .await
             .context("get_current_branch")?;
@@ -596,7 +597,7 @@ impl ConversationStore for SqliteConversationStore {
         prefer_session: Option<&SessionId>,
     ) -> Result<Option<(SessionId, BranchId)>> {
         let (session_prefix, name) = match target.split_once('/') {
-            Some((p, n)) => (Some(p.to_string()), n.to_string()),
+            Some((prefix, name)) => (Some(prefix.to_string()), name.to_string()),
             None => (None, target.to_string()),
         };
         let prefer_session = prefer_session.map(|s| s.0.clone());
@@ -605,46 +606,37 @@ impl ConversationStore for SqliteConversationStore {
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
                 if let Some(prefix) = session_prefix {
-                    let pattern = format!("{prefix}%");
-                    let row = c
+                    return c
                         .query_row(
                             "SELECT b.session_id, b.id
                              FROM branches b JOIN sessions s ON s.id = b.session_id
                              WHERE b.name = ?1 AND b.session_id LIKE ?2
                              ORDER BY s.started_at DESC LIMIT 1",
-                            rusqlite::params![name, pattern],
-                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                            rusqlite::params![name, format!("{prefix}%")],
+                            branch_ref,
                         )
-                        .ok();
-                    Ok(row)
-                } else if let Some(pref) = prefer_session {
-                    if let Ok(row) = c.query_row(
-                        "SELECT session_id, id FROM branches WHERE name = ?1 AND session_id = ?2",
-                        rusqlite::params![name, pref],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-                    ) {
-                        return Ok(Some(row));
-                    }
-                    Ok(c.query_row(
-                        "SELECT b.session_id, b.id
-                         FROM branches b JOIN sessions s ON s.id = b.session_id
-                         WHERE b.name = ?1
-                         ORDER BY s.started_at DESC LIMIT 1",
-                        rusqlite::params![name],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-                    )
-                    .ok())
-                } else {
-                    Ok(c.query_row(
-                        "SELECT b.session_id, b.id
-                         FROM branches b JOIN sessions s ON s.id = b.session_id
-                         WHERE b.name = ?1
-                         ORDER BY s.started_at DESC LIMIT 1",
-                        rusqlite::params![name],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-                    )
-                    .ok())
+                        .optional();
                 }
+                if let Some(pref) = prefer_session
+                    && let Some(row) = c
+                        .query_row(
+                            "SELECT session_id, id FROM branches WHERE name = ?1 AND session_id = ?2",
+                            rusqlite::params![name, pref],
+                            branch_ref,
+                        )
+                        .optional()?
+                {
+                    return Ok(Some(row));
+                }
+                c.query_row(
+                    "SELECT b.session_id, b.id
+                     FROM branches b JOIN sessions s ON s.id = b.session_id
+                     WHERE b.name = ?1
+                     ORDER BY s.started_at DESC LIMIT 1",
+                    rusqlite::params![name],
+                    branch_ref,
+                )
+                .optional()
             })
             .await
             .context("resolve_branch")?;
@@ -714,18 +706,16 @@ impl ConversationStore for SqliteConversationStore {
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
-                let ts: Option<String> = c
-                    .query_row(
-                        "SELECT c.timestamp
-                         FROM branch_messages bm
-                         JOIN conversations c ON c.id = bm.conversation_id
-                         WHERE bm.branch_id = ?1
-                         ORDER BY bm.seq DESC LIMIT 1",
-                        rusqlite::params![branch.0],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok();
-                Ok(ts)
+                c.query_row(
+                    "SELECT c.timestamp
+                     FROM branch_messages bm
+                     JOIN conversations c ON c.id = bm.conversation_id
+                     WHERE bm.branch_id = ?1
+                     ORDER BY bm.seq DESC LIMIT 1",
+                    rusqlite::params![branch.0],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
             })
             .await
             .context("latest_branch_activity")
@@ -744,15 +734,13 @@ impl ConversationStore for SqliteConversationStore {
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
-                let title: Option<String> = c
-                    .query_row(
-                        "SELECT title FROM sessions WHERE id = ?1",
-                        rusqlite::params![session_id],
-                        |r| r.get::<_, Option<String>>(0),
-                    )
-                    .ok()
-                    .flatten();
-                Ok(title)
+                c.query_row(
+                    "SELECT title FROM sessions WHERE id = ?1",
+                    rusqlite::params![session_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map(Option::flatten)
             })
             .await
             .context("get_session_title")
@@ -773,24 +761,22 @@ impl ConversationStore for SqliteConversationStore {
         self.handle
             .conn()
             .call(|c| -> rusqlite::Result<_> {
-                let row = c
-                    .query_row(
-                        "SELECT id, current_branch_id, daemon_pid, started_at
-                         FROM sessions
-                         WHERE ended_at IS NULL AND current_branch_id IS NOT NULL
-                         ORDER BY started_at DESC LIMIT 1",
-                        [],
-                        |r| {
-                            Ok((
-                                r.get::<_, String>(0)?,
-                                r.get::<_, i64>(1)?,
-                                r.get::<_, u32>(2)?,
-                                r.get::<_, String>(3)?,
-                            ))
-                        },
-                    )
-                    .ok();
-                Ok(row)
+                c.query_row(
+                    "SELECT id, current_branch_id, daemon_pid, started_at
+                     FROM sessions
+                     WHERE ended_at IS NULL AND current_branch_id IS NOT NULL
+                     ORDER BY started_at DESC LIMIT 1",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, u32>(2)?,
+                            r.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .optional()
             })
             .await
             .context("find_resumable_session")
@@ -803,6 +789,10 @@ impl ConversationStore for SqliteConversationStore {
                 })
             })
     }
+}
+
+fn branch_ref(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, i64)> {
+    Ok((row.get(0)?, row.get(1)?))
 }
 
 #[cfg(test)]

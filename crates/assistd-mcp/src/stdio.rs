@@ -16,12 +16,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::error::McpError;
-use crate::jsonrpc::{Correlator, Response, RpcError, notification_line};
-use crate::{McpClient, ToolResult, ToolSchema};
+use crate::jsonrpc::{Correlator, Response, notification_line};
+use crate::{McpClient, ToolResult, ToolSchema, protocol};
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
-const CLIENT_NAME: &str = "assistd";
-const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The reader drops the connection rather than buffer a line past
 /// this, so a misbehaving server cannot exhaust memory.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -164,25 +161,10 @@ impl StdioMcpClient {
     /// Run the `initialize` handshake. No other request may be issued
     /// before this completes.
     pub async fn initialize(&self) -> Result<(), McpError> {
-        let params = json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": {} },
-            "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION },
-        });
-        let result = self.call("initialize", params).await?;
-
-        if let Some(server_pv) = result.get("protocolVersion").and_then(Value::as_str)
-            && server_pv != PROTOCOL_VERSION
-        {
-            warn!(
-                target: "assistd::mcp",
-                server = %self.label,
-                client_version = PROTOCOL_VERSION,
-                server_version = server_pv,
-                "MCP protocol version mismatch (continuing optimistically)",
-            );
-        }
-
+        let result = self
+            .call("initialize", protocol::initialize_params())
+            .await?;
+        protocol::warn_on_version_mismatch(&self.label, &result);
         let bytes = notification_line("notifications/initialized", json!({}))?;
         self.write_tx
             .send(bytes)
@@ -199,23 +181,7 @@ impl StdioMcpClient {
             .await
             .map_err(|_| McpError::TransportClosed)?;
 
-        let reply = match tokio::time::timeout(self.request_timeout, pending.rx).await {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(_)) => return Err(McpError::TransportClosed),
-            Err(_) => return Err(McpError::RequestTimeout(self.request_timeout)),
-        };
-        match reply {
-            Ok(value) => Ok(value),
-            Err(RpcError {
-                code,
-                message,
-                data,
-            }) => Err(McpError::RpcError {
-                code,
-                message,
-                data,
-            }),
-        }
+        protocol::await_reply(pending.rx, self.request_timeout).await
     }
 }
 
@@ -223,94 +189,14 @@ impl StdioMcpClient {
 impl McpClient for StdioMcpClient {
     async fn list_tools(&self) -> AnyResult<Vec<ToolSchema>> {
         let result = self.call("tools/list", json!({})).await?;
-        let tools_arr = result
-            .get("tools")
-            .and_then(Value::as_array)
-            .ok_or_else(|| McpError::Protocol("tools/list missing `tools` array".into()))?;
-        let mut out = Vec::with_capacity(tools_arr.len());
-        for entry in tools_arr {
-            let name = entry
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| McpError::Protocol("tool entry missing `name`".into()))?
-                .to_string();
-            let description = entry
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let input_schema = entry
-                .get("inputSchema")
-                .cloned()
-                .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
-            out.push(ToolSchema {
-                name,
-                description,
-                input_schema,
-            });
-        }
-        Ok(out)
+        Ok(protocol::parse_tools_list(&result)?)
     }
 
     async fn invoke(&self, name: &str, arguments: Value) -> AnyResult<ToolResult> {
-        let params = json!({ "name": name, "arguments": arguments });
-        let result = self.call("tools/call", params).await?;
-
-        let content_arr = result
-            .get("content")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let is_error = result
-            .get("isError")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-
-        let first = content_arr.into_iter().next();
-        let parsed = match first {
-            None => ToolResult::Text(String::new()),
-            Some(entry) => parse_content_entry(entry)?,
-        };
-
-        if is_error {
-            let parsed = match parsed {
-                ToolResult::Text(t) => ToolResult::Text(format!("[mcp tool error] {t}")),
-                other => other,
-            };
-            return Ok(parsed);
-        }
-        Ok(parsed)
-    }
-}
-
-fn parse_content_entry(entry: Value) -> Result<ToolResult, McpError> {
-    let kind = entry.get("type").and_then(Value::as_str).unwrap_or("");
-    match kind {
-        "text" => {
-            let text = entry
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            Ok(ToolResult::Text(text))
-        }
-        "image" => {
-            let mime = entry
-                .get("mimeType")
-                .and_then(Value::as_str)
-                .ok_or_else(|| McpError::Protocol("image content missing `mimeType`".into()))?
-                .to_string();
-            let data_b64 = entry
-                .get("data")
-                .and_then(Value::as_str)
-                .ok_or_else(|| McpError::Protocol("image content missing `data`".into()))?;
-            use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(data_b64)
-                .map_err(|e| McpError::Protocol(format!("image base64 decode failed: {e}")))?;
-            Ok(ToolResult::Image { mime, bytes })
-        }
-        _ => Ok(ToolResult::Json(entry)),
+        let result = self
+            .call("tools/call", protocol::tool_call_params(name, arguments))
+            .await?;
+        Ok(protocol::parse_tool_call(result)?)
     }
 }
 
@@ -474,11 +360,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
         }
     }
-    correlator.fail_all(|| RpcError {
-        code: -32603,
-        message: "MCP transport closed".into(),
-        data: None,
-    });
+    correlator.fail_all(protocol::closed_err);
     let _ = done_tx.send(());
 }
 

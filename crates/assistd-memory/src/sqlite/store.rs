@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use rusqlite::OptionalExtension;
 
 use crate::{MemoryRecord, MemoryStore};
 
@@ -51,21 +52,12 @@ impl MemoryStore for SqliteMemoryStore {
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
-                let result = c
-                    .query_row(
-                        "SELECT value FROM memories WHERE key = ?1",
-                        rusqlite::params![key],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .map(Some)
-                    .or_else(|e| {
-                        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                            Ok(None)
-                        } else {
-                            Err(e)
-                        }
-                    })?;
-                Ok(result)
+                c.query_row(
+                    "SELECT value FROM memories WHERE key = ?1",
+                    rusqlite::params![key],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
             })
             .await
             .context("memory load")
