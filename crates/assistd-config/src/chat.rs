@@ -74,10 +74,8 @@ impl ChatConfig {
         self.summary_target_tokens.get().saturating_mul(6) / 5
     }
 
-    /// Effective budget for the entire request, after applying a 10% safety
-    /// margin against the real model context length. Protects us from the
-    /// token heuristic (bytes/4) under-counting relative to the real BPE
-    /// tokenizer.
+    /// Context length less a 10% margin, since the bytes/4 token
+    /// heuristic under-counts relative to the real tokenizer.
     pub fn effective_context_budget(&self, model: &ModelConfig) -> u32 {
         (u64::from(model.context_length.get()) * 9 / 10) as u32
     }

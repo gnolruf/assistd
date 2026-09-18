@@ -1,23 +1,10 @@
 //! Vector retrieval over `embeddings` (chunk-keyed) and
 //! `memory_embeddings` (memory-keyed).
 //!
-//! Both vector collections are stored as little-endian `f32` BLOBs and
-//! L2-normalised at write time, so cosine similarity collapses to a
-//! plain dot product. At query time we:
-//!
-//! 1. Read every `(rowid, vector)` for the configured model. Reads
-//!    bypass the writer task via `conn.call(...)` directly; SQLite WAL
-//!    mode supports concurrent readers alongside a single writer.
-//! 2. Decode each BLOB with safe `chunks_exact(4)` arithmetic; no
-//!    `unsafe`, and the workspace lints deny it anyway.
-//! 3. Maintain a min-heap of size ≤ K so we don't sort the whole list.
-//! 4. Hydrate the K winners with one batched JOIN against the parent
-//!    table to surface the row's content / key / value.
-//!
-//! Linear scan is fine for the expected DB scale: even 50K chunks at
-//! 768-dim is ~150 MB of f32, microseconds to dot-product on modern
-//! hardware. If/when a heavy user pushes beyond that, an HNSW / sqlite-vec
-//! extension can drop in behind this same trait without touching callers.
+//! Vectors are little-endian `f32` BLOBs, L2-normalised at write time,
+//! so cosine similarity is a plain dot product. Retrieval is a linear
+//! scan into a bounded min-heap, then one batched JOIN to hydrate the
+//! winners; that is ample for a single user's history.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -30,9 +17,8 @@ use serde::{Deserialize, Serialize};
 use super::connection::SqliteHandle;
 use super::conversations::{PersistedRole, SessionId};
 
-/// One conversation-chunk hit, hydrated with the *full* parent message
-/// content (chunks may cut mid-sentence; for the LLM-facing surface we
-/// surface the whole message so the model isn't reading a torso).
+/// One conversation-chunk hit. `content` is the full parent message,
+/// not the chunk text, since chunks may cut mid-sentence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingHit {
     pub conversation_id: i64,
@@ -44,9 +30,7 @@ pub struct EmbeddingHit {
     pub similarity: f32,
 }
 
-/// One saved-memory hit, ranked by semantic similarity to the query.
-/// Same shape `RecallTool` already produces from prefix mode (key/value
-/// pair + similarity score), so the LLM-facing output stays uniform.
+/// One saved-memory hit, ranked by cosine similarity to the query.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryHit {
     pub memory_id: i64,
@@ -55,19 +39,13 @@ pub struct MemoryHit {
     pub similarity: f32,
 }
 
-/// Top-K vector retrieval. Sibling to [`crate::ConversationStore`];
-/// keeping it on its own trait means callers that only need FTS5 can
-/// hold `Arc<dyn ConversationStore>` without a `dim()` requirement.
+/// Top-K vector retrieval over embedded chunks and memories.
 #[async_trait]
 pub trait SemanticStore: Send + Sync + 'static {
-    /// Top-K conversation chunks ranked by cosine. `query_vector` must
-    /// already be L2-normalised (consumers go through `LlamaEmbedder`
-    /// which normalises before returning).
-    ///
-    /// `exclude_session` drops one session's chunks before ranking, so
-    /// callers searching for *other* conversations still get `top_k`
-    /// hits rather than a list padded with the dialogue they are
-    /// already holding in context.
+    /// Top-K conversation chunks by cosine. `query_vector` must already
+    /// be L2-normalised. `exclude_session` drops one session's chunks
+    /// before ranking so the caller still gets `top_k` hits from other
+    /// conversations.
     async fn nearest_chunks(
         &self,
         query_vector: Vec<f32>,
@@ -76,9 +54,8 @@ pub trait SemanticStore: Send + Sync + 'static {
         exclude_session: Option<&SessionId>,
     ) -> Result<Vec<EmbeddingHit>>;
 
-    /// Top-K saved memories ranked by cosine. Same normalisation
-    /// expectation as above. Returns empty when no memories have been
-    /// embedded yet (e.g. fresh DB or model just changed).
+    /// Top-K saved memories by cosine. `query_vector` must already be
+    /// L2-normalised. Empty when nothing is embedded under `model`.
     async fn nearest_memories(
         &self,
         query_vector: Vec<f32>,
@@ -86,36 +63,21 @@ pub trait SemanticStore: Send + Sync + 'static {
         model: &str,
     ) -> Result<Vec<MemoryHit>>;
 
-    /// Diagnostic / health: how many embedding rows exist for the
-    /// configured model? Returned as `(chunks, memories)`. Useful in
-    /// tests and a future `assistd memory stats` view.
+    /// Embedding row counts under `model`, as `(chunks, memories)`.
     async fn count_for_model(&self, model: &str) -> Result<(i64, i64)>;
 
-    /// Diagnostic: rows whose `model` does NOT equal `current`. Used by
-    /// the daemon at startup to warn when a config change has stranded
-    /// pre-existing embeddings under a different model name (the
-    /// retrieval queries filter by model, so stale rows are invisible
-    /// until reindexed). Returns total stale row count + the distinct
-    /// model names that own them, sorted lexicographically.
+    /// Rows embedded under a model other than `current`: the total
+    /// count plus the distinct stale model names, sorted.
     async fn count_stale(&self, current: &str) -> Result<(i64, Vec<String>)>;
 
-    /// Memories that have no embedding under `current`. The reindex
-    /// handler embeds and stores each `(id, value)` to bring them back
-    /// into the recall index. A row appears here when (a) the memory
-    /// was saved while the embedder subsystem was down, or (b) the
-    /// configured embedding model has changed since the row was
-    /// indexed.
+    /// Memories with no embedding under `current`, as `(id, value)`.
     async fn memories_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>>;
 
-    /// Conversation chunks that have no embedding under `current`.
-    /// Symmetric to [`SemanticStore::memories_missing_embedding`].
+    /// Conversation chunks with no embedding under `current`, as
+    /// `(id, content)`.
     async fn chunks_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>>;
 
-    /// Persist a freshly-computed embedding for a `conversation_chunks`
-    /// row. Idempotent on `(chunk_id)` via the same UPSERT the
-    /// background embedder task uses. Used by the reindex handler so
-    /// it can dispatch directly without going through the embedder
-    /// task's mpsc.
+    /// Upsert the embedding for a `conversation_chunks` row.
     async fn store_chunk_embedding(
         &self,
         chunk_id: i64,
@@ -124,8 +86,7 @@ pub trait SemanticStore: Send + Sync + 'static {
         vector: Vec<u8>,
     ) -> Result<()>;
 
-    /// Persist a freshly-computed embedding for a `memories` row.
-    /// Symmetric to [`SemanticStore::store_chunk_embedding`].
+    /// Upsert the embedding for a `memories` row.
     async fn store_memory_embedding(
         &self,
         memory_id: i64,
@@ -135,8 +96,7 @@ pub trait SemanticStore: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-/// Successful-no-op fallback used when the embedding subsystem is
-/// disabled. Mirrors `NoMemoryStore` / `NoConversationStore`.
+/// No-op fallback used when the embedding subsystem is disabled.
 pub struct NoSemanticStore;
 
 #[async_trait]
@@ -190,15 +150,13 @@ impl SemanticStore for NoSemanticStore {
     }
 }
 
-/// SQLite-backed implementation. Holds an `Arc<SqliteHandle>` so it
-/// shares the connection + writer with the other stores.
+/// SQLite-backed [`SemanticStore`].
 #[derive(Clone)]
 pub struct SqliteSemanticStore {
     handle: Arc<SqliteHandle>,
 }
 
 impl SqliteSemanticStore {
-    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
@@ -223,8 +181,8 @@ impl SemanticStore for SqliteSemanticStore {
             .handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
-                // Filtering before the cosine scan (rather than after
-                // ranking) keeps a full `top_k` of other-session hits.
+                // Filter before ranking so the excluded session doesn't
+                // eat into `top_k`.
                 let mut stmt = c.prepare(
                     "SELECT e.conversation_chunk_id, e.vector
                      FROM embeddings e
@@ -249,7 +207,6 @@ impl SemanticStore for SqliteSemanticStore {
         if ranked.is_empty() {
             return Ok(Vec::new());
         }
-        // Batched JOIN keeps hydration O(1) round-trips regardless of K.
         let chunk_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
         let sims: std::collections::HashMap<i64, f32> = ranked.iter().copied().collect();
         let placeholders = vec!["?"; chunk_ids.len()].join(",");
@@ -523,9 +480,6 @@ impl SemanticStore for SqliteSemanticStore {
     }
 }
 
-// Min-heap entry: smallest similarity at the top so we can pop it when
-// a better candidate arrives. `OrderedFloat` would do this with less
-// boilerplate, but we already avoid extra deps elsewhere, so wrap by hand.
 struct HeapEntry {
     sim: f32,
     rowid: i64,
@@ -544,9 +498,8 @@ impl PartialOrd for HeapEntry {
 }
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse the natural f32 ordering so `BinaryHeap` (which is a
-        // max-heap) acts as a min-heap. NaN treated as the smallest
-        // value so it gets evicted first.
+        // Reversed so the max-heap acts as a min-heap; NaN sorts
+        // smallest so it is evicted first.
         match other.sim.partial_cmp(&self.sim) {
             Some(o) => o,
             None => Ordering::Equal,
@@ -571,18 +524,14 @@ fn heap_to_sorted(heap: BinaryHeap<HeapEntry>) -> Vec<(i64, f32)> {
     v
 }
 
-/// Compute cosine (== dot product, given both sides L2-normalised) of
-/// `query` against the LE-packed f32 BLOB `bytes`. Returns `None` if
-/// the BLOB length is malformed (not a multiple of 4, or dim mismatch);
-/// the row is then silently skipped.
+/// Dot product of `query` against the LE-packed f32 BLOB `bytes`, or
+/// `None` when the BLOB is malformed or its dimension differs.
 fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
     if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let dim = bytes.len() / 4;
     if dim != query.len() {
-        // Embedding from a different model (or model swap mid-deploy);
-        // skip rather than poison the heap.
         return None;
     }
     let (words, _) = bytes.as_chunks::<4>();
@@ -595,9 +544,8 @@ fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
     )
 }
 
-/// Encode an `f32` slice as a LE-packed `Vec<u8>` for storage. Used by
-/// callers that want to construct `WriteOp::StoreChunkEmbedding` /
-/// `StoreMemoryEmbedding` payloads without copy-pasting the byte math.
+/// Encode an `f32` slice as the little-endian BLOB the embedding tables
+/// store.
 pub fn vector_to_blob(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
     for x in v {

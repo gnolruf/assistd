@@ -8,20 +8,10 @@
     )
 )]
 
-//! assistd configuration types.
-//!
-//! This is a leaf crate: it depends on no other internal crate, so both
-//! `assistd-core` and `assistd-llm` can import it without creating the
-//! `core → llm → core` cycle that previously forced us to mirror every
-//! config field into parallel `Spec` structs in `assistd-llm`.
-//!
-//! Every default value lives as a single `pub const` in [`defaults`],
-//! read by the owning section's `Default` impl, so tests and config
-//! defaults can't drift apart.
-//!
-//! Every section carries `#[serde(default, deny_unknown_fields)]`: an
-//! omitted key falls back to that `Default` impl, and a key the schema
-//! doesn't know is a parse error.
+//! assistd configuration types. Every default lives once in
+//! [`defaults`]; every section is `#[serde(default, deny_unknown_fields)]`,
+//! so an omitted key falls back to its default and an unknown key is a
+//! parse error.
 
 pub mod chat;
 pub mod compositor;

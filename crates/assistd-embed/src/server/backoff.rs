@@ -1,9 +1,7 @@
 use std::time::Duration;
 
-/// Cap on consecutive startup failures before the supervisor parks itself
-/// in [`crate::server::ReadyState::Degraded`]. Matches the chat server's
-/// default at `assistd_llm::llama_server::MAX_CONSECUTIVE_FAILURES` so
-/// both subsystems fail-stop with the same patience budget.
+/// Consecutive startup failures before the supervisor parks in
+/// [`crate::server::ReadyState::Degraded`].
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 /// Exponential backoff schedule: `2^attempt` seconds, capped at 60s.

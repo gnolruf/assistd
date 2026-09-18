@@ -8,9 +8,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-/// State broadcast by the supervisor as the embed child moves through
-/// its lifecycle. Mirrors `assistd_llm::llama_server::ReadyState` so the
-/// daemon's startup messages read consistently across both subsystems.
+/// Lifecycle state broadcast by the supervisor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadyState {
     /// Child is spawning or waiting for its `/health` check to pass.
@@ -26,9 +24,8 @@ pub enum ReadyState {
     Degraded,
 }
 
-/// Handle to the managed embed-server. Construct via [`EmbedService::start`];
-/// drop order at daemon shutdown: flip the daemon-wide shutdown watch,
-/// then call [`EmbedService::shutdown`] to await the supervisor task.
+/// Handle to the managed embed-server. On shutdown, flip the shutdown
+/// watch first, then call [`EmbedService::shutdown`].
 pub struct EmbedService {
     task: Option<JoinHandle<()>>,
     ready_rx: watch::Receiver<ReadyState>,
@@ -36,12 +33,8 @@ pub struct EmbedService {
 }
 
 impl EmbedService {
-    /// Spawn the supervisor and block until the child reports `Ready` or
-    /// the supervisor enters `Degraded`. Errors are surfaced via
-    /// [`EmbedServerError`].
-    /// `ready_timeout` is the backstop on the child reporting healthy.
-    /// Callers pass `llama_server.ready_timeout_secs`, shared with the
-    /// chat server.
+    /// Spawn the supervisor and wait until the child is `Ready`, or fail
+    /// once it goes `Degraded`. `ready_timeout` caps each health wait.
     #[tracing::instrument(skip(cfg, shutdown_rx), fields(host = %cfg.host, port = cfg.port))]
     pub async fn start(
         cfg: EmbeddingConfig,
@@ -89,23 +82,19 @@ impl EmbedService {
         }
     }
 
-    /// Returns `true` if the supervised child is currently in the `Ready` state.
     pub fn is_ready(&self) -> bool {
         matches!(*self.ready_rx.borrow(), ReadyState::Ready)
     }
 
-    /// Returns the current lifecycle state of the supervised embed-server.
     pub fn state(&self) -> ReadyState {
         *self.ready_rx.borrow()
     }
 
-    /// Returns the OS PID of the running child process, or `None` if not currently running.
     pub fn pid(&self) -> Option<u32> {
         *self.pid.lock()
     }
 
-    /// Await the supervisor task. Caller is expected to have flipped the
-    /// shared shutdown watch already; this simply joins.
+    /// Join the supervisor task; the shutdown watch must already be set.
     pub async fn shutdown(mut self) -> Result<(), EmbedServerError> {
         if let Some(task) = self.task.take() {
             task.await.map_err(|_| EmbedServerError::SupervisorPanic)?;

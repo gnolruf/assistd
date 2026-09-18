@@ -1,20 +1,6 @@
-//! Background worker that consumes [`EmbedJob`]s, calls the embedder,
-//! and dispatches the resulting vector into the memory writer.
-//!
-//! Mirrors `assistd-memory`'s writer-task pattern:
-//! `tokio::select! { biased; op = rx.recv() ...; _ = shutdown.changed() => drain }`
-//! so any in-flight jobs land before the daemon exits.
-//!
-//! Each job carries the rowid that the embedding will FK against. Two
-//! variants (chunks FK to `conversation_chunks.id`, memories FK to
-//! `memories.id`) share one queue, one worker, and one HTTP
-//! connection: there's no semantic value in segregating them and a
-//! single queue gives the writer cleaner backpressure shape.
-//!
-//! Failures are logged and dropped. The chunk / memory row stays
-//! without an embedding; a future `assistd memory backfill-embeddings`
-//! pass can pick it up. We deliberately avoid retries here; if the
-//! embed server is wedged, retrying just amplifies the wedge.
+//! Background worker that embeds queued rows and stores the vectors
+//! through the memory writer. A failed embed is logged and dropped,
+//! never retried; the row stays unindexed until a reindex.
 
 use std::sync::Arc;
 
@@ -24,21 +10,15 @@ use tokio::task::JoinHandle;
 
 use crate::Embedder;
 
-/// One job for the embedder worker. Variants share one queue so the
-/// worker stays simple and ordering is FIFO across both kinds.
+/// One row to embed.
 #[derive(Debug)]
 pub enum EmbedJob {
-    /// Embed a `conversation_chunks` row's text. The resulting vector
-    /// is committed via [`WriteOp::StoreChunkEmbedding`].
     Chunk { chunk_id: i64, text: String },
-    /// Embed a `memories` row's value. The resulting vector is
-    /// committed via [`WriteOp::StoreMemoryEmbedding`].
     Memory { memory_id: i64, text: String },
 }
 
-/// Spawn the worker. The daemon holds the returned [`JoinHandle`] and
-/// awaits it on shutdown so any in-flight embeddings land before the
-/// memory writer task drains.
+/// Spawn the worker. The caller awaits the returned handle on shutdown
+/// so in-flight embeddings land before the memory writer drains.
 pub fn spawn_embedder_task(
     embedder: Arc<dyn Embedder>,
     writer_tx: Arc<mpsc::Sender<WriteOp>>,

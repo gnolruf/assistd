@@ -1,23 +1,13 @@
-//! Test fixtures. A canonical minimal TOML plus helpers for building
-//! [`Config`] instances that tests can mutate before running their
-//! assertions. Available outside `#[cfg(test)]` so downstream crates
-//! (`assistd-core`, `assistd-llm`) can reuse the same fixtures from
-//! their own test modules.
+//! Test fixtures, exported so downstream crates' tests can share them.
 
 use crate::top::Config;
 
-/// Canonical minimal TOML. Every section is `#[serde(default)]`, so this
-/// carries only the handful of overrides tests rely on. Test modules that
-/// need to exercise a specific field can either mutate the parsed
-/// [`minimal`] instance, or `format!` additional `[section]` blocks onto
-/// the end of this string.
+/// Minimal TOML carrying only the overrides tests rely on.
 pub fn minimal_toml() -> &'static str {
     include_str!("../tests/fixtures/minimal.toml")
 }
 
-/// Parse [`minimal_toml`] into a valid [`Config`]. Panics on failure; the
-/// fixture is a code-controlled literal, so a failure is a bug, not an
-/// environmental error.
+/// Parse [`minimal_toml`] into a [`Config`].
 pub fn minimal() -> Config {
     toml::from_str(minimal_toml()).expect("minimal fixture TOML must parse")
 }

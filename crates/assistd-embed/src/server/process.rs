@@ -7,8 +7,8 @@ use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-/// Wraps a running embedding llama-server child plus the tasks
-/// forwarding its stdout/stderr to tracing.
+/// A running embedding llama-server child plus the tasks forwarding
+/// its output to tracing.
 pub struct ChildProcess {
     child: Child,
     stdout_task: Option<JoinHandle<()>>,
@@ -16,12 +16,6 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
-    /// Spawn a `llama-server` child process configured for embedding and begin
-    /// forwarding its stdout/stderr to tracing.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EmbedServerError::Spawn`] if the process cannot be started.
     pub fn spawn(cfg: &EmbeddingConfig) -> Result<Self, EmbedServerError> {
         let mut cmd = Command::new("llama-server");
         cmd.arg("--embedding")
@@ -74,18 +68,15 @@ impl ChildProcess {
         })
     }
 
-    /// Returns the OS PID of the child process, or `None` if it has already exited.
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }
 
-    /// Wait for the child process to exit and return its [`ExitStatus`].
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait().await
     }
 
-    /// Send SIGTERM to the child's process group, wait up to
-    /// `term_timeout`, then SIGKILL if still running.
+    /// SIGTERM the process group, wait `term_timeout`, then SIGKILL.
     pub async fn shutdown(mut self, term_timeout: Duration) -> Result<(), EmbedServerError> {
         #[cfg(unix)]
         if let Some(pid) = self.child.id()

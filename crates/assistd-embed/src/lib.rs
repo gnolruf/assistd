@@ -8,20 +8,15 @@
     )
 )]
 
-//! Embedding subsystem: a dedicated llama-server `/v1/embeddings`
-//! instance plus the [`Embedder`] trait callers depend on.
-//!
-//! Runs separately from the chat router so embeddings stay available
-//! while the router is `Drowsy` / `Sleeping`. The embedding model is
-//! small enough (~30-300 MB Q4) to keep CPU-resident.
+//! Embedding subsystem: the [`Embedder`] trait, an HTTP client for a
+//! dedicated embedding llama-server, its supervisor, and the
+//! background task that embeds queued rows.
 
 pub mod client;
 pub mod embedder_task;
 pub mod server;
 
-/// Per-request HTTP deadline against `/v1/embeddings`. Embedding a short
-/// text on CPU is sub-second for the small models this is built around;
-/// the headroom is for a cold cache on the first call.
+/// Per-request HTTP deadline against `/v1/embeddings`.
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub use client::LlamaEmbedder;
@@ -31,29 +26,20 @@ pub use server::{EmbedServerError, EmbedService, ReadyState};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 
-/// Generates embedding vectors for arbitrary text. Implementors must be
-/// `Send + Sync + 'static` so callers can hold them as
-/// `Arc<dyn Embedder>` and share across tasks.
+/// Generates embedding vectors for text.
 #[async_trait]
 pub trait Embedder: Send + Sync + 'static {
-    /// Produce an L2-normalised embedding vector for `text`. Normalisation
-    /// is the implementor's responsibility; callers compose retrieval as
-    /// dot products and assume both sides are unit-length.
+    /// An L2-normalised embedding of `text`; callers compute cosine as
+    /// a dot product.
     async fn embed(&self, text: String) -> Result<Vec<f32>>;
-    /// Model id this embedder serves. Used to filter the SQLite
-    /// `embeddings` / `memory_embeddings` rows by `model` so a query
-    /// against today's embedder never collides with vectors produced by
-    /// a previous model.
+    /// Model id, stored alongside every vector so models never mix.
     fn model(&self) -> &str;
-    /// Vector dimensionality served by this embedder. Probed at
-    /// startup; stable for the lifetime of the process.
+    /// Vector dimensionality, stable for the life of the embedder.
     fn dim(&self) -> usize;
 }
 
-/// Successful-no-op fallback used when the embedding subsystem is
-/// disabled in config or fails to start. `embed` returns an error so
-/// callers can `Result<_>::ok()` to a "skip retrieval" branch; `model()`
-/// is empty and `dim()` is `0`.
+/// Fallback when embedding is disabled: `embed` errors, `model` is
+/// empty, `dim` is zero.
 pub struct NoEmbedder;
 
 #[async_trait]

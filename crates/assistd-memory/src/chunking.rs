@@ -1,27 +1,12 @@
-//! Char-window chunker used by the persistence path before embedding.
-//!
-//! Goals (in priority order):
-//! 1. **UTF-8 safety.** Splitting must never produce invalid string slices,
-//!    even with multi-byte characters (CJK, emoji, etc.).
-//! 2. **Bounded chunks.** Each chunk has a stable upper-bound on character
-//!    count so embedding requests stay predictably-sized.
-//! 3. **Boundary overlap.** Consecutive chunks overlap so semantically
-//!    coherent runs (a sentence that straddles a window boundary) are
-//!    visible in *both* chunks. The retrieval ranker can then surface the
-//!    one with stronger overlap with the query.
-//!
-//! Trade-offs vs. sentence-aware chunking: this is a deliberately simple
-//! window-based split. The repo already has `assistd-voice/src/sentence.rs`
-//! but that's TTS-shaped (markdown stripping, code-fence handling): it
-//! drops content semantic search needs and applies transforms search
-//! doesn't want. A char-window suffices for v1; if retrieval quality
-//! suffers we can revisit.
+//! Char-window chunker applied to messages before embedding. Chunks
+//! are bounded by character count, never split a multi-byte character,
+//! and overlap so a sentence straddling a window boundary is visible in
+//! both neighbours.
 
 use serde::{Deserialize, Serialize};
 
-/// Chunking policy shared between the persistence hook and any future
-/// backfill pass. `chunk_chars` is the upper bound; `overlap_chars` is
-/// strictly less than it.
+/// Chunking policy. `chunk_chars` is the upper bound; `overlap_chars`
+/// is strictly less than it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkingConfig {
     /// Maximum number of Unicode characters per chunk.
@@ -31,9 +16,6 @@ pub struct ChunkingConfig {
 }
 
 impl Default for ChunkingConfig {
-    /// Sized against the embedding models this is built for: a 512-char
-    /// window sits comfortably inside their token limit, and the overlap
-    /// keeps a semantically coherent run from being cut at a boundary.
     fn default() -> Self {
         Self {
             chunk_chars: 512,
@@ -48,17 +30,12 @@ impl Default for ChunkingConfig {
 /// - For longer inputs, slides a window of `chunk_chars` characters,
 ///   advancing by `chunk_chars - overlap_chars` each step. The last
 ///   window is included even when shorter than the limit.
-/// - Pure-whitespace chunks are dropped (an empty input or a tail that
-///   is fully overlapped by the previous window).
-///
-/// Iteration is via `char_indices()` so all index math is on UTF-8
-/// boundaries; multi-byte chars are never split.
+/// - Pure-whitespace chunks are dropped.
 pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
     if content.trim().is_empty() {
         return Vec::new();
     }
     if cfg.chunk_chars == 0 || cfg.overlap_chars >= cfg.chunk_chars {
-        // Defensive: validation rejects this at load, but never split-by-zero.
         return vec![content.to_string()];
     }
 

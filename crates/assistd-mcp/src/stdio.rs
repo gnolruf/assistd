@@ -1,11 +1,5 @@
-//! Stdio JSON-RPC transport for MCP servers spawned as a child process.
-//!
-//! Wire format: newline-delimited JSON-RPC 2.0 over the child's stdin
-//! (outbound) and stdout (inbound). Stderr is forwarded to tracing.
-//!
-//! The transport core is split from process spawning so tests can run
-//! the full request/response loop against a `tokio::io::duplex` pair;
-//! see [`StdioMcpClient::from_streams`].
+//! Newline-delimited JSON-RPC over a child process's stdin/stdout;
+//! stderr is forwarded to tracing.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -28,9 +22,8 @@ use crate::{McpClient, ToolResult, ToolSchema};
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const CLIENT_NAME: &str = "assistd";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// MCP servers that emit a single line larger than this are protocol-violating.
-/// The reader stops at the cap rather than buffering the whole line, so an
-/// upstream bug or a hostile server cannot exhaust memory.
+/// The reader drops the connection rather than buffer a line past
+/// this, so a misbehaving server cannot exhaust memory.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 /// Per-server stdio transport configuration.
@@ -40,12 +33,11 @@ pub struct StdioConfig {
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub request_timeout: Duration,
-    /// Label used in tracing logs (typically the server's config name).
+    /// Server name used in tracing logs.
     pub label: String,
 }
 
 impl StdioConfig {
-    /// Create a config with a 30-second default request timeout and no extra env vars.
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
@@ -57,8 +49,7 @@ impl StdioConfig {
     }
 }
 
-/// `McpClient` impl that owns the writer-task channel and shares the
-/// `Correlator` with the transport's reader task.
+/// [`McpClient`] over a child process's pipes.
 pub struct StdioMcpClient {
     label: String,
     correlator: Arc<Correlator>,
@@ -67,10 +58,8 @@ pub struct StdioMcpClient {
 }
 
 impl StdioMcpClient {
-    /// Spawn an MCP server child process and bring up the transport.
-    /// Returns the client (an `Arc<dyn McpClient>` once cast) and a
-    /// `ChildLifeline` whose `wait_for_death()` future fires when the
-    /// transport stops working; used by the per-server supervisor.
+    /// Spawn the server process, run the initialize handshake, and
+    /// return the client plus the lifeline the supervisor watches.
     pub async fn spawn(cfg: StdioConfig) -> Result<(Arc<Self>, ChildLifeline), McpError> {
         let mut cmd = Command::new(&cfg.command);
         cmd.args(&cfg.args)
@@ -132,10 +121,8 @@ impl StdioMcpClient {
         Ok((client, lifeline))
     }
 
-    /// Wire the transport up over arbitrary `AsyncRead` / `AsyncWrite`.
-    /// Used by [`Self::spawn`] (with the child's stdout/stdin) and by
-    /// tests (with `tokio::io::duplex`). Does NOT perform the initialize
-    /// handshake; call [`Self::initialize`] separately.
+    /// Wire the transport over arbitrary streams without running the
+    /// initialize handshake.
     pub async fn from_streams<R, W>(
         read: R,
         write: W,
@@ -174,9 +161,8 @@ impl StdioMcpClient {
         ))
     }
 
-    /// Send the `initialize` request and the follow-up
-    /// `notifications/initialized` notification. Per the MCP spec, no
-    /// other request may be issued before this completes.
+    /// Run the `initialize` handshake. No other request may be issued
+    /// before this completes.
     pub async fn initialize(&self) -> Result<(), McpError> {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
@@ -205,7 +191,6 @@ impl StdioMcpClient {
         Ok(())
     }
 
-    /// Issue a JSON-RPC request; await response with [`Self::request_timeout`].
     async fn call(&self, method: &'static str, params: Value) -> Result<Value, McpError> {
         let pending = self.correlator.next_request(method, params)?;
         let bytes = pending.frame_line()?;
@@ -325,13 +310,11 @@ fn parse_content_entry(entry: Value) -> Result<ToolResult, McpError> {
                 .map_err(|e| McpError::Protocol(format!("image base64 decode failed: {e}")))?;
             Ok(ToolResult::Image { mime, bytes })
         }
-        // resource / structured → JSON passthrough so the model can read it.
         _ => Ok(ToolResult::Json(entry)),
     }
 }
 
-/// Owns the spawned child plus its background I/O tasks. Awaiting
-/// [`Self::wait_for_death`] returns when the transport stops working.
+/// The spawned child plus its I/O tasks.
 pub struct ChildLifeline {
     pub label: String,
     child: Option<tokio::process::Child>,
@@ -340,16 +323,13 @@ pub struct ChildLifeline {
 }
 
 impl ChildLifeline {
-    /// Return the OS PID of the child process, if still running.
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().and_then(|c| c.id())
     }
 
-    /// Block until the transport is dead: either the child exits or
-    /// its stdout read loop stops. A live child whose read loop has
-    /// ended can never answer another request -- every call would write
-    /// to stdin and then time out -- so both count as death. The
-    /// supervisor races this against the shared shutdown signal.
+    /// Resolves when the child exits or its stdout read loop ends. A
+    /// live child whose read loop has ended can never answer again, so
+    /// both count as death.
     pub async fn wait_for_death(&mut self) {
         let child = self
             .child
@@ -374,9 +354,7 @@ impl ChildLifeline {
         }
     }
 
-    /// Send SIGTERM to the child's process group, wait `term_timeout`,
-    /// then SIGKILL if still alive. Always best-effort; we don't fail
-    /// daemon shutdown on a stuck child.
+    /// SIGTERM the process group, wait `term_timeout`, then SIGKILL.
     pub async fn shutdown(mut self, term_timeout: Duration) {
         let label = self.label.clone();
         if let Some(mut child) = self.child.take() {
@@ -422,19 +400,16 @@ impl ChildLifeline {
     }
 }
 
-/// JoinHandles for the read+write tasks of a single transport. Held by
-/// `ChildLifeline` (production) or by tests for direct cleanup.
+/// The read and write tasks of one transport.
 pub struct TransportHandles {
     read_task: Option<JoinHandle<()>>,
     write_task: Option<JoinHandle<()>>,
-    /// Fires when the read loop terminates (EOF, read error, or an
-    /// over-long line). Lets a test or the supervisor detect transport
-    /// death without owning the child.
+    /// Fires when the read loop terminates.
     pub read_done: oneshot::Receiver<()>,
 }
 
 impl TransportHandles {
-    /// Abort the read and write tasks and wait up to 500ms for each to finish.
+    /// Abort both tasks and wait briefly for each to finish.
     pub async fn shutdown_and_join(mut self) {
         if let Some(t) = self.read_task.take() {
             t.abort();

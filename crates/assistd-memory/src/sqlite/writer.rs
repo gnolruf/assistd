@@ -1,17 +1,8 @@
-//! Single-writer task for the SQLite store.
-//!
-//! Every mutating operation is sent over `mpsc` to one task that owns the
-//! connection. SQLite serializes writes through its file lock anyway, so
-//! pretending to do them in parallel gains nothing. Funneling them
-//! through one place gives us a single tracing target, lets the dispatch
-//! loop fire-and-forget, and makes shutdown deterministic (we drain the
-//! channel before the task exits).
-//!
-//! All branches return their result through a per-op `oneshot::Sender`.
-//! Callers `await` that oneshot when they need the row id or to surface
-//! errors; the chat-turn dispatch loop does NOT await it on the hot path.
-//! It spawns a tiny logger task so DB latency never throttles token
-//! streaming.
+//! Single-writer task for the SQLite store. Every mutation is a
+//! [`WriteOp`] sent to one task that owns the connection; each op
+//! carries a `oneshot` ack the caller may await or ignore. On shutdown
+//! the task drains its queue so a write issued just before SIGTERM
+//! still lands.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,9 +15,7 @@ use tokio_rusqlite::Connection;
 
 use super::conversations::{BranchId, PersistedMessage, PersistedRole, TurnId, UndoOutcome};
 
-/// Typed write operations. Each carries a `oneshot` ack so callers can
-/// either await the result (CLI / IPC handlers) or fire-and-forget plus
-/// log on error (chat-turn persistence).
+/// Mutations the writer task executes, each with a `oneshot` ack.
 pub enum WriteOp {
     BeginSession {
         session_id: String,
@@ -52,31 +41,24 @@ pub enum WriteOp {
         msg: PersistedMessage,
         ack: oneshot::Sender<Result<i64>>,
     },
+    /// Upsert a memory by key; acks the row id.
     SaveMemory {
         key: String,
         value: String,
         source_conversation_id: Option<i64>,
-        /// Returns the row id of the inserted/updated memory. Callers
-        /// that fire-and-forget `save` (the IPC `MemorySave` handler)
-        /// can ignore it; callers that want to enqueue an embed job for
-        /// the value (the `RememberTool`) need it to FK the embedding.
         ack: oneshot::Sender<Result<i64>>,
     },
     DeleteMemory {
         key: String,
         ack: oneshot::Sender<Result<()>>,
     },
-    /// Delete a memory by row id. Returns the key of the deleted row
-    /// on hit so the IPC `MemoryForget` handler can echo it back to
-    /// the CLI; returns `None` when no row with that id exists. The
-    /// `memory_embeddings.memory_id ... ON DELETE CASCADE` FK cleans
-    /// the embedding row in the same statement.
+    /// Delete a memory by row id; acks the deleted key, or `None` on
+    /// miss. The embedding row cascades.
     DeleteMemoryById {
         id: i64,
         ack: oneshot::Sender<Result<Option<String>>>,
     },
-    /// Persist one chunk of a conversation message. Returns the chunk
-    /// rowid via the ack so the caller can dispatch an embed job.
+    /// Upsert one chunk of a conversation message; acks the chunk id.
     StoreChunk {
         conversation_id: i64,
         chunk_index: i64,
@@ -84,9 +66,7 @@ pub enum WriteOp {
         token_count: Option<i64>,
         ack: oneshot::Sender<Result<i64>>,
     },
-    /// Store an embedding vector for a `conversation_chunks` row.
-    /// Idempotent on `(chunk_id)` via `ON CONFLICT(conversation_chunk_id)
-    /// DO UPDATE`: the unique FK column lets a re-embed overwrite.
+    /// Upsert the embedding for a `conversation_chunks` row.
     StoreChunkEmbedding {
         chunk_id: i64,
         model: String,
@@ -94,10 +74,7 @@ pub enum WriteOp {
         vector: Vec<u8>,
         ack: oneshot::Sender<Result<()>>,
     },
-    /// Store an embedding vector for a `memories` row. Idempotent on
-    /// `(memory_id)` for the same reason as above: when a memory is
-    /// re-saved (UPSERT keeps the row id), the embedding refreshes in
-    /// place rather than accumulating duplicates.
+    /// Upsert the embedding for a `memories` row.
     StoreMemoryEmbedding {
         memory_id: i64,
         model: String,
@@ -113,16 +90,13 @@ pub enum WriteOp {
         conversation_id: i64,
         ack: oneshot::Sender<Result<()>>,
     },
-    /// Atomically begin a session and create its default `main` branch
-    /// in one transaction. Used at daemon startup; replaces the
-    /// previously-discrete `BeginSession` write op so a crash between
-    /// the two writes can't orphan a session without a branch.
+    /// Begin a session and create its `main` branch in one transaction.
     BeginSessionWithMainBranch {
         session_id: String,
         daemon_pid: u32,
         ack: oneshot::Sender<Result<BranchId>>,
     },
-    /// Insert one row into `branches`. Returns the new BranchId.
+    /// Insert one row into `branches`; acks the new id.
     CreateBranch {
         session_id: String,
         name: String,
@@ -136,10 +110,8 @@ pub enum WriteOp {
         branch_id: BranchId,
         ack: oneshot::Sender<Result<()>>,
     },
-    /// Append `msg` and reference it from `branch_messages`. The writer
-    /// runs both inserts in a single transaction so reads cannot observe
-    /// an intermediate state where a `conversations` row has no
-    /// matching `branch_messages` entry.
+    /// Append `msg` and reference it from `branch_messages`, in one
+    /// transaction.
     AppendMessageToBranch {
         session_id: String,
         branch_id: BranchId,
@@ -147,25 +119,19 @@ pub enum WriteOp {
         msg: PersistedMessage,
         ack: oneshot::Sender<Result<i64>>,
     },
-    /// Snapshot a branch: insert a new `branches` row and copy every
-    /// `branch_messages` row from `src` into the new branch, preserving
-    /// seq. Returns the new BranchId.
+    /// Create a branch that references every message on `src`,
+    /// preserving seq; acks the new id.
     ForkBranch {
         src_branch_id: BranchId,
         new_name: String,
         ack: oneshot::Sender<Result<BranchId>>,
     },
-    /// Drop the most recent turn from `branch`: delete its
-    /// `branch_messages` rows, sweep newly-orphaned `conversations`
-    /// rows, drop the `turns` row when no other branch still references
-    /// it. Returns counts so the IPC layer can echo the outcome.
+    /// Drop the most recent turn from `branch`.
     UndoLastTurn {
         branch_id: BranchId,
         ack: oneshot::Sender<Result<UndoOutcome>>,
     },
-    /// Set `sessions.title` to the LLM-generated summary. Issued
-    /// fire-and-forget by the daemon's title-generation task after the
-    /// first agent response in a session completes.
+    /// Set `sessions.title`.
     SetSessionTitle {
         session_id: String,
         title: String,
@@ -173,9 +139,8 @@ pub enum WriteOp {
     },
 }
 
-/// Spawn the writer worker. Returns its `JoinHandle` so the daemon
-/// shutdown path at `crates/assistd/src/daemon.rs:321-333` can await it
-/// alongside the other background workers.
+/// Spawn the writer task. The caller awaits the returned handle on
+/// shutdown, after flipping `shutdown`.
 pub fn spawn_writer(
     conn: Connection,
     mut rx: mpsc::Receiver<WriteOp>,
@@ -199,13 +164,8 @@ pub fn spawn_writer(
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        // Drain remaining ops before exiting so an
-                        // append_message issued just before SIGTERM
-                        // still lands. `recv` (not `try_recv`) so a
-                        // task that's about to enqueue but hasn't quite
-                        // hit `send` yet still wins. The bounded outer
-                        // timeout prevents a wedged sender from
-                        // blocking daemon exit forever.
+                        // `recv` with a timeout rather than `try_recv`, so a
+                        // sender that is about to enqueue still wins.
                         tracing::debug!(
                             target: "assistd::memory",
                             "shutdown received; draining writer queue"
@@ -461,12 +421,8 @@ async fn append_message(
     let turn_id = turn.map(|t| t.0);
     let id = conn
         .call(move |c| -> rusqlite::Result<_> {
-            // seq is per-session monotonic. Wrap the SELECT + INSERT in
-            // an explicit transaction so the two statements observe a
-            // consistent snapshot of `conversations` and so a SELECT
-            // failure surfaces as itself rather than as a UNIQUE
-            // collision on the follow-up INSERT (which is what the old
-            // `.unwrap_or(0)` produced).
+            // One transaction so the seq SELECT and the INSERT see the
+            // same snapshot.
             let tx = c.transaction()?;
             let seq: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq), -1) + 1 FROM conversations WHERE session_id = ?1",
@@ -505,10 +461,6 @@ async fn save_memory(
     source: Option<i64>,
 ) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
-    // `RETURNING id` (SQLite >= 3.35) gives us the row id of either the
-    // freshly-inserted row or the row updated via ON CONFLICT. Saves an
-    // extra `SELECT id FROM memories WHERE key = ?` round-trip, and the
-    // caller (`RememberTool`) needs the id to FK an embedding row.
     let id = conn
         .call(move |c| -> rusqlite::Result<_> {
             let id: i64 = c.query_row(
@@ -542,11 +494,6 @@ async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
 }
 
 async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String>> {
-    // `RETURNING key` (SQLite >= 3.35) gives us the deleted row's key
-    // in the same round trip; `QueryReturnedNoRows` means the id
-    // didn't exist. The `memory_embeddings.memory_id` FK has
-    // `ON DELETE CASCADE`, so the embedding row drops with the memory;
-    // no second statement needed.
     conn.call(move |c| -> rusqlite::Result<_> {
         let result = c
             .query_row(
@@ -577,8 +524,6 @@ async fn store_chunk(
 ) -> Result<i64> {
     let id = conn
         .call(move |c| -> rusqlite::Result<_> {
-            // Idempotent on (conversation_id, chunk_index): re-running
-            // chunking for the same row replaces in place.
             let id: i64 = c.query_row(
                 "INSERT INTO conversation_chunks (conversation_id, chunk_index, content, token_count)
                  VALUES (?1, ?2, ?3, ?4)
@@ -648,8 +593,6 @@ async fn store_memory_embedding(
 
 async fn delete_chunks_for_conversation(conn: &Connection, conversation_id: i64) -> Result<()> {
     conn.call(move |c| -> rusqlite::Result<_> {
-        // ON DELETE CASCADE on the embeddings FK takes care of dropping
-        // any matching `embeddings` rows.
         c.execute(
             "DELETE FROM conversation_chunks WHERE conversation_id = ?1",
             rusqlite::params![conversation_id],
@@ -669,9 +612,8 @@ async fn begin_session_with_main_branch(
     let created = started.clone();
     let branch_rowid = conn
         .call(move |c| -> rusqlite::Result<_> {
-            // One transaction so a crash midway can't leave a session
-            // without its main branch (the daemon-startup code reads
-            // current_branch_id and panics on NULL otherwise).
+            // One transaction: startup treats a session without a main
+            // branch as corrupt.
             let tx = c.transaction()?;
             tx.execute(
                 "INSERT INTO sessions (id, started_at, daemon_pid) VALUES (?1, ?2, ?3)",
@@ -750,10 +692,6 @@ async fn append_message_to_branch(
     let turn_id = turn.map(|t| t.0);
     let id = conn
         .call(move |c| -> rusqlite::Result<_> {
-            // Insert the conversations row, the branch_messages row,
-            // and assign a branch-local seq atomically. The session-wide
-            // `conversations.seq` keeps its previous "max+1 over the
-            // session" semantics so FTS5 ranking is unchanged.
             let tx = c.transaction()?;
             let seq: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq), -1) + 1 FROM conversations WHERE session_id = ?1",
@@ -817,9 +755,6 @@ async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Resu
                 rusqlite::params![session_id, new_name, src.0, fork_point_seq, created],
             )?;
             let new_branch_id = tx.last_insert_rowid();
-            // Copy every join-table row, preserving the branch-local seq.
-            // The `conversations` rows themselves are NOT duplicated; both
-            // branches reference the same row ids.
             tx.execute(
                 "INSERT INTO branch_messages (branch_id, seq, conversation_id)
                  SELECT ?1, seq, conversation_id
@@ -837,9 +772,6 @@ async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Resu
 async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutcome> {
     conn.call(move |c| -> rusqlite::Result<_> {
         let tx = c.transaction()?;
-        // Find the latest turn_id reachable through this branch. If
-        // every reachable message has NULL turn_id (e.g. system-only
-        // history), there is nothing to undo.
         let last_turn: Option<i64> = tx
             .query_row(
                 "SELECT MAX(c.turn_id)
@@ -854,7 +786,6 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
             tx.commit()?;
             return Ok(UndoOutcome::default());
         };
-        // Snapshot the user_text for echo before the row goes away.
         let last_user_text: Option<String> = tx
             .query_row(
                 "SELECT user_text FROM turns WHERE id = ?1",
@@ -863,10 +794,7 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
             )
             .ok();
 
-        // Conversations rows reachable from this branch tagged with
-        // the doomed turn_id. Capture before we delete the
-        // branch_messages rows so we know which conversations rows
-        // become orphan candidates.
+        // Captured before the delete: these are the orphan candidates.
         let target_conv_ids: Vec<i64> = {
             let mut stmt = tx.prepare(
                 "SELECT bm.conversation_id
@@ -888,10 +816,6 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
             rusqlite::params![branch.0, turn_id],
         )?;
 
-        // Sweep any conversations rows now without ANY remaining
-        // branch_messages references. The FK from
-        // `conversation_chunks` cascades, which cascades to
-        // `embeddings`, so semantic-search hits also get cleaned up.
         for cid in &target_conv_ids {
             let still_referenced: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM branch_messages WHERE conversation_id = ?1",
@@ -906,10 +830,7 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
             }
         }
 
-        // Drop the turns row when no surviving conversations row points
-        // at it. Could happen if the user undid on a forked branch and
-        // the parent branch already preserved that turn; leave the
-        // turns row in place in that case.
+        // A forked sibling may still reference the turn; keep it then.
         let turn_still_used: i64 = tx.query_row(
             "SELECT COUNT(*) FROM conversations WHERE turn_id = ?1",
             rusqlite::params![turn_id],

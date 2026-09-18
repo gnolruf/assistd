@@ -6,9 +6,7 @@ use tracing::debug;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Polls the embed server's `/health` endpoint until it returns 200 or
-/// the deadline elapses. Mirrors `assistd_llm::llama_server::HealthChecker`
-/// but with an embed-targeted error type.
+/// Polls `/health` until it returns 200 or the deadline elapses.
 pub struct HealthChecker {
     client: reqwest::Client,
     url: String,
@@ -18,11 +16,6 @@ pub struct HealthChecker {
 }
 
 impl HealthChecker {
-    /// Construct a new `HealthChecker` that polls `http://{host}:{port}/health`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EmbedServerError::Http`] if the underlying HTTP client cannot be built.
     pub fn new(host: &str, port: u16, ready_timeout: Duration) -> Result<Self, EmbedServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -37,17 +30,12 @@ impl HealthChecker {
         })
     }
 
-    /// Returns the maximum duration this checker will wait before declaring a timeout.
     pub fn ready_timeout(&self) -> Duration {
         self.ready_timeout
     }
 
-    /// Poll `/health` until it returns 200, the deadline elapses, or shutdown is signalled.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EmbedServerError::HealthTimeout`] if the ready deadline is exceeded,
-    /// or [`EmbedServerError::ShutdownDuringHealth`] if the shutdown watch fires.
+    /// Poll until 200, `HealthTimeout` at the deadline, or
+    /// `ShutdownDuringHealth` when the watch fires.
     pub async fn wait_ready(
         &self,
         shutdown_rx: &mut watch::Receiver<bool>,

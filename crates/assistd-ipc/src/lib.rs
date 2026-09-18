@@ -21,8 +21,7 @@
 //! daemon sends [`Event::Done`] (success) or [`Event::Error`] (failure) and
 //! closes the connection.
 //!
-//! Every event carries the originating request's `id`, so a future
-//! multiplexing transport can correlate concurrent in-flight requests.
+//! Every event carries the originating request's `id`.
 //!
 //! ## Passive subscription
 //!
@@ -42,11 +41,9 @@ pub mod client;
 #[cfg(feature = "client")]
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 
-/// An image attachment carried over the wire alongside a [`Request::Query`].
-/// `data_base64` is standard base64 (with padding); the daemon decodes
-/// it back into raw bytes before handing it to the LLM. `mime` is one of
-/// the values `assistd-tools::attachment` accepts (image/png, image/jpeg,
-/// image/webp).
+/// An image attachment on a [`Request::Query`]. `data_base64` is
+/// standard padded base64; `mime` is `image/png`, `image/jpeg` or
+/// `image/webp`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageAttachment {
     pub mime: String,
@@ -54,7 +51,6 @@ pub struct ImageAttachment {
 }
 
 impl ImageAttachment {
-    /// Build from raw bytes. Allocates the base64-encoded string.
     pub fn from_bytes(mime: impl Into<String>, bytes: &[u8]) -> Self {
         Self {
             mime: mime.into(),
@@ -62,8 +58,6 @@ impl ImageAttachment {
         }
     }
 
-    /// Decode `data_base64` back to bytes. Returns `Err` if the field is
-    /// not valid base64.
     pub fn decode_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
         base64::engine::general_purpose::STANDARD.decode(&self.data_base64)
     }
@@ -92,16 +86,9 @@ impl PresenceState {
     }
 }
 
-/// Push-to-talk capture state exposed on the wire so the TUI can render a
-/// four-state indicator. `Transcribing` is distinct from `Recording` because
-/// whisper inference takes 1–3 s on a few seconds of audio and users
-/// otherwise keep talking into dead air. `Queued` sits between them when the
-/// GPU is busy with an LLM stream; the transcriber is briefly waiting for
-/// the GPU before starting inference (or deciding to fall back to CPU).
-///
-/// `Idle` is pinned to discriminant 0; a unit test in
-/// `assistd-voice::mic` guards the invariant so reordering the variants
-/// without updating TUI defaults triggers a build failure.
+/// Push-to-talk capture state. `Queued` means the transcriber is
+/// waiting for the GPU to free up before inference. `Idle` must stay
+/// the first variant.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceCaptureState {
@@ -147,12 +134,9 @@ impl SubscribeFilter {
     }
 }
 
-/// Wire-protocol request sent by a client to the daemon over the Unix socket.
-///
-/// Serialized as a single JSON line with a `"type"` discriminant field.
-/// Every variant carries an `id` string that is echoed back on every
-/// [`Event`] the daemon emits in response, enabling correlation when a
-/// future multiplexing transport is added.
+/// Request sent by a client to the daemon, as one JSON line with a
+/// `"type"` discriminant. Every variant carries an `id` that is echoed
+/// on every [`Event`] emitted in response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -269,21 +253,16 @@ pub enum Request {
     /// processed, then a terminal `Done` (or `Error` on a fatal
     /// embedder failure). Backs `assistd memory reindex`.
     MemoryReindex { id: String },
-    /// Client's reply to a daemon-issued [`Event::ConfirmRequest`].
-    /// Sent on the *same* socket connection as the originating request
-    /// (Query, PttStop, etc.); see the protocol notes at the top of
-    /// this module. The daemon routes the response by `confirm_id`,
-    /// not by `id`, so a single in-flight stream can ask multiple
-    /// confirms without ambiguity.
+    /// Reply to a daemon-issued [`Event::ConfirmRequest`], sent on the
+    /// same connection as the originating request and routed by
+    /// `confirm_id`.
     ConfirmResponse {
         id: String,
         confirm_id: String,
         allow: bool,
     },
-    /// Probe the daemon's runtime capabilities (vision support, model
-    /// name). Emits a single [`Event::Capabilities`] then `Done`.
-    /// Called by clients (TUI, CLI) at startup to render UI state that
-    /// otherwise required them to reach into llama-server directly.
+    /// Probe the daemon's runtime capabilities. Emits a single
+    /// [`Event::Capabilities`] then `Done`.
     GetCapabilities { id: String },
     /// Snapshot the current conversation state into a new branch named
     /// `name` and switch to it. Emits a single [`Event::BranchSwitched`]
@@ -355,7 +334,6 @@ impl Request {
         }
     }
 
-    /// Returns the request id every variant carries.
     pub fn id(&self) -> &str {
         match self {
             Request::Query { id, .. }
@@ -431,34 +409,23 @@ impl Request {
     }
 }
 
-/// Wire-protocol events streamed from the daemon to the client.
-///
-/// Serialized as line-delimited JSON with a `"type"` discriminant field.
-/// `Eq` is intentionally not derived: `SemanticHit` carries an `f32`
-/// similarity score and `f32: !Eq`. `PartialEq` is sufficient for
-/// `assert_eq!`; hashing and set membership are not needed at the IPC layer.
+/// Events streamed from the daemon to a client, as JSON lines with a
+/// `"type"` discriminant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     /// A streamed chunk of response text.
     Delta { id: String, text: String },
-    /// A streamed chunk of the model's chain-of-thought / reasoning
-    /// content. Distinct from `Delta` so the TUI can render it as an
-    /// expandable "Thinking…" block rather than mainline reply text.
-    /// Emitted when the backend exposes a separate `reasoning_content`
-    /// channel or when our SSE handler extracts content between
-    /// `<think>...</think>` tags. Models without reasoning never emit
-    /// this; old clients silently ignore unknown variants only when the
-    /// stream decoder is hardened to skip them, so for now this is a
-    /// same-crate-version contract between TUI and daemon.
+    /// A streamed chunk of the model's reasoning content, kept separate
+    /// from `Delta` so clients can render it as a collapsible block.
     ReasoningDelta { id: String, text: String },
-    /// The model asked to invoke a tool. (Reserved for future milestones.)
+    /// The model asked to invoke a tool.
     ToolCall {
         id: String,
         name: String,
         args: serde_json::Value,
     },
-    /// Result of a tool invocation. (Reserved for future milestones.)
+    /// Result of a tool invocation.
     ToolResult {
         id: String,
         name: String,
@@ -488,21 +455,16 @@ pub enum Event {
     /// TTS playback state for a turn: `speaking: true` on the first
     /// enqueued sentence, `false` once the playback queue drains.
     SpeakingState { id: String, speaking: bool },
-    /// The daemon generated (or loaded) a display title for a session.
-    /// Broadcast so clients can label the conversation without polling;
-    /// generation happens in the background after the first turn of an
-    /// untitled session, so this arrives well after that turn's `Done`.
+    /// A display title for a session, broadcast whenever one is
+    /// generated or loaded. Generation runs in the background, so this
+    /// can arrive well after the triggering turn's `Done`.
     SessionTitle {
         id: String,
         session_id: String,
         title: String,
     },
-    /// One semantic-search hit emitted by `MemorySemanticSearch`. The
-    /// daemon emits zero or more of these ranked by cosine similarity
-    /// (best-first), then a terminal `Done`. `content` is the *full*
-    /// parent message text (not a snippet); chunks may cut
-    /// mid-sentence, so the surface message is the useful unit for the
-    /// model. `similarity` is in `[0.0, 1.0]`.
+    /// One semantic-search hit, best first. `content` is the full
+    /// parent message, not a snippet; `similarity` is in `[0.0, 1.0]`.
     SemanticHit {
         id: String,
         conversation_id: i64,
@@ -535,35 +497,25 @@ pub enum Event {
         key: String,
         value: String,
     },
-    /// Result of a `MemoryForget`. Always emitted exactly once before
-    /// the terminal `Done`. `deleted = false` (with `key = None`)
-    /// signals that no row with the given id existed; the CLI maps
-    /// this to a "no memory with id=N" stderr message and exit 2.
-    /// `key = Some(k)` carries the deleted row's key so the CLI can
-    /// echo `forgot id=N key=k`.
+    /// Result of a `MemoryForget`, emitted exactly once before `Done`.
+    /// `deleted = false` with `key = None` means no row had that id.
     MemoryForgetResult {
         id: String,
         deleted: bool,
         key: Option<String>,
     },
-    /// Progress update for a `MemoryReindex` run. `kind` is `"chunks"`
-    /// or `"memories"`; `done` is how many of `total` rows of that kind
-    /// have been embedded so far. The daemon emits these incrementally
-    /// (one per item) so the CLI can render a progress meter. The
-    /// stream terminates with `Done` after both kinds finish.
+    /// Progress of a `MemoryReindex` run, one per item. `kind` is
+    /// `"chunks"` or `"memories"`.
     ReindexProgress {
         id: String,
         kind: String,
         done: u32,
         total: u32,
     },
-    /// Mid-stream prompt: a tool dispatched by the daemon needs the
-    /// user to authorize a destructive action. The daemon parks the
-    /// agent loop until it sees a matching [`Request::ConfirmResponse`]
-    /// on the same connection. Clients without a UI for this should
-    /// reply `allow: false`; if the connection drops without a
-    /// response, the gate denies. `id` echoes the originating
-    /// request's id; `confirm_id` is the routing key.
+    /// Mid-stream prompt to authorize a destructive tool action. The
+    /// turn is parked until a [`Request::ConfirmResponse`] with the same
+    /// `confirm_id` arrives on this connection; a dropped connection
+    /// denies.
     ConfirmRequest {
         id: String,
         confirm_id: String,
@@ -572,26 +524,17 @@ pub enum Event {
         matched_pattern: String,
     },
     /// Response to [`Request::GetCapabilities`]. `vision` is true when
-    /// the loaded model has a multimodal projector and the daemon's
-    /// `/attach` path will accept images. `model_name` is the
-    /// short-form model identifier (the basename of `model.name`,
-    /// matching what the TUI status bar shows).
+    /// the loaded model accepts images; `model_name` is the basename of
+    /// `model.name`.
     Capabilities {
         id: String,
         vision: bool,
         model_name: String,
     },
-    /// Non-terminal recovery / status update. Emitted mid-stream when
-    /// the daemon hits a recoverable condition (e.g. llama-server
-    /// restarting, MCP server bouncing). Clients should render but not
-    /// treat as a terminal event; a `Done` or `Error` still follows.
-    ///
-    /// `severity` is one of `info`, `warning`, `error` (matching
-    /// `RecoverySeverity::as_str`). `component` is the canonical
-    /// component name (matching `Component::as_str`). `event` is a
-    /// short machine-readable identifier (`restarting`, `replaying`,
-    /// `degraded`, ...) that clients can branch on if they need
-    /// behavior beyond rendering the message.
+    /// Non-terminal status update for a recoverable condition; a `Done`
+    /// or `Error` still follows. `severity` is `info`, `warning` or
+    /// `error`; `event` is a short machine-readable identifier such as
+    /// `restarting`.
     Status {
         id: String,
         severity: String,
@@ -599,10 +542,8 @@ pub enum Event {
         event: String,
         message: String,
     },
-    /// One branch entry emitted by [`Request::Branches`]. Multiple
-    /// events stream out (one per branch) in active-session-first
-    /// order, terminated by `Done`. `is_active_session` is true when
-    /// `session_id` matches the daemon's currently-active session.
+    /// One branch emitted by [`Request::Branches`], active session
+    /// first.
     BranchInfo {
         id: String,
         branch_id: i64,
@@ -631,12 +572,8 @@ pub enum Event {
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
     },
-    /// One message of branch history emitted during [`Request::Switch`]
-    /// so the TUI can repaint the chat pane with the loaded branch's
-    /// turns. `role` is `system|user|assistant|tool`. Tool-result rows
-    /// arrive as `role=tool` (TUI may render them as a dim "tool: …"
-    /// line); plain user/assistant rows render as the corresponding
-    /// chat bubbles.
+    /// One message of branch history. `role` is `system`, `user`,
+    /// `assistant` or `tool`.
     HistoryEntry {
         id: String,
         seq: i64,
@@ -657,10 +594,8 @@ pub enum Event {
     Error { id: String, message: String },
     /// Terminal success event; the stream is over.
     Done { id: String },
-    /// Daemon-coalesced cumulative snapshot of an in-flight turn's
-    /// reply. Emitted only onto the broadcast bus for
-    /// [`Request::Subscribe`] consumers; `text` is the running
-    /// reply so far, not just the latest token.
+    /// The running reply so far, emitted only on the broadcast bus for
+    /// [`Request::Subscribe`] consumers.
     LastDelta { id: String, text: String },
 }
 
@@ -670,7 +605,6 @@ impl Event {
         matches!(self, Event::Done { .. } | Event::Error { .. })
     }
 
-    /// Returns the request id this event is associated with.
     pub fn id(&self) -> &str {
         match self {
             Event::Delta { id, .. }
@@ -703,10 +637,8 @@ impl Event {
         }
     }
 
-    /// Classify this event for [`SubscribeFilter`] matching. Returns
-    /// `None` for dialog-local events that don't cross the broadcast
-    /// bus. The match below is intentionally exhaustive — adding an
-    /// [`Event`] variant forces a decision about its bus eligibility.
+    /// The broadcast kind of this event, or `None` for dialog-local
+    /// events. Exhaustive so a new variant must decide its eligibility.
     pub fn kind(&self) -> Option<EventKind> {
         Some(match self {
             Event::Delta { .. } => EventKind::Delta,

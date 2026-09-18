@@ -1,16 +1,4 @@
 //! MCP (Model Context Protocol) client configuration.
-//!
-//! `[mcp]` is a top-level config section. When `enabled = true` the
-//! daemon connects to each `[[mcp.servers]]` entry at startup, discovers
-//! its tool catalog via `tools/list`, and registers each tool in the
-//! global `ToolRegistry` under the namespace `mcp__<server>__<tool>`.
-//!
-//! Two transports are supported, selected by the `transport` field:
-//!   * `"stdio"`: daemon spawns a child process and speaks
-//!     newline-delimited JSON-RPC over its stdin/stdout. Requires
-//!     `command` (and optional `args`/`env`).
-//!   * `"sse"`: daemon connects to a remote HTTP+SSE endpoint.
-//!     Requires `url` (and optional `headers`).
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;

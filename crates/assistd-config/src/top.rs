@@ -94,8 +94,6 @@ impl Config {
         }
 
         if self.voice.enabled {
-            // hotkey may be empty; the user might prefer the IPC-only
-            // PTT pathway (i3 bindsym → `assistd ptt-start/stop`).
             let t = &self.voice.transcription;
             if !is_valid_hf_id(&t.model) {
                 errors.push(
@@ -113,9 +111,6 @@ impl Config {
             }
         }
 
-        // Synthesis (Piper TTS) is gated independently of voice.enabled:
-        // a user might want LLM responses spoken aloud even with no
-        // microphone available.
         if self.voice.synthesis.enabled {
             let s = &self.voice.synthesis;
             if s.binary_path.as_os_str().is_empty() {

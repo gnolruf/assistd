@@ -1,10 +1,4 @@
-//! End-to-end test for AC #3 of Milestone 4: open the SQLite store at
-//! a real on-disk path, write a turn, drop everything, reopen at the
-//! *same* path, and prove the search returns a hit.
-//!
-//! Validates the daemon-restart scenario without spinning up a daemon
-//! or llama-server; the persistence layer alone has to satisfy the
-//! contract.
+//! Persistence survives closing and reopening the store at the same path.
 
 use assistd_memory::{
     ConversationStore, MemoryStore, PersistedMessage, PersistedRole, SqliteConversationStore,
@@ -15,10 +9,6 @@ use tokio::sync::watch;
 
 #[tokio::test]
 async fn turn_persists_across_store_reopen() {
-    // Use a NamedTempFile so the *path* persists across the inner
-    // open/close. tempdir() would also work but NamedTempFile is the
-    // canonical "I want a file path that cleans up at end-of-test"
-    // pattern.
     let temp = tempfile::Builder::new().suffix(".db").tempfile().unwrap();
     let path = temp.path().to_path_buf();
 
@@ -60,17 +50,12 @@ async fn turn_persists_across_store_reopen() {
         convs.end_turn(turn).await.unwrap();
         convs.end_session(&session).await.unwrap();
 
-        // Save a memory at the same time: the headline KV use case.
         mems.save("fact:lang", "rust".into()).await.unwrap();
 
-        // Drop every reference so the writer's mpsc closes naturally,
-        // then await the writer so the DB is fully flushed before we
-        // reopen below.
+        // Dropping the last sender lets the writer exit; awaiting it
+        // flushes the DB before the reopen.
         drop(convs);
         drop(mems);
-        // `handle` is now the only reference; dropping it closes the
-        // last `mpsc::Sender<WriteOp>` clone and the writer exits.
-        // (The connection is also dropped, releasing the WAL lock.)
         writer.await.unwrap();
     }
 
@@ -82,10 +67,6 @@ async fn turn_persists_across_store_reopen() {
         let convs = SqliteConversationStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle);
 
-        // FTS5 search over message content. The CLI no longer exposes
-        // this path (semantic-only), but the index/query is still
-        // exercised here as the storage-layer contract until the FTS5
-        // schema is removed in a follow-up.
         let hits = convs.search("rust", 10).await.unwrap();
         assert!(
             hits.iter()
@@ -121,11 +102,6 @@ async fn turn_persists_across_store_reopen() {
 
 #[tokio::test]
 async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
-    // Regression for the writer drain race: previously the shutdown
-    // branch used `try_recv` which would miss any op whose `send`
-    // hadn't quite landed before the drain loop polled. With the
-    // bounded `recv` drain, an op enqueued microseconds after the
-    // shutdown signal still lands.
     let temp = tempfile::Builder::new().suffix(".db").tempfile().unwrap();
     let path = temp.path().to_path_buf();
     let session_text: String;

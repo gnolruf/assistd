@@ -8,35 +8,9 @@
     )
 )]
 
-//! Persistent-memory subsystem trait and a no-op placeholder.
-//!
-//! Milestone 4 will land a SQLite-backed concrete implementation; this
-//! crate exists now so the trait shape and the [`AppState`] wiring are
-//! settled before the first storage code is written. Locking the
-//! interface down up front avoids retrofitting every call site once
-//! the real backend arrives.
-//!
-//! # Trait shape
-//!
-//! [`MemoryStore`] is a small key/value surface scoped to **string
-//! values keyed by string keys**. Richer types (e.g. embeddings,
-//! conversation snapshots) are intentionally *not* on this trait;
-//! they will live in higher-level adapters that serialize to/from this
-//! flat surface so the storage backend can stay simple. The methods
-//! mirror the four operations the agent loop will need at minimum:
-//! `save` to commit a fact, `load` to recall one, `delete` to forget,
-//! and `list` to enumerate keys under a prefix (used for namespaced
-//! categories like `pref:`, `fact:`, `summary:`).
-//!
-//! # The `NoMemoryStore` placeholder
-//!
-//! Mirrors the shape of `assistd_voice::NoVoiceOutput`: every method
-//! is a successful no-op so the daemon's startup path can wire a
-//! `MemoryStore` unconditionally and degrade gracefully on a build or
-//! environment where persistent storage isn't configured. `load`
-//! returns `Ok(None)`, `list` returns `Ok(vec![])`, and `save` /
-//! `delete` succeed silently, so an agent calling them in this
-//! configuration just behaves as if it has no long-term memory.
+//! Persistent memory: the flat key/value [`MemoryStore`] trait, the
+//! conversation and semantic stores under [`sqlite`], and no-op
+//! fallbacks for when memory is disabled.
 
 pub mod chunking;
 pub mod migrations;
@@ -53,10 +27,7 @@ pub use sqlite::{
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// One row from the `memories` table, exposed as a single struct for
-/// callers that need the row id alongside the key/value pair (the
-/// `assistd memory list` CLI prints `id\tkey\tvalue`; the `forget <id>`
-/// CLI takes the id from this struct's earlier output).
+/// One row from the `memories` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryRecord {
     pub id: i64,
@@ -64,58 +35,33 @@ pub struct MemoryRecord {
     pub value: String,
 }
 
-/// Persistent key/value memory accessible to the daemon and the
-/// agent loop. Implementors must be `Send + Sync + 'static` because
-/// `AppState` holds them as `Arc<dyn MemoryStore>`.
+/// Persistent string-keyed, string-valued memory.
 #[async_trait]
 pub trait MemoryStore: Send + Sync + 'static {
-    /// Persist `value` under `key`. Overwrites any existing value at
-    /// the same key. Concrete implementations decide their own
-    /// durability semantics (write-through vs. periodic flush); the
-    /// trait makes no guarantees beyond "the next `load(key)` from
-    /// this process should observe the write".
-    ///
-    /// Returns the row id of the saved memory. Callers that don't need
-    /// it (the IPC `MemorySave` handler) discard the value; callers
-    /// that want to enqueue an embed job for the saved value (the
-    /// `RememberTool`) use the id to FK the `memory_embeddings` row.
-    /// The `NoMemoryStore` placeholder returns `Ok(0)`.
+    /// Persist `value` under `key`, overwriting any existing value.
+    /// Returns the row id of the saved memory; the next `load(key)`
+    /// from this process observes the write.
     async fn save(&self, key: &str, value: String) -> Result<i64>;
 
-    /// Read the value previously stored at `key`. Returns `Ok(None)`
-    /// when the key is absent (distinct from an `Err` path, which is
-    /// reserved for backend failures).
+    /// Value stored at `key`, or `None` when absent. `Err` is reserved
+    /// for backend failures.
     async fn load(&self, key: &str) -> Result<Option<String>>;
 
-    /// Remove `key`. No-op when the key is already absent; this
-    /// matches the agent-loop usage pattern of "forget X if you
-    /// remember it" and saves a probe-then-delete round trip.
+    /// Remove `key`. No-op when already absent.
     async fn delete(&self, key: &str) -> Result<()>;
 
-    /// Remove the row with `id`. Returns `Ok(Some(key))` with the key
-    /// of the deleted row on hit, `Ok(None)` when no row matched.
-    /// Callers that need to distinguish hit/miss (the `assistd memory
-    /// forget <id>` CLI) use the option, callers that don't can ignore
-    /// it. Errs only on backend failure.
+    /// Remove the row with `id`. Returns the deleted row's key, or
+    /// `None` when no row matched.
     async fn delete_by_id(&self, id: i64) -> Result<Option<String>>;
 
-    /// Enumerate keys whose name starts with `prefix`. Order is
-    /// unspecified. Used for namespaced categories (`pref:`, `fact:`,
-    /// `summary:`) so the agent can list "all preferences" without
-    /// scanning the whole store.
+    /// Keys starting with `prefix`, in unspecified order.
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
 
-    /// Enumerate full rows whose key starts with `prefix`. Like
-    /// [`MemoryStore::list`] but returns `(id, key, value)` triples in
-    /// one round trip; used by the `assistd memory list` CLI which
-    /// prints all three fields. Order is unspecified at the trait
-    /// level (the SQLite impl yields lexicographic by key).
+    /// Full rows whose key starts with `prefix`, in unspecified order.
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>>;
 }
 
-/// Successful-no-op fallback used when no persistent backend is
-/// configured. Wired unconditionally in `AppState` so the agent loop
-/// can call `MemoryStore` methods without checking for an `Option`.
+/// No-op fallback used when no persistent backend is configured.
 pub struct NoMemoryStore;
 
 #[async_trait]
@@ -157,9 +103,6 @@ mod tests {
 
     #[tokio::test]
     async fn no_memory_store_save_and_load_round_trip_returns_none() {
-        // The placeholder accepts saves silently and reports the key
-        // as absent on load. This is the contract the agent loop
-        // depends on for the no-backend configuration.
         let store = NoMemoryStore;
         let id = store.save("fact:user.name", "Ben".into()).await.unwrap();
         assert_eq!(id, 0, "no-backend save returns sentinel id 0");
@@ -195,8 +138,7 @@ mod tests {
         assert!(!version().is_empty());
     }
 
-    /// Compile-only: prove the trait is object-safe by holding it
-    /// behind `Arc<dyn MemoryStore>`. AppState relies on this shape.
+    /// Compile-only: the trait must stay object-safe.
     #[test]
     fn memory_store_is_object_safe() {
         let _: std::sync::Arc<dyn MemoryStore> = std::sync::Arc::new(NoMemoryStore);

@@ -1,12 +1,4 @@
 //! Embedding-server and semantic-search configuration.
-//!
-//! `[embedding]` is a top-level config section parallel to
-//! `[llama_server]`. Embeddings are produced by a separate, dedicated
-//! llama-server instance held resident on its own port. Keeping it
-//! independent of the chat server means semantic retrieval still works
-//! when the chat router is `Drowsy` or `Sleeping`. The embed model is
-//! intentionally small enough to stay on CPU (`gpu_layers = 0`) so it
-//! never contends with the chat model for VRAM.
 
 use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32};
@@ -23,9 +15,7 @@ use crate::defaults::{
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmbeddingConfig {
-    /// Master switch. When `false` the daemon binds the `NoEmbedder`
-    /// placeholder; the `recall` and `reminisce` tools both fall back
-    /// to "(no memories)" / "(no past conversations indexed)".
+    /// Master switch. When `false` semantic recall is unavailable.
     pub enabled: bool,
     /// HuggingFace model id passed verbatim to llama-server's
     /// `--hf-repo` flag. Format: `<owner>/<repo>:<file>`.
@@ -35,9 +25,7 @@ pub struct EmbeddingConfig {
     /// TCP port the embedding llama-server binds to. Must differ from
     /// `llama_server.port`.
     pub port: NonZeroU16,
-    /// `-ngl` count for the embed server. Defaults to `0` (CPU only) so
-    /// the embed model never competes with the chat model for VRAM.
-    /// Small embedding models (~30-300MB Q4) are CPU-fast.
+    /// `-ngl` count for the embed server. `0` keeps it on CPU.
     pub gpu_layers: u32,
     /// How many nearest-neighbor matches to retrieve per query for
     /// auto-injection and the `reminisce` tool's default.

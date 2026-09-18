@@ -8,9 +8,7 @@ use crate::defaults::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Tools subsystem configuration. Nested container so future tool-related
-/// knobs (sandboxing, per-command timeouts, etc.) can slot in alongside the
-/// output-presentation limits.
+/// Tools subsystem configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
@@ -24,8 +22,7 @@ pub struct ToolsConfig {
     pub screenshot: ToolsScreenshotConfig,
 }
 
-/// Layer-2 presentation limits applied to the final output of `run` before
-/// it is handed to the LLM.
+/// Limits applied to a `run` result before it is handed to the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsOutputConfig {
@@ -70,14 +67,9 @@ pub enum BashSandboxMode {
     None,
 }
 
-/// Bash-command policy: timeout ceiling, denylist of literal substrings that
-/// are rejected before spawn, destructive-pattern prefixes that require user
-/// confirmation, and sandbox mode.
-///
-/// Honest caveat: once bash is available, any syntactic pre-check can be
-/// defeated by a sufficiently clever caller (variable expansion, here-docs,
-/// command substitution). The denylist and destructive patterns are a
-/// backstop for the *obvious* cases; the sandbox is the real defense.
+/// Bash-command policy. The denylist and destructive patterns are
+/// syntactic backstops for the obvious cases; the sandbox is the real
+/// defence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsBashConfig {

@@ -1,15 +1,6 @@
-//! Per-server lifecycle: spawn the transport, supervise crashes, expose
-//! a stable `Arc<dyn McpClient>` for the rest of the daemon.
-//!
-//! The handle is the sole boundary between the always-on registry and
-//! the ephemeral transport. Even when the underlying server is down or
-//! restarting, the registered `McpToolAdapter` still holds a live
-//! `Arc<dyn McpClient>` (the [`SwitchingClient`]) that returns
-//! `McpError::ServerDown` until the supervisor reconnects.
-//!
-//! Note that the `HealthRoutedTool` short-circuits before the
-//! transport is consulted at all, so the `ServerDown` path here is
-//! defense in depth (and useful for direct-client consumers).
+//! Per-server lifecycle: spawn the transport, restart it on crash, and
+//! expose a stable `Arc<dyn McpClient>` that answers `ServerDown`
+//! while the transport is away.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,9 +18,7 @@ use crate::sse::{SseConfig, SseLifeline, SseMcpClient};
 use crate::stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
 use crate::{McpClient, ToolResult, ToolSchema};
 
-/// Coarse health status published by the supervisor on every state change.
-/// The `HealthRoutedTool` reads this on every invoke to decide whether to
-/// forward to the transport or short-circuit with a tool-error JSON.
+/// Health published by the supervisor on every state change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthState {
     Healthy,
@@ -37,23 +26,11 @@ pub enum HealthState {
     Unhealthy,
 }
 
-/// Per-server transport configuration. The daemon builds one of these
-/// from `assistd_config::McpServerConfig` and hands it to
-/// [`McpServerHandle::start`].
+/// Per-server transport configuration.
 #[derive(Debug, Clone)]
 pub enum TransportConfig {
     Stdio(StdioConfig),
     Sse(SseConfig),
-}
-
-impl TransportConfig {
-    /// Return the human-readable label for this transport, used in tracing logs.
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Stdio(s) => &s.label,
-            Self::Sse(s) => &s.label,
-        }
-    }
 }
 
 /// Stable handle for a single MCP server. The `Arc<dyn McpClient>`
@@ -67,14 +44,9 @@ pub struct McpServerHandle {
 }
 
 impl McpServerHandle {
-    /// Start the server: spawn the first transport, perform initial
-    /// discovery, then hand off to a supervisor task that handles all
-    /// future crashes/restarts.
-    ///
-    /// Returns `Err` only on the FIRST spawn attempt; once the handle
-    /// is alive, the supervisor takes over and the daemon never sees
-    /// transport-level failures again (they surface to the model via
-    /// the health-routed adapter).
+    /// Spawn the first transport and hand it to a supervisor task.
+    /// Errors only if that first spawn fails; later failures surface
+    /// through [`Self::watch_health`].
     pub async fn start(
         name: String,
         transport_cfg: TransportConfig,
@@ -106,22 +78,20 @@ impl McpServerHandle {
         })
     }
 
-    /// Return the stable [`McpClient`] handle backed by the current transport.
+    /// Stable client that follows the current transport.
     pub fn client(&self) -> Arc<dyn McpClient> {
         self.switch.clone()
     }
 
-    /// Return the current health state without waiting for a change.
     pub fn health(&self) -> HealthState {
         *self.health_rx.borrow()
     }
 
-    /// Return a watch receiver that fires on every health-state transition.
     pub fn watch_health(&self) -> watch::Receiver<HealthState> {
         self.health_rx.clone()
     }
 
-    /// Signal the supervisor to stop and wait up to 15 seconds for it to exit.
+    /// Stop the supervisor and wait up to 15 seconds for it to exit.
     pub async fn shutdown(mut self) {
         let _ = self.supervisor_shutdown_tx.send(true);
         if let Some(task) = self.supervisor_task.take() {
@@ -132,11 +102,9 @@ impl McpServerHandle {
 
 impl Drop for McpServerHandle {
     fn drop(&mut self) {
-        // Defense-in-depth for the no-shutdown() path (panics, tests,
-        // future misuse). Graceful path is `shutdown()`; here we just
-        // signal + abort. Stdio children still die because
-        // `Child::kill_on_drop(true)` is set in stdio.rs; aborting
-        // the supervisor drops the Child future, which sends SIGKILL.
+        // Aborting the supervisor drops the child, which is
+        // `kill_on_drop`, so a handle dropped without `shutdown()` still
+        // reaps its process.
         let _ = self.supervisor_shutdown_tx.send(true);
         if let Some(task) = self.supervisor_task.take() {
             task.abort();
@@ -144,10 +112,8 @@ impl Drop for McpServerHandle {
     }
 }
 
-/// `McpClient` impl that points at the live transport via
-/// `RwLock<Option<Arc<dyn McpClient>>>`. The supervisor swaps it on
-/// crash/restart so the registry-side `McpToolAdapter` keeps holding
-/// a stable `Arc<dyn McpClient>`.
+/// [`McpClient`] that forwards to whichever transport is live, or
+/// answers [`McpError::ServerDown`] between transports.
 pub struct SwitchingClient {
     inner: RwLock<Option<Arc<dyn McpClient>>>,
 }
@@ -350,7 +316,6 @@ impl Supervisor {
                         error = %e,
                         "MCP server restart failed",
                     );
-                    // current_lifeline stays None; the loop retries with backoff.
                 }
             }
         }

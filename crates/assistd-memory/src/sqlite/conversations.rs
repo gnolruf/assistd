@@ -1,10 +1,5 @@
-//! Conversation persistence: sessions, turns, messages, and FTS5 search.
-//!
-//! [`ConversationStore`] is a sibling trait to [`crate::MemoryStore`]:
-//! the latter is a flat string-keyed KV; this one stores the richer
-//! shape that the agent loop produces. Both implementations share a
-//! single [`super::SqliteHandle`] so all writes go through the same
-//! background writer.
+//! Conversation persistence: sessions, turns, branches, messages, and
+//! FTS5 search.
 
 use std::sync::Arc;
 
@@ -17,19 +12,15 @@ use uuid::Uuid;
 use super::connection::SqliteHandle;
 use super::writer::{WriteCall, WriteOp};
 
-/// Opaque session identifier. Stored as a uuid string so it stays
-/// stable across daemon restarts (no risk of an in-memory rowid
-/// recycling onto a stored ended_at).
+/// Session identifier: a UUID string, stable across daemon restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
 impl SessionId {
-    /// Generate a new random [`SessionId`] using UUIDv4.
     pub fn new() -> Self {
         Self(Uuid::new_v4().to_string())
     }
 
-    /// Borrow the inner UUID string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -55,8 +46,7 @@ pub struct TurnId(pub i64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BranchId(pub i64);
 
-/// Role of a persisted message. Mirrors `assistd_llm::chat::conversation::Role`
-/// plus a `Tool` variant for tool-result rows.
+/// Role of a persisted message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PersistedRole {
@@ -67,7 +57,7 @@ pub enum PersistedRole {
 }
 
 impl PersistedRole {
-    /// Return the lowercase wire string stored in the `conversations.role` column.
+    /// Lowercase form stored in the `conversations.role` column.
     pub fn as_wire(self) -> &'static str {
         match self {
             PersistedRole::System => "system",
@@ -77,8 +67,7 @@ impl PersistedRole {
         }
     }
 
-    /// Parse a wire string from the `conversations.role` column, returning
-    /// `None` for unrecognised values.
+    /// Inverse of [`Self::as_wire`]; `None` for unrecognised values.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "system" => Some(PersistedRole::System),
@@ -90,9 +79,7 @@ impl PersistedRole {
     }
 }
 
-/// One message ready to write to the `conversations` table. Built at
-/// the persistence boundary in `state.rs::handle_query` from the
-/// streaming `LlmEvent`s.
+/// One message ready to write to the `conversations` table.
 #[derive(Debug, Clone)]
 pub struct PersistedMessage {
     pub role: PersistedRole,
@@ -107,7 +94,6 @@ pub struct PersistedMessage {
 }
 
 impl PersistedMessage {
-    /// Build a user-role message with no tool fields set.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: PersistedRole::User,
@@ -118,7 +104,6 @@ impl PersistedMessage {
         }
     }
 
-    /// Build a plain assistant text message with no tool fields set.
     pub fn assistant_text(content: impl Into<String>) -> Self {
         Self {
             role: PersistedRole::Assistant,
@@ -129,7 +114,6 @@ impl PersistedMessage {
         }
     }
 
-    /// Build an assistant message that carries tool-call JSON but no text content.
     pub fn assistant_tool_calls(calls: serde_json::Value) -> Self {
         Self {
             role: PersistedRole::Assistant,
@@ -140,7 +124,6 @@ impl PersistedMessage {
         }
     }
 
-    /// Build a tool-result message with the given content, call id, and tool name.
     pub fn tool_result(
         content: impl Into<String>,
         call_id: impl Into<String>,
@@ -163,14 +146,11 @@ pub struct SearchHit {
     pub session_id: String,
     pub timestamp: String,
     pub role: PersistedRole,
-    /// FTS5 `snippet()` output: a short excerpt with match-highlighting
-    /// markers around the search terms. Format is
-    /// `…before <mark>match</mark> after…`.
+    /// FTS5 `snippet()` output: `…before <mark>match</mark> after…`.
     pub snippet: String,
 }
 
-/// Coarse summary of one turn. Used by `assistd memory sessions` and
-/// future "show recent turns" UIs.
+/// Coarse summary of one turn.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnSummary {
     pub turn_id: i64,
@@ -181,10 +161,8 @@ pub struct TurnSummary {
     pub message_count: i64,
 }
 
-/// Per-branch metadata returned by [`ConversationStore::list_branches`].
-/// `is_current_in_session` flags the branch that `sessions.current_branch_id`
-/// points at; the active session can be cross-referenced via the
-/// daemon-held [`SessionId`].
+/// Per-branch metadata. `is_current_in_session` flags the branch that
+/// `sessions.current_branch_id` points at.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BranchInfo {
     pub branch_id: BranchId,
@@ -201,10 +179,8 @@ pub struct BranchInfo {
     pub is_current_in_session: bool,
 }
 
-/// One persisted message reconstructed from the DB for replay into the
-/// LLM backend's in-memory conversation. Carries enough fields to
-/// faithfully reproduce both plain user/assistant rows AND
-/// assistant-with-tool-calls / tool-result rows.
+/// One persisted message reconstructed for replay into the in-memory
+/// conversation, including tool-call and tool-result rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryRow {
     pub conversation_id: i64,
@@ -218,11 +194,9 @@ pub struct HistoryRow {
     pub tool_name: Option<String>,
 }
 
-/// Result of [`ConversationStore::undo_last_turn`]. `removed_messages`
-/// is the count of `branch_messages` rows dropped from the branch (so
-/// the TUI can render "removed N entries" feedback). `last_user_text`
-/// echoes back the user prompt that was undone, used by callers that
-/// want to surface "undone: <text>".
+/// Result of [`ConversationStore::undo_last_turn`]: how many
+/// `branch_messages` rows were dropped, the undone user prompt, and the
+/// dropped turn id.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UndoOutcome {
     pub removed_messages: u32,
@@ -230,9 +204,7 @@ pub struct UndoOutcome {
     pub removed_turn_id: Option<i64>,
 }
 
-/// Conversation persistence trait. Sibling to [`crate::MemoryStore`];
-/// implementations may share underlying storage (the SQLite impls
-/// below do; both hold an `Arc<SqliteHandle>`).
+/// Conversation persistence.
 #[async_trait]
 pub trait ConversationStore: Send + Sync + 'static {
     /// Open a new session row for the daemon process identified by `daemon_pid`.
@@ -255,18 +227,14 @@ pub trait ConversationStore: Send + Sync + 'static {
     /// Return the `limit` most-recent turns ordered by turn id descending.
     async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>>;
 
-    /// Atomically begin a session and create its default `main` branch.
-    /// Returns both ids; the caller stores them in `AppState`. Replaces
-    /// the [`Self::begin_session`] call at daemon startup so a crash
-    /// between the two writes can't orphan a session without a branch.
+    /// Atomically begin a session and create its `main` branch, so a
+    /// crash between the two writes can't leave a session without one.
     async fn begin_session_with_main_branch(
         &self,
         daemon_pid: u32,
     ) -> Result<(SessionId, BranchId)>;
 
-    /// Create a new branch in `session` with the given name. Used by
-    /// `begin_session_with_main_branch` internally and by direct
-    /// branch-creation paths during recovery / tests.
+    /// Insert a branch row in `session`.
     async fn create_branch(
         &self,
         session: &SessionId,
@@ -281,9 +249,8 @@ pub trait ConversationStore: Send + Sync + 'static {
     /// Read the current branch pointer for `session`, if any.
     async fn get_current_branch(&self, session: &SessionId) -> Result<Option<BranchId>>;
 
-    /// Append `msg` to the conversations table AND to the
-    /// `branch_messages` join under `branch`. Atomic via a single
-    /// transaction. Returns the conversations.id rowid.
+    /// Append `msg` and reference it from `branch_messages` under
+    /// `branch`, in one transaction. Returns the `conversations.id`.
     async fn append_message_to_branch(
         &self,
         session: &SessionId,
@@ -292,9 +259,8 @@ pub trait ConversationStore: Send + Sync + 'static {
         msg: PersistedMessage,
     ) -> Result<i64>;
 
-    /// Enumerate every branch across every session. Sorted by
-    /// session.started_at DESC, then branches.id ASC. The caller
-    /// (handle_branches) re-orders so the active session shows first.
+    /// Every branch across every session, sorted by session start
+    /// (newest first) then branch id.
     async fn list_branches(&self) -> Result<Vec<BranchInfo>>;
 
     /// Look up a branch by name, optionally qualified by an 8-char
@@ -315,48 +281,32 @@ pub trait ConversationStore: Send + Sync + 'static {
     /// the new BranchId. Atomic in a single transaction.
     async fn fork_branch(&self, src: BranchId, new_name: &str) -> Result<BranchId>;
 
-    /// Load every message row referenced by `branch`, ordered by
-    /// `branch_messages.seq`. Used by `/switch` and by daemon-startup
-    /// resume to repopulate the in-memory `Conversation`.
+    /// Every message on `branch`, ordered by branch-local seq.
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>>;
 
-    /// Return the RFC3339 timestamp of the most recent message on
-    /// `branch`, or `None` when the branch has no messages. Used by
-    /// [`Request::ResumeOrNew`] to decide whether to replay the current
-    /// branch or start a fresh session.
+    /// RFC3339 timestamp of the newest message on `branch`, or `None`
+    /// when the branch is empty.
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<String>>;
 
-    /// Drop the latest turn from `branch`. Implementation:
-    /// 1. find max(turn_id) for messages reachable from `branch`,
-    /// 2. delete the matching `branch_messages` rows for `branch`,
-    /// 3. orphan-sweep `conversations` rows now unreferenced by ANY
-    ///    `branch_messages`,
-    /// 4. delete the matching `turns` row when no other branch still
-    ///    references it.
-    /// Returns count + last user_text + the dropped turn id (when any).
+    /// Drop the latest turn from `branch`: its `branch_messages` rows,
+    /// any `conversations` rows no branch references any more, and the
+    /// `turns` row when no surviving message points at it.
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome>;
 
-    /// Find the most recent session with `ended_at IS NULL` whose
-    /// `daemon_pid` is no longer alive. The caller then resumes by
-    /// loading `current_branch_id`'s messages back into memory. Returns
-    /// `None` when nothing is resumable (first-ever startup, or the
-    /// only candidate is owned by a still-running daemon).
+    /// The most recent session with `ended_at IS NULL` and a current
+    /// branch, or `None`. The caller checks whether `daemon_pid` is
+    /// still alive before claiming it.
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>>;
 
-    /// Return the current `sessions.title` for `session`, or `None`
-    /// when no title has been generated yet. Used by the daemon's
-    /// title-generation hook to decide whether to call the LLM.
+    /// Current `sessions.title`, or `None` when none has been set.
     async fn get_session_title(&self, session: &SessionId) -> Result<Option<String>>;
 
-    /// Persist `title` as the human-readable summary for `session`.
-    /// Issued fire-and-forget by the title-generation task after the
-    /// first agent response completes.
+    /// Set `sessions.title` for `session`.
     async fn set_session_title(&self, session: &SessionId, title: &str) -> Result<()>;
 }
 
-/// Candidate session returned by [`ConversationStore::find_resumable_session`].
-/// `daemon_pid` lets the caller decide whether the prior owner is still
-/// alive (`kill -0`) before claiming the session.
+/// Candidate session returned by
+/// [`ConversationStore::find_resumable_session`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeCandidate {
     pub session_id: SessionId,
@@ -365,8 +315,7 @@ pub struct ResumeCandidate {
     pub started_at: String,
 }
 
-/// Successful-no-op fallback used when memory is disabled in config or in
-/// tests that don't exercise persistence.
+/// No-op fallback used when memory is disabled.
 pub struct NoConversationStore;
 
 #[async_trait]
@@ -471,15 +420,13 @@ impl ConversationStore for NoConversationStore {
     }
 }
 
-/// SQLite-backed implementation. Holds an `Arc<SqliteHandle>` so it
-/// shares the connection + writer with [`super::SqliteMemoryStore`].
+/// SQLite-backed [`ConversationStore`].
 #[derive(Clone)]
 pub struct SqliteConversationStore {
     handle: Arc<SqliteHandle>,
 }
 
 impl SqliteConversationStore {
-    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
@@ -544,16 +491,8 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        // Reads bypass the writer channel; SQLite in WAL mode handles
-        // concurrent readers fine, and routing them through the writer
-        // would queue them behind any in-flight inserts.
-        //
-        // Wrap the user-supplied query in an FTS5 literal phrase so
-        // grammar metacharacters (`*`, `+`, `-`, `OR`, quotes, …) are
-        // matched as text rather than parsed as operators. Today only
-        // tests call this method, but future callers (CLI re-exposure,
-        // an LLM tool) inherit safe-by-default behaviour. A future
-        // `search_raw` sibling can opt back into FTS5 grammar.
+        // Quote the query as an FTS5 phrase so grammar metacharacters
+        // match as text rather than parse as operators.
         let q = fts5_literal(query);
         let limit = limit as i64;
         self.handle
@@ -772,9 +711,6 @@ impl ConversationStore for SqliteConversationStore {
         target: &str,
         prefer_session: Option<&SessionId>,
     ) -> Result<Option<(SessionId, BranchId)>> {
-        // Accept "session_prefix/name" (8-char hex prefix) or just
-        // "name". Bare name disambiguates by preferring the active
-        // session, then by most-recent session.
         let (session_prefix, name) = match target.split_once('/') {
             Some((p, n)) => (Some(p.to_string()), n.to_string()),
             None => (None, target.to_string()),
@@ -798,8 +734,6 @@ impl ConversationStore for SqliteConversationStore {
                         .ok();
                     Ok(row)
                 } else if let Some(pref) = prefer_session {
-                    // Look first inside the preferred session, then fall
-                    // back to "any session, most-recent first".
                     if let Ok(row) = c.query_row(
                         "SELECT session_id, id FROM branches WHERE name = ?1 AND session_id = ?2",
                         rusqlite::params![name, pref],
@@ -1017,8 +951,6 @@ mod tests {
     async fn fresh_store() -> (SqliteConversationStore, tokio::task::JoinHandle<()>) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        // Leak the tempdir for the duration of the test; `path` must
-        // outlive the handle. Cleanup happens on test process exit.
         std::mem::forget(temp);
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();

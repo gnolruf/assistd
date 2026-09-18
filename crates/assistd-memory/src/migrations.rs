@@ -1,15 +1,6 @@
-//! Schema-evolution backbone for the SQLite memory store.
-//!
-//! A single `Migrations` value is built up from a static `Vec<M>`; each
-//! `M::up(SQL)` is one schema version and the runner is idempotent;
-//! calling [`run`] against an already-migrated DB is a no-op. New
-//! milestones append a new `M::up(...)` entry to [`migrations`] and bump
-//! nothing else; the runner records progress in `schema_migrations`.
-//!
-//! The whole V1 schema lives in one `execute_batch`-style string so we
-//! land it as a single atomic step. SQLite executes the statements in
-//! order inside an implicit transaction (rusqlite_migration wraps each
-//! migration in `BEGIN; ... COMMIT;`), so failures roll back cleanly.
+//! Schema migrations for the SQLite store. Each `M::up(SQL)` is one
+//! schema version; [`run`] applies whatever is pending and is a no-op
+//! on an up-to-date database.
 
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
@@ -153,15 +144,12 @@ CREATE TABLE embeddings (
 CREATE INDEX idx_embeddings_model ON embeddings(model);
 "#;
 
-/// Build the full migration set. `'static` because the SQL is embedded
-/// in the binary; rusqlite_migration just needs read access.
+/// The full migration set.
 pub fn migrations() -> Migrations<'static> {
     Migrations::new(vec![M::up(V1_SQL)])
 }
 
-/// Apply all pending migrations to `conn`. Idempotent: re-running on an
-/// already-current DB is a no-op (rusqlite_migration consults the
-/// internal `user_version` pragma + our `schema_migrations` table).
+/// Apply all pending migrations to `conn`.
 pub fn run(conn: &mut Connection) -> Result<(), rusqlite_migration::Error> {
     migrations().to_latest(conn)
 }
@@ -177,9 +165,6 @@ mod tests {
 
     #[test]
     fn migrations_validate() {
-        // rusqlite_migration ships a `validate` that re-runs every
-        // migration against an in-memory DB and fails loudly on bad
-        // SQL; catches schema typos before we ever ship a release.
         migrations().validate().expect("V1 SQL is well-formed");
     }
 
@@ -231,8 +216,6 @@ mod tests {
 
     #[test]
     fn run_is_idempotent() {
-        // Running twice against the same DB must not error and must not
-        // recreate tables. This is the contract every restart relies on.
         let mut conn = open_in_memory();
         run(&mut conn).expect("first run");
         run(&mut conn).expect("second run no-op");
