@@ -114,8 +114,7 @@ impl TrayTracker {
 
 /// Map a resolved state to its freedesktop icon-theme name. These names
 /// are present in every major theme (Adwaita, Breeze, Papirus), so a
-/// fresh install shows recognizable icons with no image assets in the
-/// repo and nothing to configure.
+/// fresh install shows recognizable icons with no image assets shipped.
 pub fn icon_name_for(state: TrayState) -> &'static str {
     match state {
         TrayState::Disconnected => "network-offline",

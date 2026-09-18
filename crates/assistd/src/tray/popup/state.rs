@@ -255,9 +255,8 @@ fn flatten_whitespace(s: &str) -> String {
 }
 
 /// Cap on the body text rendered in the popup: the last `BODY_CHARS`
-/// codepoints of the running reply. Sized to what fits the popup's
-/// default 360x120 geometry — more text would just be clipped by the
-/// window, less would truncate a reply that still fits.
+/// codepoints of the running reply. Sized to the popup's default
+/// 360x120 geometry.
 const BODY_CHARS: usize = 300;
 
 fn truncate_chars_from_end(s: &str, max: usize) -> String {

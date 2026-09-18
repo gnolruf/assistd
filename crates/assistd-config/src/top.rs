@@ -43,10 +43,6 @@ impl Config {
     /// Validates the cross-field and format constraints that the field
     /// types can't express on their own. Returns every problem found,
     /// not just the first.
-    ///
-    /// Single-field constraints (non-zero, parseable host, well-formed
-    /// URL) are enforced by the types themselves at deserialization, so
-    /// they are absent here by design.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
 

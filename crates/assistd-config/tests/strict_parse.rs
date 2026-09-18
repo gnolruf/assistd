@@ -1,6 +1,5 @@
 //! Every section is optional, and anything not in the schema is a hard
-//! error. The second half is the point: before `deny_unknown_fields`, a
-//! misspelled key silently reverted its field to the default.
+//! error.
 
 use assistd_config::Config;
 
@@ -40,9 +39,6 @@ fn every_section_may_be_declared_empty() {
     assert_eq!(cfg, Config::default());
 }
 
-/// `[remote]` was never read by anything and `[timeouts]` has moved off
-/// the TOML surface. Both have to fail loudly rather than be accepted and
-/// silently ignored.
 #[test]
 fn deleted_sections_are_rejected() {
     for section in ["[remote]", "[timeouts]"] {
@@ -58,9 +54,6 @@ fn deleted_sections_are_rejected() {
 
 #[test]
 fn unknown_section_is_rejected() {
-    // Verbatim from a real config file. `[agent]` was a real section
-    // until b60a103 deleted it from the schema; that config has carried
-    // it ever since, accepted and ignored on every startup.
     let err = toml::from_str::<Config>("[agent]\nmax_iterations = 50\n")
         .expect_err("an unknown section must not parse");
     let msg = err.to_string();
@@ -95,8 +88,6 @@ temperture = 0.7
 
 #[test]
 fn written_default_round_trips_under_strict_parsing() {
-    // `write_default` serializes `Config::default()`; that output has to be
-    // re-readable, which `deny_unknown_fields` makes a real constraint.
     let serialized = toml::to_string_pretty(&Config::default()).expect("serialize default");
     let back: Config = toml::from_str(&serialized).expect("written default must re-parse");
     assert_eq!(back, Config::default());

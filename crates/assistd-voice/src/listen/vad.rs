@@ -72,9 +72,8 @@ const ONSET_CONFIRM_MS: u32 = 60;
 const AGGRESSIVENESS: u8 = 3;
 
 impl VadTuning {
-    /// Construct [`VadTuning`] from the two millisecond/second values a user
-    /// can reasonably tune, converting each to whole-frame counts (one frame
-    /// = 20 ms). The rest of the segmentation window is fixed.
+    /// Construct [`VadTuning`] from the two configurable values, converting
+    /// each to whole-frame counts (one frame = 20 ms).
     pub fn from_ms(silence_ms: u32, max_utterance_secs: u32) -> Self {
         let frame_ms = 20u32;
         Self {

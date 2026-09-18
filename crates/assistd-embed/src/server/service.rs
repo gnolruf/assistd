@@ -39,10 +39,9 @@ impl EmbedService {
     /// Spawn the supervisor and block until the child reports `Ready` or
     /// the supervisor enters `Degraded`. Errors are surfaced via
     /// [`EmbedServerError`].
-    /// `ready_timeout` is the backstop on the child reporting healthy;
-    /// callers pass `llama_server.ready_timeout_secs` so both managed
-    /// servers share one dial (a slow first-time HuggingFace download
-    /// affects them identically).
+    /// `ready_timeout` is the backstop on the child reporting healthy.
+    /// Callers pass `llama_server.ready_timeout_secs`, shared with the
+    /// chat server.
     #[tracing::instrument(skip(cfg, shutdown_rx), fields(host = %cfg.host, port = cfg.port))]
     pub async fn start(
         cfg: EmbeddingConfig,

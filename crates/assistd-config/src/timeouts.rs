@@ -8,10 +8,9 @@ use crate::defaults::{
 /// safety valve, not a normal-case latency budget; defaults are
 /// generous and a trip should always be logged at `warn!`.
 ///
-/// Not part of the TOML surface — `Config` skips this field. A user has
-/// no basis for picking these, and each one that trips is a bug to fix
-/// rather than a number to raise. They stay a struct so tests can shorten
-/// a deadline instead of waiting out the real one.
+/// Not part of the TOML surface: `Config` skips this field. It stays a
+/// struct so tests can shorten a deadline instead of waiting out the
+/// real one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeoutsConfig {
     /// Cap on `PresenceManager::sleep`'s `service.shutdown()` call.

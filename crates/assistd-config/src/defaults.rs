@@ -9,10 +9,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
-/// Build a `NonZero` from a literal. The `const` evaluator rejects a zero
-/// at compile time, so a value that would have failed `validate()` at
-/// runtime now fails the build instead. Public so callers constructing
-/// config structs by hand — chiefly tests — get the same guarantee.
+/// Build a `NonZero` from a literal, rejecting a zero at compile time
+/// rather than at config load.
 pub const fn nz16(v: u16) -> NonZeroU16 {
     match NonZeroU16::new(v) {
         Some(n) => n,

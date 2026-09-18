@@ -214,8 +214,6 @@ mod tests {
         assert!(toml.contains("transport = \"stdio\""), "{toml}");
     }
 
-    /// The whole point of the enum: a key belonging to the other
-    /// transport is rejected instead of silently doing nothing.
     #[test]
     fn transport_specific_keys_do_not_cross_variants() {
         let stdio_with_url = r#"

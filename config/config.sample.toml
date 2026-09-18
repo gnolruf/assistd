@@ -91,7 +91,10 @@ temperature = 0.7
 # presence_penalty = 1.5
 # Maximum tokens the model may emit in a single streamed response.
 max_response_tokens = 1024
-# HTTP request timeout for a single /v1/chat/completions call.
+# HTTP request timeout for a single /v1/chat/completions call. This also
+# bounds the wait for the first streamed byte, which is prompt prefill
+# rather than a stall — raise it if a large model on CPU-offloaded
+# experts needs longer to reach its first token.
 request_timeout_secs = 120
 # Sampling temperature for the non-streaming summarization call. Lower
 # than `temperature` by default because summaries should be deterministic.
@@ -482,27 +485,6 @@ hotkey = "Super+Escape"
 #
 # [mcp.servers.headers]
 # Authorization = "Bearer YOUR_TOKEN_HERE"
-
-# ---- Timeouts -----------------------------------------------------------
-# Deadlines on awaits that cross a process boundary (HTTP, SSE chunk
-# reads, llama-server subprocess shutdown) are not configurable: they are
-# safety valves, not latency budgets, and every trip is logged at warn as
-# a bug to fix rather than a number to raise.
-#
-# The wait for the *first* SSE byte is prompt prefill, not a stall, and
-# is bounded by chat.request_timeout_secs instead. Raise that one if a
-# large model on CPU-offloaded experts needs longer to reach first token.
-#
-# Waking from Sleeping (spawn llama-server) and loading model weights
-# are not on a wall-clock budget: a slow load runs to completion as long
-# as the llama-server process stays healthy, and aborts at once if it
-# crashes. The only backstop is llama_server.ready_timeout_secs.
-
-# ---- Tray icon ----------------------------------------------------------
-# `assistd tray` (a StatusNotifierItem client suitable for compositor
-# autostart) renders a fixed freedesktop icon name per state, chosen from
-# names that ship in every major theme (Adwaita, Breeze, Papirus). Not
-# configurable.
 
 # ---- Tray popup ---------------------------------------------------------
 # Borderless ~360×120 floating window spawned by `assistd tray` (only

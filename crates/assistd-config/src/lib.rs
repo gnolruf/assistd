@@ -21,8 +21,7 @@
 //!
 //! Every section carries `#[serde(default, deny_unknown_fields)]`: an
 //! omitted key falls back to that `Default` impl, and a key the schema
-//! doesn't know is a parse error rather than a silent revert to the
-//! default.
+//! doesn't know is a parse error.
 
 pub mod chat;
 pub mod compositor;
