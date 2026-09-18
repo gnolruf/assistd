@@ -210,10 +210,9 @@ fn every_registered_command_emits_convention_compliant_error() {
     }
 }
 
-/// Acceptance criterion #6: every registered production command has a
-/// non-empty `help()` return value. Also asserts `summary()` is
-/// non-empty and within the ≤80-char budget, since the Level-0
-/// description is the contract the LLM actually consumes.
+/// Every registered production command has non-empty `help()` and
+/// `summary()` text, with the summary inside the 80-char budget the
+/// tool schema shows the model.
 #[test]
 fn every_registered_command_has_nonempty_help_and_summary() {
     let reg = crate::commands::test_registry();
