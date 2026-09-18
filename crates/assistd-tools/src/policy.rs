@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
@@ -20,6 +21,98 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 use assistd_ipc::Event;
+
+use crate::command::{CommandOutput, error_line};
+use crate::exec::POLICY_DENIED_EXIT;
+
+/// Policy for the commands that spawn subprocesses. Destructive
+/// patterns are pre-tokenized so no invocation re-parses them.
+#[derive(Debug, Clone)]
+pub struct BashPolicyCfg {
+    pub timeout: Duration,
+    pub denylist: Vec<String>,
+    pub destructive_patterns: Vec<Vec<String>>,
+}
+
+impl Default for BashPolicyCfg {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            denylist: Vec::new(),
+            destructive_patterns: Vec::new(),
+        }
+    }
+}
+
+/// Everything a command needs to run model-chosen argv: the policy,
+/// the sandbox to wrap it in, and the gate that confirms destructive
+/// invocations.
+pub(crate) struct SubprocessPolicy {
+    pub(crate) cfg: Arc<BashPolicyCfg>,
+    pub(crate) sandbox: Arc<SandboxInfo>,
+    pub(crate) gate: Arc<dyn ConfirmationGate>,
+}
+
+impl SubprocessPolicy {
+    /// Refuse `script` when it hits the denylist or when the gate
+    /// declines a destructive match. `tool` and `op` name the caller in
+    /// the error line; `destructive` is the caller's own match result,
+    /// since `bash` matches its script and `wm open` matches argv.
+    pub(crate) async fn authorize(
+        &self,
+        tool: &str,
+        op: &str,
+        script: &str,
+        destructive: Option<&[String]>,
+    ) -> Result<(), CommandOutput> {
+        if let Some(pat) = matches_denylist(script, &self.cfg.denylist) {
+            warn!(
+                target: "assistd::policy",
+                tool = %tool,
+                script = %script,
+                matched = %pat,
+                "denied by denylist"
+            );
+            return Err(CommandOutput::failed(
+                POLICY_DENIED_EXIT,
+                error_line(
+                    tool,
+                    format_args!("{op} denied by policy. Matched denylist pattern: {pat}"),
+                    "Try",
+                    "a non-destructive alternative",
+                )
+                .into_bytes(),
+            ));
+        }
+        let Some(matched) = destructive else {
+            return Ok(());
+        };
+        let pattern_display = matched.join(" ");
+        let approved = self
+            .gate
+            .confirm(ConfirmationRequest {
+                tool: tool.to_string(),
+                script: script.to_string(),
+                matched_pattern: pattern_display.clone(),
+            })
+            .await;
+        if approved {
+            return Ok(());
+        }
+        Err(CommandOutput::failed(
+            POLICY_DENIED_EXIT,
+            error_line(
+                tool,
+                format_args!(
+                    "{op} cancelled by user. Matched destructive pattern: {pattern_display}"
+                ),
+                "Try",
+                "a different approach",
+            )
+            .into_bytes(),
+        ))
+    }
+}
 
 /// Describes a request for user confirmation before executing a destructive
 /// command. Passed to [`ConfirmationGate::confirm`].

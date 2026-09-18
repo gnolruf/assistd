@@ -34,6 +34,17 @@ impl WritePolicyCfg {
     pub fn prefixes(&self) -> impl Iterator<Item = &PathBuf> {
         std::iter::once(&self.first).chain(&self.rest)
     }
+
+    /// Resolve `raw` to the path that will be written, refusing anything
+    /// outside the allowlist.
+    fn resolve(&self, raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
+        let resolved = resolve_for_allowlist(raw, home)?;
+        if self.prefixes().any(|prefix| resolved.starts_with(prefix)) {
+            Ok(resolved)
+        } else {
+            Err(PathResolveError::NotAllowlisted)
+        }
+    }
 }
 
 /// `write PATH [CONTENT...]`: write to PATH, subject to the configured
@@ -109,60 +120,12 @@ impl Command for WriteCommand {
         };
 
         let home = std::env::var("HOME").ok();
-        let write_target: PathBuf = match resolve_for_allowlist(&raw_path, home.as_deref()) {
-            Ok(resolved) => {
-                if !self
-                    .cfg
-                    .prefixes()
-                    .any(|prefix| resolved.starts_with(prefix))
-                {
-                    return Ok(CommandOutput::failed(
-                        POLICY_DENIED_EXIT,
-                        error_line(
-                            "write",
-                            format_args!("{raw_path}: path not in writable allowlist"),
-                            "Check",
-                            "[tools.write] writable_paths in config",
-                        )
-                        .into_bytes(),
-                    ));
-                }
-                resolved
-            }
-            Err(PathResolveError::Relative) => {
+        let write_target = match self.cfg.resolve(&raw_path, home.as_deref()) {
+            Ok(path) => path,
+            Err(e) => {
                 return Ok(CommandOutput::failed(
                     POLICY_DENIED_EXIT,
-                    error_line(
-                        "write",
-                        format_args!("{raw_path}: relative paths not permitted"),
-                        "Try",
-                        "an absolute path under an allowlisted directory",
-                    )
-                    .into_bytes(),
-                ));
-            }
-            Err(PathResolveError::HomeNotSet) => {
-                return Ok(CommandOutput::failed(
-                    POLICY_DENIED_EXIT,
-                    error_line(
-                        "write",
-                        format_args!("{raw_path}: cannot expand ~ ($HOME not set)"),
-                        "Try",
-                        "writing an explicit absolute path instead of ~",
-                    )
-                    .into_bytes(),
-                ));
-            }
-            Err(PathResolveError::AnchorMissing(anchor)) => {
-                return Ok(CommandOutput::failed(
-                    POLICY_DENIED_EXIT,
-                    error_line(
-                        "write",
-                        format_args!("{raw_path}: cannot resolve ancestor {anchor}"),
-                        "Check",
-                        "that the directory exists or widen [tools.write] writable_paths",
-                    )
-                    .into_bytes(),
+                    e.error_line(&raw_path).into_bytes(),
                 ));
             }
         };
@@ -182,6 +145,35 @@ enum PathResolveError {
     Relative,
     HomeNotSet,
     AnchorMissing(String),
+    NotAllowlisted,
+}
+
+impl PathResolveError {
+    fn error_line(&self, raw_path: &str) -> String {
+        let (what, hint, recovery) = match self {
+            Self::Relative => (
+                format!("{raw_path}: relative paths not permitted"),
+                "Try",
+                "an absolute path under an allowlisted directory",
+            ),
+            Self::HomeNotSet => (
+                format!("{raw_path}: cannot expand ~ ($HOME not set)"),
+                "Try",
+                "writing an explicit absolute path instead of ~",
+            ),
+            Self::AnchorMissing(anchor) => (
+                format!("{raw_path}: cannot resolve ancestor {anchor}"),
+                "Check",
+                "that the directory exists or widen [tools.write] writable_paths",
+            ),
+            Self::NotAllowlisted => (
+                format!("{raw_path}: path not in writable allowlist"),
+                "Check",
+                "[tools.write] writable_paths in config",
+            ),
+        };
+        error_line("write", what, hint, recovery)
+    }
 }
 
 fn resolve_for_allowlist(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {

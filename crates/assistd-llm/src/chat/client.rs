@@ -76,6 +76,51 @@ impl LlamaChatClient {
         })
     }
 
+    /// A request carrying the configured sampling parameters and no
+    /// tools; callers set what differs.
+    fn base_request<'a>(&'a self, messages: Vec<wire::ChatMessage<'a>>) -> wire::ChatRequest<'a> {
+        wire::ChatRequest {
+            model: self.model.name.as_str(),
+            messages,
+            stream: true,
+            temperature: self.chat.temperature,
+            max_tokens: self.chat.max_response_tokens.get(),
+            top_p: self.chat.top_p,
+            top_k: self.chat.top_k.map(NonZeroU32::get),
+            min_p: self.chat.min_p,
+            presence_penalty: self.chat.presence_penalty,
+            tools: None,
+            tool_choice: None,
+            chat_template_kwargs: None,
+        }
+    }
+
+    /// Classify a failed request: a restart-coincident failure becomes
+    /// [`StreamOutcome::ServerRestart`]; anything else keeps whatever
+    /// was already streamed or propagates `err` if nothing was.
+    fn fail(
+        &self,
+        accum: StreamAccum,
+        err: ChatClientError,
+        pid_at_request: Option<u32>,
+    ) -> StreamOutcome {
+        if self.looks_like_server_crash(pid_at_request) {
+            let pre_emit = !accum.has_output();
+            return StreamOutcome::ServerRestart { accum, pre_emit };
+        }
+        if accum.has_output() {
+            warn!(
+                target: "assistd::chat",
+                "mid-stream error after {} bytes / {} tool-call builders: {err}",
+                accum.text.len(),
+                accum.tool_calls.len()
+            );
+            StreamOutcome::PartialAfterEmit(accum)
+        } else {
+            StreamOutcome::PreEmitError(err)
+        }
+    }
+
     /// Whether an HTTP failure coincides with a supervisor restart: the
     /// child's pid changed or vanished since the request was sent, or
     /// the readiness state left `Ready`. Always false without a probe.
@@ -122,29 +167,22 @@ impl LlamaChatClient {
                 r
             }
             Err(e) => {
-                if self.looks_like_server_crash(pid_at_request) {
-                    return StreamOutcome::ServerRestart {
-                        accum: StreamAccum::default(),
-                        pre_emit: true,
-                    };
-                }
-                return StreamOutcome::PreEmitError(ChatClientError::Http(e));
+                return self.fail(
+                    StreamAccum::default(),
+                    ChatClientError::Http(e),
+                    pid_at_request,
+                );
             }
         };
 
         let status = response.status();
         if !status.is_success() {
             let body = read_body_capped(&mut response, ERROR_BODY_CAP).await;
-            if self.looks_like_server_crash(pid_at_request) {
-                return StreamOutcome::ServerRestart {
-                    accum: StreamAccum::default(),
-                    pre_emit: true,
-                };
-            }
-            return StreamOutcome::PreEmitError(ChatClientError::Server {
+            let err = ChatClientError::Server {
                 status: status.as_u16(),
                 body,
-            });
+            };
+            return self.fail(StreamAccum::default(), err, pid_at_request);
         }
 
         let mut reader = SseLineReader::new();
@@ -160,11 +198,7 @@ impl LlamaChatClient {
                 Ok(Ok(Some(c))) => c,
                 Ok(Ok(None)) => break,
                 Ok(Err(e)) => {
-                    if self.looks_like_server_crash(pid_at_request) {
-                        let pre_emit = !accum_was_emitted(&accum);
-                        return StreamOutcome::ServerRestart { accum, pre_emit };
-                    }
-                    return fold_mid_stream_error(accum, ChatClientError::Http(e));
+                    return self.fail(accum, ChatClientError::Http(e), pid_at_request);
                 }
                 Err(_) => {
                     warn!(
@@ -175,17 +209,11 @@ impl LlamaChatClient {
                         tool_call_builders = accum.tool_calls.len(),
                         "SSE stream inactive past deadline; aborting read"
                     );
-                    if self.looks_like_server_crash(pid_at_request) {
-                        let pre_emit = !accum_was_emitted(&accum);
-                        return StreamOutcome::ServerRestart { accum, pre_emit };
-                    }
-                    return fold_mid_stream_error(
-                        accum,
-                        ChatClientError::Sse(format!(
-                            "no bytes received for {}s",
-                            deadline.as_secs()
-                        )),
-                    );
+                    let err = ChatClientError::Sse(format!(
+                        "no bytes received for {}s",
+                        deadline.as_secs()
+                    ));
+                    return self.fail(accum, err, pid_at_request);
                 }
             };
             saw_bytes = true;
@@ -195,13 +223,7 @@ impl LlamaChatClient {
                 let event = match reader.next_event() {
                     Ok(Some(e)) => e,
                     Ok(None) => break,
-                    Err(e) => {
-                        if self.looks_like_server_crash(pid_at_request) {
-                            let pre_emit = !accum_was_emitted(&accum);
-                            return StreamOutcome::ServerRestart { accum, pre_emit };
-                        }
-                        return fold_mid_stream_error(accum, e);
-                    }
+                    Err(e) => return self.fail(accum, e, pid_at_request),
                 };
                 match event {
                     SseEvent::Data(payload) => {
@@ -209,11 +231,7 @@ impl LlamaChatClient {
                         {
                             Ok(p) => p,
                             Err(e) => {
-                                if self.looks_like_server_crash(pid_at_request) {
-                                    let pre_emit = !accum_was_emitted(&accum);
-                                    return StreamOutcome::ServerRestart { accum, pre_emit };
-                                }
-                                return fold_mid_stream_error(accum, ChatClientError::Json(e));
+                                return self.fail(accum, ChatClientError::Json(e), pid_at_request);
                             }
                         };
                         let Some(choice) = parsed.choices.into_iter().next() else {
@@ -342,21 +360,7 @@ impl LlmBackend for LlamaChatClient {
                 );
                 conv.truncate_to_budget(&self.chat, &self.model);
             }
-            let wire_messages = conv.as_wire_messages();
-            let payload = wire::ChatRequest {
-                model: self.model.name.as_str(),
-                messages: wire_messages,
-                stream: true,
-                temperature: self.chat.temperature,
-                max_tokens: self.chat.max_response_tokens.get(),
-                top_p: self.chat.top_p,
-                top_k: self.chat.top_k.map(NonZeroU32::get),
-                min_p: self.chat.min_p,
-                presence_penalty: self.chat.presence_penalty,
-                tools: None,
-                tool_choice: None,
-                chat_template_kwargs: None,
-            };
+            let payload = self.base_request(conv.as_wire_messages());
             match serde_json::to_vec(&payload) {
                 Ok(b) => b,
                 Err(e) => {
@@ -429,28 +433,12 @@ impl LlmBackend for LlamaChatClient {
                 );
                 conv.truncate_to_budget(&self.chat, &self.model);
             }
-            let wire_messages = conv.as_wire_messages();
-            let has_tools = !tools.is_empty();
-            let payload = wire::ChatRequest {
-                model: self.model.name.as_str(),
-                messages: wire_messages,
-                stream: true,
-                temperature: self.chat.temperature,
-                max_tokens: self.chat.max_response_tokens.get(),
-                top_p: self.chat.top_p,
-                top_k: self.chat.top_k.map(NonZeroU32::get),
-                min_p: self.chat.min_p,
-                presence_penalty: self.chat.presence_penalty,
-                tools: if has_tools { Some(tools) } else { None },
-                tool_choice: if has_tools { Some("auto") } else { None },
-                chat_template_kwargs: None,
-            };
-            match serde_json::to_vec(&payload) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(LlmError::Chat(ChatClientError::Json(e)));
-                }
+            let mut payload = self.base_request(conv.as_wire_messages());
+            if !tools.is_empty() {
+                payload.tools = Some(tools);
+                payload.tool_choice = Some("auto");
             }
+            serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
 
         let outcome = self.stream_openai(body_bytes, &tx).await;
@@ -551,29 +539,18 @@ impl LlmBackend for LlamaChatClient {
 
     async fn complete_oneshot(&self, prompt: String, thinking: Thinking) -> LlmResult<String> {
         let body_bytes = {
-            let payload = wire::ChatRequest {
-                model: self.model.name.as_str(),
-                messages: vec![wire::ChatMessage {
-                    role: "user",
-                    content: Some(wire::ContentBody::Text(prompt.as_str())),
-                    tool_calls: None,
-                    tool_call_id: None,
-                }],
-                stream: true,
-                temperature: self.chat.temperature,
-                max_tokens: self.chat.max_summary_tokens(),
-                top_p: self.chat.top_p,
-                top_k: self.chat.top_k.map(NonZeroU32::get),
-                min_p: self.chat.min_p,
-                presence_penalty: self.chat.presence_penalty,
-                tools: None,
-                tool_choice: None,
-                chat_template_kwargs: match thinking {
-                    Thinking::Enabled => None,
-                    Thinking::Disabled => Some(wire::ChatTemplateKwargs {
-                        enable_thinking: false,
-                    }),
-                },
+            let mut payload = self.base_request(vec![wire::ChatMessage {
+                role: "user",
+                content: Some(wire::ContentBody::Text(prompt.as_str())),
+                tool_calls: None,
+                tool_call_id: None,
+            }]);
+            payload.max_tokens = self.chat.max_summary_tokens();
+            payload.chat_template_kwargs = match thinking {
+                Thinking::Enabled => None,
+                Thinking::Disabled => Some(wire::ChatTemplateKwargs {
+                    enable_thinking: false,
+                }),
             };
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
@@ -738,6 +715,12 @@ struct StreamAccum {
 }
 
 impl StreamAccum {
+    /// Whether anything reached the consumer or a tool call is being
+    /// assembled.
+    fn has_output(&self) -> bool {
+        self.has_emitted || !self.tool_calls.is_empty()
+    }
+
     fn merge_tool_call_delta(&mut self, delta: wire::ToolCallDelta) {
         let entry = self.tool_calls.entry(delta.index).or_default();
         if let Some(id) = delta.id {
@@ -809,24 +792,6 @@ enum StreamOutcome {
     /// The failure coincided with a supervisor restart. `pre_emit` is
     /// true when nothing had been streamed to the consumer yet.
     ServerRestart { accum: StreamAccum, pre_emit: bool },
-}
-
-fn fold_mid_stream_error(accum: StreamAccum, err: ChatClientError) -> StreamOutcome {
-    if accum.has_emitted || !accum.tool_calls.is_empty() {
-        warn!(
-            target: "assistd::chat",
-            "mid-stream error after {} bytes / {} tool-call builders: {err}",
-            accum.text.len(),
-            accum.tool_calls.len()
-        );
-        StreamOutcome::PartialAfterEmit(accum)
-    } else {
-        StreamOutcome::PreEmitError(err)
-    }
-}
-
-fn accum_was_emitted(accum: &StreamAccum) -> bool {
-    accum.has_emitted || !accum.tool_calls.is_empty()
 }
 
 async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> String {

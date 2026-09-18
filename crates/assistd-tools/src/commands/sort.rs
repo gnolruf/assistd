@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Command, CommandInput, CommandOutput};
 use crate::commands::collect_input;
 
 /// `sort [-fnr] [FILE]...`: sort the lines of the named files, or of
@@ -91,10 +91,10 @@ impl Command for SortCommand {
         let (flags, files) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => {
-                return Ok(CommandOutput::failed(
-                    2,
-                    error_line("sort", msg, "Use", "sort (no args) for supported flags")
-                        .into_bytes(),
+                return Ok(CommandOutput::usage_error(
+                    "sort",
+                    msg,
+                    "sort (no args) for supported flags",
                 ));
             }
         };

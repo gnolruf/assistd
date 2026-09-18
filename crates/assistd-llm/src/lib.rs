@@ -21,34 +21,19 @@ use tokio::sync::{Mutex, mpsc};
 
 /// Reason an [`LlmHealthProbe::wait_for_ready`] call ended without
 /// observing `ReadyState::Ready`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum HealthWaitError {
-    /// The wait budget elapsed before the supervisor reported Ready.
+    #[error("LLM did not become ready before timeout")]
     Timeout,
-    /// The supervisor entered `Degraded` (gave up after consecutive
-    /// failures); waiting longer will not help.
+    /// The supervisor gave up after consecutive failures; waiting
+    /// longer will not help.
+    #[error("LLM supervisor entered Degraded; restart abandoned")]
     Degraded,
-    /// No managed service is currently attached. The daemon is
-    /// `Sleeping`, or the probe was constructed against a presence
-    /// manager that hasn't woken yet.
+    /// No managed service is attached, typically because the daemon is
+    /// asleep.
+    #[error("no llama-server is currently managed (presence asleep?)")]
     NoService,
 }
-
-impl std::fmt::Display for HealthWaitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HealthWaitError::Timeout => f.write_str("LLM did not become ready before timeout"),
-            HealthWaitError::Degraded => {
-                f.write_str("LLM supervisor entered Degraded; restart abandoned")
-            }
-            HealthWaitError::NoService => {
-                f.write_str("no llama-server is currently managed (presence asleep?)")
-            }
-        }
-    }
-}
-
-impl std::error::Error for HealthWaitError {}
 
 /// Health/restart probe the chat client consults to classify an HTTP
 /// failure as crash-induced (worth replaying) or transport-level

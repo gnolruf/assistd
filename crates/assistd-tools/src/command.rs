@@ -170,6 +170,16 @@ impl CommandOutput {
         }
     }
 
+    /// The reply to a call whose arguments could not be understood:
+    /// `[error] <cmd>: <what>. Use: <recovery>` with exit 2.
+    pub fn usage_error(
+        cmd: &str,
+        what: impl std::fmt::Display,
+        recovery: impl std::fmt::Display,
+    ) -> Self {
+        Self::failed(2, error_line(cmd, what, "Use", recovery).into_bytes())
+    }
+
     /// Append `next`'s streams and attachments to this output and adopt
     /// its exit code: the shape `&&`, `||` and `;` produce.
     pub fn then(mut self, next: Self) -> Self {

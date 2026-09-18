@@ -161,7 +161,7 @@ fn every_registered_command_emits_convention_compliant_error() {
             "bash",
             rt.block_on(run_cmd(
                 {
-                    use crate::commands::bash::BashPolicyCfg;
+                    use crate::policy::BashPolicyCfg;
                     use crate::policy::{AlwaysAllowGate, SandboxInfo};
                     use std::sync::Arc;
                     BashCommand::new(

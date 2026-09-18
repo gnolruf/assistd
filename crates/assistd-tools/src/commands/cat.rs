@@ -47,9 +47,10 @@ impl Command for CatCommand {
         let (flags, files) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => {
-                return Ok(CommandOutput::failed(
-                    2,
-                    error_line("cat", msg, "Use", "cat -b FILE or cat -n FILE").into_bytes(),
+                return Ok(CommandOutput::usage_error(
+                    "cat",
+                    msg,
+                    "cat -b FILE or cat -n FILE",
                 ));
             }
         };

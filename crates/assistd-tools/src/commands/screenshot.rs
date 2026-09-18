@@ -3,21 +3,19 @@
 //! vision input. `--focused` resolves the window geometry through
 //! xdotool, swaymsg, or hyprctl. The PNG bytes never touch disk.
 
-use std::collections::VecDeque;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command as ProcCommand;
-use tokio::time::timeout;
 
+use crate::attachment::MAX_IMAGE_BYTES;
 use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line};
 use crate::commands::cat::human_size;
-use crate::exec::{SPAWN_FAILED_EXIT, TIMEOUT_EXIT};
+use crate::exec::{SPAWN_FAILED_EXIT, TIMEOUT_EXIT, WaitOutcome, capture, exit_code};
+use crate::vision::VisionGate;
 
 const STDERR_TAIL_LINES: usize = 20;
 
@@ -63,11 +61,11 @@ enum WaylandCompositor {
 /// and attach it as a vision input for the next LLM turn.
 pub struct ScreenshotCommand {
     cfg: Arc<ScreenshotPolicyCfg>,
-    gate: Arc<crate::VisionGate>,
+    gate: Arc<VisionGate>,
 }
 
 impl ScreenshotCommand {
-    pub fn new(cfg: Arc<ScreenshotPolicyCfg>, gate: Arc<crate::VisionGate>) -> Self {
+    pub fn new(cfg: Arc<ScreenshotPolicyCfg>, gate: Arc<VisionGate>) -> Self {
         Self { cfg, gate }
     }
 }
@@ -77,7 +75,7 @@ impl Default for ScreenshotCommand {
     fn default() -> Self {
         Self::new(
             Arc::new(ScreenshotPolicyCfg::default()),
-            crate::VisionGate::new(true),
+            VisionGate::new(true),
         )
     }
 }
@@ -145,18 +143,13 @@ impl Command for ScreenshotCommand {
                 .into_bytes(),
             ));
         }
-        let target = match parse_args(&input.args) {
+        let target = match parse_target(&input.args) {
             Ok(t) => t,
             Err(msg) => {
-                return Ok(CommandOutput::failed(
-                    2,
-                    error_line(
-                        "screenshot",
-                        msg,
-                        "Use",
-                        "screenshot --full or screenshot --focused",
-                    )
-                    .into_bytes(),
+                return Ok(CommandOutput::usage_error(
+                    "screenshot",
+                    msg,
+                    "screenshot --full or screenshot --focused",
                 ));
             }
         };
@@ -180,24 +173,8 @@ impl Command for ScreenshotCommand {
             },
         };
 
-        match capture(backend, &target, self.cfg.timeout).await {
+        match capture_target(backend, &target, self.cfg.timeout).await {
             Ok(png) => {
-                if png.len() as u64 > crate::attachment::MAX_IMAGE_BYTES {
-                    return Ok(CommandOutput::failed(
-                        1,
-                        error_line(
-                            "screenshot",
-                            format_args!(
-                                "captured PNG too large ({} > {} max)",
-                                human_size(png.len()),
-                                human_size(crate::attachment::MAX_IMAGE_BYTES as usize),
-                            ),
-                            "Try",
-                            "--focused, or capture a single monitor",
-                        )
-                        .into_bytes(),
-                    ));
-                }
                 let stdout = format!(
                     "captured PNG ({}, {}, backend={}); attached to next turn\n",
                     human_size(png.len()),
@@ -219,7 +196,7 @@ impl Command for ScreenshotCommand {
     }
 }
 
-fn parse_args(args: &[String]) -> Result<Target, String> {
+fn parse_target(args: &[String]) -> Result<Target, String> {
     match args.len() {
         0 => Ok(Target::Full),
         1 => match args[0].as_str() {
@@ -338,6 +315,9 @@ enum CaptureError {
     EmptyOutput {
         binary: String,
     },
+    TooLarge {
+        size: usize,
+    },
     FocusedUnsupportedOnWayland {
         compositor: String,
     },
@@ -346,19 +326,19 @@ enum CaptureError {
     },
 }
 
-async fn capture(
+async fn capture_target(
     backend: Backend,
     target: &Target,
     deadline: Duration,
 ) -> Result<Vec<u8>, CaptureError> {
     match (backend, target) {
-        (Backend::X11, Target::Full) => spawn_subprocess("maim", &[], deadline).await,
+        (Backend::X11, Target::Full) => run_capture("maim", &[], deadline).await,
         (Backend::X11, Target::Focused) => capture_x11_focused(deadline).await,
         (Backend::X11, Target::Monitor(name)) => capture_x11_monitor(name, deadline).await,
-        (Backend::Wayland, Target::Full) => spawn_subprocess("grim", &["-"], deadline).await,
+        (Backend::Wayland, Target::Full) => run_capture("grim", &["-"], deadline).await,
         (Backend::Wayland, Target::Focused) => capture_wayland_focused(deadline).await,
         (Backend::Wayland, Target::Monitor(name)) => {
-            spawn_subprocess("grim", &["-o", name, "-"], deadline).await
+            run_capture("grim", &["-o", name, "-"], deadline).await
         }
     }
 }
@@ -404,110 +384,80 @@ fn strip_xrandr_geom_token(tok: &str) -> Option<String> {
 }
 
 async fn capture_x11_monitor(monitor: &str, deadline: Duration) -> Result<Vec<u8>, CaptureError> {
-    let raw = spawn_subprocess("xrandr", &["--listmonitors"], deadline).await?;
+    let raw = run_capture("xrandr", &["--listmonitors"], deadline).await?;
     let listing = String::from_utf8_lossy(&raw);
     let geom = parse_xrandr_monitor_geom(&listing, monitor).ok_or_else(|| CaptureError::Parse {
         what: format!("monitor `{monitor}` not found in xrandr output"),
     })?;
-    spawn_subprocess("maim", &["-g", &geom], deadline).await
+    run_capture("maim", &["-g", &geom], deadline).await
 }
 
-/// Spawn `binary` with `args`, drain stdout to `Vec<u8>`, drain stderr to
-/// a tail, wait for exit (or timeout), and return the bytes. The subprocess
-/// pattern (`kill_on_drop` + `process_group(0)` on Unix) mirrors
-/// `assistd-voice/src/piper/synth.rs`: a timeout drops the `Child`,
-/// which sends SIGKILL to the process group via `kill_on_drop`.
-async fn spawn_subprocess(
+/// Run `binary` to completion and return its stdout.
+async fn run_capture(
     binary: &str,
     args: &[&str],
     deadline: Duration,
 ) -> Result<Vec<u8>, CaptureError> {
     let mut cmd = ProcCommand::new(binary);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(if e.kind() == std::io::ErrorKind::NotFound {
-                CaptureError::BinaryMissing {
-                    binary: binary.to_string(),
-                }
-            } else {
-                CaptureError::Spawn {
-                    binary: binary.to_string(),
-                    msg: e.to_string(),
-                }
+    cmd.args(args);
+    let max_output = MAX_IMAGE_BYTES as usize;
+    let captured = capture(cmd, &[], deadline, max_output).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            CaptureError::BinaryMissing {
+                binary: binary.to_string(),
+            }
+        } else {
+            CaptureError::Spawn {
+                binary: binary.to_string(),
+                msg: e.to_string(),
+            }
+        }
+    })?;
+    match captured.outcome {
+        WaitOutcome::Exited(status) if status.success() => {}
+        WaitOutcome::Exited(status) => {
+            return Err(CaptureError::NonZero {
+                binary: binary.to_string(),
+                status: exit_code(&status),
+                stderr_tail: stderr_tail(&captured.stderr),
             });
         }
-    };
-
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
-
-    let drain_stdout = async {
-        let mut buf = Vec::new();
-        let mut reader = stdout;
-        let _ = reader.read_to_end(&mut buf).await;
-        buf
-    };
-    let drain_stderr = async {
-        let mut tail: VecDeque<String> = VecDeque::with_capacity(STDERR_TAIL_LINES);
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if tail.len() == STDERR_TAIL_LINES {
-                tail.pop_front();
-            }
-            tail.push_back(line);
+        WaitOutcome::WaitErr(e) => {
+            return Err(CaptureError::Spawn {
+                binary: binary.to_string(),
+                msg: format!("wait: {e}"),
+            });
         }
-        tail.into_iter().collect::<Vec<_>>().join("\n")
-    };
-
-    let work = async {
-        let (stdout_bytes, stderr_tail, status) =
-            tokio::join!(drain_stdout, drain_stderr, child.wait());
-        let status = status.map_err(|e| CaptureError::Spawn {
-            binary: binary.to_string(),
-            msg: format!("wait: {e}"),
-        })?;
-        Ok::<_, CaptureError>((stdout_bytes, stderr_tail, status))
-    };
-
-    let (stdout_bytes, stderr_tail, status) = match timeout(deadline, work).await {
-        Ok(Ok(triple)) => triple,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => return Err(CaptureError::Timeout),
-    };
-
-    if !status.success() {
-        return Err(CaptureError::NonZero {
-            binary: binary.to_string(),
-            status: status.code().unwrap_or(TIMEOUT_EXIT),
-            stderr_tail,
-        });
+        WaitOutcome::Timeout => return Err(CaptureError::Timeout),
+        WaitOutcome::Overflow => {
+            return Err(CaptureError::TooLarge {
+                size: captured.stdout.len(),
+            });
+        }
     }
-    if stdout_bytes.is_empty() {
+    if captured.stdout.is_empty() {
         return Err(CaptureError::EmptyOutput {
             binary: binary.to_string(),
         });
     }
-    Ok(stdout_bytes)
+    Ok(captured.stdout)
+}
+
+fn stderr_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(STDERR_TAIL_LINES)..].join("\n")
 }
 
 async fn capture_x11_focused(deadline: Duration) -> Result<Vec<u8>, CaptureError> {
-    let id_bytes = spawn_subprocess("xdotool", &["getactivewindow"], deadline).await?;
+    let id_bytes = run_capture("xdotool", &["getactivewindow"], deadline).await?;
     let id_str = String::from_utf8_lossy(&id_bytes).trim().to_string();
     if id_str.is_empty() || id_str.parse::<u64>().is_err() {
         return Err(CaptureError::Parse {
             what: format!("xdotool active window id: {id_str:?}"),
         });
     }
-    spawn_subprocess("maim", &["-i", &id_str], deadline).await
+    run_capture("maim", &["-i", &id_str], deadline).await
 }
 
 async fn capture_wayland_focused(deadline: Duration) -> Result<Vec<u8>, CaptureError> {
@@ -524,11 +474,11 @@ async fn capture_wayland_focused(deadline: Duration) -> Result<Vec<u8>, CaptureE
             });
         }
     };
-    spawn_subprocess("grim", &["-g", &geom, "-"], deadline).await
+    run_capture("grim", &["-g", &geom, "-"], deadline).await
 }
 
 async fn focused_geom_sway(deadline: Duration) -> Result<String, CaptureError> {
-    let json = spawn_subprocess("swaymsg", &["-t", "get_tree", "-r"], deadline).await?;
+    let json = run_capture("swaymsg", &["-t", "get_tree", "-r"], deadline).await?;
     let v: Value = serde_json::from_slice(&json).map_err(|e| CaptureError::Parse {
         what: format!("swaymsg JSON: {e}"),
     })?;
@@ -559,7 +509,7 @@ fn find_focused_sway_rect(v: &Value) -> Option<String> {
 }
 
 async fn focused_geom_hyprland(deadline: Duration) -> Result<String, CaptureError> {
-    let json = spawn_subprocess("hyprctl", &["activewindow", "-j"], deadline).await?;
+    let json = run_capture("hyprctl", &["activewindow", "-j"], deadline).await?;
     let v: Value = serde_json::from_slice(&json).map_err(|e| CaptureError::Parse {
         what: format!("hyprctl JSON: {e}"),
     })?;
@@ -635,6 +585,20 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             )
             .into_bytes(),
         ),
+        CaptureError::TooLarge { size } => CommandOutput::failed(
+            1,
+            error_line(
+                "screenshot",
+                format_args!(
+                    "captured PNG too large ({} > {} max)",
+                    human_size(size),
+                    human_size(MAX_IMAGE_BYTES as usize),
+                ),
+                "Try",
+                "--focused, or capture a single monitor",
+            )
+            .into_bytes(),
+        ),
         CaptureError::FocusedUnsupportedOnWayland { compositor } => CommandOutput::failed(
             2,
             error_line(
@@ -673,33 +637,33 @@ fn install_hint(binary: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    // ---- parse_args ------------------------------------------------------
+    // ---- parse_target ------------------------------------------------------
 
     #[test]
     fn parse_full_default() {
-        assert_eq!(parse_args(&[]), Ok(Target::Full));
+        assert_eq!(parse_target(&[]), Ok(Target::Full));
     }
 
     #[test]
     fn parse_full_explicit() {
-        assert_eq!(parse_args(&["--full".into()]), Ok(Target::Full));
+        assert_eq!(parse_target(&["--full".into()]), Ok(Target::Full));
     }
 
     #[test]
     fn parse_focused() {
-        assert_eq!(parse_args(&["--focused".into()]), Ok(Target::Focused));
+        assert_eq!(parse_target(&["--focused".into()]), Ok(Target::Focused));
     }
 
     #[test]
     fn parse_too_many_args() {
-        let err = parse_args(&["--full".into(), "--focused".into()]).unwrap_err();
+        let err = parse_target(&["--full".into(), "--focused".into()]).unwrap_err();
         assert!(err.contains("at most one"), "{err}");
     }
 
     #[test]
     fn parse_monitor_equals_form() {
         assert_eq!(
-            parse_args(&["--monitor=DP-1".into()]),
+            parse_target(&["--monitor=DP-1".into()]),
             Ok(Target::Monitor("DP-1".into()))
         );
     }
@@ -707,20 +671,20 @@ mod tests {
     #[test]
     fn parse_monitor_two_arg_form() {
         assert_eq!(
-            parse_args(&["--monitor".into(), "HDMI-1".into()]),
+            parse_target(&["--monitor".into(), "HDMI-1".into()]),
             Ok(Target::Monitor("HDMI-1".into()))
         );
     }
 
     #[test]
     fn parse_monitor_without_value_errors() {
-        let err = parse_args(&["--monitor".into()]).unwrap_err();
+        let err = parse_target(&["--monitor".into()]).unwrap_err();
         assert!(err.contains("--monitor=<name>"), "{err}");
     }
 
     #[test]
     fn parse_monitor_empty_equals_value_errors() {
-        let err = parse_args(&["--monitor=".into()]).unwrap_err();
+        let err = parse_target(&["--monitor=".into()]).unwrap_err();
         assert!(err.contains("--monitor"), "{err}");
     }
 
@@ -1025,7 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_binary_returns_127_with_install_hint() {
-        let err = spawn_subprocess(
+        let err = run_capture(
             "assistd-screenshot-not-a-real-bin-xyz",
             &[],
             Duration::from_secs(2),
@@ -1136,7 +1100,7 @@ mod tests {
     fn summary_changes_when_vision_disabled() {
         let enabled = ScreenshotCommand::new(
             Arc::new(ScreenshotPolicyCfg::default()),
-            crate::VisionGate::new(true),
+            VisionGate::new(true),
         );
         let disabled = ScreenshotCommand::new(
             Arc::new(ScreenshotPolicyCfg::default()),

@@ -70,15 +70,10 @@ impl Command for SeeCommand {
             return Ok(CommandOutput::usage(self.help()));
         }
         if input.args.len() != 1 {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    "see",
-                    "expects exactly one path argument",
-                    "Use",
-                    "see <PATH>",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                "see",
+                "expects exactly one path argument",
+                "see <PATH>",
             ));
         }
         let path = &input.args[0];

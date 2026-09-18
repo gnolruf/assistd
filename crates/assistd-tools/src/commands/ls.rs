@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
+use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
 
 /// `ls [-al] [PATH]`: list directory entries alphabetically, one per
 /// line, formatted as `<type>\t<size>\t<name>`. Type is `dir`, `file`,
@@ -14,7 +14,7 @@ use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_
 ///   only format this command emits
 pub struct LsCommand;
 
-fn parse_args(argv: &[String]) -> Result<(bool, &str), String> {
+fn parse_flags(argv: &[String]) -> Result<(bool, &str), String> {
     let mut show_hidden = false;
     let mut path = None;
     for arg in argv {
@@ -59,14 +59,9 @@ impl Command for LsCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        let (show_hidden, path) = match parse_args(&input.args) {
+        let (show_hidden, path) = match parse_flags(&input.args) {
             Ok(v) => v,
-            Err(msg) => {
-                return Ok(CommandOutput::failed(
-                    2,
-                    error_line("ls", msg, "Use", "ls -al PATH").into_bytes(),
-                ));
-            }
+            Err(msg) => return Ok(CommandOutput::usage_error("ls", msg, "ls -al PATH")),
         };
         let mut reader = match tokio::fs::read_dir(path).await {
             Ok(r) => r,

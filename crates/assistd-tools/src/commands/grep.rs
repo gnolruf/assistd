@@ -108,10 +108,10 @@ impl Command for GrepCommand {
         let (flags, positional) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => {
-                return Ok(CommandOutput::failed(
-                    2,
-                    error_line("grep", msg, "Use", "grep (no args) for supported flags")
-                        .into_bytes(),
+                return Ok(CommandOutput::usage_error(
+                    "grep",
+                    msg,
+                    "grep (no args) for supported flags",
                 ));
             }
         };

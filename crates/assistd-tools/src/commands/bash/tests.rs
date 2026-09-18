@@ -1,5 +1,8 @@
 use super::*;
+use std::time::Duration;
+
 use crate::exec::{OUTPUT_BUF_MAX, OUTPUT_OVERFLOW_EXIT};
+use crate::policy::ConfirmationRequest;
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
 
 fn bash_with_cfg(cfg: BashPolicyCfg, gate: Arc<dyn ConfirmationGate>) -> BashCommand {

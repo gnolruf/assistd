@@ -5,43 +5,20 @@
 //! the process group and exits 137.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::warn;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
-use crate::exec::{POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT, supervise};
+use crate::exec::{SPAWN_FAILED_EXIT, supervise};
 use crate::policy::{
-    ConfirmationGate, ConfirmationRequest, SandboxAccess, SandboxInfo, matches_denylist,
+    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy,
     matches_destructive,
 };
 
-/// Policy for the commands that spawn subprocesses. Destructive
-/// patterns are pre-tokenized so no invocation re-parses them.
-#[derive(Debug, Clone)]
-pub struct BashPolicyCfg {
-    pub timeout: Duration,
-    pub denylist: Vec<String>,
-    pub destructive_patterns: Vec<Vec<String>>,
-}
-
-impl Default for BashPolicyCfg {
-    fn default() -> Self {
-        Self {
-            timeout: Duration::from_secs(30),
-            denylist: Vec::new(),
-            destructive_patterns: Vec::new(),
-        }
-    }
-}
-
 /// `bash SCRIPT`: spawn a real `bash -c <script>` subprocess, policy-gated.
 pub struct BashCommand {
-    cfg: Arc<BashPolicyCfg>,
-    sandbox: Arc<SandboxInfo>,
-    gate: Arc<dyn ConfirmationGate>,
+    policy: SubprocessPolicy,
 }
 
 impl BashCommand {
@@ -50,7 +27,9 @@ impl BashCommand {
         sandbox: Arc<SandboxInfo>,
         gate: Arc<dyn ConfirmationGate>,
     ) -> Self {
-        Self { cfg, sandbox, gate }
+        Self {
+            policy: SubprocessPolicy { cfg, sandbox, gate },
+        }
     }
 }
 
@@ -77,7 +56,7 @@ impl Command for BashCommand {
     }
 
     fn help(&self) -> String {
-        let timeout_secs = self.cfg.timeout.as_secs();
+        let timeout_secs = self.policy.cfg.timeout.as_secs();
         format!(
             "usage: bash \"<script>\"\n\
              \n\
@@ -97,60 +76,24 @@ impl Command for BashCommand {
             return Ok(CommandOutput::usage(self.help()));
         }
         let script = input.args.join(" ");
-
-        if let Some(pat) = matches_denylist(&script, &self.cfg.denylist) {
-            warn!(
-                target: "assistd::policy",
-                script = %script,
-                matched = %pat,
-                "bash denied by denylist"
-            );
-            return Ok(CommandOutput::failed(
-                POLICY_DENIED_EXIT,
-                error_line(
-                    "bash",
-                    format_args!("command denied by policy. Matched denylist pattern: {pat}"),
-                    "Try",
-                    "a non-destructive alternative",
-                )
-                .into_bytes(),
-            ));
+        let destructive = matches_destructive(&script, &self.policy.cfg.destructive_patterns);
+        if let Err(denied) = self
+            .policy
+            .authorize("bash", "command", &script, destructive)
+            .await
+        {
+            return Ok(denied);
         }
 
-        if let Some(matched) = matches_destructive(&script, &self.cfg.destructive_patterns) {
-            let pattern_display = matched.join(" ");
-            let approved = self
-                .gate
-                .confirm(ConfirmationRequest {
-                    tool: "bash".to_string(),
-                    script: script.clone(),
-                    matched_pattern: pattern_display.clone(),
-                })
-                .await;
-            if !approved {
-                return Ok(CommandOutput::failed(
-                    POLICY_DENIED_EXIT,
-                    error_line(
-                        "bash",
-                        format_args!(
-                            "cancelled by user. Matched destructive pattern: {pattern_display}"
-                        ),
-                        "Try",
-                        "a different approach",
-                    )
-                    .into_bytes(),
-                ));
-            }
-        }
-
-        let cmd = self
-            .sandbox
-            .command(SandboxAccess::Default, "bash", ["-c", script.as_str()]);
+        let cmd =
+            self.policy
+                .sandbox
+                .command(SandboxAccess::Default, "bash", ["-c", script.as_str()]);
         supervise(
             "bash",
             cmd,
             input.stdin.as_deref().unwrap_or_default(),
-            self.cfg.timeout,
+            self.policy.cfg.timeout,
         )
         .await
         .or_else(|e| {

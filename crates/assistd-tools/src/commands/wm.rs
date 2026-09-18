@@ -5,19 +5,29 @@
 
 use std::sync::Arc;
 
+use std::fmt::Display;
+
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::warn;
 
 use assistd_wm::{Layout, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
-use crate::commands::bash::BashPolicyCfg;
-use crate::exec::{POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT, spawn_detached};
+use crate::exec::{SPAWN_FAILED_EXIT, spawn_detached};
 use crate::policy::{
-    ConfirmationGate, ConfirmationRequest, SandboxAccess, SandboxInfo, matches_denylist,
+    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy,
     matches_destructive,
 };
+
+/// The `[error] wm: <op> failed: …` line for a backend error, with the
+/// recovery hint chosen by the error variant.
+fn wm_error(op: impl Display, err: &WmError) -> CommandOutput {
+    let (label, hint) = hint_for(err);
+    CommandOutput::failed(
+        1,
+        error_line(NAME, format_args!("{op} failed: {err}"), label, hint).into_bytes(),
+    )
+}
 
 fn hint_for(err: &WmError) -> (&'static str, &'static str) {
     match err {
@@ -45,9 +55,7 @@ const SUMMARY: &str = "manage windows and workspaces (focus, move, open, list, w
 /// `wm <subcommand> [args]`: drive the active window manager from the LLM's `run` tool.
 pub struct WmCommand {
     wm: Arc<dyn WindowManager>,
-    cfg: Arc<BashPolicyCfg>,
-    sandbox: Arc<SandboxInfo>,
-    gate: Arc<dyn ConfirmationGate>,
+    policy: SubprocessPolicy,
 }
 
 impl WmCommand {
@@ -62,9 +70,7 @@ impl WmCommand {
     ) -> Self {
         Self {
             wm,
-            cfg,
-            sandbox,
-            gate,
+            policy: SubprocessPolicy { cfg, sandbox, gate },
         }
     }
 }
@@ -139,15 +145,15 @@ impl Command for WmCommand {
         let sub = input.args[0].as_str();
         let rest = &input.args[1..];
         match sub {
-            "focus" => handle_focus(self.wm.as_ref(), rest).await,
-            "move" => handle_move(self.wm.as_ref(), rest).await,
+            "focus" => focus(self.wm.as_ref(), rest).await,
+            "move" => move_window(self.wm.as_ref(), rest).await,
             "open" => self.open(rest).await,
-            "active" => handle_active(self.wm.as_ref()).await,
-            "resize" => handle_resize(self.wm.as_ref(), rest).await,
-            "list" => handle_list(self.wm.as_ref()).await,
-            "workspaces" => handle_workspaces(self.wm.as_ref()).await,
-            "outputs" => handle_outputs(self.wm.as_ref()).await,
-            "layout" => handle_layout(self.wm.as_ref(), rest).await,
+            "active" => active(self.wm.as_ref()).await,
+            "resize" => resize(self.wm.as_ref(), rest).await,
+            "list" => list(self.wm.as_ref()).await,
+            "workspaces" => workspaces(self.wm.as_ref()).await,
+            "outputs" => outputs(self.wm.as_ref()).await,
+            "layout" => layout(self.wm.as_ref(), rest).await,
             other => Ok(CommandOutput::failed(
                 2,
                 error_line(
@@ -168,7 +174,7 @@ const FOCUS_HELP: &str = "usage: wm focus <id>\n\
     first to find ids; the first column is the id, the second is \
     the application label.\n";
 
-async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
+async fn focus(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.is_empty() {
         return Ok(CommandOutput::usage(FOCUS_HELP.to_string()));
     }
@@ -179,32 +185,15 @@ async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<Command
     };
     match wm.focus(&id).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(
-                    NAME,
-                    format_args!("focus {id_arg} failed: {e}"),
-                    label,
-                    hint,
-                )
-                .into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error(format_args!("focus {id_arg}"), &e)),
     }
 }
 
 fn parse_id_error(op: &'static str, raw: &str) -> CommandOutput {
-    CommandOutput::failed(
-        2,
-        error_line(
-            NAME,
-            format_args!("{op}: '{raw}' is not a valid window id (positive decimal con_id)"),
-            "Use",
-            "wm list to see ids (first TSV column)",
-        )
-        .into_bytes(),
+    CommandOutput::usage_error(
+        NAME,
+        format_args!("{op}: '{raw}' is not a valid window id (positive decimal con_id)"),
+        "wm list to see ids (first TSV column)",
     )
 }
 
@@ -214,7 +203,7 @@ const MOVE_HELP: &str = "usage: wm move <id> <workspace>\n\
     Numeric workspace identifiers (e.g. `3`) match by number; \
     non-numeric identifiers match by exact name.\n";
 
-async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
+async fn move_window(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.len() < 2 {
         return Ok(CommandOutput::usage(MOVE_HELP.to_string()));
     }
@@ -229,19 +218,10 @@ async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandO
         .expect("WorkspaceId parser is infallible");
     match wm.move_to_workspace(&id, &workspace).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(
-                    NAME,
-                    format_args!("move {id_arg} to '{workspace_arg}' failed: {e}"),
-                    label,
-                    hint,
-                )
-                .into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error(
+            format_args!("move {id_arg} to '{workspace_arg}'"),
+            &e,
+        )),
     }
 }
 
@@ -266,53 +246,19 @@ impl WmCommand {
             return Ok(CommandOutput::usage(OPEN_HELP.to_string()));
         };
         let argv = args.join(" ");
-
-        if let Some(pat) = matches_denylist(&argv, &self.cfg.denylist) {
-            warn!(
-                target: "assistd::policy",
-                argv = %argv,
-                matched = %pat,
-                "wm open denied by denylist"
-            );
-            return Ok(CommandOutput::failed(
-                POLICY_DENIED_EXIT,
-                error_line(
-                    NAME,
-                    format_args!("open denied by policy. Matched denylist pattern: {pat}"),
-                    "Try",
-                    "a non-destructive alternative",
-                )
-                .into_bytes(),
-            ));
+        let destructive = matches_destructive_argv(args, &self.policy.cfg.destructive_patterns);
+        if let Err(denied) = self
+            .policy
+            .authorize(NAME, "open", &argv, destructive)
+            .await
+        {
+            return Ok(denied);
         }
 
-        if let Some(matched) = matches_destructive_argv(args, &self.cfg.destructive_patterns) {
-            let pattern_display = matched.join(" ");
-            let approved = self
-                .gate
-                .confirm(ConfirmationRequest {
-                    tool: NAME.to_string(),
-                    script: argv.clone(),
-                    matched_pattern: pattern_display.clone(),
-                })
-                .await;
-            if !approved {
-                return Ok(CommandOutput::failed(
-                    POLICY_DENIED_EXIT,
-                    error_line(
-                        NAME,
-                        format_args!(
-                            "open cancelled by user. Matched destructive pattern: {pattern_display}"
-                        ),
-                        "Try",
-                        "a different approach",
-                    )
-                    .into_bytes(),
-                ));
-            }
-        }
-
-        let cmd = self.sandbox.command(SandboxAccess::Session, app, extra);
+        let cmd = self
+            .policy
+            .sandbox
+            .command(SandboxAccess::Session, app, extra);
         spawn_detached(NAME, cmd).await.or_else(|e| {
             let line = if e.kind() == std::io::ErrorKind::NotFound {
                 error_line(
@@ -351,7 +297,7 @@ fn matches_destructive_argv<'a>(
     })
 }
 
-async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
+async fn active(wm: &dyn WindowManager) -> Result<CommandOutput> {
     match wm.focused_context().await {
         Ok(Some(ctx)) => {
             let id_str = match ctx.id {
@@ -362,13 +308,7 @@ async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(format!("{id_str}\t{app}\n").into_bytes()))
         }
         Ok(None) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(NAME, format_args!("active failed: {e}"), label, hint).into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error("active", &e)),
     }
 }
 
@@ -378,7 +318,7 @@ const RESIZE_HELP: &str = "usage: wm resize <id> <grow|shrink> <px>\n\
     Direction is one of `grow` or `shrink`; <px> is a non-negative \
     integer count of pixels.\n";
 
-async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
+async fn resize(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.len() < 3 {
         return Ok(CommandOutput::usage(RESIZE_HELP.to_string()));
     }
@@ -390,58 +330,36 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
     let direction: ResizeDir = match args[1].parse() {
         Ok(d) => d,
         Err(_) => {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    NAME,
-                    format_args!(
-                        "resize: direction must be 'grow' or 'shrink', got '{}'",
-                        args[1]
-                    ),
-                    "Use",
-                    "wm resize <id> <grow|shrink> <px>",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                NAME,
+                format_args!(
+                    "resize: direction must be 'grow' or 'shrink', got '{}'",
+                    args[1]
+                ),
+                "wm resize <id> <grow|shrink> <px>",
             ));
         }
     };
     let amount: u32 = match args[2].parse() {
         Ok(n) => n,
         Err(_) => {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    NAME,
-                    format_args!(
-                        "resize: pixel amount must be a non-negative integer, got '{}'",
-                        args[2]
-                    ),
-                    "Use",
-                    "wm resize <id> <grow|shrink> <px>",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                NAME,
+                format_args!(
+                    "resize: pixel amount must be a non-negative integer, got '{}'",
+                    args[2]
+                ),
+                "wm resize <id> <grow|shrink> <px>",
             ));
         }
     };
     match wm.resize_width(&id, direction, amount).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(
-                    NAME,
-                    format_args!("resize {id_arg} failed: {e}"),
-                    label,
-                    hint,
-                )
-                .into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error(format_args!("resize {id_arg}"), &e)),
     }
 }
 
-async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
+async fn list(wm: &dyn WindowManager) -> Result<CommandOutput> {
     use std::fmt::Write;
     match wm.list_windows().await {
         Ok(mut windows) => {
@@ -471,17 +389,11 @@ async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
             }
             Ok(CommandOutput::ok(out.into_bytes()))
         }
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(NAME, format_args!("list failed: {e}"), label, hint).into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error("list", &e)),
     }
 }
 
-async fn handle_outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
+async fn outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
     match wm.list_outputs().await {
         Ok(mut outputs) => {
             outputs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -517,17 +429,11 @@ async fn handle_outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
             }
             Ok(CommandOutput::ok(out.into_bytes()))
         }
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(NAME, format_args!("outputs failed: {e}"), label, hint).into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error("outputs", &e)),
     }
 }
 
-async fn handle_workspaces(wm: &dyn WindowManager) -> Result<CommandOutput> {
+async fn workspaces(wm: &dyn WindowManager) -> Result<CommandOutput> {
     match wm.list_workspaces().await {
         Ok(mut workspaces) => {
             workspaces.sort_by_key(|w| w.num);
@@ -544,13 +450,7 @@ async fn handle_workspaces(wm: &dyn WindowManager) -> Result<CommandOutput> {
             }
             Ok(CommandOutput::ok(out.into_bytes()))
         }
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(NAME, format_args!("workspaces failed: {e}"), label, hint).into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error("workspaces", &e)),
     }
 }
 
@@ -560,7 +460,7 @@ const LAYOUT_HELP: &str = "usage: wm layout <default|tabbed|stacking|splith|spli
     toggles between split, tabbed, and stacking based on the \
     container's previous layout.\n";
 
-async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
+async fn layout(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.is_empty() {
         return Ok(CommandOutput::usage(LAYOUT_HELP.to_string()));
     }
@@ -568,33 +468,16 @@ async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
     let layout: Layout = match raw.parse() {
         Ok(l) => l,
         Err(_) => {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    NAME,
-                    format_args!("layout: '{raw}' is not a known layout"),
-                    "Use",
-                    "default | tabbed | stacking | splith | splitv",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                NAME,
+                format_args!("layout: '{raw}' is not a known layout"),
+                "default | tabbed | stacking | splith | splitv",
             ));
         }
     };
     match wm.set_layout(layout).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(
-                    NAME,
-                    format_args!("layout '{layout}' failed: {e}"),
-                    label,
-                    hint,
-                )
-                .into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error(format_args!("layout '{layout}'"), &e)),
     }
 }
 

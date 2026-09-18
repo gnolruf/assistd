@@ -62,28 +62,18 @@ impl Command for WebCommand {
             return Ok(CommandOutput::usage(self.help()));
         }
         if input.args.len() != 1 {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    "web",
-                    "expects exactly one URL argument",
-                    "Use",
-                    "web <URL>",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                "web",
+                "expects exactly one URL argument",
+                "web <URL>",
             ));
         }
         let url = &input.args[0];
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    "web",
-                    format_args!("only http(s):// URLs are allowed: {url}"),
-                    "Use",
-                    "web https://... or web http://...",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                "web",
+                format_args!("only http(s):// URLs are allowed: {url}"),
+                "web https://... or web http://...",
             ));
         }
 

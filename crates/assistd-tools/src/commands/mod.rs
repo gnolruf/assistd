@@ -15,7 +15,8 @@ pub mod web;
 pub mod wm;
 pub mod write;
 
-pub use bash::{BashCommand, BashPolicyCfg};
+pub use crate::policy::BashPolicyCfg;
+pub use bash::BashCommand;
 pub use cat::CatCommand;
 pub use echo::EchoCommand;
 pub use grep::GrepCommand;

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Command, CommandInput, CommandOutput};
 use crate::commands::collect_input;
 
 /// `uniq [-c] [FILE]...`: collapse runs of identical adjacent lines
@@ -46,15 +46,10 @@ impl Command for UniqCommand {
             match arg.as_str() {
                 "-c" => count_runs = true,
                 flag if flag.starts_with('-') && flag.len() > 1 => {
-                    return Ok(CommandOutput::failed(
-                        2,
-                        error_line(
-                            "uniq",
-                            format_args!("unknown flag '{flag}'"),
-                            "Use",
-                            "uniq or uniq -c",
-                        )
-                        .into_bytes(),
+                    return Ok(CommandOutput::usage_error(
+                        "uniq",
+                        format_args!("unknown flag '{flag}'"),
+                        "uniq or uniq -c",
                     ));
                 }
                 file => files.push(file.to_string()),

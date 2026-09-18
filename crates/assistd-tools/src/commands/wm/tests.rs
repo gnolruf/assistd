@@ -1,4 +1,7 @@
 use super::*;
+
+use crate::exec::POLICY_DENIED_EXIT;
+use crate::policy::ConfirmationRequest;
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
 use assistd_wm::{
     FocusedWindowContext, Layout, NoWindowManager, OutputInfo, ResizeDir, Window, WindowId,

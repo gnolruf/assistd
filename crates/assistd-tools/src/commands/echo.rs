@@ -17,7 +17,7 @@ struct Flags {
     escapes: bool,
 }
 
-fn split_flags(argv: &[String]) -> (Flags, &[String]) {
+fn parse_flags(argv: &[String]) -> (Flags, &[String]) {
     let mut flags = Flags::default();
     let mut i = 0;
     while let Some(arg) = argv.get(i) {
@@ -95,7 +95,7 @@ impl Command for EchoCommand {
         if input.args.is_empty() {
             return Ok(CommandOutput::usage(self.help()));
         }
-        let (flags, words) = split_flags(&input.args);
+        let (flags, words) = parse_flags(&input.args);
         let joined = words.join(" ");
         let mut out = if flags.escapes {
             unescape(&joined)
