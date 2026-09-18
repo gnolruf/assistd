@@ -25,6 +25,13 @@ struct QueryGuards {
     _stream: LlmStreamGuard,
 }
 
+/// Sentence splitter and the channel to the speech worker.
+struct SpeechPipeline {
+    tx: mpsc::Sender<String>,
+    sentences: SentenceBuffer,
+    partial_flush: Option<Duration>,
+}
+
 impl AppState {
     /// Handle a single user query: wake the daemon if needed, run the
     /// agent loop, stream events through `tx`, and persist the turn.
@@ -58,31 +65,13 @@ impl AppState {
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
         let generator = self.spawn_agent_task(text, attachments, llm_tx, cancel.clone());
 
-        let synthesis = &self.config.voice.synthesis;
-        let sentence_buf = SentenceBuffer::new_with_mode(
-            synthesis.max_sentence_chars.get() as usize,
-            synthesis.code_block_mode,
-        );
-        let partial_flush = if synthesis.partial_flush_ms > 0 {
-            Some(Duration::from_millis(synthesis.partial_flush_ms as u64))
-        } else {
-            None
-        };
-        let (speech_tx, speech_rx) = mpsc::channel::<String>(32);
+        let (speech, speech_rx) = self.speech_pipeline();
         let start_epoch = self.subsystems.voice_output.current_epoch();
         let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
         let done_emitted = self
             .clone()
-            .drive_event_loop(
-                id.clone(),
-                llm_rx,
-                &tx,
-                speech_tx,
-                sentence_buf,
-                partial_flush,
-                turn_id,
-            )
+            .drive_event_loop(id.clone(), llm_rx, &tx, speech, turn_id)
             .await;
 
         let gen_result = generator.await;
@@ -205,6 +194,25 @@ impl AppState {
         }
     }
 
+    fn speech_pipeline(&self) -> (SpeechPipeline, mpsc::Receiver<String>) {
+        let synthesis = &self.config.voice.synthesis;
+        let sentences = SentenceBuffer::new_with_mode(
+            synthesis.max_sentence_chars.get() as usize,
+            synthesis.code_block_mode,
+        );
+        let partial_flush = (synthesis.partial_flush_ms > 0)
+            .then(|| Duration::from_millis(synthesis.partial_flush_ms as u64));
+        let (tx, rx) = mpsc::channel::<String>(32);
+        (
+            SpeechPipeline {
+                tx,
+                sentences,
+                partial_flush,
+            },
+            rx,
+        )
+    }
+
     fn spawn_agent_task(
         &self,
         text: String,
@@ -282,17 +290,19 @@ impl AppState {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn drive_event_loop(
         self: Arc<Self>,
         id: String,
         mut llm_rx: mpsc::Receiver<LlmEvent>,
         tx: &mpsc::Sender<Event>,
-        speech_tx: mpsc::Sender<String>,
-        mut sentence_buf: SentenceBuffer,
-        partial_flush: Option<Duration>,
+        speech: SpeechPipeline,
         turn_id: Option<TurnId>,
     ) -> bool {
+        let SpeechPipeline {
+            tx: speech_tx,
+            sentences: mut sentence_buf,
+            partial_flush,
+        } = speech;
         let mut awaiting_tool_result = false;
 
         let mut assistant_accum = String::new();

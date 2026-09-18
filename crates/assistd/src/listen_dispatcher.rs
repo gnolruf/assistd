@@ -21,7 +21,6 @@ pub fn spawn(
     listener: Arc<dyn ContinuousListener>,
     presence: Arc<PresenceManager>,
     start_on_launch: bool,
-    pause_when_sleeping: bool,
     shutdown: watch::Receiver<bool>,
 ) -> ListenDispatcherHandles {
     let forwarder = tokio::spawn(run_utterance_forwarder(
@@ -33,7 +32,6 @@ pub fn spawn(
         listener,
         presence,
         start_on_launch,
-        pause_when_sleeping,
         shutdown,
     ));
     ListenDispatcherHandles {
@@ -165,24 +163,20 @@ async fn run_presence_gate(
     listener: Arc<dyn ContinuousListener>,
     presence: Arc<PresenceManager>,
     start_on_launch: bool,
-    pause_when_sleeping: bool,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut rx = presence.subscribe();
     if start_on_launch {
         let initial = *rx.borrow();
-        let should_start = !pause_when_sleeping || initial != PresenceState::Sleeping;
-        if should_start {
-            if let Err(e) = listener.start().await {
-                warn!(target: "assistd::listen", "start_on_launch failed: {e:#}");
-            } else {
-                info!(target: "assistd::listen", "continuous listening auto-started");
-            }
-        } else {
+        if initial == PresenceState::Sleeping {
             info!(
                 target: "assistd::listen",
-                "start_on_launch deferred: presence is {initial:?}, pause_when_sleeping = true"
+                "start_on_launch deferred: presence is {initial:?}"
             );
+        } else if let Err(e) = listener.start().await {
+            warn!(target: "assistd::listen", "start_on_launch failed: {e:#}");
+        } else {
+            info!(target: "assistd::listen", "continuous listening auto-started");
         }
     }
 
@@ -193,9 +187,6 @@ async fn run_presence_gate(
             changed = rx.changed() => {
                 if changed.is_err() {
                     return;
-                }
-                if !pause_when_sleeping {
-                    continue;
                 }
                 let new_state = *rx.borrow_and_update();
                 match new_state {

@@ -254,7 +254,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             voice.listener.clone(),
             presence.clone(),
             continuous_start_on_launch,
-            /* pause_when_sleeping = */ true,
             shutdown_tx.subscribe(),
         ))
     } else {
