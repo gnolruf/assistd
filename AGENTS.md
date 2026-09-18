@@ -36,6 +36,19 @@ Guidelines for AI agents (and humans) working in this repository.
   reference the task or PR that introduced the code, or leave
   "removed X" tombstones. If a comment only restates the code,
   delete it.
+- **Docs describe the contract, not the context.** A doc comment
+  says what the item does, its invariants, and when it errors. It
+  never describes who calls it, how another crate uses it, what
+  the code used to do, or which milestone, ticket, or acceptance
+  criterion produced it. Never cite another crate's file by path
+  or line number; those references rot silently. Document a
+  design decision once, on the item that embodies it, not in every
+  module that touches it. Module-level `//!` docs are one short
+  paragraph; the crate map lives in `docs/architecture.md`.
+- **Keep test modules from swamping the file.** When a
+  `#[cfg(test)]` module grows past the production code it tests,
+  move it to a sibling file (`foo/tests.rs` via
+  `#[cfg(test)] mod tests;`) so the source file stays readable.
 - **Stay minimal.** Don't add features, abstractions, or
   configuration knobs the task didn't ask for. A bug fix is a bug
   fix; bundling unrelated cleanup makes review harder. Three
