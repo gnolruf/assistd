@@ -14,9 +14,12 @@
 #![cfg(feature = "test-support")]
 
 use std::collections::VecDeque;
+use std::net::Ipv4Addr;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Duration;
 
+use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_llm::{LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome, Thinking};
 use serde_json::Value;
@@ -340,13 +343,12 @@ fn chat_spec(port: u16) -> ClientCfg {
     ClientCfg {
         chat: ChatConfig {
             system_prompt: "test system prompt".into(),
-            max_history_tokens: 10_000,
-            summary_target_tokens: 1000,
-            preserve_recent_turns: 2,
+            max_history_tokens: nz32(10_000),
+            summary_target_tokens: nz32(1000),
+            preserve_recent_turns: nz32(2),
             temperature: 0.5,
-            max_response_tokens: 256,
-            max_summary_tokens: 500,
-            request_timeout_secs: 5,
+            max_response_tokens: nz32(256),
+            request_timeout_secs: nz64(5),
             summary_temperature: 0.3,
             top_p: None,
             top_k: None,
@@ -355,10 +357,10 @@ fn chat_spec(port: u16) -> ClientCfg {
         },
         server: LlamaServerConfig {
             binary_path: "llama-server".into(),
-            host: "127.0.0.1".into(),
-            port,
+            host: Ipv4Addr::LOCALHOST.into(),
+            port: NonZeroU16::new(port).expect("bound port is never 0"),
             gpu_layers: 9999,
-            ready_timeout_secs: 60,
+            ready_timeout_secs: nz64(60),
             alias: None,
             override_tensor: None,
             flash_attn: None,
@@ -374,7 +376,7 @@ fn chat_spec(port: u16) -> ClientCfg {
         },
         model: ModelConfig {
             name: "test-model".into(),
-            context_length: 12_000,
+            context_length: nz32(12_000),
         },
         timeouts: TimeoutsConfig::default(),
     }
@@ -481,7 +483,7 @@ async fn connection_refused_returns_typed_error_not_panic() {
     drop(listener);
 
     let mut spec = chat_spec(port);
-    spec.chat.request_timeout_secs = 2;
+    spec.chat.request_timeout_secs = nz64(2);
     let client = build_client(&spec);
     let (tx, mut rx) = mpsc::channel(32);
     let result = client.generate("hi".into(), tx).await;
@@ -606,7 +608,7 @@ async fn slow_first_token_is_not_treated_as_a_stall() {
 
     let mut spec = chat_spec(port);
     spec.timeouts.stream_inactivity_secs = 1;
-    spec.chat.request_timeout_secs = 4;
+    spec.chat.request_timeout_secs = nz64(4);
     let client = build_client(&spec);
 
     let (tx, mut rx) = mpsc::channel(32);
@@ -715,9 +717,9 @@ async fn summarization_triggered_when_over_budget() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let mut spec = chat_spec(port);
-    spec.chat.max_history_tokens = 60;
-    spec.chat.summary_target_tokens = 15;
-    spec.chat.preserve_recent_turns = 1;
+    spec.chat.max_history_tokens = nz32(60);
+    spec.chat.summary_target_tokens = nz32(15);
+    spec.chat.preserve_recent_turns = nz32(1);
     let client = build_client(&spec);
 
     for i in 0..3 {
@@ -772,9 +774,9 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let mut spec = chat_spec(port);
-    spec.chat.max_history_tokens = 50;
-    spec.chat.summary_target_tokens = 10;
-    spec.chat.preserve_recent_turns = 1;
+    spec.chat.max_history_tokens = nz32(50);
+    spec.chat.summary_target_tokens = nz32(10);
+    spec.chat.preserve_recent_turns = nz32(1);
     let client = build_client(&spec);
 
     for i in 0..3 {
@@ -1158,7 +1160,7 @@ async fn request_timeout_surfaces_as_error() {
     });
 
     let mut spec = chat_spec(port);
-    spec.chat.request_timeout_secs = 1;
+    spec.chat.request_timeout_secs = nz64(1);
     let client = build_client(&spec);
     let (tx, _rx) = mpsc::channel(32);
     let result = client.generate("hi".into(), tx).await;
@@ -1234,7 +1236,8 @@ async fn complete_oneshot_uses_the_summary_budget() {
     let captured = script.captured().await;
     assert_eq!(captured.len(), 1);
     assert_eq!(
-        captured[0].body["max_tokens"], cfg.chat.max_summary_tokens,
+        captured[0].body["max_tokens"],
+        cfg.chat.max_summary_tokens(),
         "one-shot should use max_summary_tokens, not max_response_tokens"
     );
 }

@@ -75,49 +75,45 @@ async fn init_input(
     let is_gpu = primary.is_gpu();
     let primary: Arc<dyn Transcriber> = Arc::new(primary);
 
-    let transcriber: Arc<dyn Transcriber> =
-        if is_gpu && config.voice.transcription.cpu_fallback_enabled {
-            let probe = Arc::new(PresenceGpuProbe::new(
-                presence.clone(),
-                config.sleep.gpu_allowlist.clone(),
-            ));
-            let queue_cfg = QueueConfig {
-                gpu_busy_timeout_ms: config.voice.transcription.gpu_busy_timeout_ms,
-                cpu_fallback_enabled: config.voice.transcription.cpu_fallback_enabled,
-            };
-            let cpu_cfg = config.voice.transcription.clone();
-            let cpu_factory: assistd_voice::CpuFallbackFactory = Arc::new(move || {
-                let cfg = cpu_cfg.clone();
-                Box::pin(async move {
-                    let t = build_cpu_fallback(&cfg, None).await?;
-                    Ok(Arc::new(t) as Arc<dyn Transcriber>)
-                })
-            });
-            info!(
-                "voice: GPU transcription active; CPU fallback armed \
+    let queue_cfg = QueueConfig::default();
+    let transcriber: Arc<dyn Transcriber> = if is_gpu && queue_cfg.cpu_fallback_enabled {
+        let probe = Arc::new(PresenceGpuProbe::new(
+            presence.clone(),
+            config.sleep.gpu_allowlist.clone(),
+        ));
+        let cpu_cfg = config.voice.transcription.clone();
+        let cpu_factory: assistd_voice::CpuFallbackFactory = Arc::new(move || {
+            let cfg = cpu_cfg.clone();
+            Box::pin(async move {
+                let t = build_cpu_fallback(&cfg, None).await?;
+                Ok(Arc::new(t) as Arc<dyn Transcriber>)
+            })
+        });
+        info!(
+            "voice: GPU transcription active; CPU fallback armed \
                  (gpu_busy_timeout_ms={})",
-                queue_cfg.gpu_busy_timeout_ms
-            );
-            Arc::new(QueuedTranscriber::new(
-                primary.clone(),
-                true,
-                cpu_factory,
-                probe,
-                queue_cfg,
-            ))
+            queue_cfg.gpu_busy_timeout_ms
+        );
+        Arc::new(QueuedTranscriber::new(
+            primary.clone(),
+            true,
+            cpu_factory,
+            probe,
+            queue_cfg,
+        ))
+    } else {
+        if is_gpu {
+            info!("voice: GPU transcription active; CPU fallback disabled by config");
         } else {
-            if is_gpu {
-                info!("voice: GPU transcription active; CPU fallback disabled by config");
-            } else {
-                info!("voice: CPU transcription active");
-            }
-            primary.clone()
-        };
+            info!("voice: CPU transcription active");
+        }
+        primary.clone()
+    };
 
     let mic = MicVoiceInput::new(
         transcriber.clone(),
         config.voice.mic_device.clone(),
-        config.voice.max_recording_secs.max(1),
+        config.voice.max_recording_secs.get(),
     );
     let listener: Arc<dyn ContinuousListener> = if config.voice.continuous.enabled {
         info!(

@@ -9,7 +9,6 @@
 //! `subscribe.rs` owns.
 
 use anyhow::Result;
-use assistd_config::TrayConfig;
 use assistd_ipc::{Event, IpcClient, PresenceState, Request};
 use ksni::{
     Category, Status, ToolTip, Tray,
@@ -41,20 +40,17 @@ pub type ActivateCallback = Box<dyn Fn() + Send + Sync>;
 /// `Handle::update` and `Handle::shutdown` respectively.
 pub struct TrayItem {
     tracker: TrayTracker,
-    cfg: TrayConfig,
     actions: UnboundedSender<MenuAction>,
     on_activate: Option<ActivateCallback>,
 }
 
 impl TrayItem {
     pub fn new(
-        cfg: TrayConfig,
         actions: UnboundedSender<MenuAction>,
         on_activate: Option<ActivateCallback>,
     ) -> Self {
         Self {
             tracker: TrayTracker::default(),
-            cfg,
             actions,
             on_activate,
         }
@@ -103,7 +99,7 @@ impl Tray for TrayItem {
     }
 
     fn icon_name(&self) -> String {
-        icon_name_for(self.tracker.current(), &self.cfg).to_string()
+        icon_name_for(self.tracker.current()).to_string()
     }
 
     fn tool_tip(&self) -> ToolTip {

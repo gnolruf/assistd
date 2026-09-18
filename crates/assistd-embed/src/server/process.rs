@@ -32,7 +32,7 @@ impl ChildProcess {
             .arg("-ngl")
             .arg(cfg.gpu_layers.to_string())
             .arg("--host")
-            .arg(&cfg.host)
+            .arg(cfg.host.to_string())
             .arg("--port")
             .arg(cfg.port.to_string());
 

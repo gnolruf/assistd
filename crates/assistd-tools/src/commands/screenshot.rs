@@ -34,8 +34,7 @@ const TIMEOUT_EXIT: i32 = 137;
 /// child from filling memory if something goes badly wrong.
 const STDERR_TAIL_LINES: usize = 20;
 
-/// Configuration for the screenshot command. Built from `[tools.screenshot]`
-/// in the user's TOML config; see `assistd_config::ToolsScreenshotConfig`.
+/// Configuration for the screenshot command.
 #[derive(Debug, Clone)]
 pub struct ScreenshotPolicyCfg {
     /// Force a specific backend. `None` = auto-detect on every call.

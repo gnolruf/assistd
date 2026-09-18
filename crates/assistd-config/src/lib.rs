@@ -15,9 +15,13 @@
 //! `core → llm → core` cycle that previously forced us to mirror every
 //! config field into parallel `Spec` structs in `assistd-llm`.
 //!
-//! Every default value lives as a single `pub const` in [`defaults`]; the
-//! `#[serde(default = "…")]` helpers in each section module reference
-//! those constants so tests and config defaults can't drift apart.
+//! Every default value lives as a single `pub const` in [`defaults`],
+//! read by the owning section's `Default` impl, so tests and config
+//! defaults can't drift apart.
+//!
+//! Every section carries `#[serde(default, deny_unknown_fields)]`: an
+//! omitted key falls back to that `Default` impl, and a key the schema
+//! doesn't know is a parse error.
 
 pub mod chat;
 pub mod compositor;
@@ -31,7 +35,6 @@ pub mod mcp;
 pub mod memory;
 pub mod model;
 pub mod presence;
-pub mod remote;
 pub mod sleep;
 pub mod timeouts;
 pub mod tools;
@@ -45,11 +48,10 @@ pub use daemon::DaemonConfig;
 pub use embedding::EmbeddingConfig;
 pub use errors::ConfigError;
 pub use llama::LlamaServerConfig;
-pub use mcp::{McpConfig, McpServerConfig, McpTransport};
+pub use mcp::{McpConfig, McpServerConfig};
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;
 pub use presence::PresenceConfig;
-pub use remote::RemoteConfig;
 pub use sleep::SleepConfig;
 pub use timeouts::TimeoutsConfig;
 pub use tools::{

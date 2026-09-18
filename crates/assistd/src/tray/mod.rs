@@ -55,7 +55,7 @@ pub async fn run(args: TrayArgs) -> Result<()> {
 
     let (actions_tx, actions_rx) = mpsc::unbounded_channel();
     let activate_cb = build_activate_callback(&popup_sink);
-    let item = TrayItem::new(config.tray.clone(), actions_tx, activate_cb);
+    let item = TrayItem::new(actions_tx, activate_cb);
 
     let handle = item
         .assume_sni_available(true)

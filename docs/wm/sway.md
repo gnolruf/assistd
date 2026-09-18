@@ -135,9 +135,8 @@ bindsym $mod+Shift+Escape exec assistd sleep
 bindsym $mod+Shift+w      exec assistd wake
 ```
 
-`assistd sleep` will also suspend the machine if you set
-`[sleep] suspend = true` in `config.toml`; otherwise it just frees the
-GPU. `assistd wake` blocks until `llama-server` is back at `Active`.
+`assistd sleep` frees the GPU; it never suspends the machine.
+`assistd wake` blocks until `llama-server` is back at `Active`.
 
 ## TUI scratchpad
 

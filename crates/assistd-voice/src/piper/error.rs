@@ -40,11 +40,11 @@ pub enum PiperError {
     },
 
     #[error("piper binary '{binary}' not found on PATH")]
-    BinaryMissing { binary: String },
+    BinaryMissing { binary: PathBuf },
 
     #[error("failed to spawn piper at {binary}: {source}")]
     Spawn {
-        binary: String,
+        binary: PathBuf,
         #[source]
         source: std::io::Error,
     },

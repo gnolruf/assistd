@@ -1,26 +1,54 @@
 //! Centralised default values for every config field.
 //!
 //! Each constant is the single source of truth for its field: referenced
-//! both by the `#[serde(default = "...")]` helpers in the section modules
-//! and by tests that need to assert on defaults. Changing the literal
-//! here propagates everywhere with no drift.
+//! by the `Default` impl in the owning section module and by tests that
+//! assert on defaults. Changing the literal here propagates everywhere
+//! with no drift.
+
+use std::net::{IpAddr, Ipv4Addr};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
+use std::path::PathBuf;
+
+/// Build a `NonZero` from a literal, rejecting a zero at compile time
+/// rather than at config load.
+pub const fn nz16(v: u16) -> NonZeroU16 {
+    match NonZeroU16::new(v) {
+        Some(n) => n,
+        None => panic!("default must be non-zero"),
+    }
+}
+
+/// See [`nz16`].
+pub const fn nz32(v: u32) -> NonZeroU32 {
+    match NonZeroU32::new(v) {
+        Some(n) => n,
+        None => panic!("default must be non-zero"),
+    }
+}
+
+/// See [`nz16`].
+pub const fn nz64(v: u64) -> NonZeroU64 {
+    match NonZeroU64::new(v) {
+        Some(n) => n,
+        None => panic!("default must be non-zero"),
+    }
+}
 
 pub const DEFAULT_LLAMA_BINARY: &str = "llama-server";
-pub const DEFAULT_LLAMA_HOST: &str = "127.0.0.1";
-pub const DEFAULT_LLAMA_PORT: u16 = 8385;
+pub const DEFAULT_LLAMA_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+pub const DEFAULT_LLAMA_PORT: NonZeroU16 = nz16(8385);
 pub const DEFAULT_GPU_LAYERS: u32 = 9999;
-pub const DEFAULT_READY_TIMEOUT_SECS: u64 = 300;
+pub const DEFAULT_READY_TIMEOUT_SECS: NonZeroU64 = nz64(300);
 
 pub const DEFAULT_MODEL_NAME: &str = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M";
-pub const DEFAULT_MODEL_CONTEXT_LENGTH: u32 = 8192;
+pub const DEFAULT_MODEL_CONTEXT_LENGTH: NonZeroU32 = nz32(8192);
 
-pub const DEFAULT_CHAT_MAX_HISTORY_TOKENS: u32 = 6000;
-pub const DEFAULT_CHAT_SUMMARY_TARGET_TOKENS: u32 = 1000;
-pub const DEFAULT_CHAT_PRESERVE_RECENT_TURNS: u32 = 4;
+pub const DEFAULT_CHAT_MAX_HISTORY_TOKENS: NonZeroU32 = nz32(6000);
+pub const DEFAULT_CHAT_SUMMARY_TARGET_TOKENS: NonZeroU32 = nz32(1000);
+pub const DEFAULT_CHAT_PRESERVE_RECENT_TURNS: NonZeroU32 = nz32(4);
 pub const DEFAULT_CHAT_TEMPERATURE: f32 = 0.7;
-pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: u32 = 1024;
-pub const DEFAULT_CHAT_MAX_SUMMARY_TOKENS: u32 = 1200;
-pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: NonZeroU32 = nz32(1024);
+pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(120);
 pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
 /// Slim role-and-voice prose. Tool surface (native + MCP) is appended at
 /// daemon startup by `assistd_tools::prompt::format_tool_listing` and
@@ -36,27 +64,21 @@ pub const DEFAULT_VOICE_HOTKEY: &str = "Super+Space";
 /// hotkey past this is truncated to the first N seconds (the ring buffer
 /// drops newer samples once full). Also determines the buffer size
 /// pre-allocated when recording starts.
-pub const DEFAULT_VOICE_MAX_RECORDING_SECS: u32 = 60;
+pub const DEFAULT_VOICE_MAX_RECORDING_SECS: NonZeroU32 = nz32(60);
 
 pub const DEFAULT_WHISPER_MODEL: &str = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin";
 pub const DEFAULT_WHISPER_VAD_MODEL: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
 pub const DEFAULT_WHISPER_PREFER_GPU: bool = true;
-pub const DEFAULT_WHISPER_BEAMS: u32 = 1;
+pub const DEFAULT_WHISPER_BEAMS: NonZeroU32 = nz32(1);
 pub const DEFAULT_WHISPER_VAD_ENABLED: bool = true;
-pub const DEFAULT_WHISPER_VAD_SILENCE_SECS: f32 = 0.5;
-pub const DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS: u32 = 300;
-pub const DEFAULT_WHISPER_CPU_FALLBACK_ENABLED: bool = true;
 
 pub const DEFAULT_PIPER_ENABLED: bool = false;
 pub const DEFAULT_PIPER_BINARY: &str = "piper";
 pub const DEFAULT_PIPER_VOICE: &str =
     "rhasspy/piper-voices:en/en_US/lessac/medium/en_US-lessac-medium.onnx";
 pub const DEFAULT_PIPER_LENGTH_SCALE: f32 = 1.0;
-pub const DEFAULT_PIPER_NOISE_SCALE: f32 = 0.667;
-pub const DEFAULT_PIPER_NOISE_W: f32 = 0.8;
-pub const DEFAULT_PIPER_SENTENCE_SILENCE_SECS: f32 = 0.2;
-pub const DEFAULT_PIPER_DEADLINE_SECS: u32 = 30;
-pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: u32 = 400;
+pub const DEFAULT_PIPER_DEADLINE_SECS: NonZeroU32 = nz32(30);
+pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: NonZeroU32 = nz32(400);
 /// Idle gap (ms) between LLM deltas after which the sentence buffer is
 /// flushed even without a terminator. `0` disables the timeout flush;
 /// only the terminal `Done`-based flush is used. Inhibited while a tool
@@ -75,15 +97,8 @@ pub const DEFAULT_PIPER_SKIP_HOTKEY: &str = "";
 pub const DEFAULT_LISTEN_ENABLED: bool = false;
 pub const DEFAULT_LISTEN_START_ON_LAUNCH: bool = false;
 pub const DEFAULT_LISTEN_HOTKEY: &str = "";
-pub const DEFAULT_LISTEN_SILENCE_MS: u32 = 800;
-pub const DEFAULT_LISTEN_MIN_UTTERANCE_MS: u32 = 400;
-pub const DEFAULT_LISTEN_MAX_UTTERANCE_SECS: u32 = 30;
-pub const DEFAULT_LISTEN_PREROLL_MS: u32 = 300;
-pub const DEFAULT_LISTEN_ONSET_CONFIRM_MS: u32 = 60;
-pub const DEFAULT_LISTEN_AGGRESSIVENESS: u8 = 3;
-
-pub const DEFAULT_REMOTE_BIND_ADDRESS: &str = "127.0.0.1";
-pub const DEFAULT_REMOTE_PORT: u16 = 8384;
+pub const DEFAULT_LISTEN_SILENCE_MS: NonZeroU32 = nz32(800);
+pub const DEFAULT_LISTEN_MAX_UTTERANCE_SECS: NonZeroU32 = nz32(30);
 
 pub const DEFAULT_PRESENCE_HOTKEY: &str = "Super+Escape";
 
@@ -97,37 +112,30 @@ pub const DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS: u64 = 30;
 pub const DEFAULT_IDLE_TO_DROWSY_MINS: u64 = 30;
 pub const DEFAULT_IDLE_TO_SLEEP_MINS: u64 = 120;
 pub const DEFAULT_GPU_MONITOR_ENABLED: bool = true;
-pub const DEFAULT_GPU_POLL_SECS: u64 = 5;
-pub const DEFAULT_GPU_VRAM_THRESHOLD_MB: u64 = 2048;
+pub const DEFAULT_GPU_POLL_SECS: NonZeroU64 = nz64(5);
+pub const DEFAULT_GPU_VRAM_THRESHOLD_MB: NonZeroU64 = nz64(2048);
 
-pub const DEFAULT_TOOLS_MAX_LINES: u32 = 200;
-pub const DEFAULT_TOOLS_MAX_KB: u32 = 50;
+pub const DEFAULT_TOOLS_MAX_LINES: NonZeroU32 = nz32(200);
+pub const DEFAULT_TOOLS_MAX_KB: NonZeroU32 = nz32(50);
 pub const DEFAULT_TOOLS_OVERFLOW_DIR: &str = "/tmp/assistd-output";
-pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 30;
-pub const DEFAULT_SCREENSHOT_TIMEOUT_SECS: u64 = 5;
+pub const DEFAULT_BASH_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 
 pub const DEFAULT_MEMORY_ENABLED: bool = true;
-/// `0` means keep forever. The retention sweeper isn't shipped yet; the
-/// field exists so future work doesn't need a schema-version bump.
-pub const DEFAULT_MEMORY_RETENTION_DAYS: u32 = 0;
 
 pub const DEFAULT_EMBEDDING_ENABLED: bool = true;
 /// HuggingFace id passed verbatim to the embed server's `--hf-repo`.
-/// 768-dim, ~140 MB Q4, strong retrieval quality on conversational text.
-pub const DEFAULT_EMBEDDING_MODEL: &str =
-    "nomic-ai/nomic-embed-text-v1.5-GGUF:nomic-embed-text-v1.5.Q4_K_M.gguf";
-pub const DEFAULT_EMBEDDING_HOST: &str = "127.0.0.1";
-/// Distinct from `DEFAULT_LLAMA_PORT` (8385) and `DEFAULT_REMOTE_PORT`
-/// (8384). Validated for collisions in `Config::validate()`.
-pub const DEFAULT_EMBEDDING_PORT: u16 = 8386;
+/// The `:` suffix must be a quant tag, not a `.gguf` filename: llama-server
+/// resolves it against its preset manifest and a filename fails with a
+/// misleading "no GGUF files found". 768-dim, ~140 MB Q4.
+pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M";
+pub const DEFAULT_EMBEDDING_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+/// Distinct from `DEFAULT_LLAMA_PORT` (8385). Validated for collisions in
+/// `Config::validate()`.
+pub const DEFAULT_EMBEDDING_PORT: NonZeroU16 = nz16(8386);
 /// CPU-only by default: small embedders are CPU-fast, and pinning them
 /// off the GPU prevents VRAM contention with the chat model.
 pub const DEFAULT_EMBEDDING_GPU_LAYERS: u32 = 0;
-pub const DEFAULT_EMBEDDING_READY_TIMEOUT_SECS: u64 = 300;
-pub const DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS: u64 = 30;
-pub const DEFAULT_EMBEDDING_TOP_K: u32 = 5;
-pub const DEFAULT_EMBEDDING_CHUNK_CHARS: usize = 512;
-pub const DEFAULT_EMBEDDING_CHUNK_OVERLAP: usize = 64;
+pub const DEFAULT_EMBEDDING_TOP_K: NonZeroU32 = nz32(5);
 pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 
 /// MCP (Model Context Protocol), opt-in. Existing users on upgrade
@@ -135,23 +143,7 @@ pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 /// noise-free. They flip `enabled = true` when they add their first
 /// `[[mcp.servers]]` block.
 pub const DEFAULT_MCP_ENABLED: bool = false;
-pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: u64 = 30;
-/// SSE-only. Catches a server that holds the SSE socket open while
-/// sitting wedged. Per-read deadline applied via `reqwest::ClientBuilder::read_timeout`.
-pub const DEFAULT_MCP_SSE_READ_TIMEOUT_SECS: u64 = 30;
-/// SSE-only. Period of the separate ping task that detects "socket
-/// open but server not processing requests".
-pub const DEFAULT_MCP_SSE_PING_INTERVAL_SECS: u64 = 15;
-
-/// System-tray icon-theme names. Picked to be present in every major
-/// icon theme (Adwaita, Breeze, Papirus) so a fresh install shows
-/// recognizable icons without shipping any image assets in the repo.
-pub const DEFAULT_TRAY_ICON_ACTIVE: &str = "user-available";
-pub const DEFAULT_TRAY_ICON_DROWSY: &str = "user-away";
-pub const DEFAULT_TRAY_ICON_SLEEPING: &str = "user-offline";
-pub const DEFAULT_TRAY_ICON_LISTENING: &str = "audio-input-microphone";
-pub const DEFAULT_TRAY_ICON_GENERATING: &str = "system-run";
-pub const DEFAULT_TRAY_ICON_DISCONNECTED: &str = "network-offline";
+pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 
 /// Borderless floating popup spawned by `assistd tray` (feature
 /// `tray-popup`). Geometry is in CSS pixels at the compositor's logical
@@ -165,11 +157,6 @@ pub const DEFAULT_TRAY_POPUP_HEIGHT: u32 = 120;
 pub const DEFAULT_TRAY_POPUP_OFFSET_X: i32 = -10;
 pub const DEFAULT_TRAY_POPUP_OFFSET_Y: i32 = 10;
 pub const DEFAULT_TRAY_POPUP_AUTO_HIDE_MS: u64 = 3000;
-/// Idle timeout used while the daemon's continuous listener is active.
-/// The popup gives the user a longer hands-free window to verbally
-/// reply before dismissing itself.
-pub const DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS: u64 = 10000;
-pub const DEFAULT_TRAY_POPUP_TRUNCATE_CHARS: usize = 300;
 /// X11 `WM_CLASS` and Wayland `app_id` of the popup window. The popup
 /// GUI builder sets it; the `[app_id="…"]` placement criteria sent
 /// through `assistd-wm` matches against it. Not exposed in
@@ -191,19 +178,15 @@ pub const DEFAULT_TRAY_POPUP_WAKE_ERROR: bool = true;
 ///
 /// Resolves to `$XDG_DATA_HOME/assistd/memory.db` when set and non-empty,
 /// otherwise `$HOME/.local/share/assistd/memory.db`.
-pub fn default_memory_db_path() -> String {
+pub fn default_memory_db_path() -> PathBuf {
     let data_dir = match std::env::var_os("XDG_DATA_HOME") {
-        Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => {
             let home = std::env::var_os("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".local/share")
+            PathBuf::from(home).join(".local/share")
         }
     };
-    data_dir
-        .join("assistd")
-        .join("memory.db")
-        .to_string_lossy()
-        .into_owned()
+    data_dir.join("assistd").join("memory.db")
 }
 
 /// Returns the default GPU contention allowlist of process basenames that never trigger sleep.

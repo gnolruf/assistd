@@ -1481,7 +1481,7 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(SleepTool { ms: 300 });
         let mut cfg = config_with_partial_flush(50);
-        cfg.voice.synthesis.max_sentence_chars = 400;
+        cfg.voice.synthesis.max_sentence_chars = assistd_config::defaults::nz32(400);
         let state = Arc::new(AppState::new(
             cfg,
             backend,

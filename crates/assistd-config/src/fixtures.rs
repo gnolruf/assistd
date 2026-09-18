@@ -6,8 +6,9 @@
 
 use crate::top::Config;
 
-/// Canonical minimal TOML covering every required section. Test modules
-/// that need to exercise a specific field can either mutate the parsed
+/// Canonical minimal TOML. Every section is `#[serde(default)]`, so this
+/// carries only the handful of overrides tests rely on. Test modules that
+/// need to exercise a specific field can either mutate the parsed
 /// [`minimal`] instance, or `format!` additional `[section]` blocks onto
 /// the end of this string.
 pub fn minimal_toml() -> &'static str {

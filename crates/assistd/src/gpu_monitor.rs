@@ -67,24 +67,6 @@ pub(crate) struct ProcSample {
     pub(crate) name: String,
 }
 
-/// Pre-flight check called from daemon startup, mirroring
-/// [`crate::hotkey::validate`]. Does NOT probe NVML; hardware absence
-/// is handled at spawn time, not treated as a config error.
-pub fn validate(cfg: &SleepConfig) -> Result<()> {
-    if !cfg.gpu_monitor_enabled {
-        return Ok(());
-    }
-    if cfg.gpu_poll_secs == 0 {
-        anyhow::bail!("sleep.gpu_poll_secs must be greater than 0 when gpu_monitor_enabled");
-    }
-    if cfg.gpu_vram_threshold_mb == 0 {
-        anyhow::bail!(
-            "sleep.gpu_vram_threshold_mb must be greater than 0 when gpu_monitor_enabled"
-        );
-    }
-    Ok(())
-}
-
 /// Spawn the GPU contention monitor. Returns `None` when the feature is
 /// disabled in config or when `Nvml::init()` fails, the same idiom as
 /// [`crate::hotkey::spawn_listener`]. Logs once in either case.
@@ -146,7 +128,7 @@ async fn run_monitor(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let self_pid = std::process::id();
-    let mut tick = tokio::time::interval(Duration::from_secs(cfg.gpu_poll_secs));
+    let mut tick = tokio::time::interval(Duration::from_secs(cfg.gpu_poll_secs.get()));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut sub = presence.subscribe();
@@ -243,7 +225,7 @@ fn decide(
     let trigger = samples.iter().find(|s| {
         let denied = cfg.gpu_denylist.iter().any(|n| n == &s.name);
         let allowed = cfg.gpu_allowlist.iter().any(|n| n == &s.name);
-        denied || (s.used_mb >= cfg.gpu_vram_threshold_mb && !allowed)
+        denied || (s.used_mb >= cfg.gpu_vram_threshold_mb.get() && !allowed)
     });
 
     match (state, trigger, cause) {
@@ -308,15 +290,15 @@ fn read_comm(pid: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assistd_config::defaults::nz64;
 
     fn cfg() -> SleepConfig {
         SleepConfig {
             idle_to_drowsy_mins: 30,
             idle_to_sleep_mins: 120,
-            suspend: false,
             gpu_monitor_enabled: true,
-            gpu_poll_secs: 5,
-            gpu_vram_threshold_mb: 2048,
+            gpu_poll_secs: nz64(5),
+            gpu_vram_threshold_mb: nz64(2048),
             gpu_auto_wake: false,
             gpu_allowlist: vec!["Xorg".into(), "firefox".into()],
             gpu_denylist: Vec::new(),
@@ -329,33 +311,6 @@ mod tests {
             used_mb,
             name: name.into(),
         }
-    }
-
-    // --- validate -----------------------------------------------------
-
-    #[test]
-    fn validate_disabled_is_ok() {
-        let mut c = cfg();
-        c.gpu_monitor_enabled = false;
-        c.gpu_poll_secs = 0;
-        c.gpu_vram_threshold_mb = 0;
-        validate(&c).expect("disabled monitor tolerates zero fields");
-    }
-
-    #[test]
-    fn validate_enabled_rejects_zero_poll() {
-        let mut c = cfg();
-        c.gpu_poll_secs = 0;
-        let err = validate(&c).unwrap_err();
-        assert!(err.to_string().contains("gpu_poll_secs"));
-    }
-
-    #[test]
-    fn validate_enabled_rejects_zero_threshold() {
-        let mut c = cfg();
-        c.gpu_vram_threshold_mb = 0;
-        let err = validate(&c).unwrap_err();
-        assert!(err.to_string().contains("gpu_vram_threshold_mb"));
     }
 
     // --- decide: Active/Drowsy + trigger → Sleep ---------------------

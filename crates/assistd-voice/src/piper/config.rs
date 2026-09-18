@@ -3,6 +3,13 @@ use std::time::Duration;
 
 use crate::piper::cache::VoiceFiles;
 
+/// Sampling noise scale, at the value upstream recommends.
+pub const NOISE_SCALE: f32 = 0.667;
+/// Phoneme noise scale, at the value upstream recommends.
+pub const NOISE_W: f32 = 0.8;
+/// Trailing silence Piper inserts after each utterance, in seconds.
+pub const SENTENCE_SILENCE_SECS: f32 = 0.2;
+
 /// Resolved, ready-to-spawn Piper configuration. Built once at startup
 /// from `assistd_config::SynthesisConfig` plus the on-disk voice files
 /// returned by [`crate::piper::cache::ensure_voice`]. Cloning is cheap
@@ -11,7 +18,7 @@ use crate::piper::cache::VoiceFiles;
 /// reads from it without locking.
 #[derive(Debug, Clone)]
 pub struct PiperRuntimeConfig {
-    pub binary_path: String,
+    pub binary_path: PathBuf,
     pub voice_files: VoiceFiles,
     pub length_scale: f32,
     pub noise_scale: f32,

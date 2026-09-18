@@ -5,7 +5,6 @@
 
 use std::collections::HashSet;
 
-use assistd_config::TrayConfig;
 use assistd_ipc::{Event, PresenceState};
 
 /// What the tray icon should currently display.
@@ -113,15 +112,16 @@ impl TrayTracker {
     }
 }
 
-/// Map a resolved state to the freedesktop icon-theme name configured
-/// for it.
-pub fn icon_name_for(state: TrayState, cfg: &TrayConfig) -> &str {
+/// Map a resolved state to its freedesktop icon-theme name. These names
+/// are present in every major theme (Adwaita, Breeze, Papirus), so a
+/// fresh install shows recognizable icons with no image assets shipped.
+pub fn icon_name_for(state: TrayState) -> &'static str {
     match state {
-        TrayState::Disconnected => &cfg.icon_disconnected,
-        TrayState::Generating => &cfg.icon_generating,
-        TrayState::Listening => &cfg.icon_listening,
-        TrayState::Active => &cfg.icon_active,
-        TrayState::Sleeping => &cfg.icon_sleeping,
+        TrayState::Disconnected => "network-offline",
+        TrayState::Generating => "system-run",
+        TrayState::Listening => "audio-input-microphone",
+        TrayState::Active => "user-available",
+        TrayState::Sleeping => "user-offline",
     }
 }
 
@@ -284,16 +284,18 @@ mod tests {
     }
 
     #[test]
-    fn icon_name_for_threads_through_config() {
-        let cfg = TrayConfig::default();
-        assert_eq!(icon_name_for(TrayState::Active, &cfg), &cfg.icon_active);
-        assert_eq!(
-            icon_name_for(TrayState::Disconnected, &cfg),
-            &cfg.icon_disconnected
-        );
-        assert_eq!(
-            icon_name_for(TrayState::Generating, &cfg),
-            &cfg.icon_generating
-        );
+    fn every_state_maps_to_a_distinct_icon() {
+        let names: Vec<_> = [
+            TrayState::Disconnected,
+            TrayState::Generating,
+            TrayState::Listening,
+            TrayState::Active,
+            TrayState::Sleeping,
+        ]
+        .into_iter()
+        .map(icon_name_for)
+        .collect();
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "{names:?}");
     }
 }

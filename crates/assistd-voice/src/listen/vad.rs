@@ -57,29 +57,35 @@ pub struct VadTuning {
     pub aggressiveness: u8,
 }
 
+/// Utterances shorter than this are dropped without transcription;
+/// filters clicks and single-phoneme bursts.
+const MIN_UTTERANCE_MS: u32 = 400;
+/// Audio kept in a rolling pre-roll ring and prepended to a new utterance
+/// so the first syllable isn't clipped between onset confirmation and
+/// buffer start.
+const PREROLL_MS: u32 = 300;
+/// Consecutive voiced-frame duration needed to confirm speech onset.
+/// Guards against single-frame noise spikes (keyboard clicks, fan pops).
+const ONSET_CONFIRM_MS: u32 = 60;
+/// webrtc-vad's most selective mode. Anything lower admits keyboard and
+/// fan noise as speech on a desktop mic.
+const AGGRESSIVENESS: u8 = 3;
+
 impl VadTuning {
-    /// Construct [`VadTuning`] from millisecond/second config values, converting
-    /// each to whole-frame counts (one frame = 20 ms). Aggressiveness is clamped
-    /// to `[0, 3]` matching webrtc-vad's accepted range.
-    pub fn from_ms(
-        silence_ms: u32,
-        min_utterance_ms: u32,
-        max_utterance_secs: u32,
-        preroll_ms: u32,
-        onset_confirm_ms: u32,
-        aggressiveness: u8,
-    ) -> Self {
+    /// Construct [`VadTuning`] from the two configurable values, converting
+    /// each to whole-frame counts (one frame = 20 ms).
+    pub fn from_ms(silence_ms: u32, max_utterance_secs: u32) -> Self {
         let frame_ms = 20u32;
         Self {
-            onset_confirm_frames: onset_confirm_ms.div_ceil(frame_ms).max(1),
+            onset_confirm_frames: ONSET_CONFIRM_MS.div_ceil(frame_ms).max(1),
             offset_frames: silence_ms.div_ceil(frame_ms).max(1),
-            min_utterance_frames: min_utterance_ms.div_ceil(frame_ms).max(1),
+            min_utterance_frames: MIN_UTTERANCE_MS.div_ceil(frame_ms).max(1),
             max_utterance_frames: max_utterance_secs
                 .saturating_mul(1000)
                 .div_ceil(frame_ms)
                 .max(1),
-            preroll_frames: preroll_ms.div_ceil(frame_ms),
-            aggressiveness: aggressiveness.min(3),
+            preroll_frames: PREROLL_MS.div_ceil(frame_ms),
+            aggressiveness: AGGRESSIVENESS,
         }
     }
 }
@@ -419,18 +425,23 @@ mod tests {
 
     #[test]
     fn vad_tuning_from_ms_rounds_up() {
-        let t = VadTuning::from_ms(800, 400, 30, 300, 60, 3);
+        let t = VadTuning::from_ms(800, 30);
         assert_eq!(t.offset_frames, 40); // 800 / 20
-        assert_eq!(t.min_utterance_frames, 20); // 400 / 20
         assert_eq!(t.max_utterance_frames, 1500); // 30000 / 20
-        assert_eq!(t.preroll_frames, 15); // 300 / 20
-        assert_eq!(t.onset_confirm_frames, 3); // 60 / 20
-        assert_eq!(t.aggressiveness, 3);
+        assert_eq!(t.min_utterance_frames, MIN_UTTERANCE_MS.div_ceil(20));
+        assert_eq!(t.preroll_frames, PREROLL_MS.div_ceil(20));
+        assert_eq!(t.onset_confirm_frames, ONSET_CONFIRM_MS.div_ceil(20));
+        assert_eq!(t.aggressiveness, AGGRESSIVENESS);
     }
 
     #[test]
-    fn vad_tuning_clamps_aggressiveness() {
-        let t = VadTuning::from_ms(800, 400, 30, 300, 60, 99);
-        assert_eq!(t.aggressiveness, 3);
+    fn vad_tuning_never_yields_a_zero_frame_window() {
+        // Sub-frame inputs must still round up to one frame, or the
+        // segmenter would never confirm an onset or an offset.
+        let t = VadTuning::from_ms(1, 0);
+        assert_eq!(t.offset_frames, 1);
+        assert_eq!(t.max_utterance_frames, 1);
+        assert!(t.min_utterance_frames >= 1);
+        assert!(t.onset_confirm_frames >= 1);
     }
 }

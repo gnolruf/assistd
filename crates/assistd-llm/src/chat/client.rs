@@ -16,6 +16,7 @@
 //! `step` again, until `StepOutcome::Final`.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,7 +84,7 @@ impl LlamaChatClient {
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(chat.request_timeout_secs))
+            .timeout(Duration::from_secs(chat.request_timeout_secs.get()))
             .build()?;
         let base_url = format!("http://{}:{}", server.host, server.port);
         let conv = Conversation::new(chat.system_prompt.clone());
@@ -187,7 +188,7 @@ impl LlamaChatClient {
         let mut reader = SseLineReader::new();
         let mut accum = StreamAccum::default();
         let mut saw_done = false;
-        let first_byte = Duration::from_secs(self.chat.request_timeout_secs);
+        let first_byte = Duration::from_secs(self.chat.request_timeout_secs.get());
         let inter_chunk = Duration::from_secs(self.timeouts.stream_inactivity_secs);
         let mut saw_bytes = false;
 
@@ -385,9 +386,9 @@ impl LlmBackend for LlamaChatClient {
                 messages: wire_messages,
                 stream: true,
                 temperature: self.chat.temperature,
-                max_tokens: self.chat.max_response_tokens,
+                max_tokens: self.chat.max_response_tokens.get(),
                 top_p: self.chat.top_p,
-                top_k: self.chat.top_k,
+                top_k: self.chat.top_k.map(NonZeroU32::get),
                 min_p: self.chat.min_p,
                 presence_penalty: self.chat.presence_penalty,
                 tools: None,
@@ -480,9 +481,9 @@ impl LlmBackend for LlamaChatClient {
                 messages: wire_messages,
                 stream: true,
                 temperature: self.chat.temperature,
-                max_tokens: self.chat.max_response_tokens,
+                max_tokens: self.chat.max_response_tokens.get(),
                 top_p: self.chat.top_p,
-                top_k: self.chat.top_k,
+                top_k: self.chat.top_k.map(NonZeroU32::get),
                 min_p: self.chat.min_p,
                 presence_penalty: self.chat.presence_penalty,
                 tools: if has_tools { Some(tools) } else { None },
@@ -606,9 +607,9 @@ impl LlmBackend for LlamaChatClient {
                 }],
                 stream: true,
                 temperature: self.chat.temperature,
-                max_tokens: self.chat.max_summary_tokens,
+                max_tokens: self.chat.max_summary_tokens(),
                 top_p: self.chat.top_p,
-                top_k: self.chat.top_k,
+                top_k: self.chat.top_k.map(NonZeroU32::get),
                 min_p: self.chat.min_p,
                 presence_penalty: self.chat.presence_penalty,
                 tools: None,

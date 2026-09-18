@@ -33,7 +33,7 @@ impl ChildProcess {
             .arg("-ngl")
             .arg(cfg.gpu_layers.to_string())
             .arg("--host")
-            .arg(&cfg.host)
+            .arg(cfg.host.to_string())
             .arg("--port")
             .arg(cfg.port.to_string())
             .arg("-c")
@@ -130,7 +130,7 @@ impl ChildProcess {
             target: "assistd::llama_server",
             pid = child.id(),
             "spawned llama-server (router mode): {} -ngl {} --host {} --port {} -c {} (model {} loaded on demand)",
-            cfg.binary_path,
+            cfg.binary_path.display(),
             cfg.gpu_layers,
             cfg.host,
             cfg.port,

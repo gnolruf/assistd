@@ -63,7 +63,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
     hotkey::validate(&config.presence, &config.voice)?;
-    gpu_monitor::validate(&config.sleep)?;
     idle_monitor::validate(&config.sleep)?;
     assistd_voice::mic_validate(&config.voice)?;
 
@@ -97,15 +96,14 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     assistd_core::install_panic_hook(Arc::downgrade(&presence));
 
+    let llama_host = config.llama_server.host.to_string();
+    let llama_port = config.llama_server.port.get();
     let initial_vision_state = {
-        let control = assistd_llm::LlamaServerControl::new(
-            &config.llama_server.host,
-            config.llama_server.port,
-        )
-        .context("failed to construct llama-server control client for vision probe")?;
+        let control = assistd_llm::LlamaServerControl::new(&llama_host, llama_port)
+            .context("failed to construct llama-server control client for vision probe")?;
         assistd_llm::probe_capabilities_routed(
-            &config.llama_server.host,
-            config.llama_server.port,
+            &llama_host,
+            llama_port,
             &config.model.name,
             &control,
         )
@@ -120,8 +118,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let vision_revalidator = assistd_core::VisionRevalidator::new(
         vision_gate.clone(),
         initial_vision_state.model_id,
-        config.llama_server.host.clone(),
-        config.llama_server.port,
+        llama_host.clone(),
+        llama_port,
         config.model.name.clone(),
     );
 

@@ -1,7 +1,10 @@
+use std::num::{NonZeroU32, NonZeroU64};
+use std::path::PathBuf;
+
 use crate::defaults::{
-    DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_SCREENSHOT_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB,
-    DEFAULT_TOOLS_MAX_LINES, DEFAULT_TOOLS_OVERFLOW_DIR, default_bash_denylist,
-    default_bash_destructive_patterns, default_writable_paths,
+    DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
+    DEFAULT_TOOLS_OVERFLOW_DIR, default_bash_denylist, default_bash_destructive_patterns,
+    default_writable_paths,
 };
 use serde::{Deserialize, Serialize};
 
@@ -9,35 +12,30 @@ use serde::{Deserialize, Serialize};
 /// knobs (sandboxing, per-command timeouts, etc.) can slot in alongside the
 /// output-presentation limits.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
     /// Output presentation limits applied before handing results to the LLM.
-    #[serde(default)]
     pub output: ToolsOutputConfig,
     /// Bash command execution policy (timeout, denylist, sandbox mode).
-    #[serde(default)]
     pub bash: ToolsBashConfig,
     /// File-write command policy (allowlist of writable path prefixes).
-    #[serde(default)]
     pub write: ToolsWriteConfig,
     /// Screenshot capture settings (backend selector, timeout).
-    #[serde(default)]
     pub screenshot: ToolsScreenshotConfig,
 }
 
 /// Layer-2 presentation limits applied to the final output of `run` before
 /// it is handed to the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ToolsOutputConfig {
     /// Max lines of stdout surfaced to the LLM before overflow spill.
-    #[serde(default = "default_tools_max_lines")]
-    pub max_lines: u32,
+    pub max_lines: NonZeroU32,
     /// Max bytes of the truncated head, in KB.
-    #[serde(default = "default_tools_max_kb")]
-    pub max_kb: u32,
+    pub max_kb: NonZeroU32,
     /// Directory where overflow output is spilled as `cmd-<n>.txt`.
     /// Cleared + recreated on daemon startup.
-    #[serde(default = "default_tools_overflow_dir")]
-    pub overflow_dir: String,
+    pub overflow_dir: PathBuf,
 }
 
 impl Default for ToolsOutputConfig {
@@ -45,7 +43,7 @@ impl Default for ToolsOutputConfig {
         Self {
             max_lines: DEFAULT_TOOLS_MAX_LINES,
             max_kb: DEFAULT_TOOLS_MAX_KB,
-            overflow_dir: DEFAULT_TOOLS_OVERFLOW_DIR.to_string(),
+            overflow_dir: DEFAULT_TOOLS_OVERFLOW_DIR.into(),
         }
     }
 }
@@ -53,20 +51,8 @@ impl Default for ToolsOutputConfig {
 impl ToolsOutputConfig {
     /// `max_kb` expressed in bytes, ready to pass to the presentation layer.
     pub fn max_bytes(&self) -> usize {
-        (self.max_kb as usize) * 1024
+        (self.max_kb.get() as usize) * 1024
     }
-}
-
-fn default_tools_max_lines() -> u32 {
-    DEFAULT_TOOLS_MAX_LINES
-}
-
-fn default_tools_max_kb() -> u32 {
-    DEFAULT_TOOLS_MAX_KB
-}
-
-fn default_tools_overflow_dir() -> String {
-    DEFAULT_TOOLS_OVERFLOW_DIR.to_string()
 }
 
 /// Sandbox mode for bash subprocess execution.
@@ -93,30 +79,26 @@ pub enum BashSandboxMode {
 /// command substitution). The denylist and destructive patterns are a
 /// backstop for the *obvious* cases; the sandbox is the real defense.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ToolsBashConfig {
     /// Subprocess timeout in seconds. Must be > 0. Exceeding the timeout
     /// kills the process group and returns exit 137.
-    #[serde(default = "default_bash_timeout_secs")]
-    pub timeout_secs: u64,
+    pub timeout_secs: NonZeroU64,
     /// Literal substrings that, if present in a bash script (case-insensitive),
     /// cause immediate rejection before spawn. Use for patterns that should
     /// never be executed under any circumstances.
-    #[serde(default = "default_bash_denylist_fn")]
     pub denylist: Vec<String>,
     /// Shell-tokenized word prefixes that trigger interactive confirmation
     /// before executing (when a confirmation gate is wired up) or reject by
     /// default over IPC. Example: `"rm -rf"` matches `rm -rf foo` but not
     /// `echo "rm -rf"`.
-    #[serde(default = "default_bash_destructive_patterns_fn")]
     pub destructive_patterns: Vec<String>,
     /// Sandbox mode. See [`BashSandboxMode`].
-    #[serde(default)]
     pub sandbox: BashSandboxMode,
     /// Extra arguments appended to the bubblewrap invocation (before the
     /// trailing `--`). Useful for widening binds (e.g.
     /// `["--bind", "/srv", "/srv"]`) or tightening the sandbox (e.g.
     /// `["--unshare-net"]`).
-    #[serde(default)]
     pub bwrap_extra_args: Vec<String>,
 }
 
@@ -132,18 +114,6 @@ impl Default for ToolsBashConfig {
     }
 }
 
-fn default_bash_timeout_secs() -> u64 {
-    DEFAULT_BASH_TIMEOUT_SECS
-}
-
-fn default_bash_denylist_fn() -> Vec<String> {
-    default_bash_denylist()
-}
-
-fn default_bash_destructive_patterns_fn() -> Vec<String> {
-    default_bash_destructive_patterns()
-}
-
 /// Write-command policy: the allowlist of path prefixes under which the
 /// `write` command is permitted to create or overwrite files. Attempts
 /// outside every entry return exit 126.
@@ -152,9 +122,9 @@ fn default_bash_destructive_patterns_fn() -> Vec<String> {
 /// because the daemon's cwd is not a meaningful anchor. Non-existent
 /// allowlist entries are dropped with a warning at daemon startup.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ToolsWriteConfig {
     /// Path prefixes (supporting `~` expansion) under which the `write` command may operate.
-    #[serde(default = "default_writable_paths_fn")]
     pub writable_paths: Vec<String>,
 }
 
@@ -164,10 +134,6 @@ impl Default for ToolsWriteConfig {
             writable_paths: default_writable_paths(),
         }
     }
-}
-
-fn default_writable_paths_fn() -> Vec<String> {
-    default_writable_paths()
 }
 
 /// Screenshot capture backend selector. `Auto` picks Wayland when
@@ -182,29 +148,11 @@ pub enum ScreenshotBackend {
     Wayland,
 }
 
-/// Screenshot-command policy: which capture backend to use and how long
-/// to wait before giving up. Bytes are kept in memory and never written
+/// Screenshot-command policy. Bytes are kept in memory and never written
 /// to disk by this command.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ToolsScreenshotConfig {
     /// Which capture backend to use.
-    #[serde(default)]
     pub backend: ScreenshotBackend,
-    /// Capture subprocess timeout in seconds. Must be > 0. Exceeding the
-    /// timeout kills the process group and returns exit 137.
-    #[serde(default = "default_screenshot_timeout_secs")]
-    pub timeout_secs: u64,
-}
-
-impl Default for ToolsScreenshotConfig {
-    fn default() -> Self {
-        Self {
-            backend: ScreenshotBackend::default(),
-            timeout_secs: DEFAULT_SCREENSHOT_TIMEOUT_SECS,
-        }
-    }
-}
-
-fn default_screenshot_timeout_secs() -> u64 {
-    DEFAULT_SCREENSHOT_TIMEOUT_SECS
 }

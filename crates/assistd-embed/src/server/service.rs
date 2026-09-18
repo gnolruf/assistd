@@ -4,6 +4,7 @@ use super::supervisor::Supervisor;
 use assistd_config::EmbeddingConfig;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -38,9 +39,13 @@ impl EmbedService {
     /// Spawn the supervisor and block until the child reports `Ready` or
     /// the supervisor enters `Degraded`. Errors are surfaced via
     /// [`EmbedServerError`].
+    /// `ready_timeout` is the backstop on the child reporting healthy.
+    /// Callers pass `llama_server.ready_timeout_secs`, shared with the
+    /// chat server.
     #[tracing::instrument(skip(cfg, shutdown_rx), fields(host = %cfg.host, port = cfg.port))]
     pub async fn start(
         cfg: EmbeddingConfig,
+        ready_timeout: Duration,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Result<Self, EmbedServerError> {
         let (ready_tx, mut ready_rx) = watch::channel(ReadyState::Starting);
@@ -48,6 +53,7 @@ impl EmbedService {
 
         let supervisor = Supervisor {
             cfg,
+            ready_timeout,
             shutdown_rx,
             ready_tx,
             pid: pid.clone(),

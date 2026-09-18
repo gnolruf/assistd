@@ -154,8 +154,12 @@ impl Supervisor {
     async fn supervise_once(&mut self) -> Result<CycleResult, LlamaServerError> {
         let mut child = ChildProcess::spawn(&self.cfg, &self.model)?;
         *self.pid.lock() = child.pid();
-        let ready_timeout = Duration::from_secs(self.cfg.ready_timeout_secs);
-        let health = HealthChecker::new(&self.cfg.host, self.cfg.port, ready_timeout)?;
+        let ready_timeout = Duration::from_secs(self.cfg.ready_timeout_secs.get());
+        let health = HealthChecker::new(
+            &self.cfg.host.to_string(),
+            self.cfg.port.get(),
+            ready_timeout,
+        )?;
 
         enum Phase1 {
             Ready,

@@ -32,7 +32,7 @@ use async_trait::async_trait;
 
 use crate::VoiceOutput;
 use crate::piper::cache::{default_cache_dir, ensure_voice};
-use crate::piper::config::PiperRuntimeConfig;
+use crate::piper::config::{NOISE_SCALE, NOISE_W, PiperRuntimeConfig, SENTENCE_SILENCE_SECS};
 use crate::piper::error::PiperError;
 use crate::piper::playback::RodioPlaybackWorker;
 use crate::piper::synth::OneShotSynth;
@@ -92,11 +92,11 @@ impl PiperVoiceOutput {
             binary_path: cfg.binary_path.clone(),
             voice_files,
             length_scale: cfg.length_scale,
-            noise_scale: cfg.noise_scale,
-            noise_w: cfg.noise_w,
-            sentence_silence_secs: cfg.sentence_silence_secs,
+            noise_scale: NOISE_SCALE,
+            noise_w: NOISE_W,
+            sentence_silence_secs: SENTENCE_SILENCE_SECS,
             espeak_data_dir: cfg.espeak_data_dir.clone(),
-            deadline: Duration::from_secs(cfg.deadline_secs as u64),
+            deadline: Duration::from_secs(u64::from(cfg.deadline_secs.get())),
             use_cuda: cfg.use_cuda,
             output_device: cfg.output_device.clone(),
         });
