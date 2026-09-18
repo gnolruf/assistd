@@ -1,9 +1,5 @@
-//! Consumer side of the PTT pipeline.
-//!
-//! Runs on a `tokio::task::spawn_blocking` worker. Drains raw mono
-//! f32 samples out of the SPSC ring at the native device sample rate,
-//! resamples to 16 kHz via `rubato::FastFixedIn`, converts to i16,
-//! and returns the accumulated PCM when stopped.
+//! Push-to-talk ring consumer: drains native-rate f32 samples,
+//! resamples to 16 kHz, and accumulates i16 PCM until stopped.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,31 +13,20 @@ use tracing::debug;
 
 use super::capture::{AudioCaptureError, TARGET_SAMPLE_RATE};
 
-/// How many native-rate samples the consumer pulls from the ring
-/// before handing a chunk off to the resampler. Smaller = lower
-/// drain latency; larger = fewer resampler calls. 1024 samples at 48
-/// kHz is ~21 ms, which keeps the ring shallow without excessive
-/// resampler overhead.
+/// Native-rate samples per resampler call; ~21 ms at 48 kHz.
 const DRAIN_CHUNK_SIZE: usize = 1024;
 
-/// How long to park when the ring is empty and we haven't been
-/// asked to stop. Much shorter than whisper inference latency; a
-/// smaller value would burn CPU.
 const IDLE_PARK: Duration = Duration::from_millis(10);
 
-/// Drain the ring buffer, resample to 16 kHz, and return accumulated i16 PCM.
-///
-/// Blocks until `stop_flag` is set or `max_pcm_samples` is reached. Pads the
-/// final partial chunk with zeros so the tail of the utterance is not dropped.
+/// Drain the ring until `stop_flag` is set or `max_pcm_samples` is
+/// reached, returning 16 kHz i16 PCM. The final partial chunk is
+/// zero-padded so the tail of the utterance is kept.
 pub fn drain_loop(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
     max_pcm_samples: usize,
     stop_flag: Arc<AtomicBool>,
 ) -> Result<Vec<i16>, AudioCaptureError> {
-    // Short-circuit when native rate already equals the whisper
-    // target: skip rubato entirely. Some USB mics and headsets do
-    // offer 16 kHz directly.
     let needs_resample = native_rate != TARGET_SAMPLE_RATE;
 
     let mut pcm: Vec<i16> = Vec::with_capacity(max_pcm_samples.min(16_000 * 10));
@@ -51,13 +36,10 @@ pub fn drain_loop(
         return Ok(pcm);
     }
 
-    // rubato's polynomial Async resampler wants a fixed input chunk
-    // size per call. We pad the last partial chunk with zeros on
-    // shutdown so the very end of the utterance isn't dropped.
     let ratio = TARGET_SAMPLE_RATE as f64 / native_rate as f64;
     let mut resampler = Async::<f32>::new_poly(
         ratio,
-        1.0, // fixed ratio; no runtime modulation
+        1.0,
         PolynomialDegree::Linear,
         DRAIN_CHUNK_SIZE,
         1,
@@ -73,8 +55,7 @@ pub fn drain_loop(
         if available >= DRAIN_CHUNK_SIZE {
             let got = consumer.pop_slice(&mut in_buf);
             if got < DRAIN_CHUNK_SIZE {
-                // Partial pop despite `occupied_len >= chunk`: race
-                // with producer drop on teardown; pad and finish.
+                // The producer was dropped mid-pop on teardown.
                 for s in in_buf.iter_mut().skip(got) {
                     *s = 0.0;
                 }
@@ -93,8 +74,6 @@ pub fn drain_loop(
         }
 
         if stop_flag.load(Ordering::Relaxed) {
-            // Drain whatever fractional chunk is left, padded with
-            // zeros to meet the fixed input-chunk requirement.
             let got = consumer.pop_slice(&mut in_buf);
             if got > 0 {
                 for s in in_buf.iter_mut().skip(got) {
@@ -173,7 +152,6 @@ fn resample_and_append(
 
 #[inline]
 pub(crate) fn f32_to_i16(s: f32) -> i16 {
-    // Clamp to avoid wrapping on occasional out-of-range float noise.
     let clamped = s.clamp(-1.0, 1.0);
     (clamped * i16::MAX as f32) as i16
 }
@@ -187,7 +165,6 @@ mod tests {
         assert_eq!(f32_to_i16(0.0), 0);
         assert_eq!(f32_to_i16(1.0), i16::MAX);
         assert_eq!(f32_to_i16(-1.0), -i16::MAX);
-        // Out-of-range input clamps, doesn't wrap.
         assert_eq!(f32_to_i16(2.0), i16::MAX);
         assert_eq!(f32_to_i16(-2.0), -i16::MAX);
     }

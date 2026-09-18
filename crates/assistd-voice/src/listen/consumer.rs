@@ -1,12 +1,5 @@
-//! Streaming consumer for continuous listening.
-//!
-//! Drains the SPSC ring buffer continuously, resamples from the
-//! device's native rate to 16 kHz via `rubato::FastFixedIn`, and
-//! emits fixed-size 20 ms i16 frames over a tokio mpsc channel. The
-//! VAD task reads from the other end one frame at a time.
-//!
-//! Runs on a `tokio::task::spawn_blocking` worker because the cpal
-//! stream it cooperates with is `!Send` on ALSA.
+//! Continuous-listen ring consumer: drains native-rate f32 samples,
+//! resamples to 16 kHz, and emits 20 ms i16 frames over a channel.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,20 +16,11 @@ use super::vad::FRAME_SAMPLES;
 use crate::mic::capture::{AudioCaptureError, TARGET_SAMPLE_RATE};
 use crate::mic::consumer::f32_to_i16;
 
-/// Chunk size (native-rate samples) pulled from the ring before each
-/// resampler step. Matches the PTT pipeline; 1024 samples ~= 21 ms
-/// at 48 kHz. Tuned to amortize resampler overhead without overshooting
-/// frame boundaries badly.
 const DRAIN_CHUNK_SIZE: usize = 1024;
-
-/// How long to park when the ring is empty and we haven't been asked
-/// to stop. Short enough to keep latency to whisper-ready under
-/// ~20 ms of ring drain.
 const IDLE_PARK: Duration = Duration::from_millis(10);
 
-/// Pull samples out of the ring, resample to 16 kHz, convert to i16,
-/// and emit 20-ms frames on `frame_tx` until `stop_flag` flips. A
-/// dropped receiver is treated as a silent stop.
+/// Emit 20 ms frames on `frame_tx` until `stop_flag` is set. A dropped
+/// receiver is a silent stop.
 pub fn stream_frames(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
@@ -69,8 +53,6 @@ pub fn stream_frames(
         .unwrap_or(DRAIN_CHUNK_SIZE);
     let mut out_buf = vec![0.0f32; out_cap];
 
-    // Rolling pending buffer: accumulates 16 kHz i16 samples until
-    // we have at least FRAME_SAMPLES (320) to emit a 20 ms frame.
     let mut pending: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 2);
 
     let mut frames_emitted: u64 = 0;

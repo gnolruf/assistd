@@ -1,14 +1,5 @@
-//! Microphone capture for push-to-talk voice input.
-//!
-//! `MicVoiceInput` wires cpal (cross-platform audio I/O), a lock-free
-//! SPSC ring buffer (`ringbuf`), and a consumer task that resamples and
-//! converts PCM for the existing `WhisperTranscriber`. The three pieces
-//! are split across submodules so the audio-thread hot path and the
-//! off-thread drain can be read independently.
-//!
-//! cpal's `Stream` is `!Send` on ALSA, so the stream lives entirely
-//! inside a single `spawn_blocking` worker. The outer `MicVoiceInput`
-//! holds only the atomics and the `JoinHandle`, all trivially `Send`.
+//! Push-to-talk microphone capture: cpal callback, SPSC ring buffer,
+//! and a blocking consumer that resamples to 16 kHz for the transcriber.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,22 +33,16 @@ pub enum VoiceInputError {
     ConsumerPanic(String),
 }
 
-/// Push-to-talk voice input backed by cpal + a [`Transcriber`] (typically
-/// the daemon's [`crate::QueuedTranscriber`] wrapping whisper-rs).
-///
-/// Construction builds the whisper context (downloads models on first
-/// use) but does *not* open the audio device; that happens inside
-/// [`start_recording`](VoiceInput::start_recording) so a headless CI
-/// server without a mic still builds the daemon successfully.
+/// Push-to-talk voice input backed by cpal and a [`Transcriber`]. The
+/// audio device is opened on [`start_recording`](VoiceInput::start_recording),
+/// not at construction.
 pub struct MicVoiceInput {
     transcriber: Arc<dyn Transcriber>,
     mic_device: Option<String>,
     max_recording_secs: u32,
     state_tx: watch::Sender<VoiceCaptureState>,
-    // Monotonic counter so a stale transcription from an aborted PTT
-    // press cannot clobber the state of a newer press. Incremented in
-    // `start_recording`; checked in the state-forwarder before each
-    // forwarded transition. Shared in an `Arc` with the forwarder task.
+    /// Bumped per press so a stale transition from an aborted press
+    /// cannot clobber the state of a newer one.
     active_session_id: Arc<AtomicU64>,
     inner: Arc<Mutex<InnerState>>,
 }
@@ -68,13 +53,8 @@ struct InnerState {
 }
 
 impl MicVoiceInput {
-    /// Build a voice input from the user's config. This async step
-    /// downloads the whisper/VAD models on first use and probes GPU
-    /// availability, but does NOT enumerate or open the audio device.
-    /// The returned input is backed by a bare [`crate::WhisperTranscriber`]
-    /// (no queueing, no CPU fallback); daemon code that wants the
-    /// queue/fallback behavior should build a
-    /// [`crate::QueuedTranscriber`] and pass it to [`Self::new`].
+    /// Build from config with a bare [`crate::WhisperTranscriber`] (no
+    /// queueing or CPU fallback). Downloads models on first use.
     pub async fn from_config(cfg: &VoiceConfig) -> Result<Self, VoiceInputError> {
         let transcriber = WhisperTranscriberBuilder::from_config(&cfg.transcription)
             .build()
@@ -86,10 +66,8 @@ impl MicVoiceInput {
         ))
     }
 
-    /// Construct a `MicVoiceInput` from an already-built transcriber.
-    ///
-    /// `mic_device` selects the cpal input device by name, or `None` for the system default.
-    /// `max_recording_secs` caps each PTT session; the ring buffer is sized accordingly.
+    /// `mic_device` selects the cpal input device by name, `None` for
+    /// the system default. `max_recording_secs` caps each session.
     pub fn new(
         transcriber: Arc<dyn Transcriber>,
         mic_device: Option<String>,
@@ -109,20 +87,15 @@ impl MicVoiceInput {
         }
     }
 
-    /// Bypass cpal capture and feed pre-recorded PCM directly to the
-    /// transcriber, exercising the published state sequence
-    /// (`Recording → Transcribing → Idle`) without opening an audio
-    /// device. Test-support only; real PTT goes through
-    /// [`VoiceInput::start_recording`] / [`VoiceInput::stop_and_transcribe`].
+    /// Feed pre-recorded PCM straight to the transcriber, publishing the
+    /// same `Recording → Transcribing → Idle` sequence as a real press.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn transcribe_pcm_for_test(
         &self,
         pcm_i16_16k_mono: &[i16],
     ) -> Result<String, VoiceInputError> {
-        // Real PTT yields between Recording and Transcribing across the
-        // mic-capture boundary; here we yield manually so watch
-        // subscribers can observe each transition rather than collapsing
-        // them to the latest value.
+        // Yield between transitions so watch subscribers observe each
+        // one instead of only the latest.
         let _ = self.state_tx.send(VoiceCaptureState::Recording);
         tokio::task::yield_now().await;
         let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
@@ -133,11 +106,6 @@ impl MicVoiceInput {
         Ok(result?)
     }
 
-    /// Send a terminal `Idle` and join the state-forwarder from the
-    /// current session so a stale Queued/Transcribing publish from a
-    /// still-running transcription (e.g. on a VoiceInputError that
-    /// returned before the transcriber finished) cannot overwrite the
-    /// final Idle.
     async fn cleanup_forwarder_and_idle(&self, forwarder: Option<JoinHandle<()>>) {
         if let Some(h) = forwarder {
             h.abort();
@@ -152,9 +120,6 @@ impl VoiceInput for MicVoiceInput {
     async fn start_recording(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
         if inner.session.is_some() {
-            // Idempotent re-entry: already recording. A dropped
-            // Released event would otherwise leave the user unable to
-            // stop; let the first active recording carry on.
             return Ok(());
         }
 
@@ -163,12 +128,6 @@ impl VoiceInput for MicVoiceInput {
         let session = capture::start(self.mic_device.as_deref(), self.max_recording_secs);
         inner.session = Some(session);
 
-        // Spawn a state-forwarder subscribing to the transcriber's
-        // internal state stream (if it exposes one). The forwarder
-        // relays Queued / Transcribing transitions into our own
-        // state_tx so TUI clients see them. It gates on `session_id`
-        // so a late transition from an aborted PTT press cannot
-        // clobber a fresh Recording state.
         if let Some(mut rx) = self.transcriber.subscribe_state() {
             let state_tx = self.state_tx.clone();
             let session_id_at_spawn = session_id;
@@ -179,15 +138,10 @@ impl VoiceInput for MicVoiceInput {
                         return;
                     }
                     let s = *rx.borrow_and_update();
-                    // Drop transitions that belong to a previous PTT.
                     if counter.load(Ordering::SeqCst) != session_id_at_spawn {
                         return;
                     }
-                    // Only forward the non-Idle transitions here; the
-                    // outer `stop_and_transcribe` owns the terminal
-                    // Idle publish so we don't flicker the indicator
-                    // between the transcriber's Idle and our own
-                    // terminal publish.
+                    // `stop_and_transcribe` owns the terminal Idle.
                     if matches!(
                         s,
                         VoiceCaptureState::Queued | VoiceCaptureState::Transcribing
@@ -211,20 +165,11 @@ impl VoiceInput for MicVoiceInput {
             let mut inner = self.inner.lock().await;
             match inner.session.take() {
                 Some(s) => (s, inner.forwarder.take()),
-                None => {
-                    // Release without matching press; benign no-op.
-                    return Ok(String::new());
-                }
+                None => return Ok(String::new()),
             }
         };
 
-        // Publish an initial Transcribing; the forwarder may overwrite
-        // it with Queued if the transcriber decides to wait for the
-        // GPU. That's fine; the TUI renders the latest value.
         let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
-
-        // Signal stop; the worker will exit its drain loop, drop the
-        // cpal stream (on its own thread), and return the final PCM.
         session.stop_flag.store(true, Ordering::SeqCst);
 
         let pcm = match session.handle.await {
@@ -271,8 +216,6 @@ impl VoiceInput for MicVoiceInput {
         );
 
         let result = self.transcriber.transcribe(&pcm).await;
-
-        // Regardless of result: retire the forwarder and publish Idle.
         self.cleanup_forwarder_and_idle(forwarder).await;
 
         let text = match result {
@@ -305,8 +248,6 @@ mod tests {
 
     #[test]
     fn voice_capture_state_pins_idle_default() {
-        // Guards against accidental reordering of the enum; the
-        // TUI treats Idle as the no-indicator default.
         assert_eq!(VoiceCaptureState::Idle as u8, 0);
     }
 

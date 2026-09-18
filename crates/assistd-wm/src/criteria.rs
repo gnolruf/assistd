@@ -1,22 +1,15 @@
-//! Helpers for formatting i3/Sway criteria strings.
-//!
-//! Both compositors accept the same `[key="value"] action` syntax, so
-//! this module is shared between [`crate::i3`] and [`crate::sway`].
-//! Backslashes and quotes inside a criteria value need escaping; numeric
-//! workspace targets get the more-robust `workspace number N` form.
+//! Formatting for the `[key="value"] action` command syntax that i3
+//! and Sway share.
 
 use crate::{AnchorCorner, PlacementAnchor, PlacementCriteria, Rect, WorkspaceId};
 
-/// Escape `\` and `"` inside a value that lands between `[class="..."]`
-/// or `workspace "..."`. Backslashes are escaped first so we don't
-/// double-escape the slashes inserted in front of quotes.
+/// Escape `\` and `"` inside a quoted criteria value. Backslashes go
+/// first so the ones inserted before quotes aren't doubled.
 pub fn escape_for_criteria(s: &str) -> String {
     s.replace('\\', r"\\").replace('"', r#"\""#)
 }
 
-/// Numeric workspace IDs become `workspace number N` (robust to renames);
-/// named workspaces become `workspace "<escaped name>"`. The enum
-/// variant carries the choice; no parse round-trip on every call.
+/// `workspace number N` for numeric ids, `workspace "<name>"` otherwise.
 pub fn format_workspace_target(ws: &WorkspaceId) -> String {
     match ws {
         WorkspaceId::Num(n) => format!("workspace number {n}"),
@@ -24,11 +17,8 @@ pub fn format_workspace_target(ws: &WorkspaceId) -> String {
     }
 }
 
-/// Render a [`PlacementCriteria`] into the `[key="value"]` prefix both
-/// compositors expect. `con_id` skips the escape pass — it's a
-/// `NonZeroU64` and can't carry quotes. `Title` is anchored with
-/// `^…$` so the regex i3/sway run against `_NET_WM_NAME` matches
-/// only the full title, not any substring of it.
+/// The `[key="value"]` prefix for a [`PlacementCriteria`]. `Title` is
+/// anchored with `^…$` because the compositor treats it as a regex.
 pub fn format_criteria_clause(c: &PlacementCriteria) -> String {
     match c {
         PlacementCriteria::AppId(s) => format!(r#"[app_id="{}"]"#, escape_for_criteria(s)),
@@ -38,13 +28,9 @@ pub fn format_criteria_clause(c: &PlacementCriteria) -> String {
     }
 }
 
-/// Build the `floating enable, resize, move position, sticky enable`
-/// payload for the configured anchor on the focused workspace.
-///
-/// Uses explicit pixel positions (`move position {X}px {Y}px`) because
-/// i3's ppt-based positioning silently clamps off-screen values, which
-/// makes a follow-up `move left Wpx` walk the popup further off-screen
-/// on every wake.
+/// The `floating enable, resize, move position, sticky enable` payload.
+/// Positions are absolute pixels because i3's ppt-based positioning
+/// silently clamps off-screen values.
 pub fn format_place_floating_pixels(
     c: &PlacementCriteria,
     anchor: PlacementAnchor,
@@ -59,11 +45,8 @@ pub fn format_place_floating_pixels(
     )
 }
 
-/// Top-left corner of the window, in output-relative pixels, for the
-/// given anchor + offsets on a workspace of the given size. Negative
-/// values are allowed and let users intentionally push the popup
-/// off-screen if they really want to — we don't second-guess the
-/// configured offsets.
+/// Top-left corner of the window in output-relative pixels. Negative
+/// results are allowed.
 pub fn compute_target_position(anchor: PlacementAnchor, workspace: Rect) -> (i32, i32) {
     let w = anchor.width as i32;
     let h = anchor.height as i32;
@@ -149,8 +132,6 @@ mod tests {
             "scratch".parse::<WorkspaceId>().unwrap(),
             WorkspaceId::Name("scratch".into())
         );
-        // "1:web" doesn't parse as u32 → Named (this matches the old
-        // alias because i3 itself treats it as a name).
         assert_eq!(
             "1:web".parse::<WorkspaceId>().unwrap(),
             WorkspaceId::Name("1:web".into())

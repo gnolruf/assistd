@@ -10,12 +10,7 @@ pub const NOISE_W: f32 = 0.8;
 /// Trailing silence Piper inserts after each utterance, in seconds.
 pub const SENTENCE_SILENCE_SECS: f32 = 0.2;
 
-/// Resolved, ready-to-spawn Piper configuration. Built once at startup
-/// from `assistd_config::SynthesisConfig` plus the on-disk voice files
-/// returned by [`crate::piper::cache::ensure_voice`]. Cloning is cheap
-/// (everything is `Arc`-shareable) so the supervising service holds an
-/// `Arc<PiperRuntimeConfig>` and each `OneShotSynth::synthesize` call
-/// reads from it without locking.
+/// Resolved, ready-to-spawn Piper configuration.
 #[derive(Debug, Clone)]
 pub struct PiperRuntimeConfig {
     pub binary_path: PathBuf,
@@ -26,13 +21,10 @@ pub struct PiperRuntimeConfig {
     pub sentence_silence_secs: f32,
     pub espeak_data_dir: Option<PathBuf>,
     pub deadline: Duration,
-    /// When true, `OneShotSynth::synthesize` adds `--cuda` to the
-    /// piper invocation. Requires a piper binary built against
-    /// onnxruntime-gpu; falls back gracefully (piper exits non-zero)
-    /// if the binary is CPU-only, surfaced via the synth circuit
-    /// breaker after 3 failures in 60s.
+    /// Pass `--cuda` to piper. A CPU-only binary exits non-zero, which
+    /// the circuit breaker surfaces.
     pub use_cuda: bool,
-    /// Optional cpal output-device name (matches `aplay -L`). `None`
-    /// uses `cpal::default_host().default_output_device()`.
+    /// cpal output-device name (as in `aplay -L`); `None` for the
+    /// system default.
     pub output_device: Option<String>,
 }

@@ -8,16 +8,9 @@
     )
 )]
 
-//! Voice subsystem: input (speech-to-text) and output (text-to-speech) traits.
-//!
-//! Milestone 5 ships voice input: [`WhisperTranscriber`] (whisper-rs) and
-//! [`MicVoiceInput`] (cpal + ring buffer + rubato) for push-to-talk, plus
-//! [`MicContinuousListener`] (webrtc-vad) for hands-free capture. These
-//! sit behind the `whisper`, `mic`, and `listen` cargo features
-//! respectively. Milestone 6 will add a `Piper` implementation of
-//! [`VoiceOutput`]; the trait lives here already so the daemon can hold
-//! it as `Arc<dyn VoiceOutput>` from the moment the feature lands,
-//! without touching the protocol or handler shape.
+//! Voice subsystem: the [`VoiceInput`] (speech-to-text) and
+//! [`VoiceOutput`] (text-to-speech) traits, with Whisper, cpal, and
+//! Piper implementations behind cargo features.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -64,68 +57,47 @@ pub use transcribe::{
 #[cfg(feature = "whisper")]
 pub use whisper::{WhisperTranscriber, WhisperTranscriberBuilder, build_cpu_fallback};
 
-/// Push-to-talk voice capture. Implementors buffer mic audio between
+/// Push-to-talk voice capture: buffer mic audio between
 /// [`start_recording`](VoiceInput::start_recording) and
-/// [`stop_and_transcribe`](VoiceInput::stop_and_transcribe), then run
-/// whisper on the buffered samples and return the transcribed text.
-///
-/// The three-state lifecycle is visible to callers via [`state`](Self::state)
-/// and the watch receiver from [`subscribe`](Self::subscribe), so TUIs can
-/// render "idle / recording / transcribing" without polling.
+/// [`stop_and_transcribe`](VoiceInput::stop_and_transcribe), then
+/// transcribe it.
 #[async_trait]
 pub trait VoiceInput: Send + Sync + 'static {
-    /// Open the capture device and begin buffering audio. Returns once
-    /// the cpal stream has started; the caller must eventually call
-    /// [`stop_and_transcribe`](Self::stop_and_transcribe) or the
-    /// recording will run up to the configured cap.
+    /// Open the capture device and begin buffering. Recording runs
+    /// until [`stop_and_transcribe`](Self::stop_and_transcribe) or the
+    /// configured cap.
     async fn start_recording(&self) -> Result<()>;
 
-    /// Stop the capture, transcribe the buffered audio, and return the
-    /// text. Returns `Ok("")` when VAD trimmed the audio down to silence;
-    /// callers should treat empty strings as "no speech detected",
-    /// not as an error.
+    /// Stop capture and transcribe. `Ok("")` means no speech was
+    /// detected, not an error.
     async fn stop_and_transcribe(&self) -> Result<String>;
 
     /// Current capture state; cheap synchronous snapshot.
     fn state(&self) -> VoiceCaptureState;
 
-    /// Subscribe to state transitions. The initial value is the current
-    /// state, and each subsequent change is published at most once per
-    /// transition.
+    /// Subscribe to state transitions. The initial value is the
+    /// current state.
     fn subscribe(&self) -> watch::Receiver<VoiceCaptureState>;
 }
 
-/// Speak the given text aloud.
-///
-/// Designed for streaming pipelines where the daemon hands utterances to
-/// TTS one sentence at a time. The implementation is expected to keep an
-/// internal playback queue so sequential `speak` calls produce
-/// back-to-back audio with no audible gap.
+/// Text-to-speech with a FIFO playback queue, so sequential `speak`
+/// calls produce back-to-back audio.
 #[async_trait]
 pub trait VoiceOutput: Send + Sync + 'static {
-    /// Synthesize `text` and append the resulting audio to the playback
-    /// queue. Returns once the audio is enqueued, **not** once playback
-    /// finishes. Sequential calls produce back-to-back audio because the
-    /// playback queue is FIFO. Use [`wait_idle`](Self::wait_idle) to await
-    /// queue drain.
+    /// Synthesize `text` and enqueue the audio. Returns once enqueued,
+    /// not once played; use [`wait_idle`](Self::wait_idle) for that.
     async fn speak(&self, text: String) -> Result<()>;
 
-    /// Block until the playback queue drains. Used at end-of-query so
-    /// the worker isn't torn down before the last utterance plays.
-    /// Default impl is a no-op for output backends that have no queue.
+    /// Block until the playback queue drains.
     async fn wait_idle(&self) -> Result<()> {
         Ok(())
     }
 
-    /// Drop pending audio (mid-utterance interrupt). Idempotent and
-    /// infallible; used by future "shut up" / barge-in handling.
-    /// Default impl is a no-op.
+    /// Drop pending audio. Idempotent.
     async fn cancel(&self) {}
 }
 
-/// Placeholder [`VoiceInput`] used when voice is disabled in config or
-/// built without the `mic` feature. All methods refuse capture or report
-/// the `Idle` state.
+/// Placeholder [`VoiceInput`] that refuses capture and reports `Idle`.
 pub struct NoVoiceInput {
     state_tx: watch::Sender<VoiceCaptureState>,
 }
@@ -137,7 +109,6 @@ impl Default for NoVoiceInput {
 }
 
 impl NoVoiceInput {
-    /// Create a new `NoVoiceInput`.
     pub fn new() -> Self {
         let (state_tx, _) = watch::channel(VoiceCaptureState::Idle);
         Self { state_tx }
@@ -163,9 +134,7 @@ impl VoiceInput for NoVoiceInput {
     }
 }
 
-/// Placeholder [`VoiceOutput`] used when TTS is disabled in config or
-/// built without the `tts` feature. Drops every request silently and
-/// inherits the trait's no-op `wait_idle` / `cancel` defaults.
+/// Placeholder [`VoiceOutput`] that drops every request silently.
 pub struct NoVoiceOutput;
 
 #[async_trait]
@@ -175,7 +144,7 @@ impl VoiceOutput for NoVoiceOutput {
     }
 }
 
-/// Returns the crate version string from `Cargo.toml`.
+/// The crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

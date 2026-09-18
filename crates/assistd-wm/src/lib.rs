@@ -8,14 +8,8 @@
     )
 )]
 
-//! Window manager / compositor integration trait.
-//!
-//! Milestone 8 ships concrete implementations for i3, Sway, and Hyprland
-//! that speak their respective IPC protocols. The i3 ([`i3::I3Backend`])
-//! and Sway ([`sway::SwayBackend`]) backends are landed; Hyprland
-//! follows in a later PR. The daemon picks one at startup based on
-//! `[compositor].type` in `config.toml` (or runtime detection when
-//! `type = "auto"`; see `assistd_config::compositor::detect_from_env`).
+//! Window manager integration: the [`WindowManager`] trait plus the i3
+//! and Sway backends that implement it over their IPC sockets.
 
 use async_trait::async_trait;
 
@@ -28,10 +22,8 @@ pub(crate) mod snapshot;
 #[cfg(feature = "sway")]
 pub mod sway;
 
-/// Per-call IPC timeout for `run_command`, `get_tree`, `get_workspaces`,
-/// `get_outputs`. A wedged compositor must release within one user
-/// turn or the daemon's "every-turn-injects-window-context" path
-/// wedges with it.
+/// Per-call IPC timeout. A wedged compositor must not stall the
+/// caller's turn along with it.
 pub(crate) const WM_IPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub use error::{WmError, WmResult};
 #[cfg(feature = "i3")]
@@ -39,15 +31,8 @@ pub use i3::{I3Backend, I3Handle};
 #[cfg(feature = "sway")]
 pub use sway::{SwayBackend, SwayHandle};
 
-/// Aggregated shutdown handle for the active WM backend, so the daemon
-/// can hold a single `Option<WmHandle>` regardless of which backend
-/// was started. Each variant wraps the per-backend supervisor task;
-/// [`WmHandle::shutdown`] dispatches.
-///
-/// The variants are feature-gated to match the backend modules: a
-/// build with `--no-default-features --features i3` only sees
-/// `WmHandle::I3` and the daemon's match becomes exhaustive against
-/// the smaller enum.
+/// Shutdown handle for whichever backend was started. Each variant
+/// wraps that backend's supervisor task.
 pub enum WmHandle {
     #[cfg(feature = "i3")]
     I3(I3Handle),
@@ -56,8 +41,8 @@ pub enum WmHandle {
 }
 
 impl WmHandle {
-    /// Drains the per-backend supervisor task. The daemon should flip
-    /// its shutdown watch first; this just awaits the task's exit.
+    /// Awaits the supervisor task. Flip the shutdown watch first or
+    /// this blocks until the compositor connection drops.
     pub async fn shutdown(self) {
         match self {
             #[cfg(feature = "i3")]
@@ -68,30 +53,20 @@ impl WmHandle {
     }
 }
 
-/// Opaque identifier for a window in the compositor's namespace.
-///
-/// Wraps the compositor's container id (i3 emits this as
-/// `reply::Node.id: usize`, Sway as `Node.id: i64`) so two windows of
-/// the same X11 class (e.g. two Firefox windows) can be addressed
-/// independently. The criteria string for both compositors is
-/// `[con_id="N"]`.
-///
-/// `NonZeroU64` is chosen so `Option<WindowId>` is the same size as a
-/// bare `u64` and so a zero id (which neither compositor emits, but
-/// which would be ambiguous if it ever appeared) is unrepresentable.
+/// Compositor container id (`con_id`). Two windows of the same class
+/// have distinct ids, so this is the only unambiguous window handle.
+/// Neither compositor emits zero, so `NonZeroU64` makes an invalid id
+/// unrepresentable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WindowId(pub std::num::NonZeroU64);
 
 impl WindowId {
-    /// Construct a [`WindowId`] from a raw `u64`. Returns `None` for 0;
-    /// the compositor never emits zero, so the wrapper takes that as
-    /// a structural error signal rather than treating it as valid.
+    /// Returns `None` for zero.
     pub fn new(raw: u64) -> Option<Self> {
         std::num::NonZeroU64::new(raw).map(WindowId)
     }
 
-    /// Unwrap to the raw `u64`. Useful for IPC payload formatting
-    /// (`format!("{}", id.get())` produces `"42"`).
+    /// The raw `u64`.
     pub fn get(self) -> u64 {
         self.0.get()
     }
@@ -104,8 +79,7 @@ impl std::fmt::Display for WindowId {
 }
 
 /// Returned by [`WindowId::from_str`] when the input is not a positive
-/// decimal integer. The caller already has the offending input and
-/// renders its own message.
+/// decimal integer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseWindowIdError;
 
@@ -120,10 +94,6 @@ impl std::error::Error for ParseWindowIdError {}
 impl std::str::FromStr for WindowId {
     type Err = ParseWindowIdError;
 
-    /// Parse a decimal con_id. Hex / leading-`0x` is rejected: Sway's
-    /// id space is large enough that decimal is the only consistent
-    /// rendering, and non-numeric ids would just be confusing for the
-    /// LLM that's piping `wm list` output back into `wm focus`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.parse::<u64>()
             .ok()
@@ -132,14 +102,8 @@ impl std::str::FromStr for WindowId {
     }
 }
 
-/// Workspace identifier: either a number (i3/sway's `workspace number
-/// N` form, robust to renames) or a free-form name (`workspace
-/// "<name>"`).
-///
-/// Modeling this as an enum kills the parse-round-trip the previous
-/// type alias forced on `format_workspace_target`: the parser ran on
-/// every focus/move dispatch even though the caller already knew which
-/// form they meant.
+/// Workspace identifier: either a number (`workspace number N`, robust
+/// to renames) or a free-form name (`workspace "<name>"`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WorkspaceId {
     /// Numeric workspace, addressed by `workspace number N`.
@@ -149,15 +113,12 @@ pub enum WorkspaceId {
 }
 
 impl WorkspaceId {
-    /// Construct a numeric workspace id.
     pub fn num(n: u32) -> Self {
         WorkspaceId::Num(n)
     }
 
-    /// Construct a named workspace id. Use this for non-numeric
-    /// workspace names like `"scratch"` or `"1:web"`. Note that
-    /// `"1:web"` is a *named* workspace because it does not parse as
-    /// `u32` even though it visually starts with a digit.
+    /// A named workspace. `"1:web"` is a name, not a number, because
+    /// it does not parse as `u32`.
     pub fn name(s: impl Into<String>) -> Self {
         WorkspaceId::Name(s.into())
     }
@@ -175,10 +136,8 @@ impl std::fmt::Display for WorkspaceId {
 impl std::str::FromStr for WorkspaceId {
     type Err = std::convert::Infallible;
 
-    /// Parse-or-name: a string that round-trips through `u32::from_str`
-    /// becomes [`WorkspaceId::Num`]; everything else is
-    /// [`WorkspaceId::Name`]. Mirrors the previous alias-based
-    /// `format_workspace_target` behaviour so call sites don't change.
+    /// A string that parses as `u32` becomes [`WorkspaceId::Num`];
+    /// everything else is [`WorkspaceId::Name`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Ok(n) = s.parse::<u32>() {
             Ok(WorkspaceId::Num(n))
@@ -206,53 +165,35 @@ impl From<u32> for WorkspaceId {
     }
 }
 
-/// One row of [`WindowManager::list_windows`]. The trait's wider methods
-/// (`focus`, `move_to_workspace`) take a [`WindowId`] (con_id) alone;
-/// this struct is the richer view returned to surfaces (the `wm list`
-/// command) that need a human-readable label and workspace context.
+/// One row of [`WindowManager::list_windows`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
-    /// Compositor-unique id, usable with [`WindowManager::focus`] /
-    /// [`WindowManager::move_to_workspace`]. Emitted as the leading
-    /// `<id>` column in `wm list` so the LLM can pipe it back.
     pub id: WindowId,
-    /// Human-readable application label: X11 `WM_CLASS` on i3, or
-    /// `app_id` (Wayland-native) / `class` (XWayland) on Sway. `None`
-    /// when the window has neither set, which is rare. Surfaced as the
-    /// second column of `wm list` so the LLM can disambiguate ids by
-    /// app name.
+    /// X11 `WM_CLASS` on i3; `app_id` (Wayland-native) or `class`
+    /// (XWayland) on Sway. `None` when the window sets neither.
     pub app: Option<String>,
     /// `_NET_WM_NAME` / `WM_NAME`. Missing on some transient or just-
     /// mapped windows.
     pub title: Option<String>,
-    /// Workspace this window currently lives on. `None` for scratchpad
-    /// or otherwise un-anchored windows.
+    /// `None` for scratchpad or otherwise un-anchored windows.
     pub workspace: Option<String>,
 }
 
-/// One row of [`WindowManager::list_workspaces`]. Named to avoid colliding
-/// with `tokio_i3ipc::reply::Workspace` at use sites; both backends will
-/// flatten their compositor's workspace shape into this common view.
+/// One row of [`WindowManager::list_workspaces`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceInfo {
-    /// Numeric component (i3's `num`). `-1` when the workspace name does
-    /// not begin with a number.
+    /// `-1` when the workspace name does not begin with a number.
     pub num: i32,
     /// User-visible label (e.g. `"1"`, `"1:web"`, `"scratch"`).
     pub name: String,
-    /// True when this workspace currently holds the active focus on its
-    /// output. (Multi-monitor setups have one focused workspace per
-    /// output; this matches i3's `focused` field on `reply::Workspace`.)
+    /// True when this workspace holds focus on its output. Multi-monitor
+    /// setups have one focused workspace per output.
     pub focused: bool,
-    /// Monitor / output name (e.g. `"DP-1"`).
+    /// Output name (e.g. `"DP-1"`).
     pub output: String,
 }
 
-/// One row of [`WindowManager::list_outputs`]. Sway exposes rich output
-/// metadata (mode, scale, refresh, focused workspace) over IPC; i3's
-/// equivalent reply is much sparser, so the trait method is opt-in:
-/// backends without an implementation return `Err` so callers can
-/// distinguish "not supported" from "no monitors".
+/// One row of [`WindowManager::list_outputs`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputInfo {
     /// Connector / output name (e.g. `"DP-1"`, `"eDP-1"`, `"HDMI-A-1"`).
@@ -274,8 +215,7 @@ pub struct OutputInfo {
     pub focused_workspace: Option<String>,
 }
 
-/// Direction for a width-resize operation. Decoded from the
-/// `wm resize <class> <grow|shrink> <px>` user argument.
+/// Direction for a width-resize operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeDir {
     Grow,
@@ -311,13 +251,11 @@ impl std::str::FromStr for ResizeDir {
 }
 
 /// Returned by [`ResizeDir::from_str`] when the input is neither
-/// `"grow"` nor `"shrink"`. Carries no data; the caller already has
-/// the offending input and renders its own message.
+/// `"grow"` nor `"shrink"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseResizeDirError;
 
-/// Layout to apply to the focused container. Decoded from the
-/// `wm layout <name>` user argument.
+/// Layout to apply to the focused container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     Default,
@@ -362,39 +300,27 @@ impl std::str::FromStr for Layout {
 }
 
 /// Returned by [`Layout::from_str`] when the input is not a known
-/// layout name. Carries no data; the caller already has the offending
-/// input and renders its own message.
+/// layout name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseLayoutError;
 
-/// Snapshot of what the user is currently looking at. Returned by
-/// [`WindowManager::focused_context`]. Each field is independently
-/// optional because compositors deliver focus / title / workspace
-/// state through separate events; a backend may have any subset.
-///
-/// Built from the backend's cached event snapshot (no IPC round-trip),
-/// so callers can read it cheaply on every LLM query.
+/// Snapshot of the focused window and workspace, read from the
+/// backend's event cache without an IPC round-trip. Each field is
+/// independently optional because compositors deliver focus, title,
+/// and workspace state through separate events.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FocusedWindowContext {
-    /// Compositor con_id of the focused window. Surfaced for callers
-    /// that want to wire `wm focus $(wm active)` flows; the system-
-    /// prompt block does not render it (the model picks windows by
-    /// human description, so a numeric id is just token waste).
     pub id: Option<WindowId>,
-    /// X11 `WM_CLASS` (or `app_id` on Wayland-native sway) of the
-    /// focused window. Used for the "Current desktop context" block
-    /// the daemon injects into the LLM's per-turn system prompt.
+    /// X11 `WM_CLASS`, or `app_id` on Wayland-native Sway.
     pub class: Option<String>,
-    /// `_NET_WM_NAME` / `WM_NAME` of the focused window.
+    /// `_NET_WM_NAME` / `WM_NAME`.
     pub title: Option<String>,
-    /// Name of the workspace currently holding focus.
     pub workspace: Option<String>,
 }
 
-/// Best-effort allowlist of X11 `WM_CLASS` values for terminal
-/// emulators. Matched case-insensitively because compositors and apps
-/// disagree on capitalization (`xterm` vs `XTerm`, `alacritty` vs
-/// `Alacritty`). Future work: surface extra classes via config.
+/// `WM_CLASS` values of known terminal emulators, matched
+/// case-insensitively because compositors and apps disagree on
+/// capitalisation (`xterm` vs `XTerm`).
 const TERMINAL_CLASSES: &[&str] = &[
     "Alacritty",
     "kitty",
@@ -416,57 +342,43 @@ const TERMINAL_CLASSES: &[&str] = &[
     "Termite",
 ];
 
-/// Returns true when `class` looks like a terminal emulator. The list
-/// is intentionally conservative: emitters not in [`TERMINAL_CLASSES`]
-/// fall through as non-terminal (no hint emitted, but no wrong hint).
+/// True when `class` is a known terminal emulator. Unknown classes are
+/// reported as non-terminal.
 pub fn is_terminal_class(class: &str) -> bool {
     TERMINAL_CLASSES
         .iter()
         .any(|t| t.eq_ignore_ascii_case(class))
 }
 
-/// How a window the compositor should act on is matched. The criteria
-/// becomes the `[key="value"]` prefix on the IPC command; all four
-/// forms are accepted by i3 and sway with the caveat that `AppId`
-/// only works for Wayland-native sway windows (i3 is X11-only and
-/// doesn't grammar `app_id`).
+/// How the compositor matches the window to act on. Becomes the
+/// `[key="value"]` prefix on the IPC command.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PlacementCriteria {
-    /// Match by Wayland `app_id` (`[app_id="…"]`). Sway-only; on i3,
-    /// each backend rewrites this to whichever identifier is actually
-    /// reliable on its compositor.
+    /// Wayland `app_id`. i3 is X11-only and rewrites this to a title
+    /// match.
     AppId(String),
-    /// Match by X11 `WM_CLASS` (`[class="…"]`).
+    /// X11 `WM_CLASS`.
     Class(String),
-    /// Match by `_NET_WM_NAME` / `WM_NAME` with the value treated as
-    /// an exact (anchored) regular expression. Used as an escape
-    /// hatch on i3 when the GUI toolkit doesn't set `WM_CLASS` (e.g.
-    /// egui-winit 0.34 leaves `WM_CLASS` empty on X11).
+    /// Exact `_NET_WM_NAME` / `WM_NAME` match. The escape hatch when a
+    /// toolkit leaves `WM_CLASS` empty on X11 (egui-winit 0.34 does).
     Title(String),
     /// Match a specific compositor container id (`[con_id="…"]`).
     ConId(WindowId),
 }
 
-/// Which corner of the focused output the window's anchor sits in.
-/// Offsets are measured inward from this corner.
+/// Corner of the focused output a placed window anchors to. Offsets
+/// are measured inward from this corner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnchorCorner {
-    /// Top-left of the focused output.
     TopLeft,
-    /// Top-right of the focused output.
     TopRight,
-    /// Bottom-left of the focused output.
     BottomLeft,
-    /// Bottom-right of the focused output.
     BottomRight,
-    /// Centred horizontally and vertically.
     Center,
 }
 
-/// A pixel-space rectangle, used by `place_floating` to compute
-/// output-relative target coordinates for the focused workspace.
-/// `(x, y)` is the top-left corner in global screen coordinates;
-/// `(width, height)` is the visible area in logical pixels.
+/// Pixel rectangle: `(x, y)` is the top-left corner in global screen
+/// coordinates, `(width, height)` the size in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -475,12 +387,8 @@ pub struct Rect {
     pub height: u32,
 }
 
-/// Compositor-emitted window lifecycle event. Each concrete backend
-/// fans these out from its IPC events stream onto an internal
-/// broadcast channel that `place_floating` uses to detect a freshly
-/// mapped window without polling. `Opened` is the one consumers
-/// typically care about; the others exist for completeness so the
-/// channel can grow into more general uses without renaming.
+/// Compositor window lifecycle event, broadcast by each backend from
+/// its IPC event stream.
 #[derive(Debug, Clone)]
 pub enum WindowEvent {
     /// A window was mapped (i3/sway `window::new`).
@@ -500,10 +408,7 @@ pub enum WindowEvent {
 }
 
 impl WindowEvent {
-    /// Return the window id if this event represents a freshly-opened
-    /// window matching `criteria`; `None` for non-`Opened` events or
-    /// non-matching windows. Used by `place_floating` to filter the
-    /// broadcast stream down to "events that affect my window."
+    /// The window id if this is an `Opened` event matching `criteria`.
     pub fn matches_opened(&self, criteria: &PlacementCriteria) -> Option<WindowId> {
         let Self::Opened {
             id,
@@ -524,38 +429,28 @@ impl WindowEvent {
     }
 }
 
-/// Where to place a floating window: a corner anchor plus offsets and
-/// the target size. The compositor receives one templated IPC sequence
-/// that sets floating, resizes, and moves in a single round-trip; see
-/// [`WindowManager::place_floating`].
+/// Where to place a floating window: a corner anchor, offsets from
+/// it, and the target size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlacementAnchor {
-    /// Corner of the focused output the window anchors to.
     pub corner: AnchorCorner,
-    /// Horizontal offset from the corner, in pixels. Positive shifts
-    /// the window to the right of the anchor; negative shifts left.
+    /// Positive shifts right, negative left.
     pub offset_x: i32,
-    /// Vertical offset from the corner, in pixels. Positive shifts
-    /// down; negative shifts up.
+    /// Positive shifts down, negative up.
     pub offset_y: i32,
-    /// Target window width in pixels (applied via `resize set`).
     pub width: u32,
-    /// Target window height in pixels (applied via `resize set`).
     pub height: u32,
 }
 
-/// Async interface to a window manager / compositor.
-///
-/// Each method maps to one IPC operation. Backends implement this trait and
-/// are held behind `Arc<dyn WindowManager>` by the daemon. All methods are
-/// subject to [`crate::WM_IPC_TIMEOUT`]; implementations should return
-/// [`WmError::Timeout`] when a call exceeds it and trigger reconnection.
+/// Async interface to a window manager. Each method is one IPC
+/// operation bounded by [`WM_IPC_TIMEOUT`]; a call that exceeds it
+/// returns [`WmError::Timeout`] and triggers reconnection.
 #[async_trait]
 pub trait WindowManager: Send + Sync + 'static {
     /// Focus the window with the given id.
     async fn focus(&self, window: &WindowId) -> WmResult<()>;
 
-    /// Move the named window to the given workspace.
+    /// Move the window to the given workspace.
     async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()>;
 
     /// Return the id of the currently focused window, or `None` when no
@@ -568,20 +463,13 @@ pub trait WindowManager: Send + Sync + 'static {
     /// Enumerate every workspace the compositor knows about.
     async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>>;
 
-    /// Return a snapshot of the currently focused window's class,
-    /// title, and the active workspace. Used by the daemon to inject
-    /// passive desktop context into the LLM's per-turn system prompt.
-    ///
-    /// Returns `Ok(None)` when nothing is focused or the backend has
-    /// no opinion. The default impl returns `Ok(None)` so backends
-    /// without event-snapshot support compile unchanged.
+    /// Snapshot of the focused window and active workspace. `Ok(None)`
+    /// when nothing is focused or the backend keeps no snapshot.
     async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
         Ok(None)
     }
 
-    /// Resize the named window's width by `pixels`. Backends format the
-    /// compositor-specific payload internally so consumers don't reach
-    /// into IPC syntax.
+    /// Resize the window's width by `pixels`.
     async fn resize_width(
         &self,
         window: &WindowId,
@@ -589,71 +477,37 @@ pub trait WindowManager: Send + Sync + 'static {
         pixels: u32,
     ) -> WmResult<()>;
 
-    /// Set the layout of the currently-focused container. Acts on the
-    /// focus state (no window argument) because that's how
-    /// `i3-msg layout …` and `swaymsg layout …` behave.
+    /// Set the layout of the focused container.
     async fn set_layout(&self, layout: Layout) -> WmResult<()>;
 
-    /// Enumerate the compositor's outputs (monitors). Sway exposes a
-    /// detailed reply via `GET_OUTPUTS`; i3's reply is much sparser, so
-    /// the default implementation returns [`WmError::Unsupported`] and
-    /// i3-class backends inherit it. Callers that surface this through
-    /// a tool (`wm outputs`) must translate the error into a "not
-    /// supported" message rather than an empty list, so users see the
-    /// difference between an unsupported backend and a connected
-    /// machine with zero monitors.
+    /// Enumerate outputs (monitors). Backends without a rich output
+    /// reply return [`WmError::Unsupported`], which is distinct from an
+    /// empty list.
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
         Err(WmError::Unsupported("output enumeration"))
     }
 
-    /// Return the pixel rect of the workspace currently focused on the
-    /// active output. Callers use this to compute target coordinates
-    /// for `place_floating` callers that need to position a window
-    /// before it's mapped (e.g. eframe's `ViewportBuilder::with_position`
-    /// runs before `place_floating` has anything to act on). The
-    /// default impl returns [`WmError::Unsupported`] so backends
-    /// without workspace introspection compile unchanged.
+    /// Pixel rect of the workspace focused on the active output.
     async fn focused_workspace_rect(&self) -> WmResult<Rect> {
         Err(WmError::Unsupported("focused workspace rect"))
     }
 
-    /// Scale factor of the output currently holding focus (e.g. `1.0`,
-    /// `1.5`, `2.0`). The tray popup uses this to convert its configured
-    /// logical width / height into the physical size winit will end up
-    /// mapping on HiDPI displays, so a pre-positioned window lands at
-    /// the right corner from its very first frame instead of flashing
-    /// at the compositor default.
-    ///
-    /// Wayland compositors (sway) report this directly through their
-    /// output IPC reply. X11 backends (i3) have to fall back to the
-    /// X-side conventions: `GDK_SCALE` / `QT_SCALE_FACTOR` env vars,
-    /// then `Xft.dpi` from the X resource database.
-    ///
-    /// The default impl returns `1.0` — backends that can't determine
-    /// the scale should report no scaling rather than fail, so callers
-    /// don't have to special-case "unsupported" against a real `1.0`
-    /// display.
+    /// Scale factor of the focused output (`1.0`, `1.5`, `2.0`, ...).
+    /// Sway reports it over IPC; i3 derives it from
+    /// `WINIT_X11_SCALE_FACTOR`, then `Xft.dpi`, then the output's
+    /// physical size from `xrandr`. Backends that cannot determine it
+    /// report `1.0` rather than fail.
     async fn focused_output_scale(&self) -> WmResult<f64> {
         Ok(1.0)
     }
 
-    /// Mark the matched window floating, resize it to
-    /// [`PlacementAnchor::width`] / [`PlacementAnchor::height`], and
-    /// move it to the chosen corner with the configured offsets. The
-    /// three steps are sent as one chained IPC payload so the
-    /// compositor applies them atomically.
+    /// Float the matched window, resize it to the anchor's size, and
+    /// move it to the anchored corner, as one chained IPC payload.
     ///
-    /// Backends without floating support return
-    /// [`WmError::Unsupported`]; the default impl is unsupported so a
-    /// future backend (Hyprland) compiles before adding its own
-    /// floating semantics.
-    ///
-    /// Both i3 and sway treat a criteria that matches no windows as
-    /// silent success: the call returns `Ok(())` whether or not the
-    /// targeted window was actually mapped. Callers that need
-    /// at-least-once placement should issue the call only after the
-    /// window has been mapped (e.g. on the GUI toolkit's first-paint
-    /// callback) plus a short follow-up retry.
+    /// Both i3 and Sway treat criteria matching no window as silent
+    /// success, so `Ok(())` does not mean the window was placed.
+    /// Callers needing at-least-once placement should call this after
+    /// the window is mapped and retry once shortly after.
     async fn place_floating(
         &self,
         _criteria: &PlacementCriteria,
@@ -662,19 +516,15 @@ pub trait WindowManager: Send + Sync + 'static {
         Err(WmError::Unsupported("floating placement"))
     }
 
-    /// Report whether the backend is actually connected to a compositor.
-    /// The default `true` covers concrete backends; [`NoWindowManager`]
-    /// overrides to `false` so callers can short-circuit with a single
-    /// "compositor not connected" message instead of waiting for the
-    /// generic [`WmError::Disconnected`] from each operation.
+    /// Whether the backend is connected to a compositor. Lets callers
+    /// short-circuit instead of collecting a [`WmError::Disconnected`]
+    /// per operation.
     fn is_connected(&self) -> bool {
         true
     }
 }
 
-/// Placeholder [`WindowManager`] that refuses every operation. Used by
-/// the daemon when no compositor backend is configured or the configured
-/// backend failed to connect at startup.
+/// Placeholder [`WindowManager`] that refuses every operation.
 pub struct NoWindowManager;
 
 #[async_trait]
@@ -730,7 +580,7 @@ impl WindowManager for NoWindowManager {
     }
 }
 
-/// Returns the crate version string from `CARGO_PKG_VERSION`.
+/// The crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -805,13 +655,9 @@ mod tests {
             "42".parse::<WindowId>().unwrap(),
             WindowId::new(42).unwrap()
         );
-        // 0 has no NonZeroU64 representation.
         assert!("0".parse::<WindowId>().is_err());
-        // Non-numeric input: rejected.
         assert!("Firefox".parse::<WindowId>().is_err());
-        // Negative: rejected (u64 doesn't accept "-1").
         assert!("-1".parse::<WindowId>().is_err());
-        // Hex / leading-0x: rejected.
         assert!("0x2a".parse::<WindowId>().is_err());
     }
 
@@ -1026,8 +872,6 @@ mod tests {
 
     #[test]
     fn is_terminal_class_is_case_insensitive() {
-        // X11 WM_CLASS capitalization varies in practice; users on
-        // `alacritty` vs `Alacritty` should both get the terminal hint.
         assert!(is_terminal_class("alacritty"));
         assert!(is_terminal_class("XTERM"));
         assert!(is_terminal_class("xterm"));
@@ -1043,8 +887,6 @@ mod tests {
 
     #[tokio::test]
     async fn no_window_manager_focused_context_is_none() {
-        // Default trait impl returns Ok(None); NoWindowManager inherits
-        // it because we don't override.
         assert!(NoWindowManager.focused_context().await.unwrap().is_none());
     }
 }

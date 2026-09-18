@@ -1,7 +1,4 @@
-//! Speech-to-text primitive. The `Transcriber` trait is the stable
-//! boundary: callers hand over a buffer of 16 kHz mono PCM samples and
-//! get back a transcribed string, regardless of which backend is
-//! running underneath.
+//! The [`Transcriber`] trait and the GPU-or-CPU [`QueuedTranscriber`].
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,18 +12,13 @@ use crate::VoiceCaptureState;
 /// Transcribe 16 kHz mono PCM audio into text.
 #[async_trait]
 pub trait Transcriber: Send + Sync + 'static {
-    /// `pcm_i16_16k_mono` must be signed 16-bit samples at 16 kHz, single
-    /// channel. Returns the transcribed text with leading/trailing
-    /// whitespace trimmed. An empty string is returned when the input
-    /// contains only silence (per VAD); it is not an error.
+    /// Transcribe signed 16-bit mono samples at 16 kHz. Returns trimmed
+    /// text; an empty string means the input was silence, not an error.
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError>;
 
-    /// Optional stream of capture-state transitions driven by the
-    /// transcriber itself. Implementations that internally move through
-    /// `Queued`/`Transcribing` (e.g. [`crate::whisper::QueuedTranscriber`])
-    /// override this so owners can surface those states without
-    /// polling. The default returns `None`; owners publish their own
-    /// `Transcribing` → `Idle` transition around the call instead.
+    /// State transitions the transcriber drives itself (`Queued`,
+    /// `Transcribing`). `None` when the implementation has no internal
+    /// states to report.
     fn subscribe_state(&self) -> Option<watch::Receiver<VoiceCaptureState>> {
         None
     }
@@ -68,34 +60,23 @@ pub enum TranscriptionError {
     Join(#[from] tokio::task::JoinError),
 }
 
-/// Injected "is the GPU available for Whisper?" probe. Concrete impls
-/// live in the daemon crate (which wires them to `PresenceManager` and
-/// optional NVML state); the voice crate stays NVML-free and just calls
-/// into the trait.
+/// Answers "is the GPU available for Whisper right now?".
 #[async_trait]
 pub trait BusyProbe: Send + Sync + 'static {
-    /// Blocks up to `timeout` for the LLM stream count to reach zero.
-    /// Returns `true` when the GPU became free in time, `false` on
-    /// timeout. Implementations should short-circuit when no stream is
-    /// in flight.
+    /// Wait up to `timeout` for in-flight LLM streams to drain. `true`
+    /// when the GPU became free in time.
     async fn wait_until_llm_idle(&self, timeout: Duration) -> bool;
 
-    /// True if a non-assistd process is currently holding meaningful
-    /// VRAM (e.g. a game or another local model runner). When true,
-    /// Whisper skips the GPU path entirely; waiting wouldn't help
-    /// because the contender isn't ours to schedule around.
+    /// True when a process outside assistd holds meaningful VRAM, so
+    /// waiting would not help.
     fn foreign_gpu_busy(&self) -> bool;
 
-    /// True when the daemon is confidently `Active`, i.e. llama-server
-    /// is running and the GPU whisper context is safe to use. When
-    /// false (Drowsy/Sleeping/mid-transition), Whisper must not touch
-    /// the GPU because the context may be torn down concurrently.
+    /// True when the GPU whisper context is safe to use. When false the
+    /// context may be torn down concurrently and must not be touched.
     fn presence_active(&self) -> bool;
 }
 
-/// Null probe used in tests and when the daemon feature is compiled
-/// out. Reports "GPU is always free" so orchestration falls back to
-/// the primary synchronous path.
+/// Probe that always reports the GPU free.
 pub struct NullBusyProbe;
 
 #[async_trait]
@@ -115,31 +96,23 @@ impl BusyProbe for NullBusyProbe {
 #[derive(Debug, Clone, Copy)]
 pub struct QueueConfig {
     /// How long to wait for the LLM to finish streaming before falling
-    /// back to CPU. `0` forces CPU the moment a stream is inflight.
+    /// back to CPU. `0` falls back the moment a stream is in flight.
     pub gpu_busy_timeout_ms: u32,
-    /// Whether a CPU fallback is permitted at all. When false, the
-    /// transcriber waits indefinitely (well, up to the timeout) and
-    /// then runs on the primary anyway.
+    /// When false, the primary is used unconditionally.
     pub cpu_fallback_enabled: bool,
 }
 
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
-            // Long enough to ride out the tail of a streaming response,
-            // short enough that an utterance doesn't sit queued behind a
-            // multi-minute generation.
             gpu_busy_timeout_ms: 300,
             cpu_fallback_enabled: true,
         }
     }
 }
 
-/// Async factory for the CPU fallback context. Built once at daemon
-/// startup (from the same TranscriptionConfig that built the primary)
-/// and stored inside [`QueuedTranscriber`], which invokes it the first
-/// time a fallback is needed. Using a boxed future keeps the voice
-/// crate free of a concrete builder type.
+/// Async factory for the CPU fallback transcriber, invoked the first
+/// time a fallback is needed.
 pub type CpuFallbackFactory = Arc<
     dyn Fn() -> std::pin::Pin<
             Box<dyn Future<Output = Result<Arc<dyn Transcriber>, TranscriptionError>> + Send>,
@@ -147,20 +120,10 @@ pub type CpuFallbackFactory = Arc<
         + Sync,
 >;
 
-/// Wraps a primary (GPU) transcriber with queue-and-fallback logic:
-///
-/// 1. If the primary is already CPU-backed or fallback is disabled →
-///    run directly on the primary.
-/// 2. Otherwise publish `Queued`, then consult the injected
-///    [`BusyProbe`]. Route to CPU when presence isn't Active, a foreign
-///    process is holding VRAM, or the LLM stream doesn't drain within
-///    the configured timeout.
-/// 3. Publish `Transcribing`, run inference on the chosen context,
-///    publish `Idle` and return the text.
-///
-/// The CPU context is built lazily on first fallback via
-/// [`CpuFallbackFactory`] and retained for subsequent fallbacks. Owners
-/// subscribe to state transitions via [`Transcriber::subscribe_state`].
+/// Wraps a GPU transcriber with queue-and-fallback: publish `Queued`,
+/// consult the [`BusyProbe`], and route to a lazily built CPU
+/// transcriber when the GPU is unavailable or busy past the timeout.
+/// A CPU-backed primary, or fallback disabled, runs directly.
 pub struct QueuedTranscriber {
     primary: Arc<dyn Transcriber>,
     primary_is_gpu: bool,
@@ -172,8 +135,7 @@ pub struct QueuedTranscriber {
 }
 
 impl QueuedTranscriber {
-    /// Construct a new `QueuedTranscriber`. `primary_is_gpu` controls whether
-    /// the queue-and-fallback path is active; pass `false` for a CPU-only primary.
+    /// `primary_is_gpu = false` disables the queue-and-fallback path.
     pub fn new(
         primary: Arc<dyn Transcriber>,
         primary_is_gpu: bool,
@@ -266,10 +228,7 @@ impl Transcriber for QueuedTranscriber {
     }
 }
 
-/// Test-only transcriber returning a fixed string regardless of input.
-/// Tracks call count for assertion. Public under `cfg(test)` or the
-/// `test-support` feature so cross-crate tests can use it without
-/// reaching into the whisper backend.
+/// Test transcriber returning a fixed string and counting calls.
 #[cfg(any(test, feature = "test-support"))]
 pub struct StubTranscriber {
     text: String,
@@ -278,7 +237,6 @@ pub struct StubTranscriber {
 
 #[cfg(any(test, feature = "test-support"))]
 impl StubTranscriber {
-    /// Build a stub returning the given text on every call.
     pub fn with_text(text: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             text: text.into(),
@@ -286,7 +244,6 @@ impl StubTranscriber {
         })
     }
 
-    /// Number of times `transcribe()` has been invoked.
     pub fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -471,9 +428,6 @@ mod tests {
         assert_eq!(cpu.calls(), 0);
     }
 
-    /// A stub that gates on a Notify so the test can observe state
-    /// while transcription is in flight rather than racing against
-    /// fast synchronous stubs collapsing values in the watch channel.
     struct GatedTranscriber {
         label: &'static str,
         started: Arc<tokio::sync::Notify>,
@@ -491,14 +445,9 @@ mod tests {
 
     #[tokio::test]
     async fn queued_publishes_transcribing_while_running_and_idle_when_done() {
-        // The intermediate Queued → Transcribing edge is not
-        // deterministically observable through a watch channel because
-        // watch collapses same-tick updates to "latest value". What we
-        // CAN assert is: while the CPU stub is held inside transcribe,
-        // the visible state is Transcribing (not Idle), and when the
-        // transcriber finishes the state returns to Idle. That's the
-        // invariant the TUI relies on for its indicator; a fast
-        // cold-path flash of Queued is acceptable.
+        // A watch channel collapses same-tick updates, so the Queued
+        // edge is not observable; only Transcribing-while-held and the
+        // final Idle are asserted.
         let primary = StubTranscriber::with_text("GPU");
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -531,18 +480,13 @@ mod tests {
         let q2 = q.clone();
         let handle = tokio::spawn(async move { q2.transcribe(&[0i16; 16]).await });
 
-        // Wait for CPU stub to be inside transcribe; state must now be
-        // Transcribing (never Idle while inference is running).
         started.notified().await;
         assert_eq!(*rx.borrow(), VoiceCaptureState::Transcribing);
 
-        // Release CPU inference; the final Idle must be published.
         release.notify_one();
         let text = handle.await.unwrap().unwrap();
         assert_eq!(text, "CPU");
 
-        // Final state is Idle. Small yield in case the outer send lands
-        // just after we drop back into the scheduler.
         for _ in 0..20 {
             if *rx.borrow() == VoiceCaptureState::Idle {
                 return;

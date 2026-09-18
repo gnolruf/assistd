@@ -1,6 +1,4 @@
-//! Whisper-rs-backed `Transcriber`. Downloads the model on first use,
-//! chooses GPU or CPU inference, and wraps whisper.cpp's native Silero
-//! VAD for silence trimming.
+//! Whisper-rs-backed [`Transcriber`].
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -16,7 +14,6 @@ use crate::gpu;
 use crate::model_cache::{self, default_cache_dir};
 use crate::transcribe::{Transcriber, TranscriptionError};
 
-/// Runtime-configurable knobs used by each `transcribe` call.
 #[derive(Debug, Clone)]
 struct InferenceConfig {
     threads: Option<u32>,
@@ -38,15 +35,11 @@ pub struct WhisperTranscriber {
 }
 
 impl WhisperTranscriber {
-    /// Returns a builder for constructing a [`WhisperTranscriber`].
     pub fn builder() -> WhisperTranscriberBuilder {
         WhisperTranscriberBuilder::default()
     }
 
-    /// Reports whether this transcriber was built against a GPU-backed
-    /// whisper context. Voice orchestration uses this to decide whether
-    /// the queue-and-fallback flow is even needed; a CPU-only primary
-    /// never contends with the LLM on the same device.
+    /// Whether inference runs on a GPU-backed whisper context.
     pub fn is_gpu(&self) -> bool {
         self.is_gpu
     }
@@ -137,12 +130,12 @@ fn run_inference(
     Ok(out.trim().to_string())
 }
 
-/// Builder for [`WhisperTranscriber`]. `build()` is async because it may
-/// Minimum trailing silence, in seconds, that Silero VAD needs before it
-/// will trim a segment. Maps to whisper.cpp's `min_silence_duration_ms`.
+/// Minimum trailing silence, in seconds, before Silero VAD trims a
+/// segment. Maps to whisper.cpp's `min_silence_duration_ms`.
 pub const VAD_SILENCE_SECS: f32 = 0.5;
 
-/// download model files and probe NVML.
+/// Builder for [`WhisperTranscriber`]. `build()` is async because it
+/// may download model files.
 #[derive(Debug, Default, Clone)]
 pub struct WhisperTranscriberBuilder {
     model: Option<String>,
@@ -207,8 +200,7 @@ impl WhisperTranscriberBuilder {
         self
     }
 
-    /// Populate from a [`TranscriptionConfig`] for ergonomic wiring from
-    /// the daemon.
+    /// Populate from a [`TranscriptionConfig`](assistd_config::TranscriptionConfig).
     pub fn from_config(cfg: &assistd_config::TranscriptionConfig) -> Self {
         Self {
             model: Some(cfg.model.clone()),
@@ -222,13 +214,9 @@ impl WhisperTranscriberBuilder {
         }
     }
 
-    /// Finalize the builder: download any missing model files, initialize the
-    /// whisper.cpp context, and return a ready-to-use [`WhisperTranscriber`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TranscriptionError`] if a required model identifier is missing,
-    /// the model download fails, or the whisper context cannot be initialized.
+    /// Download any missing model files and initialize the whisper
+    /// context. Errors when a required model identifier is missing,
+    /// a download fails, or the context cannot be initialized.
     pub async fn build(self) -> Result<WhisperTranscriber, TranscriptionError> {
         whisper_rs::install_logging_hooks();
 
@@ -277,11 +265,8 @@ impl WhisperTranscriberBuilder {
     }
 }
 
-/// Build a CPU-backed [`WhisperTranscriber`] sharing the same model (and
-/// VAD, if enabled) as the primary. Used by
-/// [`crate::transcribe::QueuedTranscriber`] as its lazily-initialized
-/// fallback when the GPU is contended. Reuses
-/// [`model_cache::ensure_model`] so the weights aren't re-downloaded.
+/// Build a CPU-backed [`WhisperTranscriber`] from the same config as
+/// the primary, sharing its cached model files.
 pub async fn build_cpu_fallback(
     cfg: &assistd_config::TranscriptionConfig,
     cache_dir_override: Option<PathBuf>,

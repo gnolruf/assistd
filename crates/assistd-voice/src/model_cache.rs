@@ -1,5 +1,5 @@
-//! On-disk cache for Whisper GGML model files. HuggingFace identifier
-//! in, local `PathBuf` out; downloads atomically on first use.
+//! On-disk cache for Whisper GGML model files, downloaded from
+//! HuggingFace on first use.
 
 use std::path::{Path, PathBuf};
 
@@ -44,9 +44,9 @@ fn cached_path(cache_dir: &Path, repo: &str, file: &str) -> PathBuf {
     cache_dir.join(sanitize_repo(repo)).join(file)
 }
 
-/// Ensure the file for `hf_id` exists locally, downloading it on first
-/// use. Returns the resolved path. Safe against partial writes: the
-/// download lands in `<file>.part` and is atomically renamed on success.
+/// Path to the cached file for `hf_id`, downloading it first if
+/// missing. The download lands in `<file>.part` and is renamed on
+/// success, so a crash never leaves a partial file at the final path.
 pub async fn ensure_model(hf_id: &str, cache_dir: &Path) -> Result<PathBuf, TranscriptionError> {
     let (repo, file) = parse_hf_id(hf_id)?;
     let dest = cached_path(cache_dir, &repo, &file);

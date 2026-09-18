@@ -1,11 +1,5 @@
-//! Blocking worker that opens cpal, streams 16 kHz mono 20 ms i16
-//! frames to the VAD task, and closes the device when signalled.
-//!
-//! This is the continuous-listen counterpart to
-//! [`crate::mic::capture::capture_worker`]. They both use the shared
-//! [`open_producer_stream`] helper to get a cpal `Stream` + ring
-//! consumer; what differs is the drain strategy. PTT accumulates
-//! into one `Vec<i16>`; this worker streams frame-sized chunks.
+//! Blocking capture worker that streams 20 ms 16 kHz i16 frames to
+//! the VAD task until signalled.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,24 +12,18 @@ use super::consumer::stream_frames;
 use super::vad::FRAME_SAMPLES;
 use crate::mic::capture::{AudioCaptureError, ProducerStream, open_producer_stream};
 
-/// Ring capacity in mono native-rate samples. Continuous listening
-/// only needs enough headroom for the VAD task to catch up during a
-/// scheduling hiccup; ~5 s at 48 kHz is plenty and small enough to
-/// avoid ballooning memory.
 const LISTEN_RING_SECONDS: usize = 5;
 const LISTEN_RING_NATIVE_RATE_ASSUMED: usize = 48_000;
 
-/// Handles for the running capture session. Dropping these (or
-/// setting `stop_flag`) brings the stream down.
+/// Handles to a running continuous capture.
 pub struct ListenCaptureSession {
     pub stop_flag: Arc<AtomicBool>,
     pub overrun: Arc<AtomicU64>,
     pub handle: JoinHandle<Result<(), AudioCaptureError>>,
 }
 
-/// Start a continuous capture: opens cpal, begins streaming 20 ms
-/// frames into `frame_tx`. The returned `handle` resolves when the
-/// worker exits (stop_flag set, or `frame_tx` dropped).
+/// Spawn a blocking worker streaming 20 ms frames into `frame_tx`
+/// until `stop_flag` is set or the receiver is dropped.
 pub fn start(
     device_hint: Option<&str>,
     frame_tx: mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
@@ -92,7 +80,6 @@ fn listen_worker(
         );
     }
 
-    // Drop cpal stream on this same thread to avoid `!Send` drop issues.
     drop(stream);
     result
 }

@@ -1,36 +1,14 @@
-//! Runtime control over a [`VoiceOutput`] backend: toggle on/off, skip
-//! the current response, interrupt for push-to-talk barge-in.
-//!
-//! The controller composes with (rather than replacing) the existing
-//! `Arc<dyn VoiceOutput>`. It owns two pieces of mutable runtime state:
-//!
-//! - `enabled`: a runtime mute switch. Off means the speech worker
-//!   silently discards sentences as it dequeues them. The setting is
-//!   *not* persisted across daemon restarts (the initial value is read
-//!   from `voice.synthesis.enabled` at construction).
-//! - `skip_epoch`: a monotonically increasing counter that lets each
-//!   per-query speech worker capture its own epoch at spawn time and
-//!   detect later "skip everything in flight" requests by comparing
-//!   against the current value. This avoids per-query state in
-//!   `AppState` and handles concurrent queries correctly: a `skip()`
-//!   advances the global epoch so every active worker independently
-//!   sees the change, while a future query captures the new epoch at
-//!   spawn and is unaffected.
-//!
-//! Both `set_enabled(false)` and `skip()` call `inner.cancel()` so
-//! audio that's already in the playback queue stops within milliseconds
-//! (`PiperVoiceOutput::cancel` clears rodio's FIFO).
-//!
-//! `set_enabled(true)` does *not* advance the epoch; re-enabling
-//! resumes speaking later sentences for the same query (those that
-//! arrive after the toggle-back-on; sentences enqueued during the off
-//! window are dropped at dequeue and not buffered).
+//! Runtime control over a [`VoiceOutput`]: a mute switch and a skip
+//! epoch. Each speech worker captures the epoch when it starts;
+//! [`VoiceOutputController::skip`] advances it so every in-flight
+//! worker drops its remaining sentences while later queries are
+//! unaffected.
 
 use crate::VoiceOutput;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// Shared, reference-counted controller wrapping an `Arc<dyn VoiceOutput>`.
+/// Mute switch and skip epoch over an `Arc<dyn VoiceOutput>`.
 pub struct VoiceOutputController {
     inner: Arc<dyn VoiceOutput>,
     enabled: AtomicBool,
@@ -49,8 +27,6 @@ pub enum SpeakDecision {
 }
 
 impl VoiceOutputController {
-    /// Create a controller. `initially_enabled` typically comes from
-    /// `config.voice.synthesis.enabled`.
     pub fn new(inner: Arc<dyn VoiceOutput>, initially_enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             inner,
@@ -59,18 +35,16 @@ impl VoiceOutputController {
         })
     }
 
-    /// Returns `true` if TTS is currently enabled.
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
     }
 
-    /// Returns the current skip epoch counter.
     pub fn current_epoch(&self) -> u64 {
         self.skip_epoch.load(Ordering::SeqCst)
     }
 
-    /// Flip the runtime mute switch. Turning off cancels currently-queued
-    /// audio; turning on is a pure flag flip with no cancel.
+    /// Turning off cancels queued audio. Turning on does not advance
+    /// the epoch, so a running worker resumes speaking.
     pub async fn set_enabled(&self, on: bool) {
         let prev = self.enabled.swap(on, Ordering::SeqCst);
         if prev && !on {
@@ -78,23 +52,20 @@ impl VoiceOutputController {
         }
     }
 
-    /// Abort the current response: advance the epoch (so active speech
-    /// workers drop the rest of their queued sentences) and clear the
-    /// audio playback queue. Does not change the enabled flag; TTS
-    /// stays armed for the next query.
+    /// Advance the epoch and cancel queued audio. Leaves the mute
+    /// switch unchanged.
     pub async fn skip(&self) {
         self.skip_epoch.fetch_add(1, Ordering::SeqCst);
         self.inner.cancel().await;
     }
 
-    /// PTT barge-in. Identical semantics to [`skip`](Self::skip); kept
-    /// as a named alias so call sites read intuitively.
+    /// Push-to-talk barge-in; identical to [`skip`](Self::skip).
     pub async fn interrupt(&self) {
         self.skip().await;
     }
 
-    /// Speech-worker policy: given the epoch the worker captured at
-    /// spawn time, return what to do with the next dequeued sentence.
+    /// What a worker that started at `start_epoch` should do with its
+    /// next sentence.
     pub fn should_speak(&self, start_epoch: u64) -> SpeakDecision {
         if self.skip_epoch.load(Ordering::SeqCst) != start_epoch {
             SpeakDecision::DropForSkip
@@ -105,8 +76,6 @@ impl VoiceOutputController {
         }
     }
 
-    /// Access the underlying backend (used by the speech worker for
-    /// `speak()` and `wait_idle()`).
     pub fn inner(&self) -> &Arc<dyn VoiceOutput> {
         &self.inner
     }
@@ -225,16 +194,13 @@ mod tests {
         let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), false);
         let start = ctrl.current_epoch();
         ctrl.skip().await;
-        // Both disabled AND epoch advanced: skip wins so callers can
-        // distinguish "user pressed skip" from "user toggled off".
         assert_eq!(ctrl.should_speak(start), SpeakDecision::DropForSkip);
     }
 
     #[tokio::test]
     async fn future_query_after_skip_speaks_normally() {
         let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), true);
-        ctrl.skip().await; // simulates a previous query being skipped
-        // New query captures the post-skip epoch:
+        ctrl.skip().await;
         let start = ctrl.current_epoch();
         assert_eq!(ctrl.should_speak(start), SpeakDecision::Speak);
     }
@@ -247,9 +213,7 @@ mod tests {
         ctrl.set_enabled(false).await;
         assert_eq!(ctrl.should_speak(start), SpeakDecision::DropSilent);
         ctrl.set_enabled(true).await;
-        // Same start_epoch (toggle does NOT bump) so the worker resumes.
         assert_eq!(ctrl.should_speak(start), SpeakDecision::Speak);
-        // No epoch advance from either toggle:
         assert_eq!(ctrl.current_epoch(), start);
     }
 }

@@ -1,15 +1,4 @@
-//! Per-utterance Piper subprocess. One `synthesize()` call =
-//! one `Command::spawn` of `piper --output-raw ...` with the text
-//! written to stdin and EOF signaled by closing the pipe. EOF on
-//! stdout marks the end of audio; the child exits naturally afterward.
-//!
-//! Why per-utterance: piper writes raw PCM continuously to stdout
-//! with no in-band frame delimiter. Long-running mode would have to
-//! detect utterance boundaries via stderr-log markers, which is
-//! version-fragile and races against the kernel pipe between FDs.
-//! Per-utterance trades 50–250 ms of CPU model-load latency for a
-//! deterministic protocol; that latency overlaps with LLM generation
-//! of the next sentence, so users don't see it.
+//! Per-utterance Piper subprocess.
 
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -23,31 +12,25 @@ use tokio::process::{ChildStderr, ChildStdout, Command};
 use crate::piper::config::PiperRuntimeConfig;
 use crate::piper::error::PiperError;
 
-/// Result of one `synthesize` call: 16-bit signed little-endian PCM
-/// samples plus the sample rate (read from the voice's `.onnx.json`).
+/// Signed 16-bit PCM plus its sample rate.
 #[derive(Debug, Clone)]
 pub struct SynthOutput {
     pub samples: Vec<i16>,
     pub sample_rate: u32,
 }
 
-/// Stateless synthesizer. The runtime config is shared via `Arc`; each
-/// `synthesize` call reads from it without mutation.
+/// Stateless synthesizer: one piper subprocess per call.
 pub struct OneShotSynth {
     cfg: Arc<PiperRuntimeConfig>,
 }
 
 impl OneShotSynth {
-    /// Create an `OneShotSynth` from the given runtime config.
     pub fn new(cfg: Arc<PiperRuntimeConfig>) -> Self {
         Self { cfg }
     }
 
-    /// Spawn piper, write `text + \n`, close stdin, drain stdout to
-    /// EOF, return PCM. Stderr is read concurrently to prevent the
-    /// kernel pipe from filling and blocking piper mid-synthesis.
-    /// On non-zero exit, the last 20 stderr lines are included in the
-    /// error so callers can see piper's complaint.
+    /// Spawn piper, write `text`, and drain stdout to EOF. On non-zero
+    /// exit the error carries piper's last stderr lines.
     pub async fn synthesize(&self, text: &str) -> Result<SynthOutput, PiperError> {
         let cfg = &*self.cfg;
         let mut cmd = Command::new(&cfg.binary_path);
@@ -94,21 +77,15 @@ impl OneShotSynth {
         let stderr_tail = Arc::new(Mutex::new(VecDeque::<String>::with_capacity(20)));
         let stderr_tail_for_drain = stderr_tail.clone();
 
-        // Concurrent helpers: `read_to_end` on stdout, line-buffered
-        // tail on stderr. Reading only stdout would let stderr fill the
-        // kernel pipe and stall piper mid-synthesis.
-        //
-        // Everything (child + stdout + stderr) is `move`d into the
-        // inner future. On timeout the future is dropped, which drops
-        // `child`, and `kill_on_drop(true)` ensures the OS process
-        // dies. The drain tasks live for the duration of the future
-        // via `tokio::join!`, so they're cancelled together.
+        // stderr must be drained alongside stdout or a full pipe stalls
+        // piper. The child is moved into the future so a timeout drops
+        // it and `kill_on_drop` reaps the process.
         let deadline = cfg.deadline;
         let binary = cfg.binary_path.clone();
         let text_owned = text.replace('\n', " ");
         let synth_fut = async move {
             let write_res = stdin.write_all(format!("{text_owned}\n").as_bytes()).await;
-            drop(stdin); // signal EOF unconditionally
+            drop(stdin);
             if let Err(e) = write_res {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
@@ -137,7 +114,6 @@ impl OneShotSynth {
             Ok(Ok(pair)) => pair,
             Ok(Err(e)) => return Err(e),
             Err(_) => {
-                // Future dropped → child dropped → kill_on_drop fires.
                 tracing::warn!(
                     target: "assistd::voice::piper",
                     deadline_secs = deadline.as_secs(),
@@ -182,9 +158,8 @@ impl OneShotSynth {
         })
     }
 
-    /// Tiny synthesis used by `PiperVoiceOutput::start()` to fail fast
-    /// at daemon startup if the binary is missing, the model file is
-    /// corrupt, or piper exits non-zero for any reason.
+    /// Synthesize a short probe so a missing binary or corrupt model
+    /// fails at startup.
     pub async fn health_check(&self) -> Result<(), PiperError> {
         let out = self.synthesize("ok").await?;
         if out.samples.is_empty() {
@@ -199,9 +174,8 @@ impl OneShotSynth {
 }
 
 async fn drain_stdout(mut stdout: ChildStdout) -> Result<Vec<u8>, PiperError> {
-    // Chunked read so we can timestamp the first PCM byte (the practical
-    // proxy for "audio is now flowing"). 8 KiB matches piper's typical
-    // pipe block size; total bytes copied is unchanged from `read_to_end`.
+    // Chunked rather than `read_to_end` so the first PCM byte can be
+    // timestamped.
     let mut buf = Vec::with_capacity(64 * 1024);
     let mut chunk = [0u8; 8192];
     let mut first = true;

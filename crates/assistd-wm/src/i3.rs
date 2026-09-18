@@ -1,12 +1,6 @@
-//! i3 backend for [`crate::WindowManager`].
-//!
-//! Speaks the i3 IPC protocol via `tokio-i3ipc`. Two Unix-socket
-//! connections are opened at startup: one held under a `Mutex` for
-//! command sends, one consumed by [`tokio_i3ipc::I3::listen`] for the
-//! event stream. A background task subscribes to `Window` events and
-//! keeps a snapshot of the focused window's class up to date so
-//! [`I3Backend::focused_window`] reads from memory rather than round-
-//! tripping over the socket.
+//! i3 backend for [`crate::WindowManager`], over `tokio-i3ipc`. One
+//! socket serves commands; a second feeds the event stream that keeps
+//! the focus snapshot current.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,64 +26,41 @@ use crate::{
     WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
 
-/// How many window events to buffer per subscriber. Subscribers that
-/// fall this far behind get a `Lagged` error and must reconnect — we
-/// treat that as a no-op in the popup placement path (just fall back
-/// to polling), so a small buffer is fine.
+/// Window events buffered per subscriber. A lagged subscriber falls
+/// back to polling, so a small buffer is fine.
 const WINDOW_EVENTS_CAPACITY: usize = 32;
 
-/// Max time `find_window_rect_by_criteria` waits for a matching
-/// `WindowEvent::Opened` after its initial tree poll comes up empty.
-/// Bounded so the popup never blocks indefinitely if the window
-/// somehow never appears.
+/// How long `find_window_rect_by_criteria` waits for a matching
+/// `WindowEvent::Opened` after its first tree poll misses.
 const WINDOW_EVENT_WAIT: Duration = Duration::from_millis(500);
 
-/// `WindowManager` impl wrapping a single i3 IPC command socket.
-/// Held inside `Arc<dyn WindowManager>` by the daemon's `AppState`.
+/// [`WindowManager`] over a single i3 IPC command socket.
 pub struct I3Backend {
     cmd: Arc<Mutex<Option<I3>>>,
     snapshot: Arc<RwLock<Snapshot>>,
-    /// Bumped by call-site failures (`run_command`, `get_tree`, …) so
-    /// the supervisor task reconnects without waiting for the next
-    /// event-stream error to fire.
     reconnect: Arc<tokio::sync::Notify>,
-    /// Broadcasts every i3 `window::*` event so consumers (currently
-    /// just the tray popup's placement path) can react synchronously
-    /// to a freshly mapped window instead of polling `GET_TREE`.
-    /// Receivers are created on demand via `subscribe`; lagged
-    /// receivers get a typed `Lagged` error and fall back to polling.
     window_events: broadcast::Sender<WindowEvent>,
 }
 
-/// Returned by [`I3Backend::start`] alongside the backend itself. The
-/// daemon awaits [`I3Handle::shutdown`] in its graceful-shutdown block
-/// so the supervisor task drains before the process exits, matching
-/// how other long-lived subsystems (`embedder_task_handle`,
-/// `hotkey_handle`, etc.) are awaited in `daemon.rs`.
+/// The backend plus its supervisor task, returned by [`I3Backend::start`].
 pub struct I3Handle {
     pub backend: Arc<I3Backend>,
     supervisor_task: JoinHandle<()>,
 }
 
 impl I3Handle {
-    /// Awaits the supervisor task. The daemon should flip `shutdown_tx` before
-    /// calling this so the supervisor exits cleanly rather than blocking.
+    /// Awaits the supervisor task. Flip the shutdown watch first or
+    /// this blocks until the socket drops.
     pub async fn shutdown(self) {
         let _ = self.supervisor_task.await;
     }
 }
 
 impl I3Backend {
-    /// Connect to the i3 IPC sockets, seed the focused-window snapshot,
-    /// and spawn the supervisor task that drives the event stream and
-    /// reconnects on socket drops.
-    ///
-    /// Returns `Err` when the i3 socket isn't reachable on first try
-    /// (i3 not running, `I3SOCK` unset, non-Linux dev box, …). The
-    /// daemon catches that and substitutes `NoWindowManager` so the
-    /// rest of startup proceeds. After the initial connect, transient
-    /// socket failures are handled in-process by the supervisor;
-    /// `i3-msg restart` no longer requires a daemon restart.
+    /// Connect to the i3 IPC sockets, seed the focus snapshot, and
+    /// spawn the supervisor that drives events and reconnects on
+    /// socket drops. Errors only when the initial connect fails;
+    /// later socket failures are handled by the supervisor.
     pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<I3Handle> {
         let (mut cmd, events_conn) = connect_pair().await?;
         let initial = match seed_snapshot(&mut cmd).await {
@@ -129,8 +100,6 @@ impl I3Backend {
         let results =
             match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.run_command(payload)).await {
                 Err(_) => {
-                    // Wedged i3: drop the conn so the supervisor reconnects
-                    // instead of holding the broken socket forever.
                     *guard = None;
                     self.reconnect.notify_one();
                     return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
@@ -264,11 +233,8 @@ impl WindowManager for I3Backend {
     ) -> WmResult<()> {
         let translated = translate_criteria_for_i3(criteria);
         let workspace = self.focused_workspace_rect_inner().await?;
-        // eframe / winit / X11 don't always honour the size we passed
-        // to `with_inner_size` exactly — DPI scaling especially can
-        // turn a configured 360-logical-px window into a 420-physical-
-        // px one. Compute placement using the window's actual rect so
-        // the anchor lands precisely regardless of scale.
+        // DPI scaling can map a 360-logical-px request to 420 physical
+        // px, so place using the window's actual rect.
         let effective = match self.find_window_rect_by_criteria(&translated).await {
             Ok(actual) => {
                 tracing::info!(
@@ -300,21 +266,9 @@ impl WindowManager for I3Backend {
 }
 
 impl I3Backend {
-    /// Walk the i3 tree looking for a window matching the given
-    /// criteria, returning its current rect. Used by
-    /// [`Self::place_floating`] to feed the actual on-screen
-    /// dimensions into the placement formula. Only the
-    /// title/class/app_id variants are searched here; `con_id`
-    /// short-circuits via the tree's `id` field.
-    ///
-    /// Subscribes to the backend's window-event broadcast first, then
-    /// does a single tree poll. If the window is already there we
-    /// return immediately. Otherwise we wait (up to
-    /// [`WINDOW_EVENT_WAIT`]) for a matching `WindowEvent::Opened`
-    /// from i3's `window::new` event stream and then re-poll the tree
-    /// to get the rect. Subscribing before polling closes the race
-    /// where the supervisor processes the new-window event after our
-    /// `GET_TREE` reply but before we get a chance to wait.
+    /// Current rect of the window matching `criteria`. Subscribes to
+    /// window events before the first tree poll so a `window::new`
+    /// that lands between the poll and the wait is not missed.
     async fn find_window_rect_by_criteria(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
         let mut events = self.window_events.subscribe();
 
@@ -330,11 +284,7 @@ impl I3Backend {
                             return true;
                         }
                     }
-                    // Sender dropped (backend shutting down) — bail.
                     Err(broadcast::error::RecvError::Closed) => return false,
-                    // Lagged: we missed events. The window might
-                    // already be in the tree, so break out and let the
-                    // final poll find it.
                     Err(broadcast::error::RecvError::Lagged(_)) => return false,
                 }
             }
@@ -373,12 +323,6 @@ impl I3Backend {
             .ok_or_else(|| WmError::Rejected(format!("no window matches {criteria:?}")))
     }
 
-    /// Query the focused workspace's pixel rect via `GET_WORKSPACES`.
-    /// Used by [`Self::place_floating`] to compute absolute pixel
-    /// coordinates for the popup, bypassing i3's silent clamping of
-    /// off-screen ppt-based positions. Exposed through the
-    /// `WindowManager` trait method of the same name; the private
-    /// `_inner` suffix avoids the trait/inherent collision.
     async fn focused_workspace_rect_inner(&self) -> WmResult<Rect> {
         let mut guard = self.cmd.lock().await;
         let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
@@ -401,8 +345,6 @@ impl I3Backend {
             .into_iter()
             .find(|w| w.focused)
             .map(|w| Rect {
-                // tokio-i3ipc reports rect coordinates as `isize`; sway
-                // uses `i32`. Normalise both to `i32` at this seam.
                 x: w.rect.x as i32,
                 y: w.rect.y as i32,
                 width: w.rect.width.max(0) as u32,
@@ -411,13 +353,9 @@ impl I3Backend {
             .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
     }
 
-    /// Compute the scale factor for the focused output from `xrandr`'s
-    /// physical-size reading, using the same DPI quantisation winit
-    /// applies as its last-resort fallback. Returns `None` when we
-    /// can't determine the focused output's name (no focused workspace)
-    /// or `xrandr` isn't available / doesn't list a matching connected
-    /// output. The xrandr subprocess runs on a `spawn_blocking` thread
-    /// so the async runtime isn't blocked on the fork+exec.
+    /// Scale factor derived from the focused output's physical size in
+    /// `xrandr`, using winit's DPI quantisation. `None` when no
+    /// workspace is focused or `xrandr` doesn't list the output.
     async fn focused_output_randr_scale(&self) -> Option<f64> {
         let output_name = self.focused_output_name().await.ok().flatten()?;
         let xrandr = run_xrandr_query().await?;
@@ -425,8 +363,7 @@ impl I3Backend {
         Some(calc_randr_scale(pixels, mm))
     }
 
-    /// Name of the output (e.g. `"DP-0"`) currently hosting the focused
-    /// workspace. Returns `Ok(None)` when no workspace is focused.
+    /// Output hosting the focused workspace; `Ok(None)` when none is.
     async fn focused_output_name(&self) -> WmResult<Option<String>> {
         let mut guard = self.cmd.lock().await;
         let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
@@ -449,14 +386,9 @@ impl I3Backend {
     }
 }
 
-/// i3's IPC grammar predates Wayland; its criteria block accepts
-/// `class` / `instance` / `con_id` / `id` / `title` etc. but not
-/// `app_id`. Map the protocol-neutral [`PlacementCriteria::AppId`]
-/// onto `title` — egui-winit 0.34 (and presumably other toolkits)
-/// doesn't reliably populate X11 `WM_CLASS` from the same identifier
-/// they pass to `with_app_id` on Wayland, but the title is always
-/// settable. Callers that own their popup window must set its title
-/// to the same string they pass as `AppId(...)`.
+/// i3 has no `app_id` criterion, and egui-winit 0.34 leaves `WM_CLASS`
+/// empty on X11, so `AppId` maps onto `title`. Callers must set their
+/// window title to the same string they pass as `AppId`.
 fn translate_criteria_for_i3(c: &PlacementCriteria) -> PlacementCriteria {
     match c {
         PlacementCriteria::AppId(s) => PlacementCriteria::Title(s.clone()),
@@ -464,11 +396,6 @@ fn translate_criteria_for_i3(c: &PlacementCriteria) -> PlacementCriteria {
     }
 }
 
-/// Recursively search the i3 tree for a window matching the given
-/// criteria and return its rendered rect. The rect is i3's
-/// `window_rect` (the client area inside any decorations), which is
-/// what the placement formula needs to anchor exactly. Container
-/// nodes (no `window`) are skipped.
 fn find_node_rect(node: &reply::Node, criteria: &PlacementCriteria) -> Option<Rect> {
     if node.window.is_some() && node_matches(node, criteria) {
         return Some(Rect {
@@ -498,15 +425,11 @@ fn node_matches(node: &reply::Node, criteria: &PlacementCriteria) -> bool {
             .and_then(|p| p.class.as_deref())
             .is_some_and(|c| c == want),
         // AppId is rewritten to Title before reaching here; ConId is
-        // matched by id at a different layer. Leave as no-match so a
-        // misuse fails loudly rather than silently picking the wrong
-        // window.
+        // matched by id elsewhere. No-match so a misuse fails loudly.
         _ => false,
     }
 }
 
-/// Format the i3 RUN_COMMAND payload for `resize_width`. Factored out
-/// so unit tests can assert on the literal string without a live i3.
 fn i3_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
     format!(
         r#"[con_id="{}"] resize {} width {} px or 0 ppt"#,
@@ -516,16 +439,10 @@ fn i3_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> St
     )
 }
 
-/// Format the i3 RUN_COMMAND payload for `set_layout`. The bare
-/// `layout <name>` form acts on the focused container, the same shape
-/// `i3-msg layout …` produces.
 fn i3_layout_payload(layout: Layout) -> String {
     format!("layout {}", layout.as_str())
 }
 
-/// Parse an environment variable as a positive, finite `f64`. Used to
-/// read scale-factor overrides like `WINIT_X11_SCALE_FACTOR` without
-/// blowing up on unset or malformed values.
 fn env_scale(name: &str) -> Option<f64> {
     std::env::var(name)
         .ok()
@@ -533,10 +450,6 @@ fn env_scale(name: &str) -> Option<f64> {
         .filter(|s| s.is_finite() && *s > 0.0)
 }
 
-/// Run `xrdb -query` and return its stdout as a string. `None` when
-/// the binary is missing or exits non-zero. Wrapped in
-/// `spawn_blocking` because the fork+exec is sync and `assistd-wm`
-/// doesn't pull in tokio's `process` feature.
 async fn run_xrdb_query() -> Option<String> {
     tokio::task::spawn_blocking(|| {
         let out = std::process::Command::new("xrdb")
@@ -553,8 +466,6 @@ async fn run_xrdb_query() -> Option<String> {
     .flatten()
 }
 
-/// Run `xrandr --query` and return its stdout. See [`run_xrdb_query`]
-/// for the blocking-task rationale.
 async fn run_xrandr_query() -> Option<String> {
     tokio::task::spawn_blocking(|| {
         let out = std::process::Command::new("xrandr")
@@ -571,9 +482,7 @@ async fn run_xrandr_query() -> Option<String> {
     .flatten()
 }
 
-/// Parse the `Xft.dpi` line out of `xrdb -query` output and convert it
-/// to a scale factor (`dpi / 96`, clamped to `>= 1.0`). Returns `None`
-/// when the line is absent or unparseable.
+/// `Xft.dpi / 96`, clamped to `>= 1.0`.
 fn parse_xft_dpi_scale(xrdb_output: &str) -> Option<f64> {
     xrdb_output
         .lines()
@@ -583,13 +492,8 @@ fn parse_xft_dpi_scale(xrdb_output: &str) -> Option<f64> {
         .map(|dpi| (dpi / 96.0).max(1.0))
 }
 
-/// Find the `<name> connected …<mm_w>mm x <mm_h>mm` line for the named
-/// output in `xrandr --query` output and return its pixel size and
-/// physical size in millimetres. Disconnected or unlisted outputs
-/// return `None`. The xrandr output format isn't officially stable but
-/// has been consistent since at least xrandr 1.5; we match the
-/// `WIDTHxHEIGHT+X+Y` geometry chunk and the trailing `<W>mm x <H>mm`
-/// physical-size pair.
+/// Pixel size and physical size in millimetres of a connected output,
+/// from its `<name> connected WxH+X+Y ... <W>mm x <H>mm` line.
 fn parse_xrandr_output_size(
     xrandr_output: &str,
     output_name: &str,
@@ -599,10 +503,6 @@ fn parse_xrandr_output_size(
 
     let pixels = line.split_whitespace().find_map(parse_geometry_size)?;
 
-    // Physical size sits at the tail as `<W>mm x <H>mm`. We look for
-    // the two `<n>mm` tokens around an `x` separator rather than
-    // assuming exact column positions, so a stray `(normal …)` flags
-    // block doesn't throw off the parse.
     let tokens: Vec<&str> = line.split_whitespace().collect();
     let mm = tokens.windows(3).rev().find_map(|w| {
         match (w[0].strip_suffix("mm"), w[1], w[2].strip_suffix("mm")) {
@@ -617,9 +517,8 @@ fn parse_xrandr_output_size(
     Some((pixels, mm))
 }
 
-/// Parse a single xrandr geometry token (`WIDTHxHEIGHT+X+Y` — the `+X+Y`
-/// is required so we don't accidentally match a mode-list entry like
-/// `2560x1440`). Returns the `(width, height)` pixel pair.
+/// `(width, height)` from a `WIDTHxHEIGHT+X+Y` token. The `+X+Y` is
+/// required so a mode-list entry like `2560x1440` doesn't match.
 fn parse_geometry_size(token: &str) -> Option<(u32, u32)> {
     let plus = token.find('+')?;
     let dims = &token[..plus];
@@ -627,10 +526,9 @@ fn parse_geometry_size(token: &str) -> Option<(u32, u32)> {
     Some((w.parse().ok()?, h.parse().ok()?))
 }
 
-/// Winit's RandR-based DPI scaling formula (`platform_impl/linux/x11/util/randr.rs::calc_dpi_factor`).
-/// Quantises to the nearest 1/12 step so consecutive monitors with
-/// minor EDID rounding agree on a single scale. Returns `1.0` for
-/// zero-sized inputs or absurd results.
+/// Winit's RandR DPI formula (`x11/util/randr.rs::calc_dpi_factor`),
+/// quantised to 1/12 steps so monitors with minor EDID rounding agree.
+/// `1.0` for zero-sized inputs or absurd results.
 fn calc_randr_scale(pixels: (u32, u32), mm: (u64, u64)) -> f64 {
     let (px_w, px_h) = (pixels.0 as f64, pixels.1 as f64);
     let (mm_w, mm_h) = (mm.0 as f64, mm.1 as f64);
@@ -646,11 +544,6 @@ fn calc_randr_scale(pixels: (u32, u32), mm: (u64, u64)) -> f64 {
     }
 }
 
-/// Walk the i3 tree recursively, emitting one [`Window`] per leaf node
-/// that has an X11 window backing (i.e. real, mapped clients, not
-/// containers). Tracks the most recent `NodeType::Workspace` ancestor
-/// in `current_ws` so each window can be tagged with the workspace it
-/// lives on.
 fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<Window>) {
     let next_ws = if matches!(node.node_type, reply::NodeType::Workspace) {
         node.name.as_deref()
@@ -702,8 +595,6 @@ async fn seed_snapshot(cmd: &mut I3) -> Result<Snapshot> {
     })
 }
 
-/// Open the cmd + events socket pair and subscribe events. Pulled out
-/// of `start()` so the supervisor can reuse it on each reconnect.
 async fn connect_pair() -> WmResult<(I3, I3)> {
     let cmd = I3::connect()
         .await
@@ -718,10 +609,8 @@ async fn connect_pair() -> WmResult<(I3, I3)> {
     Ok((cmd, events_conn))
 }
 
-/// Drive one events connection until it errors or the supervisor
-/// signals a forced reconnect. Returns when the inner loop should
-/// fall through to the reconnect branch, or `false` if shutdown was
-/// observed (in which case the supervisor exits cleanly).
+/// Drive one events connection. Returns `true` when the caller should
+/// reconnect, `false` on shutdown.
 async fn drive_events(
     events_conn: I3,
     snapshot: Arc<RwLock<Snapshot>>,
@@ -743,8 +632,6 @@ async fn drive_events(
                     Some(Ok(Event::Window(w))) => {
                         handle_window_event(&w, &snapshot).await;
                         if let Some(ev) = window_event_from_i3(&w) {
-                            // Best-effort: receivers may not exist yet
-                            // (no popup running), and that's fine.
                             let _ = window_events.send(ev);
                         }
                     }
@@ -759,26 +646,19 @@ async fn drive_events(
                         tracing::warn!("i3 event stream error: {e}");
                         return true;
                     }
-                    None => return true, // socket closed
+                    None => return true,
                 }
             }
         }
     }
 }
 
-/// Project an i3 `WindowData` event onto our backend-neutral
-/// [`WindowEvent`]. Returns `None` for change kinds the broadcast
-/// channel doesn't care about (focus, move, urgent, mark, fullscreen,
-/// floating).
 fn window_event_from_i3(w: &tokio_i3ipc::event::WindowData) -> Option<WindowEvent> {
     let id = WindowId::new(w.container.id as u64)?;
     match w.change {
         WindowChange::New => {
             let props = w.container.window_properties.as_ref();
             let class = props.and_then(|p| p.class.clone());
-            // i3 is X11-only; Wayland app_id doesn't apply. Setting
-            // `app_id` to `None` keeps the field shape uniform with
-            // sway, where the same enum variant carries both.
             Some(WindowEvent::Opened {
                 id,
                 title: w.container.name.clone(),
@@ -795,10 +675,6 @@ fn window_event_from_i3(w: &tokio_i3ipc::event::WindowData) -> Option<WindowEven
     }
 }
 
-/// Outer reconnect loop. Drives events through `drive_events`; on
-/// fall-through (socket error, forced-reconnect, or initial events-
-/// stream creation failure), drops `cmd` to `None`, sleeps with
-/// exponential backoff, and reconnects. Exits cleanly on shutdown.
 async fn supervisor_loop(
     backend: Arc<I3Backend>,
     initial_events: I3,
@@ -864,11 +740,6 @@ async fn supervisor_loop(
     }
 }
 
-/// Project an i3 `WindowData` event into the shared snapshot's
-/// `(id, class, title, kind)` tuple and dispatch to
-/// [`apply_window_event`]. The compositor-specific projection (reading
-/// `container.id`, `window_properties.class`, etc.) lives here; the
-/// "what changes when" rules live in `crate::snapshot`.
 async fn handle_window_event(w: &tokio_i3ipc::event::WindowData, snap: &Arc<RwLock<Snapshot>>) {
     let kind = match w.change {
         WindowChange::Focus => WindowChangeKind::Focus,
@@ -946,8 +817,6 @@ mod tests {
 
     #[test]
     fn layout_payload_emits_bare_form() {
-        // i3 / sway treat `layout <name>` as acting on the focused
-        // container; no criteria prefix.
         for (l, expected) in [
             (Layout::Default, "layout default"),
             (Layout::Tabbed, "layout tabbed"),
@@ -973,8 +842,6 @@ mod tests {
 
     #[test]
     fn xft_dpi_clamps_below_96() {
-        // The Xft.dpi-based path is for HiDPI; sub-96 DPI shouldn't
-        // ever shrink the popup, so clamp to 1.0.
         let xrdb = "Xft.dpi:\t72\n";
         assert_eq!(parse_xft_dpi_scale(xrdb), Some(1.0));
     }
@@ -1014,7 +881,6 @@ DP-0 connected 2560x1440+0+0 (normal left inverted right x axis y axis) 587mm x 
 
     #[test]
     fn xrandr_returns_none_when_no_mm_dimensions() {
-        // Some virtual outputs report no physical size.
         let xrandr = "DP-0 connected 2560x1440+0+0 (normal left inverted right)\n";
         assert_eq!(parse_xrandr_output_size(xrandr, "DP-0"), None);
     }
@@ -1030,24 +896,18 @@ DP-0 connected 2560x1440+0+0 (normal left inverted right x axis y axis) 587mm x 
 
     #[test]
     fn randr_scale_clamps_zero_mm_to_one() {
-        // A monitor reporting 0mm physical size used to send winit
-        // into NaN; we return 1.0 instead.
         assert_eq!(calc_randr_scale((1920, 1080), (0, 0)), 1.0);
         assert_eq!(calc_randr_scale((1920, 1080), (500, 0)), 1.0);
     }
 
     #[test]
     fn randr_scale_floor_is_one() {
-        // Low-DPI monitor: don't scale below 1.0 even when the math
-        // says so (matches winit's `.max(1.0)`).
         let s = calc_randr_scale((1024, 768), (400, 300));
         assert_eq!(s, 1.0);
     }
 
     #[test]
     fn parse_geometry_size_requires_position_suffix() {
-        // The `+X+Y` is what distinguishes a real geometry token from a
-        // mode-list entry like `2560x1440`.
         assert_eq!(parse_geometry_size("2560x1440+0+0"), Some((2560, 1440)));
         assert_eq!(parse_geometry_size("1920x1080+100+200"), Some((1920, 1080)));
         assert_eq!(parse_geometry_size("2560x1440"), None);

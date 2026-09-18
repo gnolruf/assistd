@@ -1,26 +1,6 @@
-//! Shared focus-snapshot state and event-apply logic for the i3 and
-//! Sway backends.
-//!
-//! Both compositors deliver the same kinds of `Window` events (Focus,
-//! Title, Close) and the same `Workspace::Focus` event. The race rules
-//! for keeping the snapshot consistent under those events are
-//! identical (key on the unique con_id, drop title updates from
-//! background windows, etc.). Originally those rules lived in two
-//! near-identical `handle_window_event` copies, one per backend.
-//!
-//! Each backend now extracts the container's `(id, class, title)` from
-//! its native `WindowEvent` payload (the only piece that's compositor-
-//! specific, since the reply types differ between `tokio-i3ipc` and
-//! `swayipc-async`) and hands off to [`apply_window_event`] /
-//! [`apply_workspace_focus`] here. The "what changes when" lives in
-//! one place; the "how do I parse the IPC frame" stays in the
-//! backend-specific module.
-//!
-//! No sealed `Compositor` trait yet; that was the more aggressive
-//! goal in the M9 plan, and it requires an async-trait + associated-stream
-//! shape that risks GAT pitfalls and would force every backend to
-//! own-and-pin its event stream. The simpler share-the-rules form
-//! removes the bulk of the duplication without the lifetime gymnastics.
+//! Focus snapshot shared by the i3 and Sway backends. Backends project
+//! their native window events onto `(kind, id, class, title)` and hand
+//! them to [`apply_window_event`]; the update rules live here.
 
 use std::sync::Arc;
 
@@ -28,12 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::{FocusedWindowContext, WindowId};
 
-/// Cached focus state. Shared between the i3 and Sway backends.
-///
-/// Stores the compositor con_id (the [`WindowId`] returned to callers)
-/// alongside the raw `app_id` / X11 class string and window title used
-/// to render [`FocusedWindowContext::class`] / `::title` for the
-/// system-prompt context block.
+/// Cached focus state.
 #[derive(Default, Clone)]
 pub(crate) struct Snapshot {
     pub focused_id: Option<WindowId>,
@@ -42,9 +17,7 @@ pub(crate) struct Snapshot {
     pub active_workspace: Option<String>,
 }
 
-/// The subset of `Window`-event change kinds the snapshot reacts to.
-/// Backends translate their native enum (`tokio_i3ipc::event::WindowChange`
-/// / `swayipc_async::WindowChange`) into this shared shape.
+/// The window-event kinds the snapshot reacts to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowChangeKind {
     Focus,
@@ -52,17 +25,9 @@ pub(crate) enum WindowChangeKind {
     Close,
 }
 
-/// Apply a `Window` event to the cached focus snapshot.
-///
-/// Race rules (key on con_id rather than class, since two windows of the
-/// same app would otherwise alias each other in title/close updates):
-/// - `Focus` overwrites id + class + title from the new container.
-/// - `Title` only takes effect when the event's con_id matches the
-///   currently-focused id. Title events from background windows must
-///   not overwrite the foreground title; class also drifts to match
-///   the latest container metadata for the same id.
-/// - `Close` clears id + class + title only when the closed container
-///   is the focused one. Workspace is left intact.
+/// Apply a window event to the snapshot. Events are keyed on con_id,
+/// not class, so two windows of the same app never alias: `Title` and
+/// `Close` only take effect when their id is the focused one.
 pub(crate) async fn apply_window_event(
     snap: &Arc<RwLock<Snapshot>>,
     kind: WindowChangeKind,
@@ -95,22 +60,16 @@ pub(crate) async fn apply_window_event(
     }
 }
 
-/// Apply a `Workspace::Focus` event to the snapshot. Used by both
-/// backends to keep `active_workspace` aligned with what the
-/// compositor reports as the currently-focused workspace.
 pub(crate) async fn apply_workspace_focus(snap: &Arc<RwLock<Snapshot>>, workspace: Option<String>) {
     snap.write().await.active_workspace = workspace;
 }
 
-/// Read the currently-focused window's id from the snapshot. Cheap
-/// (single RwLock read), so callers don't need to cache the result.
 pub(crate) async fn read_focused_id(snap: &Arc<RwLock<Snapshot>>) -> Option<WindowId> {
     snap.read().await.focused_id
 }
 
-/// Build a [`FocusedWindowContext`] from the snapshot for the daemon's
-/// per-turn system-prompt injection. Returns `None` only when every
-/// field is empty; a partial snapshot still produces a context block.
+/// `None` only when every field is empty; a partial snapshot still
+/// yields a context.
 pub(crate) async fn read_focused_context(
     snap: &Arc<RwLock<Snapshot>>,
 ) -> Option<FocusedWindowContext> {
@@ -183,10 +142,6 @@ mod tests {
 
     #[tokio::test]
     async fn title_event_for_other_id_is_ignored() {
-        // The crucial regression check: a background window's Title
-        // event must NOT overwrite the foreground title. Pre-PR-3b
-        // this used to be keyed on class, which aliased two windows
-        // of the same app.
         let s = snap();
         apply_window_event(
             &s,
@@ -199,7 +154,7 @@ mod tests {
         apply_window_event(
             &s,
             WindowChangeKind::Title,
-            Some(id(99)), // different con_id
+            Some(id(99)),
             Some("Firefox".into()),
             Some("background drift".into()),
         )

@@ -1,8 +1,5 @@
-//! On-disk cache for Piper voices. Each voice is two files: a `.onnx`
-//! ONNX model and a matching `.onnx.json` config that carries the
-//! sample rate among other things. Both must sit side-by-side in the
-//! cache directory because piper looks for `<onnx>.json` next to the
-//! `--model` path.
+//! On-disk cache for Piper voices: a `.onnx` model and the `.onnx.json`
+//! config piper expects beside it.
 
 use std::path::{Path, PathBuf};
 
@@ -11,8 +8,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::piper::error::PiperError;
 
-/// `<owner>/<repo>:<file>` parser. Identical contract to the whisper
-/// cache version, duplicated locally to keep error types crate-local.
+/// Parse `"<owner>/<repo>:<file>"` into `(repo, file)`.
 pub fn parse_hf_id(id: &str) -> Result<(String, String), PiperError> {
     let err = |reason: &str| PiperError::VoiceParse {
         id: id.to_string(),
@@ -36,8 +32,6 @@ pub fn default_cache_dir() -> PathBuf {
     default_cache_dir_for(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
 }
 
-/// Pure resolver: env reads happen at the boundary so this can be tested
-/// without mutating process-global state.
 fn default_cache_dir_for(
     xdg_cache_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
@@ -49,9 +43,8 @@ fn default_cache_dir_for(
     base.join("assistd").join("piper")
 }
 
-/// Resolved on-disk paths for a voice. Sample rate is read from the
-/// `.onnx.json`'s `audio.sample_rate` field; everything else piper
-/// loads itself from the `.onnx`.
+/// Resolved on-disk paths for a voice, plus the sample rate read from
+/// its `.onnx.json`.
 #[derive(Debug, Clone)]
 pub struct VoiceFiles {
     pub onnx: PathBuf,
@@ -59,12 +52,8 @@ pub struct VoiceFiles {
     pub sample_rate: u32,
 }
 
-/// Ensure both the `.onnx` and `.onnx.json` for `hf_id` exist locally,
-/// downloading whichever is missing. Returns the resolved `VoiceFiles`.
-///
-/// Atomic writes: each download lands in `<file>.part` and is renamed
-/// only after the body is fully flushed, so a crash mid-download leaves
-/// no half-baked file masquerading as a complete one.
+/// Ensure both voice files exist locally, downloading whichever is
+/// missing.
 pub async fn ensure_voice(hf_id: &str, cache_dir: &Path) -> Result<VoiceFiles, PiperError> {
     let (repo, file) = parse_hf_id(hf_id)?;
     let onnx = cached_path(cache_dir, &repo, &file);
@@ -201,8 +190,7 @@ async fn read_sample_rate(json: &Path) -> Result<u32, PiperError> {
             source,
         })?;
 
-    // Defend against HuggingFace returning a 200-OK HTML "file not
-    // found" page in place of the JSON body.
+    // HuggingFace serves a 200-OK HTML "not found" page for missing files.
     let trimmed = body.trim_start();
     if !trimmed.starts_with('{') {
         let prefix: String = trimmed.chars().take(40).collect();

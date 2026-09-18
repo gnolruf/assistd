@@ -1,27 +1,9 @@
-//! Sway backend for [`crate::WindowManager`].
-//!
-//! Sway implements the i3 IPC protocol with Wayland-specific extensions
-//! (the `app_id` field on views, and a richer output reply). This
-//! backend mirrors [`crate::i3`] in shape: two IPC connections (one
-//! held under a `Mutex` for commands, one consumed by `subscribe()` to
-//! drive the event stream), a snapshot updated on every `Window` and
-//! `Workspace::Focus` event so synchronous reads from the daemon's
-//! per-turn context injection don't round-trip the socket.
-//!
-//! The IPC client is `swayipc-async`, which is built on `async-io`
-//! rather than `tokio`. Its futures coexist with the workspace tokio
-//! runtime; the cost is one extra reactor thread per process, which
-//! is acceptable since the WM event path is not on the LLM hot loop.
-//!
-//! Wayland-native vs XWayland identifiers: every Sway view has either
-//! `Node::app_id` (xdg-shell, the Wayland-native case) or
-//! `Node::window_properties.class` (XWayland fallback). We surface
-//! whichever is present as [`crate::Window::id`], and dispatch
-//! [`SwayBackend::focus`] / [`SwayBackend::move_to_workspace`] with a
-//! composite criteria string so the caller doesn't have to know which
-//! kind a given window uses. Sway treats a 0-match criteria as a
-//! silent success (same as i3), so `wm focus X` is best-effort: the
-//! caller verifies via `wm active` if it cares.
+//! Sway backend for [`crate::WindowManager`], over `swayipc-async`.
+//! Same shape as the i3 backend: one command socket, one event socket.
+//! `swayipc-async` runs on `async-io`, which costs one extra reactor
+//! thread alongside tokio. Views carry either `app_id` (Wayland-native)
+//! or `window_properties.class` (XWayland); whichever is present is
+//! surfaced as the window's app.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,16 +27,9 @@ use crate::{
     Window, WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
 
-/// Mirror of [`crate::i3::WINDOW_EVENTS_CAPACITY`].
 const WINDOW_EVENTS_CAPACITY: usize = 32;
-
-/// Mirror of [`crate::i3::WINDOW_EVENT_WAIT`].
 const WINDOW_EVENT_WAIT: Duration = Duration::from_millis(500);
 
-/// Cast a sway `Node.id` (`i64`) to a [`WindowId`]. Sway never emits
-/// non-positive ids in practice, but the bounds check keeps the
-/// conversion total; non-positive ids are silently dropped (the
-/// caller treats them as "no id available").
 fn sway_id(raw: i64) -> Option<WindowId> {
     if raw <= 0 {
         return None;
@@ -62,40 +37,32 @@ fn sway_id(raw: i64) -> Option<WindowId> {
     WindowId::new(raw as u64)
 }
 
-/// `WindowManager` impl wrapping a single Sway IPC command socket.
-/// Held inside `Arc<dyn WindowManager>` by the daemon's `AppState`.
+/// [`WindowManager`] over a single Sway IPC command socket.
 pub struct SwayBackend {
     cmd: Arc<Mutex<Option<Connection>>>,
     snapshot: Arc<RwLock<Snapshot>>,
     reconnect: Arc<tokio::sync::Notify>,
-    /// Mirror of [`crate::i3::I3Backend::window_events`].
     window_events: broadcast::Sender<WindowEvent>,
 }
 
-/// Returned by [`SwayBackend::start`] alongside the backend itself. The
-/// daemon awaits [`SwayHandle::shutdown`] in its graceful-shutdown
-/// block, the same pattern as `I3Handle`.
+/// The backend plus its supervisor task, returned by [`SwayBackend::start`].
 pub struct SwayHandle {
     pub backend: Arc<SwayBackend>,
     supervisor_task: JoinHandle<()>,
 }
 
 impl SwayHandle {
-    /// Awaits the supervisor task. The daemon should flip `shutdown_tx` before
-    /// calling this so the supervisor exits cleanly rather than blocking.
+    /// Awaits the supervisor task. Flip the shutdown watch first or
+    /// this blocks until the socket drops.
     pub async fn shutdown(self) {
         let _ = self.supervisor_task.await;
     }
 }
 
 impl SwayBackend {
-    /// Connect to Sway's IPC sockets, seed the focused-window snapshot,
-    /// and spawn the supervisor task that drives the event stream and
-    /// reconnects on socket drops.
-    ///
-    /// Returns `Err` only on the initial connect failure. After
-    /// startup, transient socket errors (e.g. `swaymsg reload`) are
-    /// handled in-process by the supervisor.
+    /// Connect to the Sway IPC sockets, seed the focus snapshot, and
+    /// spawn the supervisor that drives events and reconnects on
+    /// socket drops. Errors only when the initial connect fails.
     pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<SwayHandle> {
         let (mut cmd, stream) = connect_pair().await?;
         let initial = match seed_snapshot(&mut cmd).await {
@@ -129,11 +96,9 @@ impl SwayBackend {
         })
     }
 
-    /// Walk Sway's tree looking for a window matching `criteria`,
-    /// returning its current rect. Mirror of
-    /// [`crate::i3::I3Backend::find_window_rect_by_criteria`], with
-    /// the same event-driven race-closing: subscribe → quick poll →
-    /// wait for matching `WindowEvent::Opened` → re-poll.
+    /// Current rect of the window matching `criteria`. Subscribes to
+    /// window events before the first tree poll so a `window::new`
+    /// that lands between the poll and the wait is not missed.
     async fn find_window_rect_by_criteria(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
         let mut events = self.window_events.subscribe();
 
@@ -188,12 +153,6 @@ impl SwayBackend {
             .ok_or_else(|| WmError::Rejected(format!("no window matches {criteria:?}")))
     }
 
-    /// Query the focused workspace's pixel rect via `GET_WORKSPACES`.
-    /// Used by [`WindowManager::place_floating`] to compute output-
-    /// relative pixel coordinates without relying on ppt-based moves
-    /// that compositors may clamp. Exposed through the
-    /// `WindowManager` trait method of the same name; the private
-    /// `_inner` suffix avoids the trait/inherent collision.
     async fn focused_workspace_rect_inner(&self) -> WmResult<Rect> {
         let mut guard = self.cmd.lock().await;
         let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
@@ -342,9 +301,6 @@ impl WindowManager for SwayBackend {
         anchor: PlacementAnchor,
     ) -> WmResult<()> {
         let workspace = self.focused_workspace_rect_inner().await?;
-        // See I3Backend::place_floating: use the window's actual rect
-        // so DPI scaling / WM-enforced sizing don't push the popup
-        // off-screen.
         let effective = match self.find_window_rect_by_criteria(criteria).await {
             Ok(actual) => {
                 tracing::info!(
@@ -433,8 +389,6 @@ impl WindowManager for SwayBackend {
     }
 }
 
-/// Open the cmd + events socket pair and subscribe events. Pulled out
-/// of `start()` so the supervisor can reuse it on each reconnect.
 async fn connect_pair() -> WmResult<(Connection, EventStream)> {
     let cmd = Connection::new()
         .await
@@ -449,10 +403,8 @@ async fn connect_pair() -> WmResult<(Connection, EventStream)> {
     Ok((cmd, stream))
 }
 
-/// Drive one events stream until it errors or the supervisor signals
-/// a forced reconnect. Returns `false` if shutdown was observed
-/// (caller exits cleanly), `true` if the inner loop fell through and
-/// the caller should reconnect.
+/// Drive one events stream. Returns `true` when the caller should
+/// reconnect, `false` on shutdown.
 async fn drive_events(
     mut stream: EventStream,
     snapshot: Arc<RwLock<Snapshot>>,
@@ -487,22 +439,19 @@ async fn drive_events(
                         tracing::warn!("sway event stream error: {e}");
                         return true;
                     }
-                    None => return true, // socket closed
+                    None => return true,
                 }
             }
         }
     }
 }
 
-/// Mirror of [`crate::i3::window_event_from_i3`] for sway events.
 fn window_event_from_sway(w: &swayipc_async::WindowEvent) -> Option<WindowEvent> {
     let id = sway_id(w.container.id)?;
     match w.change {
         WindowChange::New => {
             let props = w.container.window_properties.as_ref();
             let class = props.and_then(|p| p.class.clone());
-            // Title falls back through Wayland title → XWayland WM_NAME
-            // the same way the snapshot does.
             let title = w
                 .container
                 .name
@@ -524,9 +473,6 @@ fn window_event_from_sway(w: &swayipc_async::WindowEvent) -> Option<WindowEvent>
     }
 }
 
-/// Outer reconnect loop. Mirrors the i3 supervisor: drive events
-/// through `drive_events`; on fall-through, drop cmd, sleep with
-/// exponential backoff, reconnect, re-seed, repeat.
 async fn supervisor_loop(
     backend: Arc<SwayBackend>,
     initial_stream: EventStream,
@@ -592,9 +538,6 @@ async fn supervisor_loop(
     }
 }
 
-/// Recursively search Sway's tree for a leaf node matching the
-/// criteria; mirror of [`crate::i3::find_node_rect`]. Sway's leaves
-/// are `Con` or `FloatingCon`; container nodes are skipped.
 fn find_sway_node_rect(node: &Node, criteria: &PlacementCriteria) -> Option<Rect> {
     if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
         && sway_node_matches(node, criteria)
@@ -626,8 +569,7 @@ fn sway_node_matches(node: &Node, criteria: &PlacementCriteria) -> bool {
             .as_deref()
             .or_else(|| props.and_then(|p| p.title.as_deref()))
             .is_some_and(|t| t == want),
-        // ConId would short-circuit at a different layer; leave as
-        // no-match so a misuse fails loudly.
+        // ConId is matched by id elsewhere. No-match so a misuse fails loudly.
         PlacementCriteria::ConId(_) => false,
     }
 }
@@ -641,20 +583,10 @@ fn sway_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> 
     )
 }
 
-/// Format the Sway RUN_COMMAND payload for `set_layout`. Acts on the
-/// focused container, the same form i3 uses, since Sway speaks the i3
-/// IPC dialect for `layout`.
 fn sway_layout_payload(layout: Layout) -> String {
     format!("layout {}", layout.as_str())
 }
 
-/// Walk Sway's tree recursively, emitting one [`Window`] per leaf view.
-/// Sway leaves are nodes with `app_id` (Wayland-native) or
-/// `window_properties.class` (XWayland) set; we prefer `app_id` for the
-/// returned `Window.id` so the caller sees the natural identifier and
-/// can pass it back unchanged. Tracks the most recent
-/// `NodeType::Workspace` ancestor in `current_ws` so each window is
-/// tagged with its workspace.
 fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>) {
     let next_ws = if matches!(node.node_type, NodeType::Workspace) {
         node.name.as_deref()
@@ -665,9 +597,6 @@ fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>)
     if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
         && let Some(id) = sway_id(node.id)
     {
-        // Prefer Wayland-native app_id; fall back to the X11 class for
-        // XWayland views. A leaf with neither falls through with
-        // app: None; the LLM can still target it by con_id.
         let class = node
             .window_properties
             .as_ref()

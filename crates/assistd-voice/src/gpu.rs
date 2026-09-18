@@ -1,12 +1,9 @@
-//! Lightweight CUDA availability probe via NVML. Mirrors the idiom in
-//! `crates/assistd/src/gpu_monitor.rs`: if NVML init or `device_count`
-//! fail, treat it as "no GPU" and let the caller fall back to CPU.
+//! CUDA availability probe via NVML.
 
 use nvml_wrapper::Nvml;
 
-/// Returns `true` iff NVML initializes AND reports at least one device.
-/// Any failure mode (no driver, `/dev/nvidia*` hidden, non-NVIDIA GPU) is
-/// collapsed to `false`.
+/// True iff NVML initializes and reports at least one device. Every
+/// failure mode collapses to `false`.
 pub fn probe_cuda_available() -> bool {
     match Nvml::init() {
         Ok(nvml) => match nvml.device_count() {

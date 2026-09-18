@@ -1,11 +1,8 @@
 //! cpal stream construction and the audio-thread callback.
 //!
-//! `cpal::Stream` is `!Send` on most platforms (the ALSA backend holds a
-//! raw ALSA handle whose safety invariants are tied to its creating
-//! thread). To avoid poisoning `MicVoiceInput: Send + Sync`, the stream
-//! lives entirely inside a single `spawn_blocking` worker; the outer
-//! `MicVoiceInput` only holds a `JoinHandle` plus shared atomics, all of
-//! which are trivially `Send`.
+//! `cpal::Stream` is `!Send` on ALSA, so every stream in this crate is
+//! opened, held, and dropped on one `spawn_blocking` worker; only
+//! atomics and join handles cross threads.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -39,42 +36,27 @@ pub enum AudioCaptureError {
     DeviceError(String),
 }
 
-/// Target sample rate for whisper. The consumer resamples from native
-/// device rate to this before conversion to i16.
+/// Whisper's input rate; the consumer resamples the device rate to it.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
-/// Handles to a running capture session. The cpal stream is owned by
-/// the consumer task; callers only see the atomics and the join
-/// handle.
+/// Handles to a running push-to-talk capture.
 pub struct CaptureSession {
     pub stop_flag: Arc<AtomicBool>,
     pub overrun: Arc<AtomicU64>,
     pub handle: JoinHandle<Result<Vec<i16>, AudioCaptureError>>,
 }
 
-/// Pieces returned by [`open_producer_stream`] to a blocking worker.
-/// The `Stream` must stay alive on the thread that built it (cpal's
-/// `Stream` is `!Send` on ALSA); the caller drops it last.
+/// A running input stream and the ring consumer it feeds. The caller
+/// drops `stream` last, on the thread that built it.
 pub struct ProducerStream {
     pub consumer: ringbuf::HeapCons<f32>,
     pub native_rate: u32,
     pub stream: Stream,
 }
 
-/// Open the cpal input device and start a running stream that pushes
-/// mono f32 samples at the native device rate into a ring buffer.
-///
-/// Runs synchronously on the caller's thread because cpal's `Stream`
-/// is `!Send` on ALSA; both PTT and continuous-listen callers invoke
-/// this from inside a `tokio::task::spawn_blocking` worker.
-///
-/// `ring_capacity_samples` sizes the SPSC ring (in mono samples at
-/// native rate). PTT sizes this to cover `max_recording_secs`;
-/// continuous-listen can use a few seconds of headroom since its
-/// consumer drains continuously.
-///
-/// `overrun` is the counter the cpal callback bumps when the ring is
-/// full and samples are dropped. The caller keeps a clone to read it.
+/// Open the input device and start a stream pushing mono f32 samples
+/// at the native rate into a ring of `ring_capacity_samples`. The
+/// callback bumps `overrun` for every sample dropped on a full ring.
 pub fn open_producer_stream(
     device_hint: Option<&str>,
     ring_capacity_samples: usize,
@@ -117,9 +99,8 @@ pub fn open_producer_stream(
     })
 }
 
-/// Spawn a blocking worker that opens cpal, records, and returns the
-/// resampled 16 kHz mono i16 PCM when stopped. Device enumeration
-/// happens inside the worker so `!Send` cpal types never cross threads.
+/// Spawn a blocking worker that records until stopped and returns the
+/// 16 kHz mono i16 PCM.
 pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSession {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let overrun = Arc::new(AtomicU64::new(0));
@@ -149,10 +130,7 @@ fn capture_worker(
     stop_flag: Arc<AtomicBool>,
     overrun: Arc<AtomicU64>,
 ) -> Result<Vec<i16>, AudioCaptureError> {
-    // Ring capacity: 1 s per second of recording + 1 s headroom. Sized
-    // in mono samples at native rate; we over-provision slightly using
-    // a conservative 48 kHz assumption; `open_producer_stream`
-    // enforces a per-open floor regardless.
+    // Sized before the native rate is known, so assume 48 kHz.
     let conservative_rate = 48_000usize;
     let ring_cap = conservative_rate
         .saturating_mul((max_recording_secs as usize).saturating_add(1))
@@ -165,34 +143,19 @@ fn capture_worker(
 
     let max_pcm_samples = (TARGET_SAMPLE_RATE as usize).saturating_mul(max_recording_secs as usize);
     let pcm = consumer::drain_loop(cons, native_rate, max_pcm_samples, stop_flag)?;
-
-    // Drop cpal stream on this same thread. On ALSA this joins the
-    // worker thread; doing it here avoids any `!Send` drop problem.
     drop(stream);
     Ok(pcm)
 }
 
-/// Pre-flight check called from daemon startup, mirroring
-/// [`crate::gpu`]'s graceful-degradation idiom. When
-/// [`assistd_config::VoiceConfig::enabled`] is false, succeeds
-/// unconditionally. When `mic_device` is `None`, the system default
-/// will be selected at PTT start; missing-default is intentionally a
-/// soft failure (we don't want a headless CI without ALSA to fail
-/// daemon startup). Only the `Some(name)` case where the configured
-/// name cannot be found is hard-rejected.
-///
-/// The error message includes the configured name, every available
-/// input device name enumerated via cpal, and a hint about
-/// `mic_device = null`. If cpal itself refuses to enumerate devices,
-/// that is wrapped verbatim.
+/// Startup check that a configured `mic_device` exists. A missing
+/// system default is not an error, so a headless host still starts;
+/// only a named device that cannot be found is rejected. Always logs
+/// the available input devices.
 pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     if !cfg.enabled {
         return Ok(());
     }
 
-    // Always enumerate input devices at startup so the log captures
-    // which cpal-visible devices exist; indispensable for diagnosing
-    // "wrong mic picked" problems on systems with many PipeWire sinks.
     let host = cpal::default_host();
     let default_name = host
         .default_input_device()
@@ -257,7 +220,7 @@ fn name_of(device: &Device) -> Result<String, CpalError> {
     })
 }
 
-/// Select a cpal input device by optional name hint, or fall back to the system default.
+/// The named input device, or the system default when `hint` is `None`.
 pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, AudioCaptureError> {
     match hint {
         None => host
@@ -330,17 +293,11 @@ fn build_stream(
     Ok(stream)
 }
 
-/// Mutable state shared with the audio callback. cpal calls the
-/// closure from its own worker thread; the inner `Mutex`es guard
-/// scratch buffers and the ring producer, while the `AtomicU64`
-/// counts dropped samples on overrun.
 struct CallbackState {
     producer: parking_lot::Mutex<RbProd>,
     channels: usize,
     overrun: Arc<AtomicU64>,
-    /// Scratch buffer for downmixed mono samples. Pre-sized to avoid
-    /// allocation in the hot path; a reasonable cpal callback delivers
-    /// a few thousand frames at most.
+    /// Pre-sized so the audio callback never allocates.
     scratch: parking_lot::Mutex<Vec<f32>>,
 }
 

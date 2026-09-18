@@ -1,24 +1,8 @@
-//! `PiperVoiceOutput`: the assembled façade implementing
-//! [`crate::VoiceOutput`]. Owns one [`OneShotSynth`] and one
-//! [`RodioPlaybackWorker`] for the daemon's lifetime; speak() runs the
-//! per-utterance subprocess and appends PCM to the playback queue.
-//!
-//! `speak()` returns once PCM has been enqueued, *not* once playback
-//! finishes. Sequential calls produce back-to-back audio because
-//! `rodio::Player`'s queue is FIFO and drained continuously by the
-//! audio thread. Callers that need to await drain (e.g. on shutdown)
-//! call [`crate::VoiceOutput::wait_idle`].
-//!
-//! Circuit breaker: synthesis failures are timestamped in a small
-//! ringbuffer. After 3 failures within 60 seconds the service flips
-//! to [`ReadyState::Degraded`] and subsequent speak() calls become
-//! no-ops (logged once). Once `FAILURE_WINDOW` has elapsed since the
-//! last failure the breaker goes half-open: one utterance is let
-//! through, and it either re-arms the service or re-opens the
-//! breaker. This is the practical interpretation of "restarted on
-//! crash" for the per-utterance design; a missing binary or broken
-//! audio device shouldn't spam the logs forever, but it also
-//! shouldn't take down speech until the next daemon restart.
+//! [`PiperVoiceOutput`]: synthesis plus playback behind a circuit
+//! breaker. After `FAILURE_THRESHOLD` failures within `FAILURE_WINDOW`
+//! the service goes `Degraded` and drops utterances; once the window
+//! has elapsed since the last failure one utterance is let through
+//! and either re-arms the service or re-opens the breaker.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -37,9 +21,7 @@ use crate::piper::error::PiperError;
 use crate::piper::playback::RodioPlaybackWorker;
 use crate::piper::synth::OneShotSynth;
 
-/// Number of failures within `FAILURE_WINDOW` that flips the breaker.
 const FAILURE_THRESHOLD: usize = 3;
-/// Sliding window for circuit-breaker accounting.
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 
 /// Current health state of the [`PiperVoiceOutput`] circuit breaker.
@@ -47,19 +29,18 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 pub enum ReadyState {
     /// Synthesis is operating normally.
     Ready,
-    /// Circuit breaker has tripped after repeated failures; `reason` carries the last error.
+    /// The breaker has tripped; `reason` is the last error.
     Degraded { reason: String },
 }
 
 struct CircuitState {
     ready: ReadyState,
     recent_failures: VecDeque<Instant>,
-    /// True after we've logged the "degraded" line once, so we don't
-    /// spam the journal on every subsequent speak().
     logged_degraded: bool,
 }
 
-/// [`VoiceOutput`] implementation backed by a per-utterance piper subprocess and rodio playback.
+/// [`VoiceOutput`] backed by per-utterance piper subprocesses and
+/// rodio playback.
 pub struct PiperVoiceOutput {
     synth: Arc<OneShotSynth>,
     playback: Arc<RodioPlaybackWorker>,
@@ -67,10 +48,8 @@ pub struct PiperVoiceOutput {
 }
 
 impl PiperVoiceOutput {
-    /// Resolve the voice cache, build the runtime config, open the
-    /// audio device, and run a tiny health-check synthesis. Any
-    /// failure here is reported as `PiperError`; the daemon's startup
-    /// logic then logs a warning and substitutes `NoVoiceOutput`.
+    /// Resolve the voice files, open the audio device, and run a
+    /// health-check synthesis.
     pub async fn start(cfg: SynthesisConfig) -> Result<Self, PiperError> {
         which::which(&cfg.binary_path).map_err(|_| PiperError::BinaryMissing {
             binary: cfg.binary_path.clone(),
@@ -117,7 +96,6 @@ impl PiperVoiceOutput {
         })
     }
 
-    /// Returns the current circuit-breaker state.
     pub fn ready_state(&self) -> ReadyState {
         self.state.lock().ready.clone()
     }
@@ -157,8 +135,6 @@ impl CircuitState {
 
     fn record_success(&mut self) {
         self.recent_failures.clear();
-        // Re-arming after a transient flap is intentional: a transient
-        // stutter shouldn't permanently disable speech.
         if matches!(self.ready, ReadyState::Degraded { .. }) {
             tracing::info!(target: "assistd::voice::piper", "piper recovered from degraded");
             self.ready = ReadyState::Ready;
