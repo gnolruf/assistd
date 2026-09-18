@@ -15,11 +15,8 @@
 //!     transport's line cap and keeps running (used to simulate a dead
 //!     read loop under a live child).
 //!
-//! Built as a regular `[[bin]]` of `assistd-mcp` so the integration
-//! test can locate it under `target/<profile>/fake_mcp_server` via the
-//! `CARGO_BIN_EXE_<name>` env var that cargo sets for tests.
-
-#![allow(clippy::print_stdout, clippy::print_stderr)]
+//! Built as a regular `[[bin]]` so the integration test can locate it
+//! through `CARGO_BIN_EXE_fake_mcp_server`.
 
 use std::io::{BufRead, BufReader, Write};
 
@@ -38,7 +35,7 @@ fn main() {
             Ok(0) => break,
             Ok(_) => {}
             Err(e) => {
-                eprintln!("fake-mcp: read error: {e}");
+                let _ = writeln!(std::io::stderr(), "fake-mcp: read error: {e}");
                 break;
             }
         }
@@ -49,7 +46,7 @@ fn main() {
         let req: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("fake-mcp: parse error: {e}");
+                let _ = writeln!(std::io::stderr(), "fake-mcp: parse error: {e}");
                 continue;
             }
         };
