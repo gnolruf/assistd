@@ -26,13 +26,6 @@
 //!
 //! Flags: --host <addr> --port <port> --mode <mode>
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::print_stdout,
-    clippy::print_stderr
-)]
-
 use std::collections::VecDeque;
 use std::env;
 use std::process::ExitCode;

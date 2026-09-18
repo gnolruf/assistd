@@ -1,10 +1,7 @@
-//! Multi-turn conversation state owned by `LlamaChatClient`.
-//!
-//! The daemon holds a single `Conversation` behind a `tokio::sync::Mutex`;
-//! every query from every client contributes a turn to the same ongoing
-//! dialogue. Token budgeting is best-effort, driven by a bytes-per-token
-//! heuristic that intentionally over-counts multi-byte text so we summarize
-//! early rather than overflow the server's context window.
+//! Multi-turn conversation state. Token budgeting is best-effort,
+//! driven by a bytes-per-token heuristic that intentionally over-counts
+//! multi-byte text so summarization runs early rather than the server's
+//! context window overflowing.
 
 use assistd_config::{ChatConfig, ModelConfig};
 use assistd_tools::Attachment;
@@ -52,11 +49,9 @@ impl Role {
     }
 }
 
-/// One tool call recorded on an assistant turn. Mirrors the OpenAI shape
-/// `{id, type: "function", function: {name, arguments}}`. `arguments` is the
-/// JSON-encoded argument string the model emitted, stored verbatim so the
-/// replayed wire payload preserves whatever whitespace/formatting the model
-/// used; some servers compare it against their own re-serialization.
+/// One tool call recorded on an assistant turn. `arguments` is the
+/// JSON-encoded string the model emitted, stored verbatim because some
+/// servers compare the replayed text against their own serialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRecord {
     pub id: String,
@@ -69,30 +64,19 @@ pub struct ToolCallRecord {
 pub struct Message {
     pub role: Role,
     pub content: String,
-    /// Image attachments carried by this turn. Empty for every classic
-    /// text-only message; populated by `push_user_with_attachments` when
-    /// a tool-call (typically `see`) produced an image the model should
-    /// see on its next turn.
     pub attachments: Vec<Attachment>,
     /// Non-empty only on assistant messages that requested tool calls.
-    /// When present, the outgoing wire message renders its narration (if
-    /// any) as `content` plus a `tool_calls` array.
     pub tool_calls: Vec<ToolCallRecord>,
     /// Set only on [`Role::Tool`] messages: the id of the assistant tool
-    /// call this message answers. Chat templates use it to line the
-    /// result up with its call.
+    /// call this message answers.
     pub tool_call_id: Option<String>,
 }
 
-/// Summarizer trait so unit tests can inject a fake without spinning up
-/// an HTTP server. [`crate::LlamaChatClient`] implements this trait for itself.
+/// Condenses a stretch of dialogue into a summary when the conversation
+/// outgrows its token budget.
 #[async_trait]
 pub trait Summarizer: Send + Sync {
     /// Summarize `dialogue` into at most `max_tokens`, targeting `target_tokens`.
-    ///
-    /// # Errors
-    /// Returns [`ChatClientError`] if the underlying HTTP call fails or the
-    /// server returns a non-success status.
     async fn summarize(
         &self,
         dialogue: String,
@@ -104,16 +88,14 @@ pub trait Summarizer: Send + Sync {
 /// Mutable conversation state.
 ///
 /// Layout invariants:
-/// - `system_prompt` is injected at the head of `as_wire_messages()` only when
-///   non-empty.
-/// - `transient_context`, if `Some`, is rendered as a *second* system message
-///   immediately after `system_prompt` and is intended to live for exactly
-///   one [`crate::LlmBackend::step`] call. The chat client clears it via
-///   [`Self::consume_transient_context`] once the stream commits, so a
-///   follow-up turn re-runs retrieval rather than reusing stale context.
-/// - `messages` never contains a pre-baked system-prompt message; it holds
-///   user/assistant turns plus at most one synthetic summary message (role
-///   `System`, content prefixed with `SUMMARY_PREFIX`) that sits at index 0.
+/// - `system_prompt` heads `as_wire_messages()` only when non-empty.
+/// - `transient_context`, if `Some`, renders as a second system message
+///   right after `system_prompt` and lives for one request; the caller
+///   clears it with [`Self::consume_transient_context`] once that
+///   request commits.
+/// - `messages` never holds the system prompt itself; it holds the
+///   turns plus at most one summary message (role `System`, content
+///   prefixed with `SUMMARY_PREFIX`) at index 0.
 #[derive(Debug)]
 pub struct Conversation {
     system_prompt: String,
@@ -132,23 +114,16 @@ impl Conversation {
     }
 
     /// Set a one-shot system message rendered between the static
-    /// `system_prompt` and the conversation history. Overwrites any
-    /// existing pending transient (the auto-injection path always
-    /// rewrites the whole block, so the latest retrieval wins).
+    /// `system_prompt` and the history, replacing any pending one.
     pub fn set_transient_context(&mut self, text: String) {
         self.transient_context = Some(text);
     }
 
-    /// Take the pending transient context, leaving `None` behind. The
-    /// chat client calls this from `commit_step` after a successful
-    /// stream so the next turn starts clean. On `PreEmitError` the
-    /// transient is *not* consumed; a retry should see the same context.
+    /// Take the pending transient context, leaving `None` behind.
     pub fn consume_transient_context(&mut self) -> Option<String> {
         self.transient_context.take()
     }
 
-    /// Test/diag helper. Production callers should use the consume
-    /// path so the transient is read at most once per turn.
     #[cfg(test)]
     pub fn transient_context(&self) -> Option<&str> {
         self.transient_context.as_deref()
@@ -165,10 +140,9 @@ impl Conversation {
         });
     }
 
-    /// Append a user turn that carries one or more attachments alongside
-    /// its text. When rendered to the wire, the message becomes a
-    /// multimodal `content` array with one `text` part followed by one
-    /// `image_url` part per attachment.
+    /// Append a user turn whose wire form is a multimodal `content`
+    /// array: one `text` part followed by one `image_url` part per
+    /// attachment.
     pub fn push_user_with_attachments(&mut self, content: String, attachments: Vec<Attachment>) {
         self.messages.push(Message {
             role: Role::User,
@@ -190,12 +164,9 @@ impl Conversation {
         });
     }
 
-    /// Append an assistant turn that requested tool calls. `content` is the
-    /// assistant's narration — the text it streamed to the user before
-    /// calling the tool. Keeping it means the model can see what it
-    /// already said on the next iteration instead of repeating itself.
-    /// `calls` must be non-empty; on the wire the message renders with
-    /// `tool_calls: [...]` and `content` omitted when narration is absent.
+    /// Append an assistant turn that requested tool calls. `content` is
+    /// the narration streamed before the call, kept so the model does not
+    /// repeat itself on the next step. `calls` must be non-empty.
     pub fn push_assistant_with_tool_calls(
         &mut self,
         content: Option<String>,
@@ -229,29 +200,25 @@ impl Conversation {
         });
     }
 
-    /// Drop the most recent message if and only if it's a user message.
-    /// Called after a pre-emit HTTP failure to keep history consistent with
-    /// what the model actually saw.
+    /// Drop the most recent message if and only if it is a user message,
+    /// keeping history consistent with what the model actually saw after
+    /// a request fails before any output.
     pub fn rollback_last_user(&mut self) {
         if matches!(self.messages.last().map(|m| m.role), Some(Role::User)) {
             self.messages.pop();
         }
     }
 
-    /// Replace the running message list wholesale and clear any pending
-    /// transient context. Used by branch /switch and daemon-startup
-    /// resume to repopulate the conversation from persisted history.
+    /// Replace the message list wholesale and clear any pending
+    /// transient context.
     pub fn replace_messages(&mut self, msgs: Vec<Message>) {
         self.messages = msgs;
         self.transient_context = None;
     }
 
-    /// Drop everything after (and including) the latest "real" user
-    /// message. A "real" user message is [`Role::User`] whose content
-    /// does NOT start with [`TOOL_RESULT_PREFIX`]; tool-result rows
-    /// share the User role but are part of the assistant's reply, so
-    /// they get dropped alongside it. Also clears `transient_context`
-    /// (we are at a turn boundary). Returns the count of removed
+    /// Drop everything from the latest real user message onward, where
+    /// a tool result riding on the user role does not count as one.
+    /// Also clears `transient_context`. Returns the number of removed
     /// entries; 0 when no real user message exists.
     pub fn truncate_to_last_real_user(&mut self) -> usize {
         let mut last_real_user = None;
@@ -288,13 +255,9 @@ impl Conversation {
         total
     }
 
-    /// Render current state as wire messages. Drops the system prompt if
-    /// the user explicitly configured it empty. Messages with attachments
-    /// are rendered as a multimodal `content` array (text part + one
-    /// `image_url` part per attachment); text-only messages stay as plain
-    /// strings for compatibility with non-vision models. Assistant messages
-    /// carrying `tool_calls` render with a populated `tool_calls` array and
-    /// their narration as `content`, omitted entirely when there is none.
+    /// Render the current state as wire messages. Text-only messages
+    /// stay plain strings for compatibility with non-vision models;
+    /// messages with attachments become multimodal `content` arrays.
     pub fn as_wire_messages(&self) -> Vec<wire::ChatMessage<'_>> {
         let mut out = Vec::with_capacity(self.messages.len() + 2);
         if !self.system_prompt.is_empty() {
@@ -306,9 +269,6 @@ impl Conversation {
             });
         }
         if let Some(ctx) = &self.transient_context {
-            // `&self` keeps `as_wire_messages` idempotent: rendering twice
-            // before `consume_transient_context` produces the same payload.
-            // The chat client consumes after the stream commits.
             out.push(wire::ChatMessage {
                 role: Role::System.as_wire(),
                 content: Some(wire::ContentBody::Text(ctx)),
@@ -316,52 +276,55 @@ impl Conversation {
                 tool_call_id: None,
             });
         }
-        for m in &self.messages {
-            if !m.tool_calls.is_empty() {
+        for message in &self.messages {
+            if !message.tool_calls.is_empty() {
                 // Narration-free tool calls omit `content` entirely: the
                 // OpenAI spec allows null/absent and some chat templates
                 // require absent rather than empty.
-                let specs: Vec<wire::ToolCallSpec<'_>> = m
+                let specs: Vec<wire::ToolCallSpec<'_>> = message
                     .tool_calls
                     .iter()
-                    .map(|c| wire::ToolCallSpec {
-                        id: &c.id,
+                    .map(|call| wire::ToolCallSpec {
+                        id: &call.id,
                         kind: "function",
                         function: wire::FunctionCallSpec {
-                            name: &c.name,
-                            arguments: &c.arguments,
+                            name: &call.name,
+                            arguments: &call.arguments,
                         },
                     })
                     .collect();
                 out.push(wire::ChatMessage {
-                    role: m.role.as_wire(),
-                    content: (!m.content.is_empty()).then(|| wire::ContentBody::Text(&m.content)),
+                    role: message.role.as_wire(),
+                    content: (!message.content.is_empty())
+                        .then(|| wire::ContentBody::Text(&message.content)),
                     tool_calls: Some(specs),
                     tool_call_id: None,
                 });
                 continue;
             }
-            if m.role == Role::Tool {
+            if message.role == Role::Tool {
                 out.push(wire::ChatMessage {
-                    role: m.role.as_wire(),
-                    content: Some(wire::ContentBody::Text(&m.content)),
+                    role: message.role.as_wire(),
+                    content: Some(wire::ContentBody::Text(&message.content)),
                     tool_calls: None,
-                    tool_call_id: m.tool_call_id.as_deref(),
+                    tool_call_id: message.tool_call_id.as_deref(),
                 });
                 continue;
             }
-            let content = if m.attachments.is_empty() {
-                wire::ContentBody::Text(&m.content)
+            let content = if message.attachments.is_empty() {
+                wire::ContentBody::Text(&message.content)
             } else {
-                let mut parts = Vec::with_capacity(m.attachments.len() + 1);
-                parts.push(wire::ContentPart::Text { text: &m.content });
-                for att in &m.attachments {
-                    parts.push(attachment_to_part(att));
+                let mut parts = Vec::with_capacity(message.attachments.len() + 1);
+                parts.push(wire::ContentPart::Text {
+                    text: &message.content,
+                });
+                for attachment in &message.attachments {
+                    parts.push(attachment_to_part(attachment));
                 }
                 wire::ContentBody::Parts(parts)
             };
             out.push(wire::ChatMessage {
-                role: m.role.as_wire(),
+                role: message.role.as_wire(),
                 content: Some(content),
                 tool_calls: None,
                 tool_call_id: None,
@@ -370,9 +333,9 @@ impl Conversation {
         out
     }
 
-    /// Ensure total approximate tokens stay under the configured budget.
-    /// Triggers a summarization call if needed; on summarizer failure the
-    /// caller is expected to fall back to `truncate_to_budget`.
+    /// Keep the approximate token total under budget, summarizing the
+    /// oldest turns if needed. On summarizer failure the caller falls
+    /// back to [`Self::truncate_to_budget`].
     pub async fn ensure_budget(
         &mut self,
         summarizer: &dyn Summarizer,
@@ -466,12 +429,11 @@ impl Conversation {
         }
     }
 
-    /// Remove `idx` and, when it is an assistant-with-tool_calls, every
-    /// tool result that immediately follows it — one per call the
-    /// message requested — so the wire payload never carries a
-    /// `tool_calls` message without its results.
-    /// `first_droppable_index` always returns the assistant half first,
-    /// so the reverse direction never needs handling.
+    /// Remove `idx` and, when it is an assistant message with tool
+    /// calls, the tool results that follow it, so the wire payload never
+    /// carries `tool_calls` without their results. `first_droppable_index`
+    /// always yields the assistant half first, so the reverse direction
+    /// never needs handling.
     fn drop_with_pair(&mut self, idx: usize) {
         if idx >= self.messages.len() {
             return;
@@ -525,6 +487,9 @@ impl Conversation {
                     idx = prev;
                 }
                 Role::Assistant => {
+                    // An assistant reply is counted together with the
+                    // user message it answers, so the walk steps over
+                    // both at once.
                     if prev > start {
                         idx = prev - 1;
                     } else {
@@ -577,9 +542,6 @@ fn approx_tokens(text: &str) -> u32 {
 
 fn approx_message_tokens(m: &Message) -> u32 {
     let image_cost = (m.attachments.len() as u32).saturating_mul(TOKENS_PER_IMAGE);
-    // Each tool-call entry contributes its id + name + arguments verbatim
-    // plus a small per-entry structural overhead (braces, type, field
-    // names). `approx_tokens` over-counts slightly on purpose.
     let tool_call_bytes: usize = m
         .tool_calls
         .iter()
@@ -607,9 +569,7 @@ fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
 }
 
 fn effective_budget(chat: &ChatConfig, model: &ModelConfig) -> u32 {
-    chat.max_history_tokens
-        .get()
-        .min(chat.effective_context_budget(model))
+    chat.max_history_tokens.get().min(model.context_budget())
 }
 
 fn serialize_tail(messages: &[Message]) -> String {
@@ -638,678 +598,4 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use assistd_config::defaults::{nz32, nz64};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    use tokio::sync::Mutex;
-
-    struct FakeSummarizer {
-        reply: String,
-        calls: Arc<AtomicUsize>,
-        captured: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl FakeSummarizer {
-        fn new(reply: impl Into<String>) -> Self {
-            Self {
-                reply: reply.into(),
-                calls: Arc::new(AtomicUsize::new(0)),
-                captured: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Summarizer for FakeSummarizer {
-        async fn summarize(
-            &self,
-            dialogue: String,
-            _target_tokens: u32,
-            _max_tokens: u32,
-        ) -> Result<String, ChatClientError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.captured.lock().await.push(dialogue);
-            Ok(self.reply.clone())
-        }
-    }
-
-    struct FailingSummarizer;
-
-    #[async_trait]
-    impl Summarizer for FailingSummarizer {
-        async fn summarize(
-            &self,
-            _dialogue: String,
-            _target_tokens: u32,
-            _max_tokens: u32,
-        ) -> Result<String, ChatClientError> {
-            Err(ChatClientError::Summarize("boom".into()))
-        }
-    }
-
-    fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) {
-        let chat = ChatConfig {
-            system_prompt: "sys".into(),
-            max_history_tokens: nz32(max_history),
-            summary_target_tokens: nz32(max_history / 4),
-            preserve_recent_turns: nz32(preserve),
-            temperature: 0.7,
-            max_response_tokens: nz32(512),
-            request_timeout_secs: nz64(60),
-            summary_temperature: 0.3,
-            top_p: None,
-            top_k: None,
-            min_p: None,
-            presence_penalty: None,
-        };
-        let model = ModelConfig {
-            name: "test-model".into(),
-            context_length: nz32(ctx),
-        };
-        (chat, model)
-    }
-
-    #[test]
-    fn transient_context_renders_as_second_system_message() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("hello".into());
-        c.set_transient_context("Relevant past context: …".into());
-        let wire = c.as_wire_messages();
-        // Expect: [system=sys, system=transient, user=hello]
-        assert_eq!(wire.len(), 3);
-        assert_eq!(wire[0].role, "system");
-        assert_eq!(wire[1].role, "system");
-        match &wire[1].content {
-            Some(wire::ContentBody::Text(t)) => assert!(t.starts_with("Relevant past context")),
-            _ => panic!("expected text body on transient system message"),
-        }
-        assert_eq!(wire[2].role, "user");
-    }
-
-    #[test]
-    fn transient_context_omitted_when_unset() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("hi".into());
-        let wire = c.as_wire_messages();
-        // Only the static system prompt + the user message.
-        assert_eq!(wire.len(), 2);
-        assert_eq!(wire[0].role, "system");
-        assert_eq!(wire[1].role, "user");
-    }
-
-    #[test]
-    fn render_is_idempotent_until_consumed() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("hi".into());
-        c.set_transient_context("ctx".into());
-        let n1 = c.as_wire_messages().len();
-        let n2 = c.as_wire_messages().len();
-        assert_eq!(n1, n2, "as_wire_messages must be idempotent");
-        // Consume clears the slot.
-        let consumed = c.consume_transient_context();
-        assert_eq!(consumed.as_deref(), Some("ctx"));
-        let n3 = c.as_wire_messages().len();
-        assert_eq!(n3, n1 - 1, "after consume, transient is gone");
-        // Subsequent consume returns None.
-        assert_eq!(c.consume_transient_context(), None);
-    }
-
-    #[test]
-    fn approx_total_tokens_includes_transient_context() {
-        let mut c = Conversation::new("sys".into());
-        let baseline = c.approx_total_tokens();
-        c.set_transient_context("a".repeat(100));
-        let with_ctx = c.approx_total_tokens();
-        assert!(
-            with_ctx > baseline,
-            "transient context must contribute to budget math: {baseline} → {with_ctx}"
-        );
-    }
-
-    #[test]
-    fn replace_messages_swaps_history_and_clears_transient() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("first".into());
-        c.set_transient_context("ctx".into());
-        c.replace_messages(vec![
-            Message {
-                role: Role::User,
-                content: "loaded user".into(),
-                attachments: Vec::new(),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-            },
-            Message {
-                role: Role::Assistant,
-                content: "loaded assistant".into(),
-                attachments: Vec::new(),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-            },
-        ]);
-        let wire = c.as_wire_messages();
-        // [system=sys, user=loaded user, assistant=loaded assistant]; transient gone.
-        assert_eq!(wire.len(), 3);
-        assert_eq!(wire[0].role, "system");
-        assert_eq!(wire[1].role, "user");
-        match &wire[1].content {
-            Some(wire::ContentBody::Text(t)) => assert_eq!(*t, "loaded user"),
-            _ => panic!("expected text body"),
-        }
-        assert!(c.transient_context().is_none());
-    }
-
-    #[test]
-    fn truncate_to_last_real_user_drops_through_assistant_chain() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("first".into());
-        c.push_assistant("a1".into());
-        c.push_user("second".into());
-        c.push_assistant("a2".into());
-        let removed = c.truncate_to_last_real_user();
-        assert_eq!(removed, 2, "drops 'second' user + 'a2' assistant");
-        assert_eq!(c.messages.len(), 2);
-        assert_eq!(c.messages[0].content, "first");
-        assert_eq!(c.messages[1].content, "a1");
-    }
-
-    #[test]
-    fn truncate_to_last_real_user_skips_tool_results_to_real_user() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("real q".into());
-        // Tool-call pair, ending with a tool-result user message.
-        c.push_assistant_with_tool_calls(
-            None,
-            vec![ToolCallRecord {
-                id: "c-1".into(),
-                name: "run".into(),
-                arguments: "{}".into(),
-            }],
-        );
-        c.push_user("[tool:run]\noutput".into());
-        c.push_assistant("final".into());
-        let removed = c.truncate_to_last_real_user();
-        assert_eq!(removed, 4);
-        assert!(c.messages.is_empty());
-    }
-
-    #[test]
-    fn truncate_to_last_real_user_returns_zero_when_no_user_present() {
-        let mut c = Conversation::new("sys".into());
-        let removed = c.truncate_to_last_real_user();
-        assert_eq!(removed, 0);
-    }
-
-    #[test]
-    fn push_and_rollback_user_message() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("hi".into());
-        c.push_assistant("hello".into());
-        c.rollback_last_user();
-        assert_eq!(
-            c.messages.len(),
-            2,
-            "rollback is a no-op when last is assistant"
-        );
-
-        c.push_user("again".into());
-        c.rollback_last_user();
-        assert_eq!(c.messages.len(), 2);
-        assert!(matches!(c.messages.last().unwrap().role, Role::Assistant));
-    }
-
-    #[test]
-    fn as_wire_messages_injects_system_first() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("hi".into());
-        let wire = c.as_wire_messages();
-        assert_eq!(wire.len(), 2);
-        assert_eq!(wire[0].role, "system");
-        assert_eq!(wire[0].content, Some(wire::ContentBody::Text("sys")));
-        assert_eq!(wire[1].role, "user");
-    }
-
-    #[test]
-    fn as_wire_messages_drops_empty_system_prompt() {
-        let mut c = Conversation::new(String::new());
-        c.push_user("hi".into());
-        let wire = c.as_wire_messages();
-        assert_eq!(wire.len(), 1);
-        assert_eq!(wire[0].role, "user");
-    }
-
-    #[test]
-    fn approx_tokens_matches_bytes_over_four() {
-        assert_eq!(approx_tokens(""), 0);
-        assert_eq!(approx_tokens("abcd"), 1);
-        assert_eq!(approx_tokens("abcde"), 2);
-        assert_eq!(approx_tokens("hello world"), 3);
-    }
-
-    #[test]
-    fn push_user_with_attachments_renders_multimodal_wire() {
-        let mut c = Conversation::new(String::new());
-        c.push_user_with_attachments(
-            "what is this?".into(),
-            vec![Attachment::Image {
-                mime: "image/png".into(),
-                bytes: vec![0xAB, 0xCD],
-            }],
-        );
-        let wire = c.as_wire_messages();
-        assert_eq!(wire.len(), 1);
-        assert_eq!(wire[0].role, "user");
-        let parts = match &wire[0].content {
-            Some(wire::ContentBody::Parts(p)) => p,
-            other => panic!("expected Some(Parts), got {other:?}"),
-        };
-        assert_eq!(parts.len(), 2);
-        match &parts[0] {
-            wire::ContentPart::Text { text } => assert_eq!(*text, "what is this?"),
-            other => panic!("first part must be text, got {other:?}"),
-        }
-        match &parts[1] {
-            wire::ContentPart::ImageUrl { image_url } => {
-                assert_eq!(image_url.url, "data:image/png;base64,q80=");
-            }
-            other => panic!("second part must be image_url, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn plain_text_user_still_renders_as_string_content() {
-        let mut c = Conversation::new(String::new());
-        c.push_user("hello".into());
-        let wire = c.as_wire_messages();
-        assert!(matches!(
-            wire[0].content,
-            Some(wire::ContentBody::Text("hello"))
-        ));
-    }
-
-    #[test]
-    fn attachments_contribute_to_token_budget() {
-        let mut c = Conversation::new(String::new());
-        c.push_user("q".into());
-        let baseline = c.approx_total_tokens();
-
-        let mut c = Conversation::new(String::new());
-        c.push_user_with_attachments(
-            "q".into(),
-            vec![Attachment::Image {
-                mime: "image/png".into(),
-                bytes: vec![0; 10],
-            }],
-        );
-        let with_image = c.approx_total_tokens();
-        assert_eq!(with_image, baseline + TOKENS_PER_IMAGE);
-    }
-
-    #[test]
-    fn multimodal_wire_serializes_to_openai_shape() {
-        let mut c = Conversation::new(String::new());
-        c.push_user_with_attachments(
-            "describe".into(),
-            vec![Attachment::Image {
-                mime: "image/jpeg".into(),
-                bytes: vec![0x12, 0x34, 0x56],
-            }],
-        );
-        let msgs = c.as_wire_messages();
-        let json = serde_json::to_value(&msgs).unwrap();
-        assert_eq!(json[0]["content"][0]["type"], "text");
-        assert_eq!(json[0]["content"][0]["text"], "describe");
-        assert_eq!(json[0]["content"][1]["type"], "image_url");
-        assert_eq!(
-            json[0]["content"][1]["image_url"]["url"],
-            "data:image/jpeg;base64,EjRW"
-        );
-    }
-
-    #[tokio::test]
-    async fn ensure_budget_noop_when_under() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("hi".into());
-        let fake = FakeSummarizer::new("summary");
-        let (chat, model) = spec(10_000, 4, 20_000);
-        c.ensure_budget(&fake, &chat, &model).await.unwrap();
-        assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn ensure_budget_summarizes_when_over() {
-        let mut c = Conversation::new("sys".into());
-        for i in 0..10 {
-            c.push_user(format!("user turn {i} with some filler text"));
-            c.push_assistant(format!(
-                "assistant reply {i} with enough text to blow the budget"
-            ));
-        }
-        c.push_user("latest question".into());
-        let before_total = c.approx_total_tokens();
-
-        let fake = FakeSummarizer::new("the conversation covered topics 0 through 9");
-        let (chat, model) = spec(60, 2, 10_000);
-        c.ensure_budget(&fake, &chat, &model).await.unwrap();
-
-        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
-        assert!(c.approx_total_tokens() <= 60 || c.approx_total_tokens() < before_total);
-
-        let first = &c.messages[0];
-        assert_eq!(first.role, Role::System);
-        assert!(first.content.starts_with(SUMMARY_PREFIX));
-
-        let last = c.messages.last().unwrap();
-        assert_eq!(last.role, Role::User);
-        assert_eq!(last.content, "latest question");
-    }
-
-    #[tokio::test]
-    async fn ensure_budget_preserves_recent_turns_around_summary() {
-        let mut c = Conversation::new("sys".into());
-        for i in 0..6 {
-            c.push_user(format!("user {i} message with enough length to count"));
-            c.push_assistant(format!("assistant {i} message with enough length to count"));
-        }
-        c.push_user("current question with enough length to count".into());
-
-        let fake = FakeSummarizer::new("early chat covered topics 0 and 1");
-        let (chat, model) = spec(120, 2, 10_000);
-        c.ensure_budget(&fake, &chat, &model).await.unwrap();
-
-        let tail_contents: Vec<_> = c
-            .messages
-            .iter()
-            .rev()
-            .take(5)
-            .map(|m| m.content.clone())
-            .collect();
-        assert!(tail_contents.iter().any(|c| c.contains("current question")));
-    }
-
-    #[tokio::test]
-    async fn ensure_budget_summarize_failure_propagates() {
-        let mut c = Conversation::new("sys".into());
-        for i in 0..20 {
-            c.push_user(format!("user turn {i}"));
-            c.push_assistant(format!("assistant reply {i}"));
-        }
-        let (chat, model) = spec(40, 2, 10_000);
-        let result = c.ensure_budget(&FailingSummarizer, &chat, &model).await;
-        assert!(matches!(result, Err(ChatClientError::Summarize(_))));
-    }
-
-    #[test]
-    fn truncate_drops_oldest_first() {
-        let mut c = Conversation::new("sys".into());
-        for i in 0..8 {
-            c.push_user(format!("user message {i} with padding"));
-            c.push_assistant(format!("assistant reply {i} with padding"));
-        }
-        let before = c.messages.len();
-        let (chat, model) = spec(40, 2, 10_000);
-        c.truncate_to_budget(&chat, &model);
-        assert!(c.messages.len() < before);
-        assert_eq!(c.messages.last().unwrap().role, Role::Assistant);
-    }
-
-    #[test]
-    fn truncate_preserves_last_user_message() {
-        let mut c = Conversation::new("sys".into());
-        for i in 0..30 {
-            c.push_user(format!("u{i} with filler"));
-            c.push_assistant(format!("a{i} with filler"));
-        }
-        c.push_user("keepme with filler".into());
-        let (chat, model) = spec(20, 1, 10_000);
-        c.truncate_to_budget(&chat, &model);
-        assert_eq!(c.messages.last().unwrap().content, "keepme with filler");
-    }
-
-    #[test]
-    fn truncate_utf8_clamps_on_codepoint_boundary() {
-        let s = "世界世界世界";
-        let truncated = truncate_utf8(s, 4);
-        assert!(truncated.ends_with('…'));
-        assert!(truncated.chars().filter(|c| *c != '…').all(|c| c == '世'));
-    }
-
-    // --- tool-call conversation support ----------------------------------
-
-    fn mk_call(id: &str, args: &str) -> ToolCallRecord {
-        ToolCallRecord {
-            id: id.into(),
-            name: "run".into(),
-            arguments: args.into(),
-        }
-    }
-
-    #[test]
-    fn push_assistant_with_tool_calls_records_calls() {
-        let mut c = Conversation::new(String::new());
-        c.push_user("do it".into());
-        c.push_assistant_with_tool_calls(None, vec![mk_call("call-1", r#"{"command":"ls"}"#)]);
-        let last = c.messages.last().unwrap();
-        assert_eq!(last.role, Role::Assistant);
-        assert_eq!(last.content, "");
-        assert_eq!(last.tool_calls.len(), 1);
-        assert_eq!(last.tool_calls[0].id, "call-1");
-        assert_eq!(last.tool_calls[0].name, "run");
-        assert_eq!(last.tool_calls[0].arguments, r#"{"command":"ls"}"#);
-    }
-
-    #[test]
-    fn as_wire_messages_renders_tool_calls_with_content_absent() {
-        let mut c = Conversation::new(String::new());
-        c.push_user("do it".into());
-        c.push_assistant_with_tool_calls(None, vec![mk_call("call-1", r#"{"command":"ls"}"#)]);
-        let wire = c.as_wire_messages();
-        assert_eq!(wire.len(), 2);
-        assert_eq!(wire[1].role, "assistant");
-        assert!(wire[1].content.is_none(), "content must be absent");
-        let calls = wire[1].tool_calls.as_ref().expect("tool_calls present");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id, "call-1");
-        assert_eq!(calls[0].kind, "function");
-        assert_eq!(calls[0].function.name, "run");
-        assert_eq!(calls[0].function.arguments, r#"{"command":"ls"}"#);
-
-        // Serialized JSON must omit `content` (null is not equivalent for
-        // strict Jinja templates).
-        let json = serde_json::to_value(&wire[1]).unwrap();
-        assert!(
-            json.get("content").is_none(),
-            "content key must be omitted: {json}"
-        );
-        assert_eq!(json["tool_calls"][0]["function"]["name"], "run");
-    }
-
-    #[test]
-    fn as_wire_messages_keeps_narration_alongside_tool_calls() {
-        let mut c = Conversation::new(String::new());
-        c.push_user("do it".into());
-        c.push_assistant_with_tool_calls(
-            Some("Got it, listing the directory.".into()),
-            vec![mk_call("call-1", r#"{"command":"ls"}"#)],
-        );
-        let wire = c.as_wire_messages();
-        let json = serde_json::to_value(&wire[1]).unwrap();
-        assert_eq!(json["content"], "Got it, listing the directory.");
-        assert_eq!(json["tool_calls"][0]["function"]["name"], "run");
-    }
-
-    #[test]
-    fn tool_results_render_on_the_tool_role_with_their_call_id() {
-        let mut c = Conversation::new(String::new());
-        c.push_user("do it".into());
-        c.push_assistant_with_tool_calls(None, vec![mk_call("call-1", r#"{"command":"ls"}"#)]);
-        c.push_tool_result("call-1".into(), "a\nb\n[exit:0 | 1ms]".into());
-        let wire = c.as_wire_messages();
-        let json = serde_json::to_value(&wire[2]).unwrap();
-        assert_eq!(json["role"], "tool");
-        assert_eq!(json["tool_call_id"], "call-1");
-        assert_eq!(json["content"], "a\nb\n[exit:0 | 1ms]");
-        assert!(json.get("tool_calls").is_none());
-    }
-
-    #[test]
-    fn dropping_a_tool_call_message_drops_all_of_its_results() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("first question".into());
-        c.push_assistant_with_tool_calls(None, vec![mk_call("c-1", "{}"), mk_call("c-2", "{}")]);
-        c.push_tool_result("c-1".into(), "one".into());
-        c.push_tool_result("c-2".into(), "two".into());
-        c.push_assistant("answer".into());
-        c.push_user("second question".into());
-
-        let (chat, model) = spec(20, 1, 10_000);
-        c.truncate_to_budget(&chat, &model);
-
-        for (i, m) in c.messages.iter().enumerate() {
-            if m.role == Role::Tool {
-                assert!(
-                    c.messages[..i]
-                        .iter()
-                        .any(|p| p.role == Role::Assistant && !p.tool_calls.is_empty()),
-                    "tool result at {i} lost its call"
-                );
-            }
-        }
-        assert_eq!(c.messages.last().unwrap().content, "second question");
-    }
-
-    #[test]
-    fn tool_results_do_not_count_as_preserved_turns() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("real question with enough length to count".into());
-        for i in 0..6 {
-            c.push_assistant_with_tool_calls(None, vec![mk_call(&format!("c-{i}"), "{}")]);
-            c.push_tool_result(format!("c-{i}"), format!("output {i} with padding"));
-        }
-        c.push_assistant("done".into());
-
-        // Two preserved pairs must reach past the tool traffic to real
-        // turns rather than stopping at the last two tool results.
-        let idx = c.first_preserved_index(2);
-        let preserved = &c.messages[idx..];
-        assert!(
-            preserved
-                .iter()
-                .filter(|m| m.role == Role::Assistant)
-                .count()
-                >= 2,
-            "expected assistant turns in the preserved tail, got {preserved:?}"
-        );
-    }
-
-    #[test]
-    fn truncate_to_last_real_user_skips_tool_role_results() {
-        let mut c = Conversation::new("sys".into());
-        c.push_user("real q".into());
-        c.push_assistant_with_tool_calls(None, vec![mk_call("c-1", "{}")]);
-        c.push_tool_result("c-1".into(), "output".into());
-        c.push_assistant("final".into());
-        let removed = c.truncate_to_last_real_user();
-        assert_eq!(removed, 4);
-        assert!(c.messages.is_empty());
-    }
-
-    #[test]
-    fn tool_calls_contribute_to_token_budget() {
-        let mut c = Conversation::new(String::new());
-        c.push_user("q".into());
-        let baseline = c.approx_total_tokens();
-
-        let mut c2 = Conversation::new(String::new());
-        c2.push_user("q".into());
-        c2.push_assistant_with_tool_calls(
-            None,
-            vec![mk_call(
-                "call-1",
-                r#"{"command":"a very long command string here to make the call nontrivial"}"#,
-            )],
-        );
-        let with_call = c2.approx_total_tokens();
-        assert!(
-            with_call > baseline,
-            "tool_calls should add to token count: {with_call} vs {baseline}"
-        );
-    }
-
-    #[test]
-    fn truncate_drops_tool_call_pair_atomically() {
-        let mut c = Conversation::new(String::new());
-        // Old messages we'll summarize/truncate:
-        c.push_user("old q".into());
-        c.push_assistant_with_tool_calls(None, vec![mk_call("c-1", r#"{"command":"ls"}"#)]);
-        c.push_user_with_attachments("[tool:run]\nsome output\n".into(), Vec::new());
-        c.push_assistant("old reply".into());
-        // The latest turn (kept by preserve):
-        c.push_user("latest".into());
-
-        let (chat, model) = spec(10, 1, 10_000);
-        c.truncate_to_budget(&chat, &model);
-
-        // The remaining history must not carry a dangling tool_calls
-        // without a matching result (or vice versa).
-        for (i, m) in c.messages.iter().enumerate() {
-            if m.role == Role::Assistant && !m.tool_calls.is_empty() {
-                let next = c.messages.get(i + 1);
-                assert!(
-                    matches!(next, Some(n) if n.role == Role::User
-                             && n.content.starts_with(TOOL_RESULT_PREFIX)),
-                    "assistant tool_calls at index {i} has no matching result; \
-                     history: {:?}",
-                    c.messages
-                );
-            }
-            if m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX) {
-                let prev = i.checked_sub(1).and_then(|p| c.messages.get(p));
-                assert!(
-                    matches!(prev, Some(p) if p.role == Role::Assistant
-                             && !p.tool_calls.is_empty()),
-                    "tool result at index {i} has no matching assistant; \
-                     history: {:?}",
-                    c.messages
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn summarize_preserves_tool_call_pair_boundary() {
-        let mut c = Conversation::new("sys".into());
-        // Stuff enough history to force summarization.
-        for i in 0..5 {
-            c.push_user(format!("turn {i} question with some filler text here"));
-            c.push_assistant(format!(
-                "turn {i} answer with some filler text here to blow budget"
-            ));
-        }
-        // A tool-call pair in the recent tail.
-        c.push_assistant_with_tool_calls(None, vec![mk_call("c-99", r#"{"command":"ls"}"#)]);
-        c.push_user_with_attachments("[tool:run]\nfoo\nbar\n".into(), Vec::new());
-        c.push_user("latest".into());
-
-        let fake = FakeSummarizer::new("summary");
-        let (chat, model) = spec(60, 2, 10_000);
-        c.ensure_budget(&fake, &chat, &model).await.unwrap();
-
-        // Post-summarize, the preserved tail must not have a dangling
-        // tool_calls or tool-result.
-        for (i, m) in c.messages.iter().enumerate() {
-            if m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX) {
-                let prev = i.checked_sub(1).and_then(|p| c.messages.get(p));
-                assert!(
-                    matches!(prev, Some(p) if p.role == Role::Assistant
-                             && !p.tool_calls.is_empty()),
-                    "orphaned tool result at {i}"
-                );
-            }
-        }
-    }
-}
+mod tests;

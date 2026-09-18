@@ -1,24 +1,17 @@
 //! Command-execution policy: confirmation gates, pattern matchers, and
 //! sandbox probing.
 //!
-//! The types here are consumed by [`crate::commands::BashCommand`] (denylist
-//! check, destructive-pattern confirmation, bwrap wrapping) and
-//! [`crate::commands::WriteCommand`] (writable-path allowlist, resolved at
-//! build time by the caller, not by this module). They are deliberately
-//! decoupled from `assistd-core::config` to avoid a circular crate
-//! dependency: the caller in `assistd-core::build_tools` constructs the
-//! primitive policy types here from its own `Config`.
-//!
-//! Honest caveat on syntactic checks: the denylist and destructive-pattern
-//! list are backstops for *obvious* dangerous invocations (`rm -rf /`,
-//! `mkfs`, …). They can be defeated by a sufficiently clever caller
-//! (variable expansion, here-docs, command substitution), so they are not
-//! the real defense; the bwrap sandbox is.
+//! The denylist and destructive-pattern checks are syntactic backstops
+//! for obvious dangerous invocations (`rm -rf /`, `mkfs`, …). A
+//! sufficiently clever script defeats them through variable expansion,
+//! here-docs, or command substitution, so they are not the real
+//! defense; the bwrap sandbox is.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
@@ -28,6 +21,98 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 use assistd_ipc::Event;
+
+use crate::command::{CommandOutput, Hint, error_line};
+use crate::exec::POLICY_DENIED_EXIT;
+
+/// Policy for the commands that spawn subprocesses. Destructive
+/// patterns are pre-tokenized so no invocation re-parses them.
+#[derive(Debug, Clone)]
+pub struct BashPolicyCfg {
+    pub timeout: Duration,
+    pub denylist: Vec<String>,
+    pub destructive_patterns: Vec<Vec<String>>,
+}
+
+impl Default for BashPolicyCfg {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            denylist: Vec::new(),
+            destructive_patterns: Vec::new(),
+        }
+    }
+}
+
+/// Everything a command needs to run model-chosen argv: the policy,
+/// the sandbox to wrap it in, and the gate that confirms destructive
+/// invocations.
+pub(crate) struct SubprocessPolicy {
+    pub(crate) cfg: Arc<BashPolicyCfg>,
+    pub(crate) sandbox: Arc<SandboxInfo>,
+    pub(crate) gate: Arc<dyn ConfirmationGate>,
+}
+
+impl SubprocessPolicy {
+    /// Refuse `script` when it hits the denylist or when the gate
+    /// declines a destructive match. `tool` and `op` name the caller in
+    /// the error line; `destructive` is the caller's own match result,
+    /// since `bash` matches its script and `wm open` matches argv.
+    pub(crate) async fn authorize(
+        &self,
+        tool: &str,
+        op: &str,
+        script: &str,
+        destructive: Option<&[String]>,
+    ) -> Result<(), CommandOutput> {
+        if let Some(pat) = matches_denylist(script, &self.cfg.denylist) {
+            warn!(
+                target: "assistd::policy",
+                tool = %tool,
+                script = %script,
+                matched = %pat,
+                "denied by denylist"
+            );
+            return Err(CommandOutput::failed(
+                POLICY_DENIED_EXIT,
+                error_line(
+                    tool,
+                    format_args!("{op} denied by policy. Matched denylist pattern: {pat}"),
+                    Hint::Try,
+                    "a non-destructive alternative",
+                )
+                .into_bytes(),
+            ));
+        }
+        let Some(matched) = destructive else {
+            return Ok(());
+        };
+        let pattern_display = matched.join(" ");
+        let approved = self
+            .gate
+            .confirm(ConfirmationRequest {
+                tool: tool.to_string(),
+                script: script.to_string(),
+                matched_pattern: pattern_display.clone(),
+            })
+            .await;
+        if approved {
+            return Ok(());
+        }
+        Err(CommandOutput::failed(
+            POLICY_DENIED_EXIT,
+            error_line(
+                tool,
+                format_args!(
+                    "{op} cancelled by user. Matched destructive pattern: {pattern_display}"
+                ),
+                Hint::Try,
+                "a different approach",
+            )
+            .into_bytes(),
+        ))
+    }
+}
 
 /// Describes a request for user confirmation before executing a destructive
 /// command. Passed to [`ConfirmationGate::confirm`].
@@ -42,17 +127,7 @@ pub struct ConfirmationRequest {
     pub matched_pattern: String,
 }
 
-/// A policy authority that decides whether a destructive command may run.
-///
-/// Two built-in implementations are provided:
-/// - [`DenyAllGate`]: the headless/IPC default. Always returns `false`. Logs
-///   a warn when it denies so the operator can see why a command was blocked.
-/// - [`AlwaysAllowGate`]: a test-only bypass.
-///
-/// Real interactive use wires up a TUI-side gate that forwards the request
-/// to the user through an `mpsc` channel and awaits a `oneshot` response.
-/// The trait is `Send + Sync + 'static` so the same `Arc<dyn ConfirmationGate>`
-/// can be handed to every command.
+/// Decides whether a destructive command may run.
 #[async_trait]
 pub trait ConfirmationGate: Send + Sync + 'static {
     /// Ask for confirmation. `true` = proceed, `false` = cancel.
@@ -62,7 +137,7 @@ pub trait ConfirmationGate: Send + Sync + 'static {
     async fn confirm(&self, req: ConfirmationRequest) -> bool;
 }
 
-/// Default gate for headless / IPC-connected paths. Never approves.
+/// Gate that never approves, logging each denial.
 #[derive(Debug, Default)]
 pub struct DenyAllGate;
 
@@ -91,52 +166,24 @@ impl ConfirmationGate for AlwaysAllowGate {
     }
 }
 
-/// Cap on the number of concurrently-pending confirmation prompts on
-/// a single connection. A misbehaving client could repeatedly call a
-/// destructive command without ever responding to the prompts; without
-/// a bound, every `ask` would leak a `oneshot::Sender` into
-/// `ConfirmRouter::pending`. The cap is generous (a real interactive
-/// user is never going to have 32 confirmation prompts queued in
-/// parallel) so it doesn't trip on normal use.
+/// Cap on confirmation prompts in flight on one connection. A client
+/// that never answers would otherwise leak a `oneshot::Sender` per ask.
 pub const MAX_PENDING_CONFIRMS: usize = 32;
 
-/// Per-connection routing table for in-flight confirmation prompts.
-///
-/// One [`ConfirmRouter`] is created per IPC connection. The connection
-/// handler installs it into the [`CONFIRM_ROUTER`] task-local before
-/// calling `dispatch`, so the [`IpcConfirmationGate`] can find it
-/// without explicit plumbing through every tool. The connection's
-/// read loop calls [`ConfirmRouter::route_response`] when it sees an
-/// inbound `Request::ConfirmResponse`, signalling the matching
-/// pending oneshot.
-///
-/// Concurrency: routing is keyed on a fresh `confirm_id` per `ask`
-/// call, so two concurrent connections each get their own pending
-/// table, and a single connection that asks multiple confirms
-/// in sequence routes responses correctly.
-///
-/// Bounded: at most [`MAX_PENDING_CONFIRMS`] prompts may be in flight
-/// at once. Beyond that, [`ConfirmRouter::ask`] denies immediately and
-/// logs a `warn!`; the gate contract is "never hang the agent," and
-/// silently denying a few prompts is preferable to unbounded memory
-/// growth from a hostile or stuck client.
+/// Per-connection routing table for in-flight confirmation prompts,
+/// installed in the [`CONFIRM_ROUTER`] task-local so
+/// [`IpcConfirmationGate`] can find it without plumbing. Each `ask`
+/// gets a fresh `confirm_id`, and beyond [`MAX_PENDING_CONFIRMS`] in
+/// flight further asks are denied rather than queued.
 pub struct ConfirmRouter {
-    /// Originating IPC request id, used as `Event::ConfirmRequest::id`
-    /// for trace correlation. Set once per connection.
+    /// Id of the connection's originating request, carried on every
+    /// emitted [`Event::ConfirmRequest`].
     request_id: String,
-    /// Wire channel back to the client. Cloned from the connection
-    /// handler's main event sender.
     wire: mpsc::Sender<Event>,
-    /// Pending confirmation prompts, keyed by `confirm_id`. The lock
-    /// is held only across HashMap insert/remove; no `.await` is
-    /// held under the guard, so a sync Mutex is sufficient.
     pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
 }
 
 impl ConfirmRouter {
-    /// Build a router. `request_id` is the id of the connection's
-    /// initial Request; every emitted [`Event::ConfirmRequest`] carries
-    /// it.
     pub fn new(request_id: String, wire: mpsc::Sender<Event>) -> Arc<Self> {
         Arc::new(Self {
             request_id,
@@ -145,10 +192,9 @@ impl ConfirmRouter {
         })
     }
 
-    /// Forward the daemon's prompt to the connected client and await
-    /// the response. Returns `false` on any failure mode (channel
-    /// drop, dispatch shutdown, malformed response); the gate
-    /// contract says never hang the agent.
+    /// Forward the prompt to the connected client and await the answer.
+    /// Every failure mode (channel drop, cap reached, disconnect) is
+    /// `false`.
     pub async fn ask(&self, req: ConfirmationRequest) -> bool {
         let confirm_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
@@ -175,7 +221,6 @@ impl ConfirmRouter {
             matched_pattern: req.matched_pattern.clone(),
         };
         if self.wire.send(event).await.is_err() {
-            // Wire dead; clean up and deny.
             self.pending.lock().remove(&confirm_id);
             warn!(
                 target: "assistd::policy",
@@ -199,11 +244,8 @@ impl ConfirmRouter {
         }
     }
 
-    /// Route an inbound `Request::ConfirmResponse` to its matching
-    /// pending oneshot. Returns `Err` (logged by the caller) when the
-    /// response doesn't match any in-flight prompt; that signals
-    /// either a buggy client or a confirm whose deadline already
-    /// expired.
+    /// Deliver a client's answer to the matching pending prompt. `Err`
+    /// means no prompt with that id is in flight.
     pub fn route_response(&self, confirm_id: &str, allow: bool) -> Result<(), &'static str> {
         let sender = self.pending.lock().remove(confirm_id);
         match sender {
@@ -217,23 +259,13 @@ impl ConfirmRouter {
 }
 
 tokio::task_local! {
-    /// Per-connection [`ConfirmRouter`] in scope while [`AppState::dispatch`]
-    /// runs. The connection handler in `assistd-core::socket` installs
-    /// it; [`IpcConfirmationGate::confirm`] reads it. Tasks spawned by
-    /// dispatch inherit this task-local automatically because
-    /// `tokio::task_local!` propagates through `tokio::spawn`.
+    /// The [`ConfirmRouter`] of the IPC connection whose request is
+    /// being dispatched.
     pub static CONFIRM_ROUTER: Arc<ConfirmRouter>;
 }
 
-/// Confirmation gate that forwards prompts to whatever IPC client is
-/// driving the active connection. Reads the per-connection
-/// [`ConfirmRouter`] from [`CONFIRM_ROUTER`] (the task-local installed
-/// by the socket handler) and asks it to round-trip the prompt.
-///
-/// When called from a code path that has no [`ConfirmRouter`] in scope
-/// (daemon-internal dispatch with no client wire, e.g. an autonomous
-/// continuous-listener-driven query, or a unit test), falls back to
-/// deny so the agent loop never hangs.
+/// Gate that round-trips prompts through the [`CONFIRM_ROUTER`] in
+/// scope, denying when there is none.
 #[derive(Debug, Default)]
 pub struct IpcConfirmationGate;
 
@@ -276,19 +308,12 @@ pub fn matches_denylist<'a>(script: &str, patterns: &'a [String]) -> Option<&'a 
     })
 }
 
-/// Tokenize the bash script with `shlex` and check whether any token
-/// subsequence matches a configured destructive prefix. The first token of
-/// a prefix must equal the first token of a script segment (roughly, a
-/// command invocation), with subsequent prefix tokens appearing in order.
+/// Whether any command segment of the shlex-tokenized script starts with
+/// a configured destructive prefix. Returns the matched prefix.
 ///
-/// Quoted arguments (`echo "rm -rf"`) are left as single tokens by `shlex`
-/// and therefore do **not** match `["rm", "-rf"]`. Unparseable scripts
-/// (unbalanced quotes, etc.) are treated as "no match" so we don't block
-/// legitimate constructs; the subsequent bash invocation will surface the
-/// syntax error itself.
-///
-/// Returns the matched prefix (for display in the confirmation prompt) or
-/// `None`.
+/// Quoted arguments (`echo "rm -rf"`) stay single tokens and so do not
+/// match `["rm", "-rf"]`. Unparseable scripts count as no match; bash
+/// will surface the syntax error itself.
 pub fn matches_destructive<'a>(script: &str, prefixes: &'a [Vec<String>]) -> Option<&'a [String]> {
     let tokens = shlex::split(script)?;
     if tokens.is_empty() {
@@ -321,8 +346,7 @@ pub fn matches_destructive<'a>(script: &str, prefixes: &'a [Vec<String>]) -> Opt
     None
 }
 
-/// How the caller requested sandboxing for bash. Derived from
-/// `config::BashSandboxMode` at startup.
+/// How sandboxing was requested for subprocess-spawning commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxRequest {
     /// Use bwrap if found on `PATH`; fall back to unsandboxed with a warn.
@@ -343,7 +367,8 @@ pub enum ResolvedSandboxMode {
     Bwrap { path: PathBuf },
 }
 
-/// Cached sandbox configuration threaded into every `BashCommand`.
+/// Resolved sandbox configuration shared by every subprocess-spawning
+/// command.
 #[derive(Debug)]
 pub struct SandboxInfo {
     pub mode: ResolvedSandboxMode,
@@ -352,9 +377,7 @@ pub struct SandboxInfo {
 }
 
 /// Session resources a sandboxed command needs beyond the default
-/// profile. Selecting a variant is the only way to widen the sandbox
-/// from inside the workspace; anything else goes through the operator's
-/// `bwrap_extra_args`.
+/// profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxAccess {
     /// The default profile. `/run` is a fresh tmpfs, so the compositor
@@ -367,7 +390,7 @@ pub enum SandboxAccess {
 }
 
 impl SandboxInfo {
-    /// Convenience constructor for tests that don't care about sandboxing.
+    /// A configuration that never wraps.
     pub fn none() -> Arc<Self> {
         Arc::new(Self {
             mode: ResolvedSandboxMode::None,
@@ -448,20 +471,14 @@ fn default_bwrap_flags() -> Vec<String> {
 /// Bind flags for [`SandboxAccess::Session`], re-exposing the compositor
 /// and D-Bus session sockets that the default profile's `--tmpfs /run`
 /// hides.
-///
-/// Returns empty when `XDG_RUNTIME_DIR` is unset or does not name a
-/// directory: `bwrap` aborts on a missing bind source, so a stale value
-/// would take every launch down with it rather than merely leaving the
-/// sandbox tight.
 fn session_bind_flags() -> Vec<String> {
-    session_bind_flags_in(std::env::var("XDG_RUNTIME_DIR").ok())
+    session_bind_flags_for(std::env::var("XDG_RUNTIME_DIR").ok())
 }
 
-/// Inner form of [`session_bind_flags`] that takes the `XDG_RUNTIME_DIR`
-/// value explicitly, so tests can exercise the unset and stale-path
-/// branches without mutating the global process environment (which would
-/// race with parallel tests).
-fn session_bind_flags_in(runtime_dir: Option<String>) -> Vec<String> {
+/// Empty when `runtime_dir` is unset or not a directory: `bwrap` aborts
+/// on a missing bind source, so a stale value would take every launch
+/// down with it rather than merely leaving the sandbox tight.
+fn session_bind_flags_for(runtime_dir: Option<String>) -> Vec<String> {
     match runtime_dir {
         Some(dir) if std::path::Path::new(&dir).is_dir() => {
             vec!["--bind".into(), dir.clone(), dir]
@@ -477,27 +494,18 @@ fn session_bind_flags_in(runtime_dir: Option<String>) -> Vec<String> {
     }
 }
 
-/// Probe the environment once at daemon startup and return a shared
-/// [`SandboxInfo`] for the entire process lifetime.
-///
-/// Behaviour by `request`:
-/// - `None` → always returns [`ResolvedSandboxMode::None`].
-/// - `Auto` → returns `Bwrap` if `bwrap` is found on `PATH`; otherwise
-///   logs a `warn!` and returns `None`, running degraded.
-/// - `Bwrap` → returns `Bwrap` if found; otherwise returns an error so
-///   daemon startup fails fast.
+/// Resolve `request` against the environment once, for the whole
+/// process lifetime. `Auto` falls back to unsandboxed with a warning
+/// when `bwrap` is missing; `Bwrap` errors instead.
 pub fn probe_sandbox(
     request: SandboxRequest,
     extra_args: Vec<String>,
 ) -> anyhow::Result<Arc<SandboxInfo>> {
     let path_env = std::env::var_os("PATH").unwrap_or_default();
-    probe_sandbox_in(request, extra_args, &path_env)
+    probe_sandbox_with_path(request, extra_args, &path_env)
 }
 
-/// Inner form of [`probe_sandbox`] that takes the `PATH` value explicitly,
-/// so tests can exercise the missing-bwrap failure path without mutating
-/// the global process environment (which would race with parallel tests).
-fn probe_sandbox_in(
+fn probe_sandbox_with_path(
     request: SandboxRequest,
     extra_args: Vec<String>,
     path_env: &std::ffi::OsStr,
@@ -507,7 +515,7 @@ fn probe_sandbox_in(
             info!(target: "assistd::policy", "bash sandbox: disabled by config");
             ResolvedSandboxMode::None
         }
-        SandboxRequest::Auto => match which_in_path_in("bwrap", path_env) {
+        SandboxRequest::Auto => match find_executable("bwrap", path_env) {
             Some(path) => {
                 info!(
                     target: "assistd::policy",
@@ -525,7 +533,7 @@ fn probe_sandbox_in(
                 ResolvedSandboxMode::None
             }
         },
-        SandboxRequest::Bwrap => match which_in_path_in("bwrap", path_env) {
+        SandboxRequest::Bwrap => match find_executable("bwrap", path_env) {
             Some(path) => {
                 info!(
                     target: "assistd::policy",
@@ -545,12 +553,8 @@ fn probe_sandbox_in(
     Ok(Arc::new(SandboxInfo { mode, extra_args }))
 }
 
-/// Minimal `which`: first entry in the supplied PATH value that contains an
-/// executable file with the given basename. Taking `path_env` as a parameter
-/// (rather than reading `std::env::var_os("PATH")` directly) keeps the
-/// function pure and lets tests inject an empty PATH without racing other
-/// threads.
-fn which_in_path_in(name: &str, path_env: &std::ffi::OsStr) -> Option<PathBuf> {
+/// Minimal `which` over an explicit PATH value.
+fn find_executable(name: &str, path_env: &std::ffi::OsStr) -> Option<PathBuf> {
     for dir in std::env::split_paths(path_env) {
         if dir.as_os_str().is_empty() {
             continue;
@@ -782,7 +786,7 @@ mod tests {
         // shadowed by the tmpfs and the socket would be invisible.
         let dir = std::env::temp_dir();
         let dir_str = dir.to_string_lossy().into_owned();
-        let flags = session_bind_flags_in(Some(dir_str.clone()));
+        let flags = session_bind_flags_for(Some(dir_str.clone()));
         assert_eq!(flags, vec!["--bind".to_string(), dir_str.clone(), dir_str]);
 
         let profile = default_bwrap_flags();
@@ -795,9 +799,9 @@ mod tests {
 
     #[test]
     fn session_bind_is_skipped_when_runtime_dir_is_unusable() {
-        assert!(session_bind_flags_in(None).is_empty());
+        assert!(session_bind_flags_for(None).is_empty());
         assert!(
-            session_bind_flags_in(Some("/nonexistent/assistd-runtime-dir".into())).is_empty(),
+            session_bind_flags_for(Some("/nonexistent/assistd-runtime-dir".into())).is_empty(),
             "a stale XDG_RUNTIME_DIR must not be passed to bwrap, which aborts on a \
              missing bind source"
         );
@@ -811,7 +815,8 @@ mod tests {
 
     #[test]
     fn probe_sandbox_bwrap_missing_fails_startup() {
-        let result = probe_sandbox_in(SandboxRequest::Bwrap, Vec::new(), std::ffi::OsStr::new(""));
+        let result =
+            probe_sandbox_with_path(SandboxRequest::Bwrap, Vec::new(), std::ffi::OsStr::new(""));
         assert!(
             result.is_err(),
             "expected bwrap probe to fail with empty PATH"

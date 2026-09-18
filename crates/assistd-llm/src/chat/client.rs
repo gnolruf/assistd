@@ -1,21 +1,12 @@
 //! HTTP streaming chat client for the locally-managed llama-server.
 //!
-//! `LlamaChatClient` implements `LlmBackend`, so the daemon can drop it into
-//! `AppState::llm` exactly where `EchoBackend` used to live. A
-//! `tokio::sync::Mutex<Conversation>` guards the chat history. The mutex is
-//! held only across the cheap state-mutation phases (`push_user`,
-//! `ensure_budget`, building the wire payload, and the post-stream
-//! `push_assistant`/`rollback`). The HTTP streaming call itself runs
-//! lock-free, so a slow or hung server never blocks a concurrent
-//! `push_user`/`set_transient_context` call from another caller.
-//!
-//! Tool-use support comes via three extra `LlmBackend` methods:
-//! `push_user`, `push_tool_results`, and `step`. The agent loop in
-//! `assistd-core` drives them: `push_user(text)` at the start of a turn,
-//! then `step` → handle the outcome → `push_tool_results(...)` if needed →
-//! `step` again, until `StepOutcome::Final`.
+//! The conversation mutex is held only across the cheap state-mutation
+//! phases before and after a request; the HTTP stream itself runs
+//! lock-free, so a hung server never blocks a concurrent `push_user` or
+//! `set_transient_context`.
 
 use std::collections::BTreeMap;
+use std::mem::take;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,10 +36,6 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce 
     assistant conclusions. Write in past tense. Do not add commentary.";
 
 /// HTTP streaming chat client backed by a locally-managed llama-server.
-///
-/// Implements [`crate::LlmBackend`]. A `tokio::sync::Mutex<Conversation>` guards
-/// the chat history; the HTTP streaming call itself runs lock-free so a slow
-/// server never blocks concurrent state mutations.
 pub struct LlamaChatClient {
     client: reqwest::Client,
     base_url: String,
@@ -56,24 +43,15 @@ pub struct LlamaChatClient {
     model: ModelConfig,
     timeouts: TimeoutsConfig,
     conv: Mutex<Conversation>,
-    /// Optional handle into the supervisor so we can classify HTTP
-    /// errors as crash-induced (server died → reply `ServerRestarting`
-    /// so the agent loop can replay) vs. genuine transport faults.
-    /// `None` in tests that drive the client without a real supervisor.
+    /// Without a probe every HTTP failure is a transport fault; with
+    /// one, a failure that coincides with a supervisor restart becomes
+    /// [`LlmError::ServerRestarting`] so the caller can replay.
     health: Option<Arc<dyn LlmHealthProbe>>,
 }
 
 impl LlamaChatClient {
-    /// `chat` carries the sampling + history-window knobs, `server` provides
-    /// the host:port the request is sent to, and `model` is the identifier
-    /// llama-server has loaded (plus its context length for budget math).
-    /// All three are cloned; the caller keeps ownership.
-    ///
-    /// `health` is the optional probe used to detect mid-stream
-    /// llama-server crashes. Pass `None` when there is no supervisor
-    /// (test backends, fake-server harnesses); production callers wire
-    /// the `PresenceManager`-backed probe so crash → restart → replay
-    /// works end-to-end.
+    /// Build a client for the server at `server.host:server.port`. Pass
+    /// `health: None` when no supervisor is attached.
     pub fn new(
         chat: &ChatConfig,
         server: &LlamaServerConfig,
@@ -99,24 +77,60 @@ impl LlamaChatClient {
         })
     }
 
-    /// Snapshot the probe state at the moment of an HTTP failure.
-    /// Returns `Some((pid_at_request, current_state))` when a probe is
-    /// attached, allowing the caller to decide whether the failure
-    /// looks like a server crash (pid changed or state != Ready). The
-    /// outer `Option` is `None` when the client was built without a
-    /// probe; in that case the caller treats every error as a
-    /// transport fault (no replay).
-    fn classify_failure(&self, pid_at_request: Option<u32>) -> bool {
+    /// A request carrying the configured sampling parameters and no
+    /// tools; callers set what differs.
+    fn base_request<'a>(&'a self, messages: Vec<wire::ChatMessage<'a>>) -> wire::ChatRequest<'a> {
+        wire::ChatRequest {
+            model: self.model.name.as_str(),
+            messages,
+            stream: true,
+            temperature: self.chat.temperature,
+            max_tokens: self.chat.max_response_tokens.get(),
+            top_p: self.chat.top_p,
+            top_k: self.chat.top_k.map(NonZeroU32::get),
+            min_p: self.chat.min_p,
+            presence_penalty: self.chat.presence_penalty,
+            tools: None,
+            tool_choice: None,
+            chat_template_kwargs: None,
+        }
+    }
+
+    /// Classify a failed request: a restart-coincident failure becomes
+    /// [`StreamOutcome::ServerRestart`]; anything else keeps whatever
+    /// was already streamed or propagates `err` if nothing was.
+    fn fail(
+        &self,
+        accum: StreamAccum,
+        err: ChatClientError,
+        pid_at_request: Option<u32>,
+    ) -> StreamOutcome {
+        if self.looks_like_server_crash(pid_at_request) {
+            let pre_emit = !accum.has_output();
+            return StreamOutcome::ServerRestart { accum, pre_emit };
+        }
+        if accum.has_output() {
+            warn!(
+                target: "assistd::chat",
+                "mid-stream error after {} bytes / {} tool-call builders: {err}",
+                accum.text.len(),
+                accum.tool_calls.len()
+            );
+            StreamOutcome::PartialAfterEmit(accum)
+        } else {
+            StreamOutcome::PreEmitError(err)
+        }
+    }
+
+    /// Whether an HTTP failure coincides with a supervisor restart: the
+    /// child's pid changed or vanished since the request was sent, or
+    /// the readiness state left `Ready`. Always false without a probe.
+    fn looks_like_server_crash(&self, pid_at_request: Option<u32>) -> bool {
         let Some(probe) = self.health.as_ref() else {
             return false;
         };
         let current_pid = probe.pid();
         let current_state = probe.state();
-        // Crash-induced when:
-        // - we had a pid before the request and either the pid has
-        //   changed (supervisor already respawned) or it's now None
-        //   (child died, supervisor not yet respawned), OR
-        // - the state went non-Ready (Starting / BackingOff / Degraded).
         let pid_changed = match (pid_at_request, current_pid) {
             (Some(_), None) => true,
             (Some(a), Some(b)) => a != b,
@@ -127,17 +141,54 @@ impl LlamaChatClient {
     }
 
     async fn stream_openai(&self, body: Vec<u8>, tx: &mpsc::Sender<LlmEvent>) -> StreamOutcome {
-        let url = format!("{}/v1/chat/completions", self.base_url);
-        // Snapshot the supervisor's PID at request time so we can
-        // distinguish a crash-induced HTTP failure (pid changed or
-        // disappeared, state went non-Ready) from a transport-level
-        // hiccup (network, timeout) when classifying errors below.
         let pid_at_request = self.health.as_ref().and_then(|h| h.pid());
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "llm_request_sent",
             "voice latency stage"
         );
+        let mut response = match self.send_request(body, pid_at_request).await {
+            Ok(response) => response,
+            Err(outcome) => return outcome,
+        };
+        let mut accum = StreamAccum::default();
+        let saw_done = match self
+            .read_stream(&mut response, &mut accum, tx, pid_at_request)
+            .await
+        {
+            Ok(saw_done) => saw_done,
+            Err(outcome) => return outcome,
+        };
+        if !saw_done {
+            warn!(
+                target: "assistd::chat",
+                "stream ended before [DONE] marker; accumulated {} bytes text, {} tool-call builders",
+                accum.text.len(),
+                accum.tool_calls.len()
+            );
+        }
+        match accum.splitter.finish() {
+            Some(Segment::Reasoning(text)) => {
+                let _ = tx.send(LlmEvent::ReasoningDelta { text }).await;
+            }
+            Some(Segment::Visible(text)) if !text.is_empty() => {
+                accum.text.push_str(&text);
+                accum.has_emitted = true;
+                let _ = tx.send(LlmEvent::Delta { text }).await;
+            }
+            _ => {}
+        }
+        StreamOutcome::Ok(accum)
+    }
+
+    /// POST the request and return the response once it is known to be
+    /// a success from a server that has not restarted underneath us.
+    async fn send_request(
+        &self,
+        body: Vec<u8>,
+        pid_at_request: Option<u32>,
+    ) -> Result<reqwest::Response, StreamOutcome> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
         let mut response = match self
             .client
             .post(&url)
@@ -147,62 +198,54 @@ impl LlamaChatClient {
             .send()
             .await
         {
-            Ok(r) => {
-                if self.classify_failure(pid_at_request) {
-                    // Server crashed between snapshot and response; the
-                    // 200 we just received was racing the supervisor's
-                    // teardown. Treat as restart so the agent replays.
-                    return StreamOutcome::ServerRestart {
-                        accum: StreamAccum::default(),
-                        pre_emit: true,
-                    };
-                }
-                r
-            }
+            Ok(response) => response,
             Err(e) => {
-                if self.classify_failure(pid_at_request) {
-                    return StreamOutcome::ServerRestart {
-                        accum: StreamAccum::default(),
-                        pre_emit: true,
-                    };
-                }
-                return StreamOutcome::PreEmitError(ChatClientError::Http(e));
+                return Err(self.fail(
+                    StreamAccum::default(),
+                    ChatClientError::Http(e),
+                    pid_at_request,
+                ));
             }
         };
-
+        if self.looks_like_server_crash(pid_at_request) {
+            // A 200 that raced the supervisor's teardown.
+            return Err(StreamOutcome::ServerRestart {
+                accum: StreamAccum::default(),
+                pre_emit: true,
+            });
+        }
         let status = response.status();
         if !status.is_success() {
             let body = read_body_capped(&mut response, ERROR_BODY_CAP).await;
-            if self.classify_failure(pid_at_request) {
-                return StreamOutcome::ServerRestart {
-                    accum: StreamAccum::default(),
-                    pre_emit: true,
-                };
-            }
-            return StreamOutcome::PreEmitError(ChatClientError::Server {
+            let err = ChatClientError::Server {
                 status: status.as_u16(),
                 body,
-            });
+            };
+            return Err(self.fail(StreamAccum::default(), err, pid_at_request));
         }
+        Ok(response)
+    }
 
+    /// Drive the SSE stream until `[DONE]` or EOF, forwarding events
+    /// through `tx`. Returns whether `[DONE]` was seen.
+    async fn read_stream(
+        &self,
+        response: &mut reqwest::Response,
+        accum: &mut StreamAccum,
+        tx: &mpsc::Sender<LlmEvent>,
+        pid_at_request: Option<u32>,
+    ) -> Result<bool, StreamOutcome> {
         let mut reader = SseLineReader::new();
-        let mut accum = StreamAccum::default();
-        let mut saw_done = false;
         let first_byte = Duration::from_secs(self.chat.request_timeout_secs.get());
         let inter_chunk = Duration::from_secs(self.timeouts.stream_inactivity_secs);
         let mut saw_bytes = false;
-
         loop {
             let deadline = if saw_bytes { inter_chunk } else { first_byte };
             let chunk = match timeout(deadline, response.chunk()).await {
-                Ok(Ok(Some(c))) => c,
-                Ok(Ok(None)) => break,
+                Ok(Ok(Some(chunk))) => chunk,
+                Ok(Ok(None)) => return Ok(false),
                 Ok(Err(e)) => {
-                    if self.classify_failure(pid_at_request) {
-                        let pre_emit = !accum_was_emitted(&accum);
-                        return StreamOutcome::ServerRestart { accum, pre_emit };
-                    }
-                    return fold_mid_stream_error(accum, ChatClientError::Http(e));
+                    return Err(self.fail(take(accum), ChatClientError::Http(e), pid_at_request));
                 }
                 Err(_) => {
                     warn!(
@@ -213,150 +256,104 @@ impl LlamaChatClient {
                         tool_call_builders = accum.tool_calls.len(),
                         "SSE stream inactive past deadline; aborting read"
                     );
-                    if self.classify_failure(pid_at_request) {
-                        let pre_emit = !accum_was_emitted(&accum);
-                        return StreamOutcome::ServerRestart { accum, pre_emit };
-                    }
-                    return fold_mid_stream_error(
-                        accum,
-                        ChatClientError::Sse(format!(
-                            "no bytes received for {}s",
-                            deadline.as_secs()
-                        )),
-                    );
+                    let err = ChatClientError::Sse(format!(
+                        "no bytes received for {}s",
+                        deadline.as_secs()
+                    ));
+                    return Err(self.fail(take(accum), err, pid_at_request));
                 }
             };
             saw_bytes = true;
             reader.feed(&chunk);
-
             loop {
-                let event = match reader.next_event() {
-                    Ok(Some(e)) => e,
+                match reader.next_event() {
+                    Ok(Some(SseEvent::Data(payload))) => {
+                        self.handle_chunk(&payload, accum, tx, pid_at_request)
+                            .await?;
+                    }
+                    Ok(Some(SseEvent::Done)) => return Ok(true),
                     Ok(None) => break,
-                    Err(e) => {
-                        if self.classify_failure(pid_at_request) {
-                            let pre_emit = !accum_was_emitted(&accum);
-                            return StreamOutcome::ServerRestart { accum, pre_emit };
-                        }
-                        return fold_mid_stream_error(accum, e);
-                    }
-                };
-                match event {
-                    SseEvent::Data(payload) => {
-                        let parsed: wire::ChatCompletionChunk = match serde_json::from_str(&payload)
-                        {
-                            Ok(p) => p,
-                            Err(e) => {
-                                if self.classify_failure(pid_at_request) {
-                                    let pre_emit = !accum_was_emitted(&accum);
-                                    return StreamOutcome::ServerRestart { accum, pre_emit };
-                                }
-                                return fold_mid_stream_error(accum, ChatClientError::Json(e));
-                            }
-                        };
-                        let Some(choice) = parsed.choices.into_iter().next() else {
-                            continue;
-                        };
-                        if let Some(reason) = choice.finish_reason {
-                            accum.finish_reason = Some(reason);
-                        }
-                        if let Some(calls) = choice.delta.tool_calls {
-                            for delta in calls {
-                                accum.merge_tool_call_delta(delta);
-                            }
-                        }
-                        if let Some(reasoning) = choice.delta.reasoning_content
-                            && !reasoning.is_empty()
-                            && tx
-                                .send(LlmEvent::ReasoningDelta { text: reasoning })
-                                .await
-                                .is_err()
-                        {
-                            debug!(
-                                target: "assistd::chat",
-                                "client disconnected mid-stream"
-                            );
-                            return StreamOutcome::ClientDisconnected(accum);
-                        }
-                        if let Some(text) = choice.delta.content
-                            && !text.is_empty()
-                        {
-                            for seg in accum.splitter.feed(&text) {
-                                match seg {
-                                    Segment::Reasoning(s) => {
-                                        if tx
-                                            .send(LlmEvent::ReasoningDelta { text: s })
-                                            .await
-                                            .is_err()
-                                        {
-                                            debug!(
-                                                target: "assistd::chat",
-                                                "client disconnected mid-stream"
-                                            );
-                                            return StreamOutcome::ClientDisconnected(accum);
-                                        }
-                                    }
-                                    Segment::Visible(s) => {
-                                        if s.is_empty() {
-                                            continue;
-                                        }
-                                        if !accum.has_emitted {
-                                            tracing::debug!(
-                                                target: "assistd::voice::latency",
-                                                stage = "llm_first_token",
-                                                "voice latency stage"
-                                            );
-                                        }
-                                        accum.text.push_str(&s);
-                                        accum.has_emitted = true;
-                                        if tx.send(LlmEvent::Delta { text: s }).await.is_err() {
-                                            debug!(
-                                                target: "assistd::chat",
-                                                "client disconnected mid-stream"
-                                            );
-                                            return StreamOutcome::ClientDisconnected(accum);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    SseEvent::Done => {
-                        saw_done = true;
-                        break;
-                    }
-                }
-            }
-
-            if saw_done {
-                break;
-            }
-        }
-
-        if !saw_done {
-            warn!(
-                target: "assistd::chat",
-                "stream ended before [DONE] marker; accumulated {} bytes text, {} tool-call builders",
-                accum.text.len(),
-                accum.tool_calls.len()
-            );
-        }
-        if let Some(seg) = accum.splitter.finish() {
-            match seg {
-                Segment::Reasoning(s) => {
-                    let _ = tx.send(LlmEvent::ReasoningDelta { text: s }).await;
-                }
-                Segment::Visible(s) => {
-                    if !s.is_empty() {
-                        accum.text.push_str(&s);
-                        accum.has_emitted = true;
-                        let _ = tx.send(LlmEvent::Delta { text: s }).await;
-                    }
+                    Err(e) => return Err(self.fail(take(accum), e, pid_at_request)),
                 }
             }
         }
-        StreamOutcome::Ok(accum)
     }
+
+    /// Fold one `data:` payload into `accum`, forwarding its deltas.
+    async fn handle_chunk(
+        &self,
+        payload: &str,
+        accum: &mut StreamAccum,
+        tx: &mpsc::Sender<LlmEvent>,
+        pid_at_request: Option<u32>,
+    ) -> Result<(), StreamOutcome> {
+        let parsed: wire::ChatCompletionChunk = match serde_json::from_str(payload) {
+            Ok(parsed) => parsed,
+            Err(e) => return Err(self.fail(take(accum), ChatClientError::Json(e), pid_at_request)),
+        };
+        let Some(choice) = parsed.choices.into_iter().next() else {
+            return Ok(());
+        };
+        if let Some(reason) = choice.finish_reason {
+            accum.finish_reason = Some(reason);
+        }
+        for delta in choice.delta.tool_calls.unwrap_or_default() {
+            accum.merge_tool_call_delta(delta);
+        }
+        if let Some(text) = choice.delta.reasoning_content
+            && !text.is_empty()
+        {
+            forward(tx, LlmEvent::ReasoningDelta { text }, accum).await?;
+        }
+        if let Some(text) = choice.delta.content
+            && !text.is_empty()
+        {
+            for segment in accum.splitter.feed(&text) {
+                forward_segment(tx, segment, accum).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Send one classified segment, recording visible text on `accum`.
+async fn forward_segment(
+    tx: &mpsc::Sender<LlmEvent>,
+    segment: Segment,
+    accum: &mut StreamAccum,
+) -> Result<(), StreamOutcome> {
+    match segment {
+        Segment::Reasoning(text) => forward(tx, LlmEvent::ReasoningDelta { text }, accum).await,
+        Segment::Visible(text) => {
+            if text.is_empty() {
+                return Ok(());
+            }
+            if !accum.has_emitted {
+                tracing::debug!(
+                    target: "assistd::voice::latency",
+                    stage = "llm_first_token",
+                    "voice latency stage"
+                );
+            }
+            accum.text.push_str(&text);
+            accum.has_emitted = true;
+            forward(tx, LlmEvent::Delta { text }, accum).await
+        }
+    }
+}
+
+/// Send `event`, or hand back everything accumulated so far when the
+/// consumer has gone away.
+async fn forward(
+    tx: &mpsc::Sender<LlmEvent>,
+    event: LlmEvent,
+    accum: &mut StreamAccum,
+) -> Result<(), StreamOutcome> {
+    if tx.send(event).await.is_err() {
+        debug!(target: "assistd::chat", "client disconnected mid-stream");
+        return Err(StreamOutcome::ClientDisconnected(take(accum)));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -380,26 +377,10 @@ impl LlmBackend for LlamaChatClient {
                 );
                 conv.truncate_to_budget(&self.chat, &self.model);
             }
-            let wire_messages = conv.as_wire_messages();
-            let payload = wire::ChatRequest {
-                model: self.model.name.as_str(),
-                messages: wire_messages,
-                stream: true,
-                temperature: self.chat.temperature,
-                max_tokens: self.chat.max_response_tokens.get(),
-                top_p: self.chat.top_p,
-                top_k: self.chat.top_k.map(NonZeroU32::get),
-                min_p: self.chat.min_p,
-                presence_penalty: self.chat.presence_penalty,
-                tools: None,
-                tool_choice: None,
-                chat_template_kwargs: None,
-            };
+            let payload = self.base_request(conv.as_wire_messages());
             match serde_json::to_vec(&payload) {
                 Ok(b) => b,
                 Err(e) => {
-                    // Roll back the user push so the caller can retry
-                    // without observing the half-committed message.
                     conv.rollback_last_user();
                     return Err(LlmError::Chat(ChatClientError::Json(e)));
                 }
@@ -428,14 +409,9 @@ impl LlmBackend for LlamaChatClient {
                 conv.rollback_last_user();
                 Err(LlmError::Chat(e))
             }
-            StreamOutcome::ServerRestart { .. } => {
-                // `generate` is single-turn; callers cannot replay. Leave
-                // the user message in place; a follow-up call would
-                // re-push, and double-pushing would duplicate.
-                Err(LlmError::ServerRestarting(
-                    "llama-server crashed during generate".into(),
-                ))
-            }
+            StreamOutcome::ServerRestart { .. } => Err(LlmError::ServerRestarting(
+                "llama-server crashed during generate".into(),
+            )),
         }
     }
 
@@ -474,28 +450,12 @@ impl LlmBackend for LlamaChatClient {
                 );
                 conv.truncate_to_budget(&self.chat, &self.model);
             }
-            let wire_messages = conv.as_wire_messages();
-            let has_tools = !tools.is_empty();
-            let payload = wire::ChatRequest {
-                model: self.model.name.as_str(),
-                messages: wire_messages,
-                stream: true,
-                temperature: self.chat.temperature,
-                max_tokens: self.chat.max_response_tokens.get(),
-                top_p: self.chat.top_p,
-                top_k: self.chat.top_k.map(NonZeroU32::get),
-                min_p: self.chat.min_p,
-                presence_penalty: self.chat.presence_penalty,
-                tools: if has_tools { Some(tools) } else { None },
-                tool_choice: if has_tools { Some("auto") } else { None },
-                chat_template_kwargs: None,
-            };
-            match serde_json::to_vec(&payload) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(LlmError::Chat(ChatClientError::Json(e)));
-                }
+            let mut payload = self.base_request(conv.as_wire_messages());
+            if !tools.is_empty() {
+                payload.tools = Some(tools);
+                payload.tool_choice = Some("auto");
             }
+            serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
 
         let outcome = self.stream_openai(body_bytes, &tx).await;
@@ -506,8 +466,8 @@ impl LlmBackend for LlamaChatClient {
             | StreamOutcome::PartialAfterEmit(accum)
             | StreamOutcome::ClientDisconnected(accum) => {
                 let result = commit_step(&mut conv, accum);
-                // Consume so the next turn re-runs retrieval; `PreEmitError`
-                // leaves it in place so a retry sees the same injected block.
+                // `PreEmitError` leaves the transient in place so a retry
+                // sees the same injected block.
                 let _ = conv.consume_transient_context();
                 result
             }
@@ -560,10 +520,9 @@ impl LlmBackend for LlamaChatClient {
                         tool_call_id: None,
                     });
                 }
-                // A row with no call id predates tool-role routing (or
-                // was written by the vision path); replaying it as a
-                // tool message would leave the template without the id
-                // it needs, so those keep the tagged user shape.
+                // A row with no call id was written by the vision path;
+                // replaying it as a tool message would leave the template
+                // without the id it needs, so it keeps the tagged user shape.
                 HistoryRole::Tool => match entry.tool_call_id {
                     Some(call_id) => msgs.push(Message {
                         role: Role::Tool,
@@ -597,29 +556,18 @@ impl LlmBackend for LlamaChatClient {
 
     async fn complete_oneshot(&self, prompt: String, thinking: Thinking) -> LlmResult<String> {
         let body_bytes = {
-            let payload = wire::ChatRequest {
-                model: self.model.name.as_str(),
-                messages: vec![wire::ChatMessage {
-                    role: "user",
-                    content: Some(wire::ContentBody::Text(prompt.as_str())),
-                    tool_calls: None,
-                    tool_call_id: None,
-                }],
-                stream: true,
-                temperature: self.chat.temperature,
-                max_tokens: self.chat.max_summary_tokens(),
-                top_p: self.chat.top_p,
-                top_k: self.chat.top_k.map(NonZeroU32::get),
-                min_p: self.chat.min_p,
-                presence_penalty: self.chat.presence_penalty,
-                tools: None,
-                tool_choice: None,
-                chat_template_kwargs: match thinking {
-                    Thinking::Enabled => None,
-                    Thinking::Disabled => Some(wire::ChatTemplateKwargs {
-                        enable_thinking: false,
-                    }),
-                },
+            let mut payload = self.base_request(vec![wire::ChatMessage {
+                role: "user",
+                content: Some(wire::ContentBody::Text(prompt.as_str())),
+                tool_calls: None,
+                tool_call_id: None,
+            }]);
+            payload.max_tokens = self.chat.max_summary_tokens();
+            payload.chat_template_kwargs = match thinking {
+                Thinking::Enabled => None,
+                Thinking::Disabled => Some(wire::ChatTemplateKwargs {
+                    enable_thinking: false,
+                }),
             };
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
@@ -776,19 +724,20 @@ impl Summarizer for LlamaChatClient {
 #[derive(Debug, Default)]
 struct StreamAccum {
     text: String,
-    /// `BTreeMap` so a fallback iteration order (ascending `index`) is
-    /// stable when we finalize, matching the order in which the model
-    /// emitted the calls.
+    /// Keyed by the model's `index` so finalization keeps emission order.
     tool_calls: BTreeMap<u32, ToolCallBuilder>,
     finish_reason: Option<String>,
     has_emitted: bool,
-    /// Splits `delta.content` into Visible vs Reasoning segments for
-    /// models that emit `<think>...</think>` inline. State persists
-    /// across SSE chunks so tags split across chunks classify correctly.
     splitter: ThinkSplitter,
 }
 
 impl StreamAccum {
+    /// Whether anything reached the consumer or a tool call is being
+    /// assembled.
+    fn has_output(&self) -> bool {
+        self.has_emitted || !self.tool_calls.is_empty()
+    }
+
     fn merge_tool_call_delta(&mut self, delta: wire::ToolCallDelta) {
         let entry = self.tool_calls.entry(delta.index).or_default();
         if let Some(id) = delta.id {
@@ -857,33 +806,9 @@ enum StreamOutcome {
     ClientDisconnected(StreamAccum),
     /// Stream errored before any deltas were forwarded; propagate as `Err`.
     PreEmitError(ChatClientError),
-    /// The HTTP failure looks crash-induced: the supervisor's PID
-    /// changed under us or the readiness state went non-Ready. The
-    /// agent loop will see [`LlmError::ServerRestarting`] and replay
-    /// the same payload once after waiting for the supervisor to
-    /// restore Ready. `pre_emit` distinguishes "no deltas streamed
-    /// yet" (so the caller can clean up an unstreamed response) from
-    /// "had partial output" (caller must consider what the user has
-    /// already seen on the wire).
+    /// The failure coincided with a supervisor restart. `pre_emit` is
+    /// true when nothing had been streamed to the consumer yet.
     ServerRestart { accum: StreamAccum, pre_emit: bool },
-}
-
-fn fold_mid_stream_error(accum: StreamAccum, err: ChatClientError) -> StreamOutcome {
-    if accum.has_emitted || !accum.tool_calls.is_empty() {
-        warn!(
-            target: "assistd::chat",
-            "mid-stream error after {} bytes / {} tool-call builders: {err}",
-            accum.text.len(),
-            accum.tool_calls.len()
-        );
-        StreamOutcome::PartialAfterEmit(accum)
-    } else {
-        StreamOutcome::PreEmitError(err)
-    }
-}
-
-fn accum_was_emitted(accum: &StreamAccum) -> bool {
-    accum.has_emitted || !accum.tool_calls.is_empty()
 }
 
 async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> String {

@@ -1,26 +1,8 @@
-//! HTTP+SSE JSON-RPC transport for remote MCP servers.
-//!
-//! Wire shape per the MCP HTTP+SSE binding:
-//!   * Client opens `GET <base_url>` with `Accept: text/event-stream`.
-//!     The server's first SSE event is `event: endpoint\ndata: <url>`,
-//!     telling the client which URL to POST requests to; that URL is
-//!     usually a relative reference and is resolved against `base_url`.
-//!     (Servers that don't emit this event are assumed to accept POSTs
-//!     at `base_url`.)
-//!   * Client POSTs JSON-RPC requests to that URL. Server returns 202.
-//!   * Server replies arrive over the SSE stream as
-//!     `event: message\ndata: <json-rpc-response>`.
-//!
-//! Two background tasks per server:
-//!   * SSE reader: long-lived GET, parses event stream, hands JSON-RPC
-//!     responses to the [`Correlator`]. It runs on its own
-//!     `reqwest::Client` carrying only a `read_timeout`, so the stream
-//!     is bounded by server silence rather than by elapsed time; the
-//!     POST client keeps the total `request_timeout`.
-//!   * Ping task: sends JSON-RPC `ping` every `ping_interval`. If the
-//!     response doesn't arrive within `request_timeout`, signals the
-//!     read loop to drop the connection. Catches the case where the
-//!     SSE socket stays open but the server stops processing requests.
+//! JSON-RPC over the MCP HTTP+SSE binding: requests are POSTed to the
+//! URL the server's `endpoint` event names (or `base_url` if it emits
+//! none), replies arrive on a long-lived `GET` event stream. A ping
+//! task drops the connection when the server stops answering while
+//! the stream stays open.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,12 +19,9 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::error::McpError;
-use crate::jsonrpc::{Correlator, Reply, Response, RpcError, notification_line};
-use crate::{McpClient, ToolResult, ToolSchema};
-
-const PROTOCOL_VERSION: &str = "2024-11-05";
-const CLIENT_NAME: &str = "assistd";
-const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+use crate::jsonrpc::{Correlator, Response, notification_line};
+use crate::protocol::closed_err;
+use crate::{McpClient, ToolResult, ToolSchema, protocol};
 
 /// Per-server SSE configuration.
 #[derive(Debug, Clone)]
@@ -56,7 +35,6 @@ pub struct SseConfig {
 }
 
 impl SseConfig {
-    /// Create a config with default timeouts (30s request/read, 15s ping interval).
     pub fn new(label: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
@@ -69,9 +47,8 @@ impl SseConfig {
     }
 }
 
-/// [`McpClient`] implementation that speaks JSON-RPC over HTTP+SSE.
+/// [`McpClient`] over HTTP+SSE.
 pub struct SseMcpClient {
-    #[allow(dead_code)]
     label: String,
     correlator: Arc<Correlator>,
     http: reqwest::Client,
@@ -82,9 +59,8 @@ pub struct SseMcpClient {
 }
 
 impl SseMcpClient {
-    /// Connect to an SSE MCP server: opens the SSE GET stream, waits
-    /// for the optional `endpoint` discovery event, performs the
-    /// `initialize` handshake, and starts the periodic ping task.
+    /// Open the event stream, wait briefly for an `endpoint` event, run
+    /// the initialize handshake, and start the ping task.
     pub async fn connect(cfg: SseConfig) -> Result<(Arc<Self>, SseLifeline), McpError> {
         let base_url = Url::parse(&cfg.url)
             .map_err(|e| McpError::config(format!("invalid SSE url `{}`", cfg.url), e))?;
@@ -185,14 +161,11 @@ impl SseMcpClient {
     }
 
     async fn initialize(&self) -> Result<(), McpError> {
-        let params = json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": {} },
-            "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION },
-        });
-        let _ = self.call("initialize", params).await?;
+        let result = self
+            .call("initialize", protocol::initialize_params())
+            .await?;
+        protocol::warn_on_version_mismatch(&self.label, &result);
         let bytes = notification_line("notifications/initialized", json!({}))?;
-        // Strip the trailing newline; POST bodies don't need it.
         let body = &bytes[..bytes.len().saturating_sub(1)];
         let post = self
             .post_url
@@ -244,27 +217,7 @@ impl SseMcpClient {
             )));
         }
 
-        let reply = match tokio::time::timeout(self.request_timeout, pending.rx).await {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(_)) => return Err(McpError::TransportClosed),
-            Err(_) => return Err(McpError::RequestTimeout(self.request_timeout)),
-        };
-        reply_to_result(reply)
-    }
-}
-
-fn reply_to_result(reply: Reply) -> Result<Value, McpError> {
-    match reply {
-        Ok(value) => Ok(value),
-        Err(RpcError {
-            code,
-            message,
-            data,
-        }) => Err(McpError::RpcError {
-            code,
-            message,
-            data,
-        }),
+        protocol::await_reply(pending.rx, self.request_timeout).await
     }
 }
 
@@ -272,70 +225,18 @@ fn reply_to_result(reply: Reply) -> Result<Value, McpError> {
 impl McpClient for SseMcpClient {
     async fn list_tools(&self) -> AnyResult<Vec<ToolSchema>> {
         let result = self.call("tools/list", json!({})).await?;
-        let tools_arr = result
-            .get("tools")
-            .and_then(Value::as_array)
-            .ok_or_else(|| McpError::Protocol("tools/list missing `tools` array".into()))?;
-        let mut out = Vec::with_capacity(tools_arr.len());
-        for entry in tools_arr {
-            let name = entry
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| McpError::Protocol("tool entry missing `name`".into()))?
-                .to_string();
-            let description = entry
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let input_schema = entry
-                .get("inputSchema")
-                .cloned()
-                .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
-            out.push(ToolSchema {
-                name,
-                description,
-                input_schema,
-            });
-        }
-        Ok(out)
+        Ok(protocol::parse_tools_list(&result)?)
     }
 
     async fn invoke(&self, name: &str, arguments: Value) -> AnyResult<ToolResult> {
         let result = self
-            .call(
-                "tools/call",
-                json!({ "name": name, "arguments": arguments }),
-            )
+            .call("tools/call", protocol::tool_call_params(name, arguments))
             .await?;
-        let content_arr = result
-            .get("content")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let is_error = result
-            .get("isError")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let first = content_arr.into_iter().next();
-        let parsed = match first {
-            None => ToolResult::Text(String::new()),
-            Some(entry) => parse_content_entry(entry)?,
-        };
-        if is_error {
-            let parsed = match parsed {
-                ToolResult::Text(t) => ToolResult::Text(format!("[mcp tool error] {t}")),
-                other => other,
-            };
-            return Ok(parsed);
-        }
-        Ok(parsed)
+        Ok(protocol::parse_tool_call(result)?)
     }
 }
 
-/// Owns the SSE reader task, the ping task, and a cancellation watch
-/// that the supervisor flips on shutdown. `wait_for_disconnect` resolves
-/// when the read loop terminates (either naturally or via cancellation).
+/// The reader and ping tasks of one SSE connection.
 pub struct SseLifeline {
     pub label: String,
     cancel_tx: watch::Sender<bool>,
@@ -345,14 +246,14 @@ pub struct SseLifeline {
 }
 
 impl SseLifeline {
-    /// Await the SSE read loop's termination signal.
+    /// Resolves when the read loop terminates.
     pub async fn wait_for_disconnect(&mut self) {
         if let Some(rx) = self.done_rx.take() {
             let _ = rx.await;
         }
     }
 
-    /// Cancel the SSE and ping tasks and wait briefly for them to finish.
+    /// Cancel both tasks and wait briefly for them to finish.
     pub async fn shutdown(mut self) {
         let _ = self.cancel_tx.send(true);
         if let Some(t) = self.stream_task.take() {
@@ -471,14 +372,6 @@ impl ReadLoop {
     }
 }
 
-fn closed_err() -> RpcError {
-    RpcError {
-        code: -32603,
-        message: "MCP transport closed".into(),
-        data: None,
-    }
-}
-
 fn resolve_endpoint(base_url: &Url, data: &str) -> Result<Url, url::ParseError> {
     base_url.join(data.trim())
 }
@@ -514,20 +407,17 @@ async fn handle_event(
                 );
             }
         },
-        "message" | "" => {
-            // Default event type per the SSE spec is "message".
-            match serde_json::from_str::<Response>(&event.data) {
-                Ok(resp) => correlator.deliver(resp),
-                Err(e) => {
-                    warn!(
-                        target: "assistd::mcp",
-                        server = %label,
-                        "SSE message JSON parse error: {e}; data: {}",
-                        event.data,
-                    );
-                }
+        "message" | "" => match serde_json::from_str::<Response>(&event.data) {
+            Ok(resp) => correlator.deliver(resp),
+            Err(e) => {
+                warn!(
+                    target: "assistd::mcp",
+                    server = %label,
+                    "SSE message JSON parse error: {e}; data: {}",
+                    event.data,
+                );
             }
-        }
+        },
         other => {
             debug!(
                 target: "assistd::mcp",
@@ -592,8 +482,7 @@ pub struct SseEvent {
     pub id: Option<String>,
 }
 
-/// Stateful parser that accepts incremental byte chunks (as they arrive
-/// from the HTTP body) and yields complete SSE events one at a time.
+/// Incremental SSE parser: feed body chunks, pull complete events.
 #[derive(Default)]
 pub struct EventParser {
     buf: Vec<u8>,
@@ -608,21 +497,18 @@ struct PartialEvent {
 }
 
 impl EventParser {
-    /// Create a new, empty parser.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Feed the next chunk of bytes from the HTTP body into the parser.
     pub fn push(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
     }
 
-    /// Pull the next complete event off the buffer. Returns `None` if
-    /// the buffer doesn't yet contain a blank-line terminator.
+    /// The next complete event, or `None` until a blank-line terminator
+    /// has arrived.
     pub fn next_event(&mut self) -> Option<SseEvent> {
         loop {
-            // SSE allows \r\n or \n as line terminators.
             let nl = self.buf.iter().position(|&b| b == b'\n')?;
             let mut line: Vec<u8> = self.buf.drain(..=nl).collect();
             line.pop();
@@ -645,10 +531,8 @@ impl EventParser {
             if line.first() == Some(&b':') {
                 continue;
             }
-            // A line with no colon is treated as a field name with empty value (per spec).
-            let line_str = match std::str::from_utf8(&line) {
-                Ok(s) => s,
-                Err(_) => continue, // drop non-UTF-8 lines
+            let Ok(line_str) = std::str::from_utf8(&line) else {
+                continue;
             };
             let (field, value) = match line_str.split_once(':') {
                 Some((f, v)) => {
@@ -661,40 +545,9 @@ impl EventParser {
                 "event" => self.cur.event_type = Some(value.to_string()),
                 "data" => self.cur.data_lines.push(value.to_string()),
                 "id" => self.cur.id = Some(value.to_string()),
-                _ => {} // ignore unknown fields (including "retry")
+                _ => {}
             }
         }
-    }
-}
-
-fn parse_content_entry(entry: Value) -> Result<ToolResult, McpError> {
-    let kind = entry.get("type").and_then(Value::as_str).unwrap_or("");
-    match kind {
-        "text" => {
-            let text = entry
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            Ok(ToolResult::Text(text))
-        }
-        "image" => {
-            let mime = entry
-                .get("mimeType")
-                .and_then(Value::as_str)
-                .ok_or_else(|| McpError::Protocol("image content missing `mimeType`".into()))?
-                .to_string();
-            let data_b64 = entry
-                .get("data")
-                .and_then(Value::as_str)
-                .ok_or_else(|| McpError::Protocol("image content missing `data`".into()))?;
-            use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(data_b64)
-                .map_err(|e| McpError::Protocol(format!("image base64 decode failed: {e}")))?;
-            Ok(ToolResult::Image { mime, bytes })
-        }
-        _ => Ok(ToolResult::Json(entry)),
     }
 }
 

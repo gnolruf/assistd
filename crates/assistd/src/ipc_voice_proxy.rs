@@ -1,18 +1,7 @@
-//! `VoiceInput` adapter that forwards `start_recording` /
-//! `stop_and_transcribe` to the daemon's IPC surface as
-//! `Request::PttStart` / `Request::PttStop`.
-//!
-//! Used in two places:
-//!
-//! - the chat TUI, where the local hotkey listener needs to route
-//!   press/release into the daemon (no local voice subsystem);
-//! - the daemon itself, where the hotkey listener routes back through
-//!   the daemon's own Unix socket so the PTT flow goes through the
-//!   canonical `handle_ptt_start` / `handle_ptt_stop` path. That gets
-//!   us the presence warmup (so Whisper takes the GPU path instead of
-//!   falling back to CPU) and the per-connection bus tee in
-//!   `socket.rs` for free, instead of duplicating both inside the
-//!   hotkey listener.
+//! [`assistd_voice::VoiceInput`] over IPC: press and release become
+//! `Request::PttStart` and `Request::PttStop`. Both the chat TUI and the
+//! daemon's own hotkey listener use it, so every push-to-talk turn takes
+//! the daemon's one PTT path.
 
 use std::sync::Arc;
 
@@ -21,14 +10,8 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
-/// Adapter that satisfies [`assistd_voice::VoiceInput`] by talking IPC.
-///
-/// `event_sink`, when `Some`, receives every event the daemon emits
-/// over the PTT connection so a UI (or test harness) can react to
-/// transcription / streaming reply / tool calls. `None` is the daemon's
-/// own configuration: events still tee onto the daemon's broadcast bus
-/// inside `socket.rs`, so the popup and other passive subscribers see
-/// them without the proxy needing to re-forward.
+/// `event_sink`, when `Some`, receives every event the daemon emits on
+/// the PTT connection.
 pub struct IpcVoiceProxy {
     ipc: Arc<IpcClient>,
     event_sink: Option<mpsc::Sender<Event>>,

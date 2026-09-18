@@ -1,15 +1,11 @@
-//! Single-line input buffer with readline-style keybindings and in-memory
-//! history. All state is plain Rust and fully unit-testable without a
-//! terminal.
+//! Single-line input buffer with readline keybindings and history.
 
 use std::collections::VecDeque;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-/// Maximum number of history entries retained by default.
 pub const DEFAULT_HISTORY_CAP: usize = 500;
 
-/// Single-line text editor with readline-style keybindings and submission history.
 #[derive(Debug)]
 pub struct InputLine {
     buffer: String,
@@ -38,7 +34,6 @@ impl Default for InputLine {
 }
 
 impl InputLine {
-    /// Create an empty `InputLine` with the default history capacity.
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
@@ -50,26 +45,21 @@ impl InputLine {
         }
     }
 
-    /// Current buffer contents.
     pub fn buffer(&self) -> &str {
         &self.buffer
     }
 
-    /// Replace the entire buffer with `text` and place the cursor at
-    /// the end. Used by tab completion to extend a `/attach <path>`
-    /// prefix in place without rebuilding the InputLine.
+    /// Replace the buffer and put the cursor at the end.
     pub fn set_buffer(&mut self, text: String) {
         self.cursor = text.len();
         self.buffer = text;
     }
 
-    /// Cursor column in characters (not bytes). Suitable for placing the
-    /// terminal cursor when rendering the input line.
+    /// Cursor column in characters, not bytes.
     pub fn cursor_col(&self) -> u16 {
         self.buffer[..self.cursor].chars().count() as u16
     }
 
-    /// Process one key event and return the resulting action.
     pub fn on_key(&mut self, ev: KeyEvent) -> InputAction {
         if !matches!(ev.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return InputAction::None;

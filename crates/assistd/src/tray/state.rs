@@ -1,7 +1,4 @@
-//! Tray state machine. Translates raw daemon events into the small
-//! enum the icon renderer cares about, applying a fixed priority order
-//! so concurrent signals (e.g. listening while generating) produce a
-//! single deterministic icon.
+//! Tray state: raw daemon signals resolved to one icon by priority.
 
 use std::collections::HashSet;
 
@@ -22,8 +19,6 @@ pub enum TrayState {
     Sleeping,
 }
 
-/// Mutable bag of raw signals received over IPC, plus the priority
-/// resolution that derives a single [`TrayState`] from them.
 #[derive(Debug, Clone)]
 pub struct TrayTracker {
     presence: PresenceState,
@@ -44,8 +39,7 @@ impl Default for TrayTracker {
 }
 
 impl TrayTracker {
-    /// Resolve the raw signals into a single tray state, applying the
-    /// priority order disconnected → generating → listening → presence.
+    /// Priority: disconnected, generating, listening, presence.
     pub fn current(&self) -> TrayState {
         if !self.connected {
             return TrayState::Disconnected;
@@ -62,24 +56,19 @@ impl TrayTracker {
         }
     }
 
-    /// The daemon's most recently observed presence (independent of
-    /// connection state). Used by the menu to label the "Sleep / Wake"
-    /// toggle item.
     pub fn presence(&self) -> PresenceState {
         self.presence
     }
 
-    /// Mark the connection up. Returns `true` when the resolved
-    /// [`TrayState`] actually changed.
+    /// Returns `true` when the resolved [`TrayState`] changed.
     pub fn set_connected(&mut self) -> bool {
         let before = self.current();
         self.connected = true;
         before != self.current()
     }
 
-    /// Mark the connection down and drop all per-turn state we can no
-    /// longer trust. Returns `true` when the resolved [`TrayState`]
-    /// actually changed.
+    /// Also drops per-turn state. Returns `true` when the resolved
+    /// [`TrayState`] changed.
     pub fn set_disconnected(&mut self) -> bool {
         let before = self.current();
         self.connected = false;
@@ -88,9 +77,7 @@ impl TrayTracker {
         before != self.current()
     }
 
-    /// Apply an incoming wire event, updating the relevant raw signal.
-    /// Returns `true` when the resolved [`TrayState`] actually changed,
-    /// so the caller can skip redundant DBus property-changed broadcasts.
+    /// Returns `true` when the resolved [`TrayState`] changed.
     pub fn ingest(&mut self, event: &Event) -> bool {
         let before = self.current();
         match event {
@@ -112,9 +99,8 @@ impl TrayTracker {
     }
 }
 
-/// Map a resolved state to its freedesktop icon-theme name. These names
-/// are present in every major theme (Adwaita, Breeze, Papirus), so a
-/// fresh install shows recognizable icons with no image assets shipped.
+/// freedesktop icon-theme names present in every major theme, so no
+/// image assets ship.
 pub fn icon_name_for(state: TrayState) -> &'static str {
     match state {
         TrayState::Disconnected => "network-offline",
@@ -125,7 +111,6 @@ pub fn icon_name_for(state: TrayState) -> &'static str {
     }
 }
 
-/// Short human-readable label for the tooltip.
 pub fn tooltip_for(state: TrayState) -> &'static str {
     match state {
         TrayState::Disconnected => "assistd: daemon offline",
@@ -249,8 +234,6 @@ mod tests {
 
         let changed = t.set_connected();
         assert!(changed);
-        // After reconnect, in-flight and listening are gone; presence
-        // defaults to Active until the daemon broadcasts otherwise.
         assert_eq!(t.current(), TrayState::Active);
     }
 
@@ -258,11 +241,8 @@ mod tests {
     fn ingest_returns_change_flag() {
         let mut t = TrayTracker::default();
         t.set_connected();
-        // First Delta: enters Generating → state changed.
         assert!(t.ingest(&delta("a")));
-        // Second Delta for the same id: still Generating → no change.
         assert!(!t.ingest(&delta("a")));
-        // Done for the only in-flight id: back to Active → state changed.
         assert!(t.ingest(&done("a")));
     }
 

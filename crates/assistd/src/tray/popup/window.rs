@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use super::state::{PopupActivity, PopupState};
 use super::visibility::DriverInput;
 
-pub fn run(
+pub fn run_gui_loop(
     state_rx: watch::Receiver<PopupState>,
     event_tx: UnboundedSender<DriverInput>,
     app_id: &str,
@@ -32,8 +32,6 @@ pub fn run(
     }
     let options = eframe::NativeOptions {
         viewport,
-        // The tray runtime owns the main thread, so run the popup's
-        // winit loop on a worker thread instead.
         event_loop_builder: Some(Box::new(|builder| {
             use winit::platform::wayland::EventLoopBuilderExtWayland;
             use winit::platform::x11::EventLoopBuilderExtX11;

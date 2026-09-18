@@ -43,8 +43,7 @@ fn push_bullet(out: &mut String, name: &str, desc: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{McpClient, ToolResult};
-    use crate::{ToolSchema, adapt_client_as_tools};
+    use crate::{McpClient, McpToolAdapter, ToolResult, ToolSchema};
     use anyhow::Result;
     use async_trait::async_trait;
     use serde_json::{Value, json};
@@ -101,7 +100,16 @@ mod tests {
                 input_schema: json!({"type": "object"}),
             }],
         });
-        let tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
+        let tools: Vec<Box<dyn Tool>> = client
+            .list_tools()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|schema| {
+                let name = format!("mcp__web__{}", schema.name);
+                Box::new(McpToolAdapter::new(client.clone(), schema, name)) as Box<dyn Tool>
+            })
+            .collect();
         let refs: Vec<&dyn Tool> = tools.iter().map(|b| b.as_ref()).collect();
         let out = format_mcp_listing(&refs);
         assert!(

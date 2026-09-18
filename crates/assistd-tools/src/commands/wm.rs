@@ -1,72 +1,51 @@
-//! `wm <subcommand> [args]`: drive the active [`WindowManager`] backend
-//! from the LLM's `run` tool.
-//!
-//! Subcommand surface:
-//!
-//! - `wm focus <class>` - focus the named window
-//! - `wm move <class> <workspace>` - move window to workspace
-//! - `wm open <app> [args...]` - launch a process (does not go through
-//!   the WindowManager; i3/sway/hyprland don't spawn processes, they
-//!   only manage already-mapped windows). The argv comes from the model,
-//!   so it runs under the same policy as `bash`: denylist,
-//!   destructive-pattern confirmation, and bubblewrap. The launched
-//!   application is left running once it survives a startup probe.
-//! - `wm active` - class of the focused window
-//! - `wm resize <class> <grow|shrink> <px>` - width-only resize
-//! - `wm list` - TSV `<class>\t<workspace>\t<title>`
-//! - `wm workspaces` - TSV `<num>\t<name>\t<focused>\t<output>`
-//! - `wm outputs` - TSV `<name>\t<active>\t<primary>\t<mode>\t<scale>\t<focused_workspace>`
-//! - `wm layout <default|tabbed|stacking|splith|splitv>` - set the
-//!   focused container's layout
-//!
-//! Discovery: `wm` (no args) returns the help block on stdout (exit 2).
-//! Every subcommand with too few args returns its own usage block on
-//! stdout (exit 2). All real failures emit a convention-compliant
-//! `[error] wm: …. <Hint>: <recovery>` line on stderr.
-//!
-//! When the backend is [`assistd_wm::NoWindowManager`] (no compositor
-//! configured / connect failure / Sway+Hyprland not yet implemented),
-//! every subcommand short-circuits with `[error] wm: compositor not
-//! connected. …` so the LLM gets one uniform error to recover from.
+//! `wm <subcommand> [args]`: drive the active [`WindowManager`] from the
+//! LLM's `run` tool. `wm open` spawns model-chosen argv, so it runs
+//! under the same policy as `bash`. When no compositor is connected
+//! every subcommand fails with one uniform error.
 
 use std::sync::Arc;
 
+use std::fmt::Display;
+
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::warn;
 
 use assistd_wm::{Layout, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
-use crate::commands::bash::BashPolicyCfg;
-use crate::exec::{POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT, spawn_detached};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
+use crate::exec::{SPAWN_FAILED_EXIT, spawn_detached};
 use crate::policy::{
-    ConfirmationGate, ConfirmationRequest, SandboxAccess, SandboxInfo, matches_denylist,
+    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy,
     matches_destructive,
 };
 
-/// Pick the `(label, hint)` pair attached to a [`WmError`] for the
-/// `[error] wm: …. <label>: <hint>` line the LLM sees. The variant
-/// determines the recovery action; the handler-specific operation is
-/// already in the message body (`"focus 'Firefox' failed: …"`), so the
-/// hint stays per-variant rather than per-handler.
-fn hint_for(err: &WmError) -> (&'static str, &'static str) {
+/// The `[error] wm: <op> failed: …` line for a backend error, with the
+/// recovery hint chosen by the error variant.
+fn wm_error(op: impl Display, err: &WmError) -> CommandOutput {
+    let (label, hint) = hint_for(err);
+    CommandOutput::failed(
+        1,
+        error_line(NAME, format_args!("{op} failed: {err}"), label, hint).into_bytes(),
+    )
+}
+
+fn hint_for(err: &WmError) -> (Hint, &'static str) {
     match err {
         WmError::Disconnected => (
-            "Check",
+            Hint::Check,
             "[compositor] in config.toml and that i3/sway/hyprland is running",
         ),
-        WmError::NotFound(_) => ("Use", "wm list to find the right window"),
-        WmError::Rejected(_) => ("Try", "wm list to verify the window/workspace exists"),
+        WmError::NotFound(_) => (Hint::Use, "wm list to find the right window"),
+        WmError::Rejected(_) => (Hint::Try, "wm list to verify the window/workspace exists"),
         WmError::Timeout(_) => (
-            "Note",
+            Hint::Note,
             "compositor unresponsive; retry once before assuming it crashed",
         ),
         WmError::Unsupported(_) => (
-            "Note",
+            Hint::Note,
             "the active backend may not support this operation (i3 does not list outputs)",
         ),
-        WmError::Ipc(_) => ("Check", "compositor connection (see daemon logs)"),
+        WmError::Ipc(_) => (Hint::Check, "compositor connection (see daemon logs)"),
     }
 }
 
@@ -76,18 +55,13 @@ const SUMMARY: &str = "manage windows and workspaces (focus, move, open, list, w
 /// `wm <subcommand> [args]`: drive the active window manager from the LLM's `run` tool.
 pub struct WmCommand {
     wm: Arc<dyn WindowManager>,
-    cfg: Arc<BashPolicyCfg>,
-    sandbox: Arc<SandboxInfo>,
-    gate: Arc<dyn ConfirmationGate>,
+    policy: SubprocessPolicy,
 }
 
 impl WmCommand {
-    /// Construct a `WmCommand` backed by the given [`WindowManager`] implementation.
-    ///
-    /// `cfg`, `sandbox`, and `gate` are the same values handed to
-    /// [`crate::commands::BashCommand`]. `wm open` spawns argv the model
-    /// chose, so it is gated by the identical `[tools.bash]` policy
-    /// rather than a parallel one that could drift out of step.
+    /// `cfg`, `sandbox`, and `gate` are the same policy `bash` runs
+    /// under; `wm open` is gated identically rather than by a parallel
+    /// policy that could drift.
     pub fn new(
         wm: Arc<dyn WindowManager>,
         cfg: Arc<BashPolicyCfg>,
@@ -96,18 +70,13 @@ impl WmCommand {
     ) -> Self {
         Self {
             wm,
-            cfg,
-            sandbox,
-            gate,
+            policy: SubprocessPolicy { cfg, sandbox, gate },
         }
     }
 }
 
 #[cfg(test)]
 impl WmCommand {
-    /// Test-only constructor: default policy (no denylist, no destructive
-    /// patterns), no sandbox, allow-all gate. Production paths always go
-    /// through [`WmCommand::new`] with the daemon's real config.
     pub(crate) fn for_test(wm: Arc<dyn WindowManager>) -> Self {
         use crate::policy::AlwaysAllowGate;
         Self::new(
@@ -166,7 +135,7 @@ impl Command for WmCommand {
                 error_line(
                     NAME,
                     "compositor not connected",
-                    "Check",
+                    Hint::Check,
                     "[compositor] in config.toml and that i3/sway/hyprland is running",
                 )
                 .into_bytes(),
@@ -176,21 +145,21 @@ impl Command for WmCommand {
         let sub = input.args[0].as_str();
         let rest = &input.args[1..];
         match sub {
-            "focus" => handle_focus(self.wm.as_ref(), rest).await,
-            "move" => handle_move(self.wm.as_ref(), rest).await,
+            "focus" => focus(self.wm.as_ref(), rest).await,
+            "move" => move_window(self.wm.as_ref(), rest).await,
             "open" => self.open(rest).await,
-            "active" => handle_active(self.wm.as_ref()).await,
-            "resize" => handle_resize(self.wm.as_ref(), rest).await,
-            "list" => handle_list(self.wm.as_ref()).await,
-            "workspaces" => handle_workspaces(self.wm.as_ref()).await,
-            "outputs" => handle_outputs(self.wm.as_ref()).await,
-            "layout" => handle_layout(self.wm.as_ref(), rest).await,
+            "active" => active(self.wm.as_ref()).await,
+            "resize" => resize(self.wm.as_ref(), rest).await,
+            "list" => list(self.wm.as_ref()).await,
+            "workspaces" => workspaces(self.wm.as_ref()).await,
+            "outputs" => outputs(self.wm.as_ref()).await,
+            "layout" => layout(self.wm.as_ref(), rest).await,
             other => Ok(CommandOutput::failed(
                 2,
                 error_line(
                     NAME,
                     format_args!("unknown subcommand '{other}'"),
-                    "Available",
+                    Hint::Available,
                     "focus, move, open, active, resize, list, workspaces, outputs, layout",
                 )
                 .into_bytes(),
@@ -199,15 +168,13 @@ impl Command for WmCommand {
     }
 }
 
-// --------- subcommand handlers ---------
-
 const FOCUS_HELP: &str = "usage: wm focus <id>\n\
     \n\
     Focus the window with the given decimal con_id. Run `wm list` \
     first to find ids; the first column is the id, the second is \
     the application label.\n";
 
-async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
+async fn focus(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.is_empty() {
         return Ok(CommandOutput::usage(FOCUS_HELP.to_string()));
     }
@@ -218,35 +185,15 @@ async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<Command
     };
     match wm.focus(&id).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(
-                    NAME,
-                    format_args!("focus {id_arg} failed: {e}"),
-                    label,
-                    hint,
-                )
-                .into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error(format_args!("focus {id_arg}"), &e)),
     }
 }
 
-/// Render the `[error] wm: <op>: …` line for "user passed a non-numeric
-/// or non-positive id". Centralized so focus / move / resize stay in
-/// sync. Exit code 2 mirrors the validation errors elsewhere in `wm`.
 fn parse_id_error(op: &'static str, raw: &str) -> CommandOutput {
-    CommandOutput::failed(
-        2,
-        error_line(
-            NAME,
-            format_args!("{op}: '{raw}' is not a valid window id (positive decimal con_id)"),
-            "Use",
-            "wm list to see ids (first TSV column)",
-        )
-        .into_bytes(),
+    CommandOutput::usage_error(
+        NAME,
+        format_args!("{op}: '{raw}' is not a valid window id (positive decimal con_id)"),
+        "wm list to see ids (first TSV column)",
     )
 }
 
@@ -256,7 +203,7 @@ const MOVE_HELP: &str = "usage: wm move <id> <workspace>\n\
     Numeric workspace identifiers (e.g. `3`) match by number; \
     non-numeric identifiers match by exact name.\n";
 
-async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
+async fn move_window(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.len() < 2 {
         return Ok(CommandOutput::usage(MOVE_HELP.to_string()));
     }
@@ -271,19 +218,10 @@ async fn handle_move(wm: &dyn WindowManager, args: &[String]) -> Result<CommandO
         .expect("WorkspaceId parser is infallible");
     match wm.move_to_workspace(&id, &workspace).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(
-                    NAME,
-                    format_args!("move {id_arg} to '{workspace_arg}' failed: {e}"),
-                    label,
-                    hint,
-                )
-                .into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error(
+            format_args!("move {id_arg} to '{workspace_arg}'"),
+            &e,
+        )),
     }
 }
 
@@ -308,66 +246,32 @@ impl WmCommand {
             return Ok(CommandOutput::usage(OPEN_HELP.to_string()));
         };
         let argv = args.join(" ");
-
-        if let Some(pat) = matches_denylist(&argv, &self.cfg.denylist) {
-            warn!(
-                target: "assistd::policy",
-                argv = %argv,
-                matched = %pat,
-                "wm open denied by denylist"
-            );
-            return Ok(CommandOutput::failed(
-                POLICY_DENIED_EXIT,
-                error_line(
-                    NAME,
-                    format_args!("open denied by policy. Matched denylist pattern: {pat}"),
-                    "Try",
-                    "a non-destructive alternative",
-                )
-                .into_bytes(),
-            ));
+        let destructive = matches_destructive_argv(args, &self.policy.cfg.destructive_patterns);
+        if let Err(denied) = self
+            .policy
+            .authorize(NAME, "open", &argv, destructive)
+            .await
+        {
+            return Ok(denied);
         }
 
-        if let Some(matched) = matches_destructive_argv(args, &self.cfg.destructive_patterns) {
-            let pattern_display = matched.join(" ");
-            let approved = self
-                .gate
-                .confirm(ConfirmationRequest {
-                    tool: NAME.to_string(),
-                    script: argv.clone(),
-                    matched_pattern: pattern_display.clone(),
-                })
-                .await;
-            if !approved {
-                return Ok(CommandOutput::failed(
-                    POLICY_DENIED_EXIT,
-                    error_line(
-                        NAME,
-                        format_args!(
-                            "open cancelled by user. Matched destructive pattern: {pattern_display}"
-                        ),
-                        "Try",
-                        "a different approach",
-                    )
-                    .into_bytes(),
-                ));
-            }
-        }
-
-        let cmd = self.sandbox.command(SandboxAccess::Session, app, extra);
+        let cmd = self
+            .policy
+            .sandbox
+            .command(SandboxAccess::Session, app, extra);
         spawn_detached(NAME, cmd).await.or_else(|e| {
             let line = if e.kind() == std::io::ErrorKind::NotFound {
                 error_line(
                     NAME,
                     format_args!("open: binary '{app}' not found on PATH"),
-                    "Check",
+                    Hint::Check,
                     format_args!("which {app}"),
                 )
             } else {
                 error_line(
                     NAME,
                     format_args!("open '{app}' failed: {e}"),
-                    "Try",
+                    Hint::Try,
                     "a different binary or absolute path",
                 )
             };
@@ -393,7 +297,7 @@ fn matches_destructive_argv<'a>(
     })
 }
 
-async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
+async fn active(wm: &dyn WindowManager) -> Result<CommandOutput> {
     match wm.focused_context().await {
         Ok(Some(ctx)) => {
             let id_str = match ctx.id {
@@ -404,13 +308,7 @@ async fn handle_active(wm: &dyn WindowManager) -> Result<CommandOutput> {
             Ok(CommandOutput::ok(format!("{id_str}\t{app}\n").into_bytes()))
         }
         Ok(None) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(NAME, format_args!("active failed: {e}"), label, hint).into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error("active", &e)),
     }
 }
 
@@ -420,7 +318,7 @@ const RESIZE_HELP: &str = "usage: wm resize <id> <grow|shrink> <px>\n\
     Direction is one of `grow` or `shrink`; <px> is a non-negative \
     integer count of pixels.\n";
 
-async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
+async fn resize(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.len() < 3 {
         return Ok(CommandOutput::usage(RESIZE_HELP.to_string()));
     }
@@ -432,63 +330,39 @@ async fn handle_resize(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
     let direction: ResizeDir = match args[1].parse() {
         Ok(d) => d,
         Err(_) => {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    NAME,
-                    format_args!(
-                        "resize: direction must be 'grow' or 'shrink', got '{}'",
-                        args[1]
-                    ),
-                    "Use",
-                    "wm resize <id> <grow|shrink> <px>",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                NAME,
+                format_args!(
+                    "resize: direction must be 'grow' or 'shrink', got '{}'",
+                    args[1]
+                ),
+                "wm resize <id> <grow|shrink> <px>",
             ));
         }
     };
     let amount: u32 = match args[2].parse() {
         Ok(n) => n,
         Err(_) => {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    NAME,
-                    format_args!(
-                        "resize: pixel amount must be a non-negative integer, got '{}'",
-                        args[2]
-                    ),
-                    "Use",
-                    "wm resize <id> <grow|shrink> <px>",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                NAME,
+                format_args!(
+                    "resize: pixel amount must be a non-negative integer, got '{}'",
+                    args[2]
+                ),
+                "wm resize <id> <grow|shrink> <px>",
             ));
         }
     };
     match wm.resize_width(&id, direction, amount).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(
-                    NAME,
-                    format_args!("resize {id_arg} failed: {e}"),
-                    label,
-                    hint,
-                )
-                .into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error(format_args!("resize {id_arg}"), &e)),
     }
 }
 
-async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
+async fn list(wm: &dyn WindowManager) -> Result<CommandOutput> {
     use std::fmt::Write;
     match wm.list_windows().await {
         Ok(mut windows) => {
-            // Sort by workspace then app so the LLM can find an id by
-            // app+title without scanning unrelated rows.
             windows.sort_by(|a, b| {
                 a.workspace
                     .as_deref()
@@ -515,17 +389,11 @@ async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
             }
             Ok(CommandOutput::ok(out.into_bytes()))
         }
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(NAME, format_args!("list failed: {e}"), label, hint).into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error("list", &e)),
     }
 }
 
-async fn handle_outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
+async fn outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
     match wm.list_outputs().await {
         Ok(mut outputs) => {
             outputs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -539,8 +407,7 @@ async fn handle_outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
                 out.push('\t');
                 match o.current_mode {
                     Some((w, h, hz)) => {
-                        // Sway reports refresh in mHz; emit integer Hz when
-                        // the fractional part is zero, else 3-decimal form.
+                        // Sway reports refresh in mHz.
                         let hz_int = hz / 1000;
                         let hz_frac = hz % 1000;
                         if hz_frac == 0 {
@@ -562,17 +429,11 @@ async fn handle_outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
             }
             Ok(CommandOutput::ok(out.into_bytes()))
         }
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(NAME, format_args!("outputs failed: {e}"), label, hint).into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error("outputs", &e)),
     }
 }
 
-async fn handle_workspaces(wm: &dyn WindowManager) -> Result<CommandOutput> {
+async fn workspaces(wm: &dyn WindowManager) -> Result<CommandOutput> {
     match wm.list_workspaces().await {
         Ok(mut workspaces) => {
             workspaces.sort_by_key(|w| w.num);
@@ -589,13 +450,7 @@ async fn handle_workspaces(wm: &dyn WindowManager) -> Result<CommandOutput> {
             }
             Ok(CommandOutput::ok(out.into_bytes()))
         }
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(NAME, format_args!("workspaces failed: {e}"), label, hint).into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error("workspaces", &e)),
     }
 }
 
@@ -605,7 +460,7 @@ const LAYOUT_HELP: &str = "usage: wm layout <default|tabbed|stacking|splith|spli
     toggles between split, tabbed, and stacking based on the \
     container's previous layout.\n";
 
-async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
+async fn layout(wm: &dyn WindowManager, args: &[String]) -> Result<CommandOutput> {
     if args.is_empty() {
         return Ok(CommandOutput::usage(LAYOUT_HELP.to_string()));
     }
@@ -613,849 +468,18 @@ async fn handle_layout(wm: &dyn WindowManager, args: &[String]) -> Result<Comman
     let layout: Layout = match raw.parse() {
         Ok(l) => l,
         Err(_) => {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    NAME,
-                    format_args!("layout: '{raw}' is not a known layout"),
-                    "Use",
-                    "default | tabbed | stacking | splith | splitv",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                NAME,
+                format_args!("layout: '{raw}' is not a known layout"),
+                "default | tabbed | stacking | splith | splitv",
             ));
         }
     };
     match wm.set_layout(layout).await {
         Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-        Err(e) => {
-            let (label, hint) = hint_for(&e);
-            Ok(CommandOutput::failed(
-                1,
-                error_line(
-                    NAME,
-                    format_args!("layout '{layout}' failed: {e}"),
-                    label,
-                    hint,
-                )
-                .into_bytes(),
-            ))
-        }
+        Err(e) => Ok(wm_error(format_args!("layout '{layout}'"), &e)),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::policy::{AlwaysAllowGate, DenyAllGate};
-    use assistd_wm::{
-        FocusedWindowContext, Layout, NoWindowManager, OutputInfo, ResizeDir, Window, WindowId,
-        WmResult, WorkspaceId, WorkspaceInfo,
-    };
-    use parking_lot::Mutex;
-
-    /// Test-only id constructor; every fixture id is non-zero by
-    /// construction, so this `expect` is unreachable at runtime.
-    fn id(n: u64) -> WindowId {
-        WindowId::new(n).expect("test ids are non-zero")
-    }
-
-    /// Test fixture for [`WindowManager`]. Records every call so tests
-    /// can assert on the typed argument tuples that would be dispatched
-    /// to the backend, and lets each operation be wired to fail with a
-    /// canned error message.
-    #[derive(Default)]
-    struct StubWm {
-        connected: bool,
-        windows: Vec<Window>,
-        workspaces: Vec<WorkspaceInfo>,
-        outputs: Vec<OutputInfo>,
-        focused: Option<WindowId>,
-        /// Human-readable label of the focused window, surfaced via
-        /// `focused_context().class`. Independent of `focused` so tests
-        /// can exercise "id present but app unknown" code paths.
-        focused_app: Option<String>,
-        focus_calls: Mutex<Vec<WindowId>>,
-        move_calls: Mutex<Vec<(WindowId, WorkspaceId)>>,
-        resize_calls: Mutex<Vec<(WindowId, ResizeDir, u32)>>,
-        layout_calls: Mutex<Vec<Layout>>,
-        focus_err: Option<String>,
-        move_err: Option<String>,
-        resize_err: Option<String>,
-        layout_err: Option<String>,
-        list_windows_err: Option<String>,
-        list_workspaces_err: Option<String>,
-        list_outputs_err: Option<String>,
-        focused_err: Option<String>,
-        list_outputs_unsupported: bool,
-    }
-
-    impl StubWm {
-        fn connected() -> Self {
-            Self {
-                connected: true,
-                ..Self::default()
-            }
-        }
-    }
-
-    /// Wrap a `&Option<String>` as a `WmError::Ipc(anyhow!(msg))`. Tests
-    /// that want to inject a backend failure write `focus_err: Some("…")`;
-    /// without typed variants they used `anyhow::bail!`. The Ipc variant
-    /// preserves the message body (which the tests assert on) and routes
-    /// through the `Check: compositor connection` recovery hint.
-    fn ipc_err(msg: &str) -> WmError {
-        WmError::Ipc(anyhow::anyhow!("{msg}"))
-    }
-
-    #[async_trait]
-    impl WindowManager for StubWm {
-        async fn focus(&self, window: &WindowId) -> WmResult<()> {
-            self.focus_calls.lock().push(*window);
-            if let Some(msg) = &self.focus_err {
-                return Err(ipc_err(msg));
-            }
-            Ok(())
-        }
-        async fn move_to_workspace(
-            &self,
-            window: &WindowId,
-            workspace: &WorkspaceId,
-        ) -> WmResult<()> {
-            self.move_calls.lock().push((*window, workspace.clone()));
-            if let Some(msg) = &self.move_err {
-                return Err(ipc_err(msg));
-            }
-            Ok(())
-        }
-        async fn focused_window(&self) -> WmResult<Option<WindowId>> {
-            if let Some(msg) = &self.focused_err {
-                return Err(ipc_err(msg));
-            }
-            Ok(self.focused)
-        }
-        async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
-            if let Some(msg) = &self.focused_err {
-                return Err(ipc_err(msg));
-            }
-            if self.focused.is_none() && self.focused_app.is_none() {
-                return Ok(None);
-            }
-            Ok(Some(FocusedWindowContext {
-                id: self.focused,
-                class: self.focused_app.clone(),
-                title: None,
-                workspace: None,
-            }))
-        }
-        async fn list_windows(&self) -> WmResult<Vec<Window>> {
-            if let Some(msg) = &self.list_windows_err {
-                return Err(ipc_err(msg));
-            }
-            Ok(self.windows.clone())
-        }
-        async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
-            if let Some(msg) = &self.list_workspaces_err {
-                return Err(ipc_err(msg));
-            }
-            Ok(self.workspaces.clone())
-        }
-        async fn resize_width(
-            &self,
-            window: &WindowId,
-            direction: ResizeDir,
-            pixels: u32,
-        ) -> WmResult<()> {
-            self.resize_calls.lock().push((*window, direction, pixels));
-            if let Some(msg) = &self.resize_err {
-                return Err(ipc_err(msg));
-            }
-            Ok(())
-        }
-        async fn set_layout(&self, layout: Layout) -> WmResult<()> {
-            self.layout_calls.lock().push(layout);
-            if let Some(msg) = &self.layout_err {
-                return Err(ipc_err(msg));
-            }
-            Ok(())
-        }
-        async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
-            if self.list_outputs_unsupported {
-                // Mirror the trait default: backends that don't
-                // implement outputs return Unsupported so the wm tool
-                // can tell the LLM the difference between a connected
-                // machine with zero monitors and an i3-class backend.
-                return Err(WmError::Unsupported("output enumeration"));
-            }
-            if let Some(msg) = &self.list_outputs_err {
-                return Err(ipc_err(msg));
-            }
-            Ok(self.outputs.clone())
-        }
-        fn is_connected(&self) -> bool {
-            self.connected
-        }
-    }
-
-    async fn run_wm(wm: Arc<dyn WindowManager>, args: &[&str]) -> CommandOutput {
-        WmCommand::for_test(wm)
-            .run(CommandInput {
-                args: args.iter().map(|s| s.to_string()).collect(),
-                stdin: None,
-            })
-            .await
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn no_args_returns_help() {
-        let out = run_wm(Arc::new(StubWm::connected()), &[]).await;
-        assert_eq!(out.exit_code, 2);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.starts_with("usage: wm <subcommand>"), "{stdout}");
-        assert!(stdout.contains("focus"), "{stdout}");
-        assert!(stdout.contains("workspaces"), "{stdout}");
-    }
-
-    #[tokio::test]
-    async fn unknown_subcommand_errors_with_available_list() {
-        let out = run_wm(Arc::new(StubWm::connected()), &["bogus"]).await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] wm: unknown subcommand 'bogus'"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("Available:"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn disconnected_short_circuits() {
-        // StubWm::default() has connected = false.
-        let out = run_wm(Arc::new(StubWm::default()), &["focus", "Firefox"]).await;
-        assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] wm: compositor not connected"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("Check:"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn no_window_manager_short_circuits_on_focus() {
-        // The production `NoWindowManager` must behave exactly as the
-        // StubWm disconnected path does.
-        let out = run_wm(Arc::new(NoWindowManager), &["focus", "42"]).await;
-        assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] wm: compositor not connected"),
-            "{stderr}"
-        );
-    }
-
-    #[tokio::test]
-    async fn focus_no_args_returns_subcommand_help() {
-        let out = run_wm(Arc::new(StubWm::connected()), &["focus"]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(String::from_utf8_lossy(&out.stdout).contains("usage: wm focus"));
-    }
-
-    #[tokio::test]
-    async fn focus_calls_backend_with_id() {
-        let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["focus", "42"]).await;
-        assert_eq!(out.exit_code, 0);
-        let calls = stub.focus_calls.lock();
-        assert_eq!(*calls, vec![id(42)]);
-    }
-
-    #[tokio::test]
-    async fn focus_rejects_non_numeric_arg() {
-        let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["focus", "Firefox"]).await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("not a valid window id"), "{stderr}");
-        assert!(stderr.contains("wm list"), "{stderr}");
-        assert!(stub.focus_calls.lock().is_empty());
-    }
-
-    #[tokio::test]
-    async fn focus_translates_backend_error() {
-        let stub = Arc::new(StubWm {
-            connected: true,
-            focus_err: Some("i3 socket dropped".into()),
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["focus", "42"]).await;
-        assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[error] wm: focus 42 failed"), "{stderr}");
-        // Backend Ipc errors route through the "Check: compositor
-        // connection" hint, different from the static "Use: wm list"
-        // hint that the pre-WmError handler emitted unconditionally.
-        assert!(stderr.contains("Check:"), "{stderr}");
-    }
-
-    #[test]
-    fn hint_for_disconnected() {
-        let (label, hint) = hint_for(&WmError::Disconnected);
-        assert_eq!(label, "Check");
-        assert!(hint.contains("config.toml"), "{hint}");
-    }
-
-    #[test]
-    fn hint_for_not_found() {
-        let (label, hint) = hint_for(&WmError::NotFound(id(42)));
-        assert_eq!(label, "Use");
-        assert!(hint.contains("wm list"), "{hint}");
-    }
-
-    #[test]
-    fn hint_for_rejected() {
-        let (label, _) = hint_for(&WmError::Rejected("focus: bad criteria".into()));
-        assert_eq!(label, "Try");
-    }
-
-    #[test]
-    fn hint_for_timeout() {
-        let (label, hint) = hint_for(&WmError::Timeout(std::time::Duration::from_secs(5)));
-        assert_eq!(label, "Note");
-        assert!(hint.contains("retry"), "{hint}");
-    }
-
-    #[test]
-    fn hint_for_unsupported() {
-        let (label, hint) = hint_for(&WmError::Unsupported("output enumeration"));
-        assert_eq!(label, "Note");
-        assert!(hint.contains("i3 does not"), "{hint}");
-    }
-
-    #[test]
-    fn hint_for_ipc() {
-        let (label, _) = hint_for(&WmError::Ipc(anyhow::anyhow!("socket dropped")));
-        assert_eq!(label, "Check");
-    }
-
-    #[tokio::test]
-    async fn move_needs_two_args() {
-        let out = run_wm(Arc::new(StubWm::connected()), &["move", "42"]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(String::from_utf8_lossy(&out.stdout).contains("usage: wm move"));
-    }
-
-    #[tokio::test]
-    async fn move_calls_backend() {
-        let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["move", "42", "3"]).await;
-        assert_eq!(out.exit_code, 0);
-        let calls = stub.move_calls.lock();
-        // "3" parses as numeric → WorkspaceId::Num(3); the args are
-        // typed all the way through to the backend now.
-        assert_eq!(*calls, vec![(id(42), WorkspaceId::Num(3))]);
-    }
-
-    #[tokio::test]
-    async fn move_rejects_non_numeric_id() {
-        let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["move", "Firefox", "3"]).await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("not a valid window id"), "{stderr}");
-        assert!(stub.move_calls.lock().is_empty());
-    }
-
-    #[tokio::test]
-    async fn open_no_args_returns_help() {
-        let out = run_wm(Arc::new(StubWm::connected()), &["open"]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(String::from_utf8_lossy(&out.stdout).contains("usage: wm open"));
-    }
-
-    #[tokio::test]
-    async fn open_missing_binary_returns_path_error() {
-        let out = run_wm(
-            Arc::new(StubWm::connected()),
-            &["open", "definitely-not-a-real-binary-xyzzy-12345"],
-        )
-        .await;
-        assert_eq!(out.exit_code, SPAWN_FAILED_EXIT);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] wm: open: binary 'definitely-not-a-real-binary-xyzzy-12345' not found on PATH"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("Check:"), "{stderr}");
-    }
-
-    fn policed_wm(cfg: BashPolicyCfg, gate: Arc<dyn ConfirmationGate>) -> WmCommand {
-        WmCommand::new(
-            Arc::new(StubWm::connected()),
-            Arc::new(cfg),
-            SandboxInfo::none(),
-            gate,
-        )
-    }
-
-    async fn run_open(cmd: &WmCommand, args: &[&str]) -> CommandOutput {
-        let mut argv = vec!["open".to_string()];
-        argv.extend(args.iter().map(|s| s.to_string()));
-        cmd.run(CommandInput {
-            args: argv,
-            stdin: None,
-        })
-        .await
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn open_captures_child_output() {
-        let out = run_wm(Arc::new(StubWm::connected()), &["open", "echo", "hi"]).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"hi\n");
-    }
-
-    #[tokio::test]
-    async fn open_surfaces_nonzero_child_exit() {
-        let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
-        let out = run_open(&cmd, &["false"]).await;
-        assert_eq!(out.exit_code, 1);
-    }
-
-    #[tokio::test]
-    async fn open_denylist_blocks_before_spawn() {
-        let cmd = policed_wm(
-            BashPolicyCfg {
-                denylist: vec!["rm -rf /".into()],
-                ..Default::default()
-            },
-            Arc::new(AlwaysAllowGate),
-        );
-        let out = run_open(&cmd, &["bash", "-c", "rm -rf /"]).await;
-        assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("denylist pattern: rm -rf /"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn open_destructive_argv_consults_gate() {
-        let cmd = policed_wm(
-            BashPolicyCfg {
-                destructive_patterns: vec![vec!["rm".into(), "-rf".into()]],
-                ..Default::default()
-            },
-            Arc::new(DenyAllGate),
-        );
-        let out = run_open(&cmd, &["rm", "-rf", "/tmp/whatever"]).await;
-        assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("Matched destructive pattern: rm -rf"),
-            "{stderr}"
-        );
-    }
-
-    /// A script passed as one argument still has to reach the gate; it
-    /// only matches once each argument is checked on its own.
-    #[tokio::test]
-    async fn open_destructive_inside_bash_c_argument_consults_gate() {
-        let cmd = policed_wm(
-            BashPolicyCfg {
-                destructive_patterns: vec![vec!["rm".into(), "-rf".into()]],
-                ..Default::default()
-            },
-            Arc::new(DenyAllGate),
-        );
-        let out = run_open(&cmd, &["bash", "-c", "rm -rf /tmp/whatever"]).await;
-        assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-    }
-
-    #[tokio::test]
-    async fn open_gate_approval_lets_the_process_run() {
-        let cmd = policed_wm(
-            BashPolicyCfg {
-                destructive_patterns: vec![vec!["true".into()]],
-                ..Default::default()
-            },
-            Arc::new(AlwaysAllowGate),
-        );
-        let out = run_open(&cmd, &["true"]).await;
-        assert_eq!(out.exit_code, 0);
-    }
-
-    /// An application outliving the startup probe keeps running, and the
-    /// launch reports success rather than blocking the turn.
-    #[tokio::test]
-    async fn open_leaves_a_surviving_process_running() {
-        let marker = std::env::temp_dir().join(format!("assistd-wm-open-{}", std::process::id()));
-        let _ = std::fs::remove_file(&marker);
-
-        let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
-        let started = std::time::Instant::now();
-        let out = run_open(
-            &cmd,
-            &[
-                "bash",
-                "-c",
-                &format!("sleep 1; touch {}", marker.display()),
-            ],
-        )
-        .await;
-
-        assert_eq!(out.exit_code, 0, "surviving launch should report success");
-        assert!(out.stdout.is_empty());
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(900),
-            "launch should return on the probe, not on the child exiting"
-        );
-        assert!(!marker.exists(), "child should not have finished yet");
-
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        assert!(
-            marker.exists(),
-            "detached child must keep running after the launch returned"
-        );
-        let _ = std::fs::remove_file(&marker);
-    }
-
-    #[tokio::test]
-    async fn open_reports_a_failed_startup_with_its_output() {
-        let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
-        let out = run_open(&cmd, &["bash", "-c", "echo boom >&2; exit 3"]).await;
-        assert_eq!(out.exit_code, 3);
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("boom"),
-            "startup failure must surface the child's stderr"
-        );
-    }
-
-    /// Policy is scoped to `open`; the compositor subcommands never
-    /// consult the gate or the denylist.
-    #[tokio::test]
-    async fn non_open_subcommands_skip_the_gate() {
-        struct PanicGate;
-        #[async_trait]
-        impl ConfirmationGate for PanicGate {
-            async fn confirm(&self, _r: ConfirmationRequest) -> bool {
-                panic!("wm policy must only gate `open`");
-            }
-        }
-        let cmd = policed_wm(
-            BashPolicyCfg {
-                denylist: vec!["focus".into()],
-                destructive_patterns: vec![vec!["focus".into()]],
-                ..Default::default()
-            },
-            Arc::new(PanicGate),
-        );
-        let out = cmd
-            .run(CommandInput {
-                args: vec!["focus".into(), "42".into()],
-                stdin: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(out.exit_code, 0);
-    }
-
-    #[tokio::test]
-    async fn active_prints_id_tab_app() {
-        // wm active emits `<id>\t<app>\n` so the LLM can pipe either
-        // column: `wm focus $(wm active | cut -f1)` or read the app
-        // label from column 2 to confirm what's focused.
-        let stub = Arc::new(StubWm {
-            connected: true,
-            focused: Some(id(42)),
-            focused_app: Some("Firefox".into()),
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["active"]).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"42\tFirefox\n");
-    }
-
-    #[tokio::test]
-    async fn active_renders_dash_when_app_missing() {
-        let stub = Arc::new(StubWm {
-            connected: true,
-            focused: Some(id(7)),
-            focused_app: None,
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["active"]).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"7\t-\n");
-    }
-
-    #[tokio::test]
-    async fn active_with_no_focus_is_empty_stdout() {
-        let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub, &["active"]).await;
-        assert_eq!(out.exit_code, 0);
-        assert!(out.stdout.is_empty());
-    }
-
-    #[tokio::test]
-    async fn resize_too_few_args_returns_help() {
-        let out = run_wm(Arc::new(StubWm::connected()), &["resize", "42", "grow"]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(String::from_utf8_lossy(&out.stdout).contains("usage: wm resize"));
-    }
-
-    #[tokio::test]
-    async fn resize_bad_direction_errors() {
-        let out = run_wm(
-            Arc::new(StubWm::connected()),
-            &["resize", "42", "sideways", "10"],
-        )
-        .await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[error] wm: resize"), "{stderr}");
-        assert!(stderr.contains("Use:"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn resize_bad_pixel_count_errors() {
-        let out = run_wm(
-            Arc::new(StubWm::connected()),
-            &["resize", "42", "grow", "lots"],
-        )
-        .await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[error] wm: resize"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn resize_dispatches_typed_args() {
-        // wm.rs passes the parsed direction + pixel count to the
-        // backend's typed `resize_width` method. The literal con_id
-        // payload (`[con_id="…"] resize …`) is tested in
-        // `assistd_wm::i3::tests` / `sway::tests` directly.
-        let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["resize", "42", "grow", "50"]).await;
-        assert_eq!(out.exit_code, 0);
-        let calls = stub.resize_calls.lock();
-        assert_eq!(*calls, vec![(id(42), ResizeDir::Grow, 50)]);
-    }
-
-    #[tokio::test]
-    async fn resize_rejects_non_numeric_id() {
-        let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["resize", "Firefox", "grow", "5"]).await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("not a valid window id"), "{stderr}");
-        assert!(stub.resize_calls.lock().is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_emits_tsv_sorted_by_workspace_then_app() {
-        let stub = Arc::new(StubWm {
-            connected: true,
-            windows: vec![
-                Window {
-                    id: id(1001),
-                    app: Some("Firefox".into()),
-                    title: Some("GitHub".into()),
-                    workspace: Some("3".into()),
-                },
-                Window {
-                    id: id(1002),
-                    app: Some("code".into()),
-                    title: Some("wm.rs".into()),
-                    workspace: Some("1".into()),
-                },
-                Window {
-                    id: id(1003),
-                    app: Some("Alacritty".into()),
-                    title: None,
-                    workspace: Some("1".into()),
-                },
-            ],
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["list"]).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            "1003\tAlacritty\t1\t\n1002\tcode\t1\twm.rs\n1001\tFirefox\t3\tGitHub\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn list_orphans_use_dash_for_missing_columns() {
-        let stub = Arc::new(StubWm {
-            connected: true,
-            windows: vec![Window {
-                id: id(7),
-                app: None,
-                title: Some("notes".into()),
-                workspace: None,
-            }],
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["list"]).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"7\t-\t-\tnotes\n");
-    }
-
-    #[tokio::test]
-    async fn workspaces_emits_tsv_with_focus_marker() {
-        let stub = Arc::new(StubWm {
-            connected: true,
-            workspaces: vec![
-                WorkspaceInfo {
-                    num: 3,
-                    name: "3".into(),
-                    focused: false,
-                    output: "DP-1".into(),
-                },
-                WorkspaceInfo {
-                    num: 1,
-                    name: "1:web".into(),
-                    focused: true,
-                    output: "DP-1".into(),
-                },
-            ],
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["workspaces"]).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            "1\t1:web\t*\tDP-1\n3\t3\t-\tDP-1\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn layout_no_args_returns_help() {
-        let out = run_wm(Arc::new(StubWm::connected()), &["layout"]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(String::from_utf8_lossy(&out.stdout).contains("usage: wm layout"));
-    }
-
-    #[tokio::test]
-    async fn layout_unknown_name_errors() {
-        let out = run_wm(Arc::new(StubWm::connected()), &["layout", "spinning"]).await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[error] wm: layout"), "{stderr}");
-        assert!(stderr.contains("Use:"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn layout_dispatches_typed_arg() {
-        let stub = Arc::new(StubWm::connected());
-        let out = run_wm(stub.clone(), &["layout", "tabbed"]).await;
-        assert_eq!(out.exit_code, 0);
-        let calls = stub.layout_calls.lock();
-        assert_eq!(*calls, vec![Layout::Tabbed]);
-    }
-
-    #[test]
-    fn summary_fits_eighty_chars() {
-        assert!(SUMMARY.len() <= 80, "{} chars: {SUMMARY}", SUMMARY.len());
-    }
-
-    #[tokio::test]
-    async fn outputs_emits_tsv_sorted_by_name() {
-        let stub = Arc::new(StubWm {
-            connected: true,
-            outputs: vec![
-                OutputInfo {
-                    name: "DP-2".into(),
-                    active: true,
-                    primary: false,
-                    current_mode: Some((2560, 1440, 144_000)),
-                    scale: Some(1.0),
-                    focused_workspace: Some("3".into()),
-                },
-                OutputInfo {
-                    name: "DP-1".into(),
-                    active: true,
-                    primary: true,
-                    current_mode: Some((1920, 1080, 60_000)),
-                    scale: Some(1.5),
-                    focused_workspace: Some("1:web".into()),
-                },
-            ],
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["outputs"]).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            "DP-1\t*\t*\t1920x1080@60Hz\t1.5\t1:web\nDP-2\t*\t-\t2560x1440@144Hz\t1\t3\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn outputs_handles_missing_fields_with_dash() {
-        let stub = Arc::new(StubWm {
-            connected: true,
-            outputs: vec![OutputInfo {
-                name: "HDMI-A-1".into(),
-                active: false,
-                primary: false,
-                current_mode: None,
-                scale: None,
-                focused_workspace: None,
-            }],
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["outputs"]).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"HDMI-A-1\t-\t-\t-\t-\t-\n");
-    }
-
-    #[tokio::test]
-    async fn outputs_unsupported_backend_emits_error_with_note() {
-        // Mirrors the i3-class case: list_outputs returns
-        // "does not support" so wm outputs surfaces a helpful error
-        // rather than empty stdout.
-        let stub = Arc::new(StubWm {
-            connected: true,
-            list_outputs_unsupported: true,
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["outputs"]).await;
-        assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[error] wm: outputs failed"), "{stderr}");
-        assert!(stderr.contains("Note:"), "{stderr}");
-        assert!(stderr.contains("i3 does not"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn outputs_propagates_runtime_error() {
-        let stub = Arc::new(StubWm {
-            connected: true,
-            list_outputs_err: Some("sway socket dropped".into()),
-            ..Default::default()
-        });
-        let out = run_wm(stub, &["outputs"]).await;
-        assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[error] wm: outputs failed"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn unknown_subcommand_lists_outputs_in_available() {
-        // Regression check that the help hint includes the new subcommand.
-        let out = run_wm(Arc::new(StubWm::connected()), &["bogus"]).await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("outputs"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn help_block_advertises_outputs_subcommand() {
-        let out = run_wm(Arc::new(StubWm::connected()), &[]).await;
-        assert_eq!(out.exit_code, 2);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains("outputs"), "{stdout}");
-    }
-}
+mod tests;

@@ -1,13 +1,7 @@
-//! HTTP control plane for the managed llama-server.
-//!
-//! llama.cpp's router-mode server exposes `POST /models/load` and
-//! `POST /models/unload` endpoints that attach/detach model weights without
-//! restarting the process. `LlamaServerControl` wraps those calls so the
-//! presence-state machine can free VRAM on `drowse` and rehydrate on `wake`
-//! without paying the cost of spawning a new child.
-//!
-//! The server is assumed to be listening already; callers that also need to
-//! supervise the child process should use [`super::LlamaService`] for that.
+//! HTTP control plane for llama.cpp's router-mode server: `POST
+//! /models/load` and `POST /models/unload` attach and detach model
+//! weights without restarting the process. The server is assumed to be
+//! listening already; [`super::LlamaService`] supervises the process.
 
 use std::time::Duration;
 
@@ -18,21 +12,16 @@ use super::error::LlamaServerError;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Small HTTP client for the model-management endpoints on llama-server.
-///
-/// Stateless modulo the underlying `reqwest::Client`'s connection pool, safe
-/// to reuse across many calls and across process restarts of the server
-/// (the base URL is fixed).
+/// HTTP client for the model-management endpoints on llama-server.
+/// Stateless apart from the connection pool, so it survives restarts of
+/// the server behind its fixed base URL.
 pub struct LlamaServerControl {
     client: reqwest::Client,
     base_url: String,
 }
 
 impl LlamaServerControl {
-    /// Creates a control client pointing at `http://{host}:{port}`.
-    ///
-    /// # Errors
-    /// Returns [`LlamaServerError`] if the underlying HTTP client cannot be built.
+    /// Build a control client for `http://{host}:{port}`.
     pub fn new(host: &str, port: u16) -> Result<Self, LlamaServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -44,40 +33,28 @@ impl LlamaServerControl {
         })
     }
 
-    /// Asks the server to load `model` into memory. Returns once the server
-    /// acknowledges the request; the server itself is responsible for
-    /// blocking the response until the weights are resident.
+    /// Ask the server to load `model`. Returns once the request is
+    /// acknowledged, which is before the weights are live; see
+    /// [`Self::wait_for_loaded`].
     pub async fn load_model(&self, model: &str) -> Result<(), LlamaServerError> {
         self.post_model_action("/models/load", model).await
     }
 
-    /// Asks the server to unload `model`, freeing its VRAM while keeping
+    /// Ask the server to unload `model`, freeing its VRAM while keeping
     /// the process alive.
     pub async fn unload_model(&self, model: &str) -> Result<(), LlamaServerError> {
         self.post_model_action("/models/unload", model).await
     }
 
-    /// Best-effort check for whether `model` is currently loaded.
-    ///
-    /// Queries `GET /models` and looks for an entry matching `model`
-    /// with a structured `status: {value: "loaded", args: [...]}` field
-    /// (the router-mode response shape).
+    /// Whether `GET /models` reports `model` as loaded.
     pub async fn model_is_loaded(&self, model: &str) -> Result<bool, LlamaServerError> {
         Ok(self.fetch_models().await?.contains_loaded(model))
     }
 
-    /// Returns the child server's listening port for `model` if it is
-    /// currently loaded, or `None` otherwise.
-    ///
-    /// In router mode llama-server spawns a child per loaded model on a
-    /// transient port encoded in the per-model `status.args` array (the
-    /// value following `--port`). Callers need this port to reach the
-    /// model directly — `/props`, `/health`, etc. on the router itself
-    /// describe the router, not the loaded model.
-    ///
-    /// Returns `None` when the model is missing, marked unloaded, or
-    /// when the response shape doesn't carry the spawn args (e.g.
-    /// non-router-mode servers).
+    /// Port of the child server that hosts `model`, or `None` when the
+    /// model is missing, unloaded, or the server is not in router mode.
+    /// `/props` and `/health` on the router describe the router itself,
+    /// so reaching the model means talking to this port.
     pub async fn find_loaded_child_port(
         &self,
         model: &str,
@@ -85,14 +62,10 @@ impl LlamaServerControl {
         Ok(self.fetch_models().await?.find_loaded_child_port(model))
     }
 
-    /// Polls `/models` until `model` reports `status.value == "loaded"`
-    /// or `deadline` elapses.
-    ///
-    /// `POST /models/load` on the router returns `200` the moment the
-    /// router accepts the spawn request — it does not block until the
-    /// child has actually finished loading weights + mmproj. Anything
-    /// that depends on the model being live (vision probe, first
-    /// chat request) needs to wait for this transition explicitly.
+    /// Poll `/models` until `model` reports loaded or `deadline` elapses.
+    /// `POST /models/load` returns 200 as soon as the router accepts the
+    /// spawn request, so anything that needs the weights live must wait
+    /// for this transition explicitly.
     pub async fn wait_for_loaded(
         &self,
         model: &str,
@@ -194,8 +167,6 @@ impl ModelStatus {
         self.value == "loaded"
     }
 
-    /// Extract the value following `--port` in the spawn args. Only
-    /// present when the router actually spawned a child for this model.
     fn child_port(&self) -> Option<u16> {
         let mut iter = self.args.iter();
         while let Some(arg) = iter.next() {

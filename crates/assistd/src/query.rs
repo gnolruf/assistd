@@ -1,15 +1,15 @@
-//! Client for the `query` subcommand: sends a one-shot text (with optional
-//! image attachments) to the running daemon and streams the response to stdout.
+//! `query` subcommand.
 
 use anyhow::Result;
-use assistd_ipc::{Event, ImageAttachment, IpcClient, IpcClientError, Request};
+use assistd_ipc::{Event, ImageAttachment, Request};
 use assistd_tools::attachment::{LoadImageError, MAX_IMAGE_BYTES};
 use clap::Args;
 use std::io::Write;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// Maximum chars shown from a tool-call `command` argument in the status line.
+use crate::ipc_helper::run_one_shot;
+
 const PREVIEW_MAX_CHARS: usize = 80;
 
 fn truncate_preview(s: &str) -> String {
@@ -23,7 +23,6 @@ fn truncate_preview(s: &str) -> String {
     out
 }
 
-/// Arguments for the `query` subcommand.
 #[derive(Args)]
 pub struct QueryArgs {
     /// Text to send to the daemon.
@@ -35,12 +34,6 @@ pub struct QueryArgs {
     pub images: Vec<PathBuf>,
 }
 
-/// Send a query to the daemon and stream the response to stdout.
-///
-/// # Errors
-///
-/// Returns an error if image loading fails, the IPC connection fails,
-/// or the daemon sends an unexpected terminal event.
 pub async fn run(args: QueryArgs) -> Result<()> {
     let mut wire_attachments = Vec::with_capacity(args.images.len());
     for path in &args.images {
@@ -60,39 +53,20 @@ pub async fn run(args: QueryArgs) -> Result<()> {
         }
     }
 
-    let client = IpcClient::new();
     let req = if wire_attachments.is_empty() {
         Request::query(Uuid::new_v4().to_string(), args.text)
     } else {
         Request::query_with_attachments(Uuid::new_v4().to_string(), args.text, wire_attachments)
     };
-    let mut stream = client.one_shot(req).await.map_err(|e| match e {
-        IpcClientError::NotReachable { path, source } => anyhow::anyhow!(
-            "assistd daemon is not running (could not connect to {}): {source}",
-            path.display()
-        ),
-        other => anyhow::Error::from(other),
-    })?;
 
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
+    let mut stdout = std::io::stdout().lock();
     let mut wrote_anything = false;
-
-    loop {
-        let event = match stream.next_event().await? {
-            Some(ev) => ev,
-            None => anyhow::bail!("daemon closed the connection without sending a terminal event"),
-        };
-
+    run_one_shot(req, |event| {
         match event {
             Event::Delta { text, .. } => {
                 stdout.write_all(text.as_bytes())?;
                 stdout.flush()?;
                 wrote_anything = wrote_anything || !text.is_empty();
-            }
-            Event::ReasoningDelta { .. } => {
-                // CLI `assistd query` streams only the model's visible
-                // reply; chain-of-thought is silently dropped.
             }
             Event::ToolCall { name, args, .. } => {
                 let preview = args
@@ -125,16 +99,15 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                 }
             }
             Event::ListenState { active, .. } => {
-                writeln!(stdout, "[listen: {}]", if active { "on" } else { "off" })?;
+                writeln!(stdout, "[listen: {}]", if *active { "on" } else { "off" })?;
             }
             Event::VoiceOutputState { enabled, .. } => {
                 writeln!(
                     stdout,
                     "[voice-output: {}]",
-                    if enabled { "on" } else { "off" }
+                    if *enabled { "on" } else { "off" }
                 )?;
             }
-            Event::SpeakingState { .. } => {}
             Event::Status {
                 severity,
                 component,
@@ -143,38 +116,18 @@ pub async fn run(args: QueryArgs) -> Result<()> {
             } => {
                 eprintln!("[{severity} {component}: {message}]");
             }
-            Event::SessionTitle { .. }
-            | Event::SemanticHit { .. }
-            | Event::MemoryValue { .. }
-            | Event::MemoryKeys { .. }
-            | Event::MemoryRow { .. }
-            | Event::MemoryForgetResult { .. }
-            | Event::ReindexProgress { .. }
-            | Event::Capabilities { .. }
-            | Event::BranchInfo { .. }
-            | Event::BranchSwitched { .. }
-            | Event::HistoryEntry { .. }
-            | Event::UndoApplied { .. }
-            | Event::LastDelta { .. } => {}
             Event::ConfirmRequest { .. } => {
                 eprintln!(
                     "[daemon asked for destructive-command confirmation; denying \
                      (non-interactive query)]"
                 );
             }
-            Event::Done { .. } => {
-                if wrote_anything {
-                    writeln!(stdout)?;
-                }
-                return Ok(());
+            Event::Done { .. } | Event::Error { .. } if wrote_anything => {
+                writeln!(stdout)?;
             }
-            Event::Error { message, .. } => {
-                if wrote_anything {
-                    writeln!(stdout)?;
-                }
-                eprintln!("daemon error: {message}");
-                std::process::exit(1);
-            }
+            _ => {}
         }
-    }
+        Ok(())
+    })
+    .await
 }

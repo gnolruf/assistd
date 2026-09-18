@@ -1,12 +1,4 @@
 //! Embedding subsystem wiring for the daemon.
-//!
-//! Boots the local embed-server, builds the [`LlamaEmbedder`] client,
-//! and spawns the writer-fed embedder task that consumes [`EmbedJob`]s.
-//! When the SQLite store is available the produced
-//! [`SqliteSemanticStore`] is plumbed through; otherwise we fall back
-//! to a no-op semantic store so semantic-search tools degrade
-//! gracefully. A diagnostic logs how many existing rows were embedded
-//! against a stale model, prompting the operator to reindex.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,19 +12,12 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 
-/// Live handles for the embedding subsystem, returned by [`init`].
 pub struct EmbeddingSubsystem {
-    /// Embedder client used to produce vectors from text.
     pub embedder: Arc<dyn Embedder>,
-    /// Semantic search store backed by SQLite (or a no-op if unavailable).
     pub semantic_store: Arc<dyn SemanticStore>,
-    /// Channel for submitting background [`EmbedJob`]s to the writer task.
     pub embed_tx: mpsc::Sender<EmbedJob>,
-    /// Running embed-server process handle, shut down on [`EmbeddingSubsystem::shutdown`].
     pub service_handle: Option<EmbedService>,
-    /// Background embedder writer task.
     pub task_handle: Option<JoinHandle<()>>,
-    /// Model name reported by the running embed server.
     pub model_name: String,
 }
 
@@ -50,7 +35,6 @@ impl EmbeddingSubsystem {
         }
     }
 
-    /// Await the embedder task and shut down the embed server gracefully.
     pub async fn shutdown(self) {
         if let Some(h) = self.task_handle {
             let _ = h.await;
@@ -63,11 +47,8 @@ impl EmbeddingSubsystem {
     }
 }
 
-/// Initialise the embedding subsystem from config.
-///
-/// Starts the embed server, probes the model, and wires the embedder task.
-/// Degrades gracefully to a no-op subsystem when the server fails to start
-/// or the client probe fails.
+/// Degrades to a no-op subsystem when disabled, when the embed server
+/// fails to start, or when the client probe fails.
 pub async fn init(
     config: &Config,
     sqlite_handle: Option<&Arc<SqliteHandle>>,

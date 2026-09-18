@@ -5,7 +5,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Command, CommandInput, CommandOutput};
 use crate::commands::collect_input;
 
 /// Lines emitted when no count flag is given, matching coreutils.
@@ -27,7 +27,7 @@ struct CountError {
 
 /// Split argv into the line count and the files to read. A bare `-`
 /// means stdin, as in coreutils, so it is not taken for a flag.
-fn parse_args(cmd: &str, argv: &[String]) -> Result<(usize, Vec<String>), CountError> {
+fn parse_flags(cmd: &str, argv: &[String]) -> Result<(usize, Vec<String>), CountError> {
     let mut count = DEFAULT_LINES;
     let mut files = Vec::new();
     let mut i = 0;
@@ -59,7 +59,7 @@ fn parse_args(cmd: &str, argv: &[String]) -> Result<(usize, Vec<String>), CountE
 }
 
 fn count_error(cmd: &str, e: CountError) -> CommandOutput {
-    CommandOutput::failed(2, error_line(cmd, e.what, "Use", e.recovery).into_bytes())
+    CommandOutput::usage_error(cmd, e.what, e.recovery)
 }
 
 fn first_lines(stdin: &[u8], count: usize) -> Vec<u8> {
@@ -101,7 +101,7 @@ impl Command for HeadCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        let (count, files) = match parse_args("head", &input.args) {
+        let (count, files) = match parse_flags("head", &input.args) {
             Ok(v) => v,
             Err(e) => return Ok(count_error("head", e)),
         };
@@ -139,7 +139,7 @@ impl Command for TailCommand {
     }
 
     async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        let (count, files) = match parse_args("tail", &input.args) {
+        let (count, files) = match parse_flags("tail", &input.args) {
             Ok(v) => v,
             Err(e) => return Ok(count_error("tail", e)),
         };

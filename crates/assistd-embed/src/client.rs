@@ -1,15 +1,4 @@
-//! HTTP client for llama.cpp's `/v1/embeddings` endpoint.
-//!
-//! Holds a `reqwest::Client` (no proxy, short connect timeout, configurable
-//! per-request timeout). Vector dimensionality is **probed once at
-//! construction** by sending a one-token embed request; embedders don't
-//! advertise their dim out-of-band, and exposing it on the trait lets
-//! callers size their `Vec<f32>` buffers without a downstream round-trip.
-//!
-//! L2 normalisation happens here, before the vector leaves the crate, so
-//! every consumer (chunk indexing, query injection, `recall`/`reminisce`)
-//! can compute cosine as a plain dot product against stored vectors that
-//! were normalised the same way.
+//! HTTP client for llama-server's `/v1/embeddings` endpoint.
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -18,9 +7,6 @@ use std::time::Duration;
 
 use crate::Embedder;
 
-/// Connect timeout for the embed HTTP client. Should be loopback-fast;
-/// 2s is generous enough to absorb a busy event loop without stalling
-/// queries.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Serialize)]
@@ -39,8 +25,7 @@ struct EmbedDatum {
     embedding: Vec<f32>,
 }
 
-/// HTTP-driven implementation of [`Embedder`]. Connects to a llama-server
-/// instance running with `--embedding`. Returns L2-normalised vectors.
+/// [`Embedder`] backed by a llama-server running with `--embedding`.
 pub struct LlamaEmbedder {
     client: reqwest::Client,
     base_url: String,
@@ -49,12 +34,8 @@ pub struct LlamaEmbedder {
 }
 
 impl LlamaEmbedder {
-    /// Probe the server, latch the dim, and return a ready-to-use client.
-    ///
-    /// `request_timeout` applies per `embed()` call. The probe itself
-    /// uses the same budget; first-load may take longer, but
-    /// `EmbedService::start` already waited for `/health` so the model
-    /// is loaded by the time we get here.
+    /// Probe the server once to learn the vector dimension.
+    /// `request_timeout` applies to the probe and every `embed` call.
     pub async fn new(
         host: &str,
         port: u16,
@@ -150,11 +131,11 @@ async fn embed_raw(
 }
 
 fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
-    let mut sum_sq = 0.0f64;
-    for &x in &v {
-        sum_sq += (x as f64) * (x as f64);
-    }
-    let norm = sum_sq.sqrt();
+    let norm = v
+        .iter()
+        .map(|&x| f64::from(x) * f64::from(x))
+        .sum::<f64>()
+        .sqrt();
     if !norm.is_finite() || norm == 0.0 {
         return v;
     }

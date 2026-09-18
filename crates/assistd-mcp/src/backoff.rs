@@ -1,10 +1,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// Cap on consecutive failed restart attempts before a server's
-/// supervisor backs off to a slow-cadence retry loop in
-/// `HealthState::Unhealthy`. Matches the embed-server budget at
-/// `assistd_embed::server::backoff::MAX_CONSECUTIVE_FAILURES`.
+/// Consecutive failed restarts before the supervisor drops to the
+/// slow [`UNHEALTHY_RETRY_INTERVAL`] cadence.
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 /// A transport that ran successfully for at least this many seconds
@@ -12,11 +10,9 @@ pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 /// long-lived server that occasionally crashes does not get parked.
 pub const MIN_HEALTHY_SECONDS: u64 = 30;
 
-/// Rolling-window cap on restarts, counted regardless of how long the
-/// preceding session lived. Without it a server that stays up for
-/// [`MIN_HEALTHY_SECONDS`] before each crash resets the consecutive
-/// counter every cycle and restarts forever. Mirrors
-/// `assistd_llm::llama_server::backoff::MAX_RESTARTS_PER_WINDOW`.
+/// Rolling-window cap on restarts. Without it a server that stays up
+/// just past [`MIN_HEALTHY_SECONDS`] before each crash would reset the
+/// consecutive counter every cycle and restart forever.
 pub const MAX_RESTARTS_PER_WINDOW: usize = 10;
 
 /// Width of the rolling window used by [`MAX_RESTARTS_PER_WINDOW`].
@@ -25,12 +21,8 @@ pub const RESTART_WINDOW: Duration = Duration::from_secs(600);
 /// Cap on the SSE reconnection delay (also reused for stdio restarts).
 pub const RECONNECT_MAX_SECS: u64 = 60;
 
-/// Once a supervisor has hit [`MAX_CONSECUTIVE_FAILURES`] or
-/// [`MAX_RESTARTS_PER_WINDOW`], it transitions to
-/// `HealthState::Unhealthy` and sleeps this long between further
-/// spawn attempts. Picked so a misconfigured server the user has just
-/// fixed (typo'd binary path, etc.) self-heals within minutes without
-/// the daemon thrashing if the underlying problem persists.
+/// Spawn cadence once either cap is hit: slow enough not to thrash,
+/// fast enough that a fixed config self-heals within minutes.
 pub const UNHEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (capped).
@@ -64,11 +56,9 @@ pub struct RestartPolicy {
 }
 
 impl RestartPolicy {
-    /// Account for a transport session that ended after `ran_for`. A
-    /// session that lasted [`MIN_HEALTHY_SECONDS`] clears the
-    /// consecutive-failure counter; anything shorter counts as a
-    /// failed attempt, which is what makes a server that initializes
-    /// and immediately dies back off instead of looping at 1s.
+    /// Account for a session that ended after `ran_for`: one lasting
+    /// [`MIN_HEALTHY_SECONDS`] clears the consecutive counter, a shorter
+    /// one counts as a failure.
     pub fn record_session_end(&mut self, ran_for: Duration) {
         if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
             self.consecutive_failures = 0;
@@ -82,8 +72,7 @@ impl RestartPolicy {
         self.consecutive_failures += 1;
     }
 
-    /// Register the restart attempt about to be made and decide how
-    /// long to wait before it.
+    /// Register the restart about to be made and decide its delay.
     pub fn next_restart(&mut self, now: Instant) -> RestartDecision {
         while let Some(&oldest) = self.restarts.front() {
             if now.duration_since(oldest) > RESTART_WINDOW {

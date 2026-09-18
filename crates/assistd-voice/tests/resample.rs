@@ -1,13 +1,13 @@
 //! 48 kHz stereo → 16 kHz mono resampling coverage.
 //!
-//! Exercises `mic::consumer::drain_loop` end-to-end by feeding a
+//! Exercises `mic::consumer::drain_to_pcm` end-to-end by feeding a
 //! synthesised mono waveform into the same SPSC ring the cpal
 //! callback pushes into. Bypasses cpal entirely so the test is
 //! deterministic and runs on CI hosts without audio hardware.
 //!
 //! Stereo → mono downmix is a compile-time feature of the cpal
 //! callback (see `mic::capture::CallbackState::push_f32`). By the time
-//! a sample hits `drain_loop`, it is already mono f32 at the device's
+//! a sample hits `drain_to_pcm`, it is already mono f32 at the device's
 //! native sample rate; the only remaining work is the rate conversion
 //! we verify here.
 
@@ -15,7 +15,7 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use assistd_voice::mic::consumer::drain_loop;
+use assistd_voice::mic::consumer::drain_to_pcm;
 use ringbuf::HeapRb;
 #[allow(unused_imports)]
 use ringbuf::traits::Observer;
@@ -23,7 +23,7 @@ use ringbuf::traits::{Producer, Split};
 
 /// Synthesise `seconds` of a single-channel 440 Hz sine at `rate_hz`,
 /// push it into a ring buffer, close the producer, and drain through
-/// `drain_loop` with the stop flag already set. Returns the produced
+/// `drain_to_pcm` with the stop flag already set. Returns the produced
 /// 16 kHz i16 PCM.
 fn run_drain(rate_hz: u32, seconds: f32) -> Vec<i16> {
     let n_in = (rate_hz as f32 * seconds).round() as usize;
@@ -39,7 +39,7 @@ fn run_drain(rate_hz: u32, seconds: f32) -> Vec<i16> {
     drop(prod); // closes the producer side; consumer.occupied_len stays stable
     let stop = Arc::new(AtomicBool::new(true));
     // max_pcm_samples is generous: enough for a few seconds at 16 kHz.
-    drain_loop(cons, rate_hz, 16_000 * 4, stop).expect("drain_loop error")
+    drain_to_pcm(cons, rate_hz, 16_000 * 4, stop).expect("drain_to_pcm error")
 }
 
 #[test]

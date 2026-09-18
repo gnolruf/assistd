@@ -1,10 +1,3 @@
-//! `see PATH`: read an image file and attach it as an
-//! [`crate::Attachment::Image`] on the command output. The chain
-//! executor threads the attachment through pipes, and `RunTool` surfaces
-//! it in the JSON tool result; the chat loop (separate ticket) is
-//! responsible for turning that into a vision input on the model's
-//! next turn.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,20 +5,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::attachment::{LoadImageError, load_image_attachment};
-use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line, io_error_nav};
+use crate::command::{
+    Attachment, Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav,
+};
 use crate::commands::cat::human_size;
 use crate::vision::VisionGate;
 
 /// `see PATH`: read an image file and attach it as a vision input.
 pub struct SeeCommand {
-    /// Shared, runtime-mutable vision flag. Read on every `run()` so a
-    /// model swap on the running llama-server (revalidated by the
-    /// daemon) flips the gate without rebuilding the registry.
     gate: Arc<VisionGate>,
 }
 
 impl SeeCommand {
-    /// Construct a `SeeCommand` with the given vision gate.
     pub fn new(gate: Arc<VisionGate>) -> Self {
         Self { gate }
     }
@@ -33,10 +24,6 @@ impl SeeCommand {
 
 #[cfg(test)]
 impl Default for SeeCommand {
-    /// Test-only default: vision enabled. Lets the
-    /// convention-compliance harness in `command.rs` and the
-    /// per-command tests construct an instance without rethreading the
-    /// flag through every call site.
     fn default() -> Self {
         Self::new(VisionGate::new(true))
     }
@@ -75,7 +62,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     "vision not available: model does not support images",
-                    "Use",
+                    Hint::Use,
                     "a model with mmproj loaded",
                 )
                 .into_bytes(),
@@ -85,15 +72,10 @@ impl Command for SeeCommand {
             return Ok(CommandOutput::usage(self.help()));
         }
         if input.args.len() != 1 {
-            return Ok(CommandOutput::failed(
-                2,
-                error_line(
-                    "see",
-                    "expects exactly one path argument",
-                    "Use",
-                    "see <PATH>",
-                )
-                .into_bytes(),
+            return Ok(CommandOutput::usage_error(
+                "see",
+                "expects exactly one path argument",
+                "see <PATH>",
             ));
         }
         let path = &input.args[0];
@@ -119,7 +101,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     e.user_message(),
-                    "Use",
+                    Hint::Use,
                     "a smaller image (resize or crop)",
                 )
                 .into_bytes(),
@@ -129,7 +111,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     format_args!("not an image file: {path}"),
-                    "Use",
+                    Hint::Use,
                     format_args!("cat {path}"),
                 )
                 .into_bytes(),
@@ -139,7 +121,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     format_args!("not an image file: {path} (detected {detected})"),
-                    "Use",
+                    Hint::Use,
                     format_args!("cat {path}"),
                 )
                 .into_bytes(),
@@ -149,7 +131,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     format_args!("unsupported image format: {path} ({mime})"),
-                    "Use",
+                    Hint::Use,
                     "PNG, JPEG, or WebP",
                 )
                 .into_bytes(),
@@ -161,15 +143,8 @@ impl Command for SeeCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures::PNG_BYTES;
     use tempfile::tempdir;
-
-    const PNG_BYTES: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
-        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-    ];
 
     #[tokio::test]
     async fn attaches_png_image() {
@@ -266,11 +241,8 @@ mod tests {
         assert!(stderr.contains("Use: see <PATH>"), "{stderr}");
     }
 
-    /// AC #3: when vision is disabled, `see` short-circuits with the
-    /// exact wording "vision not available: model does not support
-    /// images" and never touches the filesystem (so a real path
-    /// argument is irrelevant; we still pass one to mirror normal
-    /// usage).
+    /// With vision disabled `see` never touches the filesystem, so the
+    /// path argument is irrelevant.
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
         let out = SeeCommand::new(VisionGate::new(false))

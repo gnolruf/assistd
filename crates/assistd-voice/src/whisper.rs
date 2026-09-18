@@ -1,6 +1,4 @@
-//! Whisper-rs-backed `Transcriber`. Downloads the model on first use,
-//! chooses GPU or CPU inference, and wraps whisper.cpp's native Silero
-//! VAD for silence trimming.
+//! Whisper-rs-backed [`Transcriber`].
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -13,19 +11,18 @@ use whisper_rs::{
 };
 
 use crate::gpu;
-use crate::model_cache::{self, default_cache_dir};
+use crate::hf_download;
 use crate::transcribe::{Transcriber, TranscriptionError};
 
-/// Runtime-configurable knobs used by each `transcribe` call.
 #[derive(Debug, Clone)]
 struct InferenceConfig {
     threads: Option<u32>,
     beams: u32,
-    vad: Option<VadRuntime>,
+    vad: Option<SileroVadParams>,
 }
 
 #[derive(Debug, Clone)]
-struct VadRuntime {
+struct SileroVadParams {
     model_path: String,
     silence_secs: f32,
 }
@@ -38,22 +35,17 @@ pub struct WhisperTranscriber {
 }
 
 impl WhisperTranscriber {
-    /// Returns a builder for constructing a [`WhisperTranscriber`].
     pub fn builder() -> WhisperTranscriberBuilder {
         WhisperTranscriberBuilder::default()
-    }
-
-    /// Reports whether this transcriber was built against a GPU-backed
-    /// whisper context. Voice orchestration uses this to decide whether
-    /// the queue-and-fallback flow is even needed; a CPU-only primary
-    /// never contends with the LLM on the same device.
-    pub fn is_gpu(&self) -> bool {
-        self.is_gpu
     }
 }
 
 #[async_trait]
 impl Transcriber for WhisperTranscriber {
+    fn is_gpu(&self) -> bool {
+        self.is_gpu
+    }
+
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
         if pcm_i16_16k_mono.is_empty() {
             return Err(TranscriptionError::EmptyAudio);
@@ -111,21 +103,21 @@ fn run_inference(
     if let Some(vad) = &cfg.vad {
         params.set_vad_model_path(Some(vad.model_path.as_str()));
         params.enable_vad(true);
-        let mut vp = WhisperVadParams::default();
+        let mut vad_params = WhisperVadParams::default();
         let ms = (vad.silence_secs * 1000.0)
             .round()
             .clamp(0.0, i32::MAX as f32) as i32;
-        vp.set_min_silence_duration(ms);
-        params.set_vad_params(vp);
+        vad_params.set_min_silence_duration(ms);
+        params.set_vad_params(vad_params);
     }
 
     state
         .full(params, &audio)
         .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
 
-    let n = state.full_n_segments();
+    let segment_count = state.full_n_segments();
     let mut out = String::new();
-    for i in 0..n {
+    for i in 0..segment_count {
         let Some(segment) = state.get_segment(i) else {
             continue;
         };
@@ -137,12 +129,12 @@ fn run_inference(
     Ok(out.trim().to_string())
 }
 
-/// Builder for [`WhisperTranscriber`]. `build()` is async because it may
-/// Minimum trailing silence, in seconds, that Silero VAD needs before it
-/// will trim a segment. Maps to whisper.cpp's `min_silence_duration_ms`.
+/// Minimum trailing silence, in seconds, before Silero VAD trims a
+/// segment. Maps to whisper.cpp's `min_silence_duration_ms`.
 pub const VAD_SILENCE_SECS: f32 = 0.5;
 
-/// download model files and probe NVML.
+/// Builder for [`WhisperTranscriber`]. `build()` is async because it
+/// may download model files.
 #[derive(Debug, Default, Clone)]
 pub struct WhisperTranscriberBuilder {
     model: Option<String>,
@@ -207,8 +199,7 @@ impl WhisperTranscriberBuilder {
         self
     }
 
-    /// Populate from a [`TranscriptionConfig`] for ergonomic wiring from
-    /// the daemon.
+    /// Populate from a [`TranscriptionConfig`](assistd_config::TranscriptionConfig).
     pub fn from_config(cfg: &assistd_config::TranscriptionConfig) -> Self {
         Self {
             model: Some(cfg.model.clone()),
@@ -222,13 +213,9 @@ impl WhisperTranscriberBuilder {
         }
     }
 
-    /// Finalize the builder: download any missing model files, initialize the
-    /// whisper.cpp context, and return a ready-to-use [`WhisperTranscriber`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TranscriptionError`] if a required model identifier is missing,
-    /// the model download fails, or the whisper context cannot be initialized.
+    /// Download any missing model files and initialize the whisper
+    /// context. Errors when a required model identifier is missing,
+    /// a download fails, or the context cannot be initialized.
     pub async fn build(self) -> Result<WhisperTranscriber, TranscriptionError> {
         whisper_rs::install_logging_hooks();
 
@@ -236,9 +223,11 @@ impl WhisperTranscriberBuilder {
             id: String::new(),
             reason: "model identifier is required".into(),
         })?;
-        let cache_dir = self.cache_dir.unwrap_or_else(default_cache_dir);
+        let cache_dir = self
+            .cache_dir
+            .unwrap_or_else(|| hf_download::default_cache_dir("whisper"));
 
-        let model_path = model_cache::ensure_model(&model, &cache_dir).await?;
+        let model_path = hf_download::ensure_cached(&model, &cache_dir).await?;
         let vad_runtime = if self.vad_enabled {
             let vad_id = self
                 .vad_model
@@ -246,8 +235,8 @@ impl WhisperTranscriberBuilder {
                     id: String::new(),
                     reason: "vad_model identifier is required when vad_enabled".into(),
                 })?;
-            let vad_path = model_cache::ensure_model(&vad_id, &cache_dir).await?;
-            Some(VadRuntime {
+            let vad_path = hf_download::ensure_cached(&vad_id, &cache_dir).await?;
+            Some(SileroVadParams {
                 model_path: vad_path.to_string_lossy().into_owned(),
                 silence_secs: self.vad_silence_secs.max(0.0),
             })
@@ -255,7 +244,7 @@ impl WhisperTranscriberBuilder {
             None
         };
 
-        let use_gpu = decide_use_gpu(self.prefer_gpu);
+        let use_gpu = should_use_gpu(self.prefer_gpu);
         let model_path_str = model_path.to_string_lossy().into_owned();
         let ctx = tokio::task::spawn_blocking(move || {
             let mut params = WhisperContextParameters::new();
@@ -277,53 +266,21 @@ impl WhisperTranscriberBuilder {
     }
 }
 
-/// Build a CPU-backed [`WhisperTranscriber`] sharing the same model (and
-/// VAD, if enabled) as the primary. Used by
-/// [`crate::transcribe::QueuedTranscriber`] as its lazily-initialized
-/// fallback when the GPU is contended. Reuses
-/// [`model_cache::ensure_model`] so the weights aren't re-downloaded.
+/// Build a CPU-backed [`WhisperTranscriber`] from the same config as
+/// the primary, sharing its cached model files.
 pub async fn build_cpu_fallback(
     cfg: &assistd_config::TranscriptionConfig,
     cache_dir_override: Option<PathBuf>,
 ) -> Result<WhisperTranscriber, TranscriptionError> {
-    whisper_rs::install_logging_hooks();
-
-    let cache_dir = cache_dir_override
-        .or_else(|| cfg.model_cache_dir.clone())
-        .unwrap_or_else(default_cache_dir);
-    let model_path = model_cache::ensure_model(&cfg.model, &cache_dir).await?;
-
-    let vad_runtime = if cfg.vad_enabled {
-        let vad_path = model_cache::ensure_model(&cfg.vad_model, &cache_dir).await?;
-        Some(VadRuntime {
-            model_path: vad_path.to_string_lossy().into_owned(),
-            silence_secs: VAD_SILENCE_SECS,
-        })
-    } else {
-        None
-    };
-
-    let model_path_str = model_path.to_string_lossy().into_owned();
-    let ctx = tokio::task::spawn_blocking(move || {
-        let mut params = WhisperContextParameters::new();
-        params.use_gpu(false);
-        WhisperContext::new_with_params(&model_path_str, params)
-    })
-    .await?
-    .map_err(|err| TranscriptionError::WhisperInit(err.to_string()))?;
-
-    Ok(WhisperTranscriber {
-        ctx: Arc::new(ctx),
-        cfg: InferenceConfig {
-            threads: cfg.threads.map(NonZeroU32::get),
-            beams: cfg.beams.get(),
-            vad: vad_runtime,
-        },
-        is_gpu: false,
-    })
+    let cache_dir = cache_dir_override.or_else(|| cfg.model_cache_dir.clone());
+    WhisperTranscriberBuilder::from_config(cfg)
+        .cache_dir(cache_dir)
+        .prefer_gpu(false)
+        .build()
+        .await
 }
 
-fn decide_use_gpu(prefer: bool) -> bool {
+fn should_use_gpu(prefer: bool) -> bool {
     if !cfg!(feature = "cuda") {
         tracing::info!(
             target: "assistd::voice::whisper",

@@ -1,21 +1,6 @@
-//! Typed Unix-socket client wrapper for the assistd IPC protocol.
-//!
-//! Eight CLI subcommands and the chat TUI all open the same Unix socket,
-//! send a [`Request`] line, and pump [`Event`] lines back. This module
-//! collapses that plumbing into one type so callers don't reinvent the
-//! framing each time.
-//!
-//! Two connection shapes are supported:
-//!
-//! - [`IpcClient::one_shot`]: "send one Request, shutdown write half,
-//!   read until terminal Event". The vast majority of CLI calls take
-//!   this path.
-//! - [`IpcClient::open_dialog`]: bidirectional. The connection stays
-//!   write-open after the initial Request so the client can answer
-//!   mid-stream prompts (e.g. [`Request::ConfirmResponse`]) on the same
-//!   socket. Used by the chat TUI's Query and PttStop flows.
-//!
-//! Available only with the `client` cargo feature.
+//! Unix-socket client for the IPC protocol: [`IpcClient::one_shot`]
+//! for request/stream calls and [`IpcClient::open_dialog`] when the
+//! client must answer mid-stream prompts on the same connection.
 
 use std::path::{Path, PathBuf};
 
@@ -29,19 +14,16 @@ use crate::{Event, Request, socket_path};
 /// Errors produced by the IPC client.
 #[derive(Debug, Error)]
 pub enum IpcClientError {
-    /// The daemon socket couldn't be reached. Most likely "daemon not
-    /// running"; callers can use this signal to drive an auto-spawn
-    /// path.
+    /// The daemon socket couldn't be reached, usually because the
+    /// daemon isn't running.
     #[error("daemon not reachable at {path}: {source}")]
     NotReachable {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    /// Generic I/O failure on a previously-opened connection.
     #[error("ipc i/o error: {0}")]
     Io(#[from] std::io::Error),
-    /// JSON serialization or deserialization error.
     #[error("ipc json error: {0}")]
     Json(#[from] serde_json::Error),
     /// Daemon closed the connection before emitting `Done` or `Error`.
@@ -49,64 +31,48 @@ pub enum IpcClientError {
     DaemonClosed,
 }
 
-/// Convenience alias for `Result<T, `[`IpcClientError`]`>`.
 pub type Result<T> = std::result::Result<T, IpcClientError>;
 
-/// Connection factory. Construct once, reuse across calls; `Clone` is
-/// cheap (single `PathBuf`).
+/// Connection factory bound to one socket path.
 #[derive(Debug, Clone)]
 pub struct IpcClient {
     socket_path: PathBuf,
 }
 
 impl IpcClient {
-    /// Use the default socket path (`$XDG_RUNTIME_DIR/assistd.sock` or
-    /// `/tmp/assistd-$USER.sock`).
+    /// Bind to [`socket_path`].
     pub fn new() -> Self {
         Self {
             socket_path: socket_path(),
         }
     }
 
-    /// Use a specific socket path. Primarily for tests.
     pub fn with_path(p: impl Into<PathBuf>) -> Self {
         Self {
             socket_path: p.into(),
         }
     }
 
-    /// The configured socket path. Useful for diagnostics and for
-    /// callers that want to probe `path.exists()` before connecting.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
-    /// Open the socket, send a single Request, shut down the write
-    /// half, and return an [`EventStream`] that yields events until
-    /// the daemon emits `Done` or `Error` (or closes mid-stream).
+    /// Send one request, close the write half, and stream events until
+    /// the daemon emits `Done` or `Error`.
     pub async fn one_shot(&self, req: Request) -> Result<EventStream> {
         let stream = self.connect().await?;
         let (read, mut write) = stream.into_split();
-        let mut payload = serde_json::to_string(&req)?;
-        payload.push('\n');
-        write.write_all(payload.as_bytes()).await?;
-        write.flush().await?;
+        write_frame(&mut write, &req).await?;
         write.shutdown().await?;
         Ok(EventStream::new(read))
     }
 
-    /// Open the socket and send the initial Request, but keep the
-    /// write half open. The returned [`DialogConnection`] can read
-    /// streamed events and write additional Requests (e.g. a
-    /// [`Request::ConfirmResponse`] in reply to a daemon-issued
-    /// [`Event::ConfirmRequest`]) on the same connection.
+    /// Send the initial request but keep the write half open so further
+    /// requests, such as a [`Request::ConfirmResponse`], can follow.
     pub async fn open_dialog(&self, initial: Request) -> Result<DialogConnection> {
         let stream = self.connect().await?;
         let (read, mut write) = stream.into_split();
-        let mut payload = serde_json::to_string(&initial)?;
-        payload.push('\n');
-        write.write_all(payload.as_bytes()).await?;
-        write.flush().await?;
+        write_frame(&mut write, &initial).await?;
         Ok(DialogConnection {
             write,
             events: EventStream::new(read),
@@ -129,12 +95,15 @@ impl Default for IpcClient {
     }
 }
 
+async fn write_frame(write: &mut OwnedWriteHalf, req: &Request) -> Result<()> {
+    let mut payload = serde_json::to_string(req)?;
+    payload.push('\n');
+    write.write_all(payload.as_bytes()).await?;
+    write.flush().await?;
+    Ok(())
+}
+
 /// Stream of [`Event`]s read from a daemon connection.
-///
-/// `next_event` returns `Ok(Some(_))` for each event, `Ok(None)` when
-/// the daemon closes the connection cleanly, and `Err(_)` for I/O or
-/// JSON failures. Most callers want to loop until they see a terminal
-/// event ([`Event::is_terminal`]).
 pub struct EventStream {
     inner: tokio::io::Lines<BufReader<OwnedReadHalf>>,
 }
@@ -152,10 +121,8 @@ impl EventStream {
         }
     }
 
-    /// Read the next event. `Ok(None)` means the daemon closed the
-    /// stream without an explicit terminal event; callers should
-    /// usually map this to [`IpcClientError::DaemonClosed`] when they
-    /// haven't already seen `Done`/`Error`.
+    /// The next event, or `Ok(None)` when the daemon closed the stream
+    /// without a terminal event.
     pub async fn next_event(&mut self) -> Result<Option<Event>> {
         match self.inner.next_line().await? {
             None => Ok(None),
@@ -163,9 +130,8 @@ impl EventStream {
         }
     }
 
-    /// Drain the stream into a `Vec`. Reads until either a terminal
-    /// event or `Ok(None)`. Convenient for one-shot CLI calls that
-    /// don't need to react to events as they arrive.
+    /// Collect events up to and including the terminal one. A stream
+    /// closed early is [`IpcClientError::DaemonClosed`].
     pub async fn collect(mut self) -> Result<Vec<Event>> {
         let mut out = Vec::new();
         loop {
@@ -183,37 +149,25 @@ impl EventStream {
     }
 }
 
-/// Bidirectional connection: read events as they arrive, send
-/// additional Requests at any time. Used by the chat TUI to answer
-/// mid-stream confirmation prompts on the same connection that's
-/// streaming the LLM response.
+/// Bidirectional connection: read events as they arrive, send further
+/// requests at any time.
 pub struct DialogConnection {
     write: OwnedWriteHalf,
     events: EventStream,
 }
 
 impl DialogConnection {
-    /// Receive the next event from the daemon. Same semantics as
-    /// [`EventStream::next_event`].
+    /// See [`EventStream::next_event`].
     pub async fn next_event(&mut self) -> Result<Option<Event>> {
         self.events.next_event().await
     }
 
-    /// Send a Request on the open connection. The most common case is
-    /// a [`Request::ConfirmResponse`] in reply to an inbound
-    /// [`Event::ConfirmRequest`]; the daemon also accepts arbitrary
-    /// additional Requests but most flows don't use that.
     pub async fn send(&mut self, req: Request) -> Result<()> {
-        let mut payload = serde_json::to_string(&req)?;
-        payload.push('\n');
-        self.write.write_all(payload.as_bytes()).await?;
-        self.write.flush().await?;
-        Ok(())
+        write_frame(&mut self.write, &req).await
     }
 
-    /// Close the write half, signalling end-of-input to the daemon.
-    /// The event stream remains readable until the daemon emits its
-    /// terminal event (or closes its end).
+    /// Close the write half. Events remain readable until the daemon
+    /// emits its terminal event.
     pub async fn close_write(&mut self) -> Result<()> {
         self.write.shutdown().await?;
         Ok(())

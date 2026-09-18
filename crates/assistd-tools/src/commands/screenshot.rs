@@ -1,46 +1,29 @@
-//! `screenshot [--full|--focused]`: capture the screen as a PNG and
-//! attach it as a vision input for the next LLM turn.
-//!
-//! Mirrors `SeeCommand` in shape: returns a [`crate::Attachment::Image`]
-//! on success. The bytes come from `maim` (X11) or `grim` (Wayland) instead
-//! of `tokio::fs::read`. Backend is auto-detected from `XDG_SESSION_TYPE`
-//! / `WAYLAND_DISPLAY` / `DISPLAY` unless the policy overrides it.
-//!
-//! For `--focused` we delegate window/region resolution to the platform's
-//! native tools (xdotool on X11; swaymsg / hyprctl on Wayland) and feed
-//! the resulting geometry to grim. Compositors we don't recognise return
-//! a descriptive error pointing at `--full`.
-//!
-//! In-memory only: PNG bytes never touch disk on the way out.
+//! `screenshot [--full|--focused|--monitor=NAME]`: capture the screen
+//! through `maim` (X11) or `grim` (Wayland) and attach the PNG as a
+//! vision input. `--focused` resolves the window geometry through
+//! xdotool, swaymsg, or hyprctl. The PNG bytes never touch disk.
 
-use std::collections::VecDeque;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command as ProcCommand;
-use tokio::time::timeout;
 
-use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line};
+use crate::attachment::MAX_IMAGE_BYTES;
+use crate::command::{Attachment, Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::commands::cat::human_size;
+use crate::exec::{SPAWN_FAILED_EXIT, TIMEOUT_EXIT, WaitOutcome, capture, exit_code};
+use crate::vision::VisionGate;
 
-const SPAWN_FAILED_EXIT: i32 = 127;
-const TIMEOUT_EXIT: i32 = 137;
-/// Cap on stderr captured per backend invocation. Prevents a chatty
-/// child from filling memory if something goes badly wrong.
 const STDERR_TAIL_LINES: usize = 20;
 
 /// Configuration for the screenshot command.
 #[derive(Debug, Clone)]
 pub struct ScreenshotPolicyCfg {
-    /// Force a specific backend. `None` = auto-detect on every call.
+    /// Force a specific backend; `None` auto-detects on every call.
     pub backend: Option<Backend>,
-    /// Subprocess timeout. Capture is fast on a healthy compositor; the
-    /// timeout exists to prevent a wedged child from locking the agent.
     pub timeout: Duration,
 }
 
@@ -53,8 +36,7 @@ impl Default for ScreenshotPolicyCfg {
     }
 }
 
-/// Display-server backend. The capture binary depends on this:
-/// `maim` for X11, `grim` for Wayland.
+/// Display-server backend, which selects the capture binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     X11,
@@ -65,9 +47,6 @@ pub enum Backend {
 enum Target {
     Full,
     Focused,
-    /// Capture only the named monitor/output. On X11 the name is
-    /// resolved through `xrandr` to a geometry passed to maim; on
-    /// Wayland it's passed verbatim to grim's `-o` flag.
     Monitor(String),
 }
 
@@ -82,28 +61,21 @@ enum WaylandCompositor {
 /// and attach it as a vision input for the next LLM turn.
 pub struct ScreenshotCommand {
     cfg: Arc<ScreenshotPolicyCfg>,
-    /// Shared, runtime-mutable vision flag. See [`crate::VisionGate`].
-    /// Read on every `run()` so a model swap (revalidated by the daemon)
-    /// can flip the gate without rebuilding the registry.
-    gate: Arc<crate::VisionGate>,
+    gate: Arc<VisionGate>,
 }
 
 impl ScreenshotCommand {
-    /// Construct a `ScreenshotCommand` with the given policy and vision gate.
-    pub fn new(cfg: Arc<ScreenshotPolicyCfg>, gate: Arc<crate::VisionGate>) -> Self {
+    pub fn new(cfg: Arc<ScreenshotPolicyCfg>, gate: Arc<VisionGate>) -> Self {
         Self { cfg, gate }
     }
 }
 
 #[cfg(test)]
 impl Default for ScreenshotCommand {
-    /// Test-only default: auto-detect backend, 5-second timeout, vision
-    /// enabled. Lets the convention-compliance harness in `command.rs`
-    /// construct an instance without config plumbing.
     fn default() -> Self {
         Self::new(
             Arc::new(ScreenshotPolicyCfg::default()),
-            crate::VisionGate::new(true),
+            VisionGate::new(true),
         )
     }
 }
@@ -165,24 +137,19 @@ impl Command for ScreenshotCommand {
                 error_line(
                     "screenshot",
                     "vision not available: model does not support images",
-                    "Use",
+                    Hint::Use,
                     "a model with mmproj loaded",
                 )
                 .into_bytes(),
             ));
         }
-        let target = match parse_args(&input.args) {
+        let target = match parse_target(&input.args) {
             Ok(t) => t,
             Err(msg) => {
-                return Ok(CommandOutput::failed(
-                    2,
-                    error_line(
-                        "screenshot",
-                        msg,
-                        "Use",
-                        "screenshot --full or screenshot --focused",
-                    )
-                    .into_bytes(),
+                return Ok(CommandOutput::usage_error(
+                    "screenshot",
+                    msg,
+                    "screenshot --full or screenshot --focused",
                 ));
             }
         };
@@ -197,7 +164,7 @@ impl Command for ScreenshotCommand {
                         error_line(
                             "screenshot",
                             msg,
-                            "Try",
+                            Hint::Try,
                             "running this from a graphical session",
                         )
                         .into_bytes(),
@@ -206,24 +173,8 @@ impl Command for ScreenshotCommand {
             },
         };
 
-        match capture(backend, &target, self.cfg.timeout).await {
+        match capture_target(backend, &target, self.cfg.timeout).await {
             Ok(png) => {
-                if png.len() as u64 > crate::attachment::MAX_IMAGE_BYTES {
-                    return Ok(CommandOutput::failed(
-                        1,
-                        error_line(
-                            "screenshot",
-                            format_args!(
-                                "captured PNG too large ({} > {} max)",
-                                human_size(png.len()),
-                                human_size(crate::attachment::MAX_IMAGE_BYTES as usize),
-                            ),
-                            "Try",
-                            "--focused, or capture a single monitor",
-                        )
-                        .into_bytes(),
-                    ));
-                }
                 let stdout = format!(
                     "captured PNG ({}, {}, backend={}); attached to next turn\n",
                     human_size(png.len()),
@@ -245,7 +196,7 @@ impl Command for ScreenshotCommand {
     }
 }
 
-fn parse_args(args: &[String]) -> Result<Target, String> {
+fn parse_target(args: &[String]) -> Result<Target, String> {
     match args.len() {
         0 => Ok(Target::Full),
         1 => match args[0].as_str() {
@@ -290,66 +241,67 @@ fn backend_label(b: Backend) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------- detection
-
-fn detect_backend() -> Result<Backend, &'static str> {
-    detect_backend_from_env(
-        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
-        std::env::var_os("WAYLAND_DISPLAY").is_some(),
-        std::env::var_os("DISPLAY").is_some(),
-    )
+/// The environment variables a display server advertises itself with.
+struct DisplayEnv<'a> {
+    session_type: Option<&'a str>,
+    wayland_display: bool,
+    x_display: bool,
 }
 
-fn detect_backend_from_env(
-    xdg_session_type: Option<&str>,
-    has_wayland: bool,
-    has_x: bool,
-) -> Result<Backend, &'static str> {
-    if let Some(s) = xdg_session_type {
-        match s {
-            "wayland" => return Ok(Backend::Wayland),
-            "x11" => return Ok(Backend::X11),
-            _ => {} // unrecognised; fall through to env-var check
-        }
+fn detect_backend() -> Result<Backend, &'static str> {
+    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+    detect_backend_in(DisplayEnv {
+        session_type: session_type.as_deref(),
+        wayland_display: std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        x_display: std::env::var_os("DISPLAY").is_some(),
+    })
+}
+
+fn detect_backend_in(env: DisplayEnv<'_>) -> Result<Backend, &'static str> {
+    match env.session_type {
+        Some("wayland") => return Ok(Backend::Wayland),
+        Some("x11") => return Ok(Backend::X11),
+        _ => {}
     }
-    match (has_wayland, has_x) {
-        // Hybrid (Wayland + XWayland) sessions: prefer Wayland tooling.
-        // X-only programs still get caught by grim if they're on a
-        // Wayland output; the inverse is not true.
+    match (env.wayland_display, env.x_display) {
+        // In a Wayland + XWayland session grim still captures X clients;
+        // the inverse is not true.
         (true, _) => Ok(Backend::Wayland),
         (false, true) => Ok(Backend::X11),
         (false, false) => Err("no display server detected (no WAYLAND_DISPLAY or DISPLAY)"),
     }
 }
 
-fn detect_wayland_compositor() -> WaylandCompositor {
-    detect_wayland_compositor_from_env(
-        std::env::var_os("SWAYSOCK").is_some(),
-        std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
-        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-    )
+/// The environment variables a Wayland compositor advertises itself with.
+struct WaylandEnv<'a> {
+    swaysock: bool,
+    hyprland_signature: bool,
+    current_desktop: Option<&'a str>,
 }
 
-fn detect_wayland_compositor_from_env(
-    has_swaysock: bool,
-    has_hypr_signature: bool,
-    xdg_current_desktop: Option<&str>,
-) -> WaylandCompositor {
-    if has_swaysock {
+fn detect_wayland_compositor() -> WaylandCompositor {
+    let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+    detect_wayland_compositor_in(WaylandEnv {
+        swaysock: std::env::var_os("SWAYSOCK").is_some(),
+        hyprland_signature: std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
+        current_desktop: current_desktop.as_deref(),
+    })
+}
+
+fn detect_wayland_compositor_in(env: WaylandEnv<'_>) -> WaylandCompositor {
+    if env.swaysock {
         return WaylandCompositor::Sway;
     }
-    if has_hypr_signature {
+    if env.hyprland_signature {
         return WaylandCompositor::Hyprland;
     }
-    let xdg = xdg_current_desktop.unwrap_or("");
+    let xdg = env.current_desktop.unwrap_or("");
     match xdg.to_ascii_lowercase().as_str() {
         "sway" => WaylandCompositor::Sway,
         "hyprland" => WaylandCompositor::Hyprland,
         _ => WaylandCompositor::Unknown(xdg.to_string()),
     }
 }
-
-// ------------------------------------------------------------------ capture
 
 #[derive(Debug)]
 enum CaptureError {
@@ -369,6 +321,9 @@ enum CaptureError {
     EmptyOutput {
         binary: String,
     },
+    TooLarge {
+        size: usize,
+    },
     FocusedUnsupportedOnWayland {
         compositor: String,
     },
@@ -377,46 +332,37 @@ enum CaptureError {
     },
 }
 
-async fn capture(
+async fn capture_target(
     backend: Backend,
     target: &Target,
     deadline: Duration,
 ) -> Result<Vec<u8>, CaptureError> {
     match (backend, target) {
-        (Backend::X11, Target::Full) => spawn_subprocess("maim", &[], deadline).await,
+        (Backend::X11, Target::Full) => run_capture("maim", &[], deadline).await,
         (Backend::X11, Target::Focused) => capture_x11_focused(deadline).await,
         (Backend::X11, Target::Monitor(name)) => capture_x11_monitor(name, deadline).await,
-        (Backend::Wayland, Target::Full) => spawn_subprocess("grim", &["-"], deadline).await,
+        (Backend::Wayland, Target::Full) => run_capture("grim", &["-"], deadline).await,
         (Backend::Wayland, Target::Focused) => capture_wayland_focused(deadline).await,
         (Backend::Wayland, Target::Monitor(name)) => {
-            spawn_subprocess("grim", &["-o", name, "-"], deadline).await
+            run_capture("grim", &["-o", name, "-"], deadline).await
         }
     }
 }
 
-/// Parse `xrandr --listmonitors` output. Each non-header line looks
-/// like:
-///   ` 0: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1`
-/// or:
-///   ` 1: +DP-2 2560/600x1440/340+1920+0  DP-2`
-/// We extract the `WIDTH/...xHEIGHT/...+X+Y` triple, drop the
-/// physical-size denominators, and return `WxH+X+Y` formatted for
-/// maim's `-g` flag. Match by trailing connector name (last whitespace
-/// token on the line) since the asterisks/pluses on the leading
-/// connector field vary.
+/// Find `monitor` in `xrandr --listmonitors` output and return its
+/// geometry as `WxH+X+Y` for maim's `-g` flag. Lines look like
+/// ` 0: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1`; the trailing
+/// connector name is matched because the flags on the leading one vary.
 fn parse_xrandr_monitor_geom(listing: &str, monitor: &str) -> Option<String> {
     for line in listing.lines() {
-        // Skip the `Monitors: N` header.
         if !line.starts_with(|c: char| c.is_whitespace() || c.is_ascii_digit()) {
             continue;
         }
         let trimmed = line.trim();
-        // Last whitespace-separated token is the connector name.
         let name = trimmed.split_whitespace().next_back()?;
         if name != monitor {
             continue;
         }
-        // The geometry token is the one matching `<num>/<num>x<num>/<num>+<num>+<num>`.
         for tok in trimmed.split_whitespace() {
             if let Some(geom) = strip_xrandr_geom_token(tok) {
                 return Some(geom);
@@ -426,146 +372,98 @@ fn parse_xrandr_monitor_geom(listing: &str, monitor: &str) -> Option<String> {
     None
 }
 
-/// Strip a single xrandr geometry token like `1920/598x1200/336+0+0`
-/// down to maim's `1920x1200+0+0` form. Returns `None` if the token
-/// doesn't match the expected shape.
+/// Reduce an xrandr geometry token `<w>/<wmm>x<h>/<hmm>±<x>±<y>` to
+/// maim's `<w>x<h>±<x>±<y>`.
 fn strip_xrandr_geom_token(tok: &str) -> Option<String> {
-    // Required structure: `<w>/<wmm>x<h>/<hmm>+<x>+<y>` (the second
-    // `+` may be `-` for monitors positioned off-zero, but we accept
-    // any sign).
     let (lhs, after_x) = tok.split_once('x')?;
     let (w_with_mm, _) = lhs.split_once('/')?;
     let w: u32 = w_with_mm.parse().ok()?;
-    // After 'x' we have `<h>/<hmm>+<x>+<y>`. Take the first '+' or
-    // '-' as the start of the offset block (after the height/mm).
     let h_end = after_x.find(['+', '-']).filter(|i| *i > 0)?;
-    let height_with_mm = &after_x[..h_end];
-    let offsets = &after_x[h_end..];
-    let (h_with_mm, _) = height_with_mm.split_once('/')?;
+    let (h_with_mm, _) = after_x[..h_end].split_once('/')?;
     let h: u32 = h_with_mm.parse().ok()?;
-    // `offsets` begins with the sign of x. Must contain exactly one
-    // more sign-prefixed number for y.
-    let mut chars = offsets.char_indices().peekable();
-    chars.next()?; // consume leading sign
-    let next_sign_idx = chars.find(|(_, c)| *c == '+' || *c == '-')?.0;
-    let x_part = &offsets[..next_sign_idx];
-    let y_part = &offsets[next_sign_idx..];
-    // Validate both parts parse as signed integers.
+    let offsets = &after_x[h_end..];
+    let y_start = offsets[1..].find(['+', '-'])? + 1;
+    let (x_part, y_part) = offsets.split_at(y_start);
     x_part.parse::<i32>().ok()?;
     y_part.parse::<i32>().ok()?;
     Some(format!("{w}x{h}{x_part}{y_part}"))
 }
 
-/// Look up `monitor`'s geometry via `xrandr --listmonitors` and feed
-/// it to maim as `-g WxH+X+Y`. xrandr emits one line per active
-/// monitor in the form:
-///   `1: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1`
-/// We need the `1920x1200+0+0` triple for maim.
 async fn capture_x11_monitor(monitor: &str, deadline: Duration) -> Result<Vec<u8>, CaptureError> {
-    let raw = spawn_subprocess("xrandr", &["--listmonitors"], deadline).await?;
+    let raw = run_capture("xrandr", &["--listmonitors"], deadline).await?;
     let listing = String::from_utf8_lossy(&raw);
     let geom = parse_xrandr_monitor_geom(&listing, monitor).ok_or_else(|| CaptureError::Parse {
         what: format!("monitor `{monitor}` not found in xrandr output"),
     })?;
-    spawn_subprocess("maim", &["-g", &geom], deadline).await
+    run_capture("maim", &["-g", &geom], deadline).await
 }
 
-/// Spawn `binary` with `args`, drain stdout to `Vec<u8>`, drain stderr to
-/// a tail, wait for exit (or timeout), and return the bytes. The subprocess
-/// pattern (`kill_on_drop` + `process_group(0)` on Unix) mirrors
-/// `assistd-voice/src/piper/synth.rs`: a timeout drops the `Child`,
-/// which sends SIGKILL to the process group via `kill_on_drop`.
-async fn spawn_subprocess(
+/// Run `binary` to completion and return its stdout.
+async fn run_capture(
     binary: &str,
     args: &[&str],
     deadline: Duration,
 ) -> Result<Vec<u8>, CaptureError> {
     let mut cmd = ProcCommand::new(binary);
-    cmd.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(if e.kind() == std::io::ErrorKind::NotFound {
-                CaptureError::BinaryMissing {
-                    binary: binary.to_string(),
-                }
-            } else {
-                CaptureError::Spawn {
-                    binary: binary.to_string(),
-                    msg: e.to_string(),
-                }
+    cmd.args(args);
+    let max_output = MAX_IMAGE_BYTES as usize;
+    let captured = capture(cmd, &[], deadline, max_output).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            CaptureError::BinaryMissing {
+                binary: binary.to_string(),
+            }
+        } else {
+            CaptureError::Spawn {
+                binary: binary.to_string(),
+                msg: e.to_string(),
+            }
+        }
+    })?;
+    match captured.outcome {
+        WaitOutcome::Exited(status) if status.success() => {}
+        WaitOutcome::Exited(status) => {
+            return Err(CaptureError::NonZero {
+                binary: binary.to_string(),
+                status: exit_code(&status),
+                stderr_tail: stderr_tail(&captured.stderr),
             });
         }
-    };
-
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
-
-    let drain_stdout = async {
-        let mut buf = Vec::new();
-        let mut reader = stdout;
-        let _ = reader.read_to_end(&mut buf).await;
-        buf
-    };
-    let drain_stderr = async {
-        let mut tail: VecDeque<String> = VecDeque::with_capacity(STDERR_TAIL_LINES);
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if tail.len() == STDERR_TAIL_LINES {
-                tail.pop_front();
-            }
-            tail.push_back(line);
+        WaitOutcome::WaitErr(e) => {
+            return Err(CaptureError::Spawn {
+                binary: binary.to_string(),
+                msg: format!("wait: {e}"),
+            });
         }
-        tail.into_iter().collect::<Vec<_>>().join("\n")
-    };
-
-    let work = async {
-        let (stdout_bytes, stderr_tail, status) =
-            tokio::join!(drain_stdout, drain_stderr, child.wait());
-        let status = status.map_err(|e| CaptureError::Spawn {
-            binary: binary.to_string(),
-            msg: format!("wait: {e}"),
-        })?;
-        Ok::<_, CaptureError>((stdout_bytes, stderr_tail, status))
-    };
-
-    let (stdout_bytes, stderr_tail, status) = match timeout(deadline, work).await {
-        Ok(Ok(triple)) => triple,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => return Err(CaptureError::Timeout),
-    };
-
-    if !status.success() {
-        return Err(CaptureError::NonZero {
-            binary: binary.to_string(),
-            status: status.code().unwrap_or(TIMEOUT_EXIT),
-            stderr_tail,
-        });
+        WaitOutcome::Timeout => return Err(CaptureError::Timeout),
+        WaitOutcome::Overflow => {
+            return Err(CaptureError::TooLarge {
+                size: captured.stdout.len(),
+            });
+        }
     }
-    if stdout_bytes.is_empty() {
+    if captured.stdout.is_empty() {
         return Err(CaptureError::EmptyOutput {
             binary: binary.to_string(),
         });
     }
-    Ok(stdout_bytes)
+    Ok(captured.stdout)
+}
+
+fn stderr_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(STDERR_TAIL_LINES)..].join("\n")
 }
 
 async fn capture_x11_focused(deadline: Duration) -> Result<Vec<u8>, CaptureError> {
-    let id_bytes = spawn_subprocess("xdotool", &["getactivewindow"], deadline).await?;
+    let id_bytes = run_capture("xdotool", &["getactivewindow"], deadline).await?;
     let id_str = String::from_utf8_lossy(&id_bytes).trim().to_string();
     if id_str.is_empty() || id_str.parse::<u64>().is_err() {
         return Err(CaptureError::Parse {
             what: format!("xdotool active window id: {id_str:?}"),
         });
     }
-    spawn_subprocess("maim", &["-i", &id_str], deadline).await
+    run_capture("maim", &["-i", &id_str], deadline).await
 }
 
 async fn capture_wayland_focused(deadline: Duration) -> Result<Vec<u8>, CaptureError> {
@@ -582,11 +480,11 @@ async fn capture_wayland_focused(deadline: Duration) -> Result<Vec<u8>, CaptureE
             });
         }
     };
-    spawn_subprocess("grim", &["-g", &geom, "-"], deadline).await
+    run_capture("grim", &["-g", &geom, "-"], deadline).await
 }
 
 async fn focused_geom_sway(deadline: Duration) -> Result<String, CaptureError> {
-    let json = spawn_subprocess("swaymsg", &["-t", "get_tree", "-r"], deadline).await?;
+    let json = run_capture("swaymsg", &["-t", "get_tree", "-r"], deadline).await?;
     let v: Value = serde_json::from_slice(&json).map_err(|e| CaptureError::Parse {
         what: format!("swaymsg JSON: {e}"),
     })?;
@@ -617,7 +515,7 @@ fn find_focused_sway_rect(v: &Value) -> Option<String> {
 }
 
 async fn focused_geom_hyprland(deadline: Duration) -> Result<String, CaptureError> {
-    let json = spawn_subprocess("hyprctl", &["activewindow", "-j"], deadline).await?;
+    let json = run_capture("hyprctl", &["activewindow", "-j"], deadline).await?;
     let v: Value = serde_json::from_slice(&json).map_err(|e| CaptureError::Parse {
         what: format!("hyprctl JSON: {e}"),
     })?;
@@ -636,8 +534,6 @@ fn parse_hyprland_geom(v: &Value) -> Option<String> {
     Some(format!("{x},{y} {w}x{h}"))
 }
 
-// ----------------------------------------------------- error -> CommandOutput
-
 fn capture_error_to_output(err: CaptureError) -> CommandOutput {
     match err {
         CaptureError::BinaryMissing { binary } => CommandOutput::failed(
@@ -645,7 +541,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("backend binary not found: {binary}"),
-                "Install",
+                Hint::Install,
                 install_hint(&binary),
             )
             .into_bytes(),
@@ -655,7 +551,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("spawn failed: {binary}: {msg}"),
-                "Check",
+                Hint::Check,
                 format_args!("{binary} runs from your shell"),
             )
             .into_bytes(),
@@ -665,7 +561,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 "capture timed out",
-                "Try",
+                Hint::Try,
                 "screenshot again or check the compositor is responsive",
             )
             .into_bytes(),
@@ -682,7 +578,13 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             };
             CommandOutput::failed(
                 1,
-                error_line("screenshot", what, "Try", "a different target or backend").into_bytes(),
+                error_line(
+                    "screenshot",
+                    what,
+                    Hint::Try,
+                    "a different target or backend",
+                )
+                .into_bytes(),
             )
         }
         CaptureError::EmptyOutput { binary } => CommandOutput::failed(
@@ -690,8 +592,22 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("{binary} produced no image bytes"),
-                "Try",
+                Hint::Try,
                 "screenshot --full",
+            )
+            .into_bytes(),
+        ),
+        CaptureError::TooLarge { size } => CommandOutput::failed(
+            1,
+            error_line(
+                "screenshot",
+                format_args!(
+                    "captured PNG too large ({} > {} max)",
+                    human_size(size),
+                    human_size(MAX_IMAGE_BYTES as usize),
+                ),
+                Hint::Try,
+                "--focused, or capture a single monitor",
             )
             .into_bytes(),
         ),
@@ -700,7 +616,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("--focused not supported on Wayland compositor: {compositor}"),
-                "Use",
+                Hint::Use,
                 "screenshot --full (supported compositors for --focused: sway, Hyprland)",
             )
             .into_bytes(),
@@ -710,7 +626,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("failed to parse: {what}"),
-                "Try",
+                Hint::Try,
                 "screenshot --full",
             )
             .into_bytes(),
@@ -733,33 +649,33 @@ fn install_hint(binary: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    // ---- parse_args ------------------------------------------------------
+    // ---- parse_target ------------------------------------------------------
 
     #[test]
     fn parse_full_default() {
-        assert_eq!(parse_args(&[]), Ok(Target::Full));
+        assert_eq!(parse_target(&[]), Ok(Target::Full));
     }
 
     #[test]
     fn parse_full_explicit() {
-        assert_eq!(parse_args(&["--full".into()]), Ok(Target::Full));
+        assert_eq!(parse_target(&["--full".into()]), Ok(Target::Full));
     }
 
     #[test]
     fn parse_focused() {
-        assert_eq!(parse_args(&["--focused".into()]), Ok(Target::Focused));
+        assert_eq!(parse_target(&["--focused".into()]), Ok(Target::Focused));
     }
 
     #[test]
     fn parse_too_many_args() {
-        let err = parse_args(&["--full".into(), "--focused".into()]).unwrap_err();
+        let err = parse_target(&["--full".into(), "--focused".into()]).unwrap_err();
         assert!(err.contains("at most one"), "{err}");
     }
 
     #[test]
     fn parse_monitor_equals_form() {
         assert_eq!(
-            parse_args(&["--monitor=DP-1".into()]),
+            parse_target(&["--monitor=DP-1".into()]),
             Ok(Target::Monitor("DP-1".into()))
         );
     }
@@ -767,20 +683,20 @@ mod tests {
     #[test]
     fn parse_monitor_two_arg_form() {
         assert_eq!(
-            parse_args(&["--monitor".into(), "HDMI-1".into()]),
+            parse_target(&["--monitor".into(), "HDMI-1".into()]),
             Ok(Target::Monitor("HDMI-1".into()))
         );
     }
 
     #[test]
     fn parse_monitor_without_value_errors() {
-        let err = parse_args(&["--monitor".into()]).unwrap_err();
+        let err = parse_target(&["--monitor".into()]).unwrap_err();
         assert!(err.contains("--monitor=<name>"), "{err}");
     }
 
     #[test]
     fn parse_monitor_empty_equals_value_errors() {
-        let err = parse_args(&["--monitor=".into()]).unwrap_err();
+        let err = parse_target(&["--monitor=".into()]).unwrap_err();
         assert!(err.contains("--monitor"), "{err}");
     }
 
@@ -807,12 +723,16 @@ mod tests {
         assert!(out.attachments.is_empty());
     }
 
-    // ---- detect_backend_from_env -----------------------------------------
+    // ---- detect_backend_in -----------------------------------------
 
     #[test]
     fn detect_backend_xdg_wayland() {
         assert_eq!(
-            detect_backend_from_env(Some("wayland"), false, false),
+            detect_backend_in(DisplayEnv {
+                session_type: Some("wayland"),
+                wayland_display: false,
+                x_display: false
+            }),
             Ok(Backend::Wayland)
         );
     }
@@ -820,23 +740,45 @@ mod tests {
     #[test]
     fn detect_backend_xdg_x11() {
         assert_eq!(
-            detect_backend_from_env(Some("x11"), false, false),
+            detect_backend_in(DisplayEnv {
+                session_type: Some("x11"),
+                wayland_display: false,
+                x_display: false
+            }),
             Ok(Backend::X11)
         );
     }
 
     #[test]
     fn detect_backend_no_display() {
-        assert!(detect_backend_from_env(None, false, false).is_err());
+        assert!(
+            detect_backend_in(DisplayEnv {
+                session_type: None,
+                wayland_display: false,
+                x_display: false
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn detect_backend_xdg_tty_falls_back_to_env() {
         // Login on TTY without WAYLAND_DISPLAY/DISPLAY → no display server.
-        assert!(detect_backend_from_env(Some("tty"), false, false).is_err());
+        assert!(
+            detect_backend_in(DisplayEnv {
+                session_type: Some("tty"),
+                wayland_display: false,
+                x_display: false
+            })
+            .is_err()
+        );
         // TTY but DISPLAY is forwarded → X11.
         assert_eq!(
-            detect_backend_from_env(Some("tty"), false, true),
+            detect_backend_in(DisplayEnv {
+                session_type: Some("tty"),
+                wayland_display: false,
+                x_display: true
+            }),
             Ok(Backend::X11)
         );
     }
@@ -845,22 +787,37 @@ mod tests {
     fn detect_backend_hybrid_prefers_wayland() {
         // XWayland-enabled Wayland session: both env vars set, prefer Wayland.
         assert_eq!(
-            detect_backend_from_env(None, true, true),
+            detect_backend_in(DisplayEnv {
+                session_type: None,
+                wayland_display: true,
+                x_display: true
+            }),
             Ok(Backend::Wayland)
         );
     }
 
     #[test]
     fn detect_backend_x11_via_display_only() {
-        assert_eq!(detect_backend_from_env(None, false, true), Ok(Backend::X11));
+        assert_eq!(
+            detect_backend_in(DisplayEnv {
+                session_type: None,
+                wayland_display: false,
+                x_display: true
+            }),
+            Ok(Backend::X11)
+        );
     }
 
-    // ---- detect_wayland_compositor_from_env ------------------------------
+    // ---- detect_wayland_compositor_in ------------------------------
 
     #[test]
     fn compositor_swaysock_wins_over_other_signals() {
         assert_eq!(
-            detect_wayland_compositor_from_env(true, true, Some("KDE")),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: true,
+                hyprland_signature: true,
+                current_desktop: Some("KDE")
+            }),
             WaylandCompositor::Sway
         );
     }
@@ -868,7 +825,11 @@ mod tests {
     #[test]
     fn compositor_hypr_signature() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, true, None),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: true,
+                current_desktop: None
+            }),
             WaylandCompositor::Hyprland
         );
     }
@@ -876,7 +837,11 @@ mod tests {
     #[test]
     fn compositor_xdg_sway() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, false, Some("sway")),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: false,
+                current_desktop: Some("sway")
+            }),
             WaylandCompositor::Sway
         );
     }
@@ -884,7 +849,11 @@ mod tests {
     #[test]
     fn compositor_xdg_hyprland_capitalized() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, false, Some("Hyprland")),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: false,
+                current_desktop: Some("Hyprland")
+            }),
             WaylandCompositor::Hyprland
         );
     }
@@ -892,7 +861,11 @@ mod tests {
     #[test]
     fn compositor_unknown_carries_xdg_value() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, false, Some("KDE")),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: false,
+                current_desktop: Some("KDE")
+            }),
             WaylandCompositor::Unknown("KDE".into())
         );
     }
@@ -900,7 +873,11 @@ mod tests {
     #[test]
     fn compositor_unknown_when_xdg_missing() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, false, None),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: false,
+                current_desktop: None
+            }),
             WaylandCompositor::Unknown(String::new())
         );
     }
@@ -1083,14 +1060,9 @@ mod tests {
         assert!(strip_xrandr_geom_token("1920/598x1200/336").is_none());
     }
 
-    // ---- missing-binary path ---------------------------------------------
-
-    /// AC #4: a missing capture binary returns a descriptive error. Drives
-    /// the BinaryMissing branch directly via `spawn_subprocess` with a
-    /// guaranteed-missing executable name (no env mutation needed).
     #[tokio::test]
     async fn missing_binary_returns_127_with_install_hint() {
-        let err = spawn_subprocess(
+        let err = run_capture(
             "assistd-screenshot-not-a-real-bin-xyz",
             &[],
             Duration::from_secs(2),
@@ -1168,9 +1140,6 @@ mod tests {
         assert!(s.len() <= 80, "summary is {} chars: {s:?}", s.len());
     }
 
-    /// AC #3: when vision is disabled, `screenshot` short-circuits with
-    /// the exact wording "vision not available: model does not support
-    /// images" without spawning maim/grim.
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
         let cmd = ScreenshotCommand::new(
@@ -1204,7 +1173,7 @@ mod tests {
     fn summary_changes_when_vision_disabled() {
         let enabled = ScreenshotCommand::new(
             Arc::new(ScreenshotPolicyCfg::default()),
-            crate::VisionGate::new(true),
+            VisionGate::new(true),
         );
         let disabled = ScreenshotCommand::new(
             Arc::new(ScreenshotPolicyCfg::default()),

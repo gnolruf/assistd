@@ -1,26 +1,13 @@
 //! Vector retrieval over `embeddings` (chunk-keyed) and
 //! `memory_embeddings` (memory-keyed).
 //!
-//! Both vector collections are stored as little-endian `f32` BLOBs and
-//! L2-normalised at write time, so cosine similarity collapses to a
-//! plain dot product. At query time we:
-//!
-//! 1. Read every `(rowid, vector)` for the configured model. Reads
-//!    bypass the writer task via `conn.call(...)` directly; SQLite WAL
-//!    mode supports concurrent readers alongside a single writer.
-//! 2. Decode each BLOB with safe `chunks_exact(4)` arithmetic; no
-//!    `unsafe`, and the workspace lints deny it anyway.
-//! 3. Maintain a min-heap of size ≤ K so we don't sort the whole list.
-//! 4. Hydrate the K winners with one batched JOIN against the parent
-//!    table to surface the row's content / key / value.
-//!
-//! Linear scan is fine for the expected DB scale: even 50K chunks at
-//! 768-dim is ~150 MB of f32, microseconds to dot-product on modern
-//! hardware. If/when a heavy user pushes beyond that, an HNSW / sqlite-vec
-//! extension can drop in behind this same trait without touching callers.
+//! Vectors are little-endian `f32` BLOBs, L2-normalised at write time,
+//! so cosine similarity is a plain dot product. Retrieval is a linear
+//! scan into a bounded min-heap, then one batched JOIN to hydrate the
+//! winners; that is ample for a single user's history.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -30,9 +17,8 @@ use serde::{Deserialize, Serialize};
 use super::connection::SqliteHandle;
 use super::conversations::{PersistedRole, SessionId};
 
-/// One conversation-chunk hit, hydrated with the *full* parent message
-/// content (chunks may cut mid-sentence; for the LLM-facing surface we
-/// surface the whole message so the model isn't reading a torso).
+/// One conversation-chunk hit. `content` is the full parent message,
+/// not the chunk text, since chunks may cut mid-sentence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingHit {
     pub conversation_id: i64,
@@ -44,9 +30,7 @@ pub struct EmbeddingHit {
     pub similarity: f32,
 }
 
-/// One saved-memory hit, ranked by semantic similarity to the query.
-/// Same shape `RecallTool` already produces from prefix mode (key/value
-/// pair + similarity score), so the LLM-facing output stays uniform.
+/// One saved-memory hit, ranked by cosine similarity to the query.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryHit {
     pub memory_id: i64,
@@ -55,19 +39,13 @@ pub struct MemoryHit {
     pub similarity: f32,
 }
 
-/// Top-K vector retrieval. Sibling to [`crate::ConversationStore`];
-/// keeping it on its own trait means callers that only need FTS5 can
-/// hold `Arc<dyn ConversationStore>` without a `dim()` requirement.
+/// Top-K vector retrieval over embedded chunks and memories.
 #[async_trait]
 pub trait SemanticStore: Send + Sync + 'static {
-    /// Top-K conversation chunks ranked by cosine. `query_vector` must
-    /// already be L2-normalised (consumers go through `LlamaEmbedder`
-    /// which normalises before returning).
-    ///
-    /// `exclude_session` drops one session's chunks before ranking, so
-    /// callers searching for *other* conversations still get `top_k`
-    /// hits rather than a list padded with the dialogue they are
-    /// already holding in context.
+    /// Top-K conversation chunks by cosine. `query_vector` must already
+    /// be L2-normalised. `exclude_session` drops one session's chunks
+    /// before ranking so the caller still gets `top_k` hits from other
+    /// conversations.
     async fn nearest_chunks(
         &self,
         query_vector: Vec<f32>,
@@ -76,9 +54,8 @@ pub trait SemanticStore: Send + Sync + 'static {
         exclude_session: Option<&SessionId>,
     ) -> Result<Vec<EmbeddingHit>>;
 
-    /// Top-K saved memories ranked by cosine. Same normalisation
-    /// expectation as above. Returns empty when no memories have been
-    /// embedded yet (e.g. fresh DB or model just changed).
+    /// Top-K saved memories by cosine. `query_vector` must already be
+    /// L2-normalised. Empty when nothing is embedded under `model`.
     async fn nearest_memories(
         &self,
         query_vector: Vec<f32>,
@@ -86,36 +63,21 @@ pub trait SemanticStore: Send + Sync + 'static {
         model: &str,
     ) -> Result<Vec<MemoryHit>>;
 
-    /// Diagnostic / health: how many embedding rows exist for the
-    /// configured model? Returned as `(chunks, memories)`. Useful in
-    /// tests and a future `assistd memory stats` view.
+    /// Embedding row counts under `model`, as `(chunks, memories)`.
     async fn count_for_model(&self, model: &str) -> Result<(i64, i64)>;
 
-    /// Diagnostic: rows whose `model` does NOT equal `current`. Used by
-    /// the daemon at startup to warn when a config change has stranded
-    /// pre-existing embeddings under a different model name (the
-    /// retrieval queries filter by model, so stale rows are invisible
-    /// until reindexed). Returns total stale row count + the distinct
-    /// model names that own them, sorted lexicographically.
+    /// Rows embedded under a model other than `current`: the total
+    /// count plus the distinct stale model names, sorted.
     async fn count_stale(&self, current: &str) -> Result<(i64, Vec<String>)>;
 
-    /// Memories that have no embedding under `current`. The reindex
-    /// handler embeds and stores each `(id, value)` to bring them back
-    /// into the recall index. A row appears here when (a) the memory
-    /// was saved while the embedder subsystem was down, or (b) the
-    /// configured embedding model has changed since the row was
-    /// indexed.
+    /// Memories with no embedding under `current`, as `(id, value)`.
     async fn memories_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>>;
 
-    /// Conversation chunks that have no embedding under `current`.
-    /// Symmetric to [`SemanticStore::memories_missing_embedding`].
+    /// Conversation chunks with no embedding under `current`, as
+    /// `(id, content)`.
     async fn chunks_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>>;
 
-    /// Persist a freshly-computed embedding for a `conversation_chunks`
-    /// row. Idempotent on `(chunk_id)` via the same UPSERT the
-    /// background embedder task uses. Used by the reindex handler so
-    /// it can dispatch directly without going through the embedder
-    /// task's mpsc.
+    /// Upsert the embedding for a `conversation_chunks` row.
     async fn store_chunk_embedding(
         &self,
         chunk_id: i64,
@@ -124,8 +86,7 @@ pub trait SemanticStore: Send + Sync + 'static {
         vector: Vec<u8>,
     ) -> Result<()>;
 
-    /// Persist a freshly-computed embedding for a `memories` row.
-    /// Symmetric to [`SemanticStore::store_chunk_embedding`].
+    /// Upsert the embedding for a `memories` row.
     async fn store_memory_embedding(
         &self,
         memory_id: i64,
@@ -135,8 +96,7 @@ pub trait SemanticStore: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-/// Successful-no-op fallback used when the embedding subsystem is
-/// disabled. Mirrors `NoMemoryStore` / `NoConversationStore`.
+/// No-op fallback used when the embedding subsystem is disabled.
 pub struct NoSemanticStore;
 
 #[async_trait]
@@ -190,15 +150,13 @@ impl SemanticStore for NoSemanticStore {
     }
 }
 
-/// SQLite-backed implementation. Holds an `Arc<SqliteHandle>` so it
-/// shares the connection + writer with the other stores.
+/// SQLite-backed [`SemanticStore`].
 #[derive(Clone)]
 pub struct SqliteSemanticStore {
     handle: Arc<SqliteHandle>,
 }
 
 impl SqliteSemanticStore {
-    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
@@ -219,45 +177,37 @@ impl SemanticStore for SqliteSemanticStore {
         let model = model.to_string();
         let excluded = exclude_session.map(|s| s.0.clone());
         let q = query_vector;
-        let ranked: Vec<(i64, f32)> = self
+        let ranked = self
             .handle
             .conn()
-            .call(move |c| -> rusqlite::Result<_> {
-                // Filtering before the cosine scan (rather than after
-                // ranking) keeps a full `top_k` of other-session hits.
-                let mut stmt = c.prepare(
+            .call(move |c| {
+                // Filter before ranking so the excluded session doesn't
+                // eat into `top_k`.
+                scan_top_k(
+                    c,
                     "SELECT e.conversation_chunk_id, e.vector
                      FROM embeddings e
                      JOIN conversation_chunks cc ON cc.id = e.conversation_chunk_id
                      JOIN conversations conv ON conv.id = cc.conversation_id
                      WHERE e.model = ?1 AND (?2 IS NULL OR conv.session_id <> ?2)",
-                )?;
-                let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(top_k + 1);
-                let mut rows = stmt.query(rusqlite::params![model, excluded])?;
-                while let Some(row) = rows.next()? {
-                    let chunk_id: i64 = row.get(0)?;
-                    let bytes: Vec<u8> = row.get(1)?;
-                    let Some(sim) = score_against(&q, &bytes) else {
-                        continue;
-                    };
-                    push_top_k(&mut heap, top_k, chunk_id, sim);
-                }
-                Ok(heap_to_sorted(heap))
+                    rusqlite::params![model, excluded],
+                    &q,
+                    top_k,
+                )
             })
             .await
             .context("nearest_chunks: scan embeddings")?;
         if ranked.is_empty() {
             return Ok(Vec::new());
         }
-        // Batched JOIN keeps hydration O(1) round-trips regardless of K.
         let chunk_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
-        let sims: std::collections::HashMap<i64, f32> = ranked.iter().copied().collect();
-        let placeholders = vec!["?"; chunk_ids.len()].join(",");
+        let sims: HashMap<i64, f32> = ranked.iter().copied().collect();
         let sql = format!(
             "SELECT cc.id, c.id, c.session_id, c.timestamp, c.role, c.content
              FROM conversation_chunks cc
              JOIN conversations c ON c.id = cc.conversation_id
-             WHERE cc.id IN ({placeholders})"
+             WHERE cc.id IN ({})",
+            placeholders(chunk_ids.len())
         );
         let chunk_ids_for_query = chunk_ids.clone();
         let raw: Vec<(i64, i64, String, String, String, String)> = self
@@ -265,12 +215,8 @@ impl SemanticStore for SqliteSemanticStore {
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(&sql)?;
-                let params: Vec<&dyn rusqlite::ToSql> = chunk_ids_for_query
-                    .iter()
-                    .map(|id| id as &dyn rusqlite::ToSql)
-                    .collect();
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(params), |row| {
+                    .query_map(rusqlite::params_from_iter(chunk_ids_for_query), |row| {
                         Ok((
                             row.get::<_, i64>(0)?,
                             row.get::<_, i64>(1)?,
@@ -285,7 +231,7 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .context("nearest_chunks: hydrate winners")?;
-        let by_id: std::collections::HashMap<i64, (i64, String, String, String, String)> = raw
+        let by_id: HashMap<i64, (i64, String, String, String, String)> = raw
             .into_iter()
             .map(|(cc_id, c_id, sess, ts, role, content)| (cc_id, (c_id, sess, ts, role, content)))
             .collect();
@@ -320,23 +266,17 @@ impl SemanticStore for SqliteSemanticStore {
         }
         let model = model.to_string();
         let q = query_vector;
-        let ranked: Vec<(i64, f32)> = self
+        let ranked = self
             .handle
             .conn()
-            .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt =
-                    c.prepare("SELECT memory_id, vector FROM memory_embeddings WHERE model = ?1")?;
-                let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(top_k + 1);
-                let mut rows = stmt.query(rusqlite::params![model])?;
-                while let Some(row) = rows.next()? {
-                    let memory_id: i64 = row.get(0)?;
-                    let bytes: Vec<u8> = row.get(1)?;
-                    let Some(sim) = score_against(&q, &bytes) else {
-                        continue;
-                    };
-                    push_top_k(&mut heap, top_k, memory_id, sim);
-                }
-                Ok(heap_to_sorted(heap))
+            .call(move |c| {
+                scan_top_k(
+                    c,
+                    "SELECT memory_id, vector FROM memory_embeddings WHERE model = ?1",
+                    rusqlite::params![model],
+                    &q,
+                    top_k,
+                )
             })
             .await
             .context("nearest_memories: scan memory_embeddings")?;
@@ -344,21 +284,19 @@ impl SemanticStore for SqliteSemanticStore {
             return Ok(Vec::new());
         }
         let memory_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
-        let sims: std::collections::HashMap<i64, f32> = ranked.iter().copied().collect();
-        let placeholders = vec!["?"; memory_ids.len()].join(",");
-        let sql = format!("SELECT id, key, value FROM memories WHERE id IN ({placeholders})");
+        let sims: HashMap<i64, f32> = ranked.iter().copied().collect();
+        let sql = format!(
+            "SELECT id, key, value FROM memories WHERE id IN ({})",
+            placeholders(memory_ids.len())
+        );
         let memory_ids_for_query = memory_ids.clone();
         let raw: Vec<(i64, String, String)> = self
             .handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(&sql)?;
-                let params: Vec<&dyn rusqlite::ToSql> = memory_ids_for_query
-                    .iter()
-                    .map(|id| id as &dyn rusqlite::ToSql)
-                    .collect();
                 let rows = stmt
-                    .query_map(rusqlite::params_from_iter(params), |row| {
+                    .query_map(rusqlite::params_from_iter(memory_ids_for_query), |row| {
                         Ok((
                             row.get::<_, i64>(0)?,
                             row.get::<_, String>(1)?,
@@ -370,7 +308,7 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .context("nearest_memories: hydrate winners")?;
-        let by_id: std::collections::HashMap<i64, (String, String)> = raw
+        let by_id: HashMap<i64, (String, String)> = raw
             .into_iter()
             .map(|(id, key, value)| (id, (key, value)))
             .collect();
@@ -416,8 +354,7 @@ impl SemanticStore for SqliteSemanticStore {
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut total: i64 = 0;
-                let mut models: std::collections::BTreeSet<String> =
-                    std::collections::BTreeSet::new();
+                let mut models = BTreeSet::new();
                 let sql = "SELECT model, count(*)
                            FROM embeddings WHERE model != ?1 GROUP BY model
                            UNION ALL
@@ -493,8 +430,8 @@ impl SemanticStore for SqliteSemanticStore {
         dim: i64,
         vector: Vec<u8>,
     ) -> Result<()> {
-        use super::writer::{WriteCall, WriteOp};
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::StoreChunkEmbedding {
+        use super::writer::{WriteOp, dispatch_write};
+        dispatch_write(self.handle.writer(), |ack| WriteOp::StoreChunkEmbedding {
             chunk_id,
             model,
             dim,
@@ -511,8 +448,8 @@ impl SemanticStore for SqliteSemanticStore {
         dim: i64,
         vector: Vec<u8>,
     ) -> Result<()> {
-        use super::writer::{WriteCall, WriteOp};
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::StoreMemoryEmbedding {
+        use super::writer::{WriteOp, dispatch_write};
+        dispatch_write(self.handle.writer(), |ack| WriteOp::StoreMemoryEmbedding {
             memory_id,
             model,
             dim,
@@ -523,9 +460,6 @@ impl SemanticStore for SqliteSemanticStore {
     }
 }
 
-// Min-heap entry: smallest similarity at the top so we can pop it when
-// a better candidate arrives. `OrderedFloat` would do this with less
-// boilerplate, but we already avoid extra deps elsewhere, so wrap by hand.
 struct HeapEntry {
     sim: f32,
     rowid: i64,
@@ -544,14 +478,37 @@ impl PartialOrd for HeapEntry {
 }
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse the natural f32 ordering so `BinaryHeap` (which is a
-        // max-heap) acts as a min-heap. NaN treated as the smallest
-        // value so it gets evicted first.
+        // Reversed so the max-heap acts as a min-heap; NaN sorts
+        // smallest so it is evicted first.
         match other.sim.partial_cmp(&self.sim) {
             Some(o) => o,
             None => Ordering::Equal,
         }
     }
+}
+
+fn scan_top_k(
+    c: &rusqlite::Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+    query: &[f32],
+    top_k: usize,
+) -> rusqlite::Result<Vec<(i64, f32)>> {
+    let mut stmt = c.prepare(sql)?;
+    let mut heap = BinaryHeap::with_capacity(top_k + 1);
+    let mut rows = stmt.query(params)?;
+    while let Some(row) = rows.next()? {
+        let rowid: i64 = row.get(0)?;
+        let bytes: Vec<u8> = row.get(1)?;
+        if let Some(sim) = score_against(query, &bytes) {
+            push_top_k(&mut heap, top_k, rowid, sim);
+        }
+    }
+    Ok(heap_to_sorted(heap))
+}
+
+fn placeholders(n: usize) -> String {
+    vec!["?"; n].join(",")
 }
 
 fn push_top_k(heap: &mut BinaryHeap<HeapEntry>, k: usize, rowid: i64, sim: f32) {
@@ -571,18 +528,14 @@ fn heap_to_sorted(heap: BinaryHeap<HeapEntry>) -> Vec<(i64, f32)> {
     v
 }
 
-/// Compute cosine (== dot product, given both sides L2-normalised) of
-/// `query` against the LE-packed f32 BLOB `bytes`. Returns `None` if
-/// the BLOB length is malformed (not a multiple of 4, or dim mismatch);
-/// the row is then silently skipped.
+/// Dot product of `query` against the LE-packed f32 BLOB `bytes`, or
+/// `None` when the BLOB is malformed or its dimension differs.
 fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
     if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let dim = bytes.len() / 4;
     if dim != query.len() {
-        // Embedding from a different model (or model swap mid-deploy);
-        // skip rather than poison the heap.
         return None;
     }
     let (words, _) = bytes.as_chunks::<4>();
@@ -595,9 +548,8 @@ fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
     )
 }
 
-/// Encode an `f32` slice as a LE-packed `Vec<u8>` for storage. Used by
-/// callers that want to construct `WriteOp::StoreChunkEmbedding` /
-/// `StoreMemoryEmbedding` payloads without copy-pasting the byte math.
+/// Encode an `f32` slice as the little-endian BLOB the embedding tables
+/// store.
 pub fn vector_to_blob(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
     for x in v {
@@ -607,532 +559,4 @@ pub fn vector_to_blob(v: &[f32]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::PersistedMessage;
-    use crate::sqlite::SqliteHandle;
-    use crate::sqlite::writer::WriteOp;
-    use std::sync::Arc;
-    use tokio::sync::{oneshot, watch};
-
-    async fn fresh() -> (Arc<SqliteHandle>, tokio::task::JoinHandle<()>) {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("memory.db");
-        std::mem::forget(temp);
-        let (_tx, rx) = watch::channel(false);
-        let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
-        (Arc::new(handle), writer)
-    }
-
-    fn unit_vec(angle: f32) -> Vec<f32> {
-        // 2-d unit vector at the given angle.
-        vec![angle.cos(), angle.sin()]
-    }
-
-    async fn insert_chunk_with_vec(
-        handle: &SqliteHandle,
-        conv_id: i64,
-        chunk_index: i64,
-        v: &[f32],
-        model: &str,
-    ) -> i64 {
-        // store_chunk
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::StoreChunk {
-                conversation_id: conv_id,
-                chunk_index,
-                content: format!("chunk{chunk_index}"),
-                token_count: None,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let chunk_id = rx.await.unwrap().unwrap();
-        // store embedding
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::StoreChunkEmbedding {
-                chunk_id,
-                model: model.into(),
-                dim: v.len() as i64,
-                vector: vector_to_blob(v),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-        chunk_id
-    }
-
-    #[tokio::test]
-    async fn nearest_chunks_empty_store_returns_empty() {
-        let (handle, _w) = fresh().await;
-        let s = SqliteSemanticStore::new(handle);
-        let hits = s
-            .nearest_chunks(unit_vec(0.0), 5, "test-model", None)
-            .await
-            .unwrap();
-        assert!(hits.is_empty());
-    }
-
-    #[tokio::test]
-    async fn nearest_chunks_ranks_by_similarity() {
-        let (handle, _w) = fresh().await;
-        // Create one conversation row to FK the chunks against.
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::BeginSession {
-                session_id: "sess-1".into(),
-                daemon_pid: 1,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::AppendMessage {
-                session_id: "sess-1".into(),
-                turn_id: None,
-                msg: PersistedMessage::user("hello world"),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let conv_id = rx.await.unwrap().unwrap();
-
-        // Insert three chunks with vectors at different angles.
-        // Query points at 0; expect chunk at angle 0 to win, then 0.3, then 1.5.
-        let _c1 = insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "m").await;
-        let _c2 = insert_chunk_with_vec(&handle, conv_id, 1, &unit_vec(0.3), "m").await;
-        let _c3 = insert_chunk_with_vec(&handle, conv_id, 2, &unit_vec(1.5), "m").await;
-
-        let s = SqliteSemanticStore::new(handle);
-        let hits = s.nearest_chunks(unit_vec(0.0), 3, "m", None).await.unwrap();
-        assert_eq!(hits.len(), 3);
-        // Best-first.
-        assert!(hits[0].similarity > hits[1].similarity);
-        assert!(hits[1].similarity > hits[2].similarity);
-        // First hit should be ~1.0.
-        assert!((hits[0].similarity - 1.0).abs() < 1e-4);
-    }
-
-    #[tokio::test]
-    async fn nearest_chunks_top_k_caps_results() {
-        let (handle, _w) = fresh().await;
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::BeginSession {
-                session_id: "s".into(),
-                daemon_pid: 0,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::AppendMessage {
-                session_id: "s".into(),
-                turn_id: None,
-                msg: PersistedMessage::user("x"),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let conv_id = rx.await.unwrap().unwrap();
-        for i in 0..10 {
-            insert_chunk_with_vec(&handle, conv_id, i, &unit_vec((i as f32) * 0.1), "m").await;
-        }
-        let s = SqliteSemanticStore::new(handle);
-        let hits = s.nearest_chunks(unit_vec(0.0), 3, "m", None).await.unwrap();
-        assert_eq!(hits.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn nearest_chunks_can_exclude_one_session() {
-        let (handle, _w) = fresh().await;
-        let mut conv_ids = Vec::new();
-        for session in ["past", "current"] {
-            let (tx, rx) = oneshot::channel();
-            handle
-                .writer()
-                .send(WriteOp::BeginSession {
-                    session_id: session.into(),
-                    daemon_pid: 0,
-                    ack: tx,
-                })
-                .await
-                .unwrap();
-            rx.await.unwrap().unwrap();
-            let (tx, rx) = oneshot::channel();
-            handle
-                .writer()
-                .send(WriteOp::AppendMessage {
-                    session_id: session.into(),
-                    turn_id: None,
-                    msg: PersistedMessage::user(session),
-                    ack: tx,
-                })
-                .await
-                .unwrap();
-            conv_ids.push(rx.await.unwrap().unwrap());
-        }
-        // The current session holds the closer match, so excluding it
-        // has to change the result rather than just trim the tail.
-        insert_chunk_with_vec(&handle, conv_ids[0], 0, &unit_vec(0.4), "m").await;
-        insert_chunk_with_vec(&handle, conv_ids[1], 0, &unit_vec(0.0), "m").await;
-
-        let s = SqliteSemanticStore::new(handle);
-        let all = s.nearest_chunks(unit_vec(0.0), 5, "m", None).await.unwrap();
-        assert_eq!(all.len(), 2);
-
-        let current = SessionId("current".into());
-        let others = s
-            .nearest_chunks(unit_vec(0.0), 5, "m", Some(&current))
-            .await
-            .unwrap();
-        assert_eq!(others.len(), 1);
-        assert_eq!(others[0].session_id, "past");
-    }
-
-    #[tokio::test]
-    async fn nearest_chunks_filters_by_model() {
-        let (handle, _w) = fresh().await;
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::BeginSession {
-                session_id: "s".into(),
-                daemon_pid: 0,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::AppendMessage {
-                session_id: "s".into(),
-                turn_id: None,
-                msg: PersistedMessage::user("x"),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let conv_id = rx.await.unwrap().unwrap();
-        insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "old-model").await;
-        let s = SqliteSemanticStore::new(handle);
-        // Query with the new model name; old-model rows must not appear.
-        let hits = s
-            .nearest_chunks(unit_vec(0.0), 5, "new-model", None)
-            .await
-            .unwrap();
-        assert!(hits.is_empty());
-    }
-
-    #[tokio::test]
-    async fn nearest_memories_round_trips() {
-        let (handle, _w) = fresh().await;
-        // Save a memory; capture its row id from the writer ack.
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::SaveMemory {
-                key: "editor".into(),
-                value: "vim".into(),
-                source_conversation_id: None,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let mem_id = rx.await.unwrap().unwrap();
-        // Embed it.
-        let (tx, rx) = oneshot::channel();
-        let v = unit_vec(0.0);
-        handle
-            .writer()
-            .send(WriteOp::StoreMemoryEmbedding {
-                memory_id: mem_id,
-                model: "m".into(),
-                dim: v.len() as i64,
-                vector: vector_to_blob(&v),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-        // Retrieve.
-        let s = SqliteSemanticStore::new(handle);
-        let hits = s.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].key, "editor");
-        assert_eq!(hits[0].value, "vim");
-        assert!((hits[0].similarity - 1.0).abs() < 1e-4);
-    }
-
-    #[tokio::test]
-    async fn upsert_replaces_memory_embedding_in_place() {
-        let (handle, _w) = fresh().await;
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::SaveMemory {
-                key: "k".into(),
-                value: "v1".into(),
-                source_conversation_id: None,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let mem_id_1 = rx.await.unwrap().unwrap();
-        // Re-save under same key; id should be stable.
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::SaveMemory {
-                key: "k".into(),
-                value: "v2".into(),
-                source_conversation_id: None,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let mem_id_2 = rx.await.unwrap().unwrap();
-        assert_eq!(mem_id_1, mem_id_2, "UPSERT must keep same row id");
-    }
-
-    #[tokio::test]
-    async fn no_semantic_store_returns_empty() {
-        let s = NoSemanticStore;
-        assert!(
-            s.nearest_chunks(vec![1.0], 5, "m", None)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            s.nearest_memories(vec![1.0], 5, "m")
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(s.count_for_model("m").await.unwrap(), (0, 0));
-        let (n, models) = s.count_stale("m").await.unwrap();
-        assert_eq!(n, 0);
-        assert!(models.is_empty());
-    }
-
-    #[tokio::test]
-    async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
-        let (handle, _w) = fresh().await;
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::BeginSession {
-                session_id: "sess-mx".into(),
-                daemon_pid: 1,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::AppendMessage {
-                session_id: "sess-mx".into(),
-                turn_id: None,
-                msg: PersistedMessage::user("x"),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let conv_id = rx.await.unwrap().unwrap();
-
-        // Two chunks: one indexed under "new", one indexed under "old".
-        let _ = insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "new").await;
-        let _ = insert_chunk_with_vec(&handle, conv_id, 1, &unit_vec(0.5), "old").await;
-        // One unindexed chunk (no embedding row at all).
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::StoreChunk {
-                conversation_id: conv_id,
-                chunk_index: 2,
-                content: "naked-chunk".into(),
-                token_count: None,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let naked_chunk = rx.await.unwrap().unwrap();
-
-        // Two memories: one indexed under "new", one bare.
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::SaveMemory {
-                key: "indexed".into(),
-                value: "v1".into(),
-                source_conversation_id: None,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let indexed_mem = rx.await.unwrap().unwrap();
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::StoreMemoryEmbedding {
-                memory_id: indexed_mem,
-                model: "new".into(),
-                dim: 2,
-                vector: vector_to_blob(&unit_vec(0.0)),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::SaveMemory {
-                key: "bare".into(),
-                value: "v2".into(),
-                source_conversation_id: None,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let bare_mem = rx.await.unwrap().unwrap();
-
-        let s = SqliteSemanticStore::new(handle);
-        // Under current = "new":
-        // - Chunks missing: the "old"-indexed chunk + the naked one.
-        // - Memories missing: just the bare memory.
-        let chunks = s.chunks_missing_embedding("new").await.unwrap();
-        assert_eq!(chunks.len(), 2);
-        let chunk_contents: Vec<&str> = chunks.iter().map(|(_, t)| t.as_str()).collect();
-        assert!(chunk_contents.contains(&"chunk1")); // old-indexed
-        assert!(chunk_contents.contains(&"naked-chunk"));
-        assert!(chunks.iter().any(|(id, _)| *id == naked_chunk));
-
-        let memories = s.memories_missing_embedding("new").await.unwrap();
-        assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].0, bare_mem);
-        assert_eq!(memories[0].1, "v2");
-
-        // store_*_embedding should be idempotent: write under "new"
-        // and the row drops out of the missing list.
-        s.store_memory_embedding(
-            bare_mem,
-            "new".to_string(),
-            2,
-            vector_to_blob(&unit_vec(0.0)),
-        )
-        .await
-        .unwrap();
-        let memories = s.memories_missing_embedding("new").await.unwrap();
-        assert!(memories.is_empty());
-    }
-
-    #[tokio::test]
-    async fn count_stale_aggregates_across_chunks_and_memories() {
-        let (handle, _w) = fresh().await;
-        // Create a conversation row to FK chunk inserts.
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::BeginSession {
-                session_id: "sess-stale".into(),
-                daemon_pid: 1,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::AppendMessage {
-                session_id: "sess-stale".into(),
-                turn_id: None,
-                msg: PersistedMessage::user("x"),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let conv_id = rx.await.unwrap().unwrap();
-
-        // Two chunks under "old-A", one under "old-B", one under "new".
-        let _ = insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "old-A").await;
-        let _ = insert_chunk_with_vec(&handle, conv_id, 1, &unit_vec(0.5), "old-A").await;
-        let _ = insert_chunk_with_vec(&handle, conv_id, 2, &unit_vec(1.0), "old-B").await;
-        let _ = insert_chunk_with_vec(&handle, conv_id, 3, &unit_vec(1.5), "new").await;
-
-        // One memory embedding under "old-A".
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::SaveMemory {
-                key: "k".into(),
-                value: "v".into(),
-                source_conversation_id: None,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        let mem_id = rx.await.unwrap().unwrap();
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::StoreMemoryEmbedding {
-                memory_id: mem_id,
-                model: "old-A".into(),
-                dim: 2,
-                vector: vector_to_blob(&unit_vec(0.0)),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-
-        let s = SqliteSemanticStore::new(handle);
-        // Current = "new" → 2 chunk rows under old-A + 1 chunk under old-B
-        // + 1 memory under old-A = 4 stale rows, two distinct models.
-        let (n, models) = s.count_stale("new").await.unwrap();
-        assert_eq!(n, 4);
-        assert_eq!(models, vec!["old-A".to_string(), "old-B".to_string()]);
-
-        // Switching current to "old-A" should leave only the "old-B"
-        // chunk + the "new" chunk as stale = 2 rows, two models.
-        let (n, models) = s.count_stale("old-A").await.unwrap();
-        assert_eq!(n, 2);
-        assert_eq!(models, vec!["new".to_string(), "old-B".to_string()]);
-    }
-
-    #[test]
-    fn vector_to_blob_round_trips() {
-        let v = vec![0.5f32, -0.25, 0.125, 1e-6];
-        let b = vector_to_blob(&v);
-        let (words, _) = b.as_chunks::<4>();
-        let decoded: Vec<f32> = words.iter().copied().map(f32::from_le_bytes).collect();
-        assert_eq!(decoded, v);
-    }
-
-    #[test]
-    fn score_against_dim_mismatch_returns_none() {
-        let q = vec![1.0f32, 0.0];
-        let v_3d = vector_to_blob(&[1.0, 0.0, 0.0]);
-        assert!(score_against(&q, &v_3d).is_none());
-    }
-}
+mod tests;

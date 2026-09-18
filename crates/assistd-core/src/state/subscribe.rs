@@ -1,6 +1,4 @@
-//! Handler for [`assistd_ipc::Request::Subscribe`]: forwards
-//! broadcast-eligible events from the daemon-wide bus to a passive
-//! client until either side closes the connection.
+//! `Subscribe` handler: forwards bus events to a passive client.
 
 use super::AppState;
 use anyhow::Result;

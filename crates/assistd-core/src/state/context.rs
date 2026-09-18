@@ -1,12 +1,8 @@
-//! Per-turn transient context assembly: semantic recall, window snapshot,
-//! and the rendering helpers that turn them into prompt fragments.
+//! Per-turn transient context: semantic recall and the focused window.
 
 use super::AppState;
 use anyhow::Result;
 
-/// Truncate `s` to at most `max_chars` *characters* (not bytes), appending
-/// an ellipsis when truncated. Walks `char_indices` so we never split a
-/// multi-byte character. Used to keep injected context lines short.
 fn truncate_for_context(s: &str, max_chars: usize) -> String {
     let total = s.chars().count();
     if total <= max_chars {
@@ -23,13 +19,9 @@ fn truncate_for_context(s: &str, max_chars: usize) -> String {
 }
 
 impl AppState {
-    /// Embed the user query, find the top-K nearest conversation chunks,
-    /// and return a "Relevant past context: …" block to inject as a
-    /// transient system message. Returns `Ok(None)` when retrieval is a
-    /// no-op (short query, NoEmbedder, no hits).
-    ///
-    /// Best-effort: errors propagate but the caller treats every failure
-    /// (embedder down, dim mismatch, …) as "skip injection".
+    /// Render the nearest past conversation chunks as a context block.
+    /// `Ok(None)` when the query is too short, embedding is off, or
+    /// nothing matched.
     pub(super) async fn build_semantic_context(&self, query: &str) -> Result<Option<String>> {
         if query.trim().chars().count() < 3 {
             return Ok(None);
@@ -62,13 +54,9 @@ impl AppState {
         Ok(Some(block))
     }
 
-    /// Format the focused-window snapshot as a `Current desktop context`
-    /// block for the LLM's per-turn transient system message. Returns
-    /// `None` when the window manager has no opinion (no compositor
-    /// connected, nothing focused, all fields empty).
-    ///
-    /// Errors from the WM backend degrade silently to `None` so a flaky
-    /// compositor never blocks the user's turn.
+    /// Render the focused window as a context block. `None` when no
+    /// compositor is connected, nothing is focused, or the backend
+    /// errored; a flaky compositor never blocks a turn.
     pub(super) async fn build_window_context(&self) -> Option<String> {
         let ctx = match self.subsystems.window_manager.focused_context().await {
             Ok(Some(c)) => c,
@@ -86,10 +74,7 @@ impl AppState {
     }
 }
 
-/// Render a [`assistd_wm::FocusedWindowContext`] into the prompt
-/// fragment injected as a transient system message. Pure (no async,
-/// no `&self`) so it's directly unit-testable. Returns `None` when
-/// every field is empty.
+/// `None` when every field is empty.
 pub(super) fn format_window_context_block(
     ctx: &assistd_wm::FocusedWindowContext,
 ) -> Option<String> {
@@ -127,9 +112,6 @@ pub(super) fn format_window_context_block(
     Some(block)
 }
 
-/// Concatenate the semantic and window context blocks with a blank
-/// line between them. Returns `None` only when both inputs are `None`.
-/// Pure / unit-testable.
 pub(super) fn combine_context_blocks(
     semantic: Option<String>,
     window: Option<String>,

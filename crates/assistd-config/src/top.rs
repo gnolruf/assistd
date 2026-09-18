@@ -94,28 +94,13 @@ impl Config {
         }
 
         if self.voice.enabled {
-            // hotkey may be empty; the user might prefer the IPC-only
-            // PTT pathway (i3 bindsym → `assistd ptt-start/stop`).
             let t = &self.voice.transcription;
-            if !is_valid_hf_id(&t.model) {
-                errors.push(
-                    "voice.transcription.model must be of the form \
-                     '<owner>/<repo>:<file>'"
-                        .into(),
-                );
-            }
-            if t.vad_enabled && !is_valid_hf_id(&t.vad_model) {
-                errors.push(
-                    "voice.transcription.vad_model must be of the form \
-                     '<owner>/<repo>:<file>'"
-                        .into(),
-                );
+            require_hf_id(&mut errors, "voice.transcription.model", &t.model);
+            if t.vad_enabled {
+                require_hf_id(&mut errors, "voice.transcription.vad_model", &t.vad_model);
             }
         }
 
-        // Synthesis (Piper TTS) is gated independently of voice.enabled:
-        // a user might want LLM responses spoken aloud even with no
-        // microphone available.
         if self.voice.synthesis.enabled {
             let s = &self.voice.synthesis;
             if s.binary_path.as_os_str().is_empty() {
@@ -124,11 +109,7 @@ impl Config {
                         .into(),
                 );
             }
-            if !is_valid_hf_id(&s.voice) {
-                errors.push(
-                    "voice.synthesis.voice must be of the form '<owner>/<repo>:<file>'".into(),
-                );
-            }
+            require_hf_id(&mut errors, "voice.synthesis.voice", &s.voice);
             if !s.length_scale.is_finite() || s.length_scale <= 0.0 {
                 errors
                     .push("voice.synthesis.length_scale must be a positive, finite number".into());
@@ -164,9 +145,7 @@ impl Config {
         }
 
         if self.embedding.enabled {
-            if !is_valid_hf_id(&self.embedding.model) {
-                errors.push("embedding.model must be of the form '<owner>/<repo>:<file>'".into());
-            }
+            require_hf_id(&mut errors, "embedding.model", &self.embedding.model);
             if self.embedding.port == self.llama_server.port {
                 errors.push(
                     "embedding.port must differ from llama_server.port (the chat server)".into(),
@@ -270,6 +249,14 @@ impl Config {
             source,
         })?;
         Ok(())
+    }
+}
+
+fn require_hf_id(errors: &mut Vec<String>, field: &str, value: &str) {
+    if !is_valid_hf_id(value) {
+        errors.push(format!(
+            "{field} must be of the form '<owner>/<repo>:<file>'"
+        ));
     }
 }
 

@@ -4,19 +4,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 
-/// Exit code for policy denial. POSIX "command found but not executable" is
-/// the closest semantic match to "we recognize the command but refuse it".
-/// Shared with `BashCommand` so the LLM sees a consistent signal.
-const POLICY_DENIED_EXIT: i32 = 126;
+use crate::exec::POLICY_DENIED_EXIT;
 
-/// Write-command policy, constructed by `assistd-core::build_tools` from
-/// `config.tools.write` at daemon startup. Path strings are canonicalized
-/// once here; runtime checks are fast `Path::starts_with` comparisons.
-///
-/// The allowlist is non-empty by construction: a policy with no permitted
-/// prefixes would gate nothing, so that state is not representable.
+/// Writable-path allowlist, non-empty by construction: a policy with no
+/// permitted prefixes would gate nothing, so that state is not
+/// representable. Prefixes are canonical paths compared with
+/// `Path::starts_with`.
 #[derive(Debug, Clone)]
 pub struct WritePolicyCfg {
     first: PathBuf,
@@ -38,6 +33,17 @@ impl WritePolicyCfg {
     /// The permitted path prefixes, in configuration order.
     pub fn prefixes(&self) -> impl Iterator<Item = &PathBuf> {
         std::iter::once(&self.first).chain(&self.rest)
+    }
+
+    /// Resolve `raw` to the path that will be written, refusing anything
+    /// outside the allowlist.
+    fn resolve(&self, raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
+        let resolved = resolve_for_allowlist(raw, home)?;
+        if self.prefixes().any(|prefix| resolved.starts_with(prefix)) {
+            Ok(resolved)
+        } else {
+            Err(PathResolveError::NotAllowlisted)
+        }
     }
 }
 
@@ -64,13 +70,10 @@ pub struct WriteCommand {
 }
 
 impl WriteCommand {
-    /// Construct a `WriteCommand` with the given policy configuration.
     pub fn new(cfg: Arc<WritePolicyCfg>) -> Self {
         Self { cfg }
     }
 
-    /// Test-only constructor: allowlists the filesystem root, so any
-    /// absolute path is writable. Never used in production.
     #[cfg(test)]
     pub fn permissive_for_tests() -> Self {
         Self {
@@ -117,60 +120,12 @@ impl Command for WriteCommand {
         };
 
         let home = std::env::var("HOME").ok();
-        let write_target: PathBuf = match resolve_for_allowlist(&raw_path, home.as_deref()) {
-            Ok(resolved) => {
-                if !self
-                    .cfg
-                    .prefixes()
-                    .any(|prefix| resolved.starts_with(prefix))
-                {
-                    return Ok(CommandOutput::failed(
-                        POLICY_DENIED_EXIT,
-                        error_line(
-                            "write",
-                            format_args!("{raw_path}: path not in writable allowlist"),
-                            "Check",
-                            "[tools.write] writable_paths in config",
-                        )
-                        .into_bytes(),
-                    ));
-                }
-                resolved
-            }
-            Err(PathResolveError::Relative) => {
+        let write_target = match self.cfg.resolve(&raw_path, home.as_deref()) {
+            Ok(path) => path,
+            Err(e) => {
                 return Ok(CommandOutput::failed(
                     POLICY_DENIED_EXIT,
-                    error_line(
-                        "write",
-                        format_args!("{raw_path}: relative paths not permitted"),
-                        "Try",
-                        "an absolute path under an allowlisted directory",
-                    )
-                    .into_bytes(),
-                ));
-            }
-            Err(PathResolveError::HomeNotSet) => {
-                return Ok(CommandOutput::failed(
-                    POLICY_DENIED_EXIT,
-                    error_line(
-                        "write",
-                        format_args!("{raw_path}: cannot expand ~ ($HOME not set)"),
-                        "Try",
-                        "writing an explicit absolute path instead of ~",
-                    )
-                    .into_bytes(),
-                ));
-            }
-            Err(PathResolveError::AnchorMissing(anchor)) => {
-                return Ok(CommandOutput::failed(
-                    POLICY_DENIED_EXIT,
-                    error_line(
-                        "write",
-                        format_args!("{raw_path}: cannot resolve ancestor {anchor}"),
-                        "Check",
-                        "that the directory exists or widen [tools.write] writable_paths",
-                    )
-                    .into_bytes(),
+                    e.error_line(&raw_path).into_bytes(),
                 ));
             }
         };
@@ -185,13 +140,40 @@ impl Command for WriteCommand {
     }
 }
 
-/// Failure modes for [`resolve_for_allowlist`], turned into distinct error
-/// messages by the caller so the LLM can recover accurately.
 #[derive(Debug)]
 enum PathResolveError {
     Relative,
     HomeNotSet,
     AnchorMissing(String),
+    NotAllowlisted,
+}
+
+impl PathResolveError {
+    fn error_line(&self, raw_path: &str) -> String {
+        let (what, hint, recovery) = match self {
+            Self::Relative => (
+                format!("{raw_path}: relative paths not permitted"),
+                Hint::Try,
+                "an absolute path under an allowlisted directory",
+            ),
+            Self::HomeNotSet => (
+                format!("{raw_path}: cannot expand ~ ($HOME not set)"),
+                Hint::Try,
+                "writing an explicit absolute path instead of ~",
+            ),
+            Self::AnchorMissing(anchor) => (
+                format!("{raw_path}: cannot resolve ancestor {anchor}"),
+                Hint::Check,
+                "that the directory exists or widen [tools.write] writable_paths",
+            ),
+            Self::NotAllowlisted => (
+                format!("{raw_path}: path not in writable allowlist"),
+                Hint::Check,
+                "[tools.write] writable_paths in config",
+            ),
+        };
+        error_line("write", what, hint, recovery)
+    }
 }
 
 fn resolve_for_allowlist(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
@@ -218,9 +200,8 @@ fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveErr
     }
 }
 
-/// Pure-Rust path normalization: collapses `.` and `..` components. Does
-/// not touch disk. On absolute paths, a leading `/..` is silently discarded
-/// (same as the kernel's behaviour).
+/// Collapse `.` and `..` components without touching disk. A leading
+/// `/..` is discarded, as the kernel does.
 pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
     let mut out: Vec<Component<'_>> = Vec::new();
     for comp in path.components() {
@@ -230,15 +211,8 @@ pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
                 Some(Component::Normal(_)) => {
                     out.pop();
                 }
-                Some(Component::RootDir) => {
-                    // `/..` == `/`: don't pop past root.
-                }
-                _ => {
-                    // Leading `..` on a relative path: keep, since the
-                    // caller (above) already rejects relatives. Still
-                    // preserve for completeness
-                    out.push(comp);
-                }
+                Some(Component::RootDir) => {}
+                _ => out.push(comp),
             },
             _ => out.push(comp),
         }

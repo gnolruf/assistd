@@ -1,17 +1,12 @@
-//! Top-level chat application state and reducer.
-//!
-//! `App` owns the output pane, input line, throughput meter, VRAM
-//! state, and an `IpcClient` handle for talking to the daemon. The
-//! `on_*` methods are pure reducers; I/O is confined to `spawn_query`
-//! (opens a daemon dialog connection for a Query) and `handle_attach`
-//! (loads an image from disk).
+//! Chat application state and reducer. The `on_*` methods mutate state
+//! only; I/O lives in the `spawn_*` methods and the attach handler.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_core::{PresenceState, SleepConfig};
-use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
+use assistd_ipc::{Event, IpcClient, Request, Role, StatusKind, StatusSeverity, VoiceCaptureState};
 use assistd_tools::{Attachment, ConfirmationRequest, load_image_attachment};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui_image::picker::Picker;
@@ -26,14 +21,9 @@ use super::vram::ResourceState;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
-/// Rows scrolled per mouse-wheel tick. Three matches the de facto
-/// terminal-app convention (Claude Code, less, htop, …) and keeps a
-/// single click responsive without launching past several messages.
 const MOUSE_WHEEL_STEP: u16 = 3;
 
-/// Slash commands surfaced by the input-line autocomplete popup.
-/// Each entry is `(command, usage_hint)` where `usage_hint` is shown
-/// in dim text next to the command name in the suggestion list.
+/// `(command, usage_hint)` pairs for the autocomplete popup.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/attach", "<path>"),
     ("/fork", "<name>"),
@@ -43,17 +33,13 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/undo", ""),
 ];
 
-/// One image staged by `/attach`, waiting to ride along with the user's
-/// next text submission.
+/// An image staged by `/attach` for the next submission.
 pub struct PendingAttachment {
-    /// Display name (file basename) shown in the attachment indicator and
-    /// the user-prompt tag.
+    /// File basename.
     pub name: String,
     pub mime: String,
     pub bytes: Vec<u8>,
-    /// Pre-built terminal-graphics protocol for inline thumbnail
-    /// rendering. `None` on terminals without graphics support; the
-    /// `📎 attached: ...` info line still appears either way.
+    /// `None` on terminals without graphics support.
     pub protocol: Option<StatefulProtocol>,
 }
 
@@ -70,14 +56,9 @@ impl PendingAttachment {
     }
 }
 
-/// Payload for [`ChatEvent::AttachLoaded`]. Boxed inside the enum so a
-/// `Vec<u8>` of image bytes plus a `StatefulProtocol` (which holds its
-/// own pre-built per-cell terminal-graphics buffers) doesn't bloat the
-/// other variants; `Wire(Event)` and `WireError(String)` were paying
-/// the maximum-variant size on every send before the box.
+/// Boxed inside [`ChatEvent`] so the graphics buffers do not bloat the
+/// other variants.
 pub struct AttachLoadedPayload {
-    #[allow(dead_code)]
-    pub path: String,
     pub name: String,
     pub mime: String,
     pub size: usize,
@@ -85,39 +66,35 @@ pub struct AttachLoadedPayload {
     pub protocol: Option<StatefulProtocol>,
 }
 
-/// Which of the TUI's concurrent daemon connections an event arrived
-/// on. Several run at once — the query dialog, a branch command, the
-/// presence poll, the F2 cycle — and all of them funnel into one
-/// reducer, so the tag says which slice of `App` state a stream is
-/// allowed to retire. Untagged, a status-stream `Done` closes the
-/// visible reply mid-stream and a branch-stream failure never releases
-/// the in-flight branch slot.
+/// Which concurrent daemon connection an event arrived on. Several run
+/// at once and all feed one reducer, so the tag says which slice of
+/// `App` state a stream's terminal event may retire.
 #[derive(Debug, Clone, Copy)]
 pub enum WireStream {
-    /// A `Query` dialog, or a push-to-talk turn the daemon
-    /// auto-dispatched. Owns the assistant message, [`App::generating`]
-    /// and the query writer.
+    /// A query dialog or a push-to-talk turn. Owns the assistant
+    /// message, [`App::generating`] and the query writer.
     Reply,
-    /// `/fork`, `/switch`, `/undo`, `/new`, `/resume` and the startup
-    /// resume. Owns the in-flight branch op and its buffered rows.
+    /// A branch command. Owns the in-flight branch op and its rows.
     Branch,
-    /// Presence/voice polls and the F2 cycle. Indicator state only.
+    /// Polls and the F2 cycle. Indicator state only.
     Status,
 }
 
 pub enum ChatEvent {
-    /// Streaming event from the daemon over IPC. Includes both
-    /// query-response events (Delta/ToolCall/ToolResult/Done) and
-    /// status-poll events (Presence/VoiceState/ListenState/...).
-    Wire { stream: WireStream, event: Event },
-    /// The wire connection ended in an unexpected way (I/O error,
-    /// daemon closed mid-stream without `Done`).
-    WireError { stream: WireStream, message: String },
-    /// `/attach <path>` finished reading + validating the file. Carries
-    /// everything the App needs to update the UI.
+    Wire {
+        stream: WireStream,
+        event: Event,
+    },
+    /// The connection ended without a terminal event.
+    WireError {
+        stream: WireStream,
+        message: String,
+    },
     AttachLoaded(Box<AttachLoadedPayload>),
-    /// `/attach <path>` failed (missing file, unsupported format, etc.).
-    AttachFailed { path: String, message: String },
+    AttachFailed {
+        path: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Debug for ChatEvent {
@@ -135,7 +112,6 @@ impl std::fmt::Debug for ChatEvent {
                 .finish(),
             ChatEvent::AttachLoaded(p) => f
                 .debug_struct("AttachLoaded")
-                .field("path", &p.path)
                 .field("name", &p.name)
                 .field("mime", &p.mime)
                 .field("size", &p.size)
@@ -150,160 +126,83 @@ impl std::fmt::Debug for ChatEvent {
     }
 }
 
-/// Pending destructive-command prompt displayed as an overlay. Only one
-/// is ever active at a time; the agent loop on the daemon side blocks
-/// on the gate until we send the `ConfirmResponse`.
+/// Destructive-command prompt shown as an overlay while the daemon's
+/// agent loop blocks on the answer.
 pub struct ConfirmationModal {
-    /// Renders as the modal body (script + matched_pattern). Reuses the
-    /// `assistd-tools::ConfirmationRequest` shape so the UI code can
-    /// stay agnostic of where the request came from.
     pub request: ConfirmationRequest,
-    /// Routing key the daemon sent in `Event::ConfirmRequest`. Echoed
-    /// back verbatim in the outgoing `Request::ConfirmResponse`.
+    /// Echoed back in the `Request::ConfirmResponse`.
     confirm_id: String,
 }
 
-/// Top-level TUI application state.
-///
-/// Owns the output pane, input line, throughput meter, resource stats, and
-/// the IPC connection to the daemon. The `on_*` methods are pure reducers;
-/// I/O is confined to [`App::spawn_query`] and the attach handler.
 pub struct App {
-    /// Scrollable output region.
     pub output: OutputPane,
-    /// Single-line input with readline keybindings and history.
     pub input: InputLine,
-    /// Token-rate meter for the status bar.
     pub throughput: ThroughputMeter,
-    /// Live VRAM / RAM readings.
     pub resources: ResourceState,
-    /// Display name of the loaded model.
     pub model_name: String,
-    /// `true` while a query stream is open.
+    /// `true` while a reply stream is open.
     pub generating: bool,
-    /// Set to `true` to exit the event loop.
     pub quitting: bool,
-    /// Index into [`SPINNER_CHARS`], incremented on each tick.
     pub spinner: usize,
-    /// Transient status-bar message with its display timestamp. Cleared by [`App::on_tick`] after [`NOTICE_HOLD`].
+    /// Transient status-bar message and when it was set.
     pub notice: Option<(String, Instant)>,
-    /// Height of the output area as of the last render, used for scrolling math.
     pub last_output_height: u16,
-    /// Last-known daemon presence state; `None` until the first poll response.
+    /// `None` until the first poll response.
     pub presence_state: Option<PresenceState>,
-    /// Idle-sleep thresholds copied from config for the local countdown display.
     pub sleep_cfg: SleepConfig,
-    /// Local wallclock for the most recent user activity (typing /
-    /// submitting / answering a modal). Used to compute the
-    /// status-bar countdown without round-tripping to the daemon. The
-    /// daemon authoritatively transitions on its own clock; this is a
-    /// display approximation that drifts at most a couple seconds.
+    /// Local approximation of the daemon's idle clock, for the
+    /// status-bar countdown.
     last_activity_at: Instant,
-    /// Set at chat startup from a daemon `GetCapabilities` probe.
-    /// `false` means the loaded model has no mmproj; `/attach`
-    /// rejects with the AC `vision not available` error and the
-    /// status bar renders `vision: off`.
     pub vision_enabled: bool,
-    /// Active confirmation modal, if any. Only one can be open at a time.
     pub modal: Option<ConfirmationModal>,
-    /// Push-to-talk capture state. Updated by `Event::VoiceState`
-    /// flowing in over the wire. Rendered as an indicator in
-    /// `render_status` (recording = red, transcribing = yellow).
     pub listening: VoiceCaptureState,
-    /// TTS enabled flag, polled from the daemon. Rendered as the
-    /// "voice-output: on/off" chip on the status bar.
     pub voice_output_enabled: bool,
-    /// Continuous-listen active flag, polled from the daemon.
     pub listen_active: bool,
-    /// Command of the in-flight tool call, captured on `Event::ToolCall`
-    /// and consumed on the matching `Event::ToolResult` so the
-    /// call+result pair becomes one `ToolBlock`. The agent loop is
-    /// strictly serial (only one tool runs at a time), so a single
-    /// slot suffices.
+    /// `(call id, command)` of the tool call awaiting its result. One
+    /// slot suffices because the agent loop runs tools serially.
     pending_tool_call: Option<(String, String)>,
-    /// Images staged by `/attach`, drained into the user's next
-    /// submission.
     pub pending_attachments: Vec<PendingAttachment>,
-    /// Terminal graphics-protocol picker, probed once at TUI startup.
     picker: Option<Picker>,
-    /// Daemon connection factory.
     ipc: Arc<IpcClient>,
-    /// The reply turn that currently owns the output pane. `None`
-    /// between turns.
+    /// The reply turn that owns the output pane; `None` between turns.
     active_reply: Option<ActiveReply>,
-    /// A spoken utterance transcribed while another turn still owned
-    /// the pane. Held back until that turn finishes, so the spoken line
-    /// is drawn above its own answer instead of splicing into the
-    /// running reply.
+    /// An utterance transcribed while another turn owned the pane, held
+    /// back so it is drawn above its own answer.
     queued_transcription: Option<QueuedTranscription>,
-    /// Tracks an in-flight branch command so [`Self::on_wire_event`]
-    /// can route `BranchInfo` / `BranchSwitched` / `HistoryEntry` /
-    /// `UndoApplied` events into the right rendering path. Cleared on
-    /// terminal `Done` / `Error`.
     in_flight_branch_op: Option<BranchOp>,
-    /// Buffer for branch rows accumulated during a `/resume` listing
-    /// until the terminal `Done`, at which point they're handed off to
-    /// the picker modal in one batch.
+    /// Rows of a `/resume` listing, handed to the picker on `Done`.
     branches_buffer: Vec<BranchListEntry>,
     chat_tx: mpsc::Sender<ChatEvent>,
-    /// Highlighted entry in the slash-command suggestion popup.
-    /// Reset to 0 whenever the buffer leaves a `/` prefix; clamped to
-    /// `len-1` after each keystroke filters the list down.
     slash_selected: usize,
-    /// Set by Esc while the slash popup is visible. Cleared once the
-    /// buffer no longer starts with `/`, so the next `/<x>` reopens
-    /// the popup as the user expects.
+    /// Set by Esc on the slash popup; cleared when the buffer leaves
+    /// its `/` prefix.
     slash_dismissed: bool,
-    /// Interactive branch picker shown by `/resume`. Mutually
-    /// exclusive with [`Self::modal`] (destructive-command modals);
-    /// when both somehow co-exist, the destructive modal wins
-    /// because the agent is blocked on it.
+    /// Mutually exclusive with `modal`; when both exist the destructive
+    /// modal wins because the agent is blocked on it.
     pub picker_modal: Option<BranchPickerModal>,
-    /// Last-rounded-second of any live thinking block, used to throttle
-    /// wrap-cache invalidation to 1 Hz. The tick handler reads the
-    /// current second from [`OutputPane::live_thinking_seconds`]; when
-    /// it differs from this stamp it marks the output pane dirty so
-    /// the rewrap picks up the new header text. `None` when no
-    /// thinking block is live; cleared on `Done`/`Error`.
+    /// Throttles rewraps for a live thinking block's timer to 1 Hz.
     last_thinking_seconds: Option<u64>,
-    /// Title of the active conversation, rendered at the head of the
-    /// status bar. Arrives as `Event::SessionTitle` once the daemon has
-    /// summarised the session's first turn, and is replaced (or
-    /// cleared) whenever `/switch`, `/resume` or `/new` moves the
-    /// daemon to a different session.
     pub session_title: Option<String>,
-    /// Verbose-rendering toggle, flipped by Ctrl+O. When `true`, the
-    /// output pane force-expands every Thinking and Tool block in
-    /// scrollback regardless of their per-item `expanded` flag. The
-    /// per-item flag still tracks individual Tab toggles so flipping
-    /// verbose off restores the previous fine-grained state.
+    /// Ctrl+O. Force-expands every thinking and tool block without
+    /// touching their per-item `expanded` flags.
     pub verbose: bool,
 }
 
-/// The reply turn that owns the output pane: the open assistant block,
-/// [`App::generating`], and the throughput meter. Two reply streams can
-/// be live at once — a push-to-talk turn dispatched while a typed query
-/// is still streaming — but the daemon runs one agent turn at a time
-/// behind its turn lock, so the pane is handed from one to the next
-/// rather than shared.
+/// The reply turn that owns the output pane. A push-to-talk turn can
+/// start while a typed query is still streaming; the daemon serialises
+/// turns, so the pane is handed from one to the next rather than shared.
 struct ActiveReply {
-    /// Request id the daemon echoes on every event of this turn.
     id: String,
-    /// Write half of the turn's dialog connection, used to answer a
-    /// `ConfirmRequest`. `None` for a push-to-talk turn, whose
-    /// connection belongs to `IpcVoiceProxy`.
+    /// Answers `ConfirmRequest`. `None` for a push-to-talk turn, whose
+    /// connection belongs to the voice proxy.
     writer: Option<mpsc::Sender<Request>>,
 }
 
-/// A transcribed utterance waiting for the pane to come free.
 struct QueuedTranscription {
     id: String,
     text: String,
 }
 
-/// Which branch slash-command is currently in flight, if any. Used to
-/// distinguish `Event::BranchSwitched` arriving from `/fork` (no chat
-/// repaint) from one arriving from `/switch` (clear + replay).
 #[derive(Debug, Clone, Copy)]
 enum BranchOp {
     Fork,
@@ -314,7 +213,6 @@ enum BranchOp {
     ResumePicker,
 }
 
-/// One row buffered during a `/resume` branch listing.
 #[derive(Debug, Clone)]
 pub struct BranchListEntry {
     pub name: String,
@@ -327,9 +225,7 @@ pub struct BranchListEntry {
     pub session_title: Option<String>,
 }
 
-/// Interactive picker shown by `/resume`. Rendered as a modal overlay
-/// with arrow-key navigation; Enter dispatches `Request::Switch`
-/// against the qualified target, Esc cancels.
+/// Branch picker shown by `/resume`.
 pub struct BranchPickerModal {
     pub entries: Vec<BranchListEntry>,
     pub selected: usize,
@@ -344,7 +240,6 @@ impl BranchPickerModal {
 }
 
 impl App {
-    /// Construct a new `App` with the given IPC handle and configuration.
     pub fn new(
         ipc: Arc<IpcClient>,
         chat_tx: mpsc::Sender<ChatEvent>,
@@ -390,10 +285,7 @@ impl App {
         }
     }
 
-    /// Open a confirmation modal from a daemon-issued `Event::ConfirmRequest`.
-    /// Only one modal can be active at a time; if a second prompt
-    /// arrives while one is open we deny the new one immediately
-    /// (which the daemon's gate maps to "cancel").
+    /// A second prompt arriving while one is open is denied immediately.
     pub fn open_confirmation_modal(
         &mut self,
         confirm_id: String,
@@ -450,30 +342,23 @@ impl App {
         self.modal.is_some()
     }
 
-    /// Returns `true` when the event loop should exit.
     pub fn should_quit(&self) -> bool {
         self.quitting
     }
 
-    /// Current spinner character for the status bar.
     pub fn spinner_char(&self) -> char {
         SPINNER_CHARS[self.spinner % SPINNER_CHARS.len()]
     }
 
-    /// Active notice text, if one is currently being displayed.
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_ref().map(|(s, _)| s.as_str())
     }
 
-    /// Record the output pane's rendered height so scrolling math stays correct.
     pub fn set_output_height(&mut self, h: u16) {
         self.last_output_height = h;
     }
 
-    /// Slash-command entries that prefix-match the current buffer.
-    /// Empty when the popup should be hidden (buffer doesn't start
-    /// with `/`, contains whitespace, or the user dismissed it with
-    /// Esc).
+    /// Empty when the popup should be hidden.
     pub fn slash_suggestions(&self) -> Vec<&'static (&'static str, &'static str)> {
         if self.slash_dismissed {
             return Vec::new();
@@ -491,9 +376,6 @@ impl App {
             .collect()
     }
 
-    /// Index of the currently highlighted suggestion, clamped to the
-    /// visible list length. Used by [`super::ui`] to render the
-    /// selection highlight.
     pub fn slash_selected(&self) -> usize {
         self.slash_selected
     }
@@ -520,9 +402,6 @@ impl App {
         }
     }
 
-    /// Handle a terminal mouse event. Only scroll-wheel ticks are
-    /// consumed today; other mouse events (clicks, drags, motion) are
-    /// ignored so the alt-screen behaves like a static viewport.
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         match ev.kind {
             MouseEventKind::ScrollUp => {
@@ -537,7 +416,6 @@ impl App {
         }
     }
 
-    /// Handle a terminal key event, routing to the modal or the input line.
     pub fn on_key(&mut self, ev: KeyEvent) {
         self.touch_activity();
         if self.modal.is_some() {
@@ -647,23 +525,16 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.resolve_modal(false);
             }
-            _ => {
-                // Swallow every other key while the modal is open
-            }
+            _ => {}
         }
     }
 
-    /// Update live resource (VRAM / RAM) readings from the probe background task.
     pub fn on_resources(&mut self, v: ResourceState) {
         self.resources = v;
     }
 
-    /// Approximate countdown to the next presence transition,
-    /// computed locally from `last_activity_at + sleep_cfg`. The
-    /// daemon owns the actual clock; this is a display courtesy
-    /// that may drift by a couple seconds in either direction.
-    /// Returns `None` when no countdown applies (presence unknown,
-    /// or already Sleeping with no further transition pending).
+    /// Local approximation of the daemon's countdown to its next idle
+    /// transition. `None` when no transition is pending.
     pub fn local_time_until_next_transition(&self) -> Option<Duration> {
         let state = self.presence_state?;
         let elapsed = self.last_activity_at.elapsed();
@@ -695,40 +566,48 @@ impl App {
             .map(|s| s.next())
             .unwrap_or(PresenceState::Active);
         self.set_notice(&format!("cycling → {}", presence_label(target)));
+        let req = Request::Cycle {
+            id: Uuid::new_v4().to_string(),
+        };
+        self.spawn_one_shot(req, WireStream::Status, "cycle");
+    }
+
+    /// Send `req` on a fresh connection and pump its events into the
+    /// reducer tagged `stream`, reporting connection or read failures as
+    /// a `WireError` on the same stream.
+    fn spawn_one_shot(&self, req: Request, stream: WireStream, label: &'static str) {
         let ipc = self.ipc.clone();
         let chat_tx = self.chat_tx.clone();
         tokio::spawn(async move {
-            let req = Request::Cycle {
-                id: Uuid::new_v4().to_string(),
-            };
-            match ipc.one_shot(req).await {
-                Ok(mut stream) => {
-                    while let Ok(Some(ev)) = stream.next_event().await {
-                        let terminal = ev.is_terminal();
-                        let _ = chat_tx
-                            .send(ChatEvent::Wire {
-                                stream: WireStream::Status,
-                                event: ev,
-                            })
-                            .await;
-                        if terminal {
-                            break;
-                        }
-                    }
-                }
+            let wire_error = |message: String| ChatEvent::WireError { stream, message };
+            let mut events = match ipc.one_shot(req).await {
+                Ok(s) => s,
                 Err(e) => {
                     let _ = chat_tx
-                        .send(ChatEvent::WireError {
-                            stream: WireStream::Status,
-                            message: format!("cycle: {e}"),
-                        })
+                        .send(wire_error(format!("{label} connect: {e}")))
                         .await;
+                    return;
                 }
+            };
+            loop {
+                let outcome = match events.next_event().await {
+                    Ok(Some(event)) => {
+                        let terminal = event.is_terminal();
+                        let _ = chat_tx.send(ChatEvent::Wire { stream, event }).await;
+                        if terminal {
+                            return;
+                        }
+                        continue;
+                    }
+                    Ok(None) => wire_error(format!("{label}: daemon closed stream mid-flight")),
+                    Err(e) => wire_error(format!("{label} read: {e}")),
+                };
+                let _ = chat_tx.send(outcome).await;
+                return;
             }
         });
     }
 
-    /// Reducer entry point for everything the event loop pumps in.
     pub fn on_chat_event(&mut self, ev: ChatEvent) {
         match ev {
             ChatEvent::Wire { stream, event } => self.on_wire_event(stream, event),
@@ -742,7 +621,6 @@ impl App {
             }
             ChatEvent::AttachLoaded(payload) => {
                 let AttachLoadedPayload {
-                    path: _,
                     name,
                     mime,
                     size,
@@ -859,11 +737,11 @@ impl App {
                 ..
             } => {
                 self.set_notice(&message);
-                if event == "restarting" {
+                if event == StatusKind::Restarting {
                     self.output.finish_thinking();
                     self.output.finish_assistant();
                     self.output.push_info(&format!("[{component} restarting…]"));
-                } else if severity == "error" {
+                } else if severity == StatusSeverity::Error {
                     self.output.push_info(&format!("[{component}: {message}]"));
                 }
             }
@@ -896,40 +774,7 @@ impl App {
                 fork_point_seq,
                 session_title,
                 ..
-            } => {
-                // Always reports the now-active session, so it is also
-                // how the status bar learns a switch changed (or
-                // cleared) the title.
-                self.session_title = session_title
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .map(str::to_string);
-                match self.in_flight_branch_op {
-                    Some(BranchOp::Switch) => {
-                        self.output.clear();
-                        let msg = match session_title.as_deref().map(str::trim) {
-                            Some(t) if !t.is_empty() => {
-                                format!("[switched to conversation '{t}' on branch '{name}']")
-                            }
-                            _ => format!("[switched to new conversation on branch '{name}']"),
-                        };
-                        self.output.push_info(&msg);
-                    }
-                    Some(BranchOp::Resume) | Some(BranchOp::New) => {
-                        self.output.clear();
-                    }
-                    _ => {
-                        let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
-                            (Some(p), Some(seq)) => {
-                                format!("[forked from '{p}'@seq{seq} into '{name}']")
-                            }
-                            _ => format!("[branch '{name}' is now active]"),
-                        };
-                        self.output.push_info(&detail);
-                    }
-                }
-            }
+            } => self.on_branch_switched(name, parent_branch_name, fork_point_seq, session_title),
             Event::SessionTitle { title, .. } => {
                 self.session_title = Some(title);
             }
@@ -938,46 +783,12 @@ impl App {
                 content,
                 tool_name,
                 ..
-            } => match role.as_str() {
-                "user" => {
-                    self.output.push_user(&content);
-                }
-                "assistant" => {
-                    if !content.is_empty() {
-                        self.output.begin_assistant();
-                        self.output.append_assistant(&content);
-                        self.output.finish_assistant();
-                    }
-                }
-                "tool" => {
-                    let name = tool_name.unwrap_or_default();
-                    self.output.push_tool_block(name, content, 0, 0);
-                }
-                "system" => {
-                    self.output.push_info(&content);
-                }
-                _ => self.output.push_info(&content),
-            },
+            } => self.on_history_entry(role, content, tool_name),
             Event::UndoApplied {
                 removed_messages,
                 last_user_text,
                 ..
-            } => {
-                if removed_messages == 0 {
-                    self.set_notice("nothing to undo");
-                } else {
-                    self.output.pop_last_user_exchange();
-                    let preview = last_user_text
-                        .as_deref()
-                        .map(|t| t.chars().take(48).collect::<String>())
-                        .unwrap_or_default();
-                    if preview.is_empty() {
-                        self.set_notice(&format!("undid {removed_messages} message(s)"));
-                    } else {
-                        self.set_notice(&format!("undid: {preview}"));
-                    }
-                }
-            }
+            } => self.on_undo_applied(removed_messages, last_user_text),
             Event::Done { .. } => match stream {
                 WireStream::Reply => self.finish_reply(now),
                 WireStream::Branch => self.finish_branch_op(),
@@ -998,6 +809,79 @@ impl App {
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. }
             | Event::LastDelta { .. } => {}
+        }
+    }
+
+    /// Always reports the now-active session, so it is also how the
+    /// status bar learns that a switch changed or cleared the title.
+    fn on_branch_switched(
+        &mut self,
+        name: String,
+        parent_branch_name: Option<String>,
+        fork_point_seq: Option<i64>,
+        session_title: Option<String>,
+    ) {
+        let title = session_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        self.session_title = title.map(str::to_string);
+        match self.in_flight_branch_op {
+            Some(BranchOp::Switch) => {
+                self.output.clear();
+                let msg = match title {
+                    Some(t) => format!("[switched to conversation '{t}' on branch '{name}']"),
+                    None => format!("[switched to new conversation on branch '{name}']"),
+                };
+                self.output.push_info(&msg);
+            }
+            Some(BranchOp::Resume) | Some(BranchOp::New) => {
+                self.output.clear();
+            }
+            _ => {
+                let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
+                    (Some(p), Some(seq)) => {
+                        format!("[forked from '{p}'@seq{seq} into '{name}']")
+                    }
+                    _ => format!("[branch '{name}' is now active]"),
+                };
+                self.output.push_info(&detail);
+            }
+        }
+    }
+
+    fn on_history_entry(&mut self, role: Role, content: String, tool_name: Option<String>) {
+        match role {
+            Role::User => self.output.push_user(&content),
+            Role::Assistant => {
+                if !content.is_empty() {
+                    self.output.begin_assistant();
+                    self.output.append_assistant(&content);
+                    self.output.finish_assistant();
+                }
+            }
+            Role::Tool => {
+                self.output
+                    .push_tool_block(tool_name.unwrap_or_default(), content, 0, 0);
+            }
+            Role::System => self.output.push_info(&content),
+        }
+    }
+
+    fn on_undo_applied(&mut self, removed_messages: u32, last_user_text: Option<String>) {
+        if removed_messages == 0 {
+            self.set_notice("nothing to undo");
+            return;
+        }
+        self.output.pop_last_user_exchange();
+        let preview = last_user_text
+            .as_deref()
+            .map(|t| t.chars().take(48).collect::<String>())
+            .unwrap_or_default();
+        if preview.is_empty() {
+            self.set_notice(&format!("undid {removed_messages} message(s)"));
+        } else {
+            self.set_notice(&format!("undid: {preview}"));
         }
     }
 
@@ -1081,10 +965,6 @@ impl App {
         self.branches_buffer.clear();
     }
 
-    /// Advance the spinner and expire stale notices. Also bumps the
-    /// output-pane's wrap cache once per second whenever a thinking
-    /// block is live, so its "Thinking… (Ns)" header keeps counting
-    /// up without invalidating the cache on every 250 ms frame.
     pub fn on_tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
         if let Some((_, at)) = &self.notice {
@@ -1107,11 +987,7 @@ impl App {
 
     fn try_complete_attach_path(&mut self) -> bool {
         let buffer = self.input.buffer();
-        let partial = if let Some(rest) = buffer.strip_prefix("/attach ") {
-            rest
-        } else if let Some(rest) = buffer.strip_prefix("/attach_image ") {
-            rest
-        } else {
+        let Some(partial) = buffer.strip_prefix("/attach ") else {
             return false;
         };
         let (dir, file_prefix) = match partial.rsplit_once('/') {
@@ -1157,59 +1033,41 @@ impl App {
         } else {
             return true;
         };
-        let cmd_prefix = if buffer.starts_with("/attach_image ") {
-            "/attach_image "
-        } else {
-            "/attach "
-        };
         let dir_part = match partial.rsplit_once('/') {
             Some((d, _)) => format!("{d}/"),
             None => String::new(),
         };
         self.input
-            .set_buffer(format!("{cmd_prefix}{dir_part}{completed}"));
+            .set_buffer(format!("/attach {dir_part}{completed}"));
         true
     }
 
     fn submit_typed(&mut self, text: String) {
-        let is_attach = text.starts_with("/attach ") || text.trim() == "/attach";
-        if is_attach && !self.vision_enabled {
-            self.output.push_error(
-                "[error] attach_image: vision not available: model does not support \
-                 images. Use: a model with mmproj loaded",
-            );
-            self.set_notice("vision not available");
-            return;
-        }
-        if let Some(rest) = text.strip_prefix("/attach ") {
-            self.handle_attach(rest.trim());
-            return;
-        }
-        if text.trim() == "/attach" {
-            self.output
-                .push_error("/attach: expected a path. Usage: /attach <path>");
-            self.set_notice("/attach: missing path");
-            return;
-        }
-        if let Some(name) = parse_slash_arg(&text, "/fork") {
-            self.handle_fork_cmd(name.to_string());
-            return;
-        }
-        if let Some(target) = parse_slash_arg(&text, "/switch") {
-            self.handle_switch_cmd(target.to_string());
-            return;
-        }
-        if text.trim() == "/undo" {
-            self.handle_undo_cmd();
-            return;
-        }
-        if text.trim() == "/new" {
-            self.handle_new_cmd();
-            return;
-        }
-        if text.trim() == "/resume" {
-            self.handle_resume_cmd();
-            return;
+        match SlashCommand::parse(&text) {
+            Some(SlashCommand::Attach(_)) if !self.vision_enabled => {
+                self.output.push_error(
+                    "[error] attach: vision not available: model does not support \
+                     images. Use: a model with mmproj loaded",
+                );
+                self.set_notice("vision not available");
+                return;
+            }
+            Some(SlashCommand::Attach(path)) => {
+                if path.is_empty() {
+                    self.output
+                        .push_error("/attach: expected a path. Usage: /attach <path>");
+                    self.set_notice("/attach: missing path");
+                } else {
+                    self.handle_attach(&path);
+                }
+                return;
+            }
+            Some(SlashCommand::Fork(name)) => return self.handle_fork_cmd(name),
+            Some(SlashCommand::Switch(target)) => return self.handle_switch_cmd(target),
+            Some(SlashCommand::Undo) => return self.handle_undo_cmd(),
+            Some(SlashCommand::New) => return self.handle_new_cmd(),
+            Some(SlashCommand::Resume) => return self.handle_resume_cmd(),
+            None => {}
         }
         if self.generating {
             self.set_notice("still generating, please wait");
@@ -1287,7 +1145,6 @@ impl App {
                     });
                     let _ = tx
                         .send(ChatEvent::AttachLoaded(Box::new(AttachLoadedPayload {
-                            path: path_for_load,
                             name,
                             mime,
                             size,
@@ -1319,63 +1176,9 @@ impl App {
         }
         self.in_flight_branch_op = Some(op);
         self.branches_buffer.clear();
-        let ipc = self.ipc.clone();
-        let chat_tx = self.chat_tx.clone();
-        tokio::spawn(async move {
-            let mut stream = match ipc.one_shot(req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = chat_tx
-                        .send(ChatEvent::WireError {
-                            stream: WireStream::Branch,
-                            message: format!("branch connect: {e}"),
-                        })
-                        .await;
-                    return;
-                }
-            };
-            loop {
-                match stream.next_event().await {
-                    Ok(Some(ev)) => {
-                        let terminal = ev.is_terminal();
-                        let _ = chat_tx
-                            .send(ChatEvent::Wire {
-                                stream: WireStream::Branch,
-                                event: ev,
-                            })
-                            .await;
-                        if terminal {
-                            return;
-                        }
-                    }
-                    Ok(None) => {
-                        let _ = chat_tx
-                            .send(ChatEvent::WireError {
-                                stream: WireStream::Branch,
-                                message: "daemon closed branch stream mid-flight".into(),
-                            })
-                            .await;
-                        return;
-                    }
-                    Err(e) => {
-                        let _ = chat_tx
-                            .send(ChatEvent::WireError {
-                                stream: WireStream::Branch,
-                                message: format!("branch read: {e}"),
-                            })
-                            .await;
-                        return;
-                    }
-                }
-            }
-        });
+        self.spawn_one_shot(req, WireStream::Branch, "branch");
     }
 
-    /// Issue `Request::ResumeOrNew` at TUI startup so the daemon
-    /// decides between resuming the current branch (when its latest
-    /// message landed within `recency_secs`) and starting a fresh
-    /// session. Wire events flow into the existing
-    /// `BranchSwitched` / `HistoryEntry` handlers via `chat_tx`.
     pub fn spawn_resume_or_new(&mut self, recency_secs: u64) {
         let req = Request::ResumeOrNew {
             id: Uuid::new_v4().to_string(),
@@ -1570,13 +1373,35 @@ fn turn_scoped_id(ev: &Event) -> Option<&str> {
     }
 }
 
-fn parse_slash_arg<'a>(text: &'a str, verb: &str) -> Option<&'a str> {
-    let trimmed = text.trim_end();
-    if trimmed == verb {
-        return Some("");
+/// A typed slash command with its trimmed argument.
+enum SlashCommand {
+    Attach(String),
+    Fork(String),
+    Switch(String),
+    Undo,
+    New,
+    Resume,
+}
+
+impl SlashCommand {
+    /// `None` when `text` is not a slash command; unknown commands are
+    /// sent to the model as ordinary text.
+    fn parse(text: &str) -> Option<Self> {
+        let trimmed = text.trim();
+        let (verb, arg) = match trimmed.split_once(char::is_whitespace) {
+            Some((verb, rest)) => (verb, rest.trim()),
+            None => (trimmed, ""),
+        };
+        match verb {
+            "/attach" => Some(Self::Attach(arg.to_string())),
+            "/fork" => Some(Self::Fork(arg.to_string())),
+            "/switch" => Some(Self::Switch(arg.to_string())),
+            "/undo" => Some(Self::Undo),
+            "/new" => Some(Self::New),
+            "/resume" => Some(Self::Resume),
+            _ => None,
+        }
     }
-    let prefix = format!("{verb} ");
-    trimmed.strip_prefix(&prefix).map(|rest| rest.trim())
 }
 
 fn expand_tilde(p: &str) -> PathBuf {
@@ -1632,648 +1457,4 @@ fn human_size_short(n: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-
-    fn test_sleep_cfg() -> SleepConfig {
-        let mut cfg = assistd_core::Config::default().sleep;
-        cfg.idle_to_drowsy_mins = 0;
-        cfg.idle_to_sleep_mins = 0;
-        cfg
-    }
-
-    fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
-        test_app_with(true)
-    }
-
-    fn test_app_with(vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
-        // Bogus socket path; these tests never open a real connection.
-        test_app_at(
-            std::path::PathBuf::from("/tmp/assistd-test-nonexistent.sock"),
-            vision_enabled,
-        )
-    }
-
-    fn test_app_at(
-        socket: std::path::PathBuf,
-        vision_enabled: bool,
-    ) -> (App, mpsc::Receiver<ChatEvent>) {
-        let (tx, rx) = mpsc::channel::<ChatEvent>(16);
-        let ipc = Arc::new(IpcClient::with_path(socket));
-        let app = App::new(
-            ipc,
-            tx,
-            "test-model".into(),
-            test_sleep_cfg(),
-            vision_enabled,
-            None,
-        );
-        (app, rx)
-    }
-
-    fn typed(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
-    }
-
-    fn delta(text: &str) -> Event {
-        Event::Delta {
-            id: "r".into(),
-            text: text.into(),
-        }
-    }
-
-    fn done() -> Event {
-        Event::Done { id: "r".into() }
-    }
-
-    fn delta_for(id: &str, text: &str) -> Event {
-        Event::Delta {
-            id: id.into(),
-            text: text.into(),
-        }
-    }
-
-    fn transcription_for(id: &str, text: &str) -> Event {
-        Event::Transcription {
-            id: id.into(),
-            text: text.into(),
-        }
-    }
-
-    fn rendered(app: &mut App) -> Vec<String> {
-        let (lines, _) = app.output.render_view(80, 80);
-        lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect()
-    }
-
-    fn line_index(lines: &[String], needle: &str) -> usize {
-        lines
-            .iter()
-            .position(|l| l.contains(needle))
-            .unwrap_or_else(|| panic!("{needle:?} missing from {lines:#?}"))
-    }
-
-    fn start_typed_turn(app: &mut App, id: &str, prompt: &str) {
-        app.begin_submit(prompt, &[]);
-        app.active_reply = Some(ActiveReply {
-            id: id.into(),
-            writer: None,
-        });
-    }
-
-    fn reply(event: Event) -> ChatEvent {
-        ChatEvent::Wire {
-            stream: WireStream::Reply,
-            event,
-        }
-    }
-
-    fn status(event: Event) -> ChatEvent {
-        ChatEvent::Wire {
-            stream: WireStream::Status,
-            event,
-        }
-    }
-
-    /// Accept one dialog connection, read its request line, then stream
-    /// `events` back. The delay before the first write gives the query
-    /// driver time to observe its closed writer channel while nothing is
-    /// readable, which is the state the pre-fix driver parked in forever.
-    async fn mock_daemon(
-        socket: std::path::PathBuf,
-        events: Vec<Event>,
-    ) -> tokio::task::JoinHandle<()> {
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (read, mut write) = stream.into_split();
-            let mut reader = tokio::io::BufReader::new(read);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            for ev in events {
-                let mut out = serde_json::to_string(&ev).unwrap();
-                out.push('\n');
-                write.write_all(out.as_bytes()).await.unwrap();
-            }
-        })
-    }
-
-    #[test]
-    fn delta_keeps_generating_true() {
-        let (mut app, _rx) = test_app();
-        app.generating = true;
-        app.on_chat_event(reply(delta("hi")));
-        assert!(app.generating);
-    }
-
-    #[test]
-    fn done_clears_generating() {
-        let (mut app, _rx) = test_app();
-        app.generating = true;
-        app.on_chat_event(reply(delta("hi")));
-        app.on_chat_event(reply(done()));
-        assert!(!app.generating);
-    }
-
-    #[test]
-    fn reply_wire_error_clears_generating() {
-        let (mut app, _rx) = test_app();
-        app.generating = true;
-        app.on_chat_event(ChatEvent::WireError {
-            stream: WireStream::Reply,
-            message: "boom".into(),
-        });
-        assert!(!app.generating);
-    }
-
-    #[test]
-    fn branch_wire_error_releases_the_in_flight_op() {
-        let (mut app, _rx) = test_app();
-        app.generating = true;
-        app.in_flight_branch_op = Some(BranchOp::Fork);
-        app.on_chat_event(ChatEvent::WireError {
-            stream: WireStream::Branch,
-            message: "branch connect: no such file".into(),
-        });
-        assert!(app.in_flight_branch_op.is_none());
-        assert!(app.generating, "a branch failure must not end the reply");
-    }
-
-    #[test]
-    fn session_title_event_lands_in_the_status_bar() {
-        let (mut app, _rx) = test_app();
-        assert!(app.session_title.is_none());
-        app.on_chat_event(status(Event::SessionTitle {
-            id: "q-1".into(),
-            session_id: "s-1".into(),
-            title: "Cats And Dogs".into(),
-        }));
-        assert_eq!(app.session_title.as_deref(), Some("Cats And Dogs"));
-    }
-
-    #[test]
-    fn status_stream_done_does_not_end_the_reply() {
-        let (mut app, _rx) = test_app();
-        app.generating = true;
-        app.on_chat_event(reply(delta("hi")));
-        app.on_chat_event(status(done()));
-        assert!(app.generating);
-        app.on_chat_event(reply(done()));
-        assert!(!app.generating);
-    }
-
-    #[test]
-    fn voice_turn_spoken_over_a_typed_reply_waits_its_turn() {
-        let (mut app, _rx) = test_app();
-        start_typed_turn(&mut app, "typed", "typed question");
-        app.on_chat_event(reply(delta_for("typed", "typed ")));
-
-        // The user speaks while the typed reply is still streaming; the
-        // daemon transcribes it, then blocks on its agent-turn lock.
-        app.on_chat_event(reply(transcription_for("voice", "spoken question")));
-        app.on_chat_event(reply(delta_for("typed", "answer")));
-        let lines = rendered(&mut app);
-        assert!(
-            lines.iter().any(|l| l.contains("typed answer")),
-            "the transcript must not split the typed block: {lines:#?}",
-        );
-
-        app.on_chat_event(reply(Event::Done { id: "typed".into() }));
-        assert!(!app.generating);
-
-        // Only now does the voice turn run, and it opens with its own
-        // transcript rather than appending to the finished reply.
-        app.on_chat_event(reply(delta_for("voice", "spoken answer")));
-        assert!(app.generating);
-        let lines = rendered(&mut app);
-        let typed = line_index(&lines, "typed answer");
-        let spoken_q = line_index(&lines, "spoken question");
-        let spoken_a = line_index(&lines, "spoken answer");
-        assert!(typed < spoken_q, "transcript must not split the reply");
-        assert!(spoken_q < spoken_a);
-
-        app.on_chat_event(reply(Event::Done { id: "voice".into() }));
-        assert!(!app.generating);
-    }
-
-    #[test]
-    fn another_turns_terminal_events_leave_the_owner_alone() {
-        let (mut app, _rx) = test_app();
-        start_typed_turn(&mut app, "typed", "typed question");
-        app.on_chat_event(reply(delta_for("typed", "half ")));
-
-        app.on_chat_event(reply(Event::Done { id: "other".into() }));
-        assert!(app.generating, "a foreign Done must not end the reply");
-        app.on_chat_event(reply(Event::Error {
-            id: "other".into(),
-            message: "voice turn rejected".into(),
-        }));
-        assert!(app.generating, "a foreign Error must not end the reply");
-        assert!(app.notice().is_some(), "but it is still surfaced");
-
-        app.on_chat_event(reply(delta_for("typed", "written")));
-        let lines = rendered(&mut app);
-        assert!(
-            lines.iter().any(|l| l.contains("half written")),
-            "the owner's block stayed open: {lines:#?}",
-        );
-    }
-
-    #[test]
-    fn a_transcript_is_dropped_when_its_turn_never_runs() {
-        let (mut app, _rx) = test_app();
-        start_typed_turn(&mut app, "typed", "typed question");
-        app.on_chat_event(reply(transcription_for("voice", "spoken question")));
-        app.on_chat_event(reply(Event::Error {
-            id: "voice".into(),
-            message: "no capacity".into(),
-        }));
-        app.on_chat_event(reply(Event::Done { id: "typed".into() }));
-
-        app.on_chat_event(reply(delta_for("later", "unrelated")));
-        let lines = rendered(&mut app);
-        assert!(
-            !lines.iter().any(|l| l.contains("spoken question")),
-            "a turn that never ran must not replay its transcript: {lines:#?}",
-        );
-    }
-
-    #[tokio::test]
-    async fn query_driver_outlives_its_writer_channel() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("mock.sock");
-        let server = mock_daemon(socket.clone(), vec![delta("hi"), done()]).await;
-
-        let (mut app, mut rx) = test_app_at(socket, true);
-        app.spawn_query("hi".into(), Vec::new());
-        app.active_reply = None;
-
-        let mut terminal = false;
-        while !terminal {
-            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
-                Ok(Some(ChatEvent::Wire { event, .. })) => terminal = event.is_terminal(),
-                Ok(other) => panic!("unexpected chat event: {other:?}"),
-                Err(_) => panic!("query driver stalled once the writer channel closed"),
-            }
-        }
-        server.await.unwrap();
-    }
-
-    #[test]
-    fn page_up_increments_scroll() {
-        let (mut app, _rx) = test_app();
-        app.last_output_height = 10;
-        app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
-        assert!(app.output.scroll_offset() > 0);
-    }
-
-    fn wheel(kind: MouseEventKind) -> MouseEvent {
-        MouseEvent {
-            kind,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }
-    }
-
-    #[test]
-    fn mouse_wheel_up_scrolls_history_up() {
-        let (mut app, _rx) = test_app();
-        let before = app.output.scroll_offset();
-        app.on_mouse(wheel(MouseEventKind::ScrollUp));
-        let after = app.output.scroll_offset();
-        assert_eq!(after - before, MOUSE_WHEEL_STEP);
-    }
-
-    #[test]
-    fn mouse_wheel_down_undoes_wheel_up() {
-        let (mut app, _rx) = test_app();
-        app.on_mouse(wheel(MouseEventKind::ScrollUp));
-        app.on_mouse(wheel(MouseEventKind::ScrollUp));
-        app.on_mouse(wheel(MouseEventKind::ScrollDown));
-        assert_eq!(app.output.scroll_offset(), MOUSE_WHEEL_STEP);
-    }
-
-    #[test]
-    fn mouse_non_wheel_events_are_ignored() {
-        let (mut app, _rx) = test_app();
-        app.on_mouse(wheel(MouseEventKind::Moved));
-        assert_eq!(app.output.scroll_offset(), 0);
-    }
-
-    #[test]
-    fn ctrl_c_on_empty_input_sets_quitting() {
-        let (mut app, _rx) = test_app();
-        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.should_quit());
-    }
-
-    #[test]
-    fn enter_while_generating_sets_notice() {
-        let (mut app, _rx) = test_app();
-        app.generating = true;
-        app.on_key(typed('h'));
-        app.on_key(typed('i'));
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.notice().is_some());
-    }
-
-    #[test]
-    fn on_tick_clears_stale_notice() {
-        let (mut app, _rx) = test_app();
-        app.notice = Some(("old".into(), Instant::now() - Duration::from_secs(10)));
-        app.on_tick();
-        assert!(app.notice().is_none());
-    }
-
-    #[test]
-    fn spinner_char_cycles() {
-        let (mut app, _rx) = test_app();
-        let c0 = app.spinner_char();
-        app.on_tick();
-        let c1 = app.spinner_char();
-        assert_ne!(c0, c1);
-    }
-
-    #[test]
-    fn presence_event_updates_state() {
-        let (mut app, _rx) = test_app();
-        assert_eq!(app.presence_state, None);
-        app.on_chat_event(status(Event::Presence {
-            id: "p".into(),
-            state: PresenceState::Drowsy,
-        }));
-        assert_eq!(app.presence_state, Some(PresenceState::Drowsy));
-        app.on_chat_event(status(Event::Presence {
-            id: "p".into(),
-            state: PresenceState::Active,
-        }));
-        assert_eq!(app.presence_state, Some(PresenceState::Active));
-    }
-
-    #[tokio::test]
-    async fn modal_approve_on_y() {
-        let (mut app, _rx) = test_app();
-        app.open_confirmation_modal(
-            "c1".into(),
-            "bash".into(),
-            "rm -rf /tmp/junk".into(),
-            "rm -rf".into(),
-        );
-        assert!(app.has_modal());
-        app.on_key(typed('y'));
-        assert!(!app.has_modal(), "modal should close on approve");
-    }
-
-    #[tokio::test]
-    async fn modal_deny_on_n() {
-        let (mut app, _rx) = test_app();
-        app.open_confirmation_modal(
-            "c1".into(),
-            "bash".into(),
-            "rm -rf /tmp/junk".into(),
-            "rm -rf".into(),
-        );
-        app.on_key(typed('n'));
-        assert!(!app.has_modal());
-    }
-
-    #[tokio::test]
-    async fn modal_swallows_unrelated_keys() {
-        let (mut app, _rx) = test_app();
-        app.open_confirmation_modal(
-            "c1".into(),
-            "bash".into(),
-            "rm -rf /tmp/junk".into(),
-            "rm -rf".into(),
-        );
-        app.on_key(typed('x'));
-        app.on_key(typed('z'));
-        assert!(app.has_modal());
-        assert!(app.input.buffer().is_empty());
-    }
-
-    #[test]
-    fn tool_call_then_result_creates_one_block_with_command() {
-        let (mut app, _rx) = test_app();
-        app.on_chat_event(reply(Event::ToolCall {
-            id: "c1".into(),
-            name: "run".into(),
-            args: serde_json::json!({"command": "ls /tmp"}),
-        }));
-        assert!(app.pending_tool_call.is_some());
-        app.on_chat_event(reply(Event::ToolResult {
-            id: "c1".into(),
-            name: "run".into(),
-            result: serde_json::json!({
-                "output": "a\nb\n[exit:0 | 5ms]",
-                "exit_code": 0,
-                "truncated": false,
-                "duration_ms": 5,
-            }),
-        }));
-        assert!(app.pending_tool_call.is_none());
-        let (lines, _) = app.output.render_view(80, 50);
-        let rendered: Vec<String> = lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        assert!(rendered.iter().any(|l| l.contains("$ ls /tmp")));
-        assert!(rendered.iter().any(|l| l.contains("[exit:0 | 5ms]")));
-    }
-
-    #[test]
-    fn confirm_request_event_opens_modal() {
-        let (mut app, _rx) = test_app();
-        app.on_chat_event(reply(Event::ConfirmRequest {
-            id: "r".into(),
-            confirm_id: "c-xyz".into(),
-            tool: "bash".into(),
-            script: "rm -rf /tmp/foo".into(),
-            matched_pattern: "rm -rf".into(),
-        }));
-        assert!(app.has_modal());
-        let modal = app.modal.as_ref().unwrap();
-        assert_eq!(modal.confirm_id, "c-xyz");
-        assert_eq!(modal.request.script, "rm -rf /tmp/foo");
-    }
-
-    #[test]
-    fn capabilities_event_updates_vision_and_model_name() {
-        let (mut app, _rx) = test_app_with(false);
-        assert!(!app.vision_enabled);
-        app.on_chat_event(status(Event::Capabilities {
-            id: "c".into(),
-            vision: true,
-            model_name: "Qwen".into(),
-        }));
-        assert!(app.vision_enabled);
-        assert_eq!(app.model_name, "Qwen");
-    }
-
-    fn type_str(app: &mut App, s: &str) {
-        for c in s.chars() {
-            app.on_key(typed(c));
-        }
-    }
-
-    #[test]
-    fn slash_popup_shows_after_slash() {
-        let (mut app, _rx) = test_app();
-        assert!(app.slash_suggestions().is_empty());
-        type_str(&mut app, "/");
-        let s = app.slash_suggestions();
-        assert_eq!(s.len(), SLASH_COMMANDS.len());
-    }
-
-    #[test]
-    fn slash_popup_filters_by_prefix() {
-        let (mut app, _rx) = test_app();
-        type_str(&mut app, "/fo");
-        let s = app.slash_suggestions();
-        assert_eq!(s.len(), 1);
-        assert_eq!(s[0].0, "/fork");
-    }
-
-    #[test]
-    fn slash_popup_hides_after_whitespace() {
-        let (mut app, _rx) = test_app();
-        type_str(&mut app, "/attach ");
-        assert!(app.slash_suggestions().is_empty());
-    }
-
-    #[test]
-    fn tab_accepts_selection_and_fills_buffer() {
-        let (mut app, _rx) = test_app();
-        type_str(&mut app, "/f");
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input.buffer(), "/fork");
-        assert!(app.slash_suggestions().is_empty());
-    }
-
-    #[test]
-    fn down_moves_selection_when_popup_active() {
-        let (mut app, _rx) = test_app();
-        type_str(&mut app, "/");
-        assert_eq!(app.slash_selected(), 0);
-        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.slash_selected(), 1);
-    }
-
-    #[test]
-    fn esc_dismisses_popup_without_clearing_buffer() {
-        let (mut app, _rx) = test_app();
-        type_str(&mut app, "/at");
-        assert!(!app.slash_suggestions().is_empty());
-        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.slash_suggestions().is_empty());
-        assert_eq!(app.input.buffer(), "/at");
-    }
-
-    #[test]
-    fn slash_registry_contains_new_and_resume() {
-        let names: Vec<&str> = SLASH_COMMANDS.iter().map(|(c, _)| *c).collect();
-        assert!(names.contains(&"/new"));
-        assert!(names.contains(&"/resume"));
-    }
-
-    fn picker_entry(
-        name: &str,
-        session: &str,
-        current: bool,
-        active_sess: bool,
-    ) -> BranchListEntry {
-        BranchListEntry {
-            name: name.into(),
-            parent_branch_name: None,
-            fork_point_seq: None,
-            message_count: 0,
-            is_current_in_session: current,
-            is_active_session: active_sess,
-            session_short: session.into(),
-            session_title: None,
-        }
-    }
-
-    #[test]
-    fn open_branch_picker_highlights_active_current() {
-        let (mut app, _rx) = test_app();
-        app.branches_buffer = vec![
-            picker_entry("main", "aaaaaaaa", false, false),
-            picker_entry("main", "bbbbbbbb", true, true),
-            picker_entry("feat", "bbbbbbbb", false, true),
-        ];
-        app.open_branch_picker();
-        let picker = app.picker_modal.as_ref().expect("picker opened");
-        assert_eq!(picker.selected, 1);
-        assert_eq!(picker.entries.len(), 3);
-    }
-
-    #[test]
-    fn open_branch_picker_with_no_entries_sets_notice() {
-        let (mut app, _rx) = test_app();
-        app.branches_buffer.clear();
-        app.open_branch_picker();
-        assert!(app.picker_modal.is_none());
-        assert!(app.notice.is_some());
-    }
-
-    #[test]
-    fn picker_current_target_is_session_qualified() {
-        let modal = BranchPickerModal {
-            entries: vec![picker_entry("feature-x", "deadbeef", false, false)],
-            selected: 0,
-        };
-        assert_eq!(
-            modal.current_target().as_deref(),
-            Some("deadbeef/feature-x")
-        );
-    }
-
-    #[test]
-    fn picker_arrow_keys_move_selection() {
-        let (mut app, _rx) = test_app();
-        app.picker_modal = Some(BranchPickerModal {
-            entries: vec![
-                picker_entry("a", "11111111", false, false),
-                picker_entry("b", "11111111", false, false),
-                picker_entry("c", "11111111", false, false),
-            ],
-            selected: 0,
-        });
-        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.picker_modal.as_ref().unwrap().selected, 2);
-        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        assert_eq!(app.picker_modal.as_ref().unwrap().selected, 1);
-    }
-
-    #[test]
-    fn picker_esc_cancels_without_dispatching() {
-        let (mut app, _rx) = test_app();
-        app.picker_modal = Some(BranchPickerModal {
-            entries: vec![picker_entry("a", "11111111", false, false)],
-            selected: 0,
-        });
-        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.picker_modal.is_none());
-    }
-
-    #[test]
-    fn dismissal_resets_after_buffer_clears() {
-        let (mut app, _rx) = test_app();
-        type_str(&mut app, "/at");
-        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        // Wipe the buffer; popup should re-arm on the next `/`.
-        for _ in 0..3 {
-            app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        }
-        type_str(&mut app, "/");
-        assert!(!app.slash_suggestions().is_empty());
-    }
-}
+mod tests;

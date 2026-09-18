@@ -1,16 +1,5 @@
-//! Tool wrapper that intercepts invocations of MCP tools belonging to
-//! an unhealthy server *before* they reach the transport.
-//!
-//! The tool registry is built once at daemon startup and never mutated.
-//! When an MCP server crashes, its tools therefore remain in the model's
-//! tool list until the next daemon restart. Without this wrapper, a
-//! tool call against a dead server would propagate to the supervisor's
-//! `SwitchingClient` (returning `ServerDown`); fine in principle, but
-//! the failure surfaces as an `anyhow::Error` deep in the agent loop's
-//! dispatch path. Surfacing it earlier as a synthetic tool result lets
-//! the model see "this tool is unavailable, try a different one" and
-//! continue the turn, instead of triggering a tool-error path that
-//! treats every MCP server stall the same as a daemon-side bug.
+//! Tool wrapper that answers with a tool-error envelope, without an
+//! RPC, while the owning server is unhealthy.
 
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
@@ -29,7 +18,6 @@ pub struct HealthRoutedTool {
 }
 
 impl HealthRoutedTool {
-    /// Wrap `inner` with a health gate keyed on `health_rx`.
     pub fn new(
         inner: McpToolAdapter,
         server_name: String,
@@ -61,28 +49,14 @@ impl Tool for HealthRoutedTool {
         let state = *self.health_rx.borrow();
         match state {
             HealthState::Healthy => self.inner.invoke(args).await,
-            HealthState::Restarting | HealthState::Unhealthy => {
-                // Shape mirrors the JSON `RunTool` emits via
-                // `assistd_tools::PresentResult` so the agent loop's
-                // dispatch site (`agent.rs::dispatch_tool_call`) reads
-                // `output`/`exit_code`/`duration_ms`/`truncated` straight
-                // into the tool_role message body. Routing through
-                // `mcp_error_line(ServerDown)` keeps the line shape
-                // consistent with every other MCP failure the model
-                // sees, so the recovery hint (`Try: another tool while
-                // the server reconnects`) is the same regardless of
-                // whether the failure was caught at the wrapper or at
-                // the transport. `duration_ms` stays 0; the wrapper
-                // short-circuits before any RPC, so 0 is honest.
-                Ok(json!({
-                    "type": "error",
-                    "output": mcp_error_line(self.inner.name(), &McpError::ServerDown),
-                    "exit_code": -1,
-                    "duration_ms": 0,
-                    "truncated": false,
-                    "server_name": self.server_name,
-                }))
-            }
+            HealthState::Restarting | HealthState::Unhealthy => Ok(json!({
+                "type": "error",
+                "output": mcp_error_line(self.inner.name(), &McpError::ServerDown),
+                "exit_code": -1,
+                "duration_ms": 0,
+                "truncated": false,
+                "server_name": self.server_name,
+            })),
         }
     }
 }

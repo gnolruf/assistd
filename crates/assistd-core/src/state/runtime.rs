@@ -13,9 +13,8 @@ const EVENTS_BUS_CAPACITY: usize = 256;
 /// Active (session, branch) pointer shared by every persistence write site.
 pub struct ConversationContext {
     inner: tokio::sync::RwLock<ConversationContextInner>,
-    /// Broadcasts the active session so holders that cannot await the
-    /// lock — the `reminisce` tool, which excludes the conversation
-    /// already in context — can read it synchronously.
+    /// Lets holders that cannot await the lock read the session
+    /// synchronously.
     session: watch::Sender<Arc<SessionId>>,
 }
 
@@ -41,9 +40,7 @@ impl ConversationContext {
         }
     }
 
-    /// Watch the active session id. The current value is readable
-    /// synchronously via `borrow()`, and updates land on every
-    /// `/switch` or `/new`.
+    /// Watch the active session id.
     pub fn session_updates(&self) -> watch::Receiver<Arc<SessionId>> {
         self.session.subscribe()
     }
@@ -64,24 +61,18 @@ impl ConversationContext {
 /// Runtime bookkeeping owned by `AppState`.
 pub struct RuntimeState {
     pub conversation_ctx: Arc<ConversationContext>,
-    /// Serializes entire agent turns so one query's tool-call /
-    /// tool-result cycle never interleaves with another's.
+    /// Serialises whole agent turns.
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
-    /// Fire-and-forget persistence tasks, drained at daemon shutdown
-    /// before the writer-task channel sender drops.
+    /// Fire-and-forget persistence tasks, drained at daemon shutdown.
     pub(in crate::state) persistence_tracker: TaskTracker,
-    /// Handle to the `presence.ensure_active()` task PTT-start spawns;
-    /// PTT-stop joins it alongside Whisper transcription.
+    /// Presence warmup spawned by PTT-start and joined by PTT-stop.
     pub(in crate::state) warmup_handle:
         Arc<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>>,
-    /// Cancellation token for the currently-running agent turn, taken
-    /// by `Request::InterruptTurn` to abort the turn on its next await.
+    /// Cancellation token for the running agent turn.
     pub(in crate::state) current_cancel: Arc<Mutex<Option<CancellationToken>>>,
-    /// Tail of the persistence write chain: the completion signal of the
-    /// most recently queued message. Each new write takes it (a
-    /// synchronous swap, so the order is fixed at call time rather than
-    /// by the scheduler) and awaits it before touching the store, which
-    /// is what keeps `seq` in the order the daemon emitted the messages.
+    /// Completion signal of the most recently queued persistence write.
+    /// Each new write swaps it out synchronously and awaits it first, so
+    /// `seq` follows emission order rather than scheduler order.
     pub(in crate::state) persist_chain: StdMutex<Option<oneshot::Receiver<()>>>,
     events_bus: broadcast::Sender<Event>,
 }

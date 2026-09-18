@@ -25,24 +25,27 @@ enum CycleResult {
     },
 }
 
-/// Drives the embed-server process lifecycle: spawn, health-check, restart on crash,
-/// and graceful shutdown.
+enum Startup {
+    Ready,
+    ChildExited(ExitStatus),
+    ShuttingDown,
+    Failed(EmbedServerError),
+}
+
+/// Drives the embed-server lifecycle: spawn, health check, restart on
+/// crash, graceful shutdown.
 pub struct Supervisor {
-    /// Embedding server configuration (host, port, model).
     pub cfg: EmbeddingConfig,
-    /// Backstop on the child reporting healthy after spawn.
     pub ready_timeout: Duration,
-    /// Daemon-wide shutdown signal; `true` means stop.
     pub shutdown_rx: watch::Receiver<bool>,
-    /// Channel used to publish the current [`ReadyState`] to [`EmbedService`].
     pub ready_tx: watch::Sender<ReadyState>,
-    /// Shared slot for the child's OS PID, cleared when the child exits.
+    /// The child's PID while it runs.
     pub pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl Supervisor {
-    /// Run the supervision loop until shutdown is requested or the child enters
-    /// [`ReadyState::Degraded`] after too many consecutive failures.
+    /// Run until shutdown or until the child enters
+    /// [`ReadyState::Degraded`].
     pub async fn run(mut self) {
         let mut consecutive_failures: u32 = 0;
 
@@ -125,37 +128,30 @@ impl Supervisor {
             ready_timeout,
         )?;
 
-        enum Phase1 {
-            Ready,
-            ChildExited(ExitStatus),
-            ShuttingDown,
-            StartupError(EmbedServerError),
-        }
-
-        let phase1 = tokio::select! {
+        let startup = tokio::select! {
             res = health.wait_ready(&mut self.shutdown_rx) => match res {
-                Ok(()) => Phase1::Ready,
-                Err(EmbedServerError::ShutdownDuringHealth) => Phase1::ShuttingDown,
-                Err(e) => Phase1::StartupError(e),
+                Ok(()) => Startup::Ready,
+                Err(EmbedServerError::ShutdownDuringHealth) => Startup::ShuttingDown,
+                Err(e) => Startup::Failed(e),
             },
             exit = child.wait() => match exit {
-                Ok(status) => Phase1::ChildExited(status),
-                Err(e) => Phase1::StartupError(EmbedServerError::Io(e)),
+                Ok(status) => Startup::ChildExited(status),
+                Err(e) => Startup::Failed(EmbedServerError::Io(e)),
             }
         };
 
-        match phase1 {
-            Phase1::Ready => { /* fall through */ }
-            Phase1::ChildExited(status) => {
+        match startup {
+            Startup::Ready => {}
+            Startup::ChildExited(status) => {
                 *self.pid.lock() = None;
                 return Ok(CycleResult::FailedToStart { status });
             }
-            Phase1::ShuttingDown => {
+            Startup::ShuttingDown => {
                 child.shutdown(TERM_TIMEOUT).await?;
                 *self.pid.lock() = None;
                 return Ok(CycleResult::ShutdownRequested);
             }
-            Phase1::StartupError(e) => {
+            Startup::Failed(e) => {
                 child.shutdown(TERM_TIMEOUT).await?;
                 *self.pid.lock() = None;
                 return Err(e);

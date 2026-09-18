@@ -1,10 +1,4 @@
-//! MCP server subsystem wiring for the daemon.
-//!
-//! Translates each configured MCP server into a [`TransportConfig`],
-//! starts the corresponding [`McpServerHandle`], and adapts discovered
-//! tools onto the daemon's [`assistd_tools::Tool`] surface. Failures of
-//! individual servers are logged and skipped so a single broken server
-//! cannot block daemon startup.
+//! MCP subsystem wiring for the daemon.
 
 use std::time::Duration;
 
@@ -15,21 +9,13 @@ use assistd_mcp::{
 use tokio::sync::watch;
 use tracing::info;
 
-/// Live handles for all started MCP servers and their adapted tools.
 pub struct McpSubsystem {
-    /// One handle per successfully started MCP server.
     pub handles: Vec<McpServerHandle>,
-    /// Tool adapters discovered from each server's `tools/list` response.
     pub tools: Vec<Box<dyn assistd_tools::Tool>>,
-    /// Servers that failed to start or complete discovery; surfaced to
-    /// connected clients via `Event::Status` during `GetCapabilities` so
-    /// the TUI can render a warning instead of letting the user discover
-    /// the failure only when the model tries to call a tool.
     pub startup_failures: Vec<McpStartupFailure>,
 }
 
 impl McpSubsystem {
-    /// Shut down all MCP server processes gracefully.
     pub async fn shutdown(self) {
         for handle in self.handles {
             handle.shutdown().await;
@@ -37,11 +23,8 @@ impl McpSubsystem {
     }
 }
 
-/// Start all configured MCP servers and adapt their tools.
-///
-/// Servers that fail to start or fail tool discovery are skipped with a
-/// warning and recorded in [`McpSubsystem::startup_failures`]; they do
-/// not prevent the daemon from starting.
+/// Start every configured MCP server. A server that fails to start or to
+/// list its tools is recorded in `startup_failures` and skipped.
 pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubsystem {
     if !config.mcp.enabled {
         info!("mcp: disabled in config (mcp.enabled = false)");

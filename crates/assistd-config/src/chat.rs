@@ -6,7 +6,6 @@ use crate::defaults::{
     DEFAULT_CHAT_SUMMARY_TARGET_TOKENS, DEFAULT_CHAT_SUMMARY_TEMPERATURE, DEFAULT_CHAT_TEMPERATURE,
     DEFAULT_SYSTEM_PROMPT,
 };
-use crate::model::ModelConfig;
 use serde::{Deserialize, Serialize};
 
 /// Chat backend behaviour: system prompt, history window, sampling.
@@ -72,13 +71,5 @@ impl ChatConfig {
     /// near it instead of being cut off mid-sentence.
     pub fn max_summary_tokens(&self) -> u32 {
         self.summary_target_tokens.get().saturating_mul(6) / 5
-    }
-
-    /// Effective budget for the entire request, after applying a 10% safety
-    /// margin against the real model context length. Protects us from the
-    /// token heuristic (bytes/4) under-counting relative to the real BPE
-    /// tokenizer.
-    pub fn effective_context_budget(&self, model: &ModelConfig) -> u32 {
-        (u64::from(model.context_length.get()) * 9 / 10) as u32
     }
 }

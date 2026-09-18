@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Command, CommandInput, CommandOutput};
 use crate::commands::collect_input;
 
 /// `wc [-lwc] [FILE]...`: count what the named files, or stdin, hold.
@@ -104,15 +104,10 @@ impl Command for WcCommand {
 }
 
 fn unsupported(flag: &str) -> CommandOutput {
-    CommandOutput::failed(
-        2,
-        error_line(
-            "wc",
-            format_args!("flag '{flag}' not supported"),
-            "Use",
-            "wc, wc -l, wc -w or wc -c",
-        )
-        .into_bytes(),
+    CommandOutput::usage_error(
+        "wc",
+        format_args!("flag '{flag}' not supported"),
+        "wc, wc -l, wc -w or wc -c",
     )
 }
 

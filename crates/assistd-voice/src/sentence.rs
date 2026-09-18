@@ -1,38 +1,22 @@
-//! Streaming sentence segmenter that sits between the LLM token stream
-//! and Piper. Strips markdown, handles fenced code blocks per the
-//! configured [`CodeBlockMode`], and flushes whole sentences to TTS so
-//! utterances align with natural prosody boundaries instead of arbitrary
-//! token boundaries.
+//! Streaming sentence segmenter between the LLM token stream and TTS.
+//! Strips markdown, handles fenced code blocks per [`CodeBlockMode`],
+//! and emits whole sentences at prosody boundaries.
 //!
-//! Boundary priority (highest first):
-//!   1. Paragraph break `\n\n`
-//!   2. Strong terminator `[.!?]` followed by whitespace + uppercase /
-//!      digit / EOF, with abbreviation guard (Mr./Dr./e.g./...) and
-//!      decimal-number guard (3.14)
-//!   3. Bullet list marker `\n- ` or `\n* `
-//!   4. Length safety net at `max_len` chars (last whitespace before)
-//!
-//! Two flush modes are exposed alongside the streaming `push`:
-//!   - [`SentenceBuffer::finish`][]: terminal flush on `LlmEvent::Done`.
-//!   - [`SentenceBuffer::flush_idle`][]: mid-stream "the LLM has paused"
-//!     flush, called on an idle timeout. Preserves fence/lang state so
-//!     the stream can resume cleanly.
+//! Boundary priority, highest first: paragraph break `\n\n`; bullet
+//! marker `\n- ` or `\n* `; strong terminator `[.!?]` followed by
+//! whitespace and an uppercase letter, digit, or newline, with
+//! abbreviation and decimal guards; the `max_len` safety net. A
+//! terminator at the end of the buffer is never a boundary, because
+//! it may be an abbreviation awaiting context; `finish` flushes it.
 
 use std::collections::VecDeque;
 
 pub use assistd_config::CodeBlockMode;
 
-/// Cap on captured fence-opener language tags. Defends against
-/// pathological input; a real lang is at most a few chars.
 const MAX_LANG_LEN: usize = 32;
 
-/// Hard ceiling on `buf` size as a multiplier of `max_len`. The
-/// length safety net inside [`find_boundary`] should keep the buffer
-/// bounded in practice, but if the boundary detection ever fails to
-/// fire (regex bug, exotic content, etc.), this fallback guarantees a
-/// pathological LLM response can't grow `buf` without bound. Crossing
-/// this threshold force-flushes the accumulated text as a single
-/// synthetic sentence and logs at `warn`.
+/// Buffer size, as a multiple of `max_len`, past which the buffer is
+/// force-flushed even without a boundary.
 const HARD_CEILING_MULTIPLIER: usize = 4;
 
 const ABBREVIATIONS: &[&str] = &[
@@ -40,13 +24,9 @@ const ABBREVIATIONS: &[&str] = &[
     "U.S", "U.K", "approx", "Prof", "Gen", "Capt",
 ];
 
-/// Streaming sentence segmenter for LLM-to-TTS pipelines.
-///
-/// Accepts incremental token deltas via [`push`](Self::push), strips markdown,
-/// handles fenced code blocks per the configured [`CodeBlockMode`], and emits
-/// complete sentences at natural prosody boundaries. Call [`finish`](Self::finish)
-/// when the LLM stream ends to flush any trailing text, or [`flush_idle`](Self::flush_idle)
-/// to emit a mid-stream partial sentence when the LLM pauses.
+/// Streaming sentence segmenter. Feed deltas with [`push`](Self::push),
+/// call [`finish`](Self::finish) when the stream ends, and
+/// [`flush_idle`](Self::flush_idle) when it pauses.
 pub struct SentenceBuffer {
     buf: String,
     in_code_fence: bool,
@@ -58,14 +38,11 @@ pub struct SentenceBuffer {
 }
 
 impl SentenceBuffer {
-    /// Construct with the default [`CodeBlockMode::Skip`], dropping fenced
-    /// content silently. Equivalent to
-    /// `new_with_mode(max_len, CodeBlockMode::Skip)`.
+    /// [`new_with_mode`](Self::new_with_mode) with [`CodeBlockMode::Skip`].
     pub fn new(max_len: usize) -> Self {
         Self::new_with_mode(max_len, CodeBlockMode::Skip)
     }
 
-    /// Construct with a specific code-block handling mode.
     pub fn new_with_mode(max_len: usize, mode: CodeBlockMode) -> Self {
         Self {
             buf: String::new(),
@@ -84,23 +61,13 @@ impl SentenceBuffer {
         for ch in delta.chars() {
             self.feed_char(ch, &mut out);
         }
-        // After feeding, look for boundaries inside `buf` (pending stays
-        // in `pending`; only finalized text reaches `buf`).
         self.scan_boundaries(&mut out);
-        // Defense-in-depth ceiling: scan_boundaries should keep buf
-        // under max_len, but if it ever doesn't (bug, exotic input),
-        // force-flush before memory growth becomes a problem.
         if let Some(forced) = self.force_flush_if_oversize() {
             out.push(forced);
         }
         out
     }
 
-    /// If `buf` has crossed `HARD_CEILING_MULTIPLIER * max_len` without
-    /// finding a natural boundary, drain it as one synthetic sentence
-    /// and reset. Returns `None` when within budget. Logs at `warn` so
-    /// an operator can see when the safety net fires; it shouldn't,
-    /// but observability beats a silent buffer reset.
     fn force_flush_if_oversize(&mut self) -> Option<String> {
         let ceiling = self.max_len.saturating_mul(HARD_CEILING_MULTIPLIER);
         if self.buf.len() < ceiling {
@@ -121,15 +88,12 @@ impl SentenceBuffer {
         }
     }
 
-    /// Flush any remaining text on `LlmEvent::Done`. Returns at most
-    /// one final sentence: the leftover tail. Drops a dangling
-    /// unterminated code fence silently. The tail goes through the
-    /// same postprocess pipeline as sentences emitted from `push`,
-    /// so markdown / URLs / emphasis are stripped consistently.
+    /// Flush the remaining tail as one sentence. An unterminated code
+    /// fence is dropped silently.
     pub fn finish(&mut self) -> Option<String> {
         if !self.in_code_fence && !self.pending.is_empty() {
-            let p = std::mem::take(&mut self.pending);
-            self.buf.push_str(&strip_inline(&p));
+            let pending = std::mem::take(&mut self.pending);
+            self.buf.push_str(&strip_inline(&pending));
         }
         self.in_code_fence = false;
         self.pending.clear();
@@ -144,31 +108,16 @@ impl SentenceBuffer {
         }
     }
 
-    /// Mid-stream flush triggered by an idle timeout (the LLM has
-    /// paused without emitting a terminator). Returns the buffered
-    /// content up to the last whitespace boundary, leaving any
-    /// trailing partial word in the buffer so it isn't double-spoken
-    /// when the stream resumes. Preserves `pending`, `in_code_fence`,
-    /// `capturing_lang`, and `lang_buf`, so call this freely without
-    /// disturbing in-flight fence detection.
-    ///
-    /// Returns `None` when:
-    ///   - we're inside a code fence (stay quiet, the fence is the
-    ///     authoritative boundary),
-    ///   - the buffer has no whitespace to cut on (i.e. it's a single
-    ///     partial word; wait for more input),
-    ///   - the cut prefix postprocesses to an empty string.
+    /// Flush up to the last whitespace, leaving a trailing partial
+    /// word buffered. `None` inside a code fence, when there is no
+    /// whitespace to cut on, or when the prefix is empty after
+    /// postprocessing. Fence state is preserved.
     pub fn flush_idle(&mut self) -> Option<String> {
         if self.in_code_fence {
             return None;
         }
         let cut = self.buf.rfind(char::is_whitespace)?;
-        // Take everything up to and including the whitespace; leave any
-        // trailing partial word in `buf` for the next push to complete.
-        let mut end = cut + self.buf[cut..].chars().next()?.len_utf8();
-        while !self.buf.is_char_boundary(end) && end < self.buf.len() {
-            end += 1;
-        }
+        let end = cut + self.buf[cut..].chars().next()?.len_utf8();
         let prefix: String = self.buf.drain(..end).collect();
         let speech = postprocess_for_speech(&prefix);
         if speech.is_empty() {
@@ -180,45 +129,11 @@ impl SentenceBuffer {
 
     fn feed_char(&mut self, ch: char, out: &mut Vec<String>) {
         if ch == '`' {
-            self.pending.push('`');
-            if self.pending.ends_with("```") {
-                let opening = !self.in_code_fence;
-                self.in_code_fence = !self.in_code_fence;
-                self.pending.truncate(self.pending.len() - 3);
-                if opening {
-                    self.flush_buf_to_out(out);
-                    self.capturing_lang = matches!(self.mode, CodeBlockMode::Summarize);
-                    self.lang_buf.clear();
-                } else {
-                    self.pending.clear();
-                    if matches!(self.mode, CodeBlockMode::Summarize) {
-                        let phrase = if self.lang_buf.is_empty() {
-                            "Code block.".to_string()
-                        } else {
-                            format!("Code block in {}.", self.lang_buf)
-                        };
-                        out.push(phrase);
-                    }
-                    self.capturing_lang = false;
-                    self.lang_buf.clear();
-                }
-            }
+            self.feed_backtick(out);
             return;
         }
-
         if self.in_code_fence {
-            if self.capturing_lang {
-                if ch.is_whitespace() {
-                    self.capturing_lang = false;
-                } else if self.lang_buf.len() < MAX_LANG_LEN
-                    && (ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '_')
-                {
-                    self.lang_buf.push(ch);
-                } else {
-                    self.capturing_lang = false;
-                }
-            }
-            self.pending.clear();
+            self.feed_fenced(ch);
             return;
         }
 
@@ -233,6 +148,59 @@ impl SentenceBuffer {
         }
         self.buf.push(ch);
         self.scan_boundaries(out);
+    }
+
+    /// Backticks accumulate in `pending`; the third in a row toggles
+    /// the fence.
+    fn feed_backtick(&mut self, out: &mut Vec<String>) {
+        self.pending.push('`');
+        if !self.pending.ends_with("```") {
+            return;
+        }
+        self.pending.truncate(self.pending.len() - 3);
+        if self.in_code_fence {
+            self.close_fence(out);
+        } else {
+            self.open_fence(out);
+        }
+    }
+
+    fn open_fence(&mut self, out: &mut Vec<String>) {
+        self.in_code_fence = true;
+        self.flush_buf_to_out(out);
+        self.capturing_lang = matches!(self.mode, CodeBlockMode::Summarize);
+        self.lang_buf.clear();
+    }
+
+    fn close_fence(&mut self, out: &mut Vec<String>) {
+        self.in_code_fence = false;
+        self.pending.clear();
+        if matches!(self.mode, CodeBlockMode::Summarize) {
+            let phrase = if self.lang_buf.is_empty() {
+                "Code block.".to_string()
+            } else {
+                format!("Code block in {}.", self.lang_buf)
+            };
+            out.push(phrase);
+        }
+        self.capturing_lang = false;
+        self.lang_buf.clear();
+    }
+
+    /// Inside a fence only the language tag after the opener is kept.
+    fn feed_fenced(&mut self, ch: char) {
+        if self.capturing_lang {
+            if ch.is_whitespace() {
+                self.capturing_lang = false;
+            } else if self.lang_buf.len() < MAX_LANG_LEN
+                && (ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '_')
+            {
+                self.lang_buf.push(ch);
+            } else {
+                self.capturing_lang = false;
+            }
+        }
+        self.pending.clear();
     }
 
     fn flush_buf_to_out(&mut self, out: &mut Vec<String>) {
@@ -263,103 +231,67 @@ impl SentenceBuffer {
     }
 }
 
-/// Returns the byte offset of the first boundary in `buf`, or `None`.
+/// Byte offset of the first boundary in `buf`, or `None`.
 fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
-    let bytes = buf.as_bytes();
-
-    // 1. Paragraph break.
     if let Some(i) = buf.find("\n\n") {
         return Some(i + 2);
     }
+    find_bullet_marker(buf)
+        .or_else(|| find_terminator(buf))
+        .or_else(|| length_cutoff(buf, max_len))
+}
 
-    // 2. Bullet markers (treat as paragraph-equivalent boundary). We
-    //    flush *up to* the marker, leaving the marker as the start of
-    //    the next sentence, but we want to drop the marker from
-    //    speech, so include the leading "\n" + 1 marker char + space.
-    if let Some(i) = find_bullet_marker(buf) {
-        return Some(i);
+/// Offset just past the whitespace following a `.`, `!`, or `?` that
+/// ends a sentence. A terminator at the very end of the buffer never
+/// qualifies: it may be an abbreviation awaiting its next word.
+fn find_terminator(buf: &str) -> Option<usize> {
+    let bytes = buf.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        if !matches!(c, b'.' | b'!' | b'?') {
+            continue;
+        }
+        let &next = bytes.get(i + 1)?;
+        if !next.is_ascii_whitespace() {
+            continue;
+        }
+        if c == b'.' && (is_decimal_point(bytes, i) || is_abbreviation_at(buf, i)) {
+            continue;
+        }
+        let after_ws = bytes[i + 1..]
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .map(|off| i + 1 + off)?;
+        let succ = bytes[after_ws];
+        if succ.is_ascii_uppercase() || succ.is_ascii_digit() || next == b'\n' {
+            return Some(after_ws);
+        }
     }
-
-    // 3. Strong terminator with abbreviation + decimal guards.
-    //
-    // EOF is NOT treated as a terminator: a period at the end of the
-    // buffer is ambiguous (could be an abbreviation that hasn't
-    // received its next-word context yet). The buffered text is
-    // flushed by `finish()` instead.
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'.' || c == b'!' || c == b'?' {
-            let next = match bytes.get(i + 1).copied() {
-                Some(b) => b,
-                None => {
-                    i += 1;
-                    continue;
-                }
-            };
-            if !next.is_ascii_whitespace() {
-                // Decimal `3.14`, version `1.2.3`, file `foo.txt`.
-                i += 1;
-                continue;
-            }
-            let prev = if i > 0 {
-                bytes.get(i - 1).copied()
-            } else {
-                None
-            };
-            if c == b'.'
-                && matches!(prev, Some(b) if b.is_ascii_digit())
-                && bytes.get(i + 2).is_some_and(|b| b.is_ascii_digit())
-            {
-                i += 1;
-                continue;
-            }
-            if c == b'.' && is_abbreviation_at(buf, i) {
-                i += 1;
-                continue;
-            }
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j == bytes.len() {
-                // No follow-up content yet; defer until next push.
-                i += 1;
-                continue;
-            }
-            let succ = bytes[j];
-            if succ.is_ascii_uppercase() || succ.is_ascii_digit() {
-                return Some(j);
-            }
-            if next == b'\n' {
-                return Some(j);
-            }
-        }
-        i += 1;
-    }
-
-    // 4. Length safety net.
-    if buf.len() >= max_len {
-        let mut window = max_len;
-        while !buf.is_char_boundary(window) {
-            window -= 1;
-        }
-        if let Some(ws) = buf[..window].rfind(char::is_whitespace) {
-            let mut idx = ws + 1;
-            while !buf.is_char_boundary(idx) && idx < buf.len() {
-                idx += 1;
-            }
-            return Some(idx);
-        }
-        // Fallback: hard cut at max_len, advanced to next char boundary.
-        let mut idx = max_len.min(buf.len());
-        while !buf.is_char_boundary(idx) && idx < buf.len() {
-            idx += 1;
-        }
-        return Some(idx);
-    }
-
     None
+}
+
+fn is_decimal_point(bytes: &[u8], i: usize) -> bool {
+    i > 0 && bytes[i - 1].is_ascii_digit() && bytes.get(i + 2).is_some_and(u8::is_ascii_digit)
+}
+
+/// Cut at the last whitespace before `max_len`, or hard-cut at
+/// `max_len` when there is none.
+fn length_cutoff(buf: &str, max_len: usize) -> Option<usize> {
+    if buf.len() < max_len {
+        return None;
+    }
+    let window = floor_char_boundary(buf, max_len);
+    let cut = buf[..window]
+        .rfind(char::is_whitespace)
+        .map_or(window, |ws| ws + 1);
+    Some(cut)
+}
+
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }
 
 fn find_bullet_marker(buf: &str) -> Option<usize> {
@@ -411,8 +343,6 @@ fn strip_links(s: &str) -> String {
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '[' {
-            // Try to match `[text](url)`. If we don't find the closing
-            // ](url), emit the literal.
             let mut text = String::new();
             let mut found_close_bracket = false;
             for inner in chars.by_ref() {
@@ -435,7 +365,6 @@ fn strip_links(s: &str) -> String {
                     out.push_str(&text);
                     continue;
                 } else {
-                    // Malformed, emit literally
                     out.push('[');
                     out.push_str(&text);
                     out.push_str("](");
@@ -454,9 +383,8 @@ fn strip_links(s: &str) -> String {
     out
 }
 
+/// Drop runs of one to three `*` or `_`.
 fn strip_emphasis(s: &str) -> String {
-    // Drop runs of `*` and `_` of length 1-3 (so **bold**, *em*, ***both***
-    // collapse). Leave content alone.
     let mut out = String::with_capacity(s.len());
     let mut buf = VecDeque::<char>::new();
     for c in s.chars() {
@@ -598,9 +526,6 @@ mod tests {
                 " That was a snippet.",
             ],
         );
-        // The code is dropped; the prelude + tail should speak.
-        // Depending on how the boundaries land, we expect at least one
-        // sentence emitted.
         let joined = s.join(" | ");
         assert!(
             !joined.contains("println"),
@@ -682,21 +607,16 @@ mod tests {
     #[test]
     fn length_cap_flushes_at_whitespace() {
         let mut b = SentenceBuffer::new(50);
-        // 59 chars, no terminator: at 50 chars the safety net fires
-        // and flushes at the last whitespace before the cap.
         let s = b.push("aaaaaaaaa bbbbbbbbb ccccccccc ddddddddd eeeeeeeee fffffffff");
         assert!(
             !s.is_empty(),
             "length cap should have produced at least one flush"
         );
-        // First flushed sentence must end at a whitespace boundary,
-        // not mid-word.
         assert!(
             !s[0].ends_with(['a', 'b', 'c']),
             "should not split mid-word: {:?}",
             s[0]
         );
-        // Whatever's left lands in finish().
         let tail = b.finish().unwrap_or_default();
         let total: usize = s.iter().map(|x| x.len()).sum::<usize>() + tail.len();
         assert!(total > 0, "should have spoken something total");
@@ -714,7 +634,6 @@ mod tests {
     fn finish_returns_none_if_only_fence_left_open() {
         let mut b = SentenceBuffer::new(400);
         let _ = b.push("```rust\nfn main() {");
-        // No closing fence → drop on finish.
         assert_eq!(b.finish(), None);
     }
 
@@ -722,8 +641,6 @@ mod tests {
     fn handles_question_mark_terminator() {
         let mut b = SentenceBuffer::new(400);
         let s = b.push("Are you sure? Yes I am.");
-        // Buffer-end period defers to `finish()`; only the first one
-        // flushes from `push`.
         assert_eq!(s, vec!["Are you sure?"]);
         assert_eq!(b.finish().as_deref(), Some("Yes I am."));
     }
@@ -749,25 +666,13 @@ mod tests {
         let mut b = SentenceBuffer::new(400);
         let _ = b.push("file.txt is here. Done.");
         let tail = b.finish().unwrap_or_default();
-        // "file.txt" should not have triggered a flush mid-word; the
-        // first sentence should be "file.txt is here.".
-        // Since "file.txt" has no whitespace after the period, the
-        // boundary check fails and we don't split.
-        // We can verify via the tail being "Done." (the second
-        // sentence) and the buffer having previously flushed
-        // "file.txt is here.".
         assert!(tail == "Done." || tail.is_empty());
     }
 
     #[test]
     fn no_split_when_period_followed_by_lowercase() {
         let mut b = SentenceBuffer::new(400);
-        // ".\n" with lowercase next: should still split (newline counts).
-        // ". x" with lowercase: should NOT split (no uppercase/digit/EOF/newline).
         let s = b.push("End. then continue.");
-        // The 'then' is lowercase, so the first '.' shouldn't split.
-        // The last '.' is at EOF before finish, but `push` doesn't see
-        // EOF, so no split happens. After finish: full buffer.
         assert!(s.is_empty(), "should not split on lowercase succ: {s:?}");
         let tail = b.finish().unwrap_or_default();
         assert_eq!(tail, "End. then continue.");
@@ -777,8 +682,6 @@ mod tests {
     fn newline_after_period_counts_as_boundary() {
         let mut b = SentenceBuffer::new(400);
         let s = b.push("Item one.\nItem two.");
-        // `\n` after `.` should let it split even without uppercase.
-        // Each "Item one." ends with period+newline.
         assert!(!s.is_empty());
     }
 
@@ -788,10 +691,8 @@ mod tests {
     fn flush_idle_emits_at_last_whitespace() {
         let mut b = SentenceBuffer::new(400);
         let _ = b.push("I am writ");
-        // Trailing partial word "writ" stays buffered; "I am " flushes.
         let out = b.flush_idle();
         assert_eq!(out.as_deref(), Some("I am"));
-        // Resume: pushing the rest completes the sentence cleanly.
         let s = b.push("ing now. Done.");
         assert_eq!(s, vec!["writing now."]);
         assert_eq!(b.finish().as_deref(), Some("Done."));
@@ -808,7 +709,6 @@ mod tests {
     fn flush_idle_returns_none_in_code_fence() {
         let mut b = SentenceBuffer::new(400);
         let _ = b.push("```rust\nfn main");
-        // Inside a fence; stay quiet, don't flush partial code.
         assert!(b.flush_idle().is_none());
     }
 
@@ -816,7 +716,6 @@ mod tests {
     fn flush_idle_returns_none_on_single_partial_word() {
         let mut b = SentenceBuffer::new(400);
         let _ = b.push("writ");
-        // No whitespace boundary → wait for more input.
         assert!(b.flush_idle().is_none());
     }
 
@@ -824,12 +723,9 @@ mod tests {
     fn flush_idle_can_be_called_repeatedly_without_loss() {
         let mut b = SentenceBuffer::new(400);
         let _ = b.push("Hello world ");
-        // First idle flush takes "Hello world".
         let first = b.flush_idle();
         assert_eq!(first.as_deref(), Some("Hello world"));
-        // Buffer empty now; nothing more to flush.
         assert!(b.flush_idle().is_none());
-        // Stream resumes; subsequent push completes a sentence.
         let s = b.push("again. End.");
         assert_eq!(s, vec!["again.".to_string()]);
         assert_eq!(b.finish().as_deref(), Some("End."));
@@ -878,7 +774,6 @@ mod tests {
     fn code_block_summarize_no_lang_tag() {
         let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
         let s = push_all(&mut b, &["```\nopaque content\n```", " After."]);
-        // No language tag → "Code block." with no suffix.
         assert!(
             s.iter().any(|x| x == "Code block."),
             "expected exactly \"Code block.\": {s:?}"
@@ -895,18 +790,11 @@ mod tests {
         let long_lang: String = "a".repeat(100);
         let _ = b.push(&format!("```{long_lang}\nfoo\n```"));
         let _ = b.finish();
-        // Just asserting no panic on oversize lang tag.
     }
 
     #[test]
     fn force_flushes_pathological_no_boundary_input() {
-        // If a delta of pure non-boundary chars (no
-        // whitespace, no terminator, no paragraph break) somehow grows
-        // beyond 4*max_len, force_flush_if_oversize must emit it as a
-        // single synthetic sentence rather than allow unbounded growth.
         let mut b = SentenceBuffer::new(50);
-        // 50 * 4 = 200; push 600 chars of pure ASCII letters with no
-        // boundary chars at all.
         let blob: String = std::iter::repeat_n('a', 600).collect();
         let out = b.push(&blob);
         assert!(
@@ -922,14 +810,9 @@ mod tests {
 
     #[test]
     fn force_flush_does_not_fire_on_normal_input() {
-        // Normal content with proper sentence boundaries should not
-        // trigger the force-flush path; the natural boundaries in
-        // scan_boundaries handle everything.
         let mut b = SentenceBuffer::new(400);
         let out = b.push("First. Second. Third. Fourth. Fifth. Sixth.");
         let tail = b.finish().unwrap_or_default();
-        // Combined we should have got six sentences; none should look
-        // like a force-flushed glob.
         let combined = out.join(" ") + " " + &tail;
         assert_eq!(
             combined.matches('.').count(),
@@ -941,15 +824,12 @@ mod tests {
     #[test]
     fn code_block_summarize_emits_only_after_close() {
         let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
-        // Open fence + content but no close → no summary on finish.
         let _ = b.push("```python\nprint('hi')\n");
-        // No close fence yet: nothing emitted.
         let s = b.push("");
         assert!(
             s.iter().all(|x| !x.contains("Code block")),
             "summary emitted prematurely: {s:?}"
         );
-        // Closing fence yields the summary.
         let s2 = b.push("```");
         assert!(
             s2.iter().any(|x| x.contains("Code block in python")),

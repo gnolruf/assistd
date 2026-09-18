@@ -1,11 +1,5 @@
-//! Persistent-memory subsystem wiring for the daemon.
-//!
-//! Opens the SQLite store from `assistd-memory`, then performs the
-//! daemon-side session lifecycle: try to resume a prior session whose
-//! owning process has died, otherwise start a fresh session pinned to
-//! this daemon's PID. Returns the trait-object handles consumed by
-//! [`AppState`](assistd_core::AppState) plus the writer task and
-//! session identity needed to clean up at shutdown.
+//! Memory subsystem wiring for the daemon: open SQLite, then resume a
+//! session whose daemon has died or begin a fresh one.
 
 use std::sync::Arc;
 
@@ -18,21 +12,14 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
 
-/// Live handles for the memory subsystem, returned by [`init`].
 pub struct MemorySubsystem {
-    /// Key-value memory store (SQLite-backed or no-op).
     pub memory_store: Arc<dyn MemoryStore>,
-    /// Conversation and branch store.
     pub conversation_store: Arc<dyn ConversationStore>,
-    /// Background SQLite writer task.
     pub writer_handle: Option<JoinHandle<()>>,
-    /// Identity of the current session, shared with [`AppState`](assistd_core::AppState).
     pub session_id: Arc<SessionId>,
-    /// Active branch within the current session.
     pub branch_id: BranchId,
-    /// History rows loaded from the resumed session, to be replayed into the LLM.
+    /// History of the resumed branch, to replay into the LLM.
     pub resumed_history: Vec<HistoryRow>,
-    /// Raw SQLite handle; passed to the embedding subsystem for chunk queries.
     pub sqlite_handle: Option<Arc<SqliteHandle>>,
 }
 
@@ -49,10 +36,8 @@ impl MemorySubsystem {
         }
     }
 
-    /// End the active session row and drain the writer task. Called
-    /// after the run loop exits, before presence shutdown, so any
-    /// in-flight writes accepted earlier in shutdown still land in the
-    /// database before the writer thread terminates.
+    /// End the session row and drain the writer task. Must run before
+    /// presence shutdown so writes accepted earlier still land.
     pub async fn shutdown(self) {
         if let Err(e) = self.conversation_store.end_session(&self.session_id).await {
             tracing::warn!("memory: end_session failed at shutdown: {e:#}");
@@ -63,10 +48,8 @@ impl MemorySubsystem {
     }
 }
 
-/// Open SQLite and establish (or resume) the daemon session.
-///
-/// Degrades to a no-op subsystem when `memory.enabled = false` or when
-/// the database cannot be opened.
+/// Degrades to a no-op subsystem when disabled or when the database
+/// cannot be opened.
 pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> MemorySubsystem {
     if !config.memory.enabled {
         info!("memory: disabled in config (memory.enabled = false)");

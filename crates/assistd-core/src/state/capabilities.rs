@@ -1,19 +1,15 @@
-//! `GetCapabilities` handler: probes the running llama-server and
-//! reports vision support + model name.
+//! `GetCapabilities` handler.
 
 use super::AppState;
-use crate::recovery::{Component, RecoverySeverity};
 use anyhow::Result;
-use assistd_ipc::Event;
+use assistd_ipc::{Component, Event, StatusKind, StatusSeverity};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 impl AppState {
-    /// Probe the running llama-server's capabilities and surface the
-    /// model name in one shot, letting clients render `vision: on/off`
-    /// without reaching into the HTTP API directly. Re-probes per
-    /// request because a model swap on a long-lived daemon can flip
-    /// the vision flag between calls.
+    /// Report MCP startup failures, then probe llama-server for vision
+    /// support and the model name. Probes per request because a model
+    /// swap can flip vision between calls.
     pub(super) async fn handle_get_capabilities(
         self: Arc<Self>,
         id: String,
@@ -23,9 +19,9 @@ impl AppState {
             let _ = tx
                 .send(Event::Status {
                     id: id.clone(),
-                    severity: RecoverySeverity::Warning.as_str().to_string(),
-                    component: Component::Mcp.as_str().to_string(),
-                    event: "startup_failed".to_string(),
+                    severity: StatusSeverity::Warning,
+                    component: Component::Mcp,
+                    event: StatusKind::StartupFailed,
                     message: format!(
                         "MCP server '{}' is not available: {}",
                         failure.server_name, failure.reason

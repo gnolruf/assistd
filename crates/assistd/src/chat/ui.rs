@@ -1,7 +1,6 @@
-#![allow(elided_lifetimes_in_paths)] // ratatui Frame<'_> is mostly noise; project style is to elide it
-//! Pure ratatui render for the chat TUI. No state mutation beyond the
-//! output pane's wrap cache and the app's last-viewport-height sink, both
-//! of which must be updated during layout.
+//! ratatui render for the chat TUI. Mutates only the output pane's wrap
+//! cache and the app's last viewport height, both of which are layout
+//! outputs.
 
 use std::time::{Duration, Instant};
 
@@ -17,8 +16,7 @@ use super::app::{App, BranchPickerModal, ConfirmationModal};
 use super::output::THUMBNAIL_ROWS;
 use super::vram::{RamState, VramState};
 
-/// Render the full chat TUI into `frame`, updating the app's cached layout state.
-pub fn render(frame: &mut Frame, app: &mut App) {
+pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let frame_area = frame.area();
     let input_height =
         compute_input_height(frame_area.width, frame_area.height, app.input.buffer());
@@ -57,7 +55,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_branch_picker_modal(frame: &mut Frame, area: Rect, picker: &BranchPickerModal) {
+fn render_branch_picker_modal(frame: &mut Frame<'_>, area: Rect, picker: &BranchPickerModal) {
     let width = (area.width.saturating_mul(4) / 5).clamp(50, 120);
     let max_height = area.height.saturating_sub(2);
     let desired = picker.entries.len() as u16 + 4;
@@ -158,7 +156,7 @@ fn render_branch_picker_modal(frame: &mut Frame, area: Rect, picker: &BranchPick
 }
 
 fn render_slash_popup(
-    frame: &mut Frame,
+    frame: &mut Frame<'_>,
     area: Rect,
     suggestions: &[&'static (&'static str, &'static str)],
     selected: usize,
@@ -197,9 +195,8 @@ fn render_slash_popup(
     frame.render_widget(para, area);
 }
 
-fn render_confirmation_modal(frame: &mut Frame, area: Rect, modal: &ConfirmationModal) {
-    let width = area.width.saturating_mul(3) / 5; // 60%
-    let width = width.clamp(40, 100);
+fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &ConfirmationModal) {
+    let width = (area.width.saturating_mul(3) / 5).clamp(40, 100);
     let height = 10u16.min(area.height.saturating_sub(2));
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
@@ -247,7 +244,7 @@ fn render_confirmation_modal(frame: &mut Frame, area: Rect, modal: &Confirmation
     frame.render_widget(para, inner);
 }
 
-fn render_output(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -312,7 +309,7 @@ fn render_output(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-fn render_status(frame: &mut Frame, area: Rect, app: &App) {
+fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if area.width == 0 {
         return;
     }
@@ -341,7 +338,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let reversed = Style::default().add_modifier(Modifier::REVERSED);
-    let mut left_spans: Vec<Span> = Vec::new();
+    let mut left_spans: Vec<Span<'_>> = Vec::new();
     if let Some(title) = app.session_title.as_deref() {
         left_spans.push(Span::styled(
             truncate_title(title),
@@ -457,8 +454,6 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(para, area);
 }
 
-/// Keep a generated title from crowding the rest of the status bar on a
-/// narrow terminal.
 fn truncate_title(title: &str) -> String {
     const MAX_CHARS: usize = 32;
     if title.chars().count() <= MAX_CHARS {
@@ -498,7 +493,7 @@ fn format_countdown(d: Duration) -> String {
 
 const INPUT_PROMPT: &str = "> ";
 
-fn render_input(frame: &mut Frame, area: Rect, app: &App) {
+fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }

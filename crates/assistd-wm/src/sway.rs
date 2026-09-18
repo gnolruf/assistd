@@ -1,27 +1,9 @@
-//! Sway backend for [`crate::WindowManager`].
-//!
-//! Sway implements the i3 IPC protocol with Wayland-specific extensions
-//! (the `app_id` field on views, and a richer output reply). This
-//! backend mirrors [`crate::i3`] in shape: two IPC connections (one
-//! held under a `Mutex` for commands, one consumed by `subscribe()` to
-//! drive the event stream), a snapshot updated on every `Window` and
-//! `Workspace::Focus` event so synchronous reads from the daemon's
-//! per-turn context injection don't round-trip the socket.
-//!
-//! The IPC client is `swayipc-async`, which is built on `async-io`
-//! rather than `tokio`. Its futures coexist with the workspace tokio
-//! runtime; the cost is one extra reactor thread per process, which
-//! is acceptable since the WM event path is not on the LLM hot loop.
-//!
-//! Wayland-native vs XWayland identifiers: every Sway view has either
-//! `Node::app_id` (xdg-shell, the Wayland-native case) or
-//! `Node::window_properties.class` (XWayland fallback). We surface
-//! whichever is present as [`crate::Window::id`], and dispatch
-//! [`SwayBackend::focus`] / [`SwayBackend::move_to_workspace`] with a
-//! composite criteria string so the caller doesn't have to know which
-//! kind a given window uses. Sway treats a 0-match criteria as a
-//! silent success (same as i3), so `wm focus X` is best-effort: the
-//! caller verifies via `wm active` if it cares.
+//! Sway backend for [`crate::WindowManager`], over `swayipc-async`.
+//! Same shape as the i3 backend: one command socket, one event socket.
+//! `swayipc-async` runs on `async-io`, which costs one extra reactor
+//! thread alongside tokio. Views carry either `app_id` (Wayland-native)
+//! or `window_properties.class` (XWayland); whichever is present is
+//! surfaced as the window's app.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,26 +17,23 @@ use swayipc_async::{
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 
-use crate::criteria::{format_place_floating_pixels, format_workspace_target};
+use crate::criteria::{
+    format_focus, format_layout, format_move_to_workspace, format_place_floating_pixels,
+    format_resize_width,
+};
 use crate::error::ipc_ctx;
 use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
 use crate::{
     FocusedWindowContext, Layout, OutputInfo, PlacementAnchor, PlacementCriteria, Rect, ResizeDir,
-    Window, WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
+    WM_IPC_TIMEOUT, Window, WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId,
+    WorkspaceInfo,
 };
 
-/// Mirror of [`crate::i3::WINDOW_EVENTS_CAPACITY`].
 const WINDOW_EVENTS_CAPACITY: usize = 32;
-
-/// Mirror of [`crate::i3::WINDOW_EVENT_WAIT`].
 const WINDOW_EVENT_WAIT: Duration = Duration::from_millis(500);
 
-/// Cast a sway `Node.id` (`i64`) to a [`WindowId`]. Sway never emits
-/// non-positive ids in practice, but the bounds check keeps the
-/// conversion total; non-positive ids are silently dropped (the
-/// caller treats them as "no id available").
 fn sway_id(raw: i64) -> Option<WindowId> {
     if raw <= 0 {
         return None;
@@ -62,40 +41,32 @@ fn sway_id(raw: i64) -> Option<WindowId> {
     WindowId::new(raw as u64)
 }
 
-/// `WindowManager` impl wrapping a single Sway IPC command socket.
-/// Held inside `Arc<dyn WindowManager>` by the daemon's `AppState`.
+/// [`WindowManager`] over a single Sway IPC command socket.
 pub struct SwayBackend {
     cmd: Arc<Mutex<Option<Connection>>>,
     snapshot: Arc<RwLock<Snapshot>>,
     reconnect: Arc<tokio::sync::Notify>,
-    /// Mirror of [`crate::i3::I3Backend::window_events`].
     window_events: broadcast::Sender<WindowEvent>,
 }
 
-/// Returned by [`SwayBackend::start`] alongside the backend itself. The
-/// daemon awaits [`SwayHandle::shutdown`] in its graceful-shutdown
-/// block, the same pattern as `I3Handle`.
+/// The backend plus its supervisor task, returned by [`SwayBackend::start`].
 pub struct SwayHandle {
     pub backend: Arc<SwayBackend>,
     supervisor_task: JoinHandle<()>,
 }
 
 impl SwayHandle {
-    /// Awaits the supervisor task. The daemon should flip `shutdown_tx` before
-    /// calling this so the supervisor exits cleanly rather than blocking.
+    /// Awaits the supervisor task. Flip the shutdown watch first or
+    /// this blocks until the socket drops.
     pub async fn shutdown(self) {
         let _ = self.supervisor_task.await;
     }
 }
 
 impl SwayBackend {
-    /// Connect to Sway's IPC sockets, seed the focused-window snapshot,
-    /// and spawn the supervisor task that drives the event stream and
-    /// reconnects on socket drops.
-    ///
-    /// Returns `Err` only on the initial connect failure. After
-    /// startup, transient socket errors (e.g. `swaymsg reload`) are
-    /// handled in-process by the supervisor.
+    /// Connect to the Sway IPC sockets, seed the focus snapshot, and
+    /// spawn the supervisor that drives events and reconnects on
+    /// socket drops. Errors only when the initial connect fails.
     pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<SwayHandle> {
         let (mut cmd, stream) = connect_pair().await?;
         let initial = match seed_snapshot(&mut cmd).await {
@@ -129,11 +100,9 @@ impl SwayBackend {
         })
     }
 
-    /// Walk Sway's tree looking for a window matching `criteria`,
-    /// returning its current rect. Mirror of
-    /// [`crate::i3::I3Backend::find_window_rect_by_criteria`], with
-    /// the same event-driven race-closing: subscribe → quick poll →
-    /// wait for matching `WindowEvent::Opened` → re-poll.
+    /// Current rect of the window matching `criteria`. Subscribes to
+    /// window events before the first tree poll so a `window::new`
+    /// that lands between the poll and the wait is not missed.
     async fn find_window_rect_by_criteria(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
         let mut events = self.window_events.subscribe();
 
@@ -168,97 +137,69 @@ impl SwayBackend {
     }
 
     async fn find_window_rect_once(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let tree = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_tree()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_TREE (window rect)"));
-            }
-            Ok(Ok(t)) => t,
-        };
-        drop(guard);
+        let tree = self.tree("sway GET_TREE (window rect)").await?;
         find_sway_node_rect(&tree, criteria)
             .ok_or_else(|| WmError::Rejected(format!("no window matches {criteria:?}")))
     }
 
-    /// Query the focused workspace's pixel rect via `GET_WORKSPACES`.
-    /// Used by [`WindowManager::place_floating`] to compute output-
-    /// relative pixel coordinates without relying on ppt-based moves
-    /// that compositors may clamp. Exposed through the
-    /// `WindowManager` trait method of the same name; the private
-    /// `_inner` suffix avoids the trait/inherent collision.
-    async fn focused_workspace_rect_inner(&self) -> WmResult<Rect> {
+    /// Run one IPC call on the command socket under [`WM_IPC_TIMEOUT`].
+    /// A timeout or transport error drops the connection and wakes the
+    /// supervisor to reconnect.
+    async fn with_conn<T>(
+        &self,
+        ctx: &'static str,
+        op: impl AsyncFnOnce(&mut Connection) -> swayipc_async::Fallible<T>,
+    ) -> WmResult<T> {
         let mut guard = self.cmd.lock().await;
         let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let workspaces =
-            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
-                Err(_) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-                }
-                Ok(Err(e)) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(ipc_ctx(e, "sway GET_WORKSPACES (focused rect)"));
-                }
-                Ok(Ok(w)) => w,
-            };
-        drop(guard);
-        workspaces
-            .into_iter()
-            .find(|w| w.focused)
-            .map(|w| Rect {
-                x: w.rect.x,
-                y: w.rect.y,
-                width: w.rect.width.max(0) as u32,
-                height: w.rect.height.max(0) as u32,
-            })
-            .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
+        let outcome = tokio::time::timeout(WM_IPC_TIMEOUT, op(conn)).await;
+        let err = match outcome {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(e)) => ipc_ctx(e, ctx),
+            Err(_) => WmError::Timeout(WM_IPC_TIMEOUT),
+        };
+        *guard = None;
+        self.reconnect.notify_one();
+        Err(err)
     }
 
-    async fn run(&self, payload: &str) -> WmResult<()> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let outcomes =
-            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.run_command(payload)).await {
-                Err(_) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-                }
-                Ok(Err(e)) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(ipc_ctx(e, "sway RUN_COMMAND"));
-                }
-                Ok(Ok(v)) => v,
-            };
+    async fn run_command(&self, payload: &str) -> WmResult<()> {
+        let outcomes = self
+            .with_conn("sway RUN_COMMAND", async |conn| {
+                conn.run_command(payload).await
+            })
+            .await?;
         for r in outcomes {
             r.map_err(|e| WmError::Rejected(format!("{payload}: {e}")))?;
         }
         Ok(())
+    }
+
+    async fn workspaces(&self, ctx: &'static str) -> WmResult<Vec<swayipc_async::Workspace>> {
+        self.with_conn(ctx, async |conn| conn.get_workspaces().await)
+            .await
+    }
+
+    async fn outputs(&self, ctx: &'static str) -> WmResult<Vec<swayipc_async::Output>> {
+        self.with_conn(ctx, async |conn| conn.get_outputs().await)
+            .await
+    }
+
+    async fn tree(&self, ctx: &'static str) -> WmResult<Node> {
+        self.with_conn(ctx, async |conn| conn.get_tree().await)
+            .await
     }
 }
 
 #[async_trait]
 impl WindowManager for SwayBackend {
     async fn focus(&self, window: &WindowId) -> WmResult<()> {
-        let cmd = format!(r#"[con_id="{}"] focus"#, window.get());
-        self.run(&cmd).await
+        self.run_command(&format_focus(window)).await
     }
 
     async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
-        let target = format_workspace_target(workspace);
-        let cmd = format!(r#"[con_id="{}"] move container to {target}"#, window.get());
-        self.run(&cmd).await
+        self.run_command(&format_move_to_workspace(window, workspace))
+            .await
     }
 
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
@@ -270,44 +211,16 @@ impl WindowManager for SwayBackend {
     }
 
     async fn list_windows(&self) -> WmResult<Vec<Window>> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let tree = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_tree()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_TREE"));
-            }
-            Ok(Ok(t)) => t,
-        };
-        drop(guard);
+        let tree = self.tree("sway GET_TREE").await?;
         let mut out = Vec::new();
         collect_windows(&tree, None, &mut out);
         Ok(out)
     }
 
     async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let ws = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_WORKSPACES"));
-            }
-            Ok(Ok(w)) => w,
-        };
-        Ok(ws
+        Ok(self
+            .workspaces("sway GET_WORKSPACES")
+            .await?
             .into_iter()
             .map(|w| WorkspaceInfo {
                 num: w.num,
@@ -324,16 +237,26 @@ impl WindowManager for SwayBackend {
         direction: ResizeDir,
         pixels: u32,
     ) -> WmResult<()> {
-        self.run(&sway_resize_payload(window, direction, pixels))
+        self.run_command(&format_resize_width(window, direction, pixels))
             .await
     }
 
     async fn set_layout(&self, layout: Layout) -> WmResult<()> {
-        self.run(&sway_layout_payload(layout)).await
+        self.run_command(&format_layout(layout)).await
     }
 
     async fn focused_workspace_rect(&self) -> WmResult<Rect> {
-        self.focused_workspace_rect_inner().await
+        self.workspaces("sway GET_WORKSPACES (focused rect)")
+            .await?
+            .into_iter()
+            .find(|w| w.focused)
+            .map(|w| Rect {
+                x: w.rect.x,
+                y: w.rect.y,
+                width: w.rect.width.max(0) as u32,
+                height: w.rect.height.max(0) as u32,
+            })
+            .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
     }
 
     async fn place_floating(
@@ -341,10 +264,7 @@ impl WindowManager for SwayBackend {
         criteria: &PlacementCriteria,
         anchor: PlacementAnchor,
     ) -> WmResult<()> {
-        let workspace = self.focused_workspace_rect_inner().await?;
-        // See I3Backend::place_floating: use the window's actual rect
-        // so DPI scaling / WM-enforced sizing don't push the popup
-        // off-screen.
+        let workspace = self.focused_workspace_rect().await?;
         let effective = match self.find_window_rect_by_criteria(criteria).await {
             Ok(actual) => {
                 tracing::info!(
@@ -366,29 +286,16 @@ impl WindowManager for SwayBackend {
                 anchor
             }
         };
-        self.run(&format_place_floating_pixels(
+        self.run_command(&format_place_floating_pixels(
             criteria, effective, workspace,
         ))
         .await
     }
 
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let outputs = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_outputs()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_OUTPUTS"));
-            }
-            Ok(Ok(v)) => v,
-        };
-        Ok(outputs
+        Ok(self
+            .outputs("sway GET_OUTPUTS")
+            .await?
             .into_iter()
             .map(|o| OutputInfo {
                 name: o.name,
@@ -408,23 +315,9 @@ impl WindowManager for SwayBackend {
     }
 
     async fn focused_output_scale(&self) -> WmResult<f64> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let outputs = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_outputs()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_OUTPUTS (focused scale)"));
-            }
-            Ok(Ok(v)) => v,
-        };
-        drop(guard);
-        Ok(outputs
+        Ok(self
+            .outputs("sway GET_OUTPUTS (focused scale)")
+            .await?
             .into_iter()
             .find(|o| o.focused)
             .and_then(|o| o.scale)
@@ -433,8 +326,6 @@ impl WindowManager for SwayBackend {
     }
 }
 
-/// Open the cmd + events socket pair and subscribe events. Pulled out
-/// of `start()` so the supervisor can reuse it on each reconnect.
 async fn connect_pair() -> WmResult<(Connection, EventStream)> {
     let cmd = Connection::new()
         .await
@@ -449,10 +340,8 @@ async fn connect_pair() -> WmResult<(Connection, EventStream)> {
     Ok((cmd, stream))
 }
 
-/// Drive one events stream until it errors or the supervisor signals
-/// a forced reconnect. Returns `false` if shutdown was observed
-/// (caller exits cleanly), `true` if the inner loop fell through and
-/// the caller should reconnect.
+/// Drive one events stream. Returns `true` when the caller should
+/// reconnect, `false` on shutdown.
 async fn drive_events(
     mut stream: EventStream,
     snapshot: Arc<RwLock<Snapshot>>,
@@ -476,10 +365,10 @@ async fn drive_events(
                             let _ = window_events.send(ev);
                         }
                     }
-                    Some(Ok(Event::Workspace(d))) => {
-                        if matches!(d.change, WorkspaceChange::Focus) {
-                            let ws = d.current.as_ref().and_then(|n| n.name.clone());
-                            apply_workspace_focus(&snapshot, ws).await;
+                    Some(Ok(Event::Workspace(data))) => {
+                        if matches!(data.change, WorkspaceChange::Focus) {
+                            let name = data.current.as_ref().and_then(|n| n.name.clone());
+                            apply_workspace_focus(&snapshot, name).await;
                         }
                     }
                     Some(Ok(_)) => {}
@@ -487,22 +376,19 @@ async fn drive_events(
                         tracing::warn!("sway event stream error: {e}");
                         return true;
                     }
-                    None => return true, // socket closed
+                    None => return true,
                 }
             }
         }
     }
 }
 
-/// Mirror of [`crate::i3::window_event_from_i3`] for sway events.
 fn window_event_from_sway(w: &swayipc_async::WindowEvent) -> Option<WindowEvent> {
     let id = sway_id(w.container.id)?;
     match w.change {
         WindowChange::New => {
             let props = w.container.window_properties.as_ref();
             let class = props.and_then(|p| p.class.clone());
-            // Title falls back through Wayland title → XWayland WM_NAME
-            // the same way the snapshot does.
             let title = w
                 .container
                 .name
@@ -524,9 +410,6 @@ fn window_event_from_sway(w: &swayipc_async::WindowEvent) -> Option<WindowEvent>
     }
 }
 
-/// Outer reconnect loop. Mirrors the i3 supervisor: drive events
-/// through `drive_events`; on fall-through, drop cmd, sleep with
-/// exponential backoff, reconnect, re-seed, repeat.
 async fn supervisor_loop(
     backend: Arc<SwayBackend>,
     initial_stream: EventStream,
@@ -592,9 +475,6 @@ async fn supervisor_loop(
     }
 }
 
-/// Recursively search Sway's tree for a leaf node matching the
-/// criteria; mirror of [`crate::i3::find_node_rect`]. Sway's leaves
-/// are `Con` or `FloatingCon`; container nodes are skipped.
 fn find_sway_node_rect(node: &Node, criteria: &PlacementCriteria) -> Option<Rect> {
     if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
         && sway_node_matches(node, criteria)
@@ -626,35 +506,11 @@ fn sway_node_matches(node: &Node, criteria: &PlacementCriteria) -> bool {
             .as_deref()
             .or_else(|| props.and_then(|p| p.title.as_deref()))
             .is_some_and(|t| t == want),
-        // ConId would short-circuit at a different layer; leave as
-        // no-match so a misuse fails loudly.
+        // ConId is matched by id elsewhere. No-match so a misuse fails loudly.
         PlacementCriteria::ConId(_) => false,
     }
 }
 
-fn sway_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
-    format!(
-        r#"[con_id="{}"] resize {} width {} px or 0 ppt"#,
-        window.get(),
-        direction.as_str(),
-        pixels,
-    )
-}
-
-/// Format the Sway RUN_COMMAND payload for `set_layout`. Acts on the
-/// focused container, the same form i3 uses, since Sway speaks the i3
-/// IPC dialect for `layout`.
-fn sway_layout_payload(layout: Layout) -> String {
-    format!("layout {}", layout.as_str())
-}
-
-/// Walk Sway's tree recursively, emitting one [`Window`] per leaf view.
-/// Sway leaves are nodes with `app_id` (Wayland-native) or
-/// `window_properties.class` (XWayland) set; we prefer `app_id` for the
-/// returned `Window.id` so the caller sees the natural identifier and
-/// can pass it back unchanged. Tracks the most recent
-/// `NodeType::Workspace` ancestor in `current_ws` so each window is
-/// tagged with its workspace.
 fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>) {
     let next_ws = if matches!(node.node_type, NodeType::Workspace) {
         node.name.as_deref()
@@ -665,9 +521,6 @@ fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>)
     if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
         && let Some(id) = sway_id(node.id)
     {
-        // Prefer Wayland-native app_id; fall back to the X11 class for
-        // XWayland views. A leaf with neither falls through with
-        // app: None; the LLM can still target it by con_id.
         let class = node
             .window_properties
             .as_ref()
@@ -763,41 +616,11 @@ fn walk_focused(node: &Node) -> Option<&Node> {
 mod tests {
     use super::*;
 
-    fn id(n: u64) -> WindowId {
-        WindowId::new(n).expect("test ids are non-zero")
-    }
-
-    #[test]
-    fn resize_payload_uses_con_id_criteria() {
-        let p = sway_resize_payload(&id(42), ResizeDir::Grow, 50);
-        assert_eq!(p, r#"[con_id="42"] resize grow width 50 px or 0 ppt"#);
-    }
-
-    #[test]
-    fn resize_payload_renders_id_in_decimal() {
-        let p = sway_resize_payload(&id(1234567890), ResizeDir::Shrink, 5);
-        assert_eq!(
-            p,
-            r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#
-        );
-    }
-
     #[test]
     fn sway_id_rejects_non_positive() {
         assert!(sway_id(0).is_none());
         assert!(sway_id(-1).is_none());
         assert!(sway_id(-12345).is_none());
         assert_eq!(sway_id(42), WindowId::new(42));
-    }
-
-    #[test]
-    fn layout_payload_emits_bare_form() {
-        for (l, expected) in [
-            (Layout::Default, "layout default"),
-            (Layout::Tabbed, "layout tabbed"),
-            (Layout::SplitH, "layout splith"),
-        ] {
-            assert_eq!(sway_layout_payload(l), expected);
-        }
     }
 }

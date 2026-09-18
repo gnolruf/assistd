@@ -1,17 +1,6 @@
-//! Interactive ratatui-based chat TUI.
-//!
-//! `assistd chat` is a thin window onto the running daemon. It loads
-//! the existing config, probes the daemon's Unix socket (auto-spawning
-//! `assistd daemon` when nothing is listening), and drives a
-//! three-region terminal UI (output / status / input) by streaming
-//! `Event`s back from the daemon over IPC.
-//!
-//! No LLM service, voice pipeline, presence manager, tool registry,
-//! or memory store is constructed in this process: all of that lives
-//! in the daemon. The TUI only owns: ratatui rendering, key handling,
-//! the local hotkey grab (PTT keystrokes need to arrive at the
-//! foreground process), VRAM/throughput probes, and attachment
-//! staging.
+//! `assistd chat`: a terminal window onto the running daemon. Owns
+//! rendering, key handling, the local hotkey grab, resource probes and
+//! attachment staging; every service lives in the daemon.
 
 mod app;
 mod input;
@@ -43,7 +32,6 @@ use uuid::Uuid;
 
 use self::app::{App, ChatEvent, WireStream};
 
-/// Arguments for the `chat` subcommand.
 #[derive(Args)]
 pub struct ChatArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
@@ -63,12 +51,7 @@ struct TuiContext {
     startup_error: Option<String>,
 }
 
-/// Launch the interactive chat TUI, auto-spawning the daemon if needed.
-///
-/// # Errors
-///
-/// Returns an error if config loading fails, the terminal cannot be set up,
-/// or a fatal I/O error occurs during the session.
+/// Run the TUI, auto-spawning the daemon when nothing is listening.
 pub async fn run(args: ChatArgs) -> Result<()> {
     let _stderr_redirect = redirect_stderr_to_log()?;
 
@@ -134,7 +117,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(64);
-    let _voice_pipeline = voice::spawn(
+    let voice_pipeline = voice::spawn_pipeline(
         &config,
         ipc.clone(),
         chat_tx.clone(),
@@ -161,6 +144,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     .await;
 
     let _ = shutdown_tx.send(true);
+    voice_pipeline.shutdown().await;
     info!("assistd chat stopped");
     run_result
 }
@@ -338,7 +322,7 @@ async fn get_capabilities(ipc: &IpcClient) -> Result<(bool, String)> {
             }
             Some(Event::Done { .. }) => return Ok((vision, model_name)),
             Some(Event::Error { message, .. }) => anyhow::bail!("{message}"),
-            Some(_) => {} // ignore stray events
+            Some(_) => {}
             None => anyhow::bail!("daemon closed without responding"),
         }
     }
@@ -364,11 +348,9 @@ fn spawn_status_polling(
     })
 }
 
-/// Session titles are generated in the background, long after the turn
-/// that triggered them has closed its dialog connection, so they reach
-/// the TUI over the daemon's broadcast bus instead. Reconnects on a
-/// fixed delay: a missing title is cosmetic, so there's nothing to gain
-/// from backing off aggressively.
+/// Session titles arrive on the daemon's broadcast bus long after the
+/// turn that triggered them has closed its connection. Reconnects on a
+/// fixed delay; a missing title is cosmetic.
 fn spawn_title_subscription(
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,

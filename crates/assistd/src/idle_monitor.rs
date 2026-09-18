@@ -1,21 +1,8 @@
-//! Automatic idle-based sleep monitor.
+//! Drowses and sleeps the daemon after configured idle periods.
 //!
-//! Polls `PresenceManager::idle_duration()` on a fixed interval and
-//! drives `drowse()` / `sleep()` when the configured thresholds are
-//! crossed. Any user interaction (query, TUI submit, CLI presence
-//! command, hotkey) resets `PresenceManager::last_activity` and
-//! naturally defers the next transition.
-//!
-//! Like `gpu_monitor`, this module is a *driver* of `PresenceManager`.
-//! It calls `presence.drowse()` / `presence.sleep()` directly rather
-//! than going through `set_presence`, which means automatic transitions
-//! do not themselves reset the idle timer, a crucial invariant so that
-//! the monitor can make forward progress through Active → Drowsy →
-//! Sleeping.
-//!
-//! Disabled when both `sleep.idle_to_drowsy_mins` and
-//! `sleep.idle_to_sleep_mins` are 0; returns `None` from
-//! [`spawn_monitor`] with an info log.
+//! Calls `drowse()` / `sleep()` directly rather than `set_presence`, so
+//! automatic transitions do not reset the idle timer and the monitor can
+//! progress Active → Drowsy → Sleeping.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,10 +13,6 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-/// How often to re-check idle duration against thresholds. The
-/// thresholds themselves are in minutes, so sub-minute granularity is
-/// irrelevant; 10 s keeps the TUI countdown feeling live while
-/// imposing near-zero cost at idle (one std-mutex read + compare).
 const POLL_INTERVAL_SECS: u64 = 10;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -39,9 +22,7 @@ enum Action {
     Sleep,
 }
 
-/// Pre-flight check called from daemon startup. Duplicates a
-/// `Config::validate` rule so a caller building a `SleepConfig` without
-/// going through `Config` still fails fast.
+/// Reject a sleep threshold at or below the drowsy threshold.
 pub fn validate(cfg: &SleepConfig) -> Result<()> {
     if cfg.idle_to_drowsy_mins > 0
         && cfg.idle_to_sleep_mins > 0
@@ -55,8 +36,7 @@ pub fn validate(cfg: &SleepConfig) -> Result<()> {
     Ok(())
 }
 
-/// Spawn the idle monitor. Returns `None` when both thresholds are 0
-/// (feature fully disabled).
+/// `None` when both thresholds are 0.
 pub fn spawn_monitor(
     cfg: &SleepConfig,
     presence: Arc<PresenceManager>,
@@ -165,8 +145,6 @@ mod tests {
         c
     }
 
-    // --- validate -----------------------------------------------------
-
     #[test]
     fn validate_both_zero_is_ok() {
         validate(&cfg(0, 0)).expect("both zero disables the monitor");
@@ -194,8 +172,6 @@ mod tests {
         let err = validate(&cfg(60, 60)).unwrap_err();
         assert!(err.to_string().contains("idle_to_sleep_mins"));
     }
-
-    // --- decide: Active ----------------------------------------------
 
     #[test]
     fn active_before_drowsy_threshold_no_action() {
@@ -267,8 +243,6 @@ mod tests {
         assert_eq!(a, Action::Drowse);
     }
 
-    // --- decide: Drowsy ----------------------------------------------
-
     #[test]
     fn drowsy_before_sleep_threshold_no_action() {
         let a = decide(
@@ -298,8 +272,6 @@ mod tests {
         );
         assert_eq!(a, Action::None);
     }
-
-    // --- decide: Sleeping --------------------------------------------
 
     #[test]
     fn sleeping_never_acts() {

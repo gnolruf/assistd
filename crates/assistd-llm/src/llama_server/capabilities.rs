@@ -1,32 +1,8 @@
-//! Capability probe for the running llama-server.
-//!
-//! After [`super::LlamaService::start`] reports the child as ready
-//! (`/health` = 200), call [`probe_capabilities_routed`] (or
-//! [`detect_vision_support`] for the boolean-only variant) to decide
-//! whether the loaded model has a multimodal projector (mmproj)
-//! bundled. llama.cpp auto-loads the projector when the HF repo
-//! carries one alongside the text weights; there is no separate
-//! config flag to opt in. The only way to know is to ask the server.
-//!
-//! Router-mode awareness: when llama-server runs as a router, the
-//! daemon-managed port hosts only the router process, and `/props`
-//! there reports `role: "router"` with no model info — the real model
-//! (and the real `/props`, including `modalities`) lives in a child
-//! server spawned on a transient port. [`probe_capabilities_routed`]
-//! detects this by checking the `role` field, then consults
-//! [`super::LlamaServerControl::find_loaded_child_port`] to discover
-//! the child's port and re-probes `/props` there. Non-router setups
-//! see no detour: the first probe is the answer.
-//!
-//! The probe intentionally fails-closed: any HTTP error, parse
-//! failure, or absent capability field collapses to
-//! `vision_enabled = false`. The image-producing tools (`see`,
-//! `screenshot`, `/attach`) refuse with a navigation-compliant
-//! `[error] …: vision not available …` line in that case, which is a
-//! safer default than silently sending image bytes the model will drop.
-//!
-//! We read the capability from llama.cpp's canonical structured
-//! `modalities` object (`{"modalities": {"vision": true}}`).
+//! Vision-capability probe. llama.cpp loads a multimodal projector
+//! automatically when the HF repo bundles one, so the only way to know
+//! whether the model accepts images is to ask `/props` for its
+//! `modalities` object. The probe fails closed: any HTTP error, parse
+//! failure, or absent field reads as no vision.
 
 use std::time::Duration;
 
@@ -37,20 +13,17 @@ use super::control::LlamaServerControl;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Snapshot of a single `/props` probe. `model_id` is whatever
-/// llama-server reports as the loaded model, used by callers to
-/// detect a model swap between probes and trigger a re-probe rather
-/// than trusting a stale `vision_supported` value.
+/// Snapshot of one `/props` probe. `model_id` lets a caller detect a
+/// model swap between probes rather than trust a stale
+/// `vision_supported`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VisionState {
     pub model_id: Option<String>,
     pub vision_supported: bool,
 }
 
-/// Probe llama-server for both the model identifier and vision
-/// capability. Returns a default (no model id, no vision) on any
-/// failure, with the same fail-closed semantics as the historical
-/// [`detect_vision_support`] entrypoint.
+/// Probe `/props` on `host:port` directly. Fails closed to the default
+/// (no model id, no vision).
 pub async fn probe_capabilities(host: &str, port: u16) -> VisionState {
     let body = match fetch_props(host, port).await {
         Some(v) => v,
@@ -68,34 +41,15 @@ pub async fn probe_capabilities(host: &str, port: u16) -> VisionState {
     }
 }
 
-/// Returns `true` iff the running llama-server reports a loaded vision
-/// encoder. Returns `false` on any error (HTTP failure, non-200,
-/// malformed JSON) and logs at `warn` so the daemon's startup log
-/// captures the reason. The caller should treat a `false` result as
-/// "vision unavailable" and fall back accordingly.
-///
-/// Thin wrapper around [`probe_capabilities`] preserved for callers
-/// that don't need the model id.
+/// Whether llama-server on `host:port` reports a loaded vision encoder.
 pub async fn detect_vision_support(host: &str, port: u16) -> bool {
     probe_capabilities(host, port).await.vision_supported
 }
 
-/// Probe the *effective* model's capabilities, transparently following
-/// router indirection when needed.
-///
-/// `host`/`port` identify the daemon-managed llama-server. `model` is
-/// the configured model id (e.g. `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_XL`)
-/// — used to look up the right child when the server is in router
-/// mode. `control` is the same HTTP client the presence layer uses, so
-/// router-mode discovery reuses the configured base URL and connection
-/// pool.
-///
-/// Behaviour:
-/// - Direct mode: `/props` carries the model info → return it.
-/// - Router mode (`role == "router"` in `/props`): consult `/models`
-///   for the loaded child's port, then probe `/props` on that child.
-/// - Anything that fails along the way collapses to the default
-///   (vision off, no model id) so the gate fails closed.
+/// Probe the loaded model's capabilities, following router indirection
+/// when `/props` on `host:port` reports `role: "router"`: the model then
+/// lives in a child server whose port comes from `control`, and the
+/// child's `/props` is the answer. Fails closed to the default.
 pub async fn probe_capabilities_routed(
     host: &str,
     port: u16,

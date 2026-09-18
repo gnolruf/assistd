@@ -1,12 +1,12 @@
 //! `handle_query`: per-turn agent loop driver.
 
-use super::AppState;
 use super::context::combine_context_blocks;
 use super::wire::decode_wire_attachments;
+use super::{AppState, send_error};
 use crate::Agent;
 use crate::presence::{LlmStreamGuard, RequestGuard};
 use anyhow::Result;
-use assistd_ipc::Event;
+use assistd_ipc::{Event, StatusKind};
 use assistd_llm::LlmEvent;
 use assistd_memory::{PersistedMessage, SessionId, TurnId};
 use assistd_tools::Attachment;
@@ -23,6 +23,13 @@ const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
 struct QueryGuards {
     _request: RequestGuard,
     _stream: LlmStreamGuard,
+}
+
+/// Sentence splitter and the channel to the speech worker.
+struct SpeechPipeline {
+    tx: mpsc::Sender<String>,
+    sentences: SentenceBuffer,
+    partial_flush: Option<Duration>,
 }
 
 impl AppState {
@@ -52,39 +59,19 @@ impl AppState {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let _cancel_on_return = cancel.clone().drop_guard();
-        // Publish the token so `Request::InterruptTurn` can reach it
-        // while this turn holds `agent_turn_lock`.
         *self.runtime.current_cancel.lock().await = Some(cancel.clone());
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
         let generator = self.spawn_agent_task(text, attachments, llm_tx, cancel.clone());
 
-        let synthesis = &self.config.voice.synthesis;
-        let sentence_buf = SentenceBuffer::new_with_mode(
-            synthesis.max_sentence_chars.get() as usize,
-            synthesis.code_block_mode,
-        );
-        let partial_flush = if synthesis.partial_flush_ms > 0 {
-            Some(Duration::from_millis(synthesis.partial_flush_ms as u64))
-        } else {
-            None
-        };
-        let (speech_tx, speech_rx) = mpsc::channel::<String>(32);
+        let (speech, speech_rx) = self.speech_pipeline();
         let start_epoch = self.subsystems.voice_output.current_epoch();
         let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
         let done_emitted = self
             .clone()
-            .drive_event_loop(
-                id.clone(),
-                llm_rx,
-                &tx,
-                speech_tx,
-                sentence_buf,
-                partial_flush,
-                turn_id,
-            )
+            .drive_event_loop(id.clone(), llm_rx, &tx, speech, turn_id)
             .await;
 
         let gen_result = generator.await;
@@ -99,7 +86,7 @@ impl AppState {
             );
         }
 
-        self.finalize_turn(turn_id, gen_result, speech_handle, &tx, id, done_emitted)
+        self.finalize_turn(id, turn_id, gen_result, speech_handle, &tx, done_emitted)
             .await
     }
 
@@ -115,12 +102,7 @@ impl AppState {
         match decode_wire_attachments(wire) {
             Ok(v) => Ok(Some(v)),
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id: id.to_string(),
-                        message: format!("invalid attachment: {e}"),
-                    })
-                    .await;
+                send_error(tx, id.to_string(), format!("invalid attachment: {e}")).await;
                 Err(anyhow::anyhow!("invalid attachment: {e}"))
             }
         }
@@ -139,12 +121,7 @@ impl AppState {
         {
             Ok(g) => g,
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id: id.to_string(),
-                        message: format!("wake failed: {e:#}"),
-                    })
-                    .await;
+                send_error(tx, id.to_string(), format!("wake failed: {e:#}")).await;
                 return Err(e);
             }
         };
@@ -207,6 +184,25 @@ impl AppState {
         }
     }
 
+    fn speech_pipeline(&self) -> (SpeechPipeline, mpsc::Receiver<String>) {
+        let synthesis = &self.config.voice.synthesis;
+        let sentences = SentenceBuffer::new_with_mode(
+            synthesis.max_sentence_chars.get() as usize,
+            synthesis.code_block_mode,
+        );
+        let partial_flush = (synthesis.partial_flush_ms > 0)
+            .then(|| Duration::from_millis(synthesis.partial_flush_ms as u64));
+        let (tx, rx) = mpsc::channel::<String>(32);
+        (
+            SpeechPipeline {
+                tx,
+                sentences,
+                partial_flush,
+            },
+            rx,
+        )
+    }
+
     fn spawn_agent_task(
         &self,
         text: String,
@@ -256,9 +252,8 @@ impl AppState {
                                     "voice_output.speak failed; sentence dropped"
                                 );
                             }
-                            // `speak()` may append PCM after a mid-synthesis
-                            // skip already cleared the queue; re-check the
-                            // epoch so the late audio doesn't play.
+                            // `speak()` may append PCM after a mid-synthesis skip
+                            // already cleared the queue.
                             if matches!(ctrl.should_speak(start_epoch), SpeakDecision::DropForSkip)
                             {
                                 ctrl.inner().cancel().await;
@@ -285,17 +280,19 @@ impl AppState {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn drive_event_loop(
         self: Arc<Self>,
         id: String,
         mut llm_rx: mpsc::Receiver<LlmEvent>,
         tx: &mpsc::Sender<Event>,
-        speech_tx: mpsc::Sender<String>,
-        mut sentence_buf: SentenceBuffer,
-        partial_flush: Option<Duration>,
+        speech: SpeechPipeline,
         turn_id: Option<TurnId>,
     ) -> bool {
+        let SpeechPipeline {
+            tx: speech_tx,
+            sentences: mut sentence_buf,
+            partial_flush,
+        } = speech;
         let mut awaiting_tool_result = false;
 
         let mut assistant_accum = String::new();
@@ -424,7 +421,7 @@ impl AppState {
                     event,
                     message,
                 } => {
-                    if event == "restarting" {
+                    if matches!(event, StatusKind::Restarting) {
                         assistant_accum.clear();
                         let _ = sentence_buf.finish();
                     }
@@ -489,11 +486,11 @@ impl AppState {
 
     async fn finalize_turn(
         &self,
+        id: String,
         turn_id: Option<TurnId>,
         gen_result: std::result::Result<Result<()>, tokio::task::JoinError>,
         speech_handle: JoinHandle<()>,
         tx: &mpsc::Sender<Event>,
-        id: String,
         done_emitted: bool,
     ) -> Result<()> {
         if let Some(t) = turn_id {
@@ -513,29 +510,18 @@ impl AppState {
 
         match gen_result {
             Ok(Ok(())) => {
-                // A cancelled turn returns Ok(()) without a LlmEvent::Done;
-                // the IPC contract still requires a terminal event.
+                // A cancelled turn ends without `LlmEvent::Done`.
                 if !done_emitted {
                     let _ = tx.send(Event::Done { id }).await;
                 }
                 Ok(())
             }
             Ok(Err(e)) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("llm backend error: {e}"),
-                    })
-                    .await;
+                send_error(tx, id, format!("llm backend error: {e}")).await;
                 Err(e)
             }
             Err(join_err) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("llm backend panicked: {join_err}"),
-                    })
-                    .await;
+                send_error(tx, id, format!("llm backend panicked: {join_err}")).await;
                 Err(anyhow::anyhow!("llm backend panicked: {join_err}"))
             }
         }

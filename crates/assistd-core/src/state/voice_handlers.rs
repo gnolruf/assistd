@@ -1,6 +1,6 @@
 //! Voice-input (PTT, listen) and voice-output (TTS) request handlers.
 
-use super::AppState;
+use super::{AppState, send_error};
 use anyhow::Result;
 use assistd_ipc::{Event, VoiceCaptureState};
 use std::sync::Arc;
@@ -15,12 +15,12 @@ impl AppState {
     ) -> Result<()> {
         self.subsystems.voice_output.interrupt().await;
         if self.subsystems.listener.is_active() {
-            let _ = tx
-                .send(Event::Error {
-                    id,
-                    message: "continuous listening is active; disable it before using PTT".into(),
-                })
-                .await;
+            send_error(
+                &tx,
+                id,
+                "continuous listening is active; disable it before using PTT".into(),
+            )
+            .await;
             return Ok(());
         }
         match self.subsystems.voice.start_recording().await {
@@ -39,12 +39,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("ptt_start failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("ptt_start failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -56,12 +51,12 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
         if self.subsystems.voice.state() != VoiceCaptureState::Idle {
-            let _ = tx
-                .send(Event::Error {
-                    id,
-                    message: "cannot start continuous listening while PTT is recording".into(),
-                })
-                .await;
+            send_error(
+                &tx,
+                id,
+                "cannot start continuous listening while PTT is recording".into(),
+            )
+            .await;
             return Ok(());
         }
         match self.subsystems.listener.start().await {
@@ -76,12 +71,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("listen_start failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("listen_start failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -104,12 +94,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("listen_stop failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("listen_stop failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -253,12 +238,7 @@ impl AppState {
                         state: VoiceCaptureState::Idle,
                     })
                     .await;
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("ptt_stop failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("ptt_stop failed: {e:#}")).await;
                 return Err(e);
             }
         };

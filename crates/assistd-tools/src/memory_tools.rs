@@ -1,24 +1,7 @@
-//! LLM-callable memory tools: `remember`, `recall`, and `reminisce`.
-//!
-//! All three sit alongside [`crate::RunTool`] in the daemon's
-//! [`crate::ToolRegistry`]. The model decides when to invoke them.
-//! `remember`/`recall` operate on saved key/value facts via [`MemoryOps`],
-//! which writes through the same single SQLite writer the chat-turn
-//! persistence path uses (so saves never block the agent thread for
-//! disk). `reminisce` is the parallel verb for *past dialogue*: it
-//! runs semantic search over the chunked conversation history, not over
-//! saved facts.
-//!
-//! Dedup is by key: the `memories` table has `key TEXT NOT NULL UNIQUE`
-//! and `save_memory` does `ON CONFLICT(key) DO UPDATE`, so re-saving the
-//! same key overwrites the value rather than producing a second row.
-//! That is the AC #2 contract for "duplicate memories are not
-//! re-inserted"; the LLM is nudged toward stable snake_case keys via
-//! the [`RememberTool::description`] examples, and the
-//! `^[a-z0-9._-]+$` validator below rejects whitespace/uppercase so two
-//! turns about the same concept don't drift onto different keys.
-//! Hyphens are allowed alongside underscores and dots so ISO dates
-//! (`log.2026-09-11`) can be keys without a second spelling.
+//! LLM-callable memory tools. `remember` and `recall` work on saved
+//! key/value facts; `reminisce` searches past dialogue. Re-saving a key
+//! overwrites its value, so the key validator rejects whitespace and
+//! uppercase to keep one concept on one spelling.
 
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -34,34 +17,23 @@ use tokio::sync::{mpsc, watch};
 use crate::Tool;
 use crate::memory::MemoryOps;
 
-/// Cap on `recall` result size. The agent loop sees these pairs as text
-/// in a tool result; keeping the cap small keeps the followup turn's
-/// context small. 50 is plenty for a single user's preferences.
 const RECALL_LIMIT: usize = 50;
 
-/// Validation regex for memory keys. Hyphens are in the class for the
-/// sake of dates (`standup.2026-09-11`); whitespace and uppercase stay
-/// out so the same concept keeps one spelling.
+/// Hyphens are allowed so ISO dates (`standup.2026-09-11`) can be keys.
 const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
-/// LLM-callable tool that saves a `(key, value)` pair into persistent
-/// memory. Holds a clone of [`MemoryOps`] so it can write through the
-/// shared SQLite writer task. Also enqueues an embed job for the saved
-/// value so future `recall(mode="semantic")` queries can find the
-/// memory by paraphrase, not just by exact key prefix.
+/// Saves a `(key, value)` pair and queues its value for embedding so
+/// `recall` can find it by paraphrase.
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
-    /// Channel into the background embedder task. Closed-and-dropped
-    /// when the embedding subsystem is disabled; `try_send` then no-ops
-    /// silently and the memory still saves; only the index entry is
-    /// missed (a future backfill can recover it).
+    /// Closed when embedding is disabled; the memory still saves, only
+    /// the index entry is skipped.
     embed_tx: mpsc::Sender<EmbedJob>,
 }
 
 impl RememberTool {
-    /// Construct a `RememberTool` backed by the given ops handle and embed channel.
     pub fn new(ops: Arc<MemoryOps>, embed_tx: mpsc::Sender<EmbedJob>) -> Self {
         Self { ops, embed_tx }
     }
@@ -163,26 +135,18 @@ impl Tool for RememberTool {
     }
 }
 
-/// LLM-callable tool that returns previously-saved memories ranked by
-/// semantic similarity to the query. Embeds the query and ranks
-/// memories by cosine similarity against the saved values' embeddings,
-/// so the user can describe a fact in different words than the stored
-/// key/value text and still hit it. Falls back to the no-memories
-/// sentinel when the embedding subsystem is disabled (or no memories
-/// have been embedded yet).
-///
-/// Returns `<key>: <value>` lines.
+/// Returns saved memories ranked by semantic similarity to a query, as
+/// `<key>: <value>` lines. Reports no memories when embedding is
+/// disabled.
 pub struct RecallTool {
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
-    /// Embedding model name used to filter `memory_embeddings` rows by
-    /// `model` so a query against today's embedder never collides with
-    /// vectors produced by a previous model.
+    /// Filters stored vectors so a query never matches vectors from a
+    /// previous embedding model.
     embedding_model: String,
 }
 
 impl RecallTool {
-    /// Construct a `RecallTool` with the given embedder, semantic store, and model name.
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
@@ -302,12 +266,8 @@ fn format_pairs(pairs: &[(String, String)]) -> String {
     s
 }
 
-/// LLM-callable tool that searches *past conversation history* for
-/// messages similar in meaning to the query. Complement to `recall`:
-/// `recall` looks up saved key/value facts, `reminisce` looks up past
-/// dialogue. Use this when the user references something they
-/// "discussed before" or "worked on last month": paraphrase-tolerant
-/// semantic search over the chunked conversation log.
+/// Semantic search over past conversations, excluding the session in
+/// progress because its dialogue is already in the model's context.
 pub struct ReminisceTool {
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
@@ -316,11 +276,6 @@ pub struct ReminisceTool {
 }
 
 impl ReminisceTool {
-    /// Construct a `ReminisceTool` with the given embedder, semantic
-    /// store, and model name. `current_session` tracks the session the
-    /// daemon is in — its dialogue is already in the model's context,
-    /// so it is excluded from results; the receiver keeps that accurate
-    /// across `/switch` and `/new`.
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
@@ -623,8 +578,6 @@ mod tests {
 
     #[tokio::test]
     async fn remember_saves_key_value() {
-        // AC #1 wire-level: a `remember` invocation lands a row in the
-        // store at the requested key.
         let (ops, _w) = fresh_ops().await;
         let tool = RememberTool::new(ops.clone(), closed_embed_tx());
         let result = tool
@@ -641,9 +594,6 @@ mod tests {
 
     #[tokio::test]
     async fn remember_dedups_by_key() {
-        // AC #2: re-saving the same key overwrites the value and
-        // produces no second row. The schema's UNIQUE + ON CONFLICT
-        // guarantees this; the test pins the contract.
         let (ops, _w) = fresh_ops().await;
         let tool = RememberTool::new(ops.clone(), closed_embed_tx());
         tool.invoke(json!({"key": "editor_preference", "value": "vim"}))

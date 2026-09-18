@@ -10,6 +10,8 @@
 //! against the live session; those would mutate the user's window
 //! state.
 
+#![cfg(feature = "i3")]
+
 mod common;
 
 use std::sync::Arc;

@@ -1,14 +1,5 @@
-//! Daemon entrypoint: parses args, loads/validates config, brings up
-//! every subsystem (each via its own `*_init` sibling module), assembles
-//! [`AppState`], serves the IPC socket, and orchestrates an ordered
-//! shutdown when the run loop exits.
-//!
-//! Each subsystem (voice, wm, mcp, memory, embed) lives in its own
-//! `<name>_init.rs` module and exposes a composite "Subsystem" struct
-//! plus an `init(...)` async constructor. The daemon is a thin
-//! orchestrator: it composes the subsystems' Arc'd trait handles into
-//! [`AppState`] and retains the shutdown-relevant pieces in
-//! [`DaemonShutdown`] for ordered teardown.
+//! Daemon entrypoint: bring up every subsystem, serve the IPC socket,
+//! tear down in order.
 
 use anyhow::{Context, Result};
 use assistd_core::{AppState, Config, MemoryStack, PresenceManager, RuntimeState, Subsystems};
@@ -41,11 +32,7 @@ pub struct DaemonArgs {
     pub client_mode: bool,
 }
 
-/// Start the assistd daemon: load config, init subsystems, serve the IPC socket.
-///
-/// # Errors
-///
-/// Returns an error if config loading, validation, or the IPC socket fails.
+/// Run the daemon until shutdown.
 pub async fn run(args: DaemonArgs) -> Result<()> {
     init_tracing();
 
@@ -96,34 +83,9 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     assistd_core::install_panic_hook(Arc::downgrade(&presence));
 
-    let llama_host = config.llama_server.host.to_string();
-    let llama_port = config.llama_server.port.get();
-    let initial_vision_state = {
-        let control = assistd_llm::LlamaServerControl::new(&llama_host, llama_port)
-            .context("failed to construct llama-server control client for vision probe")?;
-        assistd_llm::probe_capabilities_routed(
-            &llama_host,
-            llama_port,
-            &config.model.name,
-            &control,
-        )
-        .await
-    };
-    if initial_vision_state.vision_supported {
-        info!("vision: enabled (model has mmproj)");
-    } else {
-        tracing::warn!("Vision not available: mmproj not loaded.");
-    }
-    let vision_gate = assistd_tools::VisionGate::new(initial_vision_state.vision_supported);
-    let vision_revalidator = assistd_core::VisionRevalidator::new(
-        vision_gate.clone(),
-        initial_vision_state.model_id,
-        llama_host.clone(),
-        llama_port,
-        config.model.name.clone(),
-    );
+    let (vision_gate, vision_revalidator) = probe_vision(&config).await?;
 
-    let health_probe: std::sync::Arc<dyn assistd_llm::LlmHealthProbe> = std::sync::Arc::new(
+    let health_probe: Arc<dyn assistd_llm::LlmHealthProbe> = Arc::new(
         assistd_core::presence::PresenceLlmHealthProbe::new(presence.clone()),
     );
 
@@ -133,28 +95,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         info!("hotkey: deferred to client (--client-mode)");
         None
     } else {
-        // Route the daemon's own hotkey through the same IPC proxy
-        // the chat TUI uses. Press → Request::PttStart, release →
-        // Request::PttStop, both handled by `handle_ptt_start` /
-        // `handle_ptt_stop` over the daemon's Unix socket. That gets
-        // us the presence warmup (Whisper takes the GPU path instead
-        // of the CPU fallback) and the per-connection bus tee in
-        // `socket.rs` for free, instead of duplicating either inside
-        // the hotkey listener.
-        let voice_proxy: Arc<dyn assistd_voice::VoiceInput> = Arc::new(
-            ipc_voice_proxy::IpcVoiceProxy::new(Arc::new(assistd_ipc::IpcClient::new()), None),
-        );
-        hotkey::spawn_listener(
-            &config.presence,
-            &config.voice,
-            hotkey::Subsystems {
-                presence: Some(presence.clone()),
-                voice: voice_proxy,
-                listener: Some(voice.listener.clone()),
-                voice_output: Some(voice.output.clone()),
-            },
-            shutdown_tx.subscribe(),
-        )
+        spawn_hotkeys(&config, &presence, &voice, shutdown_tx.subscribe())
     };
     let gpu_monitor_handle =
         gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
@@ -184,8 +125,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let mcp_tools = std::mem::take(&mut mcp.tools);
     let mcp_startup_failures = mcp.startup_failures.clone();
 
-    // Built before the tool registry so `reminisce` can hold a live
-    // view of the active session.
     let conversation_ctx = Arc::new(assistd_core::ConversationContext::from_arc(
         session_id_for_state,
         branch_id_for_state,
@@ -211,18 +150,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         overflow_dir.display()
     );
 
-    let (native_refs, mcp_refs): (Vec<&dyn assistd_tools::Tool>, Vec<&dyn assistd_tools::Tool>) =
-        tools
-            .iter_tools()
-            .partition(|t| !t.name().starts_with(assistd_tools::MCP_TOOL_NAME_PREFIX));
-    let native_block = assistd_tools::prompt::format_tool_listing(&native_refs);
-    let mcp_block = assistd_mcp::prompt::format_mcp_listing(&mcp_refs);
-    let mut system_prompt = config.chat.system_prompt.clone();
-    append_prompt_block(&mut system_prompt, &native_block);
-    append_prompt_block(&mut system_prompt, &mcp_block);
-
     let mut chat_cfg = config.chat.clone();
-    chat_cfg.system_prompt = system_prompt;
+    chat_cfg.system_prompt = build_system_prompt(&config, &tools);
     let chat = LlamaChatClient::new(
         &chat_cfg,
         &config.llama_server,
@@ -237,7 +166,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let embedding_cfg_for_state = config.embedding.clone();
     let chat: Arc<dyn assistd_llm::LlmBackend> = Arc::new(chat);
 
-    replay_history(chat.as_ref(), resumed_history).await;
+    replay_history(chat.as_ref(), &resumed_history).await;
 
     let subsystems = Subsystems::new(
         chat,
@@ -272,12 +201,11 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let persistence_tracker = state.runtime.persistence_tracker_handle();
 
     let listen_handles = if continuous_enabled {
-        Some(listen_dispatcher::spawn(
+        Some(listen_dispatcher::spawn_dispatcher(
             state.clone(),
             voice.listener.clone(),
             presence.clone(),
             continuous_start_on_launch,
-            /* pause_when_sleeping = */ true,
             shutdown_tx.subscribe(),
         ))
     } else {
@@ -311,16 +239,85 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 }
 
 /// Write a default config file to the platform config directory.
-///
-/// # Errors
-///
-/// Returns an error if the config path cannot be determined or the file cannot be written.
 pub fn init_config() -> Result<()> {
     init_tracing();
     let path = Config::default_path()?;
     Config::write_default(&path)?;
     info!("wrote default config to {}", path.display());
     Ok(())
+}
+
+/// Probe llama-server for vision support once and build the gate plus
+/// the revalidator that keeps it current across model swaps.
+async fn probe_vision(
+    config: &Config,
+) -> Result<(
+    Arc<assistd_tools::VisionGate>,
+    Arc<assistd_core::VisionRevalidator>,
+)> {
+    let host = config.llama_server.host.to_string();
+    let port = config.llama_server.port.get();
+    let control = assistd_llm::LlamaServerControl::new(&host, port)
+        .context("failed to construct llama-server control client for vision probe")?;
+    let initial =
+        assistd_llm::probe_capabilities_routed(&host, port, &config.model.name, &control).await;
+    if initial.vision_supported {
+        info!("vision: enabled (model has mmproj)");
+    } else {
+        tracing::warn!("Vision not available: mmproj not loaded.");
+    }
+    let gate = assistd_tools::VisionGate::new(initial.vision_supported);
+    let revalidator = assistd_core::VisionRevalidator::new(
+        gate.clone(),
+        initial.model_id,
+        host,
+        port,
+        config.model.name.clone(),
+    );
+    Ok((gate, revalidator))
+}
+
+/// The daemon's own hotkeys route push-to-talk through its IPC socket,
+/// so the daemon and the chat TUI share one PTT path.
+fn spawn_hotkeys(
+    config: &Config,
+    presence: &Arc<PresenceManager>,
+    voice: &voice_init::VoiceSubsystem,
+    shutdown: watch::Receiver<bool>,
+) -> Option<JoinHandle<()>> {
+    let voice_proxy: Arc<dyn assistd_voice::VoiceInput> = Arc::new(
+        ipc_voice_proxy::IpcVoiceProxy::new(Arc::new(assistd_ipc::IpcClient::new()), None),
+    );
+    hotkey::spawn_listener(
+        &config.presence,
+        &config.voice,
+        hotkey::Subsystems {
+            presence: Some(presence.clone()),
+            voice: voice_proxy,
+            listener: Some(voice.listener.clone()),
+            voice_output: Some(voice.output.clone()),
+        },
+        shutdown,
+    )
+}
+
+/// The configured system prompt followed by the native and MCP tool
+/// listings.
+fn build_system_prompt(config: &Config, tools: &assistd_core::ToolRegistry) -> String {
+    let (native_refs, mcp_refs): (Vec<&dyn assistd_tools::Tool>, Vec<&dyn assistd_tools::Tool>) =
+        tools
+            .iter_tools()
+            .partition(|t| !t.name().starts_with(assistd_tools::MCP_TOOL_NAME_PREFIX));
+    let mut prompt = config.chat.system_prompt.clone();
+    append_prompt_block(
+        &mut prompt,
+        &assistd_tools::prompt::format_tool_listing(&native_refs),
+    );
+    append_prompt_block(
+        &mut prompt,
+        &assistd_mcp::prompt::format_mcp_listing(&mcp_refs),
+    );
+    prompt
 }
 
 fn spawn_signal_handler(shutdown_tx: &watch::Sender<bool>) {
@@ -345,22 +342,15 @@ fn spawn_signal_handler(shutdown_tx: &watch::Sender<bool>) {
     );
 }
 
-async fn replay_history(chat: &dyn assistd_llm::LlmBackend, rows: Vec<assistd_memory::HistoryRow>) {
+async fn replay_history(chat: &dyn assistd_llm::LlmBackend, rows: &[assistd_memory::HistoryRow]) {
     if rows.is_empty() {
         return;
     }
-    let entries: Vec<assistd_llm::HistoryEntry> = rows
-        .into_iter()
-        .map(|r| assistd_llm::HistoryEntry {
-            role: persisted_role_to_history_role(r.role),
-            content: r.content,
-            tool_calls_json: r.tool_calls,
-            tool_call_id: r.tool_call_id,
-            tool_name: r.tool_name,
-        })
-        .collect();
-    let count = entries.len();
-    if let Err(e) = chat.replace_history(entries).await {
+    let count = rows.len();
+    if let Err(e) = chat
+        .replace_history(assistd_core::history_entries(rows))
+        .await
+    {
         tracing::warn!("memory: resume replay failed: {e:#}");
     } else {
         info!("memory: resumed {count} message(s) from prior branch");
@@ -375,15 +365,6 @@ fn append_prompt_block(prompt: &mut String, block: &str) {
         prompt.push_str("\n\n");
     }
     prompt.push_str(block);
-}
-
-fn persisted_role_to_history_role(role: assistd_memory::PersistedRole) -> assistd_llm::HistoryRole {
-    match role {
-        assistd_memory::PersistedRole::System => assistd_llm::HistoryRole::System,
-        assistd_memory::PersistedRole::User => assistd_llm::HistoryRole::User,
-        assistd_memory::PersistedRole::Assistant => assistd_llm::HistoryRole::Assistant,
-        assistd_memory::PersistedRole::Tool => assistd_llm::HistoryRole::Tool,
-    }
 }
 
 struct DaemonShutdown {

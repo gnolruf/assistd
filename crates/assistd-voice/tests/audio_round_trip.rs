@@ -50,7 +50,7 @@ async fn synthetic_pcm_through_stub_returns_canned_text() {
 
 #[tokio::test]
 async fn queued_transcriber_uses_primary_and_publishes_terminal_idle() {
-    let primary = StubTranscriber::with_text("queued result");
+    let primary = StubTranscriber::on_gpu("queued result");
     let cpu = StubTranscriber::with_text("cpu fallback");
     let primary_for_cast: Arc<dyn Transcriber> = primary.clone();
     let cpu_arc = cpu.clone();
@@ -60,7 +60,6 @@ async fn queued_transcriber_uses_primary_and_publishes_terminal_idle() {
     });
     let q = Arc::new(QueuedTranscriber::new(
         primary_for_cast,
-        true, // primary_is_gpu = true → exercise the Queue → Transcribe → Idle path
         factory,
         Arc::new(NullBusyProbe),
         QueueConfig {

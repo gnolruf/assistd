@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Command, CommandInput, CommandOutput};
 use crate::commands::collect_input;
 
 /// `uniq [-c] [FILE]...`: collapse runs of identical adjacent lines
@@ -46,15 +46,10 @@ impl Command for UniqCommand {
             match arg.as_str() {
                 "-c" => count_runs = true,
                 flag if flag.starts_with('-') && flag.len() > 1 => {
-                    return Ok(CommandOutput::failed(
-                        2,
-                        error_line(
-                            "uniq",
-                            format_args!("unknown flag '{flag}'"),
-                            "Use",
-                            "uniq or uniq -c",
-                        )
-                        .into_bytes(),
+                    return Ok(CommandOutput::usage_error(
+                        "uniq",
+                        format_args!("unknown flag '{flag}'"),
+                        "uniq or uniq -c",
                     ));
                 }
                 file => files.push(file.to_string()),
@@ -67,22 +62,20 @@ impl Command for UniqCommand {
             Err(failure) => return Ok(failure),
         };
         let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
-        // `split` on newline-terminated input leaves a trailing empty
-        // element that is not a line; blank lines in the middle are.
         if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
 
         let mut out = Vec::with_capacity(stdin.len());
         for run in lines.chunk_by(|a, b| a == b) {
-            emit(&mut out, run[0], run.len(), count_runs);
+            emit(&mut out, run[0], count_runs.then_some(run.len()));
         }
         Ok(CommandOutput::ok(out))
     }
 }
 
-fn emit(out: &mut Vec<u8>, line: &[u8], count: usize, count_runs: bool) {
-    if count_runs {
+fn emit(out: &mut Vec<u8>, line: &[u8], count: Option<usize>) {
+    if let Some(count) = count {
         out.extend_from_slice(format!("{count}\t").as_bytes());
     }
     out.extend_from_slice(line);

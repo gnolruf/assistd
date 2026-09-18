@@ -1,17 +1,15 @@
-//! SQLite-backed [`crate::MemoryStore`]: flat string KV over the
-//! `memories` table. Shares the [`super::SqliteHandle`] with
-//! [`super::SqliteConversationStore`] so both go through the same
-//! background writer.
+//! SQLite-backed [`crate::MemoryStore`] over the `memories` table.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use rusqlite::OptionalExtension;
 
 use crate::{MemoryRecord, MemoryStore};
 
 use super::connection::SqliteHandle;
-use super::writer::{WriteCall, WriteOp};
+use super::writer::{WriteOp, dispatch_write};
 
 /// SQLite-backed [`crate::MemoryStore`] implementation.
 #[derive(Clone)]
@@ -20,14 +18,12 @@ pub struct SqliteMemoryStore {
 }
 
 impl SqliteMemoryStore {
-    /// Create a new store sharing `handle` with other store types.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
 
-    /// Save a memory with provenance: links the row back to the
-    /// conversation row that produced it. Returns the row id of the
-    /// saved memory so callers can FK an embedding row.
+    /// Save a memory linked to the conversation row that produced it.
+    /// Returns the row id.
     pub async fn save_with_source(
         &self,
         key: &str,
@@ -35,7 +31,7 @@ impl SqliteMemoryStore {
         source_conversation_id: Option<i64>,
     ) -> Result<i64> {
         let key = key.to_string();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::SaveMemory {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::SaveMemory {
             key,
             value,
             source_conversation_id,
@@ -56,21 +52,12 @@ impl MemoryStore for SqliteMemoryStore {
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
-                let result = c
-                    .query_row(
-                        "SELECT value FROM memories WHERE key = ?1",
-                        rusqlite::params![key],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .map(Some)
-                    .or_else(|e| {
-                        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                            Ok(None)
-                        } else {
-                            Err(e)
-                        }
-                    })?;
-                Ok(result)
+                c.query_row(
+                    "SELECT value FROM memories WHERE key = ?1",
+                    rusqlite::params![key],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
             })
             .await
             .context("memory load")
@@ -78,7 +65,7 @@ impl MemoryStore for SqliteMemoryStore {
 
     async fn delete(&self, key: &str) -> Result<()> {
         let key = key.to_string();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::DeleteMemory {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::DeleteMemory {
             key,
             ack,
         })
@@ -86,7 +73,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn delete_by_id(&self, id: i64) -> Result<Option<String>> {
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::DeleteMemoryById {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::DeleteMemoryById {
             id,
             ack,
         })
@@ -94,9 +81,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        // SQLite `LIKE` with a literal terminator is the simple path;
-        // we escape `%` and `_` in the prefix so a key like `pref:%`
-        // doesn't match every key starting with `pref:`.
+        // Escape LIKE metacharacters so `pref:%` matches literally.
         let escaped = prefix
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -247,11 +232,8 @@ mod tests {
     async fn list_escapes_like_metacharacters_in_prefix() {
         let (store, _w) = fresh().await;
         store.save("pref:a", "1".into()).await.unwrap();
-        store.save("prefXa", "X".into()).await.unwrap(); // would match "pref_" without escape
+        store.save("prefXa", "X".into()).await.unwrap();
         let keys = store.list("pref_").await.unwrap();
-        // Without escaping, SQLite `_` is a single-char wildcard; the
-        // escape we add forces a literal underscore, so neither key
-        // matches and we get an empty list.
         assert!(
             keys.is_empty(),
             "expected empty for literal `pref_`: {keys:?}"

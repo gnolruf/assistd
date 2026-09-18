@@ -1,6 +1,4 @@
-//! Built-in commands dispatched by the chain executor. Each command is
-//! a small in-process Rust handler; `bash` is the escape hatch to the
-//! real shell.
+//! Built-in commands dispatched by the chain executor.
 
 pub mod bash;
 pub mod cat;
@@ -17,7 +15,8 @@ pub mod web;
 pub mod wm;
 pub mod write;
 
-pub use bash::{BashCommand, BashPolicyCfg};
+pub use crate::policy::BashPolicyCfg;
+pub use bash::BashCommand;
 pub use cat::CatCommand;
 pub use echo::EchoCommand;
 pub use grep::GrepCommand;
@@ -32,6 +31,8 @@ pub use web::WebCommand;
 pub use wm::WmCommand;
 pub use write::{WriteCommand, WritePolicyCfg};
 
+use crate::command::{CommandOutput, Hint, error_line, io_error_nav};
+
 /// Gather what a stdin-or-files command should operate on. Files named
 /// on the command line win over stdin (as in coreutils), and several of
 /// them concatenate exactly as `cat FILE... | <cmd>` would. Binary files
@@ -44,9 +45,7 @@ pub(crate) async fn collect_input(
     cmd: &str,
     files: &[String],
     stdin: Option<Vec<u8>>,
-) -> Result<Option<Vec<u8>>, crate::command::CommandOutput> {
-    use crate::command::{CommandOutput, error_line, io_error_nav};
-
+) -> Result<Option<Vec<u8>>, CommandOutput> {
     if files.is_empty() {
         return Ok(stdin);
     }
@@ -68,7 +67,7 @@ pub(crate) async fn collect_input(
                 error_line(
                     cmd,
                     format_args!("binary {mime} file ({size}): {path}"),
-                    "Use",
+                    Hint::Use,
                     format_args!("cat -b {path}"),
                 )
                 .into_bytes(),
@@ -79,8 +78,6 @@ pub(crate) async fn collect_input(
     Ok(Some(out))
 }
 
-/// The daemon's production command set, built with test-only policy
-/// stand-ins, for tests that need every name to flow through.
 #[cfg(test)]
 pub(crate) fn test_registry() -> crate::command::CommandRegistry {
     use assistd_wm::NoWindowManager;

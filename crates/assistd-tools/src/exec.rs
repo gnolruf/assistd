@@ -8,13 +8,10 @@
 //!   failed startup, then leaves it running. Used by `wm open`, whose
 //!   contract is "launch this and leave the window open".
 //!
-//! [`supervise`] puts the child in its own process group
-//! (`process_group(0)`) and signals that whole group on timeout or
-//! overflow, as in `assistd-llm/src/llama_server/process.rs`, so a
-//! forked grandchild can't leak. [`spawn_detached`] cannot do that and
-//! stay useful;
-//! bubblewrap's `--die-with-parent` bounds a launched application
-//! instead.
+//! [`supervise`] puts the child in its own process group and signals
+//! the whole group on timeout or overflow so a forked grandchild can't
+//! leak. [`spawn_detached`] cannot do that and stay useful; bubblewrap's
+//! `--die-with-parent` bounds a launched application instead.
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -29,7 +26,7 @@ use tokio::sync::Notify;
 use tokio::time::timeout;
 
 use crate::chain::PIPE_BUF_MAX;
-use crate::command::{CommandOutput, error_line};
+use crate::command::{CommandOutput, Hint, error_line};
 
 /// Exit code for policy denial. POSIX "command found but not executable" is
 /// the closest semantic match to "we recognize the command but refuse it".
@@ -70,18 +67,32 @@ const STARTUP_OUTPUT_MAX: usize = 64 * 1024;
 /// the write end open in a grandchild, which would never EOF.
 const POST_EXIT_DRAIN: Duration = Duration::from_millis(100);
 
-/// Spawn `cmd`, write `stdin` to it, and collect its output under `limit`.
-///
-/// `tool` names the caller in the timeout and overflow error lines. The
-/// `Err` variant is returned only when the spawn itself fails, so each
-/// caller can attach its own recovery hint (which binary to check).
-pub(crate) async fn supervise(
-    tool: &str,
+/// How a child run by [`capture`] ended.
+pub(crate) enum WaitOutcome {
+    Exited(std::process::ExitStatus),
+    WaitErr(std::io::Error),
+    Timeout,
+    /// A stream exceeded the byte cap; the child was killed.
+    Overflow,
+}
+
+/// Output of a child run by [`capture`].
+pub(crate) struct Captured {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) outcome: WaitOutcome,
+}
+
+/// Spawn `cmd` in its own process group, write `stdin` to it, and
+/// collect up to `max_output` bytes per stream until it exits or
+/// `limit` elapses. Timeout and overflow kill the whole group. `Err` is
+/// returned only when the spawn itself fails.
+pub(crate) async fn capture(
     mut cmd: ProcCommand,
     stdin: &[u8],
     limit: Duration,
-) -> std::io::Result<CommandOutput> {
-    let start = Instant::now();
+    max_output: usize,
+) -> std::io::Result<Captured> {
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -101,8 +112,8 @@ pub(crate) async fn supervise(
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
     let overflow = Arc::new(Notify::new());
-    let stdout_task = tokio::spawn(read_capped(stdout_pipe, OUTPUT_BUF_MAX, overflow.clone()));
-    let stderr_task = tokio::spawn(read_capped(stderr_pipe, OUTPUT_BUF_MAX, overflow.clone()));
+    let stdout_task = tokio::spawn(read_capped(stdout_pipe, max_output, overflow.clone()));
+    let stderr_task = tokio::spawn(read_capped(stderr_pipe, max_output, overflow.clone()));
 
     let outcome = tokio::select! {
         res = timeout(limit, child.wait()) => match res {
@@ -119,33 +130,50 @@ pub(crate) async fn supervise(
     }
 
     let (stdout, stdout_overflowed) = stdout_task.await.unwrap_or_default();
-    let (stderr_bytes, stderr_overflowed) = stderr_task.await.unwrap_or_default();
+    let (stderr, stderr_overflowed) = stderr_task.await.unwrap_or_default();
 
     let outcome = if stdout_overflowed || stderr_overflowed {
         WaitOutcome::Overflow
     } else {
         outcome
     };
+    Ok(Captured {
+        stdout,
+        stderr,
+        outcome,
+    })
+}
+
+/// Run `cmd` to completion with [`capture`] and render the result as a
+/// command output. `tool` names the caller in the timeout and overflow
+/// error lines. `Err` is returned only when the spawn itself fails, so
+/// each caller can attach its own recovery hint.
+pub(crate) async fn supervise(
+    tool: &str,
+    cmd: ProcCommand,
+    stdin: &[u8],
+    limit: Duration,
+) -> std::io::Result<CommandOutput> {
+    let start = Instant::now();
+    let Captured {
+        stdout,
+        stderr: stderr_bytes,
+        outcome,
+    } = capture(cmd, stdin, limit, OUTPUT_BUF_MAX).await?;
 
     Ok(match outcome {
-        WaitOutcome::Exited(status) => {
-            let exit_code = status
-                .code()
-                .or_else(|| signal_exit_code(&status))
-                .unwrap_or(1);
-            CommandOutput {
-                stdout,
-                stderr: stderr_bytes,
-                exit_code,
-                attachments: Vec::new(),
-            }
-        }
+        WaitOutcome::Exited(status) => CommandOutput {
+            stdout,
+            stderr: stderr_bytes,
+            exit_code: exit_code(&status),
+            attachments: Vec::new(),
+        },
         WaitOutcome::WaitErr(e) => CommandOutput::failed(
             1,
             error_line(
                 tool,
                 format_args!("wait failed: {e}"),
-                "Try",
+                Hint::Try,
                 "re-running the command",
             )
             .into_bytes(),
@@ -162,7 +190,7 @@ pub(crate) async fn supervise(
             let overflow_msg = error_line(
                 tool,
                 format_args!("output exceeded {OUTPUT_BUF_MAX} bytes; child killed"),
-                "Try",
+                Hint::Try,
                 "redirect to a file or pipe through head/wc -l to shrink the stream",
             )
             .into_bytes();
@@ -245,10 +273,7 @@ pub(crate) async fn spawn_detached(
         Ok(status) => CommandOutput {
             stdout,
             stderr,
-            exit_code: status
-                .code()
-                .or_else(|| signal_exit_code(&status))
-                .unwrap_or(1),
+            exit_code: exit_code(&status),
             attachments: Vec::new(),
         },
         Err(e) => CommandOutput::failed(
@@ -256,7 +281,7 @@ pub(crate) async fn spawn_detached(
             error_line(
                 tool,
                 format_args!("wait failed: {e}"),
-                "Try",
+                Hint::Try,
                 "re-running the command",
             )
             .into_bytes(),
@@ -299,11 +324,13 @@ fn kill_group(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }
 
-enum WaitOutcome {
-    Exited(std::process::ExitStatus),
-    WaitErr(std::io::Error),
-    Timeout,
-    Overflow,
+/// Shell-style exit code: the status code, or 128 plus the signal that
+/// killed the child.
+pub(crate) fn exit_code(status: &std::process::ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| signal_exit_code(status))
+        .unwrap_or(1)
 }
 
 #[cfg(unix)]

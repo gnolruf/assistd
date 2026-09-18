@@ -6,21 +6,8 @@ use thiserror::Error;
 /// Errors produced by the Piper TTS subsystem.
 #[derive(Debug, Error)]
 pub enum PiperError {
-    #[error(
-        "invalid voice identifier '{id}': {reason} \
-         (expected '<owner>/<repo>:<file>')"
-    )]
-    VoiceParse { id: String, reason: String },
-
-    #[error("voice download failed for {url}: {source}")]
-    Download {
-        url: String,
-        #[source]
-        source: reqwest::Error,
-    },
-
-    #[error("voice download for {url} returned HTTP {status}")]
-    Http { url: String, status: u16 },
+    #[error(transparent)]
+    Download(#[from] crate::hf_download::DownloadError),
 
     #[error("voice file at {path} is not valid JSON: starts with {prefix:?}")]
     JsonShape { path: PathBuf, prefix: String },

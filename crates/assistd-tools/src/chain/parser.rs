@@ -93,11 +93,6 @@ impl Op {
 }
 
 /// Parse a shell-style command line into a [`Chain`] AST.
-///
-/// # Errors
-///
-/// Returns [`ParseError`] when the input is empty, contains an unterminated
-/// quote, an unexpected or trailing operator, or an unsupported shell feature.
 pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
@@ -219,7 +214,7 @@ fn read_word(input: &str, start: usize) -> Result<(Word, usize), ParseError> {
                     return Err(ParseError::UnterminatedQuote);
                 }
                 buf.push_str(&input[begin..i]);
-                i += 1; // consume closing '
+                i += 1;
             }
             b'"' => {
                 quoted = true;
@@ -240,7 +235,7 @@ fn read_word(input: &str, start: usize) -> Result<(Word, usize), ParseError> {
                 if i >= bytes.len() {
                     return Err(ParseError::UnterminatedQuote);
                 }
-                i += 1; // consume closing "
+                i += 1;
             }
             _ if c.is_ascii_whitespace() => break,
             b'|' | b'&' | b';' | b'>' | b'<' => break,

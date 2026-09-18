@@ -1,17 +1,5 @@
-//! Transport-agnostic JSON-RPC 2.0 framer/correlator shared by the
-//! stdio and SSE transports.
-//!
-//! Both transports speak JSON-RPC 2.0 over their own bytes: stdio uses
-//! newline-delimited JSON over the child's stdin/stdout, SSE wraps the
-//! same JSON in HTTP POST (request) and SSE event-stream (response).
-//! Either way, request/response correlation by `id` is identical, so
-//! we lift it here.
-//!
-//! The [`Correlator`] hands out monotonically-increasing ids and a
-//! `oneshot::Receiver` per outstanding request. The transport's reader
-//! task calls [`Correlator::deliver`] when a response arrives; on
-//! transport drop, the reader calls [`Correlator::fail_all`] so every
-//! pending caller wakes with a typed error rather than hanging.
+//! JSON-RPC 2.0 frames and the request/response [`Correlator`] shared
+//! by both transports.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,8 +33,6 @@ pub struct Notification<'a> {
 /// notifications from the server have no `id`.
 #[derive(Debug, Deserialize)]
 pub struct Response {
-    #[allow(dead_code)]
-    pub jsonrpc: String,
     pub id: Option<u64>,
     pub result: Option<Value>,
     pub error: Option<RpcError>,
@@ -65,7 +51,7 @@ pub struct RpcError {
 /// from leaking memory by never replying.
 pub const MAX_IN_FLIGHT: usize = 256;
 
-/// Result type for a completed JSON-RPC round-trip: `Ok(Value)` on success, `Err(RpcError)` on server error.
+/// Outcome of one JSON-RPC round trip.
 pub type Reply = Result<Value, RpcError>;
 
 /// Matches outbound JSON-RPC request ids to their waiting [`oneshot`] receivers.
@@ -75,7 +61,6 @@ pub struct Correlator {
 }
 
 impl Correlator {
-    /// Create a new, empty correlator with the request id counter starting at 1.
     pub fn new() -> Self {
         Self {
             next_id: AtomicU64::new(1),
@@ -83,11 +68,8 @@ impl Correlator {
         }
     }
 
-    /// Reserve an id and a one-shot receiver for the response. The
-    /// returned tuple is owned by the caller; the body of the request
-    /// goes on the wire, the receiver is awaited for the reply.
-    ///
-    /// Returns `TooManyInFlight` if [`MAX_IN_FLIGHT`] is reached.
+    /// Reserve an id and a receiver for its reply. Errors with
+    /// `TooManyInFlight` once [`MAX_IN_FLIGHT`] requests are pending.
     pub fn next_request(&self, method: &'static str, params: Value) -> Result<Pending, McpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -106,9 +88,8 @@ impl Correlator {
         })
     }
 
-    /// Match a response to its waiting caller. Stale ids are dropped
-    /// silently (a `warn!` is emitted); they happen during reconnect
-    /// when an in-flight reply arrives just after the supervisor swap.
+    /// Wake the caller waiting on `response.id`. Unknown ids are logged
+    /// and dropped; they occur when a reply lands after a reconnect.
     pub fn deliver(&self, response: Response) {
         let Some(id) = response.id else {
             return;
@@ -129,9 +110,7 @@ impl Correlator {
         let _ = tx.send(reply);
     }
 
-    /// Drop every pending request, waking each caller with the same
-    /// terminal error. Called by the transport's reader task when the
-    /// connection closes.
+    /// Wake every pending caller with the error `err_factory` builds.
     pub fn fail_all(&self, err_factory: impl Fn() -> RpcError) {
         let drained: Vec<_> = {
             let mut guard = self.pending.lock();
@@ -142,7 +121,6 @@ impl Correlator {
         }
     }
 
-    /// Returns the number of requests currently awaiting a response.
     pub fn in_flight(&self) -> usize {
         self.pending.lock().len()
     }
@@ -154,9 +132,7 @@ impl Default for Correlator {
     }
 }
 
-/// Handle returned by [`Correlator::next_request`]. The `body()` helper
-/// emits the wire bytes the transport should send; the `rx` is awaited
-/// for the response.
+/// A reserved request: frame it, send it, then await `rx`.
 #[derive(Debug)]
 pub struct Pending {
     pub id: u64,
@@ -166,16 +142,13 @@ pub struct Pending {
 }
 
 impl Pending {
-    /// Encode the request as a single line of JSON terminated by `\n`,
-    /// suitable for stdio. SSE callers can drop the trailing newline
-    /// or call [`Self::frame_json`] directly.
+    /// [`Self::frame_json`] plus a trailing newline.
     pub fn frame_line(&self) -> Result<Vec<u8>, McpError> {
         let mut bytes = self.frame_json()?;
         bytes.push(b'\n');
         Ok(bytes)
     }
 
-    /// Encode the request as compact JSON bytes without a trailing newline.
     pub fn frame_json(&self) -> Result<Vec<u8>, McpError> {
         let req = Request {
             jsonrpc: "2.0",
@@ -219,7 +192,6 @@ mod tests {
         let id = pending.id;
 
         c.deliver(Response {
-            jsonrpc: "2.0".into(),
             id: Some(id),
             result: Some(json!({"ok": true})),
             error: None,
@@ -234,7 +206,6 @@ mod tests {
         let c = Correlator::new();
         let pending = c.next_request("bad", json!({})).unwrap();
         c.deliver(Response {
-            jsonrpc: "2.0".into(),
             id: Some(pending.id),
             result: None,
             error: Some(RpcError {
@@ -251,7 +222,6 @@ mod tests {
     async fn unknown_id_does_not_panic() {
         let c = Correlator::new();
         c.deliver(Response {
-            jsonrpc: "2.0".into(),
             id: Some(999),
             result: Some(Value::Null),
             error: None,

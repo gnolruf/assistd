@@ -1,46 +1,25 @@
-//! VAD-driven utterance segmentation.
-//!
-//! [`UtteranceVad`] consumes fixed-size 16 kHz mono i16 frames (20 ms
-//! each by default) from the streaming mic consumer, runs webrtc-vad
-//! on each frame, and emits completed utterances back to the listener
-//! task. A rolling pre-roll ring prepends a few hundred milliseconds
-//! of audio to each utterance so the first syllable isn't clipped
-//! between onset confirmation and buffer start.
-//!
-//! State machine (terse form):
+//! VAD-driven utterance segmentation over 20 ms frames.
 //!
 //! ```text
-//!                +--- voiced frame ---+
-//!                |                    v
-//!   Silent ---> PreVoice ---> Voiced ---> Trailing
-//!     ^            |            |            |
-//!     |            |            |            v
-//!     +---- silent frame or cancel ----- Silent
+//!   Silent ---> PreVoice ---> Voiced ---> Trailing ---> Silent
 //! ```
 //!
-//! Onset requires `onset_confirm_frames` consecutive voiced frames
-//! (guards against a single keystroke click tripping the whole
-//! pipeline). Offset requires `offset_frames` consecutive silent
-//! frames (so a natural mid-word pause doesn't cut words off).
-//! Utterances shorter than `min_utterance_frames` are dropped;
-//! utterances longer than `max_utterance_frames` are force-flushed.
+//! Onset needs `onset_confirm_frames` consecutive voiced frames so a
+//! keystroke click doesn't start an utterance; offset needs
+//! `offset_frames` consecutive silent frames so a mid-word pause
+//! doesn't end one. A pre-roll ring is prepended to each utterance
+//! so the first syllable isn't clipped.
 
 use std::collections::VecDeque;
 
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
-/// Sample rate used throughout the listen pipeline. Must match the
-/// resampler output and webrtc-vad's accepted rates.
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
 
-/// Frame size in samples at 16 kHz mono = 20 ms. webrtc-vad supports
-/// exactly {10, 20, 30} ms at 16 kHz; 20 ms is a good balance between
-/// responsiveness and CPU cost.
+/// 20 ms at 16 kHz. webrtc-vad accepts exactly 10, 20, or 30 ms frames.
 pub const FRAME_SAMPLES: usize = 320;
 
-/// Knobs for the VAD state machine, derived from `ContinuousListenConfig`
-/// at construction time (converted from millisecond/second configs to
-/// whole-frame counts so the hot path does no division).
+/// VAD state-machine thresholds, in whole frames.
 #[derive(Debug, Clone, Copy)]
 pub struct VadTuning {
     /// Consecutive voiced frames required to confirm onset.
@@ -57,23 +36,15 @@ pub struct VadTuning {
     pub aggressiveness: u8,
 }
 
-/// Utterances shorter than this are dropped without transcription;
-/// filters clicks and single-phoneme bursts.
 const MIN_UTTERANCE_MS: u32 = 400;
-/// Audio kept in a rolling pre-roll ring and prepended to a new utterance
-/// so the first syllable isn't clipped between onset confirmation and
-/// buffer start.
 const PREROLL_MS: u32 = 300;
-/// Consecutive voiced-frame duration needed to confirm speech onset.
-/// Guards against single-frame noise spikes (keyboard clicks, fan pops).
 const ONSET_CONFIRM_MS: u32 = 60;
-/// webrtc-vad's most selective mode. Anything lower admits keyboard and
-/// fan noise as speech on a desktop mic.
+/// webrtc-vad's most selective mode; lower modes admit keyboard and
+/// fan noise on a desktop mic.
 const AGGRESSIVENESS: u8 = 3;
 
 impl VadTuning {
-    /// Construct [`VadTuning`] from the two configurable values, converting
-    /// each to whole-frame counts (one frame = 20 ms).
+    /// Convert the two configurable durations to frame counts.
     pub fn from_ms(silence_ms: u32, max_utterance_secs: u32) -> Self {
         let frame_ms = 20u32;
         Self {
@@ -93,13 +64,10 @@ impl VadTuning {
 /// Output from [`UtteranceVad::feed`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VadEvent {
-    /// A complete utterance bounded by confirmed silence. The buffer
-    /// includes the pre-roll plus all voiced + intra-utterance silent
-    /// frames up to the trailing silence that terminated it.
+    /// An utterance bounded by confirmed silence, including pre-roll
+    /// and the trailing silence.
     UtteranceComplete(Vec<i16>),
-    /// `max_utterance_frames` exceeded; flushing whatever was buffered.
-    /// Caller may immediately continue recording into the next
-    /// utterance; internal state resets to `Silent` on emit.
+    /// `max_utterance_frames` exceeded; the buffer so far.
     Truncated(Vec<i16>),
 }
 
@@ -111,8 +79,8 @@ enum State {
     Trailing { silent: u32 },
 }
 
-/// State machine that classifies 20-ms frames via webrtc-vad and emits
-/// complete utterances bounded by confirmed silence.
+/// Classifies 20 ms frames via webrtc-vad and emits utterances bounded
+/// by confirmed silence.
 pub struct UtteranceVad {
     vad: Vad,
     tuning: VadTuning,
@@ -123,7 +91,6 @@ pub struct UtteranceVad {
 }
 
 impl UtteranceVad {
-    /// Create a new [`UtteranceVad`] with the given tuning parameters.
     pub fn new(tuning: VadTuning) -> Self {
         let mode = match tuning.aggressiveness {
             0 => VadMode::Quality,
@@ -143,19 +110,14 @@ impl UtteranceVad {
         }
     }
 
-    /// Feed one 20-ms frame. Returns `Some(event)` when an utterance
-    /// boundary is crossed, `None` otherwise. Uses webrtc-vad to
-    /// classify the frame; see [`Self::feed_decided`] for the
-    /// state-machine-only variant used in tests.
+    /// Feed one 20 ms frame; `Some` when an utterance boundary is crossed.
     pub fn feed(&mut self, frame: &[i16; FRAME_SAMPLES]) -> Option<VadEvent> {
         let is_voiced = self.vad.is_voice_segment(frame).unwrap_or(false);
         self.feed_decided(frame, is_voiced)
     }
 
-    /// Feed one 20-ms frame with an explicit voiced/silent decision.
-    /// Bypasses webrtc-vad so unit tests can assert purely on the
-    /// state-machine transitions without depending on VAD accuracy on
-    /// synthetic audio.
+    /// [`feed`](Self::feed) with the voiced/silent decision supplied by
+    /// the caller instead of webrtc-vad.
     pub fn feed_decided(
         &mut self,
         frame: &[i16; FRAME_SAMPLES],
@@ -180,10 +142,6 @@ impl UtteranceVad {
                     let confirmed = voiced + 1;
                     if confirmed >= self.tuning.onset_confirm_frames {
                         self.begin_utterance();
-                        // Include the confirming voiced frames that
-                        // were only in preroll until now: begin_utterance
-                        // already drained the preroll into the utterance,
-                        // so only the current frame still needs appending.
                         self.append_frame(frame);
                         self.state = State::Voiced;
                     } else {
@@ -192,7 +150,6 @@ impl UtteranceVad {
                     }
                     None
                 } else {
-                    // Onset candidate fell through; drop back to silent.
                     self.push_preroll(frame);
                     self.state = State::Silent;
                     None
@@ -283,15 +240,11 @@ mod tests {
         [0; FRAME_SAMPLES]
     }
 
-    /// Dummy non-zero frame; contents don't matter because the
-    /// state-machine tests pass the voiced/silent decision explicitly
-    /// via [`UtteranceVad::feed_decided`].
     fn voiced_frame() -> [i16; FRAME_SAMPLES] {
         [1000; FRAME_SAMPLES]
     }
 
     fn tight_tuning() -> VadTuning {
-        // 1-frame onset, 2-frame offset, 1-frame min, 50-frame max, 3-frame preroll.
         VadTuning {
             onset_confirm_frames: 1,
             offset_frames: 2,
@@ -317,18 +270,15 @@ mod tests {
         let s = silent_frame();
         let voiced = voiced_frame();
 
-        // Fill preroll with silence.
         for _ in 0..5 {
             assert_eq!(v.feed_decided(&s, false), None);
         }
-        // Speak for 10 frames (~200 ms).
         let mut events = Vec::new();
         for _ in 0..10 {
             if let Some(e) = v.feed_decided(&voiced, true) {
                 events.push(e);
             }
         }
-        // Silence ends the utterance.
         for _ in 0..5 {
             if let Some(e) = v.feed_decided(&s, false) {
                 events.push(e);
@@ -337,8 +287,6 @@ mod tests {
         assert_eq!(events.len(), 1, "expected exactly one utterance");
         match &events[0] {
             VadEvent::UtteranceComplete(pcm) => {
-                // Should include pre-roll (3 frames) + 10 voiced + 2 trailing silent.
-                // Each frame is 320 samples at 16 kHz.
                 let expected_min = 10 * FRAME_SAMPLES;
                 assert!(
                     pcm.len() >= expected_min,
@@ -359,14 +307,12 @@ mod tests {
         let s = silent_frame();
         let voiced = voiced_frame();
 
-        // Fill preroll; very short burst of 2 frames only.
         for _ in 0..5 {
             v.feed_decided(&s, false);
         }
         for _ in 0..2 {
             v.feed_decided(&voiced, true);
         }
-        // End with enough silence to confirm offset.
         let mut events = Vec::new();
         for _ in 0..10 {
             if let Some(e) = v.feed_decided(&s, false) {
@@ -383,7 +329,7 @@ mod tests {
     fn continuous_voiced_input_force_flushes_at_max() {
         let mut cfg = tight_tuning();
         cfg.max_utterance_frames = 10;
-        cfg.offset_frames = 100; // never hit via silence in this test
+        cfg.offset_frames = 100;
         let mut v = UtteranceVad::new(cfg);
 
         let voiced = voiced_frame();
@@ -403,8 +349,6 @@ mod tests {
 
     #[test]
     fn onset_requires_multiple_confirmed_frames() {
-        // Single-frame voiced burst followed by silence should not
-        // start an utterance when onset_confirm_frames > 1.
         let mut cfg = tight_tuning();
         cfg.onset_confirm_frames = 3;
         let mut v = UtteranceVad::new(cfg);
@@ -412,7 +356,6 @@ mod tests {
         let s = silent_frame();
         let voiced = voiced_frame();
 
-        // Preroll + single voiced blip + back to silence.
         for _ in 0..5 {
             v.feed_decided(&s, false);
         }
@@ -420,14 +363,13 @@ mod tests {
         for _ in 0..10 {
             assert!(v.feed_decided(&s, false).is_none());
         }
-        // No utterance should have been emitted.
     }
 
     #[test]
     fn vad_tuning_from_ms_rounds_up() {
         let t = VadTuning::from_ms(800, 30);
-        assert_eq!(t.offset_frames, 40); // 800 / 20
-        assert_eq!(t.max_utterance_frames, 1500); // 30000 / 20
+        assert_eq!(t.offset_frames, 40);
+        assert_eq!(t.max_utterance_frames, 1500);
         assert_eq!(t.min_utterance_frames, MIN_UTTERANCE_MS.div_ceil(20));
         assert_eq!(t.preroll_frames, PREROLL_MS.div_ceil(20));
         assert_eq!(t.onset_confirm_frames, ONSET_CONFIRM_MS.div_ceil(20));
@@ -436,8 +378,6 @@ mod tests {
 
     #[test]
     fn vad_tuning_never_yields_a_zero_frame_window() {
-        // Sub-frame inputs must still round up to one frame, or the
-        // segmenter would never confirm an onset or an offset.
         let t = VadTuning::from_ms(1, 0);
         assert_eq!(t.offset_frames, 1);
         assert_eq!(t.max_utterance_frames, 1);

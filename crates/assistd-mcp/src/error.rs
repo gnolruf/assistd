@@ -1,21 +1,7 @@
 use thiserror::Error;
 
-/// Errors surfaced by the MCP transport layer and the per-server supervisor.
-///
-/// `RpcError` carries the JSON-RPC server-side error verbatim (code,
-/// message, and optional data) so callers can distinguish "the server
-/// processed our request and returned a structured error" from "the
-/// transport itself broke." `TransportClosed` and `RequestTimeout` are
-/// the two terminal failure modes the supervisor watches for.
-///
-/// # Translating to the agent-facing error convention
-///
-/// Native tool errors follow `[error] <cmd>: <what>. <Hint>: <recovery>` so
-/// the LLM gets a one-step recovery path on every failure (the convention
-/// is documented in `assistd-tools/src/command.rs`). MCP tool failures must
-/// honor the same shape so the model treats them like any other tool error.
-/// [`mcp_error_line`] does that translation per variant; call it from any
-/// site that surfaces an `McpError` to the model.
+/// Errors from the MCP transports and the per-server supervisor.
+/// [`mcp_error_line`] renders each variant for the model.
 #[derive(Debug, Error)]
 pub enum McpError {
     #[error("failed to spawn MCP server `{path}`: {source}")]
@@ -38,19 +24,11 @@ pub enum McpError {
         data: Option<serde_json::Value>,
     },
 
-    /// Genuine wire-protocol violations (malformed JSON-RPC frames,
-    /// missing required fields in MCP responses, base64 decode of an
-    /// image attachment failed, …). Distinct from [`Self::Config`]:
-    /// `Protocol` means the server diverged from the spec, `Config`
-    /// means our local config is wrong.
+    /// The server diverged from the MCP spec.
     #[error("MCP protocol error: {0}")]
     Protocol(String),
 
-    /// User-config issue surfaced at connect time: bad URL, bad
-    /// header name/value, etc. Carries a context string and the
-    /// original parse error so `error.source()` walks the chain. Routed
-    /// to a "Check: <config>" recovery hint by [`mcp_error_line`] so
-    /// the operator (and the model) sees the actionable next step.
+    /// The local server config is unusable (bad URL, bad header).
     #[error("MCP config error: {context}: {source}")]
     Config {
         context: String,
@@ -70,18 +48,11 @@ pub enum McpError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
-    /// Wraps `reqwest::Error` directly so the source chain survives
-    /// for callers that downcast or walk `error.source()`. The Display
-    /// impl of `reqwest::Error` already gives a useful one-liner.
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 }
 
 impl McpError {
-    /// Build a [`Self::Config`] from a context string and a parse
-    /// error. Use for header/URL parse failures at connect time so the
-    /// operator sees a "Check: config.toml" recovery hint instead of a
-    /// generic "protocol error" line.
     pub fn config(
         context: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
@@ -93,18 +64,8 @@ impl McpError {
     }
 }
 
-/// Translate an [`McpError`] into the daemon's `[error] <cmd>: <what>.
-/// <Hint>: <recovery>\n` line shape so the model sees an MCP failure with
-/// the same recovery affordances as a native tool failure.
-///
-/// `tool_name` is the registry-facing identifier (typically
-/// `mcp__<server>__<tool>`); the LLM is already addressing the tool by
-/// that name, so echoing it back keeps the message anchored.
-///
-/// The `<Hint>` keyword is one of `Use:` / `Try:` / `Check:` / `Available:`
-/// per the convention in `assistd-tools/src/command.rs:11-32`. The recovery
-/// clause is a concrete next step the model can take (retry, switch tools,
-/// or check daemon-side state) chosen to match each variant's failure mode.
+/// Render `e` as the `[error] <tool_name>: <what>. <Hint>: <recovery>\n`
+/// line native tool failures use.
 pub fn mcp_error_line(tool_name: &str, e: &McpError) -> String {
     match e {
         McpError::Spawn { path, source } => format!(

@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use regex::{Regex, RegexBuilder};
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::commands::cat::sniff_binary;
 
 /// `grep [-icnrv] PATTERN [FILE|DIR]...`: print lines from the named
@@ -41,7 +41,7 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
         }
         if let Some(rest) = a.strip_prefix('-') {
             if rest.is_empty() {
-                break; // bare `-` = stdin sentinel; treat as positional
+                break;
             }
             for ch in rest.chars() {
                 match ch {
@@ -108,10 +108,10 @@ impl Command for GrepCommand {
         let (flags, positional) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => {
-                return Ok(CommandOutput::failed(
-                    2,
-                    error_line("grep", msg, "Use", "grep (no args) for supported flags")
-                        .into_bytes(),
+                return Ok(CommandOutput::usage_error(
+                    "grep",
+                    msg,
+                    "grep (no args) for supported flags",
                 ));
             }
         };
@@ -131,7 +131,7 @@ impl Command for GrepCommand {
                     error_line(
                         "grep",
                         format_args!("bad regex pattern: {e}"),
-                        "Check",
+                        Hint::Check,
                         "escape regex metachars; run grep for usage",
                     )
                     .into_bytes(),
@@ -165,7 +165,7 @@ fn search_stdin(re: &Regex, flags: &Flags, stdin: Vec<u8>) -> CommandOutput {
             error_line(
                 "grep",
                 "input is not valid UTF-8",
-                "Try",
+                Hint::Try,
                 "grep on a text file or pipe from cat",
             )
             .into_bytes(),
@@ -233,14 +233,12 @@ fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Ve
     count
 }
 
-/// BRE metacharacters spelled with a backslash. Rust's regex crate
-/// reads each as the literal character, so a pattern carrying one
-/// usually came from a caller writing GNU `grep` syntax.
+/// BRE metacharacters spelled with a backslash, which the regex crate
+/// reads as the literal character.
 const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"];
 
-/// A zero-match result is the only moment a dialect mismatch is visible,
-/// so that is where the explanation goes. Output and exit code are
-/// untouched; only stderr gains a line.
+/// A zero-match result is the only moment a dialect mismatch is
+/// visible, so that is where the explanation goes.
 fn annotate_dialect(mut out: CommandOutput, pattern: &str) -> CommandOutput {
     if out.exit_code != 1 || !out.stderr.is_empty() {
         return out;
@@ -254,7 +252,7 @@ fn annotate_dialect(mut out: CommandOutput, pattern: &str) -> CommandOutput {
             "no matches; `{found}` matches those characters literally here \
              (PATTERN is Rust/ERE regex, not BRE)"
         ),
-        "Use",
+        Hint::Use,
         "unescaped ERE metachars in a quoted pattern, e.g. grep \"a|b\" FILE",
     )
     .into_bytes();
@@ -270,7 +268,6 @@ fn outcome(count: usize, stdout: Vec<u8>) -> CommandOutput {
     }
 }
 
-/// Why a path named on the command line could not be searched.
 enum TargetError {
     Unreadable {
         path: String,
@@ -288,7 +285,7 @@ impl TargetError {
             Self::DirectoryWithoutRecursion { path } => error_line(
                 "grep",
                 format_args!("{path} is a directory"),
-                "Use",
+                Hint::Use,
                 format_args!("grep -r PATTERN {path}"),
             ),
         }

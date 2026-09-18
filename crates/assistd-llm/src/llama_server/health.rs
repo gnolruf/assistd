@@ -16,11 +16,8 @@ pub struct HealthChecker {
 }
 
 impl HealthChecker {
-    /// Constructs a checker that will poll `http://{host}:{port}/health` with
-    /// the given overall `ready_timeout`.
-    ///
-    /// # Errors
-    /// Returns [`LlamaServerError`] if the underlying HTTP client cannot be built.
+    /// Build a checker for `http://{host}:{port}/health` with the given
+    /// overall `ready_timeout`.
     pub fn new(host: &str, port: u16, ready_timeout: Duration) -> Result<Self, LlamaServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -40,9 +37,9 @@ impl HealthChecker {
         self.ready_timeout
     }
 
-    /// Polls `/health` until it returns 200 OK, the overall deadline elapses,
-    /// or shutdown is requested. Non-200 responses and connect/read errors
-    /// are treated as "keep polling"; we only care about the success signal.
+    /// Poll `/health` until it returns 200 OK, the deadline elapses, or
+    /// shutdown is requested. Non-200 responses and transport errors
+    /// keep polling.
     pub async fn wait_ready(
         &self,
         shutdown_rx: &mut watch::Receiver<bool>,

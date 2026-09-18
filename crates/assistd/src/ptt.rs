@@ -1,16 +1,13 @@
-//! Client for the push-to-talk CLI subcommands: `ptt-start`,
-//! `ptt-stop`. Each sends exactly one IPC request over the daemon's
-//! Unix socket, prints event lines as they arrive (voice state, the
-//! final transcription, and for `ptt-stop' the streaming LLM
-//! response), and exits on `Event::Done` or `Event::Error`.
+//! `ptt-start` and `ptt-stop` subcommands.
 
 use std::io::Write;
 
 use anyhow::Result;
-use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
+use assistd_ipc::{Event, Request, VoiceCaptureState};
 use uuid::Uuid;
 
-/// Which phase of the PTT cycle the CLI is asking the daemon to run.
+use crate::ipc_helper::run_one_shot;
+
 #[derive(Debug, Clone, Copy)]
 pub enum PttAction {
     Start,
@@ -26,30 +23,14 @@ impl PttAction {
     }
 }
 
-/// Send a PTT command to the daemon and stream the response to stdout.
-///
-/// # Errors
-///
-/// Returns an error if the IPC connection fails or the daemon sends an
-/// unexpected terminal event.
 pub async fn run(action: PttAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
-    let mut stream = IpcClient::new()
-        .one_shot(req)
-        .await
-        .map_err(crate::ipc_helper::map_not_reachable)?;
-
     let mut stdout = std::io::stdout().lock();
     let mut wrote_delta = false;
-    loop {
-        let event = match stream.next_event().await? {
-            Some(ev) => ev,
-            None => anyhow::bail!("daemon closed the connection without sending a terminal event"),
-        };
-
+    run_one_shot(req, |event| {
         match event {
             Event::VoiceState { state, .. } => {
-                eprintln!("[voice: {}]", voice_state_label(state));
+                eprintln!("[voice: {}]", voice_state_label(*state));
             }
             Event::Transcription { text, .. } => {
                 if text.trim().is_empty() {
@@ -62,10 +43,6 @@ pub async fn run(action: PttAction) -> Result<()> {
                 stdout.write_all(text.as_bytes())?;
                 stdout.flush()?;
                 wrote_delta = wrote_delta || !text.is_empty();
-            }
-            Event::ReasoningDelta { .. } => {
-                // Non-interactive PTT consumers expect only the model's
-                // visible reply; chain-of-thought is silently dropped.
             }
             Event::ToolCall { name, args, .. } => {
                 let preview = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -82,10 +59,6 @@ pub async fn run(action: PttAction) -> Result<()> {
                     .unwrap_or(0);
                 eprintln!("[tool result: {name} exit:{exit}]");
             }
-            Event::Presence { .. } => {}
-            Event::ListenState { .. } => {}
-            Event::VoiceOutputState { .. } => {}
-            Event::SpeakingState { .. } => {}
             Event::Status {
                 severity,
                 component,
@@ -94,40 +67,20 @@ pub async fn run(action: PttAction) -> Result<()> {
             } => {
                 eprintln!("[{severity} {component}: {message}]");
             }
-            Event::SessionTitle { .. }
-            | Event::SemanticHit { .. }
-            | Event::MemoryValue { .. }
-            | Event::MemoryKeys { .. }
-            | Event::MemoryRow { .. }
-            | Event::MemoryForgetResult { .. }
-            | Event::ReindexProgress { .. }
-            | Event::Capabilities { .. }
-            | Event::BranchInfo { .. }
-            | Event::BranchSwitched { .. }
-            | Event::HistoryEntry { .. }
-            | Event::UndoApplied { .. }
-            | Event::LastDelta { .. } => {}
             Event::ConfirmRequest { .. } => {
                 eprintln!(
                     "[daemon asked for destructive-command confirmation; denying \
                      (non-interactive ptt)]"
                 );
             }
-            Event::Done { .. } => {
-                if wrote_delta {
-                    writeln!(stdout)?;
-                }
-                return Ok(());
+            Event::Done { .. } | Event::Error { .. } if wrote_delta => {
+                writeln!(stdout)?;
             }
-            Event::Error { message, .. } => {
-                if wrote_delta {
-                    writeln!(stdout)?;
-                }
-                eprintln!("daemon error: {message}");
-                std::process::exit(1);
-            }
+            _ => {}
         }
-    }
+        Ok(())
+    })
+    .await
 }
 
 fn voice_state_label(s: VoiceCaptureState) -> &'static str {

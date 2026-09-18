@@ -1,119 +1,27 @@
-//! Structured recovery vocabulary, supervised task spawning, and the
-//! daemon panic hook.
-//!
-//! Three responsibilities:
-//!
-//! 1. **Vocabulary**: [`Component`] and [`RecoverySeverity`] give every
-//!    recovery event a canonical `severity`/`component` field pair.
-//!    Filterable with `RUST_LOG=assistd::recovery=info`.
-//! 2. **Panic isolation**: [`spawn_supervised`] wraps a `tokio::spawn`
-//!    so panics in detached tasks emit a recovery event instead of
-//!    silently disappearing into a never-joined `JoinHandle`.
-//! 3. **Daemon panic hook**: [`install_panic_hook`] replaces the global
-//!    panic hook so that any panic also tries to SIGTERM the running
-//!    llama-server process group before propagating, keeping a child
-//!    from being orphaned when the daemon goes down via panic.
+//! Supervised
+//! task spawning, and the daemon panic hook. Recovery events log under
+//! `target = "assistd::recovery"`.
 
 use std::any::Any;
 use std::future::Future;
 use std::sync::Weak;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::PresenceManager;
 
-/// Severity of a recovery event. Maps 1:1 to a `tracing` log level and
-/// to the `severity` string field on the wire (`Event::Status`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecoverySeverity {
-    /// Routine recovery progress (e.g. "replay started"). `info` level.
-    Info,
-    /// A recoverable failure was observed (e.g. "llama-server crashed,
-    /// restarting"). `warn` level.
-    Warning,
-    /// The recovery itself failed and the operation will not complete
-    /// (e.g. "supervisor degraded; replay aborted"). `error` level.
-    Error,
-}
+pub use assistd_ipc::{Component, StatusSeverity};
 
-impl RecoverySeverity {
-    /// Returns the canonical lowercase wire string for this severity level.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RecoverySeverity::Info => "info",
-            RecoverySeverity::Warning => "warning",
-            RecoverySeverity::Error => "error",
-        }
-    }
-}
-
-/// Canonical component identifier carried as a structured field on every
-/// recovery event. New subsystems get a new variant rather than a free-form
-/// string so log filters and dashboards can rely on a fixed vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Component {
-    /// Per-turn agent loop (tool dispatch, runaway detection).
-    Agent,
-    /// llama-server lifecycle, restarts, in-flight crash detection.
-    Llm,
-    /// MCP transport / supervisor.
-    Mcp,
-    /// Voice input/output (whisper, piper, mic, listen).
-    Voice,
-    /// SQLite-backed memory + conversation persistence.
-    Memory,
-    /// Window-manager backend (i3/sway/hyprland).
-    Wm,
-    /// Embedding service + worker task.
-    Embed,
-    /// Global hotkey listener.
-    Hotkey,
-    /// Top-level daemon orchestration (signal handler, panics with no
-    /// more specific subsystem attribution).
-    Daemon,
-    /// Idle-monitor task that auto-drowses/sleeps.
-    IdleMonitor,
-    /// GPU-monitor task that auto-sleeps when a foreground GPU consumer
-    /// (game, ML training) shows up.
-    GpuMonitor,
-    /// Continuous-listen utterance dispatcher.
-    ListenDispatcher,
-}
-
-impl Component {
-    /// Returns the canonical lowercase wire string for this component identifier.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Component::Agent => "agent",
-            Component::Llm => "llm",
-            Component::Mcp => "mcp",
-            Component::Voice => "voice",
-            Component::Memory => "memory",
-            Component::Wm => "wm",
-            Component::Embed => "embed",
-            Component::Hotkey => "hotkey",
-            Component::Daemon => "daemon",
-            Component::IdleMonitor => "idle_monitor",
-            Component::GpuMonitor => "gpu_monitor",
-            Component::ListenDispatcher => "listen_dispatcher",
-        }
-    }
-}
-
-/// Emit a structured recovery event at the given severity level.
-///
-/// Wraps the corresponding `tracing` macro so every recovery event is
-/// emitted under `target = "assistd::recovery"` with `severity` and
-/// `component` fields. Additional structured fields (pid, attempt,
-/// ran_for_secs, etc.) are passed via the trailing tt-munch.
-///
-/// # Example
+/// Emit a structured recovery event: the `tracing` macro for the
+/// severity, under `target = "assistd::recovery"`, with `severity`,
+/// `component`, and `event` fields ahead of the caller's own.
 ///
 /// ```ignore
 /// recovery_event!(
-///     RecoverySeverity::Warning,
+///     StatusSeverity::Warning,
 ///     Component::Llm,
 ///     "crash_detected",
 ///     pid = old_pid,
@@ -126,21 +34,21 @@ macro_rules! recovery_event {
         let __component_str: &'static str = $crate::recovery::Component::as_str($component);
         let __event_str: &'static str = $event;
         match $severity {
-            $crate::recovery::RecoverySeverity::Info => ::tracing::info!(
+            $crate::recovery::StatusSeverity::Info => ::tracing::info!(
                 target: "assistd::recovery",
                 severity = "info",
                 component = __component_str,
                 event = __event_str,
                 $($($field)*)?
             ),
-            $crate::recovery::RecoverySeverity::Warning => ::tracing::warn!(
+            $crate::recovery::StatusSeverity::Warning => ::tracing::warn!(
                 target: "assistd::recovery",
                 severity = "warning",
                 component = __component_str,
                 event = __event_str,
                 $($($field)*)?
             ),
-            $crate::recovery::RecoverySeverity::Error => ::tracing::error!(
+            $crate::recovery::StatusSeverity::Error => ::tracing::error!(
                 target: "assistd::recovery",
                 severity = "error",
                 component = __component_str,
@@ -151,15 +59,8 @@ macro_rules! recovery_event {
     }};
 }
 
-/// `tokio::spawn` a future and emit a recovery event if it panics.
-///
-/// Detached tokio tasks normally swallow panics into their never-joined
-/// `JoinHandle`. This wrapper joins the handle from a sentinel task so
-/// the panic surfaces as a structured `target = "assistd::recovery"`
-/// log line attributed to the named component.
-///
-/// `name` is a short identifier (e.g. `"signal_handler"`) included as
-/// the `task` field on the panic event.
+/// `tokio::spawn` a detached future and emit a recovery event if it
+/// panics, instead of losing the panic in a never-joined `JoinHandle`.
 pub fn spawn_supervised<F>(name: &'static str, component: Component, future: F) -> JoinHandle<()>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -172,7 +73,7 @@ where
                 let payload = join_err.into_panic();
                 let msg = panic_message(&payload);
                 recovery_event!(
-                    RecoverySeverity::Error,
+                    StatusSeverity::Error,
                     component,
                     "task_panic",
                     task = name,
@@ -193,15 +94,10 @@ where
     })
 }
 
-/// Replace the global panic hook with one that logs structured recovery
-/// fields and best-effort SIGTERMs the running llama-server before
-/// chaining to the previous hook.
-///
-/// `presence` is a `Weak` so the hook does not keep the manager alive
-/// past daemon shutdown. Pass `Arc::downgrade(&presence_arc)`.
-///
-/// Idempotent: installing twice replaces the previous chain, so tests can
-/// safely re-install in setup.
+/// Replace the global panic hook with one that logs a recovery event and
+/// best-effort SIGTERMs the llama-server process group before chaining
+/// to the previous hook. `presence` is `Weak` so the hook never keeps the
+/// manager alive past shutdown.
 pub fn install_panic_hook(presence: Weak<PresenceManager>) {
     static PRESENCE: Mutex<Option<Weak<PresenceManager>>> = Mutex::new(None);
     *PRESENCE.lock() = Some(presence);
@@ -215,7 +111,7 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
         let payload_msg = panic_message(info.payload());
 
         recovery_event!(
-            RecoverySeverity::Error,
+            StatusSeverity::Error,
             Component::Daemon,
             "panic",
             location = %location,
@@ -233,7 +129,7 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
         {
             let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
             recovery_event!(
-                RecoverySeverity::Warning,
+                StatusSeverity::Warning,
                 Component::Llm,
                 "panic_kill",
                 pid = pid,
@@ -243,6 +139,37 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
 
         previous(info);
     }));
+}
+
+/// Wait up to `grace` for every task in `tasks` to finish, then abort
+/// the rest. Panics are logged as `"{what} task panicked"`.
+pub async fn drain_join_set(tasks: &mut JoinSet<()>, grace: Duration, what: &str) {
+    let in_flight = tasks.len();
+    if in_flight == 0 {
+        return;
+    }
+    tracing::info!(
+        grace_secs = grace.as_secs(),
+        in_flight,
+        "draining in-flight {what} tasks"
+    );
+    let drained = tokio::time::timeout(grace, async {
+        while let Some(res) = tasks.join_next().await {
+            if let Err(e) = res
+                && e.is_panic()
+            {
+                tracing::error!("{what} task panicked: {e}");
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            remaining = tasks.len(),
+            "shutdown grace expired; aborting remaining {what} tasks"
+        );
+        tasks.shutdown().await;
+    }
 }
 
 fn panic_message(payload: &(dyn Any + Send)) -> String {
@@ -268,9 +195,9 @@ mod tests {
 
     #[test]
     fn severity_as_str_matches_tracing_levels() {
-        assert_eq!(RecoverySeverity::Info.as_str(), "info");
-        assert_eq!(RecoverySeverity::Warning.as_str(), "warning");
-        assert_eq!(RecoverySeverity::Error.as_str(), "error");
+        assert_eq!(StatusSeverity::Info.as_str(), "info");
+        assert_eq!(StatusSeverity::Warning.as_str(), "warning");
+        assert_eq!(StatusSeverity::Error.as_str(), "error");
     }
 
     #[tokio::test]
