@@ -16,8 +16,7 @@
 //!
 //! - `<cmd>`: the command name (`cat`, `see`, `bash`, …) or a pseudo-tag
 //!   for pre-dispatch failures (`parse`, `pipe`, `unknown command`).
-//! - `<Hint>`: one of `Use:`, `Try:`, `Check:`, `Available:`. The first
-//!   two phrase actionable alternatives; the latter two phrase diagnostics.
+//! - `<Hint>`: a [`Hint`] label.
 //! - `<recovery>`: either a concrete `run`-executable command the LLM can
 //!   issue verbatim (e.g. `see photo.png`, `ls /dir`, `cat -b file.bin`)
 //!   or a short check instruction (`ls -l <path>`).
@@ -28,20 +27,51 @@
 //! library emitted stderr, forward it so the LLM can see *why*.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
+/// The recovery label on an error line. `Use` and `Try` introduce an
+/// alternative to run; `Check` and `Available` introduce a diagnostic;
+/// `Install` names a package; `Note` explains a condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hint {
+    Use,
+    Try,
+    Check,
+    Available,
+    Install,
+    Note,
+}
+
+impl Hint {
+    /// The label as written on the wire, without the trailing colon.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Hint::Use => "Use",
+            Hint::Try => "Try",
+            Hint::Check => "Check",
+            Hint::Available => "Available",
+            Hint::Install => "Install",
+            Hint::Note => "Note",
+        }
+    }
+}
+
+impl fmt::Display for Hint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Format a single stderr line conforming to the error-navigation
-/// convention. Emits exactly `[error] <cmd>: <what>. <hint>: <recovery>\n`.
-///
-/// `hint` is the label without the trailing colon (e.g. `"Use"`, `"Try"`,
-/// `"Check"`, `"Available"`); the colon and space are added for you.
+/// convention: `[error] <cmd>: <what>. <hint>: <recovery>\n`.
 pub fn error_line(
     cmd: &str,
-    what: impl std::fmt::Display,
-    hint: &str,
-    recovery: impl std::fmt::Display,
+    what: impl fmt::Display,
+    hint: Hint,
+    recovery: impl fmt::Display,
 ) -> String {
     format!("[error] {cmd}: {what}. {hint}: {recovery}\n")
 }
@@ -59,25 +89,25 @@ pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
         ErrorKind::NotFound if has_glob_meta(path) => error_line(
             cmd,
             format_args!("no file matches {path}"),
-            "Try",
+            Hint::Try,
             format_args!("ls {} to see what is there", glob_parent(path)),
         ),
         ErrorKind::NotFound => error_line(
             cmd,
             format_args!("file not found: {path}"),
-            "Use",
+            Hint::Use,
             "ls to check the path",
         ),
         ErrorKind::PermissionDenied => error_line(
             cmd,
             format_args!("permission denied: {path}"),
-            "Check",
+            Hint::Check,
             format_args!("ls -l {path}"),
         ),
         _ => error_line(
             cmd,
             format_args!("{path}: {e}"),
-            "Try",
+            Hint::Try,
             "a different path or check with ls",
         ),
     }
@@ -172,12 +202,8 @@ impl CommandOutput {
 
     /// The reply to a call whose arguments could not be understood:
     /// `[error] <cmd>: <what>. Use: <recovery>` with exit 2.
-    pub fn usage_error(
-        cmd: &str,
-        what: impl std::fmt::Display,
-        recovery: impl std::fmt::Display,
-    ) -> Self {
-        Self::failed(2, error_line(cmd, what, "Use", recovery).into_bytes())
+    pub fn usage_error(cmd: &str, what: impl fmt::Display, recovery: impl fmt::Display) -> Self {
+        Self::failed(2, error_line(cmd, what, Hint::Use, recovery).into_bytes())
     }
 
     /// Append `next`'s streams and attachments to this output and adopt

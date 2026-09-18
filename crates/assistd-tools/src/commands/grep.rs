@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use regex::{Regex, RegexBuilder};
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::commands::cat::sniff_binary;
 
 /// `grep [-icnrv] PATTERN [FILE|DIR]...`: print lines from the named
@@ -131,7 +131,7 @@ impl Command for GrepCommand {
                     error_line(
                         "grep",
                         format_args!("bad regex pattern: {e}"),
-                        "Check",
+                        Hint::Check,
                         "escape regex metachars; run grep for usage",
                     )
                     .into_bytes(),
@@ -165,7 +165,7 @@ fn search_stdin(re: &Regex, flags: &Flags, stdin: Vec<u8>) -> CommandOutput {
             error_line(
                 "grep",
                 "input is not valid UTF-8",
-                "Try",
+                Hint::Try,
                 "grep on a text file or pipe from cat",
             )
             .into_bytes(),
@@ -252,7 +252,7 @@ fn annotate_dialect(mut out: CommandOutput, pattern: &str) -> CommandOutput {
             "no matches; `{found}` matches those characters literally here \
              (PATTERN is Rust/ERE regex, not BRE)"
         ),
-        "Use",
+        Hint::Use,
         "unescaped ERE metachars in a quoted pattern, e.g. grep \"a|b\" FILE",
     )
     .into_bytes();
@@ -285,7 +285,7 @@ impl TargetError {
             Self::DirectoryWithoutRecursion { path } => error_line(
                 "grep",
                 format_args!("{path} is a directory"),
-                "Use",
+                Hint::Use,
                 format_args!("grep -r PATTERN {path}"),
             ),
         }

@@ -68,14 +68,14 @@ impl Command for UniqCommand {
 
         let mut out = Vec::with_capacity(stdin.len());
         for run in lines.chunk_by(|a, b| a == b) {
-            emit(&mut out, run[0], run.len(), count_runs);
+            emit(&mut out, run[0], count_runs.then_some(run.len()));
         }
         Ok(CommandOutput::ok(out))
     }
 }
 
-fn emit(out: &mut Vec<u8>, line: &[u8], count: usize, count_runs: bool) {
-    if count_runs {
+fn emit(out: &mut Vec<u8>, line: &[u8], count: Option<usize>) {
+    if let Some(count) = count {
         out.extend_from_slice(format!("{count}\t").as_bytes());
     }
     out.extend_from_slice(line);

@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::process::Command as ProcCommand;
 
 use crate::attachment::MAX_IMAGE_BYTES;
-use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Attachment, Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::commands::cat::human_size;
 use crate::exec::{SPAWN_FAILED_EXIT, TIMEOUT_EXIT, WaitOutcome, capture, exit_code};
 use crate::vision::VisionGate;
@@ -137,7 +137,7 @@ impl Command for ScreenshotCommand {
                 error_line(
                     "screenshot",
                     "vision not available: model does not support images",
-                    "Use",
+                    Hint::Use,
                     "a model with mmproj loaded",
                 )
                 .into_bytes(),
@@ -164,7 +164,7 @@ impl Command for ScreenshotCommand {
                         error_line(
                             "screenshot",
                             msg,
-                            "Try",
+                            Hint::Try,
                             "running this from a graphical session",
                         )
                         .into_bytes(),
@@ -241,27 +241,29 @@ fn backend_label(b: Backend) -> &'static str {
     }
 }
 
-fn detect_backend() -> Result<Backend, &'static str> {
-    detect_backend_from_env(
-        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
-        std::env::var_os("WAYLAND_DISPLAY").is_some(),
-        std::env::var_os("DISPLAY").is_some(),
-    )
+/// The environment variables a display server advertises itself with.
+struct DisplayEnv<'a> {
+    session_type: Option<&'a str>,
+    wayland_display: bool,
+    x_display: bool,
 }
 
-fn detect_backend_from_env(
-    xdg_session_type: Option<&str>,
-    has_wayland: bool,
-    has_x: bool,
-) -> Result<Backend, &'static str> {
-    if let Some(s) = xdg_session_type {
-        match s {
-            "wayland" => return Ok(Backend::Wayland),
-            "x11" => return Ok(Backend::X11),
-            _ => {}
-        }
+fn detect_backend() -> Result<Backend, &'static str> {
+    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+    detect_backend_in(DisplayEnv {
+        session_type: session_type.as_deref(),
+        wayland_display: std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        x_display: std::env::var_os("DISPLAY").is_some(),
+    })
+}
+
+fn detect_backend_in(env: DisplayEnv<'_>) -> Result<Backend, &'static str> {
+    match env.session_type {
+        Some("wayland") => return Ok(Backend::Wayland),
+        Some("x11") => return Ok(Backend::X11),
+        _ => {}
     }
-    match (has_wayland, has_x) {
+    match (env.wayland_display, env.x_display) {
         // In a Wayland + XWayland session grim still captures X clients;
         // the inverse is not true.
         (true, _) => Ok(Backend::Wayland),
@@ -270,26 +272,30 @@ fn detect_backend_from_env(
     }
 }
 
-fn detect_wayland_compositor() -> WaylandCompositor {
-    detect_wayland_compositor_from_env(
-        std::env::var_os("SWAYSOCK").is_some(),
-        std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
-        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-    )
+/// The environment variables a Wayland compositor advertises itself with.
+struct WaylandEnv<'a> {
+    swaysock: bool,
+    hyprland_signature: bool,
+    current_desktop: Option<&'a str>,
 }
 
-fn detect_wayland_compositor_from_env(
-    has_swaysock: bool,
-    has_hypr_signature: bool,
-    xdg_current_desktop: Option<&str>,
-) -> WaylandCompositor {
-    if has_swaysock {
+fn detect_wayland_compositor() -> WaylandCompositor {
+    let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+    detect_wayland_compositor_in(WaylandEnv {
+        swaysock: std::env::var_os("SWAYSOCK").is_some(),
+        hyprland_signature: std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
+        current_desktop: current_desktop.as_deref(),
+    })
+}
+
+fn detect_wayland_compositor_in(env: WaylandEnv<'_>) -> WaylandCompositor {
+    if env.swaysock {
         return WaylandCompositor::Sway;
     }
-    if has_hypr_signature {
+    if env.hyprland_signature {
         return WaylandCompositor::Hyprland;
     }
-    let xdg = xdg_current_desktop.unwrap_or("");
+    let xdg = env.current_desktop.unwrap_or("");
     match xdg.to_ascii_lowercase().as_str() {
         "sway" => WaylandCompositor::Sway,
         "hyprland" => WaylandCompositor::Hyprland,
@@ -535,7 +541,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("backend binary not found: {binary}"),
-                "Install",
+                Hint::Install,
                 install_hint(&binary),
             )
             .into_bytes(),
@@ -545,7 +551,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("spawn failed: {binary}: {msg}"),
-                "Check",
+                Hint::Check,
                 format_args!("{binary} runs from your shell"),
             )
             .into_bytes(),
@@ -555,7 +561,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 "capture timed out",
-                "Try",
+                Hint::Try,
                 "screenshot again or check the compositor is responsive",
             )
             .into_bytes(),
@@ -572,7 +578,13 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             };
             CommandOutput::failed(
                 1,
-                error_line("screenshot", what, "Try", "a different target or backend").into_bytes(),
+                error_line(
+                    "screenshot",
+                    what,
+                    Hint::Try,
+                    "a different target or backend",
+                )
+                .into_bytes(),
             )
         }
         CaptureError::EmptyOutput { binary } => CommandOutput::failed(
@@ -580,7 +592,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("{binary} produced no image bytes"),
-                "Try",
+                Hint::Try,
                 "screenshot --full",
             )
             .into_bytes(),
@@ -594,7 +606,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
                     human_size(size),
                     human_size(MAX_IMAGE_BYTES as usize),
                 ),
-                "Try",
+                Hint::Try,
                 "--focused, or capture a single monitor",
             )
             .into_bytes(),
@@ -604,7 +616,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("--focused not supported on Wayland compositor: {compositor}"),
-                "Use",
+                Hint::Use,
                 "screenshot --full (supported compositors for --focused: sway, Hyprland)",
             )
             .into_bytes(),
@@ -614,7 +626,7 @@ fn capture_error_to_output(err: CaptureError) -> CommandOutput {
             error_line(
                 "screenshot",
                 format_args!("failed to parse: {what}"),
-                "Try",
+                Hint::Try,
                 "screenshot --full",
             )
             .into_bytes(),
@@ -711,12 +723,16 @@ mod tests {
         assert!(out.attachments.is_empty());
     }
 
-    // ---- detect_backend_from_env -----------------------------------------
+    // ---- detect_backend_in -----------------------------------------
 
     #[test]
     fn detect_backend_xdg_wayland() {
         assert_eq!(
-            detect_backend_from_env(Some("wayland"), false, false),
+            detect_backend_in(DisplayEnv {
+                session_type: Some("wayland"),
+                wayland_display: false,
+                x_display: false
+            }),
             Ok(Backend::Wayland)
         );
     }
@@ -724,23 +740,45 @@ mod tests {
     #[test]
     fn detect_backend_xdg_x11() {
         assert_eq!(
-            detect_backend_from_env(Some("x11"), false, false),
+            detect_backend_in(DisplayEnv {
+                session_type: Some("x11"),
+                wayland_display: false,
+                x_display: false
+            }),
             Ok(Backend::X11)
         );
     }
 
     #[test]
     fn detect_backend_no_display() {
-        assert!(detect_backend_from_env(None, false, false).is_err());
+        assert!(
+            detect_backend_in(DisplayEnv {
+                session_type: None,
+                wayland_display: false,
+                x_display: false
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn detect_backend_xdg_tty_falls_back_to_env() {
         // Login on TTY without WAYLAND_DISPLAY/DISPLAY → no display server.
-        assert!(detect_backend_from_env(Some("tty"), false, false).is_err());
+        assert!(
+            detect_backend_in(DisplayEnv {
+                session_type: Some("tty"),
+                wayland_display: false,
+                x_display: false
+            })
+            .is_err()
+        );
         // TTY but DISPLAY is forwarded → X11.
         assert_eq!(
-            detect_backend_from_env(Some("tty"), false, true),
+            detect_backend_in(DisplayEnv {
+                session_type: Some("tty"),
+                wayland_display: false,
+                x_display: true
+            }),
             Ok(Backend::X11)
         );
     }
@@ -749,22 +787,37 @@ mod tests {
     fn detect_backend_hybrid_prefers_wayland() {
         // XWayland-enabled Wayland session: both env vars set, prefer Wayland.
         assert_eq!(
-            detect_backend_from_env(None, true, true),
+            detect_backend_in(DisplayEnv {
+                session_type: None,
+                wayland_display: true,
+                x_display: true
+            }),
             Ok(Backend::Wayland)
         );
     }
 
     #[test]
     fn detect_backend_x11_via_display_only() {
-        assert_eq!(detect_backend_from_env(None, false, true), Ok(Backend::X11));
+        assert_eq!(
+            detect_backend_in(DisplayEnv {
+                session_type: None,
+                wayland_display: false,
+                x_display: true
+            }),
+            Ok(Backend::X11)
+        );
     }
 
-    // ---- detect_wayland_compositor_from_env ------------------------------
+    // ---- detect_wayland_compositor_in ------------------------------
 
     #[test]
     fn compositor_swaysock_wins_over_other_signals() {
         assert_eq!(
-            detect_wayland_compositor_from_env(true, true, Some("KDE")),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: true,
+                hyprland_signature: true,
+                current_desktop: Some("KDE")
+            }),
             WaylandCompositor::Sway
         );
     }
@@ -772,7 +825,11 @@ mod tests {
     #[test]
     fn compositor_hypr_signature() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, true, None),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: true,
+                current_desktop: None
+            }),
             WaylandCompositor::Hyprland
         );
     }
@@ -780,7 +837,11 @@ mod tests {
     #[test]
     fn compositor_xdg_sway() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, false, Some("sway")),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: false,
+                current_desktop: Some("sway")
+            }),
             WaylandCompositor::Sway
         );
     }
@@ -788,7 +849,11 @@ mod tests {
     #[test]
     fn compositor_xdg_hyprland_capitalized() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, false, Some("Hyprland")),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: false,
+                current_desktop: Some("Hyprland")
+            }),
             WaylandCompositor::Hyprland
         );
     }
@@ -796,7 +861,11 @@ mod tests {
     #[test]
     fn compositor_unknown_carries_xdg_value() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, false, Some("KDE")),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: false,
+                current_desktop: Some("KDE")
+            }),
             WaylandCompositor::Unknown("KDE".into())
         );
     }
@@ -804,7 +873,11 @@ mod tests {
     #[test]
     fn compositor_unknown_when_xdg_missing() {
         assert_eq!(
-            detect_wayland_compositor_from_env(false, false, None),
+            detect_wayland_compositor_in(WaylandEnv {
+                swaysock: false,
+                hyprland_signature: false,
+                current_desktop: None
+            }),
             WaylandCompositor::Unknown(String::new())
         );
     }

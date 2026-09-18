@@ -276,52 +276,55 @@ impl Conversation {
                 tool_call_id: None,
             });
         }
-        for m in &self.messages {
-            if !m.tool_calls.is_empty() {
+        for message in &self.messages {
+            if !message.tool_calls.is_empty() {
                 // Narration-free tool calls omit `content` entirely: the
                 // OpenAI spec allows null/absent and some chat templates
                 // require absent rather than empty.
-                let specs: Vec<wire::ToolCallSpec<'_>> = m
+                let specs: Vec<wire::ToolCallSpec<'_>> = message
                     .tool_calls
                     .iter()
-                    .map(|c| wire::ToolCallSpec {
-                        id: &c.id,
+                    .map(|call| wire::ToolCallSpec {
+                        id: &call.id,
                         kind: "function",
                         function: wire::FunctionCallSpec {
-                            name: &c.name,
-                            arguments: &c.arguments,
+                            name: &call.name,
+                            arguments: &call.arguments,
                         },
                     })
                     .collect();
                 out.push(wire::ChatMessage {
-                    role: m.role.as_wire(),
-                    content: (!m.content.is_empty()).then(|| wire::ContentBody::Text(&m.content)),
+                    role: message.role.as_wire(),
+                    content: (!message.content.is_empty())
+                        .then(|| wire::ContentBody::Text(&message.content)),
                     tool_calls: Some(specs),
                     tool_call_id: None,
                 });
                 continue;
             }
-            if m.role == Role::Tool {
+            if message.role == Role::Tool {
                 out.push(wire::ChatMessage {
-                    role: m.role.as_wire(),
-                    content: Some(wire::ContentBody::Text(&m.content)),
+                    role: message.role.as_wire(),
+                    content: Some(wire::ContentBody::Text(&message.content)),
                     tool_calls: None,
-                    tool_call_id: m.tool_call_id.as_deref(),
+                    tool_call_id: message.tool_call_id.as_deref(),
                 });
                 continue;
             }
-            let content = if m.attachments.is_empty() {
-                wire::ContentBody::Text(&m.content)
+            let content = if message.attachments.is_empty() {
+                wire::ContentBody::Text(&message.content)
             } else {
-                let mut parts = Vec::with_capacity(m.attachments.len() + 1);
-                parts.push(wire::ContentPart::Text { text: &m.content });
-                for att in &m.attachments {
-                    parts.push(attachment_to_part(att));
+                let mut parts = Vec::with_capacity(message.attachments.len() + 1);
+                parts.push(wire::ContentPart::Text {
+                    text: &message.content,
+                });
+                for attachment in &message.attachments {
+                    parts.push(attachment_to_part(attachment));
                 }
                 wire::ContentBody::Parts(parts)
             };
             out.push(wire::ChatMessage {
-                role: m.role.as_wire(),
+                role: message.role.as_wire(),
                 content: Some(content),
                 tool_calls: None,
                 tool_call_id: None,
@@ -484,6 +487,9 @@ impl Conversation {
                     idx = prev;
                 }
                 Role::Assistant => {
+                    // An assistant reply is counted together with the
+                    // user message it answers, so the walk steps over
+                    // both at once.
                     if prev > start {
                         idx = prev - 1;
                     } else {

@@ -5,7 +5,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::attachment::{LoadImageError, load_image_attachment};
-use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line, io_error_nav};
+use crate::command::{
+    Attachment, Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav,
+};
 use crate::commands::cat::human_size;
 use crate::vision::VisionGate;
 
@@ -60,7 +62,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     "vision not available: model does not support images",
-                    "Use",
+                    Hint::Use,
                     "a model with mmproj loaded",
                 )
                 .into_bytes(),
@@ -99,7 +101,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     e.user_message(),
-                    "Use",
+                    Hint::Use,
                     "a smaller image (resize or crop)",
                 )
                 .into_bytes(),
@@ -109,7 +111,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     format_args!("not an image file: {path}"),
-                    "Use",
+                    Hint::Use,
                     format_args!("cat {path}"),
                 )
                 .into_bytes(),
@@ -119,7 +121,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     format_args!("not an image file: {path} (detected {detected})"),
-                    "Use",
+                    Hint::Use,
                     format_args!("cat {path}"),
                 )
                 .into_bytes(),
@@ -129,7 +131,7 @@ impl Command for SeeCommand {
                 error_line(
                     "see",
                     format_args!("unsupported image format: {path} ({mime})"),
-                    "Use",
+                    Hint::Use,
                     "PNG, JPEG, or WebP",
                 )
                 .into_bytes(),

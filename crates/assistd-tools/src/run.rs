@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::Tool;
 use crate::chain::{ParseError, Redirection, execute, parse_chain};
-use crate::command::{Attachment, CommandOutput, CommandRegistry, error_line};
+use crate::command::{Attachment, CommandOutput, CommandRegistry, Hint, error_line};
 use crate::presentation::{PresentResult, PresentSpec, present};
 use assistd_config::ToolsOutputConfig;
 #[cfg(test)]
@@ -134,24 +134,24 @@ impl Tool for RunTool {
 
 fn parse_error_line(e: &ParseError) -> String {
     let (hint, recovery) = match e {
-        ParseError::Empty => ("Use", "run <cmd>"),
-        ParseError::UnterminatedQuote => ("Check", "match all \" pairs"),
-        ParseError::UnexpectedOperator(_) => ("Try", "put a command before the operator"),
-        ParseError::TrailingOperator(_) => ("Try", "add a command after the operator"),
-        ParseError::EmptyCommand => ("Try", "add a command between operators"),
-        ParseError::Unsupported(_) => ("Use", "bash \"...\" for unsupported shell features"),
+        ParseError::Empty => (Hint::Use, "run <cmd>"),
+        ParseError::UnterminatedQuote => (Hint::Check, "match all \" pairs"),
+        ParseError::UnexpectedOperator(_) => (Hint::Try, "put a command before the operator"),
+        ParseError::TrailingOperator(_) => (Hint::Try, "add a command after the operator"),
+        ParseError::EmptyCommand => (Hint::Try, "add a command between operators"),
+        ParseError::Unsupported(_) => (Hint::Use, "bash \"...\" for unsupported shell features"),
         ParseError::UnquotedAlternation => (
-            "Use",
+            Hint::Use,
             "a quoted ERE pattern, as in `grep \"TODO|FIXME\" FILE`",
         ),
         ParseError::Redirection(r) => match r {
             Redirection::Output | Redirection::Append => {
-                ("Use", "write PATH, as in `<cmd> | write /tmp/out.txt`")
+                (Hint::Use, "write PATH, as in `<cmd> | write /tmp/out.txt`")
             }
-            Redirection::Input => ("Use", "a pipe, as in `cat FILE | <cmd>`"),
-            Redirection::HereDoc => ("Use", "a pipe, as in `echo TEXT | <cmd>`"),
+            Redirection::Input => (Hint::Use, "a pipe, as in `cat FILE | <cmd>`"),
+            Redirection::HereDoc => (Hint::Use, "a pipe, as in `echo TEXT | <cmd>`"),
             Redirection::Stderr => (
-                "Try",
+                Hint::Try,
                 "dropping it — stderr is already in this result — or bash \"...\" to reshape it",
             ),
         },

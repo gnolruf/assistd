@@ -31,6 +31,8 @@ pub use web::WebCommand;
 pub use wm::WmCommand;
 pub use write::{WriteCommand, WritePolicyCfg};
 
+use crate::command::{CommandOutput, Hint, error_line, io_error_nav};
+
 /// Gather what a stdin-or-files command should operate on. Files named
 /// on the command line win over stdin (as in coreutils), and several of
 /// them concatenate exactly as `cat FILE... | <cmd>` would. Binary files
@@ -43,9 +45,7 @@ pub(crate) async fn collect_input(
     cmd: &str,
     files: &[String],
     stdin: Option<Vec<u8>>,
-) -> Result<Option<Vec<u8>>, crate::command::CommandOutput> {
-    use crate::command::{CommandOutput, error_line, io_error_nav};
-
+) -> Result<Option<Vec<u8>>, CommandOutput> {
     if files.is_empty() {
         return Ok(stdin);
     }
@@ -67,7 +67,7 @@ pub(crate) async fn collect_input(
                 error_line(
                     cmd,
                     format_args!("binary {mime} file ({size}): {path}"),
-                    "Use",
+                    Hint::Use,
                     format_args!("cat -b {path}"),
                 )
                 .into_bytes(),

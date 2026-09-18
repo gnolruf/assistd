@@ -26,7 +26,7 @@ use tokio::sync::Notify;
 use tokio::time::timeout;
 
 use crate::chain::PIPE_BUF_MAX;
-use crate::command::{CommandOutput, error_line};
+use crate::command::{CommandOutput, Hint, error_line};
 
 /// Exit code for policy denial. POSIX "command found but not executable" is
 /// the closest semantic match to "we recognize the command but refuse it".
@@ -173,7 +173,7 @@ pub(crate) async fn supervise(
             error_line(
                 tool,
                 format_args!("wait failed: {e}"),
-                "Try",
+                Hint::Try,
                 "re-running the command",
             )
             .into_bytes(),
@@ -190,7 +190,7 @@ pub(crate) async fn supervise(
             let overflow_msg = error_line(
                 tool,
                 format_args!("output exceeded {OUTPUT_BUF_MAX} bytes; child killed"),
-                "Try",
+                Hint::Try,
                 "redirect to a file or pipe through head/wc -l to shrink the stream",
             )
             .into_bytes();
@@ -281,7 +281,7 @@ pub(crate) async fn spawn_detached(
             error_line(
                 tool,
                 format_args!("wait failed: {e}"),
-                "Try",
+                Hint::Try,
                 "re-running the command",
             )
             .into_bytes(),

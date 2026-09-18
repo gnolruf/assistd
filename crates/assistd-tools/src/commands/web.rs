@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 
 /// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
@@ -85,7 +85,7 @@ impl Command for WebCommand {
                     error_line(
                         "web",
                         format_args!("transport error: {url}: {e}"),
-                        "Try",
+                        Hint::Try,
                         "a different URL or check the endpoint is reachable",
                     )
                     .into_bytes(),
@@ -103,7 +103,7 @@ impl Command for WebCommand {
                         status.as_u16(),
                         status.canonical_reason().unwrap_or("")
                     ),
-                    "Try",
+                    Hint::Try,
                     "a different URL or check the endpoint is reachable",
                 )
                 .into_bytes(),
@@ -118,7 +118,7 @@ impl Command for WebCommand {
                     error_line(
                         "web",
                         format_args!("body read failed: {url}: {e}"),
-                        "Try",
+                        Hint::Try,
                         "re-running or a different URL",
                     )
                     .into_bytes(),
@@ -134,7 +134,7 @@ impl Command for WebCommand {
                         "response body exceeded {BODY_MAX} bytes (got {}): {url}",
                         body.len()
                     ),
-                    "Try",
+                    Hint::Try,
                     "a URL path that returns less content",
                 )
                 .into_bytes(),

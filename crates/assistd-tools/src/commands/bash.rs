@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::{SPAWN_FAILED_EXIT, supervise};
 use crate::policy::{
     BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy,
@@ -102,7 +102,7 @@ impl Command for BashCommand {
                 error_line(
                     "bash",
                     format_args!("spawn failed: {e}"),
-                    "Check",
+                    Hint::Check,
                     "bash and (if configured) bwrap are on PATH",
                 )
                 .into_bytes(),

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 
 use assistd_wm::{Layout, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::{SPAWN_FAILED_EXIT, spawn_detached};
 use crate::policy::{
     BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy,
@@ -29,23 +29,23 @@ fn wm_error(op: impl Display, err: &WmError) -> CommandOutput {
     )
 }
 
-fn hint_for(err: &WmError) -> (&'static str, &'static str) {
+fn hint_for(err: &WmError) -> (Hint, &'static str) {
     match err {
         WmError::Disconnected => (
-            "Check",
+            Hint::Check,
             "[compositor] in config.toml and that i3/sway/hyprland is running",
         ),
-        WmError::NotFound(_) => ("Use", "wm list to find the right window"),
-        WmError::Rejected(_) => ("Try", "wm list to verify the window/workspace exists"),
+        WmError::NotFound(_) => (Hint::Use, "wm list to find the right window"),
+        WmError::Rejected(_) => (Hint::Try, "wm list to verify the window/workspace exists"),
         WmError::Timeout(_) => (
-            "Note",
+            Hint::Note,
             "compositor unresponsive; retry once before assuming it crashed",
         ),
         WmError::Unsupported(_) => (
-            "Note",
+            Hint::Note,
             "the active backend may not support this operation (i3 does not list outputs)",
         ),
-        WmError::Ipc(_) => ("Check", "compositor connection (see daemon logs)"),
+        WmError::Ipc(_) => (Hint::Check, "compositor connection (see daemon logs)"),
     }
 }
 
@@ -135,7 +135,7 @@ impl Command for WmCommand {
                 error_line(
                     NAME,
                     "compositor not connected",
-                    "Check",
+                    Hint::Check,
                     "[compositor] in config.toml and that i3/sway/hyprland is running",
                 )
                 .into_bytes(),
@@ -159,7 +159,7 @@ impl Command for WmCommand {
                 error_line(
                     NAME,
                     format_args!("unknown subcommand '{other}'"),
-                    "Available",
+                    Hint::Available,
                     "focus, move, open, active, resize, list, workspaces, outputs, layout",
                 )
                 .into_bytes(),
@@ -264,14 +264,14 @@ impl WmCommand {
                 error_line(
                     NAME,
                     format_args!("open: binary '{app}' not found on PATH"),
-                    "Check",
+                    Hint::Check,
                     format_args!("which {app}"),
                 )
             } else {
                 error_line(
                     NAME,
                     format_args!("open '{app}' failed: {e}"),
-                    "Try",
+                    Hint::Try,
                     "a different binary or absolute path",
                 )
             };

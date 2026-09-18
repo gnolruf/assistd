@@ -22,7 +22,7 @@ use tracing::{info, warn};
 
 use assistd_ipc::Event;
 
-use crate::command::{CommandOutput, error_line};
+use crate::command::{CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 
 /// Policy for the commands that spawn subprocesses. Destructive
@@ -78,7 +78,7 @@ impl SubprocessPolicy {
                 error_line(
                     tool,
                     format_args!("{op} denied by policy. Matched denylist pattern: {pat}"),
-                    "Try",
+                    Hint::Try,
                     "a non-destructive alternative",
                 )
                 .into_bytes(),
@@ -106,7 +106,7 @@ impl SubprocessPolicy {
                 format_args!(
                     "{op} cancelled by user. Matched destructive pattern: {pattern_display}"
                 ),
-                "Try",
+                Hint::Try,
                 "a different approach",
             )
             .into_bytes(),

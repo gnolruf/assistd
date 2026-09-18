@@ -12,7 +12,7 @@ use std::pin::Pin;
 
 use super::expand::expand_args;
 use super::{Chain, Word};
-use crate::command::{CommandInput, CommandOutput, CommandRegistry, error_line};
+use crate::command::{CommandInput, CommandOutput, CommandRegistry, Hint, error_line};
 
 /// Maximum bytes buffered between pipe stages. Overflow exits 141, the
 /// SIGPIPE code, so `||` fallbacks still fire.
@@ -42,7 +42,7 @@ pub fn execute<'a>(
                         error_line(
                             "pipe",
                             format_args!("stage output exceeded {PIPE_BUF_MAX} bytes"),
-                            "Try",
+                            Hint::Try,
                             "pipe through wc -l or head first to shrink the stream",
                         )
                         .into_bytes(),
@@ -82,7 +82,7 @@ async fn run_command(
             error_line(
                 "run",
                 "empty command",
-                "Use",
+                Hint::Use,
                 "run <cmd> (see tool description for available commands)",
             )
             .into_bytes(),

@@ -6,6 +6,7 @@
 //! `set_transient_context`.
 
 use std::collections::BTreeMap;
+use std::mem::take;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -140,13 +141,54 @@ impl LlamaChatClient {
     }
 
     async fn stream_openai(&self, body: Vec<u8>, tx: &mpsc::Sender<LlmEvent>) -> StreamOutcome {
-        let url = format!("{}/v1/chat/completions", self.base_url);
         let pid_at_request = self.health.as_ref().and_then(|h| h.pid());
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "llm_request_sent",
             "voice latency stage"
         );
+        let mut response = match self.send_request(body, pid_at_request).await {
+            Ok(response) => response,
+            Err(outcome) => return outcome,
+        };
+        let mut accum = StreamAccum::default();
+        let saw_done = match self
+            .read_stream(&mut response, &mut accum, tx, pid_at_request)
+            .await
+        {
+            Ok(saw_done) => saw_done,
+            Err(outcome) => return outcome,
+        };
+        if !saw_done {
+            warn!(
+                target: "assistd::chat",
+                "stream ended before [DONE] marker; accumulated {} bytes text, {} tool-call builders",
+                accum.text.len(),
+                accum.tool_calls.len()
+            );
+        }
+        match accum.splitter.finish() {
+            Some(Segment::Reasoning(text)) => {
+                let _ = tx.send(LlmEvent::ReasoningDelta { text }).await;
+            }
+            Some(Segment::Visible(text)) if !text.is_empty() => {
+                accum.text.push_str(&text);
+                accum.has_emitted = true;
+                let _ = tx.send(LlmEvent::Delta { text }).await;
+            }
+            _ => {}
+        }
+        StreamOutcome::Ok(accum)
+    }
+
+    /// POST the request and return the response once it is known to be
+    /// a success from a server that has not restarted underneath us.
+    async fn send_request(
+        &self,
+        body: Vec<u8>,
+        pid_at_request: Option<u32>,
+    ) -> Result<reqwest::Response, StreamOutcome> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
         let mut response = match self
             .client
             .post(&url)
@@ -156,25 +198,22 @@ impl LlamaChatClient {
             .send()
             .await
         {
-            Ok(r) => {
-                if self.looks_like_server_crash(pid_at_request) {
-                    // A 200 that raced the supervisor's teardown.
-                    return StreamOutcome::ServerRestart {
-                        accum: StreamAccum::default(),
-                        pre_emit: true,
-                    };
-                }
-                r
-            }
+            Ok(response) => response,
             Err(e) => {
-                return self.fail(
+                return Err(self.fail(
                     StreamAccum::default(),
                     ChatClientError::Http(e),
                     pid_at_request,
-                );
+                ));
             }
         };
-
+        if self.looks_like_server_crash(pid_at_request) {
+            // A 200 that raced the supervisor's teardown.
+            return Err(StreamOutcome::ServerRestart {
+                accum: StreamAccum::default(),
+                pre_emit: true,
+            });
+        }
         let status = response.status();
         if !status.is_success() {
             let body = read_body_capped(&mut response, ERROR_BODY_CAP).await;
@@ -182,23 +221,31 @@ impl LlamaChatClient {
                 status: status.as_u16(),
                 body,
             };
-            return self.fail(StreamAccum::default(), err, pid_at_request);
+            return Err(self.fail(StreamAccum::default(), err, pid_at_request));
         }
+        Ok(response)
+    }
 
+    /// Drive the SSE stream until `[DONE]` or EOF, forwarding events
+    /// through `tx`. Returns whether `[DONE]` was seen.
+    async fn read_stream(
+        &self,
+        response: &mut reqwest::Response,
+        accum: &mut StreamAccum,
+        tx: &mpsc::Sender<LlmEvent>,
+        pid_at_request: Option<u32>,
+    ) -> Result<bool, StreamOutcome> {
         let mut reader = SseLineReader::new();
-        let mut accum = StreamAccum::default();
-        let mut saw_done = false;
         let first_byte = Duration::from_secs(self.chat.request_timeout_secs.get());
         let inter_chunk = Duration::from_secs(self.timeouts.stream_inactivity_secs);
         let mut saw_bytes = false;
-
         loop {
             let deadline = if saw_bytes { inter_chunk } else { first_byte };
             let chunk = match timeout(deadline, response.chunk()).await {
-                Ok(Ok(Some(c))) => c,
-                Ok(Ok(None)) => break,
+                Ok(Ok(Some(chunk))) => chunk,
+                Ok(Ok(None)) => return Ok(false),
                 Ok(Err(e)) => {
-                    return self.fail(accum, ChatClientError::Http(e), pid_at_request);
+                    return Err(self.fail(take(accum), ChatClientError::Http(e), pid_at_request));
                 }
                 Err(_) => {
                     warn!(
@@ -213,130 +260,100 @@ impl LlamaChatClient {
                         "no bytes received for {}s",
                         deadline.as_secs()
                     ));
-                    return self.fail(accum, err, pid_at_request);
+                    return Err(self.fail(take(accum), err, pid_at_request));
                 }
             };
             saw_bytes = true;
             reader.feed(&chunk);
-
             loop {
-                let event = match reader.next_event() {
-                    Ok(Some(e)) => e,
+                match reader.next_event() {
+                    Ok(Some(SseEvent::Data(payload))) => {
+                        self.handle_chunk(&payload, accum, tx, pid_at_request)
+                            .await?;
+                    }
+                    Ok(Some(SseEvent::Done)) => return Ok(true),
                     Ok(None) => break,
-                    Err(e) => return self.fail(accum, e, pid_at_request),
-                };
-                match event {
-                    SseEvent::Data(payload) => {
-                        let parsed: wire::ChatCompletionChunk = match serde_json::from_str(&payload)
-                        {
-                            Ok(p) => p,
-                            Err(e) => {
-                                return self.fail(accum, ChatClientError::Json(e), pid_at_request);
-                            }
-                        };
-                        let Some(choice) = parsed.choices.into_iter().next() else {
-                            continue;
-                        };
-                        if let Some(reason) = choice.finish_reason {
-                            accum.finish_reason = Some(reason);
-                        }
-                        if let Some(calls) = choice.delta.tool_calls {
-                            for delta in calls {
-                                accum.merge_tool_call_delta(delta);
-                            }
-                        }
-                        if let Some(reasoning) = choice.delta.reasoning_content
-                            && !reasoning.is_empty()
-                            && tx
-                                .send(LlmEvent::ReasoningDelta { text: reasoning })
-                                .await
-                                .is_err()
-                        {
-                            debug!(
-                                target: "assistd::chat",
-                                "client disconnected mid-stream"
-                            );
-                            return StreamOutcome::ClientDisconnected(accum);
-                        }
-                        if let Some(text) = choice.delta.content
-                            && !text.is_empty()
-                        {
-                            for seg in accum.splitter.feed(&text) {
-                                match seg {
-                                    Segment::Reasoning(s) => {
-                                        if tx
-                                            .send(LlmEvent::ReasoningDelta { text: s })
-                                            .await
-                                            .is_err()
-                                        {
-                                            debug!(
-                                                target: "assistd::chat",
-                                                "client disconnected mid-stream"
-                                            );
-                                            return StreamOutcome::ClientDisconnected(accum);
-                                        }
-                                    }
-                                    Segment::Visible(s) => {
-                                        if s.is_empty() {
-                                            continue;
-                                        }
-                                        if !accum.has_emitted {
-                                            tracing::debug!(
-                                                target: "assistd::voice::latency",
-                                                stage = "llm_first_token",
-                                                "voice latency stage"
-                                            );
-                                        }
-                                        accum.text.push_str(&s);
-                                        accum.has_emitted = true;
-                                        if tx.send(LlmEvent::Delta { text: s }).await.is_err() {
-                                            debug!(
-                                                target: "assistd::chat",
-                                                "client disconnected mid-stream"
-                                            );
-                                            return StreamOutcome::ClientDisconnected(accum);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    SseEvent::Done => {
-                        saw_done = true;
-                        break;
-                    }
-                }
-            }
-
-            if saw_done {
-                break;
-            }
-        }
-
-        if !saw_done {
-            warn!(
-                target: "assistd::chat",
-                "stream ended before [DONE] marker; accumulated {} bytes text, {} tool-call builders",
-                accum.text.len(),
-                accum.tool_calls.len()
-            );
-        }
-        if let Some(seg) = accum.splitter.finish() {
-            match seg {
-                Segment::Reasoning(s) => {
-                    let _ = tx.send(LlmEvent::ReasoningDelta { text: s }).await;
-                }
-                Segment::Visible(s) => {
-                    if !s.is_empty() {
-                        accum.text.push_str(&s);
-                        accum.has_emitted = true;
-                        let _ = tx.send(LlmEvent::Delta { text: s }).await;
-                    }
+                    Err(e) => return Err(self.fail(take(accum), e, pid_at_request)),
                 }
             }
         }
-        StreamOutcome::Ok(accum)
     }
+
+    /// Fold one `data:` payload into `accum`, forwarding its deltas.
+    async fn handle_chunk(
+        &self,
+        payload: &str,
+        accum: &mut StreamAccum,
+        tx: &mpsc::Sender<LlmEvent>,
+        pid_at_request: Option<u32>,
+    ) -> Result<(), StreamOutcome> {
+        let parsed: wire::ChatCompletionChunk = match serde_json::from_str(payload) {
+            Ok(parsed) => parsed,
+            Err(e) => return Err(self.fail(take(accum), ChatClientError::Json(e), pid_at_request)),
+        };
+        let Some(choice) = parsed.choices.into_iter().next() else {
+            return Ok(());
+        };
+        if let Some(reason) = choice.finish_reason {
+            accum.finish_reason = Some(reason);
+        }
+        for delta in choice.delta.tool_calls.unwrap_or_default() {
+            accum.merge_tool_call_delta(delta);
+        }
+        if let Some(text) = choice.delta.reasoning_content
+            && !text.is_empty()
+        {
+            forward(tx, LlmEvent::ReasoningDelta { text }, accum).await?;
+        }
+        if let Some(text) = choice.delta.content
+            && !text.is_empty()
+        {
+            for segment in accum.splitter.feed(&text) {
+                forward_segment(tx, segment, accum).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Send one classified segment, recording visible text on `accum`.
+async fn forward_segment(
+    tx: &mpsc::Sender<LlmEvent>,
+    segment: Segment,
+    accum: &mut StreamAccum,
+) -> Result<(), StreamOutcome> {
+    match segment {
+        Segment::Reasoning(text) => forward(tx, LlmEvent::ReasoningDelta { text }, accum).await,
+        Segment::Visible(text) => {
+            if text.is_empty() {
+                return Ok(());
+            }
+            if !accum.has_emitted {
+                tracing::debug!(
+                    target: "assistd::voice::latency",
+                    stage = "llm_first_token",
+                    "voice latency stage"
+                );
+            }
+            accum.text.push_str(&text);
+            accum.has_emitted = true;
+            forward(tx, LlmEvent::Delta { text }, accum).await
+        }
+    }
+}
+
+/// Send `event`, or hand back everything accumulated so far when the
+/// consumer has gone away.
+async fn forward(
+    tx: &mpsc::Sender<LlmEvent>,
+    event: LlmEvent,
+    accum: &mut StreamAccum,
+) -> Result<(), StreamOutcome> {
+    if tx.send(event).await.is_err() {
+        debug!(target: "assistd::chat", "client disconnected mid-stream");
+        return Err(StreamOutcome::ClientDisconnected(take(accum)));
+    }
+    Ok(())
 }
 
 #[async_trait]

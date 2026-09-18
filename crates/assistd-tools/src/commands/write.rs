@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 
 use crate::exec::POLICY_DENIED_EXIT;
 
@@ -153,22 +153,22 @@ impl PathResolveError {
         let (what, hint, recovery) = match self {
             Self::Relative => (
                 format!("{raw_path}: relative paths not permitted"),
-                "Try",
+                Hint::Try,
                 "an absolute path under an allowlisted directory",
             ),
             Self::HomeNotSet => (
                 format!("{raw_path}: cannot expand ~ ($HOME not set)"),
-                "Try",
+                Hint::Try,
                 "writing an explicit absolute path instead of ~",
             ),
             Self::AnchorMissing(anchor) => (
                 format!("{raw_path}: cannot resolve ancestor {anchor}"),
-                "Check",
+                Hint::Check,
                 "that the directory exists or widen [tools.write] writable_paths",
             ),
             Self::NotAllowlisted => (
                 format!("{raw_path}: path not in writable allowlist"),
-                "Check",
+                Hint::Check,
                 "[tools.write] writable_paths in config",
             ),
         };

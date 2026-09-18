@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::command::Hint;
+
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::ConfirmationRequest;
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
@@ -250,41 +252,41 @@ async fn focus_translates_backend_error() {
 #[test]
 fn hint_for_disconnected() {
     let (label, hint) = hint_for(&WmError::Disconnected);
-    assert_eq!(label, "Check");
+    assert_eq!(label, Hint::Check);
     assert!(hint.contains("config.toml"), "{hint}");
 }
 
 #[test]
 fn hint_for_not_found() {
     let (label, hint) = hint_for(&WmError::NotFound(id(42)));
-    assert_eq!(label, "Use");
+    assert_eq!(label, Hint::Use);
     assert!(hint.contains("wm list"), "{hint}");
 }
 
 #[test]
 fn hint_for_rejected() {
     let (label, _) = hint_for(&WmError::Rejected("focus: bad criteria".into()));
-    assert_eq!(label, "Try");
+    assert_eq!(label, Hint::Try);
 }
 
 #[test]
 fn hint_for_timeout() {
     let (label, hint) = hint_for(&WmError::Timeout(std::time::Duration::from_secs(5)));
-    assert_eq!(label, "Note");
+    assert_eq!(label, Hint::Note);
     assert!(hint.contains("retry"), "{hint}");
 }
 
 #[test]
 fn hint_for_unsupported() {
     let (label, hint) = hint_for(&WmError::Unsupported("output enumeration"));
-    assert_eq!(label, "Note");
+    assert_eq!(label, Hint::Note);
     assert!(hint.contains("i3 does not"), "{hint}");
 }
 
 #[test]
 fn hint_for_ipc() {
     let (label, _) = hint_for(&WmError::Ipc(anyhow::anyhow!("socket dropped")));
-    assert_eq!(label, "Check");
+    assert_eq!(label, Hint::Check);
 }
 
 #[tokio::test]

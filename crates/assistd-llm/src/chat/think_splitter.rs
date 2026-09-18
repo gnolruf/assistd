@@ -26,7 +26,7 @@ pub enum Segment {
     Reasoning(String),
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum State {
     /// Looking for `<think>`; emit incoming bytes as [`Segment::Visible`].
     #[default]
@@ -75,11 +75,7 @@ impl ThinkSplitter {
             if let Some(rel) = haystack.find(target) {
                 let abs = cursor + rel;
                 if abs > cursor {
-                    push_segment(
-                        &mut out,
-                        self.state == State::InsideThink,
-                        &buf[cursor..abs],
-                    );
+                    push_segment(&mut out, self.state, &buf[cursor..abs]);
                 }
                 cursor = abs + target.len();
                 self.state = match self.state {
@@ -99,11 +95,7 @@ impl ThinkSplitter {
             }
             let emit_end = tail.len() - hold;
             if emit_end > 0 {
-                push_segment(
-                    &mut out,
-                    self.state == State::InsideThink,
-                    &tail[..emit_end],
-                );
+                push_segment(&mut out, self.state, &tail[..emit_end]);
             }
             if hold > 0 {
                 self.pending.push_str(&tail[emit_end..]);
@@ -127,26 +119,26 @@ impl ThinkSplitter {
     }
 }
 
-fn push_segment(out: &mut Vec<Segment>, inside_think: bool, text: &str) {
+/// Append `text` classified by `state`, coalescing with the previous
+/// segment when the classification matches.
+fn push_segment(out: &mut Vec<Segment>, state: State, text: &str) {
     if text.is_empty() {
         return;
     }
-    // Coalesce with the previous segment when classifications match,
-    // so callers see one `Visible("hello world")` instead of two.
     if let Some(last) = out.last_mut() {
-        match (last, inside_think) {
-            (Segment::Visible(s), false) | (Segment::Reasoning(s), true) => {
-                s.push_str(text);
+        match (last, state) {
+            (Segment::Visible(prev), State::OutsideThink)
+            | (Segment::Reasoning(prev), State::InsideThink) => {
+                prev.push_str(text);
                 return;
             }
             _ => {}
         }
     }
-    if inside_think {
-        out.push(Segment::Reasoning(text.to_string()));
-    } else {
-        out.push(Segment::Visible(text.to_string()));
-    }
+    out.push(match state {
+        State::OutsideThink => Segment::Visible(text.to_string()),
+        State::InsideThink => Segment::Reasoning(text.to_string()),
+    });
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 
 /// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if no files
 /// given. Binary files are rejected so their raw bytes don't pollute the
@@ -88,14 +88,14 @@ impl Command for CatCommand {
                     error_line(
                         "cat",
                         format_args!("binary image file ({size}): {path}"),
-                        "Use",
+                        Hint::Use,
                         format_args!("see {path}"),
                     )
                 } else {
                     error_line(
                         "cat",
                         format_args!("binary {mime} file ({size}): {path}"),
-                        "Use",
+                        Hint::Use,
                         format_args!("cat -b {path}"),
                     )
                 };
