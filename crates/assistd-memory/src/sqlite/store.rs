@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use crate::{MemoryRecord, MemoryStore};
 
 use super::connection::SqliteHandle;
-use super::writer::{WriteCall, WriteOp};
+use super::writer::{WriteOp, dispatch_write};
 
 /// SQLite-backed [`crate::MemoryStore`] implementation.
 #[derive(Clone)]
@@ -30,7 +30,7 @@ impl SqliteMemoryStore {
         source_conversation_id: Option<i64>,
     ) -> Result<i64> {
         let key = key.to_string();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::SaveMemory {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::SaveMemory {
             key,
             value,
             source_conversation_id,
@@ -73,7 +73,7 @@ impl MemoryStore for SqliteMemoryStore {
 
     async fn delete(&self, key: &str) -> Result<()> {
         let key = key.to_string();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::DeleteMemory {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::DeleteMemory {
             key,
             ack,
         })
@@ -81,7 +81,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn delete_by_id(&self, id: i64) -> Result<Option<String>> {
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::DeleteMemoryById {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::DeleteMemoryById {
             id,
             ack,
         })

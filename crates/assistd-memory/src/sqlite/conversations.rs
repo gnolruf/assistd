@@ -6,11 +6,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use super::connection::SqliteHandle;
-use super::writer::{WriteCall, WriteOp};
+use super::writer::{WriteOp, dispatch_write};
 
 /// Session identifier: a UUID string, stable across daemon restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -139,17 +138,6 @@ impl PersistedMessage {
     }
 }
 
-/// One FTS5 hit returned by [`ConversationStore::search`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SearchHit {
-    pub conversation_id: i64,
-    pub session_id: String,
-    pub timestamp: String,
-    pub role: PersistedRole,
-    /// FTS5 `snippet()` output: `…before <mark>match</mark> after…`.
-    pub snippet: String,
-}
-
 /// Coarse summary of one turn.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnSummary {
@@ -207,23 +195,12 @@ pub struct UndoOutcome {
 /// Conversation persistence.
 #[async_trait]
 pub trait ConversationStore: Send + Sync + 'static {
-    /// Open a new session row for the daemon process identified by `daemon_pid`.
-    async fn begin_session(&self, daemon_pid: u32) -> Result<SessionId>;
     /// Mark `id` as ended by stamping `ended_at`.
     async fn end_session(&self, id: &SessionId) -> Result<()>;
     /// Open a new turn row inside `session` labelled with `user_text`.
     async fn begin_turn(&self, session: &SessionId, user_text: &str) -> Result<TurnId>;
     /// Mark `turn` as ended by stamping `ended_at`.
     async fn end_turn(&self, turn: TurnId) -> Result<()>;
-    /// Append `msg` to the `conversations` table. Returns the new `conversations.id` rowid.
-    async fn append_message(
-        &self,
-        session: &SessionId,
-        turn: Option<TurnId>,
-        msg: PersistedMessage,
-    ) -> Result<i64>;
-    /// Full-text search via the FTS5 index. Returns up to `limit` hits ordered by relevance.
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>>;
     /// Return the `limit` most-recent turns ordered by turn id descending.
     async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>>;
 
@@ -320,9 +297,6 @@ pub struct NoConversationStore;
 
 #[async_trait]
 impl ConversationStore for NoConversationStore {
-    async fn begin_session(&self, _pid: u32) -> Result<SessionId> {
-        Ok(SessionId::new())
-    }
     async fn end_session(&self, _id: &SessionId) -> Result<()> {
         Ok(())
     }
@@ -331,17 +305,6 @@ impl ConversationStore for NoConversationStore {
     }
     async fn end_turn(&self, _t: TurnId) -> Result<()> {
         Ok(())
-    }
-    async fn append_message(
-        &self,
-        _s: &SessionId,
-        _t: Option<TurnId>,
-        _m: PersistedMessage,
-    ) -> Result<i64> {
-        Ok(0)
-    }
-    async fn search(&self, _q: &str, _l: usize) -> Result<Vec<SearchHit>> {
-        Ok(Vec::new())
     }
     async fn recent_turns(&self, _l: usize) -> Result<Vec<TurnSummary>> {
         Ok(Vec::new())
@@ -434,21 +397,9 @@ impl SqliteConversationStore {
 
 #[async_trait]
 impl ConversationStore for SqliteConversationStore {
-    async fn begin_session(&self, daemon_pid: u32) -> Result<SessionId> {
-        let id = SessionId::new();
-        let session_id = id.0.clone();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::BeginSession {
-            session_id,
-            daemon_pid,
-            ack,
-        })
-        .await?;
-        Ok(id)
-    }
-
     async fn end_session(&self, id: &SessionId) -> Result<()> {
         let session_id = id.0.clone();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::EndSession {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::EndSession {
             session_id,
             ack,
         })
@@ -458,7 +409,7 @@ impl ConversationStore for SqliteConversationStore {
     async fn begin_turn(&self, session: &SessionId, user_text: &str) -> Result<TurnId> {
         let session_id = session.0.clone();
         let text = user_text.to_string();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::BeginTurn {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::BeginTurn {
             session_id,
             user_text: text,
             ack,
@@ -467,78 +418,11 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn end_turn(&self, turn: TurnId) -> Result<()> {
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::EndTurn {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::EndTurn {
             turn_id: turn,
             ack,
         })
         .await
-    }
-
-    async fn append_message(
-        &self,
-        session: &SessionId,
-        turn: Option<TurnId>,
-        msg: PersistedMessage,
-    ) -> Result<i64> {
-        let session_id = session.0.clone();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::AppendMessage {
-            session_id,
-            turn_id: turn,
-            msg,
-            ack,
-        })
-        .await
-    }
-
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        // Quote the query as an FTS5 phrase so grammar metacharacters
-        // match as text rather than parse as operators.
-        let q = fts5_literal(query);
-        let limit = limit as i64;
-        self.handle
-            .conn()
-            .call(move |c| -> rusqlite::Result<_> {
-                let sql = "
-                    SELECT  conv.id,
-                            conv.session_id,
-                            conv.timestamp,
-                            conv.role,
-                            snippet(conversations_fts, 0, '<mark>', '</mark>', '…', 16)
-                    FROM conversations_fts
-                    JOIN conversations conv ON conv.id = conversations_fts.rowid
-                    WHERE conversations_fts MATCH ?1
-                    ORDER BY rank
-                    LIMIT ?2
-                ";
-                let mut stmt = c.prepare(sql)?;
-                let rows = stmt
-                    .query_map(rusqlite::params![q, limit], |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, String>(4)?,
-                        ))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await
-            .context("conversation search")?
-            .into_iter()
-            .map(|(id, session_id, ts, role, snippet)| {
-                let role = PersistedRole::parse(&role)
-                    .with_context(|| format!("unknown role in DB: {role}"))?;
-                Ok(SearchHit {
-                    conversation_id: id,
-                    session_id,
-                    timestamp: ts,
-                    role,
-                    snippet,
-                })
-            })
-            .collect()
     }
 
     async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>> {
@@ -582,7 +466,7 @@ impl ConversationStore for SqliteConversationStore {
     ) -> Result<(SessionId, BranchId)> {
         let id = SessionId::new();
         let session_id = id.0.clone();
-        let branch = WriteCall::run(self.handle.writer(), |ack| {
+        let branch = dispatch_write(self.handle.writer(), |ack| {
             WriteOp::BeginSessionWithMainBranch {
                 session_id,
                 daemon_pid,
@@ -602,7 +486,7 @@ impl ConversationStore for SqliteConversationStore {
     ) -> Result<BranchId> {
         let session_id = session.0.clone();
         let name = name.to_string();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::CreateBranch {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::CreateBranch {
             session_id,
             name,
             parent_branch_id: parent,
@@ -614,7 +498,7 @@ impl ConversationStore for SqliteConversationStore {
 
     async fn set_current_branch(&self, session: &SessionId, branch: BranchId) -> Result<()> {
         let session_id = session.0.clone();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::SetCurrentBranch {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::SetCurrentBranch {
             session_id,
             branch_id: branch,
             ack,
@@ -649,7 +533,7 @@ impl ConversationStore for SqliteConversationStore {
         msg: PersistedMessage,
     ) -> Result<i64> {
         let session_id = session.0.clone();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::AppendMessageToBranch {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::AppendMessageToBranch {
             session_id,
             branch_id: branch,
             turn_id: turn,
@@ -769,7 +653,7 @@ impl ConversationStore for SqliteConversationStore {
 
     async fn fork_branch(&self, src: BranchId, new_name: &str) -> Result<BranchId> {
         let new_name = new_name.to_string();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::ForkBranch {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::ForkBranch {
             src_branch_id: src,
             new_name,
             ack,
@@ -848,7 +732,7 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome> {
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::UndoLastTurn {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::UndoLastTurn {
             branch_id: branch,
             ack,
         })
@@ -877,7 +761,7 @@ impl ConversationStore for SqliteConversationStore {
     async fn set_session_title(&self, session: &SessionId, title: &str) -> Result<()> {
         let session_id = session.0.clone();
         let title = title.to_string();
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::SetSessionTitle {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::SetSessionTitle {
             session_id,
             title,
             ack,
@@ -919,28 +803,6 @@ impl ConversationStore for SqliteConversationStore {
                 })
             })
     }
-}
-
-// `WriteCall::run` returns an `oneshot::Receiver<Result<T>>` style
-// future via `dispatch`; one call site needs the `oneshot` import even
-// though most uses are inside the helper itself. Suppress the unused
-// import lint via direct reference.
-#[allow(dead_code)]
-fn _force_oneshot_referenced(_: oneshot::Receiver<Result<()>>) {}
-
-fn fts5_literal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        if ch == '"' {
-            out.push('"');
-            out.push('"');
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]

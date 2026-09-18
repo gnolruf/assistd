@@ -450,8 +450,8 @@ impl SemanticStore for SqliteSemanticStore {
         dim: i64,
         vector: Vec<u8>,
     ) -> Result<()> {
-        use super::writer::{WriteCall, WriteOp};
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::StoreChunkEmbedding {
+        use super::writer::{WriteOp, dispatch_write};
+        dispatch_write(self.handle.writer(), |ack| WriteOp::StoreChunkEmbedding {
             chunk_id,
             model,
             dim,
@@ -468,8 +468,8 @@ impl SemanticStore for SqliteSemanticStore {
         dim: i64,
         vector: Vec<u8>,
     ) -> Result<()> {
-        use super::writer::{WriteCall, WriteOp};
-        WriteCall::run(self.handle.writer(), |ack| WriteOp::StoreMemoryEmbedding {
+        use super::writer::{WriteOp, dispatch_write};
+        dispatch_write(self.handle.writer(), |ack| WriteOp::StoreMemoryEmbedding {
             memory_id,
             model,
             dim,

@@ -10,8 +10,8 @@ pub mod writer;
 pub use connection::SqliteHandle;
 pub use conversations::{
     BranchId, BranchInfo, ConversationStore, HistoryRow, NoConversationStore, PersistedMessage,
-    PersistedRole, ResumeCandidate, SearchHit, SessionId, SqliteConversationStore, TurnId,
-    TurnSummary, UndoOutcome,
+    PersistedRole, ResumeCandidate, SessionId, SqliteConversationStore, TurnId, TurnSummary,
+    UndoOutcome,
 };
 pub use embeddings::{
     EmbeddingHit, MemoryHit, NoSemanticStore, SemanticStore, SqliteSemanticStore, vector_to_blob,

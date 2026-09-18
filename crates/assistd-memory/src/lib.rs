@@ -20,7 +20,7 @@ pub use chunking::{ChunkingConfig, chunk_message};
 pub use sqlite::{
     BranchId, BranchInfo, ConversationStore, EmbeddingHit, HistoryRow, MemoryHit,
     NoConversationStore, NoSemanticStore, PersistedMessage, PersistedRole, ResumeCandidate,
-    SearchHit, SemanticStore, SessionId, SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
+    SemanticStore, SessionId, SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
     SqliteSemanticStore, TurnId, TurnSummary, UndoOutcome, WriteOp, vector_to_blob,
 };
 

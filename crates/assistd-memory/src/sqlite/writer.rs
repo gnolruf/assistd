@@ -4,7 +4,6 @@
 //! the task drains its queue so a write issued just before SIGTERM
 //! still lands.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -13,15 +12,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_rusqlite::Connection;
 
-use super::conversations::{BranchId, PersistedMessage, PersistedRole, TurnId, UndoOutcome};
+use super::conversations::{BranchId, PersistedMessage, TurnId, UndoOutcome};
 
 /// Mutations the writer task executes, each with a `oneshot` ack.
 pub enum WriteOp {
-    BeginSession {
-        session_id: String,
-        daemon_pid: u32,
-        ack: oneshot::Sender<Result<()>>,
-    },
     EndSession {
         session_id: String,
         ack: oneshot::Sender<Result<()>>,
@@ -34,12 +28,6 @@ pub enum WriteOp {
     EndTurn {
         turn_id: TurnId,
         ack: oneshot::Sender<Result<()>>,
-    },
-    AppendMessage {
-        session_id: String,
-        turn_id: Option<TurnId>,
-        msg: PersistedMessage,
-        ack: oneshot::Sender<Result<i64>>,
     },
     /// Upsert a memory by key; acks the row id.
     SaveMemory {
@@ -80,14 +68,6 @@ pub enum WriteOp {
         model: String,
         dim: i64,
         vector: Vec<u8>,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    /// Drop every chunk (and cascade-drop its embedding) for one
-    /// conversation row. Currently unused; added for the future
-    /// "re-chunk" workflow when a user edits or deletes a turn so the
-    /// FK shape doesn't need a follow-up migration.
-    DeleteChunksForConversation {
-        conversation_id: i64,
         ack: oneshot::Sender<Result<()>>,
     },
     /// Begin a session and create its `main` branch in one transaction.
@@ -194,14 +174,6 @@ pub fn spawn_writer(
 
 async fn handle_op(conn: &Connection, op: WriteOp) {
     match op {
-        WriteOp::BeginSession {
-            session_id,
-            daemon_pid,
-            ack,
-        } => {
-            let res = begin_session(conn, session_id, daemon_pid).await;
-            let _ = ack.send(res);
-        }
         WriteOp::EndSession { session_id, ack } => {
             let res = end_session(conn, session_id).await;
             let _ = ack.send(res);
@@ -216,15 +188,6 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
         }
         WriteOp::EndTurn { turn_id, ack } => {
             let res = end_turn(conn, turn_id).await;
-            let _ = ack.send(res);
-        }
-        WriteOp::AppendMessage {
-            session_id,
-            turn_id,
-            msg,
-            ack,
-        } => {
-            let res = append_message(conn, session_id, turn_id, msg).await;
             let _ = ack.send(res);
         }
         WriteOp::SaveMemory {
@@ -272,13 +235,6 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
             ack,
         } => {
             let res = store_memory_embedding(conn, memory_id, model, dim, vector).await;
-            let _ = ack.send(res);
-        }
-        WriteOp::DeleteChunksForConversation {
-            conversation_id,
-            ack,
-        } => {
-            let res = delete_chunks_for_conversation(conn, conversation_id).await;
             let _ = ack.send(res);
         }
         WriteOp::BeginSessionWithMainBranch {
@@ -352,19 +308,6 @@ async fn set_session_title(conn: &Connection, session_id: String, title: String)
     .context("set_session_title")
 }
 
-async fn begin_session(conn: &Connection, id: String, pid: u32) -> Result<()> {
-    let started = Utc::now().to_rfc3339();
-    conn.call(move |c| -> rusqlite::Result<_> {
-        c.execute(
-            "INSERT INTO sessions (id, started_at, daemon_pid) VALUES (?1, ?2, ?3)",
-            rusqlite::params![id, started, pid],
-        )?;
-        Ok(())
-    })
-    .await
-    .context("begin_session")
-}
-
 async fn end_session(conn: &Connection, id: String) -> Result<()> {
     let ended = Utc::now().to_rfc3339();
     conn.call(move |c| -> rusqlite::Result<_> {
@@ -404,54 +347,6 @@ async fn end_turn(conn: &Connection, turn: TurnId) -> Result<()> {
     })
     .await
     .context("end_turn")
-}
-
-async fn append_message(
-    conn: &Connection,
-    session: String,
-    turn: Option<TurnId>,
-    msg: PersistedMessage,
-) -> Result<i64> {
-    let timestamp = Utc::now().to_rfc3339();
-    let role = msg.role.as_wire().to_string();
-    let tool_calls_json = match msg.tool_calls {
-        Some(v) => Some(serde_json::to_string(&v).context("serialize tool_calls")?),
-        None => None,
-    };
-    let turn_id = turn.map(|t| t.0);
-    let id = conn
-        .call(move |c| -> rusqlite::Result<_> {
-            // One transaction so the seq SELECT and the INSERT see the
-            // same snapshot.
-            let tx = c.transaction()?;
-            let seq: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM conversations WHERE session_id = ?1",
-                rusqlite::params![session],
-                |r| r.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO conversations
-                    (session_id, turn_id, seq, timestamp, role, content, tool_calls, tool_call_id, tool_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![
-                    session,
-                    turn_id,
-                    seq,
-                    timestamp,
-                    role,
-                    msg.content,
-                    tool_calls_json,
-                    msg.tool_call_id,
-                    msg.tool_name,
-                ],
-            )?;
-            let id = tx.last_insert_rowid();
-            tx.commit()?;
-            Ok(id)
-        })
-        .await
-        .context("append_message")?;
-    Ok(id)
 }
 
 async fn save_memory(
@@ -589,18 +484,6 @@ async fn store_memory_embedding(
     })
     .await
     .context("store_memory_embedding")
-}
-
-async fn delete_chunks_for_conversation(conn: &Connection, conversation_id: i64) -> Result<()> {
-    conn.call(move |c| -> rusqlite::Result<_> {
-        c.execute(
-            "DELETE FROM conversation_chunks WHERE conversation_id = ?1",
-            rusqlite::params![conversation_id],
-        )?;
-        Ok(())
-    })
-    .await
-    .context("delete_chunks_for_conversation")
 }
 
 async fn begin_session_with_main_branch(
@@ -854,36 +737,15 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
     .context("undo_last_turn")
 }
 
-#[allow(dead_code)]
-pub(super) fn role_wire(role: PersistedRole) -> &'static str {
-    role.as_wire()
-}
-
-pub(super) async fn dispatch<T>(
-    tx: &mpsc::Sender<WriteOp>,
-    op: WriteOp,
-    ack_rx: oneshot::Receiver<Result<T>>,
-) -> Result<T> {
-    tx.send(op)
+pub(super) async fn dispatch_write<T, F>(tx: &mpsc::Sender<WriteOp>, build: F) -> Result<T>
+where
+    F: FnOnce(oneshot::Sender<Result<T>>) -> WriteOp,
+{
+    let (ack_tx, ack_rx) = oneshot::channel();
+    tx.send(build(ack_tx))
         .await
         .map_err(|_| anyhow::anyhow!("memory writer task is gone"))?;
     ack_rx
         .await
         .map_err(|_| anyhow::anyhow!("memory writer task dropped ack channel"))?
 }
-
-pub(super) struct WriteCall;
-
-#[allow(dead_code)]
-impl WriteCall {
-    pub(super) async fn run<T, F>(tx: &mpsc::Sender<WriteOp>, build: F) -> Result<T>
-    where
-        F: FnOnce(oneshot::Sender<Result<T>>) -> WriteOp,
-    {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        dispatch(tx, build(ack_tx), ack_rx).await
-    }
-}
-
-/// Shared sender type allowing multiple stores to enqueue writes through one channel.
-pub type WriterSender = Arc<mpsc::Sender<WriteOp>>;

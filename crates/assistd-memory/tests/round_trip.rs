@@ -1,8 +1,8 @@
 //! Persistence survives closing and reopening the store at the same path.
 
 use assistd_memory::{
-    ConversationStore, MemoryStore, PersistedMessage, PersistedRole, SqliteConversationStore,
-    SqliteHandle, SqliteMemoryStore,
+    BranchId, ConversationStore, MemoryStore, PersistedMessage, PersistedRole,
+    SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
 };
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -12,7 +12,7 @@ async fn turn_persists_across_store_reopen() {
     let temp = tempfile::Builder::new().suffix(".db").tempfile().unwrap();
     let path = temp.path().to_path_buf();
 
-    let session_id_text: String;
+    let branch: BranchId;
 
     // ─── Session 1 ────────────────────────────────────────────────
     {
@@ -22,14 +22,18 @@ async fn turn_persists_across_store_reopen() {
         let convs = SqliteConversationStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle);
 
-        let session = convs.begin_session(std::process::id()).await.unwrap();
-        session_id_text = session.0.clone();
+        let (session, main) = convs
+            .begin_session_with_main_branch(std::process::id())
+            .await
+            .unwrap();
+        branch = main;
 
         let turn = convs.begin_turn(&session, "what is rust?").await.unwrap();
 
         convs
-            .append_message(
+            .append_message_to_branch(
                 &session,
+                main,
                 Some(turn),
                 PersistedMessage::user("what is rust?"),
             )
@@ -37,8 +41,9 @@ async fn turn_persists_across_store_reopen() {
             .unwrap();
 
         convs
-            .append_message(
+            .append_message_to_branch(
                 &session,
+                main,
                 Some(turn),
                 PersistedMessage::assistant_text(
                     "Rust is a systems programming language with a strong type system.",
@@ -67,29 +72,16 @@ async fn turn_persists_across_store_reopen() {
         let convs = SqliteConversationStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle);
 
-        let hits = convs.search("rust", 10).await.unwrap();
-        assert!(
-            hits.iter()
-                .any(|h| h.snippet.to_lowercase().contains("systems programming")),
-            "expected an assistant hit mentioning 'systems programming': {hits:#?}"
-        );
-        // The session id from session 1 must round-trip via the hit.
-        assert!(
-            hits.iter().any(|h| h.session_id == session_id_text),
-            "expected at least one hit from session {session_id_text}: {hits:#?}"
-        );
-        // Roles include both User (the prompt) and Assistant (the answer).
-        let roles: std::collections::HashSet<PersistedRole> = hits.iter().map(|h| h.role).collect();
-        assert!(roles.contains(&PersistedRole::User));
-        assert!(roles.contains(&PersistedRole::Assistant));
+        let history = convs.load_branch_history(branch).await.unwrap();
+        let roles: Vec<PersistedRole> = history.iter().map(|r| r.role).collect();
+        assert_eq!(roles, [PersistedRole::User, PersistedRole::Assistant]);
+        assert!(history[1].content.contains("systems programming"));
 
-        // KV memory persisted too.
         assert_eq!(
             mems.load("fact:lang").await.unwrap().as_deref(),
             Some("rust")
         );
 
-        // recent_turns reflects the prior session.
         let turns = convs.recent_turns(5).await.unwrap();
         assert!(!turns.is_empty());
         assert_eq!(turns[0].user_text, "what is rust?");
@@ -104,7 +96,7 @@ async fn turn_persists_across_store_reopen() {
 async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
     let temp = tempfile::Builder::new().suffix(".db").tempfile().unwrap();
     let path = temp.path().to_path_buf();
-    let session_text: String;
+    let branch: BranchId;
 
     {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -112,21 +104,28 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
         let handle = Arc::new(handle);
         let convs = SqliteConversationStore::new(handle.clone());
 
-        let session = convs.begin_session(std::process::id()).await.unwrap();
-        session_text = session.0.clone();
+        let (session, main) = convs
+            .begin_session_with_main_branch(std::process::id())
+            .await
+            .unwrap();
+        branch = main;
         let turn = convs.begin_turn(&session, "drain race").await.unwrap();
 
-        // Fire the shutdown signal, then immediately enqueue more
-        // writes. Without the fix these would silently disappear.
         shutdown_tx.send(true).unwrap();
 
         convs
-            .append_message(&session, Some(turn), PersistedMessage::user("drain race"))
+            .append_message_to_branch(
+                &session,
+                main,
+                Some(turn),
+                PersistedMessage::user("drain race"),
+            )
             .await
             .unwrap();
         convs
-            .append_message(
+            .append_message_to_branch(
                 &session,
+                main,
                 Some(turn),
                 PersistedMessage::assistant_text("survived the drain"),
             )
@@ -136,19 +135,17 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
         convs.end_session(&session).await.unwrap();
 
         drop(convs);
-        // Writer must process the post-shutdown ops before exiting.
         writer.await.unwrap();
     }
 
-    // Reopen and confirm the row landed.
     let (_tx, rx) = watch::channel(false);
     let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
     let handle = Arc::new(handle);
     let convs = SqliteConversationStore::new(handle);
-    let hits = convs.search("survived the drain", 5).await.unwrap();
+    let history = convs.load_branch_history(branch).await.unwrap();
     assert!(
-        hits.iter().any(|h| h.session_id == session_text),
-        "post-shutdown append_message did not persist: {hits:#?}"
+        history.iter().any(|r| r.content == "survived the drain"),
+        "post-shutdown append did not persist: {history:#?}"
     );
     drop(convs);
     writer.await.unwrap();

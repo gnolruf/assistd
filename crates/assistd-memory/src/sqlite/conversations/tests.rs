@@ -13,16 +13,22 @@ async fn fresh_store() -> (SqliteConversationStore, tokio::task::JoinHandle<()>)
 #[tokio::test]
 async fn round_trip_user_and_assistant_messages() {
     let (store, _w) = fresh_store().await;
-    let session = store.begin_session(42).await.unwrap();
+    let (session, branch) = store.begin_session_with_main_branch(42).await.unwrap();
     let turn = store.begin_turn(&session, "what is 2+2?").await.unwrap();
 
     store
-        .append_message(&session, Some(turn), PersistedMessage::user("what is 2+2?"))
+        .append_message_to_branch(
+            &session,
+            branch,
+            Some(turn),
+            PersistedMessage::user("what is 2+2?"),
+        )
         .await
         .unwrap();
     store
-        .append_message(
+        .append_message_to_branch(
             &session,
+            branch,
             Some(turn),
             PersistedMessage::assistant_text("four"),
         )
@@ -31,11 +37,10 @@ async fn round_trip_user_and_assistant_messages() {
     store.end_turn(turn).await.unwrap();
     store.end_session(&session).await.unwrap();
 
-    let hits = store.search("2+2", 10).await.unwrap();
-    assert!(
-        hits.iter().any(|h| matches!(h.role, PersistedRole::User)),
-        "expected a user hit: {hits:#?}"
-    );
+    let history = store.load_branch_history(branch).await.unwrap();
+    let roles: Vec<PersistedRole> = history.iter().map(|r| r.role).collect();
+    assert_eq!(roles, [PersistedRole::User, PersistedRole::Assistant]);
+    assert_eq!(history[1].content, "four");
 
     let recent = store.recent_turns(5).await.unwrap();
     assert_eq!(recent.len(), 1);
@@ -46,21 +51,23 @@ async fn round_trip_user_and_assistant_messages() {
 #[tokio::test]
 async fn assistant_with_tool_calls_persists_json() {
     let (store, _w) = fresh_store().await;
-    let session = store.begin_session(1).await.unwrap();
+    let (session, branch) = store.begin_session_with_main_branch(1).await.unwrap();
     let turn = store.begin_turn(&session, "list files").await.unwrap();
 
     let calls = serde_json::json!([{"id": "c-1", "name": "run", "arguments": {"command": "ls"}}]);
     let id = store
-        .append_message(
+        .append_message_to_branch(
             &session,
+            branch,
             Some(turn),
             PersistedMessage::assistant_tool_calls(calls.clone()),
         )
         .await
         .unwrap();
     let result_id = store
-        .append_message(
+        .append_message_to_branch(
             &session,
+            branch,
             Some(turn),
             PersistedMessage::tool_result("file1\nfile2", "c-1", "run"),
         )
@@ -68,8 +75,6 @@ async fn assistant_with_tool_calls_persists_json() {
         .unwrap();
     assert_ne!(id, result_id);
 
-    // Read back: the assistant row should have non-NULL tool_calls
-    // and the tool row should carry tool_call_id and tool_name.
     let conn = store.handle.conn();
     let (assistant_calls, tool_call_id, tool_name): (
         Option<String>,
@@ -93,40 +98,10 @@ async fn assistant_with_tool_calls_persists_json() {
 }
 
 #[tokio::test]
-async fn no_conversation_store_search_returns_empty() {
+async fn no_conversation_store_returns_empty() {
     let store = NoConversationStore;
-    assert!(store.search("anything", 10).await.unwrap().is_empty());
     assert!(store.recent_turns(10).await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn search_handles_fts5_grammar_safely() {
-    // Inputs that would parse-error under raw FTS5 grammar must
-    // round-trip through the literal-phrase escape without
-    // surfacing as Err. We don't assert on hits; the default
-    // tokenizer's behaviour on these inputs is implementation
-    // detail; we only assert the call succeeds.
-    let (store, _w) = fresh_store().await;
-    let session = store.begin_session(1).await.unwrap();
-    let turn = store.begin_turn(&session, "ignore").await.unwrap();
-    store
-        .append_message(&session, Some(turn), PersistedMessage::user("she said hi"))
-        .await
-        .unwrap();
-
-    // Unmatched quote: would be a parse error pre-escape.
-    store.search("say \"hi", 10).await.unwrap();
-    // Operator-looking input: would be parsed as boolean OR.
-    store.search("apple OR banana", 10).await.unwrap();
-    // Wildcard star: would be a prefix match pre-escape.
-    store.search("foo*", 10).await.unwrap();
-}
-
-#[test]
-fn fts5_literal_doubles_internal_quotes() {
-    assert_eq!(fts5_literal("foo"), "\"foo\"");
-    assert_eq!(fts5_literal("say \"hi\""), "\"say \"\"hi\"\"\"");
-    assert_eq!(fts5_literal(""), "\"\"");
+    assert!(store.list_branches().await.unwrap().is_empty());
 }
 
 #[tokio::test]

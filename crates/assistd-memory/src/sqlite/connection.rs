@@ -10,7 +10,7 @@ use tokio_rusqlite::Connection;
 
 use crate::migrations;
 
-use super::writer::{WriteOp, spawn_writer};
+use super::writer::{WriteOp, dispatch_write, spawn_writer};
 
 /// Writer queue depth: enough to absorb one bursty agent step (roughly
 /// ten tool call/result pairs) without backpressuring the sender.
@@ -88,8 +88,7 @@ impl SqliteHandle {
         content: String,
         token_count: Option<i64>,
     ) -> anyhow::Result<i64> {
-        use super::writer::WriteCall;
-        WriteCall::run(self.writer(), |ack| WriteOp::StoreChunk {
+        dispatch_write(self.writer(), |ack| WriteOp::StoreChunk {
             conversation_id,
             chunk_index,
             content,

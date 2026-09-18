@@ -1,7 +1,7 @@
 use super::*;
 use crate::PersistedMessage;
-use crate::sqlite::SqliteHandle;
 use crate::sqlite::writer::WriteOp;
+use crate::sqlite::{ConversationStore, SqliteConversationStore, SqliteHandle};
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 
@@ -12,6 +12,16 @@ async fn fresh() -> (Arc<SqliteHandle>, tokio::task::JoinHandle<()>) {
     let (_tx, rx) = watch::channel(false);
     let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
     (Arc::new(handle), writer)
+}
+
+async fn seed_conversation(handle: &Arc<SqliteHandle>, msg: PersistedMessage) -> (SessionId, i64) {
+    let store = SqliteConversationStore::new(handle.clone());
+    let (session, branch) = store.begin_session_with_main_branch(0).await.unwrap();
+    let conv_id = store
+        .append_message_to_branch(&session, branch, None, msg)
+        .await
+        .unwrap();
+    (session, conv_id)
 }
 
 fn unit_vec(angle: f32) -> Vec<f32> {
@@ -71,30 +81,7 @@ async fn nearest_chunks_empty_store_returns_empty() {
 #[tokio::test]
 async fn nearest_chunks_ranks_by_similarity() {
     let (handle, _w) = fresh().await;
-    // Create one conversation row to FK the chunks against.
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::BeginSession {
-            session_id: "sess-1".into(),
-            daemon_pid: 1,
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    rx.await.unwrap().unwrap();
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::AppendMessage {
-            session_id: "sess-1".into(),
-            turn_id: None,
-            msg: PersistedMessage::user("hello world"),
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    let conv_id = rx.await.unwrap().unwrap();
+    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("hello world")).await;
 
     // Insert three chunks with vectors at different angles.
     // Query points at 0; expect chunk at angle 0 to win, then 0.3, then 1.5.
@@ -115,29 +102,7 @@ async fn nearest_chunks_ranks_by_similarity() {
 #[tokio::test]
 async fn nearest_chunks_top_k_caps_results() {
     let (handle, _w) = fresh().await;
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::BeginSession {
-            session_id: "s".into(),
-            daemon_pid: 0,
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    rx.await.unwrap().unwrap();
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::AppendMessage {
-            session_id: "s".into(),
-            turn_id: None,
-            msg: PersistedMessage::user("x"),
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    let conv_id = rx.await.unwrap().unwrap();
+    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
     for i in 0..10 {
         insert_chunk_with_vec(&handle, conv_id, i, &unit_vec((i as f32) * 0.1), "m").await;
     }
@@ -149,31 +114,13 @@ async fn nearest_chunks_top_k_caps_results() {
 #[tokio::test]
 async fn nearest_chunks_can_exclude_one_session() {
     let (handle, _w) = fresh().await;
+    let mut sessions = Vec::new();
     let mut conv_ids = Vec::new();
     for session in ["past", "current"] {
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::BeginSession {
-                session_id: session.into(),
-                daemon_pid: 0,
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        rx.await.unwrap().unwrap();
-        let (tx, rx) = oneshot::channel();
-        handle
-            .writer()
-            .send(WriteOp::AppendMessage {
-                session_id: session.into(),
-                turn_id: None,
-                msg: PersistedMessage::user(session),
-                ack: tx,
-            })
-            .await
-            .unwrap();
-        conv_ids.push(rx.await.unwrap().unwrap());
+        let (session_id, conv_id) =
+            seed_conversation(&handle, PersistedMessage::user(session)).await;
+        sessions.push(session_id);
+        conv_ids.push(conv_id);
     }
     // The current session holds the closer match, so excluding it
     // has to change the result rather than just trim the tail.
@@ -184,41 +131,18 @@ async fn nearest_chunks_can_exclude_one_session() {
     let all = s.nearest_chunks(unit_vec(0.0), 5, "m", None).await.unwrap();
     assert_eq!(all.len(), 2);
 
-    let current = SessionId("current".into());
     let others = s
-        .nearest_chunks(unit_vec(0.0), 5, "m", Some(&current))
+        .nearest_chunks(unit_vec(0.0), 5, "m", Some(&sessions[1]))
         .await
         .unwrap();
     assert_eq!(others.len(), 1);
-    assert_eq!(others[0].session_id, "past");
+    assert_eq!(others[0].session_id, sessions[0].0);
 }
 
 #[tokio::test]
 async fn nearest_chunks_filters_by_model() {
     let (handle, _w) = fresh().await;
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::BeginSession {
-            session_id: "s".into(),
-            daemon_pid: 0,
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    rx.await.unwrap().unwrap();
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::AppendMessage {
-            session_id: "s".into(),
-            turn_id: None,
-            msg: PersistedMessage::user("x"),
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    let conv_id = rx.await.unwrap().unwrap();
+    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
     insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "old-model").await;
     let s = SqliteSemanticStore::new(handle);
     // Query with the new model name; old-model rows must not appear.
@@ -324,29 +248,7 @@ async fn no_semantic_store_returns_empty() {
 #[tokio::test]
 async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
     let (handle, _w) = fresh().await;
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::BeginSession {
-            session_id: "sess-mx".into(),
-            daemon_pid: 1,
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    rx.await.unwrap().unwrap();
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::AppendMessage {
-            session_id: "sess-mx".into(),
-            turn_id: None,
-            msg: PersistedMessage::user("x"),
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    let conv_id = rx.await.unwrap().unwrap();
+    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
 
     // Two chunks: one indexed under "new", one indexed under "old".
     let _ = insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "new").await;
@@ -438,30 +340,7 @@ async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
 #[tokio::test]
 async fn count_stale_aggregates_across_chunks_and_memories() {
     let (handle, _w) = fresh().await;
-    // Create a conversation row to FK chunk inserts.
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::BeginSession {
-            session_id: "sess-stale".into(),
-            daemon_pid: 1,
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    rx.await.unwrap().unwrap();
-    let (tx, rx) = oneshot::channel();
-    handle
-        .writer()
-        .send(WriteOp::AppendMessage {
-            session_id: "sess-stale".into(),
-            turn_id: None,
-            msg: PersistedMessage::user("x"),
-            ack: tx,
-        })
-        .await
-        .unwrap();
-    let conv_id = rx.await.unwrap().unwrap();
+    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
 
     // Two chunks under "old-A", one under "old-B", one under "new".
     let _ = insert_chunk_with_vec(&handle, conv_id, 0, &unit_vec(0.0), "old-A").await;
