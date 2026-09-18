@@ -49,7 +49,7 @@ pub use daemon::DaemonConfig;
 pub use embedding::EmbeddingConfig;
 pub use errors::ConfigError;
 pub use llama::LlamaServerConfig;
-pub use mcp::{McpConfig, McpServerConfig, McpTransport};
+pub use mcp::{McpConfig, McpServerConfig};
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;
 pub use presence::PresenceConfig;

@@ -39,10 +39,9 @@ enum Action {
     Sleep,
 }
 
-/// Pre-flight check called from daemon startup, mirroring
-/// [`crate::gpu_monitor::validate`]. `Config::validate` already catches
-/// this; we duplicate the rule here so the daemon's fail-fast path
-/// stays symmetric across subsystems.
+/// Pre-flight check called from daemon startup. `Config::validate`
+/// already catches this; we duplicate the rule here so the daemon's
+/// fail-fast path stays symmetric across subsystems.
 pub fn validate(cfg: &SleepConfig) -> Result<()> {
     if cfg.idle_to_drowsy_mins > 0
         && cfg.idle_to_sleep_mins > 0

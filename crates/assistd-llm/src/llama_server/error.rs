@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 use thiserror::Error;
@@ -10,7 +11,7 @@ pub enum LlamaServerError {
 
     #[error("failed to spawn llama-server binary {path}: {source}")]
     Spawn {
-        path: String,
+        path: PathBuf,
         #[source]
         source: std::io::Error,
     },

@@ -384,7 +384,7 @@ impl Conversation {
             return Ok(());
         }
 
-        let preserve_pairs = chat.preserve_recent_turns.max(1) as usize;
+        let preserve_pairs = chat.preserve_recent_turns.get() as usize;
         let preserve_from = self.first_preserved_index(preserve_pairs);
 
         let tail_start = self.summary_insertion_index();
@@ -406,7 +406,7 @@ impl Conversation {
         let summary = summarizer
             .summarize(
                 dialogue,
-                chat.summary_target_tokens,
+                chat.summary_target_tokens.get(),
                 chat.max_summary_tokens(),
             )
             .await?;
@@ -417,7 +417,7 @@ impl Conversation {
             ));
         }
 
-        let max_summary_bytes = (chat.summary_target_tokens as usize).saturating_mul(4);
+        let max_summary_bytes = (chat.summary_target_tokens.get() as usize).saturating_mul(4);
         let body = if trimmed.len() > max_summary_bytes {
             truncate_utf8(trimmed, max_summary_bytes)
         } else {
@@ -608,6 +608,7 @@ fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
 
 fn effective_budget(chat: &ChatConfig, model: &ModelConfig) -> u32 {
     chat.max_history_tokens
+        .get()
         .min(chat.effective_context_budget(model))
 }
 
@@ -639,6 +640,7 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assistd_config::defaults::{nz32, nz64};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -692,12 +694,12 @@ mod tests {
     fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) {
         let chat = ChatConfig {
             system_prompt: "sys".into(),
-            max_history_tokens: max_history,
-            summary_target_tokens: max_history / 4,
-            preserve_recent_turns: preserve,
+            max_history_tokens: nz32(max_history),
+            summary_target_tokens: nz32(max_history / 4),
+            preserve_recent_turns: nz32(preserve),
             temperature: 0.7,
-            max_response_tokens: 512,
-            request_timeout_secs: 60,
+            max_response_tokens: nz32(512),
+            request_timeout_secs: nz64(60),
             summary_temperature: 0.3,
             top_p: None,
             top_k: None,
@@ -706,7 +708,7 @@ mod tests {
         };
         let model = ModelConfig {
             name: "test-model".into(),
-            context_length: ctx,
+            context_length: nz32(ctx),
         };
         (chat, model)
     }

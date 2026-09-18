@@ -141,7 +141,7 @@ impl OneShotSynth {
                 tracing::warn!(
                     target: "assistd::voice::piper",
                     deadline_secs = deadline.as_secs(),
-                    binary = %binary,
+                    binary = %binary.display(),
                     "piper synthesis exceeded deadline"
                 );
                 return Err(PiperError::Deadline {

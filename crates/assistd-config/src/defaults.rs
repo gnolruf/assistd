@@ -5,21 +5,52 @@
 //! assert on defaults. Changing the literal here propagates everywhere
 //! with no drift.
 
+use std::net::{IpAddr, Ipv4Addr};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
+use std::path::PathBuf;
+
+/// Build a `NonZero` from a literal. The `const` evaluator rejects a zero
+/// at compile time, so a value that would have failed `validate()` at
+/// runtime now fails the build instead. Public so callers constructing
+/// config structs by hand — chiefly tests — get the same guarantee.
+pub const fn nz16(v: u16) -> NonZeroU16 {
+    match NonZeroU16::new(v) {
+        Some(n) => n,
+        None => panic!("default must be non-zero"),
+    }
+}
+
+/// See [`nz16`].
+pub const fn nz32(v: u32) -> NonZeroU32 {
+    match NonZeroU32::new(v) {
+        Some(n) => n,
+        None => panic!("default must be non-zero"),
+    }
+}
+
+/// See [`nz16`].
+pub const fn nz64(v: u64) -> NonZeroU64 {
+    match NonZeroU64::new(v) {
+        Some(n) => n,
+        None => panic!("default must be non-zero"),
+    }
+}
+
 pub const DEFAULT_LLAMA_BINARY: &str = "llama-server";
-pub const DEFAULT_LLAMA_HOST: &str = "127.0.0.1";
-pub const DEFAULT_LLAMA_PORT: u16 = 8385;
+pub const DEFAULT_LLAMA_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+pub const DEFAULT_LLAMA_PORT: NonZeroU16 = nz16(8385);
 pub const DEFAULT_GPU_LAYERS: u32 = 9999;
-pub const DEFAULT_READY_TIMEOUT_SECS: u64 = 300;
+pub const DEFAULT_READY_TIMEOUT_SECS: NonZeroU64 = nz64(300);
 
 pub const DEFAULT_MODEL_NAME: &str = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M";
-pub const DEFAULT_MODEL_CONTEXT_LENGTH: u32 = 8192;
+pub const DEFAULT_MODEL_CONTEXT_LENGTH: NonZeroU32 = nz32(8192);
 
-pub const DEFAULT_CHAT_MAX_HISTORY_TOKENS: u32 = 6000;
-pub const DEFAULT_CHAT_SUMMARY_TARGET_TOKENS: u32 = 1000;
-pub const DEFAULT_CHAT_PRESERVE_RECENT_TURNS: u32 = 4;
+pub const DEFAULT_CHAT_MAX_HISTORY_TOKENS: NonZeroU32 = nz32(6000);
+pub const DEFAULT_CHAT_SUMMARY_TARGET_TOKENS: NonZeroU32 = nz32(1000);
+pub const DEFAULT_CHAT_PRESERVE_RECENT_TURNS: NonZeroU32 = nz32(4);
 pub const DEFAULT_CHAT_TEMPERATURE: f32 = 0.7;
-pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: u32 = 1024;
-pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: NonZeroU32 = nz32(1024);
+pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(120);
 pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
 /// Slim role-and-voice prose. Tool surface (native + MCP) is appended at
 /// daemon startup by `assistd_tools::prompt::format_tool_listing` and
@@ -35,12 +66,12 @@ pub const DEFAULT_VOICE_HOTKEY: &str = "Super+Space";
 /// hotkey past this is truncated to the first N seconds (the ring buffer
 /// drops newer samples once full). Also determines the buffer size
 /// pre-allocated when recording starts.
-pub const DEFAULT_VOICE_MAX_RECORDING_SECS: u32 = 60;
+pub const DEFAULT_VOICE_MAX_RECORDING_SECS: NonZeroU32 = nz32(60);
 
 pub const DEFAULT_WHISPER_MODEL: &str = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin";
 pub const DEFAULT_WHISPER_VAD_MODEL: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
 pub const DEFAULT_WHISPER_PREFER_GPU: bool = true;
-pub const DEFAULT_WHISPER_BEAMS: u32 = 1;
+pub const DEFAULT_WHISPER_BEAMS: NonZeroU32 = nz32(1);
 pub const DEFAULT_WHISPER_VAD_ENABLED: bool = true;
 
 pub const DEFAULT_PIPER_ENABLED: bool = false;
@@ -48,8 +79,8 @@ pub const DEFAULT_PIPER_BINARY: &str = "piper";
 pub const DEFAULT_PIPER_VOICE: &str =
     "rhasspy/piper-voices:en/en_US/lessac/medium/en_US-lessac-medium.onnx";
 pub const DEFAULT_PIPER_LENGTH_SCALE: f32 = 1.0;
-pub const DEFAULT_PIPER_DEADLINE_SECS: u32 = 30;
-pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: u32 = 400;
+pub const DEFAULT_PIPER_DEADLINE_SECS: NonZeroU32 = nz32(30);
+pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: NonZeroU32 = nz32(400);
 /// Idle gap (ms) between LLM deltas after which the sentence buffer is
 /// flushed even without a terminator. `0` disables the timeout flush;
 /// only the terminal `Done`-based flush is used. Inhibited while a tool
@@ -68,8 +99,8 @@ pub const DEFAULT_PIPER_SKIP_HOTKEY: &str = "";
 pub const DEFAULT_LISTEN_ENABLED: bool = false;
 pub const DEFAULT_LISTEN_START_ON_LAUNCH: bool = false;
 pub const DEFAULT_LISTEN_HOTKEY: &str = "";
-pub const DEFAULT_LISTEN_SILENCE_MS: u32 = 800;
-pub const DEFAULT_LISTEN_MAX_UTTERANCE_SECS: u32 = 30;
+pub const DEFAULT_LISTEN_SILENCE_MS: NonZeroU32 = nz32(800);
+pub const DEFAULT_LISTEN_MAX_UTTERANCE_SECS: NonZeroU32 = nz32(30);
 
 pub const DEFAULT_PRESENCE_HOTKEY: &str = "Super+Escape";
 
@@ -83,13 +114,13 @@ pub const DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS: u64 = 30;
 pub const DEFAULT_IDLE_TO_DROWSY_MINS: u64 = 30;
 pub const DEFAULT_IDLE_TO_SLEEP_MINS: u64 = 120;
 pub const DEFAULT_GPU_MONITOR_ENABLED: bool = true;
-pub const DEFAULT_GPU_POLL_SECS: u64 = 5;
-pub const DEFAULT_GPU_VRAM_THRESHOLD_MB: u64 = 2048;
+pub const DEFAULT_GPU_POLL_SECS: NonZeroU64 = nz64(5);
+pub const DEFAULT_GPU_VRAM_THRESHOLD_MB: NonZeroU64 = nz64(2048);
 
-pub const DEFAULT_TOOLS_MAX_LINES: u32 = 200;
-pub const DEFAULT_TOOLS_MAX_KB: u32 = 50;
+pub const DEFAULT_TOOLS_MAX_LINES: NonZeroU32 = nz32(200);
+pub const DEFAULT_TOOLS_MAX_KB: NonZeroU32 = nz32(50);
 pub const DEFAULT_TOOLS_OVERFLOW_DIR: &str = "/tmp/assistd-output";
-pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_BASH_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 
 pub const DEFAULT_MEMORY_ENABLED: bool = true;
 
@@ -99,14 +130,14 @@ pub const DEFAULT_EMBEDDING_ENABLED: bool = true;
 /// resolves it against its preset manifest and a filename fails with a
 /// misleading "no GGUF files found". 768-dim, ~140 MB Q4.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M";
-pub const DEFAULT_EMBEDDING_HOST: &str = "127.0.0.1";
+pub const DEFAULT_EMBEDDING_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// Distinct from `DEFAULT_LLAMA_PORT` (8385). Validated for collisions in
 /// `Config::validate()`.
-pub const DEFAULT_EMBEDDING_PORT: u16 = 8386;
+pub const DEFAULT_EMBEDDING_PORT: NonZeroU16 = nz16(8386);
 /// CPU-only by default: small embedders are CPU-fast, and pinning them
 /// off the GPU prevents VRAM contention with the chat model.
 pub const DEFAULT_EMBEDDING_GPU_LAYERS: u32 = 0;
-pub const DEFAULT_EMBEDDING_TOP_K: u32 = 5;
+pub const DEFAULT_EMBEDDING_TOP_K: NonZeroU32 = nz32(5);
 pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 
 /// MCP (Model Context Protocol), opt-in. Existing users on upgrade
@@ -114,7 +145,7 @@ pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 /// noise-free. They flip `enabled = true` when they add their first
 /// `[[mcp.servers]]` block.
 pub const DEFAULT_MCP_ENABLED: bool = false;
-pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 
 /// Borderless floating popup spawned by `assistd tray` (feature
 /// `tray-popup`). Geometry is in CSS pixels at the compositor's logical
@@ -149,19 +180,15 @@ pub const DEFAULT_TRAY_POPUP_WAKE_ERROR: bool = true;
 ///
 /// Resolves to `$XDG_DATA_HOME/assistd/memory.db` when set and non-empty,
 /// otherwise `$HOME/.local/share/assistd/memory.db`.
-pub fn default_memory_db_path() -> String {
+pub fn default_memory_db_path() -> PathBuf {
     let data_dir = match std::env::var_os("XDG_DATA_HOME") {
-        Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => {
             let home = std::env::var_os("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".local/share")
+            PathBuf::from(home).join(".local/share")
         }
     };
-    data_dir
-        .join("assistd")
-        .join("memory.db")
-        .to_string_lossy()
-        .into_owned()
+    data_dir.join("assistd").join("memory.db")
 }
 
 /// Returns the default GPU contention allowlist of process basenames that never trigger sleep.

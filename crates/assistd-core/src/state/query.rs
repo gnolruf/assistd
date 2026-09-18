@@ -62,7 +62,7 @@ impl AppState {
 
         let synthesis = &self.config.voice.synthesis;
         let sentence_buf = SentenceBuffer::new_with_mode(
-            synthesis.max_sentence_chars as usize,
+            synthesis.max_sentence_chars.get() as usize,
             synthesis.code_block_mode,
         );
         let partial_flush = if synthesis.partial_flush_ms > 0 {

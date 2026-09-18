@@ -2,6 +2,7 @@
 //! chooses GPU or CPU inference, and wraps whisper.cpp's native Silero
 //! VAD for silence trimming.
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -213,8 +214,8 @@ impl WhisperTranscriberBuilder {
             model: Some(cfg.model.clone()),
             cache_dir: cfg.model_cache_dir.clone(),
             prefer_gpu: cfg.prefer_gpu,
-            threads: cfg.threads,
-            beams: cfg.beams.max(1),
+            threads: cfg.threads.map(NonZeroU32::get),
+            beams: cfg.beams.get(),
             vad_enabled: cfg.vad_enabled,
             vad_model: Some(cfg.vad_model.clone()),
             vad_silence_secs: VAD_SILENCE_SECS,
@@ -314,8 +315,8 @@ pub async fn build_cpu_fallback(
     Ok(WhisperTranscriber {
         ctx: Arc::new(ctx),
         cfg: InferenceConfig {
-            threads: cfg.threads,
-            beams: cfg.beams.max(1),
+            threads: cfg.threads.map(NonZeroU32::get),
+            beams: cfg.beams.get(),
             vad: vad_runtime,
         },
         is_gpu: false,

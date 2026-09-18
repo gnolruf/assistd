@@ -3,13 +3,15 @@
 //! impl. Catches the common drift where a default is changed in one
 //! place but not the other.
 
+use std::path::Path;
+
 use assistd_config::*;
 use defaults::*;
 
 #[test]
 fn llama_server_defaults_match_constants() {
     let c = LlamaServerConfig::default();
-    assert_eq!(c.binary_path, DEFAULT_LLAMA_BINARY);
+    assert_eq!(c.binary_path, Path::new(DEFAULT_LLAMA_BINARY));
     assert_eq!(c.host, DEFAULT_LLAMA_HOST);
     assert_eq!(c.port, DEFAULT_LLAMA_PORT);
     assert_eq!(c.gpu_layers, DEFAULT_GPU_LAYERS);
@@ -38,7 +40,7 @@ fn memory_defaults_match_constants() {
     assert!(
         c.db_path.ends_with("assistd/memory.db"),
         "unexpected default db_path: {}",
-        c.db_path
+        c.db_path.display()
     );
 }
 
@@ -72,7 +74,7 @@ fn chat_defaults_match_constants() {
     assert_eq!(c.max_response_tokens, DEFAULT_CHAT_MAX_RESPONSE_TOKENS);
     assert_eq!(c.request_timeout_secs, DEFAULT_CHAT_REQUEST_TIMEOUT_SECS);
     assert!(
-        c.max_summary_tokens() > c.summary_target_tokens,
+        c.max_summary_tokens() > c.summary_target_tokens.get(),
         "the summarize call needs headroom above the target it asks for"
     );
     assert_eq!(c.summary_temperature, DEFAULT_CHAT_SUMMARY_TEMPERATURE);
@@ -155,7 +157,7 @@ fn tools_output_defaults_match_constants() {
     let c = ToolsOutputConfig::default();
     assert_eq!(c.max_lines, DEFAULT_TOOLS_MAX_LINES);
     assert_eq!(c.max_kb, DEFAULT_TOOLS_MAX_KB);
-    assert_eq!(c.overflow_dir, DEFAULT_TOOLS_OVERFLOW_DIR);
+    assert_eq!(c.overflow_dir, Path::new(DEFAULT_TOOLS_OVERFLOW_DIR));
 }
 
 #[test]
@@ -171,7 +173,7 @@ fn tools_bash_defaults_match_constants() {
 fn synthesis_defaults_match_constants() {
     let c = SynthesisConfig::default();
     assert_eq!(c.enabled, DEFAULT_PIPER_ENABLED);
-    assert_eq!(c.binary_path, DEFAULT_PIPER_BINARY);
+    assert_eq!(c.binary_path, Path::new(DEFAULT_PIPER_BINARY));
     assert_eq!(c.voice, DEFAULT_PIPER_VOICE);
     assert!(c.model_cache_dir.is_none());
     assert_eq!(c.length_scale, DEFAULT_PIPER_LENGTH_SCALE);

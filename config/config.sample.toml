@@ -186,8 +186,23 @@ enabled = false
 # deadline_secs = 30
 # Maximum sentence length fed to Piper. The sentence buffer flushes at
 # the last whitespace before this cap when no terminator appears within
-# the limit.
+# the limit. Minimum 50.
 # max_sentence_chars = 400
+# Idle gap (ms) between LLM deltas after which the sentence buffer is
+# flushed even without a sentence terminator, so a reply that trails off
+# still gets spoken. 0 disables the timeout flush, leaving only the
+# end-of-turn flush. Inhibited while a tool call is in flight, since the
+# model is waiting on a tool rather than stalled.
+# partial_flush_ms = 750
+# How fenced code blocks in the reply are spoken. "skip" drops them
+# silently; "summarize" drops them but says "Code block in <lang>." so
+# the listener knows something was elided.
+# code_block_mode = "skip"
+# Pass --cuda to piper, routing ONNX inference through the CUDA
+# execution provider. Requires a piper binary linked against
+# onnxruntime-gpu; a CPU-only build exits with "CUDA execution provider
+# not available".
+# use_cuda = false
 # Global hotkey that toggles TTS on/off at runtime. Empty = no
 # binding (use `assistd voice-toggle` from the CLI instead). Off
 # silences current playback; on resumes for the next sentence.
@@ -267,6 +282,19 @@ hotkey = "Super+Escape"
 # substitution, here-docs). The bubblewrap sandbox is the real
 # defense-in-depth; install bubblewrap (package: bubblewrap) and keep
 # tools.bash.sandbox = "auto" to benefit from it.
+
+[tools.output]
+# Presentation limits applied to a tool's final output before it reaches
+# the LLM. Output past either cap is truncated and the full text spilled
+# to a file under `overflow_dir`, whose path the model is told about so
+# it can `grep`/`tail` the spill rather than re-run the command.
+# Max lines of stdout surfaced to the LLM before the spill.
+# max_lines = 200
+# Max size of the surfaced head, in KB.
+# max_kb = 50
+# Directory the spill files are written to. Cleared and recreated on
+# daemon startup.
+# overflow_dir = "/tmp/assistd-output"
 
 [tools.bash]
 # This section governs every command that spawns a real subprocess:
@@ -456,17 +484,10 @@ hotkey = "Super+Escape"
 # Authorization = "Bearer YOUR_TOKEN_HERE"
 
 # ---- Timeouts -----------------------------------------------------------
-# Hard deadlines on awaits that cross a process boundary (HTTP, SSE
-# chunk reads, llama-server subprocess shutdown). Defaults are generous
-# safety valves, not normal-case latency budgets; every trip is logged
-# at warn so an operator on slow hardware can identify and tune the
-# offending value. Set fields here to override defaults.
-#
-# [timeouts]
-# presence_sleep_secs = 30           # presence.sleep: SIGTERM grace + slack
-# presence_drowse_secs = 10          # POST /models/unload
-# dispatch_envelope_secs = 600       # outer cap on a single dispatch call
-# stream_inactivity_secs = 30        # SSE gap between chunks, once streaming
+# Deadlines on awaits that cross a process boundary (HTTP, SSE chunk
+# reads, llama-server subprocess shutdown) are not configurable: they are
+# safety valves, not latency budgets, and every trip is logged at warn as
+# a bug to fix rather than a number to raise.
 #
 # The wait for the *first* SSE byte is prompt prefill, not a stall, and
 # is bounded by chat.request_timeout_secs instead. Raise that one if a
@@ -478,19 +499,10 @@ hotkey = "Super+Escape"
 # crashes. The only backstop is llama_server.ready_timeout_secs.
 
 # ---- Tray icon ----------------------------------------------------------
-# Icon-theme names rendered by `assistd tray` (a StatusNotifierItem
-# client suitable for compositor autostart). Defaults are freedesktop
-# names that ship in every major theme (Adwaita, Breeze, Papirus); set
-# any field to an installed icon name if you ship custom artwork under
-# `~/.local/share/icons/<theme>/`.
-#
-# [tray]
-# icon_active       = "user-available"         # daemon awake, idle
-# icon_drowsy       = "user-away"              # presence = Drowsy
-# icon_sleeping     = "user-offline"           # presence = Sleeping
-# icon_listening    = "audio-input-microphone" # continuous listen is on
-# icon_generating   = "system-run"             # a query is streaming
-# icon_disconnected = "network-offline"        # daemon socket unreachable
+# `assistd tray` (a StatusNotifierItem client suitable for compositor
+# autostart) renders a fixed freedesktop icon name per state, chosen from
+# names that ship in every major theme (Adwaita, Breeze, Papirus). Not
+# configurable.
 
 # ---- Tray popup ---------------------------------------------------------
 # Borderless ~360×120 floating window spawned by `assistd tray` (only
@@ -513,14 +525,12 @@ hotkey = "Super+Escape"
 # offset_y       = 10
 # width          = 360           # validated 100..=1200
 # height         = 120           # validated 60..=800
-# auto_hide_ms        = 3000     # idle timeout; reset by every new event while visible.
-#                                 # The timer is suspended entirely while a turn is in
-#                                 # flight, so a long-running tool call no longer blinks
-#                                 # the popup out mid-response (500..=60000).
-# listen_auto_hide_ms = 10000    # idle timeout used while continuous listening is active;
-#                                 # longer than `auto_hide_ms` so the user has time to
-#                                 # verbally reply without pressing a key (500..=60000).
-# truncate_chars      = 300      # body renders last N codepoints of the live reply (1..=10000)
+# auto_hide_ms   = 3000          # idle timeout; reset by every new event while visible.
+#                                # The timer is suspended entirely while a turn is in
+#                                # flight, so a long-running tool call doesn't blink the
+#                                # popup out mid-response (500..=60000). While continuous
+#                                # listening is on, the popup uses 3x this so the user
+#                                # can reply verbally without pressing a key.
 #
 # HiDPI scaling is detected from the WM backend automatically: sway
 # reads its own per-output scale over IPC, and the i3 backend cascades

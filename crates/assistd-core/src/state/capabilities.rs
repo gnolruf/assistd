@@ -34,14 +34,13 @@ impl AppState {
                 .await;
         }
 
-        let probe = match assistd_llm::LlamaServerControl::new(
-            &self.config.llama_server.host,
-            self.config.llama_server.port,
-        ) {
+        let host = self.config.llama_server.host.to_string();
+        let port = self.config.llama_server.port.get();
+        let probe = match assistd_llm::LlamaServerControl::new(&host, port) {
             Ok(control) => {
                 assistd_llm::probe_capabilities_routed(
-                    &self.config.llama_server.host,
-                    self.config.llama_server.port,
+                    &host,
+                    port,
                     &self.config.model.name,
                     &control,
                 )

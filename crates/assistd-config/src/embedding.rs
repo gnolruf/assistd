@@ -8,6 +8,9 @@
 //! intentionally small enough to stay on CPU (`gpu_layers = 0`) so it
 //! never contends with the chat model for VRAM.
 
+use std::net::IpAddr;
+use std::num::{NonZeroU16, NonZeroU32};
+
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
@@ -28,17 +31,17 @@ pub struct EmbeddingConfig {
     /// `--hf-repo` flag. Format: `<owner>/<repo>:<file>`.
     pub model: String,
     /// Bind host for the embedding llama-server. Should be loopback.
-    pub host: String,
+    pub host: IpAddr,
     /// TCP port the embedding llama-server binds to. Must differ from
     /// `llama_server.port`.
-    pub port: u16,
+    pub port: NonZeroU16,
     /// `-ngl` count for the embed server. Defaults to `0` (CPU only) so
     /// the embed model never competes with the chat model for VRAM.
     /// Small embedding models (~30-300MB Q4) are CPU-fast.
     pub gpu_layers: u32,
     /// How many nearest-neighbor matches to retrieve per query for
     /// auto-injection and the `reminisce` tool's default.
-    pub top_k: u32,
+    pub top_k: NonZeroU32,
     /// When `true`, every user query embeds the prompt and prepends
     /// the top-K conversation chunks as a "Relevant past context:"
     /// system message. Disable to require explicit `reminisce` tool
@@ -51,7 +54,7 @@ impl Default for EmbeddingConfig {
         Self {
             enabled: DEFAULT_EMBEDDING_ENABLED,
             model: DEFAULT_EMBEDDING_MODEL.to_string(),
-            host: DEFAULT_EMBEDDING_HOST.to_string(),
+            host: DEFAULT_EMBEDDING_HOST,
             port: DEFAULT_EMBEDDING_PORT,
             gpu_layers: DEFAULT_EMBEDDING_GPU_LAYERS,
             top_k: DEFAULT_EMBEDDING_TOP_K,
@@ -88,9 +91,9 @@ mod tests {
         let cfg = EmbeddingConfig::default();
         assert!(cfg.enabled);
         assert!(!cfg.model.is_empty());
-        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.host, DEFAULT_EMBEDDING_HOST);
         assert_eq!(cfg.gpu_layers, 0);
-        assert!(cfg.top_k > 0);
+        assert_eq!(cfg.top_k, DEFAULT_EMBEDDING_TOP_K);
         assert!(cfg.auto_inject);
     }
 }

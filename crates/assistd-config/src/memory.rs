@@ -5,6 +5,8 @@
 //! and either spins up `assistd_memory::SqliteHandle` or binds the
 //! `NoMemoryStore` / `NoConversationStore` placeholders.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{DEFAULT_MEMORY_ENABLED, default_memory_db_path};
@@ -19,10 +21,8 @@ pub struct MemoryConfig {
     pub enabled: bool,
     /// Path to the SQLite database file. Default resolves to
     /// `$XDG_DATA_HOME/assistd/memory.db` (or
-    /// `$HOME/.local/share/assistd/memory.db`). Stored as `String`
-    /// because `Config` round-trips through TOML and `PathBuf` is
-    /// quirkier across that boundary; converted to a `Path` at use site.
-    pub db_path: String,
+    /// `$HOME/.local/share/assistd/memory.db`).
+    pub db_path: PathBuf,
 }
 
 impl Default for MemoryConfig {

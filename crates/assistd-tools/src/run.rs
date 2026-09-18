@@ -24,6 +24,8 @@ use crate::chain::{ParseError, Redirection, execute, parse_chain};
 use crate::command::{Attachment, CommandOutput, CommandRegistry, error_line};
 use crate::presentation::{PresentResult, PresentSpec, present};
 use assistd_config::ToolsOutputConfig;
+#[cfg(test)]
+use assistd_config::defaults::nz32;
 use std::path::PathBuf;
 
 /// The single LLM-facing `run` tool. Dispatches a command-line string
@@ -51,7 +53,7 @@ impl RunTool {
         overflow_dir: PathBuf,
     ) -> Self {
         let spec = PresentSpec {
-            max_lines: output.max_lines as usize,
+            max_lines: output.max_lines.get() as usize,
             max_bytes: output.max_bytes(),
             overflow_dir,
         };
@@ -847,9 +849,9 @@ mod tests {
         reg.register(Lines(10));
         let dir = fresh_dir();
         let tight = ToolsOutputConfig {
-            max_lines: 3,
-            max_kb: 10,
-            overflow_dir: String::new(),
+            max_lines: nz32(3),
+            max_kb: nz32(10),
+            overflow_dir: PathBuf::new(),
         };
         let tool = RunTool::new(Arc::new(reg), &tight, dir.path().to_path_buf());
         let result = invoke(&tool, "lines");

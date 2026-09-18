@@ -113,7 +113,7 @@ async fn init_input(
     let mic = MicVoiceInput::new(
         transcriber.clone(),
         config.voice.mic_device.clone(),
-        config.voice.max_recording_secs.max(1),
+        config.voice.max_recording_secs.get(),
     );
     let listener: Arc<dyn ContinuousListener> = if config.voice.continuous.enabled {
         info!(

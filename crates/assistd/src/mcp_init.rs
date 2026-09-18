@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use assistd_core::{Config, McpServerConfig, McpStartupFailure, McpTransport};
+use assistd_core::{Config, McpServerConfig, McpStartupFailure};
 use assistd_mcp::{
     McpServerHandle, SseConfig, StdioConfig, TransportConfig, adapt_handle_as_tools,
 };
@@ -57,17 +57,17 @@ pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubs
     let mut startup_failures: Vec<McpStartupFailure> = Vec::new();
     for s_cfg in &config.mcp.servers {
         let transport_cfg = build_transport_config(s_cfg);
-        let label = s_cfg.name.clone();
+        let label = s_cfg.name().to_string();
         match McpServerHandle::start(label.clone(), transport_cfg, shutdown_tx.subscribe()).await {
             Ok(handle) => {
                 let prefix = format!("{}{}", assistd_tools::MCP_TOOL_NAME_PREFIX, handle.name);
                 match adapt_handle_as_tools(&handle, &prefix).await {
                     Ok(t) => {
                         info!(
-                            "mcp: {} ready ({} tools, transport={:?})",
+                            "mcp: {} ready ({} tools, transport={})",
                             handle.name,
                             t.len(),
-                            s_cfg.transport
+                            s_cfg.transport()
                         );
                         tools.extend(t);
                         handles.push(handle);
@@ -101,18 +101,27 @@ pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubs
 }
 
 fn build_transport_config(s: &McpServerConfig) -> TransportConfig {
-    match s.transport {
-        McpTransport::Stdio => {
-            let mut cfg = StdioConfig::new(s.name.clone(), s.command.clone().unwrap_or_default());
-            cfg.args = s.args.clone();
-            cfg.env = s.env.clone();
-            cfg.request_timeout = Duration::from_secs(s.request_timeout_secs);
+    let request_timeout = Duration::from_secs(s.request_timeout_secs().get());
+    match s {
+        McpServerConfig::Stdio {
+            name,
+            command,
+            args,
+            env,
+            ..
+        } => {
+            let mut cfg = StdioConfig::new(name.clone(), command.to_string_lossy().into_owned());
+            cfg.args = args.clone();
+            cfg.env = env.clone();
+            cfg.request_timeout = request_timeout;
             TransportConfig::Stdio(cfg)
         }
-        McpTransport::Sse => {
-            let mut cfg = SseConfig::new(s.name.clone(), s.url.clone().unwrap_or_default());
-            cfg.headers = s.headers.clone();
-            cfg.request_timeout = Duration::from_secs(s.request_timeout_secs);
+        McpServerConfig::Sse {
+            name, url, headers, ..
+        } => {
+            let mut cfg = SseConfig::new(name.clone(), url.to_string());
+            cfg.headers = headers.clone();
+            cfg.request_timeout = request_timeout;
             TransportConfig::Sse(cfg)
         }
     }

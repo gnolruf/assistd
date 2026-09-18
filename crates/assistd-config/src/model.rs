@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use crate::defaults::{DEFAULT_MODEL_CONTEXT_LENGTH, DEFAULT_MODEL_NAME};
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +11,7 @@ pub struct ModelConfig {
     /// Format: `owner/repo:quant` (e.g. `"unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"`).
     pub name: String,
     /// Context window length in tokens.
-    pub context_length: u32,
+    pub context_length: NonZeroU32,
 }
 
 impl Default for ModelConfig {

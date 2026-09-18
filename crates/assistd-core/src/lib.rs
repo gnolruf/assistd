@@ -48,9 +48,8 @@ pub use assistd_config as config;
 pub use assistd_config::{
     BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config, ConfigError,
     ContinuousListenConfig, DaemonConfig, LlamaServerConfig, McpConfig, McpServerConfig,
-    McpTransport, ModelConfig, PresenceConfig, ScreenshotBackend, SleepConfig, SynthesisConfig,
-    ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScreenshotConfig, ToolsWriteConfig,
-    VoiceConfig,
+    ModelConfig, PresenceConfig, ScreenshotBackend, SleepConfig, SynthesisConfig, ToolsBashConfig,
+    ToolsConfig, ToolsOutputConfig, ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig,
 };
 
 pub use assistd_ipc as ipc;
@@ -189,7 +188,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
         .filter(|toks| !toks.is_empty())
         .collect();
     let bash_cfg = Arc::new(BashPolicyCfg {
-        timeout: Duration::from_secs(config.tools.bash.timeout_secs),
+        timeout: Duration::from_secs(config.tools.bash.timeout_secs.get()),
         denylist: config.tools.bash.denylist.clone(),
         destructive_patterns,
     });

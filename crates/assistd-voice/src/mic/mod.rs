@@ -82,7 +82,7 @@ impl MicVoiceInput {
         Ok(Self::new(
             Arc::new(transcriber),
             cfg.mic_device.clone(),
-            cfg.max_recording_secs.max(1),
+            cfg.max_recording_secs.get(),
         ))
     }
 

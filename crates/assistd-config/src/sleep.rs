@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use crate::defaults::{
     DEFAULT_GPU_MONITOR_ENABLED, DEFAULT_GPU_POLL_SECS, DEFAULT_GPU_VRAM_THRESHOLD_MB,
     DEFAULT_IDLE_TO_DROWSY_MINS, DEFAULT_IDLE_TO_SLEEP_MINS, default_gpu_allowlist,
@@ -22,10 +24,10 @@ pub struct SleepConfig {
     /// daemon to Sleeping when a configurable threshold is exceeded.
     pub gpu_monitor_enabled: bool,
     /// NVML poll interval in seconds.
-    pub gpu_poll_secs: u64,
+    pub gpu_poll_secs: NonZeroU64,
     /// Per-process VRAM threshold in MiB. A non-assistd process holding at
     /// least this much VRAM triggers a transition to Sleeping. 2048 = 2 GiB.
-    pub gpu_vram_threshold_mb: u64,
+    pub gpu_vram_threshold_mb: NonZeroU64,
     /// Automatically transition back to Active when the contending process
     /// exits.
     pub gpu_auto_wake: bool,

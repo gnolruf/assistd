@@ -56,10 +56,10 @@ struct Args {
     iterations: usize,
     /// llama-server host.
     #[arg(long, default_value = "127.0.0.1")]
-    llama_host: String,
+    llama_host: std::net::IpAddr,
     /// llama-server port.
-    #[arg(long, default_value_t = 8080)]
-    llama_port: u16,
+    #[arg(long, default_value = "8080")]
+    llama_port: std::num::NonZeroU16,
     /// Model identifier sent in the `model` field of `/v1/chat/completions`.
     /// Should match what llama-server has loaded; many servers don't
     /// validate this and a placeholder works fine.
@@ -80,8 +80,8 @@ struct Args {
     /// zero content deltas; `llm_first_token` and everything
     /// downstream of it won't fire. 1024 is a safe default for most
     /// reasoning models and short prompts.
-    #[arg(long, default_value_t = 1024)]
-    max_response_tokens: u32,
+    #[arg(long, default_value = "1024")]
+    max_response_tokens: std::num::NonZeroU32,
     /// Skip Piper TTS startup and substitute the silent `NoVoiceOutput`.
     /// Use when piper isn't on PATH or you only want Whisper + LLM
     /// timings. The bench will still report every stage that fired
@@ -167,7 +167,7 @@ async fn main() -> Result<()> {
         ..ChatConfig::default()
     };
     let server_cfg = LlamaServerConfig {
-        host: args.llama_host.clone(),
+        host: args.llama_host,
         port: args.llama_port,
         ..LlamaServerConfig::default()
     };
@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
             args.piper_binary, args.piper_cuda
         );
         let synth_cfg = SynthesisConfig {
-            binary_path: args.piper_binary.clone(),
+            binary_path: args.piper_binary.clone().into(),
             use_cuda: args.piper_cuda,
             ..SynthesisConfig::default()
         };

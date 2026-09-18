@@ -96,7 +96,7 @@ impl PiperVoiceOutput {
             noise_w: NOISE_W,
             sentence_silence_secs: SENTENCE_SILENCE_SECS,
             espeak_data_dir: cfg.espeak_data_dir.clone(),
-            deadline: Duration::from_secs(cfg.deadline_secs as u64),
+            deadline: Duration::from_secs(u64::from(cfg.deadline_secs.get())),
             use_cuda: cfg.use_cuda,
             output_device: cfg.output_device.clone(),
         });

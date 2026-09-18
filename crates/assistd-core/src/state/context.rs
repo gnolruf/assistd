@@ -39,7 +39,7 @@ impl AppState {
         if model.is_empty() {
             return Ok(None);
         }
-        let top_k = self.memory.embedding_cfg.top_k as usize;
+        let top_k = self.memory.embedding_cfg.top_k.get() as usize;
         let hits = self
             .memory
             .semantic

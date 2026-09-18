@@ -1,3 +1,7 @@
+use std::net::IpAddr;
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
+use std::path::PathBuf;
+
 use crate::defaults::{
     DEFAULT_GPU_LAYERS, DEFAULT_LLAMA_BINARY, DEFAULT_LLAMA_HOST, DEFAULT_LLAMA_PORT,
     DEFAULT_READY_TIMEOUT_SECS,
@@ -9,11 +13,11 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct LlamaServerConfig {
     /// Path to the llama-server binary. Absolute path or a name resolvable via `$PATH`.
-    pub binary_path: String,
+    pub binary_path: PathBuf,
     /// Host the managed llama-server binds to. Should be a loopback address.
-    pub host: String,
+    pub host: IpAddr,
     /// TCP port the managed llama-server binds to.
-    pub port: u16,
+    pub port: NonZeroU16,
     /// GPU layer count passed as `-ngl`. Default `9999` offloads all layers;
     /// llama.cpp clamps to the model's actual layer count.
     pub gpu_layers: u32,
@@ -23,7 +27,7 @@ pub struct LlamaServerConfig {
     /// while llama-server is alive and progressing; this is only the
     /// last-ditch cap. First-time HuggingFace downloads may need several
     /// minutes — raise it on a slow connection.
-    pub ready_timeout_secs: u64,
+    pub ready_timeout_secs: NonZeroU64,
     /// Optional alias passed as `--alias`. Useful when llama-server reports
     /// the model name in `/v1/models`.
     pub alias: Option<String>,
@@ -37,7 +41,7 @@ pub struct LlamaServerConfig {
     /// KV-cache V-tensor quantization (`--cache-type-v`), e.g. `q8_0`.
     pub cache_type_v: Option<String>,
     /// CPU thread count passed as `--threads`. `None` lets llama.cpp decide.
-    pub threads: Option<u32>,
+    pub threads: Option<NonZeroU32>,
     /// Logical max batch size passed as `--batch-size`. `None` uses
     /// llama-server's default (2048).
     pub batch_size: Option<u32>,
@@ -66,8 +70,8 @@ pub struct LlamaServerConfig {
 impl Default for LlamaServerConfig {
     fn default() -> Self {
         Self {
-            binary_path: DEFAULT_LLAMA_BINARY.to_string(),
-            host: DEFAULT_LLAMA_HOST.to_string(),
+            binary_path: DEFAULT_LLAMA_BINARY.into(),
+            host: DEFAULT_LLAMA_HOST,
             port: DEFAULT_LLAMA_PORT,
             gpu_layers: DEFAULT_GPU_LAYERS,
             ready_timeout_secs: DEFAULT_READY_TIMEOUT_SECS,

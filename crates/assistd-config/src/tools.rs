@@ -1,3 +1,6 @@
+use std::num::{NonZeroU32, NonZeroU64};
+use std::path::PathBuf;
+
 use crate::defaults::{
     DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
     DEFAULT_TOOLS_OVERFLOW_DIR, default_bash_denylist, default_bash_destructive_patterns,
@@ -27,12 +30,12 @@ pub struct ToolsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsOutputConfig {
     /// Max lines of stdout surfaced to the LLM before overflow spill.
-    pub max_lines: u32,
+    pub max_lines: NonZeroU32,
     /// Max bytes of the truncated head, in KB.
-    pub max_kb: u32,
+    pub max_kb: NonZeroU32,
     /// Directory where overflow output is spilled as `cmd-<n>.txt`.
     /// Cleared + recreated on daemon startup.
-    pub overflow_dir: String,
+    pub overflow_dir: PathBuf,
 }
 
 impl Default for ToolsOutputConfig {
@@ -40,7 +43,7 @@ impl Default for ToolsOutputConfig {
         Self {
             max_lines: DEFAULT_TOOLS_MAX_LINES,
             max_kb: DEFAULT_TOOLS_MAX_KB,
-            overflow_dir: DEFAULT_TOOLS_OVERFLOW_DIR.to_string(),
+            overflow_dir: DEFAULT_TOOLS_OVERFLOW_DIR.into(),
         }
     }
 }
@@ -48,7 +51,7 @@ impl Default for ToolsOutputConfig {
 impl ToolsOutputConfig {
     /// `max_kb` expressed in bytes, ready to pass to the presentation layer.
     pub fn max_bytes(&self) -> usize {
-        (self.max_kb as usize) * 1024
+        (self.max_kb.get() as usize) * 1024
     }
 }
 
@@ -80,7 +83,7 @@ pub enum BashSandboxMode {
 pub struct ToolsBashConfig {
     /// Subprocess timeout in seconds. Must be > 0. Exceeding the timeout
     /// kills the process group and returns exit 137.
-    pub timeout_secs: u64,
+    pub timeout_secs: NonZeroU64,
     /// Literal substrings that, if present in a bash script (case-insensitive),
     /// cause immediate rejection before spawn. Use for patterns that should
     /// never be executed under any circumstances.

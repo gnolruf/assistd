@@ -18,7 +18,7 @@ pub const SENTENCE_SILENCE_SECS: f32 = 0.2;
 
 #[derive(Debug, Clone)]
 pub struct PiperRuntimeConfig {
-    pub binary_path: String,
+    pub binary_path: PathBuf,
     pub voice_files: VoiceFiles,
     pub length_scale: f32,
     pub noise_scale: f32,

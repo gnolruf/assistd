@@ -33,6 +33,8 @@ use parking_lot::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(test)]
+use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::PresenceState;
 use assistd_llm::{HealthWaitError, LlamaServerControl, LlamaService, LlmHealthProbe, ReadyState};
@@ -199,8 +201,9 @@ impl PresenceManager {
         timeouts: TimeoutsConfig,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>> {
-        let control = LlamaServerControl::new(&llama_server.host, llama_server.port)
-            .context("failed to construct llama-server control client")?;
+        let control =
+            LlamaServerControl::new(&llama_server.host.to_string(), llama_server.port.get())
+                .context("failed to construct llama-server control client")?;
 
         let current_inner_shutdown: Arc<StdMutex<Option<watch::Sender<bool>>>> =
             Arc::new(StdMutex::new(None));
@@ -723,7 +726,7 @@ impl PresenceManager {
                 .context("llama-server handle missing while loading model")?
         };
 
-        let backstop = Duration::from_secs(self.llama_server.ready_timeout_secs);
+        let backstop = Duration::from_secs(self.llama_server.ready_timeout_secs.get());
         tokio::select! {
             res = self
                 .control
@@ -795,10 +798,11 @@ impl PresenceManager {
         let (state_tx, _) = watch::channel(state);
         let llama_server = LlamaServerConfig {
             binary_path: "/does/not/exist".into(),
-            host: "127.0.0.1".into(),
-            port: 0,
+            host: std::net::Ipv4Addr::LOCALHOST.into(),
+            // Port 1 is privileged and unbound; the stub never connects.
+            port: nz16(1),
             gpu_layers: 1,
-            ready_timeout_secs: 1,
+            ready_timeout_secs: nz64(1),
             alias: None,
             override_tensor: None,
             flash_attn: None,
@@ -814,9 +818,10 @@ impl PresenceManager {
         };
         let model = ModelConfig {
             name: "stub/model".into(),
-            context_length: 1024,
+            context_length: nz32(1024),
         };
-        let control = LlamaServerControl::new(&llama_server.host, 1).expect("dummy control");
+        let control =
+            LlamaServerControl::new(&llama_server.host.to_string(), 1).expect("dummy control");
         let (stream_count_tx, _) = watch::channel(0usize);
         Arc::new(Self {
             state: StdMutex::new(state),

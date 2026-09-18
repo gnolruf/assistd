@@ -80,7 +80,7 @@ pub async fn init(
 
     let svc = match EmbedService::start(
         config.embedding.clone(),
-        Duration::from_secs(config.llama_server.ready_timeout_secs),
+        Duration::from_secs(config.llama_server.ready_timeout_secs.get()),
         shutdown_tx.subscribe(),
     )
     .await
@@ -93,8 +93,8 @@ pub async fn init(
     };
 
     let client = match LlamaEmbedder::new(
-        &config.embedding.host,
-        config.embedding.port,
+        &config.embedding.host.to_string(),
+        config.embedding.port.get(),
         config.embedding.model.clone(),
         assistd_embed::REQUEST_TIMEOUT,
     )

@@ -15,10 +15,13 @@
 
 #![cfg(feature = "test-support")]
 
+use std::net::Ipv4Addr;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 
+use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_core::{
     AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceManager,
@@ -65,11 +68,11 @@ async fn grab_port() -> u16 {
 
 fn server_spec(port: u16) -> LlamaServerConfig {
     LlamaServerConfig {
-        binary_path: FAKE_BIN.to_string(),
-        host: "127.0.0.1".to_string(),
-        port,
+        binary_path: FAKE_BIN.into(),
+        host: Ipv4Addr::LOCALHOST.into(),
+        port: NonZeroU16::new(port).expect("bound port is never 0"),
         gpu_layers: 0,
-        ready_timeout_secs: 60,
+        ready_timeout_secs: nz64(60),
         alias: None,
         override_tensor: None,
         flash_attn: None,
@@ -88,7 +91,7 @@ fn server_spec(port: u16) -> LlamaServerConfig {
 fn model_spec() -> ModelConfig {
     ModelConfig {
         name: "test/fake-model-GGUF:Q4_K_M".to_string(),
-        context_length: 2048,
+        context_length: nz32(2048),
     }
 }
 

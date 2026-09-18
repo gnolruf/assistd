@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use crate::defaults::{
@@ -26,7 +27,7 @@ pub struct VoiceConfig {
     /// Upper bound on a single PTT recording, in seconds. The ring
     /// buffer drops newer samples past this length; transcription still
     /// runs on whatever was captured.
-    pub max_recording_secs: u32,
+    pub max_recording_secs: NonZeroU32,
     /// Speech-to-text transcription settings.
     pub transcription: TranscriptionConfig,
     /// Hands-free continuous listening (VAD-gated). Disabled by default;
@@ -68,10 +69,10 @@ pub struct TranscriptionConfig {
     /// without the `cuda` feature.
     pub prefer_gpu: bool,
     /// CPU thread count. `None` lets whisper.cpp choose.
-    pub threads: Option<u32>,
+    pub threads: Option<NonZeroU32>,
     /// Number of beams for decoding. `1` = greedy; larger values improve
     /// accuracy at the cost of latency.
-    pub beams: u32,
+    pub beams: NonZeroU32,
     /// Enable Silero VAD to trim silence before decoding.
     pub vad_enabled: bool,
     /// HuggingFace identifier for the VAD GGML model. Only used when
@@ -115,10 +116,10 @@ pub struct ContinuousListenConfig {
     /// Trailing silence required to mark the end of an utterance, in
     /// milliseconds. Shorter values respond faster; longer values
     /// tolerate mid-sentence pauses.
-    pub silence_ms: u32,
+    pub silence_ms: NonZeroU32,
     /// Force-flush a utterance to whisper after this many seconds even
     /// if the user keeps speaking. Bounds memory use.
-    pub max_utterance_secs: u32,
+    pub max_utterance_secs: NonZeroU32,
 }
 
 impl Default for ContinuousListenConfig {
@@ -145,7 +146,7 @@ pub struct SynthesisConfig {
     pub enabled: bool,
     /// Path to (or name of) the piper binary. Looked up via `$PATH`
     /// when the value is a bare command name.
-    pub binary_path: String,
+    pub binary_path: PathBuf,
     /// HuggingFace identifier for the Piper voice ONNX, formatted as
     /// `<owner>/<repo>:<file>` where `<file>` is the path of the
     /// `.onnx` file inside the repo. The matching `.onnx.json` is
@@ -164,11 +165,11 @@ pub struct SynthesisConfig {
     pub espeak_data_dir: Option<PathBuf>,
     /// Per-utterance synthesis deadline in seconds. The piper child is
     /// killed if it hasn't returned PCM by this point.
-    pub deadline_secs: u32,
+    pub deadline_secs: NonZeroU32,
     /// Maximum sentence length fed to Piper. The sentence buffer flushes
     /// at the last whitespace before this cap when no terminator appears
     /// within the limit.
-    pub max_sentence_chars: u32,
+    pub max_sentence_chars: NonZeroU32,
     /// Idle gap (ms) between LLM deltas after which the sentence buffer
     /// is flushed even without a terminator. `0` disables the timeout
     /// flush; only the terminal `Done`-based flush is used. Inhibited
@@ -225,7 +226,7 @@ impl Default for SynthesisConfig {
     fn default() -> Self {
         Self {
             enabled: DEFAULT_PIPER_ENABLED,
-            binary_path: DEFAULT_PIPER_BINARY.to_string(),
+            binary_path: DEFAULT_PIPER_BINARY.into(),
             voice: DEFAULT_PIPER_VOICE.to_string(),
             model_cache_dir: None,
             length_scale: DEFAULT_PIPER_LENGTH_SCALE,
