@@ -15,9 +15,14 @@
 //! `core → llm → core` cycle that previously forced us to mirror every
 //! config field into parallel `Spec` structs in `assistd-llm`.
 //!
-//! Every default value lives as a single `pub const` in [`defaults`]; the
-//! `#[serde(default = "…")]` helpers in each section module reference
-//! those constants so tests and config defaults can't drift apart.
+//! Every default value lives as a single `pub const` in [`defaults`],
+//! read by the owning section's `Default` impl, so tests and config
+//! defaults can't drift apart.
+//!
+//! Every section carries `#[serde(default, deny_unknown_fields)]`: an
+//! omitted key falls back to that `Default` impl, and a key the schema
+//! doesn't know is a parse error rather than a silent revert to the
+//! default.
 
 pub mod chat;
 pub mod compositor;

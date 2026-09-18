@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Chat backend behaviour: system prompt, history window, sampling.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ChatConfig {
     /// System prompt injected as the first message of every request.
     /// An empty string disables system-prompt injection.
@@ -34,21 +35,16 @@ pub struct ChatConfig {
     /// Sampling temperature for the (non-streaming) summarization call.
     /// Lower than `temperature` by default because summaries should be
     /// deterministic. Range: `0.0..=2.0`.
-    #[serde(default = "default_summary_temperature")]
     pub summary_temperature: f32,
     /// Nucleus sampling cutoff in `0.0..=1.0`. `None` omits the field from the
     /// request, letting llama-server apply its own default.
-    #[serde(default)]
     pub top_p: Option<f32>,
     /// Top-k sampling limit. `None` omits the field.
-    #[serde(default)]
     pub top_k: Option<u32>,
     /// Min-p sampling cutoff in `0.0..=1.0`. `None` omits the field.
-    #[serde(default)]
     pub min_p: Option<f32>,
     /// Presence penalty in `-2.0..=2.0`. `None` omits the field. Qwen3 reasoning
     /// variants recommend a small positive value (e.g. 1.5) to reduce repetition.
-    #[serde(default)]
     pub presence_penalty: Option<f32>,
 }
 
@@ -80,8 +76,4 @@ impl ChatConfig {
     pub fn effective_context_budget(&self, model: &ModelConfig) -> u32 {
         (model.context_length as u64 * 9 / 10) as u32
     }
-}
-
-fn default_summary_temperature() -> f32 {
-    DEFAULT_CHAT_SUMMARY_TEMPERATURE
 }

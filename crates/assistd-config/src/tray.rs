@@ -16,47 +16,41 @@ use serde::{Deserialize, Serialize};
 /// install custom icons under `~/.local/share/icons/<theme>/` and
 /// reference them by name here.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct TrayConfig {
     /// Daemon presence is `Active` and no query is in flight.
-    #[serde(default = "default_tray_icon_active")]
     pub icon_active: String,
 
     /// Daemon presence is `Drowsy`.
-    #[serde(default = "default_tray_icon_drowsy")]
     pub icon_drowsy: String,
 
     /// Daemon presence is `Sleeping`.
-    #[serde(default = "default_tray_icon_sleeping")]
     pub icon_sleeping: String,
 
     /// Continuous listening is active.
-    #[serde(default = "default_tray_icon_listening")]
     pub icon_listening: String,
 
     /// At least one query is currently streaming.
-    #[serde(default = "default_tray_icon_generating")]
     pub icon_generating: String,
 
     /// Daemon socket is unreachable (not running, or connection dropped).
-    #[serde(default = "default_tray_icon_disconnected")]
     pub icon_disconnected: String,
 
     /// Floating activity popup spawned alongside the tray icon (feature
     /// `tray-popup`). Configuration is parsed regardless of the build
     /// feature so a config file authored once works on every build.
-    #[serde(default)]
     pub popup: TrayPopupConfig,
 }
 
 impl Default for TrayConfig {
     fn default() -> Self {
         Self {
-            icon_active: default_tray_icon_active(),
-            icon_drowsy: default_tray_icon_drowsy(),
-            icon_sleeping: default_tray_icon_sleeping(),
-            icon_listening: default_tray_icon_listening(),
-            icon_generating: default_tray_icon_generating(),
-            icon_disconnected: default_tray_icon_disconnected(),
+            icon_active: DEFAULT_TRAY_ICON_ACTIVE.to_string(),
+            icon_drowsy: DEFAULT_TRAY_ICON_DROWSY.to_string(),
+            icon_sleeping: DEFAULT_TRAY_ICON_SLEEPING.to_string(),
+            icon_listening: DEFAULT_TRAY_ICON_LISTENING.to_string(),
+            icon_generating: DEFAULT_TRAY_ICON_GENERATING.to_string(),
+            icon_disconnected: DEFAULT_TRAY_ICON_DISCONNECTED.to_string(),
             popup: TrayPopupConfig::default(),
         }
     }
@@ -71,76 +65,67 @@ impl Default for TrayConfig {
 /// to the compositor through `assistd-wm`; see
 /// [`PopupAnchor`] for the supported corners.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct TrayPopupConfig {
     /// Globally enable or disable the popup. When `false`, the popup
     /// task is not spawned even on a build with `--features tray-popup`.
-    #[serde(default = "default_popup_enabled")]
     pub enabled: bool,
 
     /// Screen corner the popup anchors to. Offsets are measured from
     /// the anchored corner inward; see [`PopupAnchor`].
-    #[serde(default)]
     pub anchor: PopupAnchor,
 
     /// Horizontal offset from the anchor, in pixels. Positive moves
     /// right; negative moves left. For a right-anchored popup, the
     /// default `-10` nudges the popup inward by 10 px so it doesn't
     /// kiss the screen edge.
-    #[serde(default = "default_popup_offset_x")]
     pub offset_x: i32,
 
     /// Vertical offset from the anchor, in pixels. Positive moves down;
     /// negative moves up.
-    #[serde(default = "default_popup_offset_y")]
     pub offset_y: i32,
 
     /// Popup width in pixels. Validated to 100..=1200.
-    #[serde(default = "default_popup_width")]
     pub width: u32,
 
     /// Popup height in pixels. Validated to 60..=800.
-    #[serde(default = "default_popup_height")]
     pub height: u32,
 
     /// Idle timeout before the popup auto-hides. Reset by every new
     /// event while visible, and held off entirely while a turn is
     /// in flight (so a long tool call doesn't blink the popup out
     /// mid-response). Validated to 500..=60000.
-    #[serde(default = "default_popup_auto_hide_ms")]
     pub auto_hide_ms: u64,
 
     /// Idle timeout used while the daemon's continuous listener is
     /// active. The user can verbally reply without pressing a key, so
     /// the popup hangs around longer than the regular `auto_hide_ms`.
     /// Validated to 500..=60000.
-    #[serde(default = "default_popup_listen_auto_hide_ms")]
     pub listen_auto_hide_ms: u64,
 
     /// Cap on the body text rendered in the popup. The displayed text
     /// is the **last** `truncate_chars` codepoints of the running
     /// reply, so partial Unicode is never split. Validated to
     /// 1..=10000.
-    #[serde(default = "default_popup_truncate_chars")]
     pub truncate_chars: usize,
 
     /// Which events automatically open the popup. The tray-icon
     /// left-click always shows it regardless of these flags.
-    #[serde(default)]
     pub wake_on: TrayPopupWakeConfig,
 }
 
 impl Default for TrayPopupConfig {
     fn default() -> Self {
         Self {
-            enabled: default_popup_enabled(),
+            enabled: DEFAULT_TRAY_POPUP_ENABLED,
             anchor: PopupAnchor::default(),
-            offset_x: default_popup_offset_x(),
-            offset_y: default_popup_offset_y(),
-            width: default_popup_width(),
-            height: default_popup_height(),
-            auto_hide_ms: default_popup_auto_hide_ms(),
-            listen_auto_hide_ms: default_popup_listen_auto_hide_ms(),
-            truncate_chars: default_popup_truncate_chars(),
+            offset_x: DEFAULT_TRAY_POPUP_OFFSET_X,
+            offset_y: DEFAULT_TRAY_POPUP_OFFSET_Y,
+            width: DEFAULT_TRAY_POPUP_WIDTH,
+            height: DEFAULT_TRAY_POPUP_HEIGHT,
+            auto_hide_ms: DEFAULT_TRAY_POPUP_AUTO_HIDE_MS,
+            listen_auto_hide_ms: DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS,
+            truncate_chars: DEFAULT_TRAY_POPUP_TRUNCATE_CHARS,
             wake_on: TrayPopupWakeConfig::default(),
         }
     }
@@ -150,30 +135,28 @@ impl Default for TrayPopupConfig {
 /// any combination is valid. Tray-icon left-click is not gated by
 /// these (it always opens).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub struct TrayPopupWakeConfig {
     /// Open on `Event::ToolCall` — catches every MCP / bash / web
     /// invocation. Default: `true`.
-    #[serde(default = "default_popup_wake_tool_call")]
     pub tool_call: bool,
 
     /// Open on the first `Event::LastDelta` of a turn — i.e. as soon as
     /// the model starts replying. Default: `true`. Flip to `false` if
     /// you live in the chat TUI and don't want a popup on every reply.
-    #[serde(default = "default_popup_wake_delta")]
     pub delta: bool,
 
     /// Open on `Event::Error`. Useful for noticing failures that would
     /// otherwise only land in the tracing log. Default: `true`.
-    #[serde(default = "default_popup_wake_error")]
     pub error: bool,
 }
 
 impl Default for TrayPopupWakeConfig {
     fn default() -> Self {
         Self {
-            tool_call: default_popup_wake_tool_call(),
-            delta: default_popup_wake_delta(),
-            error: default_popup_wake_error(),
+            tool_call: DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL,
+            delta: DEFAULT_TRAY_POPUP_WAKE_DELTA,
+            error: DEFAULT_TRAY_POPUP_WAKE_ERROR,
         }
     }
 }
@@ -197,74 +180,6 @@ pub enum PopupAnchor {
     BottomRight,
     /// Centred horizontally and vertically on the focused output.
     Center,
-}
-
-fn default_tray_icon_active() -> String {
-    DEFAULT_TRAY_ICON_ACTIVE.to_string()
-}
-
-fn default_tray_icon_drowsy() -> String {
-    DEFAULT_TRAY_ICON_DROWSY.to_string()
-}
-
-fn default_tray_icon_sleeping() -> String {
-    DEFAULT_TRAY_ICON_SLEEPING.to_string()
-}
-
-fn default_tray_icon_listening() -> String {
-    DEFAULT_TRAY_ICON_LISTENING.to_string()
-}
-
-fn default_tray_icon_generating() -> String {
-    DEFAULT_TRAY_ICON_GENERATING.to_string()
-}
-
-fn default_tray_icon_disconnected() -> String {
-    DEFAULT_TRAY_ICON_DISCONNECTED.to_string()
-}
-
-fn default_popup_enabled() -> bool {
-    DEFAULT_TRAY_POPUP_ENABLED
-}
-
-fn default_popup_offset_x() -> i32 {
-    DEFAULT_TRAY_POPUP_OFFSET_X
-}
-
-fn default_popup_offset_y() -> i32 {
-    DEFAULT_TRAY_POPUP_OFFSET_Y
-}
-
-fn default_popup_width() -> u32 {
-    DEFAULT_TRAY_POPUP_WIDTH
-}
-
-fn default_popup_height() -> u32 {
-    DEFAULT_TRAY_POPUP_HEIGHT
-}
-
-fn default_popup_auto_hide_ms() -> u64 {
-    DEFAULT_TRAY_POPUP_AUTO_HIDE_MS
-}
-
-fn default_popup_listen_auto_hide_ms() -> u64 {
-    DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS
-}
-
-fn default_popup_truncate_chars() -> usize {
-    DEFAULT_TRAY_POPUP_TRUNCATE_CHARS
-}
-
-fn default_popup_wake_tool_call() -> bool {
-    DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL
-}
-
-fn default_popup_wake_delta() -> bool {
-    DEFAULT_TRAY_POPUP_WAKE_DELTA
-}
-
-fn default_popup_wake_error() -> bool {
-    DEFAULT_TRAY_POPUP_WAKE_ERROR
 }
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
 //! Centralised default values for every config field.
 //!
 //! Each constant is the single source of truth for its field: referenced
-//! both by the `#[serde(default = "...")]` helpers in the section modules
-//! and by tests that need to assert on defaults. Changing the literal
-//! here propagates everywhere with no drift.
+//! by the `Default` impl in the owning section module and by tests that
+//! assert on defaults. Changing the literal here propagates everywhere
+//! with no drift.
 
 pub const DEFAULT_LLAMA_BINARY: &str = "llama-server";
 pub const DEFAULT_LLAMA_HOST: &str = "127.0.0.1";
@@ -113,9 +113,10 @@ pub const DEFAULT_MEMORY_RETENTION_DAYS: u32 = 0;
 
 pub const DEFAULT_EMBEDDING_ENABLED: bool = true;
 /// HuggingFace id passed verbatim to the embed server's `--hf-repo`.
-/// 768-dim, ~140 MB Q4, strong retrieval quality on conversational text.
-pub const DEFAULT_EMBEDDING_MODEL: &str =
-    "nomic-ai/nomic-embed-text-v1.5-GGUF:nomic-embed-text-v1.5.Q4_K_M.gguf";
+/// The `:` suffix must be a quant tag, not a `.gguf` filename: llama-server
+/// resolves it against its preset manifest and a filename fails with a
+/// misleading "no GGUF files found". 768-dim, ~140 MB Q4.
+pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M";
 pub const DEFAULT_EMBEDDING_HOST: &str = "127.0.0.1";
 /// Distinct from `DEFAULT_LLAMA_PORT` (8385) and `DEFAULT_REMOTE_PORT`
 /// (8384). Validated for collisions in `Config::validate()`.

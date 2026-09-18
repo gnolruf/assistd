@@ -21,6 +21,7 @@ use crate::voice::VoiceConfig;
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub model: ModelConfig,
     pub llama_server: LlamaServerConfig,
@@ -29,21 +30,13 @@ pub struct Config {
     pub compositor: CompositorConfig,
     pub sleep: SleepConfig,
     pub remote: RemoteConfig,
-    #[serde(default)]
     pub presence: PresenceConfig,
-    #[serde(default)]
     pub daemon: DaemonConfig,
-    #[serde(default)]
     pub tools: ToolsConfig,
-    #[serde(default)]
     pub memory: MemoryConfig,
-    #[serde(default)]
     pub embedding: EmbeddingConfig,
-    #[serde(default)]
     pub mcp: McpConfig,
-    #[serde(default)]
     pub timeouts: TimeoutsConfig,
-    #[serde(default)]
     pub tray: TrayConfig,
 }
 

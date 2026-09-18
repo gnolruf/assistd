@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Remote access API settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct RemoteConfig {
     /// Whether the remote access API is enabled.
     pub enabled: bool,

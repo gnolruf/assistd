@@ -28,27 +28,30 @@ use crate::defaults::{
 
 /// `[mcp]` section of `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct McpConfig {
     /// Master switch. When `false` the daemon doesn't connect to any
     /// MCP server, regardless of `servers`.
-    #[serde(default = "default_mcp_enabled")]
     pub enabled: bool,
     /// One entry per server the daemon should connect to at startup.
-    #[serde(default)]
     pub servers: Vec<McpServerConfig>,
 }
 
 impl Default for McpConfig {
     fn default() -> Self {
         Self {
-            enabled: default_mcp_enabled(),
+            enabled: DEFAULT_MCP_ENABLED,
             servers: Vec::new(),
         }
     }
 }
 
-/// One `[[mcp.servers]]` entry.
+/// One `[[mcp.servers]]` entry. `name` and `transport` are the only
+/// required keys; unlike the top-level sections there is no meaningful
+/// default server, so this struct has no `Default` and defaults stay
+/// per-field.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct McpServerConfig {
     /// Stable label used in tool-name prefixes (`mcp__<name>__<tool>`)
     /// and in tracing logs. Must be unique within `[mcp.servers]` and
@@ -93,9 +96,6 @@ pub enum McpTransport {
     Sse,
 }
 
-fn default_mcp_enabled() -> bool {
-    DEFAULT_MCP_ENABLED
-}
 fn default_request_timeout_secs() -> u64 {
     DEFAULT_MCP_REQUEST_TIMEOUT_SECS
 }

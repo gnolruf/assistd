@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Local model settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
     /// Model identifier passed to llama-server's `--hf` flag.
     /// Format: `owner/repo:quant` (e.g. `"unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"`).
