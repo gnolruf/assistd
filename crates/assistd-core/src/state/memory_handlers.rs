@@ -247,13 +247,10 @@ impl AppState {
         }
     }
 
-    /// Embed every memory and every conversation chunk that has no
-    /// embedding under the daemon's currently-configured model. Streams
-    /// `ReindexProgress` events as items complete; finishes with `Done`
-    /// (or `Error` if no embedder is configured). Per-item failures
-    /// during embed/write are logged and counted as still-done so a
-    /// single bad row doesn't wedge the whole run; same log-and-drop
-    /// posture as the background embedder task.
+    /// Embed every memory and conversation chunk that lacks an embedding
+    /// under the current model, streaming `ReindexProgress` as items
+    /// complete. Per-item failures are logged and counted as done so one
+    /// bad row cannot wedge the run.
     pub(super) async fn handle_memory_reindex(
         self: Arc<Self>,
         id: String,

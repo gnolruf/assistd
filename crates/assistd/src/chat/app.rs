@@ -1,10 +1,5 @@
-//! Top-level chat application state and reducer.
-//!
-//! `App` owns the output pane, input line, throughput meter, VRAM
-//! state, and an `IpcClient` handle for talking to the daemon. The
-//! `on_*` methods are pure reducers; I/O is confined to `spawn_query`
-//! (opens a daemon dialog connection for a Query) and `handle_attach`
-//! (loads an image from disk).
+//! Chat application state and reducer. The `on_*` methods mutate state
+//! only; I/O lives in the `spawn_*` methods and the attach handler.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,14 +21,9 @@ use super::vram::ResourceState;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
-/// Rows scrolled per mouse-wheel tick. Three matches the de facto
-/// terminal-app convention (Claude Code, less, htop, …) and keeps a
-/// single click responsive without launching past several messages.
 const MOUSE_WHEEL_STEP: u16 = 3;
 
-/// Slash commands surfaced by the input-line autocomplete popup.
-/// Each entry is `(command, usage_hint)` where `usage_hint` is shown
-/// in dim text next to the command name in the suggestion list.
+/// `(command, usage_hint)` pairs for the autocomplete popup.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/attach", "<path>"),
     ("/fork", "<name>"),
@@ -43,17 +33,13 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/undo", ""),
 ];
 
-/// One image staged by `/attach`, waiting to ride along with the user's
-/// next text submission.
+/// An image staged by `/attach` for the next submission.
 pub struct PendingAttachment {
-    /// Display name (file basename) shown in the attachment indicator and
-    /// the user-prompt tag.
+    /// File basename.
     pub name: String,
     pub mime: String,
     pub bytes: Vec<u8>,
-    /// Pre-built terminal-graphics protocol for inline thumbnail
-    /// rendering. `None` on terminals without graphics support; the
-    /// `📎 attached: ...` info line still appears either way.
+    /// `None` on terminals without graphics support.
     pub protocol: Option<StatefulProtocol>,
 }
 
@@ -70,14 +56,9 @@ impl PendingAttachment {
     }
 }
 
-/// Payload for [`ChatEvent::AttachLoaded`]. Boxed inside the enum so a
-/// `Vec<u8>` of image bytes plus a `StatefulProtocol` (which holds its
-/// own pre-built per-cell terminal-graphics buffers) doesn't bloat the
-/// other variants; `Wire(Event)` and `WireError(String)` were paying
-/// the maximum-variant size on every send before the box.
+/// Boxed inside [`ChatEvent`] so the graphics buffers do not bloat the
+/// other variants.
 pub struct AttachLoadedPayload {
-    #[allow(dead_code)]
-    pub path: String,
     pub name: String,
     pub mime: String,
     pub size: usize,
@@ -85,39 +66,35 @@ pub struct AttachLoadedPayload {
     pub protocol: Option<StatefulProtocol>,
 }
 
-/// Which of the TUI's concurrent daemon connections an event arrived
-/// on. Several run at once — the query dialog, a branch command, the
-/// presence poll, the F2 cycle — and all of them funnel into one
-/// reducer, so the tag says which slice of `App` state a stream is
-/// allowed to retire. Untagged, a status-stream `Done` closes the
-/// visible reply mid-stream and a branch-stream failure never releases
-/// the in-flight branch slot.
+/// Which concurrent daemon connection an event arrived on. Several run
+/// at once and all feed one reducer, so the tag says which slice of
+/// `App` state a stream's terminal event may retire.
 #[derive(Debug, Clone, Copy)]
 pub enum WireStream {
-    /// A `Query` dialog, or a push-to-talk turn the daemon
-    /// auto-dispatched. Owns the assistant message, [`App::generating`]
-    /// and the query writer.
+    /// A query dialog or a push-to-talk turn. Owns the assistant
+    /// message, [`App::generating`] and the query writer.
     Reply,
-    /// `/fork`, `/switch`, `/undo`, `/new`, `/resume` and the startup
-    /// resume. Owns the in-flight branch op and its buffered rows.
+    /// A branch command. Owns the in-flight branch op and its rows.
     Branch,
-    /// Presence/voice polls and the F2 cycle. Indicator state only.
+    /// Polls and the F2 cycle. Indicator state only.
     Status,
 }
 
 pub enum ChatEvent {
-    /// Streaming event from the daemon over IPC. Includes both
-    /// query-response events (Delta/ToolCall/ToolResult/Done) and
-    /// status-poll events (Presence/VoiceState/ListenState/...).
-    Wire { stream: WireStream, event: Event },
-    /// The wire connection ended in an unexpected way (I/O error,
-    /// daemon closed mid-stream without `Done`).
-    WireError { stream: WireStream, message: String },
-    /// `/attach <path>` finished reading + validating the file. Carries
-    /// everything the App needs to update the UI.
+    Wire {
+        stream: WireStream,
+        event: Event,
+    },
+    /// The connection ended without a terminal event.
+    WireError {
+        stream: WireStream,
+        message: String,
+    },
     AttachLoaded(Box<AttachLoadedPayload>),
-    /// `/attach <path>` failed (missing file, unsupported format, etc.).
-    AttachFailed { path: String, message: String },
+    AttachFailed {
+        path: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Debug for ChatEvent {
@@ -135,7 +112,6 @@ impl std::fmt::Debug for ChatEvent {
                 .finish(),
             ChatEvent::AttachLoaded(p) => f
                 .debug_struct("AttachLoaded")
-                .field("path", &p.path)
                 .field("name", &p.name)
                 .field("mime", &p.mime)
                 .field("size", &p.size)
@@ -150,160 +126,83 @@ impl std::fmt::Debug for ChatEvent {
     }
 }
 
-/// Pending destructive-command prompt displayed as an overlay. Only one
-/// is ever active at a time; the agent loop on the daemon side blocks
-/// on the gate until we send the `ConfirmResponse`.
+/// Destructive-command prompt shown as an overlay while the daemon's
+/// agent loop blocks on the answer.
 pub struct ConfirmationModal {
-    /// Renders as the modal body (script + matched_pattern). Reuses the
-    /// `assistd-tools::ConfirmationRequest` shape so the UI code can
-    /// stay agnostic of where the request came from.
     pub request: ConfirmationRequest,
-    /// Routing key the daemon sent in `Event::ConfirmRequest`. Echoed
-    /// back verbatim in the outgoing `Request::ConfirmResponse`.
+    /// Echoed back in the `Request::ConfirmResponse`.
     confirm_id: String,
 }
 
-/// Top-level TUI application state.
-///
-/// Owns the output pane, input line, throughput meter, resource stats, and
-/// the IPC connection to the daemon. The `on_*` methods are pure reducers;
-/// I/O is confined to [`App::spawn_query`] and the attach handler.
 pub struct App {
-    /// Scrollable output region.
     pub output: OutputPane,
-    /// Single-line input with readline keybindings and history.
     pub input: InputLine,
-    /// Token-rate meter for the status bar.
     pub throughput: ThroughputMeter,
-    /// Live VRAM / RAM readings.
     pub resources: ResourceState,
-    /// Display name of the loaded model.
     pub model_name: String,
-    /// `true` while a query stream is open.
+    /// `true` while a reply stream is open.
     pub generating: bool,
-    /// Set to `true` to exit the event loop.
     pub quitting: bool,
-    /// Index into [`SPINNER_CHARS`], incremented on each tick.
     pub spinner: usize,
-    /// Transient status-bar message with its display timestamp. Cleared by [`App::on_tick`] after [`NOTICE_HOLD`].
+    /// Transient status-bar message and when it was set.
     pub notice: Option<(String, Instant)>,
-    /// Height of the output area as of the last render, used for scrolling math.
     pub last_output_height: u16,
-    /// Last-known daemon presence state; `None` until the first poll response.
+    /// `None` until the first poll response.
     pub presence_state: Option<PresenceState>,
-    /// Idle-sleep thresholds copied from config for the local countdown display.
     pub sleep_cfg: SleepConfig,
-    /// Local wallclock for the most recent user activity (typing /
-    /// submitting / answering a modal). Used to compute the
-    /// status-bar countdown without round-tripping to the daemon. The
-    /// daemon authoritatively transitions on its own clock; this is a
-    /// display approximation that drifts at most a couple seconds.
+    /// Local approximation of the daemon's idle clock, for the
+    /// status-bar countdown.
     last_activity_at: Instant,
-    /// Set at chat startup from a daemon `GetCapabilities` probe.
-    /// `false` means the loaded model has no mmproj; `/attach`
-    /// rejects with the AC `vision not available` error and the
-    /// status bar renders `vision: off`.
     pub vision_enabled: bool,
-    /// Active confirmation modal, if any. Only one can be open at a time.
     pub modal: Option<ConfirmationModal>,
-    /// Push-to-talk capture state. Updated by `Event::VoiceState`
-    /// flowing in over the wire. Rendered as an indicator in
-    /// `render_status` (recording = red, transcribing = yellow).
     pub listening: VoiceCaptureState,
-    /// TTS enabled flag, polled from the daemon. Rendered as the
-    /// "voice-output: on/off" chip on the status bar.
     pub voice_output_enabled: bool,
-    /// Continuous-listen active flag, polled from the daemon.
     pub listen_active: bool,
-    /// Command of the in-flight tool call, captured on `Event::ToolCall`
-    /// and consumed on the matching `Event::ToolResult` so the
-    /// call+result pair becomes one `ToolBlock`. The agent loop is
-    /// strictly serial (only one tool runs at a time), so a single
-    /// slot suffices.
+    /// `(call id, command)` of the tool call awaiting its result. One
+    /// slot suffices because the agent loop runs tools serially.
     pending_tool_call: Option<(String, String)>,
-    /// Images staged by `/attach`, drained into the user's next
-    /// submission.
     pub pending_attachments: Vec<PendingAttachment>,
-    /// Terminal graphics-protocol picker, probed once at TUI startup.
     picker: Option<Picker>,
-    /// Daemon connection factory.
     ipc: Arc<IpcClient>,
-    /// The reply turn that currently owns the output pane. `None`
-    /// between turns.
+    /// The reply turn that owns the output pane; `None` between turns.
     active_reply: Option<ActiveReply>,
-    /// A spoken utterance transcribed while another turn still owned
-    /// the pane. Held back until that turn finishes, so the spoken line
-    /// is drawn above its own answer instead of splicing into the
-    /// running reply.
+    /// An utterance transcribed while another turn owned the pane, held
+    /// back so it is drawn above its own answer.
     queued_transcription: Option<QueuedTranscription>,
-    /// Tracks an in-flight branch command so [`Self::on_wire_event`]
-    /// can route `BranchInfo` / `BranchSwitched` / `HistoryEntry` /
-    /// `UndoApplied` events into the right rendering path. Cleared on
-    /// terminal `Done` / `Error`.
     in_flight_branch_op: Option<BranchOp>,
-    /// Buffer for branch rows accumulated during a `/resume` listing
-    /// until the terminal `Done`, at which point they're handed off to
-    /// the picker modal in one batch.
+    /// Rows of a `/resume` listing, handed to the picker on `Done`.
     branches_buffer: Vec<BranchListEntry>,
     chat_tx: mpsc::Sender<ChatEvent>,
-    /// Highlighted entry in the slash-command suggestion popup.
-    /// Reset to 0 whenever the buffer leaves a `/` prefix; clamped to
-    /// `len-1` after each keystroke filters the list down.
     slash_selected: usize,
-    /// Set by Esc while the slash popup is visible. Cleared once the
-    /// buffer no longer starts with `/`, so the next `/<x>` reopens
-    /// the popup as the user expects.
+    /// Set by Esc on the slash popup; cleared when the buffer leaves
+    /// its `/` prefix.
     slash_dismissed: bool,
-    /// Interactive branch picker shown by `/resume`. Mutually
-    /// exclusive with [`Self::modal`] (destructive-command modals);
-    /// when both somehow co-exist, the destructive modal wins
-    /// because the agent is blocked on it.
+    /// Mutually exclusive with `modal`; when both exist the destructive
+    /// modal wins because the agent is blocked on it.
     pub picker_modal: Option<BranchPickerModal>,
-    /// Last-rounded-second of any live thinking block, used to throttle
-    /// wrap-cache invalidation to 1 Hz. The tick handler reads the
-    /// current second from [`OutputPane::live_thinking_seconds`]; when
-    /// it differs from this stamp it marks the output pane dirty so
-    /// the rewrap picks up the new header text. `None` when no
-    /// thinking block is live; cleared on `Done`/`Error`.
+    /// Throttles rewraps for a live thinking block's timer to 1 Hz.
     last_thinking_seconds: Option<u64>,
-    /// Title of the active conversation, rendered at the head of the
-    /// status bar. Arrives as `Event::SessionTitle` once the daemon has
-    /// summarised the session's first turn, and is replaced (or
-    /// cleared) whenever `/switch`, `/resume` or `/new` moves the
-    /// daemon to a different session.
     pub session_title: Option<String>,
-    /// Verbose-rendering toggle, flipped by Ctrl+O. When `true`, the
-    /// output pane force-expands every Thinking and Tool block in
-    /// scrollback regardless of their per-item `expanded` flag. The
-    /// per-item flag still tracks individual Tab toggles so flipping
-    /// verbose off restores the previous fine-grained state.
+    /// Ctrl+O. Force-expands every thinking and tool block without
+    /// touching their per-item `expanded` flags.
     pub verbose: bool,
 }
 
-/// The reply turn that owns the output pane: the open assistant block,
-/// [`App::generating`], and the throughput meter. Two reply streams can
-/// be live at once — a push-to-talk turn dispatched while a typed query
-/// is still streaming — but the daemon runs one agent turn at a time
-/// behind its turn lock, so the pane is handed from one to the next
-/// rather than shared.
+/// The reply turn that owns the output pane. A push-to-talk turn can
+/// start while a typed query is still streaming; the daemon serialises
+/// turns, so the pane is handed from one to the next rather than shared.
 struct ActiveReply {
-    /// Request id the daemon echoes on every event of this turn.
     id: String,
-    /// Write half of the turn's dialog connection, used to answer a
-    /// `ConfirmRequest`. `None` for a push-to-talk turn, whose
-    /// connection belongs to `IpcVoiceProxy`.
+    /// Answers `ConfirmRequest`. `None` for a push-to-talk turn, whose
+    /// connection belongs to the voice proxy.
     writer: Option<mpsc::Sender<Request>>,
 }
 
-/// A transcribed utterance waiting for the pane to come free.
 struct QueuedTranscription {
     id: String,
     text: String,
 }
 
-/// Which branch slash-command is currently in flight, if any. Used to
-/// distinguish `Event::BranchSwitched` arriving from `/fork` (no chat
-/// repaint) from one arriving from `/switch` (clear + replay).
 #[derive(Debug, Clone, Copy)]
 enum BranchOp {
     Fork,
@@ -314,7 +213,6 @@ enum BranchOp {
     ResumePicker,
 }
 
-/// One row buffered during a `/resume` branch listing.
 #[derive(Debug, Clone)]
 pub struct BranchListEntry {
     pub name: String,
@@ -327,9 +225,7 @@ pub struct BranchListEntry {
     pub session_title: Option<String>,
 }
 
-/// Interactive picker shown by `/resume`. Rendered as a modal overlay
-/// with arrow-key navigation; Enter dispatches `Request::Switch`
-/// against the qualified target, Esc cancels.
+/// Branch picker shown by `/resume`.
 pub struct BranchPickerModal {
     pub entries: Vec<BranchListEntry>,
     pub selected: usize,
@@ -344,7 +240,6 @@ impl BranchPickerModal {
 }
 
 impl App {
-    /// Construct a new `App` with the given IPC handle and configuration.
     pub fn new(
         ipc: Arc<IpcClient>,
         chat_tx: mpsc::Sender<ChatEvent>,
@@ -390,10 +285,7 @@ impl App {
         }
     }
 
-    /// Open a confirmation modal from a daemon-issued `Event::ConfirmRequest`.
-    /// Only one modal can be active at a time; if a second prompt
-    /// arrives while one is open we deny the new one immediately
-    /// (which the daemon's gate maps to "cancel").
+    /// A second prompt arriving while one is open is denied immediately.
     pub fn open_confirmation_modal(
         &mut self,
         confirm_id: String,
@@ -450,30 +342,23 @@ impl App {
         self.modal.is_some()
     }
 
-    /// Returns `true` when the event loop should exit.
     pub fn should_quit(&self) -> bool {
         self.quitting
     }
 
-    /// Current spinner character for the status bar.
     pub fn spinner_char(&self) -> char {
         SPINNER_CHARS[self.spinner % SPINNER_CHARS.len()]
     }
 
-    /// Active notice text, if one is currently being displayed.
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_ref().map(|(s, _)| s.as_str())
     }
 
-    /// Record the output pane's rendered height so scrolling math stays correct.
     pub fn set_output_height(&mut self, h: u16) {
         self.last_output_height = h;
     }
 
-    /// Slash-command entries that prefix-match the current buffer.
-    /// Empty when the popup should be hidden (buffer doesn't start
-    /// with `/`, contains whitespace, or the user dismissed it with
-    /// Esc).
+    /// Empty when the popup should be hidden.
     pub fn slash_suggestions(&self) -> Vec<&'static (&'static str, &'static str)> {
         if self.slash_dismissed {
             return Vec::new();
@@ -491,9 +376,6 @@ impl App {
             .collect()
     }
 
-    /// Index of the currently highlighted suggestion, clamped to the
-    /// visible list length. Used by [`super::ui`] to render the
-    /// selection highlight.
     pub fn slash_selected(&self) -> usize {
         self.slash_selected
     }
@@ -520,9 +402,6 @@ impl App {
         }
     }
 
-    /// Handle a terminal mouse event. Only scroll-wheel ticks are
-    /// consumed today; other mouse events (clicks, drags, motion) are
-    /// ignored so the alt-screen behaves like a static viewport.
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         match ev.kind {
             MouseEventKind::ScrollUp => {
@@ -537,7 +416,6 @@ impl App {
         }
     }
 
-    /// Handle a terminal key event, routing to the modal or the input line.
     pub fn on_key(&mut self, ev: KeyEvent) {
         self.touch_activity();
         if self.modal.is_some() {
@@ -647,23 +525,16 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.resolve_modal(false);
             }
-            _ => {
-                // Swallow every other key while the modal is open
-            }
+            _ => {}
         }
     }
 
-    /// Update live resource (VRAM / RAM) readings from the probe background task.
     pub fn on_resources(&mut self, v: ResourceState) {
         self.resources = v;
     }
 
-    /// Approximate countdown to the next presence transition,
-    /// computed locally from `last_activity_at + sleep_cfg`. The
-    /// daemon owns the actual clock; this is a display courtesy
-    /// that may drift by a couple seconds in either direction.
-    /// Returns `None` when no countdown applies (presence unknown,
-    /// or already Sleeping with no further transition pending).
+    /// Local approximation of the daemon's countdown to its next idle
+    /// transition. `None` when no transition is pending.
     pub fn local_time_until_next_transition(&self) -> Option<Duration> {
         let state = self.presence_state?;
         let elapsed = self.last_activity_at.elapsed();
@@ -728,7 +599,6 @@ impl App {
         });
     }
 
-    /// Reducer entry point for everything the event loop pumps in.
     pub fn on_chat_event(&mut self, ev: ChatEvent) {
         match ev {
             ChatEvent::Wire { stream, event } => self.on_wire_event(stream, event),
@@ -742,7 +612,6 @@ impl App {
             }
             ChatEvent::AttachLoaded(payload) => {
                 let AttachLoadedPayload {
-                    path: _,
                     name,
                     mime,
                     size,
@@ -897,9 +766,6 @@ impl App {
                 session_title,
                 ..
             } => {
-                // Always reports the now-active session, so it is also
-                // how the status bar learns a switch changed (or
-                // cleared) the title.
                 self.session_title = session_title
                     .as_deref()
                     .map(str::trim)
@@ -1081,10 +947,6 @@ impl App {
         self.branches_buffer.clear();
     }
 
-    /// Advance the spinner and expire stale notices. Also bumps the
-    /// output-pane's wrap cache once per second whenever a thinking
-    /// block is live, so its "Thinking… (Ns)" header keeps counting
-    /// up without invalidating the cache on every 250 ms frame.
     pub fn on_tick(&mut self) {
         self.spinner = self.spinner.wrapping_add(1);
         if let Some((_, at)) = &self.notice {
@@ -1107,11 +969,7 @@ impl App {
 
     fn try_complete_attach_path(&mut self) -> bool {
         let buffer = self.input.buffer();
-        let partial = if let Some(rest) = buffer.strip_prefix("/attach ") {
-            rest
-        } else if let Some(rest) = buffer.strip_prefix("/attach_image ") {
-            rest
-        } else {
+        let Some(partial) = buffer.strip_prefix("/attach ") else {
             return false;
         };
         let (dir, file_prefix) = match partial.rsplit_once('/') {
@@ -1157,17 +1015,12 @@ impl App {
         } else {
             return true;
         };
-        let cmd_prefix = if buffer.starts_with("/attach_image ") {
-            "/attach_image "
-        } else {
-            "/attach "
-        };
         let dir_part = match partial.rsplit_once('/') {
             Some((d, _)) => format!("{d}/"),
             None => String::new(),
         };
         self.input
-            .set_buffer(format!("{cmd_prefix}{dir_part}{completed}"));
+            .set_buffer(format!("/attach {dir_part}{completed}"));
         true
     }
 
@@ -1175,7 +1028,7 @@ impl App {
         let is_attach = text.starts_with("/attach ") || text.trim() == "/attach";
         if is_attach && !self.vision_enabled {
             self.output.push_error(
-                "[error] attach_image: vision not available: model does not support \
+                "[error] attach: vision not available: model does not support \
                  images. Use: a model with mmproj loaded",
             );
             self.set_notice("vision not available");
@@ -1287,7 +1140,6 @@ impl App {
                     });
                     let _ = tx
                         .send(ChatEvent::AttachLoaded(Box::new(AttachLoadedPayload {
-                            path: path_for_load,
                             name,
                             mime,
                             size,
@@ -1371,11 +1223,6 @@ impl App {
         });
     }
 
-    /// Issue `Request::ResumeOrNew` at TUI startup so the daemon
-    /// decides between resuming the current branch (when its latest
-    /// message landed within `recency_secs`) and starting a fresh
-    /// session. Wire events flow into the existing
-    /// `BranchSwitched` / `HistoryEntry` handlers via `chat_tx`.
     pub fn spawn_resume_or_new(&mut self, recency_secs: u64) {
         let req = Request::ResumeOrNew {
             id: Uuid::new_v4().to_string(),
@@ -1649,7 +1496,6 @@ mod tests {
     }
 
     fn test_app_with(vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
-        // Bogus socket path; these tests never open a real connection.
         test_app_at(
             std::path::PathBuf::from("/tmp/assistd-test-nonexistent.sock"),
             vision_enabled,

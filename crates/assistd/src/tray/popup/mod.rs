@@ -116,9 +116,8 @@ pub async fn spawn(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupH
 
     let anchor = anchor_from_config(&popup_cfg);
 
-    // Pre-position the window so it never flashes in the centre before
-    // place_floating snaps it. Scale by the focused output's DPI so the
-    // size matches what winit will apply.
+    // Pre-position so the window never flashes in the centre before
+    // place_floating snaps it.
     let scale = match manager.focused_output_scale().await {
         Ok(s) => {
             tracing::info!(target: "tray", "popup: focused-output scale = {s:.4}");

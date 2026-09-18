@@ -1,13 +1,9 @@
-//! Client for the manual presence-control subcommands: `sleep`, `wake`,
-//! `drowse`, `cycle`. Each sends exactly one IPC request over the daemon's
-//! Unix socket, prints the resulting presence state, and exits on
-//! `Event::Done` or `Event::Error`.
+//! `sleep`, `wake`, `drowse`, and `cycle` subcommands.
 
 use anyhow::Result;
 use assistd_ipc::{Event, IpcClient, PresenceState, Request};
 use uuid::Uuid;
 
-/// Which transition the CLI is asking the daemon to run.
 #[derive(Debug, Clone, Copy)]
 pub enum PresenceAction {
     Sleep,
@@ -36,12 +32,6 @@ impl PresenceAction {
     }
 }
 
-/// Send a presence-control command to the daemon and print the resulting state.
-///
-/// # Errors
-///
-/// Returns an error if the IPC connection fails or the daemon sends an
-/// unexpected terminal event.
 pub async fn run(action: PresenceAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     let mut stream = IpcClient::new()

@@ -1,9 +1,5 @@
-//! Background probe that reports live VRAM and RAM usage in the TUI status
-//! bar.
-//!
-//! Shells out to `nvidia-smi` every [`POLL_INTERVAL`] for VRAM and reads
-//! `/proc/meminfo` for RAM. If `nvidia-smi` is not on the system `PATH`,
-//! VRAM is marked `Disabled` while RAM continues to be polled.
+//! VRAM (via `nvidia-smi`) and RAM (via `/proc/meminfo`) probe for the
+//! status bar.
 
 use std::time::Duration;
 
@@ -58,9 +54,6 @@ pub struct ResourceState {
     pub ram: RamState,
 }
 
-/// Spawn a background task that polls VRAM and RAM every [`POLL_INTERVAL`].
-///
-/// Returns a watch channel receiver that the TUI event loop reads on each tick.
 pub fn spawn_probe(mut shutdown: watch::Receiver<bool>) -> watch::Receiver<ResourceState> {
     let (tx, rx) = watch::channel(ResourceState::default());
     let mut vram_disabled = false;

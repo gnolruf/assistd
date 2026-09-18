@@ -1,6 +1,4 @@
-//! Handlers for `/fork`, `/branches`, `/switch`, `/undo`, `/resume`,
-//! `/new`, plus the LLM-driven session-title generator and a handful
-//! of small lookup helpers used by the above.
+//! Branch and session handlers, plus the session-title generator.
 
 use super::AppState;
 use anyhow::Result;
@@ -9,11 +7,9 @@ use assistd_memory::{BranchId, PersistedRole, SessionId};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Translate a [`assistd_memory::PersistedRole`] into the equivalent
-/// [`assistd_llm::HistoryRole`] for branch-history replay. Identity
-/// mapping; lives in this crate because `assistd-llm` doesn't depend
-/// on `assistd-memory`.
-fn persisted_role_to_history_role(role: PersistedRole) -> assistd_llm::HistoryRole {
+/// Identity mapping; lives here because `assistd-llm` does not depend on
+/// `assistd-memory`.
+pub fn persisted_role_to_history_role(role: PersistedRole) -> assistd_llm::HistoryRole {
     match role {
         PersistedRole::System => assistd_llm::HistoryRole::System,
         PersistedRole::User => assistd_llm::HistoryRole::User,
@@ -35,11 +31,9 @@ pub(super) fn clean_generated_title(raw: &str) -> String {
 }
 
 impl AppState {
-    /// `/fork <name>`: snapshot the current branch into a new branch
-    /// and switch to it. The shared agent_turn_lock + a drain of
-    /// `persistence_tracker` guarantees no in-flight turn races the
-    /// snapshot. The new branch shares conversation rows with its
-    /// parent (no row duplication); only branch_messages get copied.
+    /// `/fork <name>`: snapshot the current branch into a new branch and
+    /// switch to it. The new branch shares conversation rows with its
+    /// parent; only the branch membership is copied.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, branch = %name))]
     pub(super) async fn handle_fork(
         self: Arc<Self>,
@@ -120,9 +114,7 @@ impl AppState {
         Ok(())
     }
 
-    /// `/resume`: enumerate every branch across every session, with
-    /// the active session's branches surfaced first. The TUI feeds the
-    /// resulting `BranchInfo` events into its branch picker.
+    /// Enumerate every branch across every session, active session first.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_branches(
         self: Arc<Self>,
@@ -175,14 +167,9 @@ impl AppState {
         Ok(())
     }
 
-    /// Background hook: if `session` has no `title` yet, ask the LLM
-    /// for a short summary of `user_text`, write it back via
-    /// `set_session_title`, and broadcast it as [`Event::SessionTitle`]
-    /// so connected clients can label the conversation. Spawns onto
-    /// `persistence_tracker` so daemon shutdown drains the task;
-    /// survives `complete_oneshot` failures without failing the turn
-    /// because a missing title is a UX downgrade, not a bug. The next
-    /// turn of a still-untitled session tries again.
+    /// If `session` has no title yet, ask the LLM for one in the
+    /// background, persist it, and broadcast [`Event::SessionTitle`].
+    /// Failures are logged and retried on the session's next turn.
     pub(super) fn spawn_session_title_generation(
         self: Arc<Self>,
         id: String,
@@ -255,10 +242,8 @@ impl AppState {
         });
     }
 
-    /// `/switch <target>`: drain in-flight writes, swap the active
-    /// (session, branch) pointer, replay the target branch's history
-    /// into the LLM backend, and stream the loaded turns back to the
-    /// client so the TUI can repaint the chat pane.
+    /// `/switch <target>`: make the target branch active, replay its
+    /// history into the LLM backend, and stream it to the client.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, target = %target))]
     pub(super) async fn handle_switch(
         self: Arc<Self>,
@@ -389,10 +374,8 @@ impl AppState {
         Ok(())
     }
 
-    /// `/undo`: drop the latest user prompt and the entire assistant
-    /// reply that followed it from the current branch. Both DB and
-    /// in-memory state are updated atomically with the agent_turn_lock
-    /// held.
+    /// `/undo`: drop the latest user prompt and the assistant reply that
+    /// followed it from the current branch.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_undo(
         self: Arc<Self>,
@@ -434,12 +417,9 @@ impl AppState {
         Ok(())
     }
 
-    /// TUI-startup branch decision. If the current branch's most
-    /// recent message landed within `recency_secs`, keep the branch
-    /// and stream its history so the client can repaint the chat
-    /// pane. Otherwise, begin a fresh session with an empty `main`
-    /// branch, swap it in, and emit a `BranchSwitched` so the client
-    /// can clear its output.
+    /// Keep the current branch and stream its history if its latest
+    /// message landed within `recency_secs`; otherwise begin a fresh
+    /// session.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, recency_secs = recency_secs))]
     pub(super) async fn handle_resume_or_new(
         self: Arc<Self>,
@@ -535,7 +515,6 @@ impl AppState {
             return Ok(());
         }
 
-        // Fresh chat: new session + empty main branch.
         let (new_session, new_branch) = match self
             .memory
             .conversations
@@ -579,10 +558,7 @@ impl AppState {
         Ok(())
     }
 
-    /// `/new`: unconditionally begin a fresh session with an empty
-    /// `main` branch and swap it in. Mirrors the fresh-chat half of
-    /// [`Self::handle_resume_or_new`] but without the recency check
-    /// so the user always gets a blank canvas.
+    /// `/new`: begin a fresh session with an empty `main` branch.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_new_session(
         self: Arc<Self>,

@@ -1,11 +1,8 @@
-//! Wire-attachment decoding shared between the query handler and the
-//! IPC layer.
+//! Wire-attachment decoding for the query handler.
 
 use assistd_tools::Attachment;
 
-/// Convert wire-level [`assistd_ipc::ImageAttachment`] entries into the
-/// internal [`Attachment`] type the agent loop expects. Returns the first
-/// decode error so the caller can surface it cleanly to the client.
+/// Returns the first decode error.
 pub(super) fn decode_wire_attachments(
     wire: &[assistd_ipc::ImageAttachment],
 ) -> std::result::Result<Vec<Attachment>, String> {

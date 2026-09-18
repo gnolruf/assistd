@@ -1,12 +1,5 @@
-//! ksni `Tray` implementation and the small task that turns menu
-//! clicks into IPC calls.
-//!
-//! The activate callbacks ksni invokes on a menu click must not block
-//! (the panel freezes if they do), so they only push a [`MenuAction`]
-//! onto an mpsc channel. [`run_actions`] drains that channel from a
-//! tokio task and issues fresh `one_shot` IPC calls per action — never
-//! multiplexed on the long-lived Subscribe connection that
-//! `subscribe.rs` owns.
+//! ksni `Tray` implementation. Menu callbacks must not block (the panel
+//! freezes), so they only queue a [`MenuAction`] for [`run_actions`].
 
 use anyhow::Result;
 use assistd_ipc::{Event, IpcClient, PresenceState, Request};
@@ -19,7 +12,6 @@ use uuid::Uuid;
 
 use super::state::{TrayState, TrayTracker, icon_name_for, tooltip_for};
 
-/// Menu click → background task.
 #[derive(Debug, Clone, Copy)]
 pub enum MenuAction {
     /// Issue `SetPresence(target)` to the daemon.
@@ -28,16 +20,9 @@ pub enum MenuAction {
     Quit,
 }
 
-/// Optional callback invoked from `Tray::activate` (left-click). The
-/// concrete sender lives in the popup module under
-/// `cfg(feature = "tray-popup")`; this trait-object form keeps the menu
-/// code free of popup imports and works whether or not the feature is
-/// compiled in.
+/// Invoked on left-click.
 pub type ActivateCallback = Box<dyn Fn() + Send + Sync>;
 
-/// State owned by the ksni service. Property reads and menu rendering
-/// happen on ksni's task; `subscribe.rs` and `run_actions` reach in via
-/// `Handle::update` and `Handle::shutdown` respectively.
 pub struct TrayItem {
     tracker: TrayTracker,
     actions: UnboundedSender<MenuAction>,
@@ -56,20 +41,17 @@ impl TrayItem {
         }
     }
 
-    /// Apply an incoming daemon event. Returns `true` when the visible
-    /// tray state changed.
+    /// Returns `true` when the visible tray state changed.
     pub fn ingest(&mut self, event: &Event) -> bool {
         self.tracker.ingest(event)
     }
 
-    /// Mark the IPC connection up. Returns `true` when the visible
-    /// tray state changed.
+    /// Returns `true` when the visible tray state changed.
     pub fn set_connected(&mut self) -> bool {
         self.tracker.set_connected()
     }
 
-    /// Mark the IPC connection down. Returns `true` when the visible
-    /// tray state changed.
+    /// Returns `true` when the visible tray state changed.
     pub fn set_disconnected(&mut self) -> bool {
         self.tracker.set_disconnected()
     }
@@ -153,9 +135,7 @@ fn toggle_target(presence: PresenceState) -> PresenceState {
     }
 }
 
-/// Drain the menu-action channel until a [`MenuAction::Quit`] is
-/// received or the sender is dropped. Returns `Ok(())` on a clean exit
-/// triggered by Quit; bubbles up only fatal channel errors (none today).
+/// Drain menu actions until [`MenuAction::Quit`] or the sender drops.
 pub async fn run_actions(mut rx: UnboundedReceiver<MenuAction>, ipc: IpcClient) -> Result<()> {
     while let Some(action) = rx.recv().await {
         match action {

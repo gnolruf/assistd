@@ -1,23 +1,6 @@
-//! Daemon-level glue between the continuous listener and the LLM
-//! agent loop.
-//!
-//! Spawns two background tasks that share a shutdown channel with the
-//! rest of the daemon:
-//!
-//! 1. Utterance forwarder - subscribes to the listener's
-//!    broadcast, and for each completed transcript runs
-//!    `AppState::handle_query` (the same entry point that socket-side
-//!    queries use). Events from that turn are written to a throwaway
-//!    mpsc that we drain to `/dev/null`; no IPC client is attached.
-//!
-//! 2. Presence-gated toggler - watches presence transitions and
-//!    pauses the listener when the daemon goes `Sleeping`, resumes
-//!    when it goes `Active`. Prevents stray room speech from
-//!    repeatedly warming up llama-server.
-//!
-//! On shutdown both tasks observe the daemon's shutdown channel and
-//! exit cleanly; the shutdown path does not forcibly stop the
-//! listener (that's the daemon's `presence.sleep()` teardown).
+//! Routes continuous-listen utterances into the agent loop, and pauses
+//! the listener while the daemon sleeps so stray room speech does not
+//! keep waking llama-server.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,19 +11,11 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, error, info, warn};
 
-/// Join handles for the two tasks spawned by [`spawn`].
-///
-/// The daemon holds these until shutdown and awaits each in order.
 pub struct ListenDispatcherHandles {
-    /// Utterance-forwarder task: routes transcriptions to [`AppState::handle_query`].
     pub forwarder: JoinHandle<()>,
-    /// Presence-gate task: pauses/resumes the listener on sleep transitions.
     pub presence_gate: JoinHandle<()>,
 }
 
-/// Spawn the utterance-forwarder and presence-gate background tasks.
-///
-/// Returns [`ListenDispatcherHandles`] for the daemon to await at shutdown.
 pub fn spawn(
     state: Arc<AppState>,
     listener: Arc<dyn ContinuousListener>,

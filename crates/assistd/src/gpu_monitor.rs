@@ -1,24 +1,5 @@
-//! Automatic GPU contention monitor.
-//!
-//! Polls NVML on a configurable interval for processes holding VRAM that
-//! are not part of assistd (neither this process nor its llama-server
-//! child). When a non-assistd process exceeds the configured VRAM
-//! threshold, or its basename matches the denylist, the monitor drives
-//! [`PresenceManager`] to `Sleeping` to free all VRAM held by
-//! llama-server. Optional `gpu_auto_wake` brings the daemon back to
-//! `Active` once the contender disappears.
-//!
-//! The monitor is a *driver* of [`PresenceManager`], in the same role as
-//! the hotkey listener and the IPC `SetPresence` handler. It lives in
-//! the binary crate (not `assistd-core`) because it pulls in the
-//! optional, hardware-specific `nvml-wrapper` dependency behind the
-//! `daemon` feature.
-//!
-//! Graceful degradation: if `Nvml::init` fails (no NVIDIA GPU, missing
-//! driver), [`spawn_monitor`] returns `None` with a warning log. The
-//! daemon continues to run without contention detection rather than
-//! crashing; the very machines that lack NVIDIA GPUs are also the ones
-//! least likely to have VRAM contention.
+//! Sleeps the daemon when a foreign process contends for VRAM, and
+//! optionally wakes it again once the contender is gone.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,17 +14,9 @@ use tracing::{info, warn};
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
-/// Who owns the current Sleeping state, from the monitor's point of view.
-///
-/// `None` means "we did not cause this": either the daemon is not
-/// Sleeping, or it was put to sleep externally (user hit the hotkey, ran
-/// `assistd sleep`, etc.). In that case we must never auto-wake, even if
-/// a contending process later disappears: the user asked for Sleeping.
-///
-/// `Contention` means we put the daemon to sleep on the last poll
-/// because the named PID was contending for VRAM. When that condition
-/// goes away (the PID is gone or below threshold) AND `gpu_auto_wake` is
-/// set, it is safe to wake again.
+/// Whether the monitor caused the current `Sleeping` state. Only a sleep
+/// the monitor itself triggered may be auto-woken; a user-requested
+/// sleep stays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SleepCause {
     None,
@@ -57,19 +30,16 @@ enum Action {
     Wake,
 }
 
-/// VRAM usage for a single foreign PID, aggregated across all GPUs.
+/// VRAM usage for one foreign PID, summed across GPUs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProcSample {
     pub(crate) pid: u32,
-    /// Megabytes of VRAM used, summed across all devices.
     pub(crate) used_mb: u64,
-    /// Process name read from `/proc/<pid>/comm`.
+    /// From `/proc/<pid>/comm`.
     pub(crate) name: String,
 }
 
-/// Spawn the GPU contention monitor. Returns `None` when the feature is
-/// disabled in config or when `Nvml::init()` fails, the same idiom as
-/// [`crate::hotkey::spawn_listener`]. Logs once in either case.
+/// `None` when disabled in config or when NVML is unavailable.
 pub fn spawn_monitor(
     cfg: &SleepConfig,
     presence: Arc<PresenceManager>,
@@ -240,9 +210,7 @@ fn decide(
     }
 }
 
-/// Enumerate all processes holding VRAM, excluding `self_pid` and `llama_pid`.
-///
-/// Per-device VRAM is summed across all GPUs and converted to MiB.
+/// Every process holding VRAM except `self_pid` and `llama_pid`.
 pub(crate) fn collect_foreign_usage(
     nvml: &Nvml,
     self_pid: u32,
@@ -313,8 +281,6 @@ mod tests {
         }
     }
 
-    // --- decide: Active/Drowsy + trigger → Sleep ---------------------
-
     #[test]
     fn active_with_foreign_process_above_threshold_sleeps() {
         let s = [sample(42, 4096, "game")];
@@ -335,8 +301,6 @@ mod tests {
         assert!(matches!(a, Action::Sleep { .. }));
     }
 
-    // --- decide: no trigger → None -----------------------------------
-
     #[test]
     fn active_below_threshold_no_action() {
         let s = [sample(42, 500, "something")];
@@ -349,8 +313,6 @@ mod tests {
         let a = decide(&[], PresenceState::Active, &cfg(), SleepCause::None);
         assert_eq!(a, Action::None);
     }
-
-    // --- decide: Sleeping arms ---------------------------------------
 
     #[test]
     fn sleeping_with_contender_stays_sleeping() {
@@ -403,11 +365,8 @@ mod tests {
         assert_eq!(a, Action::None);
     }
 
-    // --- allowlist / denylist ----------------------------------------
-
     #[test]
     fn allowlist_suppresses_threshold_trigger() {
-        // firefox is allowlisted even though it's over threshold
         let s = [sample(42, 4096, "firefox")];
         let a = decide(&s, PresenceState::Active, &cfg(), SleepCause::None);
         assert_eq!(a, Action::None);
@@ -445,14 +404,12 @@ mod tests {
         assert_eq!(a, Action::None);
     }
 
-    // --- multi-sample ------------------------------------------------
-
     #[test]
     fn multi_sample_picks_a_triggering_entry() {
         let s = [
             sample(1, 100, "idle"),
-            sample(2, 8000, "firefox"), // allowlisted, not a trigger
-            sample(3, 3000, "game"),    // triggers
+            sample(2, 8000, "firefox"),
+            sample(3, 3000, "game"),
         ];
         let a = decide(&s, PresenceState::Active, &cfg(), SleepCause::None);
         assert!(matches!(
@@ -467,9 +424,6 @@ mod tests {
         assert!(name.contains(&u32::MAX.to_string()));
     }
 
-    // Live NVML smoke test. Skipped by default because it requires an
-    // actual NVIDIA driver; run explicitly with:
-    //   cargo test -p assistd-cli --features daemon -- --ignored live_nvml
     #[test]
     #[ignore = "requires NVIDIA driver"]
     fn live_nvml_collect_foreign_usage_does_not_panic() {

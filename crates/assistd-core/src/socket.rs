@@ -21,18 +21,12 @@ const EVENT_CHANNEL_CAPACITY: usize = 32;
 const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Backoff applied when `accept()` returns EMFILE/ENFILE. Without it the
-/// select! arm spins as fast as the runtime can poll because the error
-/// is returned synchronously from the syscall and nothing else changes
-/// to clear the condition. 100 ms gives in-flight connections time to
-/// finish and release file descriptors, while keeping the daemon
-/// responsive once recovery happens.
+/// select! arm spins, because the error is returned synchronously and
+/// nothing else changes to clear the condition.
 const FD_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(100);
 
-/// Returns true when an accept error reflects a file-descriptor limit
-/// (`EMFILE` — per-process limit, the common case; `ENFILE` —
-/// system-wide). We can't rely on `io::ErrorKind` here because EMFILE
-/// maps to the unstable `Uncategorized` variant on current stable Rust,
-/// so we match the raw errno directly.
+/// Matches the raw errno because EMFILE maps to the unstable
+/// `io::ErrorKind::Uncategorized` on current stable Rust.
 fn is_fd_exhaustion(err: &std::io::Error) -> bool {
     matches!(err.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE))
 }
@@ -67,10 +61,9 @@ pub enum SocketError {
     Json(#[from] serde_json::Error),
 }
 
-/// How long to wait for an existing socket to accept a probe connection
-/// before deciding it's stale. A live daemon's accept loop is reactive
-/// enough that 1s is generous; a hung socket past this point is treated
-/// as live to avoid clobbering it.
+/// How long an existing socket gets to accept a probe connection before
+/// it is treated as stale. A socket that hangs past this is treated as
+/// live to avoid clobbering it.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 async fn prepare_socket_path(path: &Path) -> Result<(), SocketError> {
@@ -102,15 +95,7 @@ async fn prepare_socket_path(path: &Path) -> Result<(), SocketError> {
     }
 }
 
-/// Serve the IPC socket at the default path from [`assistd_ipc::socket_path`].
-///
-/// Resolves the socket path and delegates to [`serve_at`]. Runs until `shutdown`
-/// resolves, then drains in-flight connections within the configured grace period.
-///
-/// # Errors
-///
-/// Returns [`SocketError`] if the stale socket file cannot be removed or the
-/// listener cannot bind.
+/// [`serve_at`] on the default path from [`assistd_ipc::socket_path`].
 pub async fn serve<F>(state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
 where
     F: Future<Output = ()>,
@@ -119,17 +104,9 @@ where
     serve_at(&path, state, shutdown).await
 }
 
-/// Serve the IPC socket at `path`, using `state` to dispatch requests.
-///
-/// Removes any stale socket file at `path`, binds a new [`UnixListener`],
-/// and runs the accept loop until `shutdown` resolves. After shutdown, in-flight
-/// connections are drained for up to `config.daemon.shutdown_grace_secs` before
-/// the listener closes. Removes the socket file on exit.
-///
-/// # Errors
-///
-/// Returns [`SocketError`] if the stale file cannot be removed, the listener
-/// cannot bind, or the accept loop encounters an unrecoverable I/O error.
+/// Serve the IPC socket at `path` until `shutdown` resolves, then drain
+/// in-flight connections for up to `daemon.shutdown_grace_secs`. A stale
+/// socket file at `path` is removed first; a live one is an error.
 pub async fn serve_at<F>(path: &Path, state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
 where
     F: Future<Output = ()>,
@@ -287,7 +264,6 @@ async fn handle_connection(
     let req = match serde_json::from_str::<Request>(line.trim()) {
         Ok(req) => req,
         Err(e) => {
-            // We can't read an id out of unparseable input; use empty.
             let err = Event::Error {
                 id: String::new(),
                 message: format!("invalid request: {e}"),
@@ -335,11 +311,7 @@ async fn handle_connection(
                 .read_line(&mut buf)
                 .await
             {
-                Ok(0) => {
-                    // Half-close from the client (one-shot CLI pattern).
-                    // Exit cleanly.
-                    break;
-                }
+                Ok(0) => break,
                 Ok(_) => {}
                 Err(e) => {
                     debug!("connection read loop ended: {e}");

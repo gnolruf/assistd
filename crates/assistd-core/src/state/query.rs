@@ -52,8 +52,6 @@ impl AppState {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let _cancel_on_return = cancel.clone().drop_guard();
-        // Publish the token so `Request::InterruptTurn` can reach it
-        // while this turn holds `agent_turn_lock`.
         *self.runtime.current_cancel.lock().await = Some(cancel.clone());
 
         let title_user_text = text.clone();
@@ -256,9 +254,8 @@ impl AppState {
                                     "voice_output.speak failed; sentence dropped"
                                 );
                             }
-                            // `speak()` may append PCM after a mid-synthesis
-                            // skip already cleared the queue; re-check the
-                            // epoch so the late audio doesn't play.
+                            // `speak()` may append PCM after a mid-synthesis skip
+                            // already cleared the queue.
                             if matches!(ctrl.should_speak(start_epoch), SpeakDecision::DropForSkip)
                             {
                                 ctrl.inner().cancel().await;
@@ -513,8 +510,7 @@ impl AppState {
 
         match gen_result {
             Ok(Ok(())) => {
-                // A cancelled turn returns Ok(()) without a LlmEvent::Done;
-                // the IPC contract still requires a terminal event.
+                // A cancelled turn ends without `LlmEvent::Done`.
                 if !done_emitted {
                     let _ = tx.send(Event::Done { id }).await;
                 }

@@ -27,18 +27,6 @@ pub use self::runtime::{ConversationContext, RuntimeState};
 pub use self::subsystems::{McpStartupFailure, Subsystems};
 
 /// Shared, long-lived daemon state handed to every request handler.
-///
-/// Decomposed into four orthogonal slots:
-/// - [`Self::config`]: static daemon configuration.
-/// - [`Self::subsystems`]: live backend handles (LLM, presence, voice,
-///   tools, window manager, vision revalidator).
-/// - [`Self::memory`]: persistence + embedding stack.
-/// - [`Self::runtime`]: per-process bookkeeping (locks, trackers,
-///   active conversation pointer).
-///
-/// All four substructs hold their internals as `Arc<...>` / cheap-clone
-/// types so the parent `Arc<AppState>` provides cross-handler sharing
-/// without extra indirection.
 pub struct AppState {
     pub config: Config,
     pub subsystems: Subsystems,
@@ -47,13 +35,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Construct a minimal `AppState` with stub memory and embedding backends.
-    ///
-    /// Subsystems are wired up from the supplied backends; memory + runtime
-    /// inherit no-op placeholders. Production callers (`crates/assistd/src/daemon.rs`)
-    /// assemble `AppState` from substruct builders directly (see [`Subsystems`],
-    /// [`MemoryStack`], [`RuntimeState`]); this constructor is retained for
-    /// tests that only need a thin shell.
+    /// An `AppState` with no-op memory and embedding backends.
     pub fn new(
         config: Config,
         llm: Arc<dyn LlmBackend>,
@@ -74,12 +56,9 @@ impl AppState {
         }
     }
 
-    /// Route a single incoming request to the appropriate subsystem.
-    ///
-    /// Events are streamed back through `tx`. When this function returns
-    /// (either `Ok` or `Err`), no further events will be sent. The caller
-    /// is responsible for surfacing `Err` to the client as an
-    /// [`Event::Error`] if one hasn't been emitted already.
+    /// Route one request to its handler, streaming events back on `tx`.
+    /// No events are sent after this returns; the caller surfaces `Err`
+    /// as an [`Event::Error`] if the handler did not already.
     pub async fn dispatch(self: Arc<Self>, req: Request, tx: mpsc::Sender<Event>) -> Result<()> {
         // Subscribe lives for the client's lifetime; no envelope cap.
         if matches!(req, Request::Subscribe { .. }) {

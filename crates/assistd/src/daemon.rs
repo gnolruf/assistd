@@ -1,14 +1,5 @@
-//! Daemon entrypoint: parses args, loads/validates config, brings up
-//! every subsystem (each via its own `*_init` sibling module), assembles
-//! [`AppState`], serves the IPC socket, and orchestrates an ordered
-//! shutdown when the run loop exits.
-//!
-//! Each subsystem (voice, wm, mcp, memory, embed) lives in its own
-//! `<name>_init.rs` module and exposes a composite "Subsystem" struct
-//! plus an `init(...)` async constructor. The daemon is a thin
-//! orchestrator: it composes the subsystems' Arc'd trait handles into
-//! [`AppState`] and retains the shutdown-relevant pieces in
-//! [`DaemonShutdown`] for ordered teardown.
+//! Daemon entrypoint: bring up every subsystem, serve the IPC socket,
+//! tear down in order.
 
 use anyhow::{Context, Result};
 use assistd_core::{AppState, Config, MemoryStack, PresenceManager, RuntimeState, Subsystems};
@@ -41,11 +32,7 @@ pub struct DaemonArgs {
     pub client_mode: bool,
 }
 
-/// Start the assistd daemon: load config, init subsystems, serve the IPC socket.
-///
-/// # Errors
-///
-/// Returns an error if config loading, validation, or the IPC socket fails.
+/// Run the daemon until shutdown.
 pub async fn run(args: DaemonArgs) -> Result<()> {
     init_tracing();
 
@@ -133,14 +120,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         info!("hotkey: deferred to client (--client-mode)");
         None
     } else {
-        // Route the daemon's own hotkey through the same IPC proxy
-        // the chat TUI uses. Press → Request::PttStart, release →
-        // Request::PttStop, both handled by `handle_ptt_start` /
-        // `handle_ptt_stop` over the daemon's Unix socket. That gets
-        // us the presence warmup (Whisper takes the GPU path instead
-        // of the CPU fallback) and the per-connection bus tee in
-        // `socket.rs` for free, instead of duplicating either inside
-        // the hotkey listener.
         let voice_proxy: Arc<dyn assistd_voice::VoiceInput> = Arc::new(
             ipc_voice_proxy::IpcVoiceProxy::new(Arc::new(assistd_ipc::IpcClient::new()), None),
         );
@@ -184,8 +163,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let mcp_tools = std::mem::take(&mut mcp.tools);
     let mcp_startup_failures = mcp.startup_failures.clone();
 
-    // Built before the tool registry so `reminisce` can hold a live
-    // view of the active session.
     let conversation_ctx = Arc::new(assistd_core::ConversationContext::from_arc(
         session_id_for_state,
         branch_id_for_state,
@@ -311,10 +288,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 }
 
 /// Write a default config file to the platform config directory.
-///
-/// # Errors
-///
-/// Returns an error if the config path cannot be determined or the file cannot be written.
 pub fn init_config() -> Result<()> {
     init_tracing();
     let path = Config::default_path()?;

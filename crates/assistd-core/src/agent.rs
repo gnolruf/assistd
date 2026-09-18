@@ -1,15 +1,8 @@
-//! Single-tool agent loop.
+//! Per-turn agent loop: step the LLM, dispatch the tool calls it
+//! requests, feed the results back, repeat until it answers.
 //!
-//! Orchestrates one "user turn": push the user's prompt into the backend's
-//! conversation state, call [`LlmBackend::step`] with the current tool
-//! schemas, dispatch any tool calls the model requests through the
-//! shared `ToolRegistry`, feed results back, and iterate. Emits
-//! [`LlmEvent::ToolCall`] / [`LlmEvent::ToolResult`] on `tx` so callers
-//! (daemon IPC, TUI) can surface the intermediate state to users.
-//!
-//! Invariant: the caller holds whatever turn-level lock is needed to
-//! prevent concurrent agent turns from interleaving in the backend's
-//! conversation state. `AppState::handle_query` owns that lock.
+//! Invariant: the caller serialises turns. Two concurrent `run_turn`
+//! calls would interleave in the backend's conversation state.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,27 +25,20 @@ use tracing::{debug, info, instrument, warn};
 /// hopeless and surface to the user.
 const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 
-/// Consecutive identical tool calls (same name and arguments) after
-/// which the model is treated as stuck. The loop then withdraws the
-/// tool schema and asks the model to answer from what it already has.
+/// Consecutive identical tool calls after which the model is treated
+/// as stuck and its tools are withdrawn.
 const DUPLICATE_CALL_LIMIT: usize = 3;
 
-/// Hard ceiling on tool-calling steps per turn. Stuck turns are caught
-/// far earlier by [`DUPLICATE_CALL_LIMIT`]; this only bounds a turn
-/// that keeps making *different* calls without ever answering, so it
-/// sits well above anything a legitimate task needs.
+/// Ceiling on tool-calling steps per turn. Only bounds a turn that keeps
+/// making *different* calls without answering; repeats are caught by
+/// [`DUPLICATE_CALL_LIMIT`] long before this.
 const MAX_TOOL_STEPS: u32 = 200;
 
-/// Long-lived agent dependencies. One `Agent` is constructed per
-/// daemon (or per test) and reused across many turns; only the
-/// per-turn input (user text, attachments, channels) varies between
-/// calls to [`Agent::run_turn`].
+/// Long-lived agent dependencies, reused across turns.
 ///
-/// `health` is the optional restart probe used to recover from
-/// llama-server crashes mid-turn. When `Some`, the loop reacts to
-/// [`LlmError::ServerRestarting`] by emitting a `Status` event,
-/// waiting for `ReadyState::Ready`, and re-running the same step
-/// once. Pass `None` for tests / mock backends that never crash.
+/// With a `health` probe the loop recovers from one llama-server crash
+/// per step: it waits for the supervisor to report ready and replays the
+/// step. Without one, a crash ends the turn.
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
@@ -60,7 +46,6 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Construct a new `Agent` with the given backend and tool registry.
     pub fn new(
         backend: Arc<dyn LlmBackend>,
         tools: Arc<ToolRegistry>,
@@ -73,35 +58,14 @@ impl Agent {
         }
     }
 
-    /// Run one agent turn end-to-end.
+    /// Run one agent turn: stream events on `tx` until the model answers,
+    /// the turn is cancelled, or the backend fails.
     ///
-    /// Lifecycle:
-    /// 1. Push `user_text` into conversation state.
-    /// 2. Call `backend.step(tools_schemas, tx)`.
-    /// 3. If the step returned text, send [`LlmEvent::Done`] and stop.
-    /// 4. Otherwise: for each requested tool call, emit
-    ///    [`LlmEvent::ToolCall`], dispatch it via the registry, emit
-    ///    [`LlmEvent::ToolResult`], and collect a [`ToolResultPayload`].
-    ///    After the loop, push the collected results back with
-    ///    `backend.push_tool_results(...)` and go to step 2.
-    /// 5. If the model repeats the same call [`DUPLICATE_CALL_LIMIT`]
-    ///    times in a row, or the turn reaches [`MAX_TOOL_STEPS`], emit a
-    ///    [`LlmEvent::Status`], withdraw the tool schema, and run one
-    ///    more step so the model answers from what it has gathered.
-    ///
-    /// Cancellation: if `tx` is closed (client disconnected) between
-    /// iterations, the loop returns `Ok(())` without running further tool
-    /// calls or LLM round trips. Callers can also explicitly cancel by
-    /// signalling the [`CancellationToken`]; useful when the daemon needs
-    /// to stop a long-running LLM step or tool call promptly (e.g. a slow
-    /// MCP tool when the user disconnects). The token is checked between
-    /// iterations and the LLM step / tool dispatch run inside a
-    /// `select!` against it so cancellation propagates without waiting
-    /// for the inner future to complete on its own.
-    ///
-    /// Pass [`CancellationToken::new`] (a fresh, never-cancelled token) if
-    /// the caller doesn't need explicit cancellation; the
-    /// `tx.is_closed()` path keeps existing behaviour for that case.
+    /// The turn stops without error when `tx` closes or `cancel` fires;
+    /// both are checked between iterations and raced against the LLM
+    /// step and each tool dispatch, so a slow tool is abandoned promptly.
+    /// A never-cancelled token is fine for callers that only rely on the
+    /// `tx` path.
     #[instrument(skip_all, name = "agent_turn")]
     pub async fn run_turn(
         &self,

@@ -1,12 +1,6 @@
-//! Global hotkey listener that drives presence cycling and push-to-talk
-//! voice capture.
-//!
-//! Registration uses the `global-hotkey` crate, which only supports X11 on
-//! Linux. On pure Wayland sessions we skip registration entirely and point
-//! the user at the compositor-binding fallback (`assistd cycle` or
-//! `assistd ptt-start/stop`). On mixed sessions (XWayland sets `DISPLAY`)
-//! we attempt registration but warn if it fails; the daemon continues to
-//! serve the socket regardless.
+//! Global hotkey listener for presence cycling and voice control.
+//! `global-hotkey` only supports X11 on Linux, so pure Wayland sessions
+//! get no listener and rely on compositor bindings to the CLI instead.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -22,9 +16,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-/// Validate every configured hotkey string before the daemon starts
-/// anything else. An empty string is accepted (the listener is
-/// disabled).
+/// Validate every configured hotkey string. Empty strings are accepted
+/// and disable that hotkey.
 pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
     if !presence.hotkey.is_empty() {
         HotKey::from_str(&presence.hotkey)
@@ -69,36 +62,17 @@ pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
     Ok(())
 }
 
-/// Subsystem handles the hotkey listener routes events to. Each
-/// optional handle gates its corresponding hotkey: when the handle is
-/// `None`, that hotkey is never registered. `voice` is the only
-/// required handle because PTT is the primary use case.
+/// Targets the hotkey listener routes events to. A `None` handle leaves
+/// its hotkey unregistered.
 pub struct Subsystems {
-    /// Presence manager for the cycle hotkey; `None` disables that hotkey.
     pub presence: Option<Arc<PresenceManager>>,
-    /// Voice input for PTT press/release events. In both the daemon and
-    /// the chat TUI this is an [`IpcVoiceProxy`](crate::ipc_voice_proxy::IpcVoiceProxy)
-    /// — `start_recording` issues `Request::PttStart` and
-    /// `stop_and_transcribe` issues `Request::PttStop`, which means the
-    /// daemon's `handle_ptt_start` / `handle_ptt_stop` run for both
-    /// callers (with the presence warmup that routes Whisper to GPU,
-    /// and the per-connection bus tee that lets the popup see the
-    /// streamed reply).
     pub voice: Arc<dyn VoiceInput>,
-    /// Continuous listener for the toggle hotkey; `None` disables it.
     pub listener: Option<Arc<dyn ContinuousListener>>,
-    /// TTS controller for the mute/skip hotkeys; `None` disables them.
     pub voice_output: Option<Arc<VoiceOutputController>>,
 }
 
-/// Spawn a background task that listens for the configured global
-/// hotkeys and routes events to the right subsystem.
-///
-/// The presence hotkey fires on press (cycles presence state). The
-/// voice hotkey fires on both press (starts PTT recording) and
-/// release (stops recording + transcribes). Returns `None` when no
-/// hotkeys are active or when registration failed; the daemon's
-/// socket-based fallback always works regardless.
+/// Spawn the hotkey listener. `None` when no hotkey is configured, the
+/// session is pure Wayland, or registration failed.
 pub fn spawn_listener(
     presence_cfg: &PresenceConfig,
     voice_cfg: &VoiceConfig,

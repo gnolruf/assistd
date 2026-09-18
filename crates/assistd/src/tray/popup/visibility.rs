@@ -59,10 +59,6 @@ pub async fn run(
                         if visible {
                             last_activity = Instant::now();
                         }
-                        // Restart the auto-hide countdown on each
-                        // held-open → idle edge (busy and speaking)
-                        // so the popup lingers for the full window
-                        // after the agent actually stops working.
                         let is_busy = tracker.is_busy();
                         let is_speaking = tracker.is_speaking();
                         if (was_busy && !is_busy) || (was_speaking && !is_speaking) {

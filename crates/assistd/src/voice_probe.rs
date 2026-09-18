@@ -1,11 +1,4 @@
-//! Binary-side [`assistd_voice::BusyProbe`] implementation.
-//!
-//! Bridges the voice crate's trait to the daemon's [`PresenceManager`]
-//! (for LLM-stream awareness) and an optional NVML handle (for
-//! foreign-process detection, reusing the same per-PID VRAM scan
-//! [`crate::gpu_monitor`] uses to drive auto-sleep). When NVML init
-//! fails the probe collapses to "no foreign busy", matching the
-//! graceful-degradation idiom in `gpu_monitor::spawn_monitor`.
+//! [`assistd_voice::BusyProbe`] backed by presence state and NVML.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,34 +10,26 @@ use nvml_wrapper::Nvml;
 
 use crate::gpu_monitor;
 
-/// Minimum per-process VRAM (MiB) to treat a foreign PID as actually
-/// contending for the GPU. Set low enough to catch a second model
-/// runner but above the noise floor of a desktop compositor with a
-/// backing shader on a secondary display.
+/// Minimum per-process VRAM (MiB) for a foreign PID to count as GPU
+/// contention. Above a desktop compositor's noise floor, below a second
+/// model runner.
 const FOREIGN_VRAM_THRESHOLD_MB: u64 = 100;
 
-/// [`BusyProbe`] implementation that checks both LLM-stream activity via
-/// [`PresenceManager`] and foreign NVML process VRAM usage.
+/// Reports the GPU busy while an LLM stream is in flight or a foreign
+/// process holds VRAM. Without NVML, foreign contention is never
+/// reported.
 pub struct PresenceGpuProbe {
     presence: Arc<PresenceManager>,
     nvml: Option<Arc<Nvml>>,
     self_pid: u32,
-    /// Process names allowed to hold VRAM without counting as
-    /// "foreign". Mirrors `sleep.gpu_allowlist`. In particular this
-    /// must include `llama-server`: in router mode the daemon's
-    /// `llama_pid` points at the router process, but the actual
-    /// model-running child (a separate PID) is the one holding VRAM,
-    /// and the per-PID `self_pid`/`llama_pid` filter doesn't catch it.
-    /// Without this, every transcription would fall back to CPU.
+    /// Process names that may hold VRAM without counting as foreign. Must
+    /// include `llama-server`: in router mode the model-running child is
+    /// a separate PID from the one presence tracks, so the PID filter
+    /// alone would push every transcription onto the CPU.
     allowlist: Vec<String>,
 }
 
 impl PresenceGpuProbe {
-    /// Build a probe. NVML initialization happens eagerly so the first
-    /// `foreign_gpu_busy()` call is cheap. A failing init logs at warn
-    /// and the probe reports "no foreign contention" from then on,
-    /// preserving the acceptance criterion on machines without
-    /// NVIDIA GPUs.
     pub fn new(presence: Arc<PresenceManager>, allowlist: Vec<String>) -> Self {
         let nvml = match Nvml::init() {
             Ok(n) => Some(Arc::new(n)),

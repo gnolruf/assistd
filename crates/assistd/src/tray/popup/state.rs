@@ -119,8 +119,8 @@ impl PopupTracker {
     pub fn ingest(&mut self, ev: &Event) -> PopupState {
         match ev {
             Event::Delta { id, .. } => {
-                // LastDelta carries the full coalesced body; appending
-                // the raw Delta on top would double-count tokens.
+                // `LastDelta` carries the whole body; appending here would
+                // double-count.
                 self.bring_turn_to_front(id);
                 self.in_flight.insert(id.clone());
                 self.turns.entry(id.clone()).or_default().activity = Some(TurnActivity::Streaming);

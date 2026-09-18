@@ -1,4 +1,4 @@
-//! Shared window-manager backend construction for daemon and tray popup.
+//! Window-manager backend construction shared by the daemon and the tray.
 
 use std::sync::Arc;
 
@@ -20,8 +20,8 @@ impl WmBackend {
     }
 }
 
-/// Resolve the configured compositor and start its backend, falling
-/// back to a disconnected [`WmBackend`] when none is available.
+/// Start the configured (or detected) compositor backend, disconnected
+/// when none is available.
 pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) -> WmBackend {
     let resolved = match config.compositor.compositor_type {
         CompositorType::Auto => match detect_from_env(
@@ -83,7 +83,7 @@ pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) 
         CompositorType::Hyprland => {
             tracing::info!(
                 target: "assistd::wm",
-                "hyprland backend not yet implemented; window operations disabled"
+                "no hyprland backend; window operations disabled"
             );
             WmBackend::disconnected()
         }

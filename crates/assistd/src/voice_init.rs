@@ -1,9 +1,4 @@
 //! Voice subsystem wiring for the daemon.
-//!
-//! Composes mic input, continuous listener, and TTS output from the
-//! `assistd-voice` crate primitives, plumbing the daemon-private
-//! [`PresenceGpuProbe`](crate::voice_probe::PresenceGpuProbe) into the
-//! GPU/CPU fallback queue.
 
 use std::sync::Arc;
 
@@ -19,17 +14,14 @@ use tracing::info;
 
 use crate::voice_probe::PresenceGpuProbe;
 
-/// Live handles for the voice subsystem, returned by [`init`].
 pub struct VoiceSubsystem {
-    /// Push-to-talk microphone input (no-op when voice is disabled).
     pub input: Arc<dyn VoiceInput>,
-    /// Continuous hands-free listener (no-op when continuous listen is disabled).
     pub listener: Arc<dyn ContinuousListener>,
-    /// TTS output controller wrapping the Piper synthesis backend.
     pub output: Arc<VoiceOutputController>,
 }
 
-/// Initialise mic input, continuous listener, and TTS output from config.
+/// Every handle degrades to a no-op when its feature is disabled or
+/// fails to initialise.
 pub async fn init(config: &Config, presence: &Arc<PresenceManager>) -> VoiceSubsystem {
     let (input, listener) = init_input(config, presence).await;
     let output_inner = init_output(config).await;

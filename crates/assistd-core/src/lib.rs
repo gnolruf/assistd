@@ -8,32 +8,10 @@
     )
 )]
 
-//! Daemon orchestration crate: the glue that wires every subsystem
-//! into a running `assistd` process.
-//!
-//! # Not a stable public library
-//!
-//! `assistd-core` is the aggregate facade consumed by the `assistd`
-//! binary (and a small amount of test code). It is **not** a versioned
-//! public API and external code should not depend on it. The re-exports
-//! below exist so the binary can `use assistd_core::*` instead of
-//! reaching into every subsystem crate.
-//!
-//! When adding a new subsystem crate (e.g. `assistd-memory`,
-//! `assistd-mcp`), define its typed API in that crate and re-export
-//! only the daemon-facing surface here, in its own `pub use` block
-//! grouped with a comment naming the upstream crate. Anything exported
-//! here that is not used outside `assistd-core` itself should be
-//! demoted to `pub(crate)`.
-//!
-//! # Modules
-//!
-//! - [`agent`]: per-turn LLM/tool loop driver.
-//! - [`presence`]: Active/Drowsy/Sleeping state machine and
-//!   `LlamaService` lifecycle.
-//! - [`socket`]: Unix-socket IPC server (line-delimited JSON).
-//! - [`state`]: `AppState` request dispatcher; one handler per
-//!   `assistd_ipc::Request` variant.
+//! Daemon orchestration: the agent loop, presence state machine, IPC
+//! socket server, and the `AppState` request dispatcher. Not a stable
+//! public API; the re-exports exist so the `assistd` binary can reach
+//! every subsystem through one crate.
 
 pub mod agent;
 pub mod presence;
@@ -87,39 +65,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
-/// Subsystem handles the daemon injects into [`build_tools`]. Bundled
-/// into one struct so the call site is a flat field initialiser rather
-/// than a dozen positional arguments.
-///
-/// Field notes:
-///
-/// - `overflow_dir` is owned so the caller chooses the path; kept as a
-///   distinct field for future call sites that need a different spill
-///   directory.
-/// - `confirmation_gate` is consulted by the destructive commands that
-///   spawn subprocesses (`bash` and `wm open`, which share one policy).
-///   The daemon passes an `IpcConfirmationGate` that forwards prompts to
-///   the active IPC client (the TUI is one such client) and falls through
-///   to deny when no router is in scope.
-/// - `vision_gate` is a shared, runtime-mutable flag (see
-///   [`assistd_tools::VisionGate`]) initialised from a `/props` probe of
-///   the running llama-server. When the gate reports `supported = false`,
-///   the image-producing commands (`see`, `screenshot`) still register
-///   but their `run()` short-circuits with the
-///   `[error] …: vision not available …` line and their `summary()` flips
-///   so the LLM sees the unavailability in its tool schema. The gate is
-///   re-evaluated on every command invocation, so a daemon-side
-///   revalidation that flips it after a model swap takes effect without
-///   rebuilding the registry.
-/// - `memory_ops` is the combined CRUD façade backing the LLM-callable
-///   `remember` and `recall` tools. The daemon passes a SQLite-backed
-///   handle.
-/// - `window_manager` backs the LLM-callable `wm` command. The daemon
-///   passes either a connected `I3Backend` (when `[compositor].type =
-///   "i3"` and the i3 socket is reachable) or [`NoWindowManager`] when
-///   the configured backend is unavailable; the latter makes every `wm`
-///   subcommand short-circuit with a uniform "compositor not connected"
-///   error rather than failing per-subcommand.
+/// Subsystem handles [`build_tools`] wires into the tool registry.
 pub struct BuildToolsDeps<'a> {
     pub config: &'a Config,
     pub overflow_dir: PathBuf,
@@ -139,8 +85,7 @@ pub struct BuildToolsDeps<'a> {
 
 /// Build the tool registry consumed by the daemon. Clears and recreates
 /// [`BuildToolsDeps::overflow_dir`] so per-process spill files land in a
-/// known-empty location at every startup. See [`BuildToolsDeps`] for the
-/// role of each injected handle.
+/// known-empty location at every startup.
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     let BuildToolsDeps {
         config,
@@ -275,36 +220,21 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     Ok(Arc::new(tools))
 }
 
-/// Cache the running llama-server's model id alongside the
-/// [`VisionGate`] state, so a re-probe can detect a model swap and
-/// flip vision availability without rebuilding the tool registry.
-///
-/// The daemon constructs one [`VisionRevalidator`] at startup, hands it
-/// to [`AppState`], and the per-query handler calls [`revalidate`] at
-/// the top of every turn. The probe is cheap (one local HTTP `GET
-/// /props` with a 2-second timeout), and we only mutate the gate when
-/// the cached model id actually changes, so a steady-state daemon
-/// pays a single round-trip per turn and never thrashes the gate.
-///
-/// [`revalidate`]: VisionRevalidator::revalidate
+/// Caches the running llama-server's model id alongside the
+/// [`assistd_tools::VisionGate`] so a re-probe can detect a model swap
+/// and flip vision availability without rebuilding the tool registry.
+/// The gate only changes when the cached model id changes.
 pub struct VisionRevalidator {
     gate: Arc<assistd_tools::VisionGate>,
     cached_model: tokio::sync::Mutex<Option<String>>,
     host: String,
     port: u16,
-    /// Configured model id (e.g. `unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_XL`).
-    /// Used to look up the live child server in router mode; see
-    /// [`assistd_llm::probe_capabilities_routed`].
     model_name: String,
 }
 
 impl VisionRevalidator {
-    /// Construct a new revalidator and wrap it in an `Arc`.
-    ///
-    /// `initial_model_id` is the model id known at startup; `None` means the
-    /// first probe result will be accepted unconditionally as the baseline.
-    /// `model_name` is the configured model — required so router-mode
-    /// probes can find the corresponding child server.
+    /// `initial_model_id` is the model id known at startup; `None` accepts
+    /// the first probe result unconditionally as the baseline.
     pub fn new(
         gate: Arc<assistd_tools::VisionGate>,
         initial_model_id: Option<String>,
@@ -342,9 +272,7 @@ impl VisionRevalidator {
         self.apply_probe(probe).await;
     }
 
-    /// Apply a probe result to the cache and gate. Split out from
-    /// [`Self::revalidate`] so unit tests can drive the swap logic
-    /// without standing up an HTTP server.
+    /// Apply a probe result to the cache and gate.
     pub async fn apply_probe(&self, probe: assistd_llm::VisionState) {
         if probe.model_id.is_none() {
             return;
@@ -362,17 +290,40 @@ impl VisionRevalidator {
         }
     }
 
-    /// Returns a reference to the shared [`assistd_tools::VisionGate`] this
-    /// revalidator manages.
     pub fn gate(&self) -> &Arc<assistd_tools::VisionGate> {
         &self.gate
     }
 }
 
+fn expand_config_tilde(raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        match std::env::var("HOME") {
+            Ok(home) => PathBuf::from(home).join(rest),
+            Err(_) => PathBuf::from(raw),
+        }
+    } else if raw == "~" {
+        match std::env::var("HOME") {
+            Ok(home) => PathBuf::from(home),
+            Err(_) => PathBuf::from(raw),
+        }
+    } else {
+        PathBuf::from(raw)
+    }
+}
+
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 #[cfg(test)]
-mod vision_revalidator_tests {
+mod tests {
     use super::*;
     use assistd_llm::VisionState;
+
+    #[test]
+    fn version_is_not_empty() {
+        assert!(!version().is_empty());
+    }
 
     fn make_revalidator(gate_initial: bool, cached_model: Option<&str>) -> Arc<VisionRevalidator> {
         VisionRevalidator::new(
@@ -436,36 +387,5 @@ mod vision_revalidator_tests {
         })
         .await;
         assert!(rev.gate().supported());
-    }
-}
-
-fn expand_config_tilde(raw: &str) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(home).join(rest),
-            Err(_) => PathBuf::from(raw),
-        }
-    } else if raw == "~" {
-        match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(home),
-            Err(_) => PathBuf::from(raw),
-        }
-    } else {
-        PathBuf::from(raw)
-    }
-}
-
-/// Returns the version string of the assistd-core crate.
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_is_not_empty() {
-        assert!(!version().is_empty());
     }
 }

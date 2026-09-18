@@ -1,18 +1,12 @@
-//! Client for `assistd memory <action>` subcommands.
-//!
-//! Mirrors the shape of [`crate::presence::run`]: opens the daemon's
-//! Unix socket, sends one [`Request::Memory*`], prints incoming events
-//! to stdout, and exits on `Event::Done` / `Event::Error`. All routing
-//! goes through the daemon; there's no direct-SQLite fallback (the
-//! daemon owns the writer, and a CLI grabbing the file lock while it's
-//! mid-write would risk corruption).
+//! `memory` subcommands. Everything goes through the daemon; the CLI
+//! never opens the SQLite file itself, because the daemon owns the
+//! writer.
 
 use anyhow::Result;
 use assistd_ipc::{Event, IpcClient, Request};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
-/// Arguments for the `memory` subcommand.
 #[derive(Args)]
 pub struct MemoryArgs {
     #[command(subcommand)]
@@ -83,12 +77,6 @@ impl MemoryAction {
     }
 }
 
-/// Dispatch a `memory` subcommand to the daemon and print the response.
-///
-/// # Errors
-///
-/// Returns an error if the IPC connection fails or the daemon sends an
-/// unexpected terminal event.
 pub async fn run(args: MemoryArgs) -> Result<()> {
     let forget_target = match &args.action {
         MemoryAction::Forget { id } => Some(*id),

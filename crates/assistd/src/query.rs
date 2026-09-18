@@ -1,5 +1,4 @@
-//! Client for the `query` subcommand: sends a one-shot text (with optional
-//! image attachments) to the running daemon and streams the response to stdout.
+//! `query` subcommand.
 
 use anyhow::Result;
 use assistd_ipc::{Event, ImageAttachment, IpcClient, IpcClientError, Request};
@@ -9,7 +8,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// Maximum chars shown from a tool-call `command` argument in the status line.
 const PREVIEW_MAX_CHARS: usize = 80;
 
 fn truncate_preview(s: &str) -> String {
@@ -23,7 +21,6 @@ fn truncate_preview(s: &str) -> String {
     out
 }
 
-/// Arguments for the `query` subcommand.
 #[derive(Args)]
 pub struct QueryArgs {
     /// Text to send to the daemon.
@@ -35,12 +32,6 @@ pub struct QueryArgs {
     pub images: Vec<PathBuf>,
 }
 
-/// Send a query to the daemon and stream the response to stdout.
-///
-/// # Errors
-///
-/// Returns an error if image loading fails, the IPC connection fails,
-/// or the daemon sends an unexpected terminal event.
 pub async fn run(args: QueryArgs) -> Result<()> {
     let mut wire_attachments = Vec::with_capacity(args.images.len());
     for path in &args.images {
@@ -90,10 +81,7 @@ pub async fn run(args: QueryArgs) -> Result<()> {
                 stdout.flush()?;
                 wrote_anything = wrote_anything || !text.is_empty();
             }
-            Event::ReasoningDelta { .. } => {
-                // CLI `assistd query` streams only the model's visible
-                // reply; chain-of-thought is silently dropped.
-            }
+            Event::ReasoningDelta { .. } => {}
             Event::ToolCall { name, args, .. } => {
                 let preview = args
                     .get("command")

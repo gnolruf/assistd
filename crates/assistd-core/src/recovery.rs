@@ -1,18 +1,6 @@
-//! Structured recovery vocabulary, supervised task spawning, and the
-//! daemon panic hook.
-//!
-//! Three responsibilities:
-//!
-//! 1. **Vocabulary**: [`Component`] and [`RecoverySeverity`] give every
-//!    recovery event a canonical `severity`/`component` field pair.
-//!    Filterable with `RUST_LOG=assistd::recovery=info`.
-//! 2. **Panic isolation**: [`spawn_supervised`] wraps a `tokio::spawn`
-//!    so panics in detached tasks emit a recovery event instead of
-//!    silently disappearing into a never-joined `JoinHandle`.
-//! 3. **Daemon panic hook**: [`install_panic_hook`] replaces the global
-//!    panic hook so that any panic also tries to SIGTERM the running
-//!    llama-server process group before propagating, keeping a child
-//!    from being orphaned when the daemon goes down via panic.
+//! Recovery vocabulary ([`Component`], [`RecoverySeverity`]), supervised
+//! task spawning, and the daemon panic hook. Recovery events log under
+//! `target = "assistd::recovery"`.
 
 use std::any::Any;
 use std::future::Future;
@@ -24,22 +12,20 @@ use tokio::task::JoinHandle;
 
 use crate::PresenceManager;
 
-/// Severity of a recovery event. Maps 1:1 to a `tracing` log level and
-/// to the `severity` string field on the wire (`Event::Status`).
+/// Severity of a recovery event; maps 1:1 to a `tracing` level and to the
+/// `severity` field of `Event::Status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoverySeverity {
-    /// Routine recovery progress (e.g. "replay started"). `info` level.
+    /// Routine recovery progress.
     Info,
-    /// A recoverable failure was observed (e.g. "llama-server crashed,
-    /// restarting"). `warn` level.
+    /// A recoverable failure was observed.
     Warning,
-    /// The recovery itself failed and the operation will not complete
-    /// (e.g. "supervisor degraded; replay aborted"). `error` level.
+    /// The recovery itself failed; the operation will not complete.
     Error,
 }
 
 impl RecoverySeverity {
-    /// Returns the canonical lowercase wire string for this severity level.
+    /// Lowercase wire string.
     pub fn as_str(self) -> &'static str {
         match self {
             RecoverySeverity::Info => "info",
@@ -49,41 +35,27 @@ impl RecoverySeverity {
     }
 }
 
-/// Canonical component identifier carried as a structured field on every
-/// recovery event. New subsystems get a new variant rather than a free-form
-/// string so log filters and dashboards can rely on a fixed vocabulary.
+/// Subsystem a recovery event is attributed to. A fixed vocabulary so log
+/// filters can rely on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Component {
-    /// Per-turn agent loop (tool dispatch, runaway detection).
     Agent,
-    /// llama-server lifecycle, restarts, in-flight crash detection.
     Llm,
-    /// MCP transport / supervisor.
     Mcp,
-    /// Voice input/output (whisper, piper, mic, listen).
     Voice,
-    /// SQLite-backed memory + conversation persistence.
     Memory,
-    /// Window-manager backend (i3/sway/hyprland).
     Wm,
-    /// Embedding service + worker task.
     Embed,
-    /// Global hotkey listener.
     Hotkey,
-    /// Top-level daemon orchestration (signal handler, panics with no
-    /// more specific subsystem attribution).
+    /// Top-level orchestration, and panics with no more specific home.
     Daemon,
-    /// Idle-monitor task that auto-drowses/sleeps.
     IdleMonitor,
-    /// GPU-monitor task that auto-sleeps when a foreground GPU consumer
-    /// (game, ML training) shows up.
     GpuMonitor,
-    /// Continuous-listen utterance dispatcher.
     ListenDispatcher,
 }
 
 impl Component {
-    /// Returns the canonical lowercase wire string for this component identifier.
+    /// Lowercase wire string.
     pub fn as_str(self) -> &'static str {
         match self {
             Component::Agent => "agent",
@@ -102,14 +74,9 @@ impl Component {
     }
 }
 
-/// Emit a structured recovery event at the given severity level.
-///
-/// Wraps the corresponding `tracing` macro so every recovery event is
-/// emitted under `target = "assistd::recovery"` with `severity` and
-/// `component` fields. Additional structured fields (pid, attempt,
-/// ran_for_secs, etc.) are passed via the trailing tt-munch.
-///
-/// # Example
+/// Emit a structured recovery event: the `tracing` macro for the
+/// severity, under `target = "assistd::recovery"`, with `severity`,
+/// `component`, and `event` fields ahead of the caller's own.
 ///
 /// ```ignore
 /// recovery_event!(
@@ -151,15 +118,8 @@ macro_rules! recovery_event {
     }};
 }
 
-/// `tokio::spawn` a future and emit a recovery event if it panics.
-///
-/// Detached tokio tasks normally swallow panics into their never-joined
-/// `JoinHandle`. This wrapper joins the handle from a sentinel task so
-/// the panic surfaces as a structured `target = "assistd::recovery"`
-/// log line attributed to the named component.
-///
-/// `name` is a short identifier (e.g. `"signal_handler"`) included as
-/// the `task` field on the panic event.
+/// `tokio::spawn` a detached future and emit a recovery event if it
+/// panics, instead of losing the panic in a never-joined `JoinHandle`.
 pub fn spawn_supervised<F>(name: &'static str, component: Component, future: F) -> JoinHandle<()>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -193,15 +153,10 @@ where
     })
 }
 
-/// Replace the global panic hook with one that logs structured recovery
-/// fields and best-effort SIGTERMs the running llama-server before
-/// chaining to the previous hook.
-///
-/// `presence` is a `Weak` so the hook does not keep the manager alive
-/// past daemon shutdown. Pass `Arc::downgrade(&presence_arc)`.
-///
-/// Idempotent: installing twice replaces the previous chain, so tests can
-/// safely re-install in setup.
+/// Replace the global panic hook with one that logs a recovery event and
+/// best-effort SIGTERMs the llama-server process group before chaining
+/// to the previous hook. `presence` is `Weak` so the hook never keeps the
+/// manager alive past shutdown.
 pub fn install_panic_hook(presence: Weak<PresenceManager>) {
     static PRESENCE: Mutex<Option<Weak<PresenceManager>>> = Mutex::new(None);
     *PRESENCE.lock() = Some(presence);

@@ -1,15 +1,10 @@
-//! Shared IPC client error mapping for the CLI subcommands.
-//!
-//! Every CLI subcommand wants the same "daemon not running" error
-//! formatted with the socket path so the user knows where to look.
-//! Centralized here so a path change or message tweak lands in one
-//! place.
+//! Shared IPC plumbing for the CLI subcommands.
 
 use anyhow::Error;
 use assistd_ipc::IpcClientError;
 
-/// Convert an [`IpcClientError`] into an `anyhow::Error`, special-casing
-/// `NotReachable` with a CLI-friendly "daemon is not running" message.
+/// Convert an [`IpcClientError`] to `anyhow`, phrasing `NotReachable`
+/// as "daemon is not running" with the socket path.
 pub fn map_not_reachable(e: IpcClientError) -> Error {
     match e {
         IpcClientError::NotReachable { path, source } => Error::msg(format!(

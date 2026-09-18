@@ -1,8 +1,4 @@
-//! Client for the push-to-talk CLI subcommands: `ptt-start`,
-//! `ptt-stop`. Each sends exactly one IPC request over the daemon's
-//! Unix socket, prints event lines as they arrive (voice state, the
-//! final transcription, and for `ptt-stop' the streaming LLM
-//! response), and exits on `Event::Done` or `Event::Error`.
+//! `ptt-start` and `ptt-stop` subcommands.
 
 use std::io::Write;
 
@@ -10,7 +6,6 @@ use anyhow::Result;
 use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
 use uuid::Uuid;
 
-/// Which phase of the PTT cycle the CLI is asking the daemon to run.
 #[derive(Debug, Clone, Copy)]
 pub enum PttAction {
     Start,
@@ -26,12 +21,6 @@ impl PttAction {
     }
 }
 
-/// Send a PTT command to the daemon and stream the response to stdout.
-///
-/// # Errors
-///
-/// Returns an error if the IPC connection fails or the daemon sends an
-/// unexpected terminal event.
 pub async fn run(action: PttAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     let mut stream = IpcClient::new()
@@ -63,10 +52,7 @@ pub async fn run(action: PttAction) -> Result<()> {
                 stdout.flush()?;
                 wrote_delta = wrote_delta || !text.is_empty();
             }
-            Event::ReasoningDelta { .. } => {
-                // Non-interactive PTT consumers expect only the model's
-                // visible reply; chain-of-thought is silently dropped.
-            }
+            Event::ReasoningDelta { .. } => {}
             Event::ToolCall { name, args, .. } => {
                 let preview = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 if preview.is_empty() {

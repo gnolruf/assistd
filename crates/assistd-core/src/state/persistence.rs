@@ -1,36 +1,21 @@
-//! Fire-and-forget persistence pipeline and in-flight drain helper.
-//!
-//! `persist_message_fire_and_forget` spawns the writer task; every
-//! handler that mutates branches (`/fork`, `/switch`, `/undo`,
-//! `/resume`, `/new`) calls `drain_persistence_inflight` while holding
-//! the agent turn lock so previously-spawned writes have a chance to
-//! land before the next branch op.
+//! Fire-and-forget message persistence and the drain that branch
+//! handlers run before mutating branches.
 
 use super::AppState;
 use assistd_embed::EmbedJob;
 use assistd_memory::{ChunkingConfig, PersistedMessage, PersistedRole, TurnId, chunk_message};
 
 impl AppState {
-    /// Fire-and-forget persist of one message. Spawns a task that:
-    /// 1. Writes the row via the conversation store (returns row id).
-    /// 2. If the row is a User/Assistant text message and embedding is
-    ///    enabled, splits the content into chunks, persists each chunk
-    ///    (returns chunk id), and `try_send`s an `EmbedJob::Chunk` for
-    ///    each so the embedder task can index it.
-    ///
-    /// The whole pipeline is on a `tokio::spawn`'d task so the dispatch
-    /// loop never waits on disk or the embed queue. `try_send` (not
-    /// `send`) so a wedged embedder doesn't backpressure persistence;
-    /// dropped jobs just leave the chunk row unindexed for the next
-    /// backfill pass.
+    /// Persist one message on a background task, then chunk and queue it
+    /// for embedding when it is user or assistant text. A full embed
+    /// queue drops the job; the chunk row stays unindexed until reindex.
     ///
     /// Writes land in call order: each task takes the previous task's
-    /// completion signal off `runtime.persist_chain` — a synchronous
-    /// swap, before any await — and waits on it before appending. The
-    /// store assigns `seq` in arrival order, so without the chain a
-    /// tool result could be sequenced ahead of the call that produced
-    /// it and `/switch` would replay a jumbled transcript. Chunking and
-    /// embedding stay off the chain; they run after the signal fires.
+    /// completion signal off `runtime.persist_chain` in a synchronous
+    /// swap and awaits it before appending. The store assigns `seq` in
+    /// arrival order, so without the chain a tool result could be
+    /// sequenced ahead of the call that produced it. Chunking and
+    /// embedding run after the signal fires and stay off the chain.
     pub(super) fn persist_message_fire_and_forget(
         &self,
         turn: Option<TurnId>,
@@ -121,9 +106,8 @@ impl AppState {
         });
     }
 
-    /// Block until every previously-spawned `persist_message_fire_and_forget`
-    /// task has landed. Held inside `agent_turn_lock` so no new tasks
-    /// can spawn during the wait.
+    /// Wait, briefly, for every queued persistence task to land. Callers
+    /// hold `agent_turn_lock` so no new tasks spawn during the wait.
     pub(super) async fn drain_persistence_inflight(&self) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while !self.runtime.persistence_tracker.is_empty() && std::time::Instant::now() < deadline {
