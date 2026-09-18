@@ -117,7 +117,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
 
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(64);
-    let voice_pipeline = voice::spawn(
+    let voice_pipeline = voice::spawn_pipeline(
         &config,
         ipc.clone(),
         chat_tx.clone(),

@@ -1,6 +1,6 @@
 //! Handlers for the `Memory*` variants of `Request`.
 
-use super::AppState;
+use super::{AppState, send_error};
 use anyhow::Result;
 use assistd_ipc::Event;
 use std::sync::Arc;
@@ -27,12 +27,7 @@ impl AppState {
         let vec = match self.memory.embedder.embed(query).await {
             Ok(v) => v,
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("embed failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("embed failed: {e:#}")).await;
                 return Err(e);
             }
         };
@@ -61,12 +56,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("semantic search failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("semantic search failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -85,12 +75,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("memory save failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("memory save failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -115,12 +100,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("memory load failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("memory load failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -144,12 +124,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("memory list failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("memory list failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -167,12 +142,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("memory delete failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("memory delete failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -206,12 +176,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("memory list_all failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("memory list_all failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -236,12 +201,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("memory forget failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("memory forget failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -258,12 +218,12 @@ impl AppState {
     ) -> Result<()> {
         let model = self.memory.embedder.model().to_string();
         if model.is_empty() {
-            let _ = tx
-                .send(Event::Error {
-                    id,
-                    message: "embedding subsystem disabled; cannot reindex".to_string(),
-                })
-                .await;
+            send_error(
+                &tx,
+                id,
+                "embedding subsystem disabled; cannot reindex".to_string(),
+            )
+            .await;
             return Ok(());
         }
         let dim = self.memory.embedder.dim() as i64;
@@ -271,12 +231,7 @@ impl AppState {
         let chunks = match self.memory.semantic.chunks_missing_embedding(&model).await {
             Ok(v) => v,
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("reindex: list missing chunks: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("reindex: list missing chunks: {e:#}")).await;
                 return Err(e);
             }
         };
@@ -288,12 +243,7 @@ impl AppState {
         {
             Ok(v) => v,
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("reindex: list missing memories: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("reindex: list missing memories: {e:#}")).await;
                 return Err(e);
             }
         };
@@ -317,85 +267,63 @@ impl AppState {
             })
             .await;
 
-        let mut done = 0u32;
-        for (chunk_id, text) in chunks {
-            match self.memory.embedder.embed(text).await {
-                Ok(vec) => {
-                    let blob = assistd_memory::vector_to_blob(&vec);
-                    if let Err(e) = self
-                        .memory
-                        .semantic
-                        .store_chunk_embedding(chunk_id, model.clone(), dim, blob)
-                        .await
-                    {
-                        tracing::warn!(
-                            target: "assistd::memory",
-                            chunk_id,
-                            error = %e,
-                            "reindex: store_chunk_embedding failed"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "assistd::memory",
-                        chunk_id,
-                        error = %e,
-                        "reindex: embed chunk failed"
-                    );
-                }
-            }
-            done = done.saturating_add(1);
-            let _ = tx
-                .send(Event::ReindexProgress {
-                    id: id.clone(),
-                    kind: "chunks".to_string(),
-                    done,
-                    total: chunks_total,
-                })
-                .await;
-        }
-
-        let mut done = 0u32;
-        for (memory_id, value) in memories {
-            match self.memory.embedder.embed(value).await {
-                Ok(vec) => {
-                    let blob = assistd_memory::vector_to_blob(&vec);
-                    if let Err(e) = self
-                        .memory
-                        .semantic
-                        .store_memory_embedding(memory_id, model.clone(), dim, blob)
-                        .await
-                    {
-                        tracing::warn!(
-                            target: "assistd::memory",
-                            memory_id,
-                            error = %e,
-                            "reindex: store_memory_embedding failed"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "assistd::memory",
-                        memory_id,
-                        error = %e,
-                        "reindex: embed memory failed"
-                    );
-                }
-            }
-            done = done.saturating_add(1);
-            let _ = tx
-                .send(Event::ReindexProgress {
-                    id: id.clone(),
-                    kind: "memories".to_string(),
-                    done,
-                    total: memories_total,
-                })
-                .await;
-        }
+        let semantic = &self.memory.semantic;
+        self.reindex_items(&id, &tx, "chunks", chunks, |chunk_id, blob| {
+            semantic.store_chunk_embedding(chunk_id, model.clone(), dim, blob)
+        })
+        .await;
+        self.reindex_items(&id, &tx, "memories", memories, |memory_id, blob| {
+            semantic.store_memory_embedding(memory_id, model.clone(), dim, blob)
+        })
+        .await;
 
         let _ = tx.send(Event::Done { id }).await;
         Ok(())
+    }
+
+    async fn reindex_items<F, Fut>(
+        &self,
+        id: &str,
+        tx: &mpsc::Sender<Event>,
+        kind: &str,
+        items: Vec<(i64, String)>,
+        store: F,
+    ) where
+        F: Fn(i64, Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let total = items.len() as u32;
+        for (done, (item_id, text)) in (1u32..).zip(items) {
+            match self.memory.embedder.embed(text).await {
+                Ok(vec) => {
+                    if let Err(e) = store(item_id, assistd_memory::vector_to_blob(&vec)).await {
+                        tracing::warn!(
+                            target: "assistd::memory",
+                            kind,
+                            item_id,
+                            error = %e,
+                            "reindex: store embedding failed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "assistd::memory",
+                        kind,
+                        item_id,
+                        error = %e,
+                        "reindex: embed failed"
+                    );
+                }
+            }
+            let _ = tx
+                .send(Event::ReindexProgress {
+                    id: id.to_string(),
+                    kind: kind.to_string(),
+                    done,
+                    total,
+                })
+                .await;
+        }
     }
 }

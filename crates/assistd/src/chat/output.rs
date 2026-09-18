@@ -520,34 +520,13 @@ fn wrapped_tool_rows(b: &ToolBlock, width: u16, verbose: bool) -> usize {
         .max(1);
     let body_lines = split_body(&b.output);
     let collapsed = !verbose && !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
-    let stderr_idxs: Vec<usize> = body_lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.starts_with("[stderr] "))
-        .map(|(i, _)| i)
-        .collect();
-    let visible_idxs: Vec<usize> = if collapsed {
-        let mut idxs: Vec<usize> = (0..COLLAPSED_HEAD_LINES.min(body_lines.len())).collect();
-        for &si in &stderr_idxs {
-            if !idxs.contains(&si) {
-                idxs.push(si);
-            }
-        }
-        idxs.sort_unstable();
-        idxs
-    } else {
-        (0..body_lines.len()).collect()
-    };
+    let visible_idxs = visible_body_indices(&body_lines, collapsed);
     for i in &visible_idxs {
         let n = textwrap::wrap(&body_lines[*i], inner_w).len().max(1);
         rows += n;
     }
-    if collapsed {
-        let hidden = body_lines.len() - visible_idxs.len();
-        if hidden > 0 {
-            // The collapsed-tail line is short; treat it as one row.
-            rows += 1;
-        }
+    if collapsed && body_lines.len() > visible_idxs.len() {
+        rows += 1;
     }
     rows + 2
 }
@@ -639,26 +618,8 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, ve
     );
 
     let body_lines = split_body(&b.output);
-    let stderr_idxs: Vec<usize> = body_lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.starts_with("[stderr] "))
-        .map(|(i, _)| i)
-        .collect();
-
     let collapsed = !verbose && !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
-    let visible_idxs: Vec<usize> = if collapsed {
-        let mut idxs: Vec<usize> = (0..COLLAPSED_HEAD_LINES.min(body_lines.len())).collect();
-        for &si in &stderr_idxs {
-            if !idxs.contains(&si) {
-                idxs.push(si);
-            }
-        }
-        idxs.sort_unstable();
-        idxs
-    } else {
-        (0..body_lines.len()).collect()
-    };
+    let visible_idxs = visible_body_indices(&body_lines, collapsed);
 
     for i in &visible_idxs {
         let line = &body_lines[*i];
@@ -716,6 +677,25 @@ fn push_barred(
             Span::styled(chunk.into_owned(), content_style),
         ]));
     }
+}
+
+/// Body lines to draw: all of them, or the leading
+/// [`COLLAPSED_HEAD_LINES`] plus every stderr line when collapsed.
+fn visible_body_indices(body_lines: &[String], collapsed: bool) -> Vec<usize> {
+    if !collapsed {
+        return (0..body_lines.len()).collect();
+    }
+    let head = COLLAPSED_HEAD_LINES.min(body_lines.len());
+    let mut idxs: Vec<usize> = (0..head).collect();
+    idxs.extend(
+        body_lines
+            .iter()
+            .enumerate()
+            .skip(head)
+            .filter(|(_, l)| l.starts_with("[stderr] "))
+            .map(|(i, _)| i),
+    );
+    idxs
 }
 
 fn split_body(output: &str) -> Vec<String> {

@@ -1,6 +1,6 @@
 //! Handlers for the presence state-machine variants of `Request`.
 
-use super::AppState;
+use super::{AppState, send_error};
 use anyhow::Result;
 use assistd_ipc::{Event, PresenceState};
 use std::sync::Arc;
@@ -25,12 +25,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("set_presence failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("set_presence failed: {e:#}")).await;
                 Err(e)
             }
         }
@@ -69,12 +64,7 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("cycle failed: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("cycle failed: {e:#}")).await;
                 Err(e)
             }
         }

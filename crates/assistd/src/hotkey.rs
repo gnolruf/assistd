@@ -16,48 +16,86 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+/// The five hotkeys the listener can register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Binding {
+    Presence,
+    Voice,
+    Listen,
+    Toggle,
+    Skip,
+}
+
+const BINDINGS: [Binding; 5] = [
+    Binding::Presence,
+    Binding::Voice,
+    Binding::Listen,
+    Binding::Toggle,
+    Binding::Skip,
+];
+
+impl Binding {
+    fn config_path(self) -> &'static str {
+        match self {
+            Binding::Presence => "presence.hotkey",
+            Binding::Voice => "voice.hotkey",
+            Binding::Listen => "voice.continuous.hotkey",
+            Binding::Toggle => "voice.synthesis.toggle_hotkey",
+            Binding::Skip => "voice.synthesis.skip_hotkey",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Binding::Presence => "press to cycle",
+            Binding::Voice => "hold to talk",
+            Binding::Listen => "press to toggle",
+            Binding::Toggle => "press to mute/unmute",
+            Binding::Skip => "press to abort current response",
+        }
+    }
+
+    /// The configured spec, or `None` when this binding's feature is
+    /// off or its hotkey is empty.
+    fn spec<'a>(self, presence: &'a PresenceConfig, voice: &'a VoiceConfig) -> Option<&'a str> {
+        let (enabled, spec) = match self {
+            Binding::Presence => (true, &presence.hotkey),
+            Binding::Voice => (voice.enabled, &voice.hotkey),
+            Binding::Listen => (
+                voice.enabled && voice.continuous.enabled,
+                &voice.continuous.hotkey,
+            ),
+            Binding::Toggle => (
+                voice.enabled && voice.synthesis.enabled,
+                &voice.synthesis.toggle_hotkey,
+            ),
+            Binding::Skip => (
+                voice.enabled && voice.synthesis.enabled,
+                &voice.synthesis.skip_hotkey,
+            ),
+        };
+        (enabled && !spec.is_empty()).then_some(spec.as_str())
+    }
+
+    /// Whether the listener has a target to route this binding to.
+    fn has_target(self, subsystems: &Subsystems) -> bool {
+        match self {
+            Binding::Presence => subsystems.presence.is_some(),
+            Binding::Voice => true,
+            Binding::Listen => subsystems.listener.is_some(),
+            Binding::Toggle | Binding::Skip => subsystems.voice_output.is_some(),
+        }
+    }
+}
+
 /// Validate every configured hotkey string. Empty strings are accepted
 /// and disable that hotkey.
 pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
-    if !presence.hotkey.is_empty() {
-        HotKey::from_str(&presence.hotkey)
-            .map(|_| ())
-            .with_context(|| format!("invalid presence.hotkey {:?}", presence.hotkey))?;
-    }
-    if voice.enabled && !voice.hotkey.is_empty() {
-        HotKey::from_str(&voice.hotkey)
-            .map(|_| ())
-            .with_context(|| format!("invalid voice.hotkey {:?}", voice.hotkey))?;
-    }
-    if voice.enabled && voice.continuous.enabled && !voice.continuous.hotkey.is_empty() {
-        HotKey::from_str(&voice.continuous.hotkey)
-            .map(|_| ())
-            .with_context(|| {
-                format!(
-                    "invalid voice.continuous.hotkey {:?}",
-                    voice.continuous.hotkey
-                )
-            })?;
-    }
-    if voice.enabled && voice.synthesis.enabled && !voice.synthesis.toggle_hotkey.is_empty() {
-        HotKey::from_str(&voice.synthesis.toggle_hotkey)
-            .map(|_| ())
-            .with_context(|| {
-                format!(
-                    "invalid voice.synthesis.toggle_hotkey {:?}",
-                    voice.synthesis.toggle_hotkey
-                )
-            })?;
-    }
-    if voice.enabled && voice.synthesis.enabled && !voice.synthesis.skip_hotkey.is_empty() {
-        HotKey::from_str(&voice.synthesis.skip_hotkey)
-            .map(|_| ())
-            .with_context(|| {
-                format!(
-                    "invalid voice.synthesis.skip_hotkey {:?}",
-                    voice.synthesis.skip_hotkey
-                )
-            })?;
+    for binding in BINDINGS {
+        if let Some(spec) = binding.spec(presence, voice) {
+            HotKey::from_str(spec)
+                .with_context(|| format!("invalid {} {spec:?}", binding.config_path()))?;
+        }
     }
     Ok(())
 }
@@ -79,50 +117,13 @@ pub fn spawn_listener(
     subsystems: Subsystems,
     shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
-    let presence_hotkey = if presence_cfg.hotkey.is_empty() || subsystems.presence.is_none() {
-        None
-    } else {
-        Some(presence_cfg.hotkey.clone())
-    };
-    let voice_hotkey = if voice_cfg.enabled && !voice_cfg.hotkey.is_empty() {
-        Some(voice_cfg.hotkey.clone())
-    } else {
-        None
-    };
-    let listen_hotkey = if voice_cfg.enabled
-        && voice_cfg.continuous.enabled
-        && !voice_cfg.continuous.hotkey.is_empty()
-        && subsystems.listener.is_some()
-    {
-        Some(voice_cfg.continuous.hotkey.clone())
-    } else {
-        None
-    };
-    let toggle_hotkey = if voice_cfg.enabled
-        && voice_cfg.synthesis.enabled
-        && !voice_cfg.synthesis.toggle_hotkey.is_empty()
-        && subsystems.voice_output.is_some()
-    {
-        Some(voice_cfg.synthesis.toggle_hotkey.clone())
-    } else {
-        None
-    };
-    let skip_hotkey = if voice_cfg.enabled
-        && voice_cfg.synthesis.enabled
-        && !voice_cfg.synthesis.skip_hotkey.is_empty()
-        && subsystems.voice_output.is_some()
-    {
-        Some(voice_cfg.synthesis.skip_hotkey.clone())
-    } else {
-        None
-    };
+    let specs: Vec<(Binding, &str)> = BINDINGS
+        .into_iter()
+        .filter(|b| b.has_target(&subsystems))
+        .filter_map(|b| b.spec(presence_cfg, voice_cfg).map(|spec| (b, spec)))
+        .collect();
 
-    if presence_hotkey.is_none()
-        && voice_hotkey.is_none()
-        && listen_hotkey.is_none()
-        && toggle_hotkey.is_none()
-        && skip_hotkey.is_none()
-    {
+    if specs.is_empty() {
         info!(
             target: "assistd::hotkey",
             "no global hotkeys configured; hotkey listener disabled"
@@ -148,234 +149,197 @@ pub fn spawn_listener(
         }
     };
 
-    let hotkeys = Hotkeys {
-        presence: register(
-            &manager,
-            presence_hotkey,
-            "presence.hotkey",
-            "press to cycle",
-        ),
-        voice: register(&manager, voice_hotkey, "voice.hotkey", "hold to talk"),
-        listen: register(
-            &manager,
-            listen_hotkey,
-            "voice.continuous.hotkey",
-            "press to toggle",
-        ),
-        toggle: register(
-            &manager,
-            toggle_hotkey,
-            "voice.synthesis.toggle_hotkey",
-            "press to mute/unmute",
-        ),
-        skip: register(
-            &manager,
-            skip_hotkey,
-            "voice.synthesis.skip_hotkey",
-            "press to abort current response",
-        ),
-    };
-
-    if hotkeys.is_empty() {
+    let registered: Vec<(Binding, HotKey)> = specs
+        .into_iter()
+        .filter_map(|(binding, spec)| register(&manager, binding, spec).map(|h| (binding, h)))
+        .collect();
+    if registered.is_empty() {
         return None;
     }
 
-    Some(tokio::spawn(hotkeys.run(manager, subsystems, shutdown)))
+    Some(tokio::spawn(run_listener(
+        manager, registered, subsystems, shutdown,
+    )))
 }
 
-fn register(
-    manager: &GlobalHotKeyManager,
-    spec: Option<String>,
-    config_path: &str,
-    hint: &str,
-) -> Option<HotKey> {
-    let s = spec?;
-    let h = match HotKey::from_str(&s) {
+fn register(manager: &GlobalHotKeyManager, binding: Binding, spec: &str) -> Option<HotKey> {
+    let config_path = binding.config_path();
+    let hotkey = match HotKey::from_str(spec) {
         Ok(h) => h,
         Err(e) => {
-            warn!(target: "assistd::hotkey", "failed to parse {config_path} {s:?}: {e}");
+            warn!(target: "assistd::hotkey", "failed to parse {config_path} {spec:?}: {e}");
             return None;
         }
     };
-    match manager.register(h) {
+    match manager.register(hotkey) {
         Ok(()) => {
-            info!(target: "assistd::hotkey", "{config_path} {s:?} registered ({hint})");
-            Some(h)
+            info!(
+                target: "assistd::hotkey",
+                "{config_path} {spec:?} registered ({})",
+                binding.hint()
+            );
+            Some(hotkey)
         }
         Err(e) => {
-            warn!(target: "assistd::hotkey", "failed to register {config_path} {s:?}: {e}");
+            warn!(target: "assistd::hotkey", "failed to register {config_path} {spec:?}: {e}");
             None
         }
     }
 }
 
-struct Hotkeys {
-    presence: Option<HotKey>,
-    voice: Option<HotKey>,
-    listen: Option<HotKey>,
-    toggle: Option<HotKey>,
-    skip: Option<HotKey>,
-}
+async fn run_listener(
+    manager: GlobalHotKeyManager,
+    registered: Vec<(Binding, HotKey)>,
+    subsystems: Subsystems,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let receiver = GlobalHotKeyEvent::receiver();
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-impl Hotkeys {
-    fn is_empty(&self) -> bool {
-        self.presence.is_none()
-            && self.voice.is_none()
-            && self.listen.is_none()
-            && self.toggle.is_none()
-            && self.skip.is_none()
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                while let Ok(event) = receiver.try_recv() {
+                    let binding = registered
+                        .iter()
+                        .find(|(_, h)| h.id() == event.id)
+                        .map(|(b, _)| *b);
+                    if let Some(binding) = binding {
+                        on_hotkey(binding, event.state, &subsystems);
+                    }
+                }
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
     }
 
-    async fn run(
-        self,
-        manager: GlobalHotKeyManager,
-        subsystems: Subsystems,
-        mut shutdown: watch::Receiver<bool>,
-    ) {
-        let presence_id = self.presence.map(|h| h.id());
-        let voice_id = self.voice.map(|h| h.id());
-        let listen_id = self.listen.map(|h| h.id());
-        let toggle_id = self.toggle.map(|h| h.id());
-        let skip_id = self.skip.map(|h| h.id());
-        let receiver = GlobalHotKeyEvent::receiver();
-        let mut tick = tokio::time::interval(Duration::from_millis(50));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    while let Ok(event) = receiver.try_recv() {
-                        if Some(event.id) == presence_id
-                            && event.state == HotKeyState::Pressed
-                            && let Some(ref p_arc) = subsystems.presence
-                        {
-                            let p = p_arc.clone();
-                            tokio::spawn(async move {
-                                match p.cycle().await {
-                                    Ok(target) => info!(
-                                        target: "assistd::hotkey",
-                                        "hotkey cycled presence → {target:?}"
-                                    ),
-                                    Err(e) => warn!(
-                                        target: "assistd::hotkey",
-                                        "hotkey cycle failed: {e:#}"
-                                    ),
-                                }
-                            });
-                        } else if Some(event.id) == voice_id {
-                            let v = subsystems.voice.clone();
-                            match event.state {
-                                HotKeyState::Pressed => {
-                                    let vo = subsystems.voice_output.clone();
-                                    tokio::spawn(async move {
-                                        if let Some(ctrl) = vo {
-                                            ctrl.interrupt().await;
-                                        }
-                                        if let Err(e) = v.start_recording().await {
-                                            warn!(
-                                                target: "assistd::hotkey",
-                                                "voice start_recording failed: {e:#}"
-                                            );
-                                        }
-                                    });
-                                }
-                                HotKeyState::Released => {
-                                    tokio::spawn(async move {
-                                        match v.stop_and_transcribe().await {
-                                            Ok(text) if text.trim().is_empty() => {
-                                                info!(
-                                                    target: "assistd::hotkey",
-                                                    "voice released: no speech detected (VAD)"
-                                                );
-                                            }
-                                            Ok(text) => {
-                                                info!(
-                                                    target: "assistd::hotkey",
-                                                    chars = text.chars().count(),
-                                                    "voice released: transcription complete"
-                                                );
-                                            }
-                                            Err(e) => warn!(
-                                                target: "assistd::hotkey",
-                                                "voice stop_and_transcribe failed: {e:#}"
-                                            ),
-                                        }
-                                    });
-                                }
-                            }
-                        } else if Some(event.id) == listen_id
-                            && event.state == HotKeyState::Pressed
-                            && let Some(ref listener_arc) = subsystems.listener
-                        {
-                            let l = listener_arc.clone();
-                            tokio::spawn(async move {
-                                let result = if l.is_active() {
-                                    l.stop().await.map(|()| false)
-                                } else {
-                                    l.start().await.map(|()| true)
-                                };
-                                match result {
-                                    Ok(active) => info!(
-                                        target: "assistd::hotkey",
-                                        active,
-                                        "hotkey toggled continuous listening"
-                                    ),
-                                    Err(e) => warn!(
-                                        target: "assistd::hotkey",
-                                        "continuous-listen toggle failed: {e:#}"
-                                    ),
-                                }
-                            });
-                        } else if Some(event.id) == toggle_id
-                            && event.state == HotKeyState::Pressed
-                            && let Some(ref ctrl_arc) = subsystems.voice_output
-                        {
-                            let ctrl = ctrl_arc.clone();
-                            tokio::spawn(async move {
-                                let new_state = !ctrl.enabled();
-                                ctrl.set_enabled(new_state).await;
-                                info!(
-                                    target: "assistd::hotkey",
-                                    enabled = new_state,
-                                    "hotkey toggled voice output"
-                                );
-                            });
-                        } else if Some(event.id) == skip_id
-                            && event.state == HotKeyState::Pressed
-                            && let Some(ref ctrl_arc) = subsystems.voice_output
-                        {
-                            let ctrl = ctrl_arc.clone();
-                            tokio::spawn(async move {
-                                ctrl.skip().await;
-                                info!(
-                                    target: "assistd::hotkey",
-                                    "hotkey skipped current voice-output response"
-                                );
-                            });
-                        }
-                    }
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        break;
-                    }
-                }
-            }
+    for (binding, hotkey) in registered {
+        if let Err(e) = manager.unregister(hotkey) {
+            warn!(
+                target: "assistd::hotkey",
+                "failed to unregister {} on shutdown: {e}",
+                binding.config_path()
+            );
         }
+    }
+}
 
-        for (h, label) in [
-            (self.presence, "presence"),
-            (self.voice, "voice"),
-            (self.listen, "continuous-listen"),
-            (self.toggle, "voice-output toggle"),
-            (self.skip, "voice-output skip"),
-        ] {
-            if let Some(h) = h
-                && let Err(e) = manager.unregister(h)
-            {
-                warn!(target: "assistd::hotkey", "failed to unregister {label} hotkey on shutdown: {e}");
-            }
+/// Route one hotkey event to its subsystem on a fresh task, so the
+/// listener never blocks on a slow transition.
+fn on_hotkey(binding: Binding, state: HotKeyState, subsystems: &Subsystems) {
+    let pressed = state == HotKeyState::Pressed;
+    match binding {
+        Binding::Presence if pressed => {
+            let Some(presence) = subsystems.presence.clone() else {
+                return;
+            };
+            tokio::spawn(async move {
+                match presence.cycle().await {
+                    Ok(target) => info!(
+                        target: "assistd::hotkey",
+                        "hotkey cycled presence → {target:?}"
+                    ),
+                    Err(e) => warn!(
+                        target: "assistd::hotkey",
+                        "hotkey cycle failed: {e:#}"
+                    ),
+                }
+            });
         }
+        Binding::Voice if pressed => {
+            let voice = subsystems.voice.clone();
+            let voice_output = subsystems.voice_output.clone();
+            tokio::spawn(async move {
+                if let Some(ctrl) = voice_output {
+                    ctrl.interrupt().await;
+                }
+                if let Err(e) = voice.start_recording().await {
+                    warn!(
+                        target: "assistd::hotkey",
+                        "voice start_recording failed: {e:#}"
+                    );
+                }
+            });
+        }
+        Binding::Voice => {
+            let voice = subsystems.voice.clone();
+            tokio::spawn(async move {
+                match voice.stop_and_transcribe().await {
+                    Ok(text) if text.trim().is_empty() => {
+                        info!(
+                            target: "assistd::hotkey",
+                            "voice released: no speech detected (VAD)"
+                        );
+                    }
+                    Ok(text) => {
+                        info!(
+                            target: "assistd::hotkey",
+                            chars = text.chars().count(),
+                            "voice released: transcription complete"
+                        );
+                    }
+                    Err(e) => warn!(
+                        target: "assistd::hotkey",
+                        "voice stop_and_transcribe failed: {e:#}"
+                    ),
+                }
+            });
+        }
+        Binding::Listen if pressed => {
+            let Some(listener) = subsystems.listener.clone() else {
+                return;
+            };
+            tokio::spawn(async move {
+                let result = if listener.is_active() {
+                    listener.stop().await.map(|()| false)
+                } else {
+                    listener.start().await.map(|()| true)
+                };
+                match result {
+                    Ok(active) => info!(
+                        target: "assistd::hotkey",
+                        active,
+                        "hotkey toggled continuous listening"
+                    ),
+                    Err(e) => warn!(
+                        target: "assistd::hotkey",
+                        "continuous-listen toggle failed: {e:#}"
+                    ),
+                }
+            });
+        }
+        Binding::Toggle if pressed => {
+            let Some(ctrl) = subsystems.voice_output.clone() else {
+                return;
+            };
+            tokio::spawn(async move {
+                let new_state = !ctrl.enabled();
+                ctrl.set_enabled(new_state).await;
+                info!(
+                    target: "assistd::hotkey",
+                    enabled = new_state,
+                    "hotkey toggled voice output"
+                );
+            });
+        }
+        Binding::Skip if pressed => {
+            let Some(ctrl) = subsystems.voice_output.clone() else {
+                return;
+            };
+            tokio::spawn(async move {
+                ctrl.skip().await;
+                info!(
+                    target: "assistd::hotkey",
+                    "hotkey skipped current voice-output response"
+                );
+            });
+        }
+        Binding::Presence | Binding::Listen | Binding::Toggle | Binding::Skip => {}
     }
 }
 

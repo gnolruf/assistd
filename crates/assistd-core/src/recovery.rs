@@ -5,10 +5,11 @@
 use std::any::Any;
 use std::future::Future;
 use std::sync::Weak;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::PresenceManager;
 
@@ -198,6 +199,37 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
 
         previous(info);
     }));
+}
+
+/// Wait up to `grace` for every task in `tasks` to finish, then abort
+/// the rest. Panics are logged as `"{what} task panicked"`.
+pub async fn drain_join_set(tasks: &mut JoinSet<()>, grace: Duration, what: &str) {
+    let in_flight = tasks.len();
+    if in_flight == 0 {
+        return;
+    }
+    tracing::info!(
+        grace_secs = grace.as_secs(),
+        in_flight,
+        "draining in-flight {what} tasks"
+    );
+    let drained = tokio::time::timeout(grace, async {
+        while let Some(res) = tasks.join_next().await {
+            if let Err(e) = res
+                && e.is_panic()
+            {
+                tracing::error!("{what} task panicked: {e}");
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            remaining = tasks.len(),
+            "shutdown grace expired; aborting remaining {what} tasks"
+        );
+        tasks.shutdown().await;
+    }
 }
 
 fn panic_message(payload: &(dyn Any + Send)) -> String {

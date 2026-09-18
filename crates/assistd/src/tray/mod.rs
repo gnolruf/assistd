@@ -47,7 +47,7 @@ pub async fn run(args: TrayArgs) -> Result<()> {
     let ipc = IpcClient::new();
 
     #[cfg(feature = "tray-popup")]
-    let popup_handle = popup::spawn(&config, ipc.clone()).await?;
+    let popup_handle = popup::spawn_popup(&config, ipc.clone()).await?;
     #[cfg(feature = "tray-popup")]
     let popup_sink = popup_handle.as_ref().map(|h| h.sink.clone());
     #[cfg(not(feature = "tray-popup"))]

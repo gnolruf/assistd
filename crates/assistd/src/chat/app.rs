@@ -566,35 +566,44 @@ impl App {
             .map(|s| s.next())
             .unwrap_or(PresenceState::Active);
         self.set_notice(&format!("cycling → {}", presence_label(target)));
+        let req = Request::Cycle {
+            id: Uuid::new_v4().to_string(),
+        };
+        self.spawn_one_shot(req, WireStream::Status, "cycle");
+    }
+
+    /// Send `req` on a fresh connection and pump its events into the
+    /// reducer tagged `stream`, reporting connection or read failures as
+    /// a `WireError` on the same stream.
+    fn spawn_one_shot(&self, req: Request, stream: WireStream, label: &'static str) {
         let ipc = self.ipc.clone();
         let chat_tx = self.chat_tx.clone();
         tokio::spawn(async move {
-            let req = Request::Cycle {
-                id: Uuid::new_v4().to_string(),
-            };
-            match ipc.one_shot(req).await {
-                Ok(mut stream) => {
-                    while let Ok(Some(ev)) = stream.next_event().await {
-                        let terminal = ev.is_terminal();
-                        let _ = chat_tx
-                            .send(ChatEvent::Wire {
-                                stream: WireStream::Status,
-                                event: ev,
-                            })
-                            .await;
-                        if terminal {
-                            break;
-                        }
-                    }
-                }
+            let wire_error = |message: String| ChatEvent::WireError { stream, message };
+            let mut events = match ipc.one_shot(req).await {
+                Ok(s) => s,
                 Err(e) => {
                     let _ = chat_tx
-                        .send(ChatEvent::WireError {
-                            stream: WireStream::Status,
-                            message: format!("cycle: {e}"),
-                        })
+                        .send(wire_error(format!("{label} connect: {e}")))
                         .await;
+                    return;
                 }
+            };
+            loop {
+                let outcome = match events.next_event().await {
+                    Ok(Some(event)) => {
+                        let terminal = event.is_terminal();
+                        let _ = chat_tx.send(ChatEvent::Wire { stream, event }).await;
+                        if terminal {
+                            return;
+                        }
+                        continue;
+                    }
+                    Ok(None) => wire_error(format!("{label}: daemon closed stream mid-flight")),
+                    Err(e) => wire_error(format!("{label} read: {e}")),
+                };
+                let _ = chat_tx.send(outcome).await;
+                return;
             }
         });
     }
@@ -765,37 +774,7 @@ impl App {
                 fork_point_seq,
                 session_title,
                 ..
-            } => {
-                self.session_title = session_title
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .map(str::to_string);
-                match self.in_flight_branch_op {
-                    Some(BranchOp::Switch) => {
-                        self.output.clear();
-                        let msg = match session_title.as_deref().map(str::trim) {
-                            Some(t) if !t.is_empty() => {
-                                format!("[switched to conversation '{t}' on branch '{name}']")
-                            }
-                            _ => format!("[switched to new conversation on branch '{name}']"),
-                        };
-                        self.output.push_info(&msg);
-                    }
-                    Some(BranchOp::Resume) | Some(BranchOp::New) => {
-                        self.output.clear();
-                    }
-                    _ => {
-                        let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
-                            (Some(p), Some(seq)) => {
-                                format!("[forked from '{p}'@seq{seq} into '{name}']")
-                            }
-                            _ => format!("[branch '{name}' is now active]"),
-                        };
-                        self.output.push_info(&detail);
-                    }
-                }
-            }
+            } => self.on_branch_switched(name, parent_branch_name, fork_point_seq, session_title),
             Event::SessionTitle { title, .. } => {
                 self.session_title = Some(title);
             }
@@ -804,46 +783,12 @@ impl App {
                 content,
                 tool_name,
                 ..
-            } => match role.as_str() {
-                "user" => {
-                    self.output.push_user(&content);
-                }
-                "assistant" => {
-                    if !content.is_empty() {
-                        self.output.begin_assistant();
-                        self.output.append_assistant(&content);
-                        self.output.finish_assistant();
-                    }
-                }
-                "tool" => {
-                    let name = tool_name.unwrap_or_default();
-                    self.output.push_tool_block(name, content, 0, 0);
-                }
-                "system" => {
-                    self.output.push_info(&content);
-                }
-                _ => self.output.push_info(&content),
-            },
+            } => self.on_history_entry(&role, content, tool_name),
             Event::UndoApplied {
                 removed_messages,
                 last_user_text,
                 ..
-            } => {
-                if removed_messages == 0 {
-                    self.set_notice("nothing to undo");
-                } else {
-                    self.output.pop_last_user_exchange();
-                    let preview = last_user_text
-                        .as_deref()
-                        .map(|t| t.chars().take(48).collect::<String>())
-                        .unwrap_or_default();
-                    if preview.is_empty() {
-                        self.set_notice(&format!("undid {removed_messages} message(s)"));
-                    } else {
-                        self.set_notice(&format!("undid: {preview}"));
-                    }
-                }
-            }
+            } => self.on_undo_applied(removed_messages, last_user_text),
             Event::Done { .. } => match stream {
                 WireStream::Reply => self.finish_reply(now),
                 WireStream::Branch => self.finish_branch_op(),
@@ -864,6 +809,79 @@ impl App {
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. }
             | Event::LastDelta { .. } => {}
+        }
+    }
+
+    /// Always reports the now-active session, so it is also how the
+    /// status bar learns that a switch changed or cleared the title.
+    fn on_branch_switched(
+        &mut self,
+        name: String,
+        parent_branch_name: Option<String>,
+        fork_point_seq: Option<i64>,
+        session_title: Option<String>,
+    ) {
+        let title = session_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        self.session_title = title.map(str::to_string);
+        match self.in_flight_branch_op {
+            Some(BranchOp::Switch) => {
+                self.output.clear();
+                let msg = match title {
+                    Some(t) => format!("[switched to conversation '{t}' on branch '{name}']"),
+                    None => format!("[switched to new conversation on branch '{name}']"),
+                };
+                self.output.push_info(&msg);
+            }
+            Some(BranchOp::Resume) | Some(BranchOp::New) => {
+                self.output.clear();
+            }
+            _ => {
+                let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
+                    (Some(p), Some(seq)) => {
+                        format!("[forked from '{p}'@seq{seq} into '{name}']")
+                    }
+                    _ => format!("[branch '{name}' is now active]"),
+                };
+                self.output.push_info(&detail);
+            }
+        }
+    }
+
+    fn on_history_entry(&mut self, role: &str, content: String, tool_name: Option<String>) {
+        match role {
+            "user" => self.output.push_user(&content),
+            "assistant" => {
+                if !content.is_empty() {
+                    self.output.begin_assistant();
+                    self.output.append_assistant(&content);
+                    self.output.finish_assistant();
+                }
+            }
+            "tool" => {
+                self.output
+                    .push_tool_block(tool_name.unwrap_or_default(), content, 0, 0);
+            }
+            _ => self.output.push_info(&content),
+        }
+    }
+
+    fn on_undo_applied(&mut self, removed_messages: u32, last_user_text: Option<String>) {
+        if removed_messages == 0 {
+            self.set_notice("nothing to undo");
+            return;
+        }
+        self.output.pop_last_user_exchange();
+        let preview = last_user_text
+            .as_deref()
+            .map(|t| t.chars().take(48).collect::<String>())
+            .unwrap_or_default();
+        if preview.is_empty() {
+            self.set_notice(&format!("undid {removed_messages} message(s)"));
+        } else {
+            self.set_notice(&format!("undid: {preview}"));
         }
     }
 
@@ -1025,44 +1043,31 @@ impl App {
     }
 
     fn submit_typed(&mut self, text: String) {
-        let is_attach = text.starts_with("/attach ") || text.trim() == "/attach";
-        if is_attach && !self.vision_enabled {
-            self.output.push_error(
-                "[error] attach: vision not available: model does not support \
-                 images. Use: a model with mmproj loaded",
-            );
-            self.set_notice("vision not available");
-            return;
-        }
-        if let Some(rest) = text.strip_prefix("/attach ") {
-            self.handle_attach(rest.trim());
-            return;
-        }
-        if text.trim() == "/attach" {
-            self.output
-                .push_error("/attach: expected a path. Usage: /attach <path>");
-            self.set_notice("/attach: missing path");
-            return;
-        }
-        if let Some(name) = parse_slash_arg(&text, "/fork") {
-            self.handle_fork_cmd(name.to_string());
-            return;
-        }
-        if let Some(target) = parse_slash_arg(&text, "/switch") {
-            self.handle_switch_cmd(target.to_string());
-            return;
-        }
-        if text.trim() == "/undo" {
-            self.handle_undo_cmd();
-            return;
-        }
-        if text.trim() == "/new" {
-            self.handle_new_cmd();
-            return;
-        }
-        if text.trim() == "/resume" {
-            self.handle_resume_cmd();
-            return;
+        match SlashCommand::parse(&text) {
+            Some(SlashCommand::Attach(_)) if !self.vision_enabled => {
+                self.output.push_error(
+                    "[error] attach: vision not available: model does not support \
+                     images. Use: a model with mmproj loaded",
+                );
+                self.set_notice("vision not available");
+                return;
+            }
+            Some(SlashCommand::Attach(path)) => {
+                if path.is_empty() {
+                    self.output
+                        .push_error("/attach: expected a path. Usage: /attach <path>");
+                    self.set_notice("/attach: missing path");
+                } else {
+                    self.handle_attach(&path);
+                }
+                return;
+            }
+            Some(SlashCommand::Fork(name)) => return self.handle_fork_cmd(name),
+            Some(SlashCommand::Switch(target)) => return self.handle_switch_cmd(target),
+            Some(SlashCommand::Undo) => return self.handle_undo_cmd(),
+            Some(SlashCommand::New) => return self.handle_new_cmd(),
+            Some(SlashCommand::Resume) => return self.handle_resume_cmd(),
+            None => {}
         }
         if self.generating {
             self.set_notice("still generating, please wait");
@@ -1171,56 +1176,7 @@ impl App {
         }
         self.in_flight_branch_op = Some(op);
         self.branches_buffer.clear();
-        let ipc = self.ipc.clone();
-        let chat_tx = self.chat_tx.clone();
-        tokio::spawn(async move {
-            let mut stream = match ipc.one_shot(req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = chat_tx
-                        .send(ChatEvent::WireError {
-                            stream: WireStream::Branch,
-                            message: format!("branch connect: {e}"),
-                        })
-                        .await;
-                    return;
-                }
-            };
-            loop {
-                match stream.next_event().await {
-                    Ok(Some(ev)) => {
-                        let terminal = ev.is_terminal();
-                        let _ = chat_tx
-                            .send(ChatEvent::Wire {
-                                stream: WireStream::Branch,
-                                event: ev,
-                            })
-                            .await;
-                        if terminal {
-                            return;
-                        }
-                    }
-                    Ok(None) => {
-                        let _ = chat_tx
-                            .send(ChatEvent::WireError {
-                                stream: WireStream::Branch,
-                                message: "daemon closed branch stream mid-flight".into(),
-                            })
-                            .await;
-                        return;
-                    }
-                    Err(e) => {
-                        let _ = chat_tx
-                            .send(ChatEvent::WireError {
-                                stream: WireStream::Branch,
-                                message: format!("branch read: {e}"),
-                            })
-                            .await;
-                        return;
-                    }
-                }
-            }
-        });
+        self.spawn_one_shot(req, WireStream::Branch, "branch");
     }
 
     pub fn spawn_resume_or_new(&mut self, recency_secs: u64) {
@@ -1417,13 +1373,35 @@ fn turn_scoped_id(ev: &Event) -> Option<&str> {
     }
 }
 
-fn parse_slash_arg<'a>(text: &'a str, verb: &str) -> Option<&'a str> {
-    let trimmed = text.trim_end();
-    if trimmed == verb {
-        return Some("");
+/// A typed slash command with its trimmed argument.
+enum SlashCommand {
+    Attach(String),
+    Fork(String),
+    Switch(String),
+    Undo,
+    New,
+    Resume,
+}
+
+impl SlashCommand {
+    /// `None` when `text` is not a slash command; unknown commands are
+    /// sent to the model as ordinary text.
+    fn parse(text: &str) -> Option<Self> {
+        let trimmed = text.trim();
+        let (verb, arg) = match trimmed.split_once(char::is_whitespace) {
+            Some((verb, rest)) => (verb, rest.trim()),
+            None => (trimmed, ""),
+        };
+        match verb {
+            "/attach" => Some(Self::Attach(arg.to_string())),
+            "/fork" => Some(Self::Fork(arg.to_string())),
+            "/switch" => Some(Self::Switch(arg.to_string())),
+            "/undo" => Some(Self::Undo),
+            "/new" => Some(Self::New),
+            "/resume" => Some(Self::Resume),
+            _ => None,
+        }
     }
-    let prefix = format!("{verb} ");
-    trimmed.strip_prefix(&prefix).map(|rest| rest.trim())
 }
 
 fn expand_tilde(p: &str) -> PathBuf {

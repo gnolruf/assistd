@@ -24,7 +24,7 @@ pub enum DriverInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaceRequest;
 
-pub async fn run(
+pub async fn drive_visibility(
     state_tx: watch::Sender<PopupState>,
     mut rx: UnboundedReceiver<DriverInput>,
     place_tx: UnboundedSender<PlaceRequest>,
@@ -165,7 +165,13 @@ mod tests {
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, mut place_rx) = mpsc::unbounded_channel();
 
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000), dummy_ipc()));
+        let handle = tokio::spawn(drive_visibility(
+            state_tx,
+            in_rx,
+            place_tx,
+            cfg(60_000),
+            dummy_ipc(),
+        ));
         in_tx.send(DriverInput::Show).expect("send");
         let s = drain_watch(&mut state_rx).await;
         assert!(s.visible);
@@ -183,7 +189,13 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(1_000), dummy_ipc()));
+        let handle = tokio::spawn(drive_visibility(
+            state_tx,
+            in_rx,
+            place_tx,
+            cfg(1_000),
+            dummy_ipc(),
+        ));
 
         in_tx.send(DriverInput::Show).expect("send");
         let _ = drain_watch(&mut state_rx).await;
@@ -211,7 +223,13 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(500), dummy_ipc()));
+        let handle = tokio::spawn(drive_visibility(
+            state_tx,
+            in_rx,
+            place_tx,
+            cfg(500),
+            dummy_ipc(),
+        ));
 
         in_tx.send(DriverInput::Show).expect("send");
         let _ = drain_watch(&mut state_rx).await;
@@ -251,7 +269,13 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, popup_cfg, dummy_ipc()));
+        let handle = tokio::spawn(drive_visibility(
+            state_tx,
+            in_rx,
+            place_tx,
+            popup_cfg,
+            dummy_ipc(),
+        ));
 
         in_tx
             .send(DriverInput::Event(Box::new(Event::ListenState {
@@ -277,7 +301,13 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(500), dummy_ipc()));
+        let handle = tokio::spawn(drive_visibility(
+            state_tx,
+            in_rx,
+            place_tx,
+            cfg(500),
+            dummy_ipc(),
+        ));
 
         in_tx.send(DriverInput::Show).expect("send");
         let _ = drain_watch(&mut state_rx).await;
@@ -328,7 +358,13 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(run(state_tx, in_rx, place_tx, cfg(60_000), dummy_ipc()));
+        let handle = tokio::spawn(drive_visibility(
+            state_tx,
+            in_rx,
+            place_tx,
+            cfg(60_000),
+            dummy_ipc(),
+        ));
 
         in_tx
             .send(DriverInput::Event(Box::new(Event::ToolCall {

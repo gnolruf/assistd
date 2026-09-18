@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use super::state::{PopupActivity, PopupState};
 use super::visibility::DriverInput;
 
-pub fn run(
+pub fn run_gui_loop(
     state_rx: watch::Receiver<PopupState>,
     event_tx: UnboundedSender<DriverInput>,
     app_id: &str,

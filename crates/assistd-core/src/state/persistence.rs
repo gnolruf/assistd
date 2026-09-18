@@ -134,7 +134,7 @@ mod tests {
     use assistd_ipc::PresenceState;
     use assistd_llm::EchoBackend;
     use assistd_memory::{
-        BranchId, BranchInfo, ConversationStore, HistoryRow, ResumeCandidate, SearchHit, SessionId,
+        BranchId, BranchInfo, ConversationStore, HistoryRow, ResumeCandidate, SessionId,
         TurnSummary, UndoOutcome,
     };
     use assistd_tools::ToolRegistry;
@@ -179,9 +179,6 @@ mod tests {
             Ok(0)
         }
 
-        async fn begin_session(&self, _pid: u32) -> anyhow::Result<SessionId> {
-            Ok(SessionId::new())
-        }
         async fn end_session(&self, _id: &SessionId) -> anyhow::Result<()> {
             Ok(())
         }
@@ -190,17 +187,6 @@ mod tests {
         }
         async fn end_turn(&self, _t: TurnId) -> anyhow::Result<()> {
             Ok(())
-        }
-        async fn append_message(
-            &self,
-            _s: &SessionId,
-            _t: Option<TurnId>,
-            _m: PersistedMessage,
-        ) -> anyhow::Result<i64> {
-            Ok(0)
-        }
-        async fn search(&self, _q: &str, _l: usize) -> anyhow::Result<Vec<SearchHit>> {
-            Ok(Vec::new())
         }
         async fn recent_turns(&self, _l: usize) -> anyhow::Result<Vec<TurnSummary>> {
             Ok(Vec::new())

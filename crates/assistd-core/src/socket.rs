@@ -202,36 +202,7 @@ where
 
     drop(listener);
     let _ = drain_tx.send(true);
-
-    let in_flight = connections.len();
-    if in_flight == 0 {
-        return Ok(());
-    }
-    info!(
-        grace_secs = grace.as_secs(),
-        in_flight, "draining in-flight connections"
-    );
-
-    let drained = tokio::time::timeout(grace, async {
-        while let Some(res) = connections.join_next().await {
-            if let Err(e) = res
-                && e.is_panic()
-            {
-                error!("connection task panicked: {e}");
-            }
-        }
-    })
-    .await;
-
-    if drained.is_err() {
-        let remaining = connections.len();
-        warn!(
-            remaining,
-            "shutdown grace expired; aborting remaining connections"
-        );
-        connections.shutdown().await;
-    }
-
+    crate::recovery::drain_join_set(&mut connections, grace, "connection").await;
     Ok(())
 }
 

@@ -3,9 +3,11 @@
 //! writer.
 
 use anyhow::Result;
-use assistd_ipc::{Event, IpcClient, Request};
+use assistd_ipc::{Event, Request};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
+
+use crate::ipc_helper::run_one_shot;
 
 #[derive(Args)]
 pub struct MemoryArgs {
@@ -85,18 +87,8 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
     let reindex_quiet = matches!(&args.action, MemoryAction::Reindex { quiet: true });
 
     let req = args.action.into_request(Uuid::new_v4().to_string());
-    let mut stream = IpcClient::new()
-        .one_shot(req)
-        .await
-        .map_err(crate::ipc_helper::map_not_reachable)?;
-
     let mut last_reindex_kind: Option<String> = None;
-    loop {
-        let event = match stream.next_event().await? {
-            Some(ev) => ev,
-            None => anyhow::bail!("daemon closed the connection without sending a terminal event"),
-        };
-
+    run_one_shot(req, |event| {
         match event {
             Event::SemanticHit {
                 conversation_id,
@@ -110,8 +102,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 let session_short = session_id.chars().take(8).collect::<String>();
                 let single_line = content.replace('\n', " ");
                 println!(
-                    "{timestamp}  {role:9}  conv={conversation_id:<6}  sess={session_short}  sim={:.2}  {single_line}",
-                    similarity
+                    "{timestamp}  {role:9}  conv={conversation_id:<6}  sess={session_short}  sim={similarity:.2}  {single_line}"
                 );
             }
             Event::MemoryValue { key, value, .. } => match value {
@@ -135,13 +126,12 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 let single_line = value.replace('\n', " ");
                 println!("{memory_id}\t{key}\t{single_line}");
             }
-            Event::MemoryForgetResult {
-                deleted: true,
-                key: Some(k),
-                ..
-            } => {
+            Event::MemoryForgetResult { deleted: true, key, .. } => {
                 let id = forget_target.unwrap_or(0);
-                println!("forgot id={id} key={k}");
+                match key {
+                    Some(k) => println!("forgot id={id} key={k}"),
+                    None => println!("forgot id={id}"),
+                }
             }
             Event::MemoryForgetResult { deleted: false, .. } => {
                 let id = forget_target.unwrap_or(0);
@@ -161,25 +151,12 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 let _ = write!(err, "\rreindex {kind}: {done}/{total}");
                 let _ = err.flush();
             }
-            Event::MemoryForgetResult {
-                deleted: true,
-                key: None,
-                ..
-            } => {
-                let id = forget_target.unwrap_or(0);
-                println!("forgot id={id}");
-            }
-            Event::Done { .. } => {
-                if last_reindex_kind.is_some() && !reindex_quiet {
-                    eprintln!();
-                }
-                return Ok(());
-            }
-            Event::Error { message, .. } => {
-                eprintln!("daemon error: {message}");
-                std::process::exit(1);
+            Event::Done { .. } if last_reindex_kind.is_some() && !reindex_quiet => {
+                eprintln!();
             }
             _ => {}
         }
-    }
+        Ok(())
+    })
+    .await
 }

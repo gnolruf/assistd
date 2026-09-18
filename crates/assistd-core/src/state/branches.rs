@@ -1,21 +1,33 @@
 //! Branch and session handlers, plus the session-title generator.
 
-use super::AppState;
+use super::{AppState, send_error};
 use anyhow::Result;
 use assistd_ipc::Event;
-use assistd_memory::{BranchId, PersistedRole, SessionId};
+use assistd_llm::{HistoryEntry, HistoryRole};
+use assistd_memory::{BranchId, HistoryRow, PersistedRole, SessionId};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Identity mapping; lives here because `assistd-llm` does not depend on
-/// `assistd-memory`.
-pub fn persisted_role_to_history_role(role: PersistedRole) -> assistd_llm::HistoryRole {
+fn persisted_role_to_history_role(role: PersistedRole) -> HistoryRole {
     match role {
-        PersistedRole::System => assistd_llm::HistoryRole::System,
-        PersistedRole::User => assistd_llm::HistoryRole::User,
-        PersistedRole::Assistant => assistd_llm::HistoryRole::Assistant,
-        PersistedRole::Tool => assistd_llm::HistoryRole::Tool,
+        PersistedRole::System => HistoryRole::System,
+        PersistedRole::User => HistoryRole::User,
+        PersistedRole::Assistant => HistoryRole::Assistant,
+        PersistedRole::Tool => HistoryRole::Tool,
     }
+}
+
+/// Rows of a branch, as the LLM backend's history type.
+pub fn history_entries(rows: &[HistoryRow]) -> Vec<HistoryEntry> {
+    rows.iter()
+        .map(|r| HistoryEntry {
+            role: persisted_role_to_history_role(r.role),
+            content: r.content.clone(),
+            tool_calls_json: r.tool_calls.clone(),
+            tool_call_id: r.tool_call_id.clone(),
+            tool_name: r.tool_name.clone(),
+        })
+        .collect()
 }
 
 pub(super) fn clean_generated_title(raw: &str) -> String {
@@ -42,12 +54,7 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<()> {
         if name.trim().is_empty() {
-            let _ = tx
-                .send(Event::Error {
-                    id,
-                    message: "/fork: name must not be empty".into(),
-                })
-                .await;
+            send_error(&tx, id, "/fork: name must not be empty".into()).await;
             return Ok(());
         }
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
@@ -62,12 +69,7 @@ impl AppState {
         {
             Ok(b) => b,
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("/fork: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("/fork: {e:#}")).await;
                 return Ok(());
             }
         };
@@ -77,12 +79,12 @@ impl AppState {
             .set_current_branch(&session, new_branch)
             .await
         {
-            let _ = tx
-                .send(Event::Error {
-                    id,
-                    message: format!("/fork: failed to update current branch: {e:#}"),
-                })
-                .await;
+            send_error(
+                &tx,
+                id,
+                format!("/fork: failed to update current branch: {e:#}"),
+            )
+            .await;
             return Ok(());
         }
         self.runtime
@@ -90,7 +92,7 @@ impl AppState {
             .replace(session.clone(), new_branch)
             .await;
 
-        let parent_name = self.lookup_branch_name(current_branch).await;
+        let (parent_name, _, _) = self.lookup_branch_meta(current_branch).await;
         let fork_point_seq = self.lookup_branch_tail_seq(current_branch).await;
         let session_title = self
             .memory
@@ -124,12 +126,7 @@ impl AppState {
         let branches = match self.memory.conversations.list_branches().await {
             Ok(v) => v,
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("/resume: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("/resume: {e:#}")).await;
                 return Ok(());
             }
         };
@@ -255,7 +252,7 @@ impl AppState {
         self.drain_persistence_inflight().await;
 
         let (active_session, _active_branch) = self.runtime.conversation_ctx.current().await;
-        let resolved = match self
+        let (target_session, target_branch) = match self
             .memory
             .conversations
             .resolve_branch(&target, Some(&active_session))
@@ -263,25 +260,14 @@ impl AppState {
         {
             Ok(Some(pair)) => pair,
             Ok(None) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("/switch: no branch named {target:?}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("/switch: no branch named {target:?}")).await;
                 return Ok(());
             }
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("/switch: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("/switch: {e:#}")).await;
                 return Ok(());
             }
         };
-        let (target_session, target_branch) = resolved;
 
         if let Err(e) = self
             .memory
@@ -289,88 +275,22 @@ impl AppState {
             .set_current_branch(&target_session, target_branch)
             .await
         {
-            let _ = tx
-                .send(Event::Error {
-                    id,
-                    message: format!("/switch: failed to update current branch: {e:#}"),
-                })
-                .await;
+            send_error(
+                &tx,
+                id,
+                format!("/switch: failed to update current branch: {e:#}"),
+            )
+            .await;
             return Ok(());
         }
-        let target_session_arc = Arc::new(target_session.clone());
+        let target_session = Arc::new(target_session);
         self.runtime
             .conversation_ctx
-            .replace(target_session_arc.clone(), target_branch)
+            .replace(target_session.clone(), target_branch)
             .await;
 
-        let rows = match self
-            .memory
-            .conversations
-            .load_branch_history(target_branch)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("/switch: load_branch_history: {e:#}"),
-                    })
-                    .await;
-                return Ok(());
-            }
-        };
-        let entries: Vec<assistd_llm::HistoryEntry> = rows
-            .iter()
-            .map(|r| assistd_llm::HistoryEntry {
-                role: persisted_role_to_history_role(r.role),
-                content: r.content.clone(),
-                tool_calls_json: r.tool_calls.clone(),
-                tool_call_id: r.tool_call_id.clone(),
-                tool_name: r.tool_name.clone(),
-            })
-            .collect();
-        if let Err(e) = self.subsystems.llm.replace_history(entries).await {
-            tracing::warn!(
-                target: "assistd::state",
-                error = %e,
-                "replace_history failed (non-fatal)"
-            );
-        }
-
-        let (branch_name, parent_name, fork_point_seq) =
-            self.lookup_branch_meta(target_branch).await;
-        let session_title = self
-            .memory
-            .conversations
-            .get_session_title(&target_session)
-            .await
-            .ok()
-            .flatten();
-
-        let _ = tx
-            .send(Event::BranchSwitched {
-                id: id.clone(),
-                branch_id: target_branch.0,
-                session_id: target_session.0.clone(),
-                session_title,
-                name: branch_name.unwrap_or_default(),
-                parent_branch_name: parent_name,
-                fork_point_seq,
-            })
+        self.replay_branch(id, &target_session, target_branch, &tx, "/switch")
             .await;
-        for r in rows {
-            let _ = tx
-                .send(Event::HistoryEntry {
-                    id: id.clone(),
-                    seq: r.seq,
-                    role: r.role.as_wire().to_string(),
-                    content: r.content,
-                    tool_name: r.tool_name,
-                })
-                .await;
-        }
-        let _ = tx.send(Event::Done { id }).await;
         Ok(())
     }
 
@@ -388,12 +308,7 @@ impl AppState {
         let outcome = match self.memory.conversations.undo_last_turn(branch).await {
             Ok(o) => o,
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("/undo: {e:#}"),
-                    })
-                    .await;
+                send_error(&tx, id, format!("/undo: {e:#}")).await;
                 return Ok(());
             }
         };
@@ -452,109 +367,11 @@ impl AppState {
         };
 
         if keep_current {
-            let rows = match self.memory.conversations.load_branch_history(branch).await {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = tx
-                        .send(Event::Error {
-                            id,
-                            message: format!("/resume: load_branch_history: {e:#}"),
-                        })
-                        .await;
-                    return Ok(());
-                }
-            };
-            let entries: Vec<assistd_llm::HistoryEntry> = rows
-                .iter()
-                .map(|r| assistd_llm::HistoryEntry {
-                    role: persisted_role_to_history_role(r.role),
-                    content: r.content.clone(),
-                    tool_calls_json: r.tool_calls.clone(),
-                    tool_call_id: r.tool_call_id.clone(),
-                    tool_name: r.tool_name.clone(),
-                })
-                .collect();
-            if let Err(e) = self.subsystems.llm.replace_history(entries).await {
-                tracing::warn!(
-                    target: "assistd::state",
-                    error = %e,
-                    "replace_history failed during resume (non-fatal)"
-                );
-            }
-            let (branch_name, parent_name, fork_point_seq) = self.lookup_branch_meta(branch).await;
-            let session_title = self
-                .memory
-                .conversations
-                .get_session_title(&session)
-                .await
-                .ok()
-                .flatten();
-            let _ = tx
-                .send(Event::BranchSwitched {
-                    id: id.clone(),
-                    branch_id: branch.0,
-                    session_id: session.0.clone(),
-                    session_title,
-                    name: branch_name.unwrap_or_default(),
-                    parent_branch_name: parent_name,
-                    fork_point_seq,
-                })
+            self.replay_branch(id, &session, branch, &tx, "/resume")
                 .await;
-            for r in rows {
-                let _ = tx
-                    .send(Event::HistoryEntry {
-                        id: id.clone(),
-                        seq: r.seq,
-                        role: r.role.as_wire().to_string(),
-                        content: r.content,
-                        tool_name: r.tool_name,
-                    })
-                    .await;
-            }
-            let _ = tx.send(Event::Done { id }).await;
-            return Ok(());
+        } else {
+            self.begin_fresh_session(id, &tx, "/resume").await;
         }
-
-        let (new_session, new_branch) = match self
-            .memory
-            .conversations
-            .begin_session_with_main_branch(std::process::id())
-            .await
-        {
-            Ok(pair) => pair,
-            Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("/resume: begin_session_with_main_branch: {e:#}"),
-                    })
-                    .await;
-                return Ok(());
-            }
-        };
-        self.runtime
-            .conversation_ctx
-            .replace(Arc::new(new_session.clone()), new_branch)
-            .await;
-        if let Err(e) = self.subsystems.llm.replace_history(Vec::new()).await {
-            tracing::warn!(
-                target: "assistd::state",
-                error = %e,
-                "replace_history(empty) failed during fresh session (non-fatal)"
-            );
-        }
-        let _ = tx
-            .send(Event::BranchSwitched {
-                id: id.clone(),
-                branch_id: new_branch.0,
-                session_id: new_session.0.clone(),
-                session_title: None,
-                name: "main".to_string(),
-                parent_branch_name: None,
-                fork_point_seq: None,
-            })
-            .await;
-        let _ = tx.send(Event::Done { id }).await;
         Ok(())
     }
 
@@ -567,7 +384,76 @@ impl AppState {
     ) -> Result<()> {
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
+        self.begin_fresh_session(id, &tx, "/new").await;
+        Ok(())
+    }
 
+    /// Load `branch`, replace the LLM history with it, and stream it to
+    /// the client as `BranchSwitched`, `HistoryEntry` rows, and `Done`.
+    async fn replay_branch(
+        &self,
+        id: String,
+        session: &SessionId,
+        branch: BranchId,
+        tx: &mpsc::Sender<Event>,
+        label: &str,
+    ) {
+        let rows = match self.memory.conversations.load_branch_history(branch).await {
+            Ok(v) => v,
+            Err(e) => {
+                send_error(tx, id, format!("{label}: load_branch_history: {e:#}")).await;
+                return;
+            }
+        };
+        if let Err(e) = self
+            .subsystems
+            .llm
+            .replace_history(history_entries(&rows))
+            .await
+        {
+            tracing::warn!(
+                target: "assistd::state",
+                error = %e,
+                "replace_history failed during {label} (non-fatal)"
+            );
+        }
+
+        let (branch_name, parent_name, fork_point_seq) = self.lookup_branch_meta(branch).await;
+        let session_title = self
+            .memory
+            .conversations
+            .get_session_title(session)
+            .await
+            .ok()
+            .flatten();
+        let _ = tx
+            .send(Event::BranchSwitched {
+                id: id.clone(),
+                branch_id: branch.0,
+                session_id: session.0.clone(),
+                session_title,
+                name: branch_name.unwrap_or_default(),
+                parent_branch_name: parent_name,
+                fork_point_seq,
+            })
+            .await;
+        for r in rows {
+            let _ = tx
+                .send(Event::HistoryEntry {
+                    id: id.clone(),
+                    seq: r.seq,
+                    role: r.role.as_wire().to_string(),
+                    content: r.content,
+                    tool_name: r.tool_name,
+                })
+                .await;
+        }
+        let _ = tx.send(Event::Done { id }).await;
+    }
+
+    /// Start a new session with an empty `main` branch, make it active,
+    /// clear the LLM history, and report `BranchSwitched` then `Done`.
+    async fn begin_fresh_session(&self, id: String, tx: &mpsc::Sender<Event>, label: &str) {
         let (new_session, new_branch) = match self
             .memory
             .conversations
@@ -576,13 +462,13 @@ impl AppState {
         {
             Ok(pair) => pair,
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("/new: begin_session_with_main_branch: {e:#}"),
-                    })
-                    .await;
-                return Ok(());
+                send_error(
+                    tx,
+                    id,
+                    format!("{label}: begin_session_with_main_branch: {e:#}"),
+                )
+                .await;
+                return;
             }
         };
         self.runtime
@@ -593,7 +479,7 @@ impl AppState {
             tracing::warn!(
                 target: "assistd::state",
                 error = %e,
-                "replace_history(empty) failed during /new (non-fatal)"
+                "replace_history(empty) failed during {label} (non-fatal)"
             );
         }
         let _ = tx
@@ -608,16 +494,6 @@ impl AppState {
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
-        Ok(())
-    }
-
-    pub(super) async fn lookup_branch_name(&self, branch: BranchId) -> Option<String> {
-        for b in self.memory.conversations.list_branches().await.ok()? {
-            if b.branch_id == branch {
-                return Some(b.name);
-            }
-        }
-        None
     }
 
     pub(super) async fn lookup_branch_tail_seq(&self, branch: BranchId) -> Option<i64> {
@@ -630,6 +506,8 @@ impl AppState {
         rows.last().map(|r| r.seq)
     }
 
+    /// `(name, parent name, fork point)` of `branch`, all `None` when the
+    /// listing fails or the branch is unknown.
     pub(super) async fn lookup_branch_meta(
         &self,
         branch: BranchId,
@@ -637,11 +515,10 @@ impl AppState {
         let Ok(branches) = self.memory.conversations.list_branches().await else {
             return (None, None, None);
         };
-        for b in branches {
-            if b.branch_id == branch {
-                return (Some(b.name), b.parent_branch_name, b.fork_point_seq);
-            }
-        }
-        (None, None, None)
+        branches
+            .into_iter()
+            .find(|b| b.branch_id == branch)
+            .map(|b| (Some(b.name), b.parent_branch_name, b.fork_point_seq))
+            .unwrap_or((None, None, None))
     }
 }

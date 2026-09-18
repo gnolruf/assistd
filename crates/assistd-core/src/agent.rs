@@ -7,6 +7,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::recovery::{Component, RecoverySeverity};
+use crate::recovery_event;
 use anyhow::Result;
 use assistd_llm::{
     HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
@@ -74,294 +76,355 @@ impl Agent {
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        let backend = &self.backend;
-        let tools = &self.tools;
-        let health = self.health.as_ref();
-
-        backend
+        self.backend
             .push_user(user_text, user_attachments)
             .await
             .map_err(anyhow::Error::new)?;
-        let mut schemas = tools.openai_schemas();
-        let mut tools_withdrawn = false;
-        let mut streak = CallStreak::default();
-        let mut iteration: u32 = 0;
+        let mut turn = Turn {
+            tx,
+            cancel,
+            schemas: self.tools.openai_schemas(),
+            tools_withdrawn: false,
+            streak: CallStreak::default(),
+            iteration: 0,
+        };
 
         loop {
-            if tx.is_closed() || cancel.is_cancelled() {
+            if turn.stop_requested() {
                 debug!(
                     target: "assistd::agent",
-                    iteration,
-                    cancelled = cancel.is_cancelled(),
+                    iteration = turn.iteration,
+                    cancelled = turn.cancel.is_cancelled(),
                     "stopping between iterations (client gone or explicit cancel)"
                 );
                 return Ok(());
             }
 
-            let mut restart_attempted = false;
-
-            let outcome = loop {
-                let step_result = tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => {
-                        debug!(
-                            target: "assistd::agent",
-                            iteration,
-                            "cancellation fired during LLM step; stopping"
-                        );
-                        return Ok(());
-                    }
-                    r = backend.step(schemas.clone(), tx.clone()) => r,
-                };
-
-                match step_result {
-                    Ok(o) => break o,
-                    Err(LlmError::ServerRestarting(reason))
-                        if !restart_attempted && health.is_some() =>
-                    {
-                        restart_attempted = true;
-                        crate::recovery_event!(
-                            crate::RecoverySeverity::Warning,
-                            crate::Component::Llm,
-                            "crash_detected",
-                            iteration = iteration,
-                            reason = %reason,
-                            "llama-server died mid-step; waiting for supervisor restart and replaying"
-                        );
-                        let _ = tx
-                            .send(LlmEvent::Status {
-                                severity: crate::RecoverySeverity::Warning.as_str().to_string(),
-                                component: crate::Component::Llm.as_str().to_string(),
-                                event: "restarting".to_string(),
-                                message: "LLM crashed: restarting and replaying your query"
-                                    .to_string(),
-                            })
-                            .await;
-
-                        let probe = health.expect("health Some by guard");
-                        let wait_result = tokio::select! {
-                            biased;
-                            () = cancel.cancelled() => {
-                                debug!(
-                                    target: "assistd::agent",
-                                    iteration,
-                                    "cancellation fired while waiting for LLM restart"
-                                );
-                                return Ok(());
-                            }
-                            res = probe.wait_for_ready(REPLAY_WAIT_BUDGET) => res,
-                        };
-
-                        match wait_result {
-                            Ok(()) => {
-                                crate::recovery_event!(
-                                    crate::RecoverySeverity::Info,
-                                    crate::Component::Llm,
-                                    "replay_ready",
-                                    iteration = iteration,
-                                    "supervisor reported Ready; replaying user query"
-                                );
-                                let _ = tx
-                                    .send(LlmEvent::Status {
-                                        severity: crate::RecoverySeverity::Info
-                                            .as_str()
-                                            .to_string(),
-                                        component: crate::Component::Llm.as_str().to_string(),
-                                        event: "replaying".to_string(),
-                                        message: "LLM restored: replaying your query".to_string(),
-                                    })
-                                    .await;
-                                continue;
-                            }
-                            Err(wait_err) => {
-                                crate::recovery_event!(
-                                    crate::RecoverySeverity::Error,
-                                    crate::Component::Llm,
-                                    "replay_abandoned",
-                                    iteration = iteration,
-                                    wait_error = %wait_err,
-                                    "supervisor did not return to Ready; abandoning replay"
-                                );
-                                let final_msg = match wait_err {
-                                    HealthWaitError::Timeout => {
-                                        "LLM did not recover before timeout"
-                                    }
-                                    HealthWaitError::Degraded => {
-                                        "LLM supervisor entered degraded state; restart abandoned"
-                                    }
-                                    HealthWaitError::NoService => {
-                                        "LLM service is not currently attached"
-                                    }
-                                };
-                                let _ = tx
-                                    .send(LlmEvent::Status {
-                                        severity: crate::RecoverySeverity::Error
-                                            .as_str()
-                                            .to_string(),
-                                        component: crate::Component::Llm.as_str().to_string(),
-                                        event: "degraded".to_string(),
-                                        message: final_msg.to_string(),
-                                    })
-                                    .await;
-                                let _ = tx
-                                    .send(LlmEvent::Delta {
-                                        text: format!("\n[agent error: {final_msg}]\n"),
-                                    })
-                                    .await;
-                                let _ = tx.send(LlmEvent::Done).await;
-                                return Err(anyhow::Error::new(LlmError::ServerRestarting(
-                                    final_msg.to_string(),
-                                )));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let label = match &e {
-                            LlmError::Chat(_) => "chat backend",
-                            LlmError::ToolCallParse(_) => "tool-call parse",
-                            LlmError::Unavailable(_) => "backend unavailable",
-                            LlmError::ServerRestarting(_) => "llm restarting",
-                        };
-                        let _ = tx
-                            .send(LlmEvent::Delta {
-                                text: format!("\n[agent error: {label}: {e}]\n"),
-                            })
-                            .await;
-                        let _ = tx.send(LlmEvent::Done).await;
-                        return Err(anyhow::Error::new(e));
-                    }
-                }
+            let outcome = match self.step_with_replay(&turn).await? {
+                Some(outcome) => outcome,
+                None => return Ok(()),
             };
 
             match outcome {
                 StepOutcome::Final => {
-                    let _ = tx.send(LlmEvent::Done).await;
+                    let _ = turn.tx.send(LlmEvent::Done).await;
                     return Ok(());
                 }
-                StepOutcome::ToolCalls(calls) if tools_withdrawn => {
+                StepOutcome::ToolCalls(calls) if turn.tools_withdrawn => {
                     warn!(
                         target: "assistd::agent",
-                        iteration,
+                        iteration = turn.iteration,
                         "model requested tools after they were withdrawn; ending turn"
                     );
                     let results = calls
                         .iter()
                         .map(|call| cancelled_tool_result(call, "ended; tools are unavailable").0)
                         .collect();
-                    backend
+                    self.backend
                         .push_tool_results(results)
                         .await
                         .map_err(anyhow::Error::new)?;
-                    let _ = tx.send(LlmEvent::Done).await;
+                    let _ = turn.tx.send(LlmEvent::Done).await;
                     return Ok(());
                 }
                 StepOutcome::ToolCalls(calls) => {
-                    let mut results = Vec::with_capacity(calls.len());
-                    let mut stuck = false;
-                    for call in calls {
-                        stuck |= streak.record(&call) >= DUPLICATE_CALL_LIMIT;
-                        if tx.is_closed() || cancel.is_cancelled() {
-                            debug!(
-                                target: "assistd::agent",
-                                iteration,
-                                tool = %call.name,
-                                cancelled = cancel.is_cancelled(),
-                                "stopping mid-call (client gone or explicit cancel) without dispatch"
-                            );
-                            let (payload, _) =
-                                cancelled_tool_result(&call, "cancelled before dispatch");
-                            results.push(payload);
-                            break;
-                        }
-
-                        let _ = tx
-                            .send(LlmEvent::ToolCall {
-                                id: call.id.clone(),
-                                name: call.name.clone(),
-                                arguments: call.arguments.clone(),
-                            })
-                            .await;
-
-                        let dispatched = tokio::select! {
-                            biased;
-                            () = cancel.cancelled() => None,
-                            r = dispatch_tool_call(tools, &call, iteration) => Some(r),
-                        };
-
-                        let (payload, raw_result) = match dispatched {
-                            Some(r) => r,
-                            None => {
-                                warn!(
-                                    target: "assistd::agent",
-                                    iteration,
-                                    tool = %call.name,
-                                    "cancellation fired during tool dispatch; abandoning tool"
-                                );
-                                cancelled_tool_result(&call, "cancelled during dispatch")
-                            }
-                        };
-                        let cancelled_mid_dispatch = cancel.is_cancelled();
-
-                        let _ = tx
-                            .send(LlmEvent::ToolResult {
-                                id: payload.call_id.clone(),
-                                name: payload.name.clone(),
-                                result: raw_result,
-                            })
-                            .await;
-
-                        results.push(payload);
-
-                        if cancelled_mid_dispatch {
-                            break;
-                        }
-                    }
-                    backend
+                    let (results, stuck) = self.dispatch_tool_calls(&mut turn, calls).await;
+                    self.backend
                         .push_tool_results(results)
                         .await
                         .map_err(anyhow::Error::new)?;
-
-                    iteration += 1;
+                    turn.iteration += 1;
                     let exhausted = if stuck {
                         Some(ToolBudgetExhausted::Repeating)
-                    } else if iteration >= MAX_TOOL_STEPS {
+                    } else if turn.iteration >= MAX_TOOL_STEPS {
                         Some(ToolBudgetExhausted::StepCeiling)
                     } else {
                         None
                     };
                     if let Some(why) = exhausted {
-                        crate::recovery_event!(
-                            crate::RecoverySeverity::Warning,
-                            crate::Component::Agent,
-                            "tools_withdrawn",
-                            iteration = iteration,
-                            reason = %why.reason(),
-                            "withdrawing tools; asking model to answer from what it has"
-                        );
-                        let _ = tx
-                            .send(LlmEvent::Status {
-                                severity: crate::RecoverySeverity::Warning.as_str().to_string(),
-                                component: crate::Component::Agent.as_str().to_string(),
-                                event: "tools_withdrawn".to_string(),
-                                message: format!(
-                                    "Agent stopped using tools ({}); answering with what it has",
-                                    why.reason()
-                                ),
-                            })
-                            .await;
-                        if let Err(e) = backend.set_transient_context(why.model_note()).await {
-                            warn!(
-                                target: "assistd::agent",
-                                error = %e,
-                                "set_transient_context failed; answering without the note"
-                            );
-                        }
-                        schemas = Vec::new();
-                        tools_withdrawn = true;
+                        self.withdraw_tools(&mut turn, why).await;
                     }
                 }
             }
         }
+    }
+
+    /// One LLM step. `Ok(None)` means the turn was cancelled while
+    /// waiting. A crash mid-step is retried once after the supervisor
+    /// reports the server ready again; any other failure, or a second
+    /// crash, ends the turn with an error after telling the client.
+    async fn step_with_replay(&self, turn: &Turn) -> Result<Option<StepOutcome>> {
+        let mut restart_attempted = false;
+        loop {
+            let step_result = tokio::select! {
+                biased;
+                () = turn.cancel.cancelled() => {
+                    debug!(
+                        target: "assistd::agent",
+                        iteration = turn.iteration,
+                        "cancellation fired during LLM step; stopping"
+                    );
+                    return Ok(None);
+                }
+                r = self.backend.step(turn.schemas.clone(), turn.tx.clone()) => r,
+            };
+            match step_result {
+                Ok(outcome) => return Ok(Some(outcome)),
+                Err(LlmError::ServerRestarting(reason))
+                    if !restart_attempted && self.health.is_some() =>
+                {
+                    restart_attempted = true;
+                    let probe = self.health.as_ref().expect("health Some by guard");
+                    match await_restart(probe, turn, &reason).await {
+                        Replay::Ready => continue,
+                        Replay::Cancelled => return Ok(None),
+                        Replay::Abandoned(final_msg) => {
+                            fail_turn(&turn.tx, &final_msg).await;
+                            return Err(anyhow::Error::new(LlmError::ServerRestarting(final_msg)));
+                        }
+                    }
+                }
+                Err(e) => {
+                    let label = match &e {
+                        LlmError::Chat(_) => "chat backend",
+                        LlmError::ToolCallParse(_) => "tool-call parse",
+                        LlmError::Unavailable(_) => "backend unavailable",
+                        LlmError::ServerRestarting(_) => "llm restarting",
+                    };
+                    fail_turn(&turn.tx, &format!("{label}: {e}")).await;
+                    return Err(anyhow::Error::new(e));
+                }
+            }
+        }
+    }
+
+    /// Dispatch every call in order, emitting `ToolCall` and `ToolResult`
+    /// events. Stops early, with cancelled payloads for the rest, when the
+    /// client goes away or the turn is cancelled. The flag is `true` when
+    /// a call repeated [`DUPLICATE_CALL_LIMIT`] times in a row.
+    async fn dispatch_tool_calls(
+        &self,
+        turn: &mut Turn,
+        calls: Vec<ToolCall>,
+    ) -> (Vec<ToolResultPayload>, bool) {
+        let mut results = Vec::with_capacity(calls.len());
+        let mut stuck = false;
+        for call in calls {
+            stuck |= turn.streak.record(&call) >= DUPLICATE_CALL_LIMIT;
+            if turn.stop_requested() {
+                debug!(
+                    target: "assistd::agent",
+                    iteration = turn.iteration,
+                    tool = %call.name,
+                    cancelled = turn.cancel.is_cancelled(),
+                    "stopping mid-call (client gone or explicit cancel) without dispatch"
+                );
+                results.push(cancelled_tool_result(&call, "cancelled before dispatch").0);
+                break;
+            }
+
+            let _ = turn
+                .tx
+                .send(LlmEvent::ToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                })
+                .await;
+
+            let dispatched = tokio::select! {
+                biased;
+                () = turn.cancel.cancelled() => None,
+                r = dispatch_tool_call(&self.tools, &call, turn.iteration) => Some(r),
+            };
+            let (payload, raw_result) = dispatched.unwrap_or_else(|| {
+                warn!(
+                    target: "assistd::agent",
+                    iteration = turn.iteration,
+                    tool = %call.name,
+                    "cancellation fired during tool dispatch; abandoning tool"
+                );
+                cancelled_tool_result(&call, "cancelled during dispatch")
+            });
+            let cancelled_mid_dispatch = turn.cancel.is_cancelled();
+
+            let _ = turn
+                .tx
+                .send(LlmEvent::ToolResult {
+                    id: payload.call_id.clone(),
+                    name: payload.name.clone(),
+                    result: raw_result,
+                })
+                .await;
+            results.push(payload);
+
+            if cancelled_mid_dispatch {
+                break;
+            }
+        }
+        (results, stuck)
+    }
+
+    async fn withdraw_tools(&self, turn: &mut Turn, why: ToolBudgetExhausted) {
+        recovery_event!(
+            RecoverySeverity::Warning,
+            Component::Agent,
+            "tools_withdrawn",
+            iteration = turn.iteration,
+            reason = %why.reason(),
+            "withdrawing tools; asking model to answer from what it has"
+        );
+        let _ = turn
+            .tx
+            .send(status_event(
+                RecoverySeverity::Warning,
+                Component::Agent,
+                "tools_withdrawn",
+                format!(
+                    "Agent stopped using tools ({}); answering with what it has",
+                    why.reason()
+                ),
+            ))
+            .await;
+        if let Err(e) = self.backend.set_transient_context(why.model_note()).await {
+            warn!(
+                target: "assistd::agent",
+                error = %e,
+                "set_transient_context failed; answering without the note"
+            );
+        }
+        turn.schemas = Vec::new();
+        turn.tools_withdrawn = true;
+    }
+}
+
+/// Per-turn state threaded through the loop.
+struct Turn {
+    tx: mpsc::Sender<LlmEvent>,
+    cancel: CancellationToken,
+    schemas: Vec<Value>,
+    tools_withdrawn: bool,
+    streak: CallStreak,
+    iteration: u32,
+}
+
+impl Turn {
+    fn stop_requested(&self) -> bool {
+        self.tx.is_closed() || self.cancel.is_cancelled()
+    }
+}
+
+enum Replay {
+    Ready,
+    Cancelled,
+    Abandoned(String),
+}
+
+/// Tell the client the server crashed, wait for the supervisor to bring
+/// it back, and report whether the step can be replayed.
+async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &str) -> Replay {
+    recovery_event!(
+        RecoverySeverity::Warning,
+        Component::Llm,
+        "crash_detected",
+        iteration = turn.iteration,
+        reason = %reason,
+        "llama-server died mid-step; waiting for supervisor restart and replaying"
+    );
+    let _ = turn
+        .tx
+        .send(status_event(
+            RecoverySeverity::Warning,
+            Component::Llm,
+            "restarting",
+            "LLM crashed: restarting and replaying your query".to_string(),
+        ))
+        .await;
+
+    let wait_result = tokio::select! {
+        biased;
+        () = turn.cancel.cancelled() => {
+            debug!(
+                target: "assistd::agent",
+                iteration = turn.iteration,
+                "cancellation fired while waiting for LLM restart"
+            );
+            return Replay::Cancelled;
+        }
+        res = probe.wait_for_ready(REPLAY_WAIT_BUDGET) => res,
+    };
+
+    match wait_result {
+        Ok(()) => {
+            recovery_event!(
+                RecoverySeverity::Info,
+                Component::Llm,
+                "replay_ready",
+                iteration = turn.iteration,
+                "supervisor reported Ready; replaying user query"
+            );
+            let _ = turn
+                .tx
+                .send(status_event(
+                    RecoverySeverity::Info,
+                    Component::Llm,
+                    "replaying",
+                    "LLM restored: replaying your query".to_string(),
+                ))
+                .await;
+            Replay::Ready
+        }
+        Err(wait_err) => {
+            recovery_event!(
+                RecoverySeverity::Error,
+                Component::Llm,
+                "replay_abandoned",
+                iteration = turn.iteration,
+                wait_error = %wait_err,
+                "supervisor did not return to Ready; abandoning replay"
+            );
+            let final_msg = match wait_err {
+                HealthWaitError::Timeout => "LLM did not recover before timeout",
+                HealthWaitError::Degraded => {
+                    "LLM supervisor entered degraded state; restart abandoned"
+                }
+                HealthWaitError::NoService => "LLM service is not currently attached",
+            };
+            let _ = turn
+                .tx
+                .send(status_event(
+                    RecoverySeverity::Error,
+                    Component::Llm,
+                    "degraded",
+                    final_msg.to_string(),
+                ))
+                .await;
+            Replay::Abandoned(final_msg.to_string())
+        }
+    }
+}
+
+/// Surface a fatal error in the stream and close it with `Done`.
+async fn fail_turn(tx: &mpsc::Sender<LlmEvent>, message: &str) {
+    let _ = tx
+        .send(LlmEvent::Delta {
+            text: format!("\n[agent error: {message}]\n"),
+        })
+        .await;
+    let _ = tx.send(LlmEvent::Done).await;
+}
+
+fn status_event(
+    severity: RecoverySeverity,
+    component: Component,
+    event: &str,
+    message: String,
+) -> LlmEvent {
+    LlmEvent::Status {
+        severity: severity.as_str().to_string(),
+        component: component.as_str().to_string(),
+        event: event.to_string(),
+        message,
     }
 }
 
@@ -420,14 +483,23 @@ impl CallStreak {
 }
 
 fn cancelled_tool_result(call: &ToolCall, reason: &str) -> (ToolResultPayload, Value) {
-    let content = format!(
-        "[error] {}: agent turn {reason}.\n[exit:-1 | 0ms]",
-        call.name
-    );
+    error_tool_result(
+        call,
+        format!("[error] {}: agent turn {reason}.", call.name),
+        0,
+    )
+}
+
+fn error_tool_result(
+    call: &ToolCall,
+    message: String,
+    duration_ms: u128,
+) -> (ToolResultPayload, Value) {
+    let content = format!("{message}\n[exit:-1 | {duration_ms}ms]");
     let raw = serde_json::json!({
         "output": content,
         "exit_code": -1,
-        "duration_ms": 0,
+        "duration_ms": duration_ms,
         "truncated": false,
     });
     (
@@ -450,12 +522,6 @@ async fn dispatch_tool_call(
 
     let Some(tool) = tools.get(&call.name) else {
         let duration_ms = start.elapsed().as_millis();
-        let content = format!(
-            "[error] agent: unknown tool '{}'. Available: {}. [exit:-1 | {}ms]",
-            call.name,
-            tools.names().collect::<Vec<_>>().join(", "),
-            duration_ms
-        );
         warn!(
             target: "assistd::agent",
             iteration,
@@ -463,35 +529,23 @@ async fn dispatch_tool_call(
             duration_ms = duration_ms,
             "unknown tool"
         );
-        let raw = serde_json::json!({
-            "output": content,
-            "exit_code": -1,
-            "duration_ms": duration_ms,
-            "truncated": false,
-        });
-        return (
-            ToolResultPayload {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                content,
-                attachments: Vec::new(),
-            },
-            raw,
+        let available = tools.names().collect::<Vec<_>>().join(", ");
+        return error_tool_result(
+            call,
+            format!(
+                "[error] agent: unknown tool '{}'. Available: {available}.",
+                call.name
+            ),
+            duration_ms,
         );
     };
 
     let result = tool.invoke(call.arguments.clone()).await;
-    let duration = start.elapsed();
-    let duration_ms = duration.as_millis();
+    let duration_ms = start.elapsed().as_millis();
 
     let raw = match result {
         Ok(v) => v,
         Err(e) => {
-            let content = format!(
-                "[error] {}: tool invocation failed. Check: {e}. \
-                 Try: a different command.\n[exit:-1 | {duration_ms}ms]",
-                call.name
-            );
             warn!(
                 target: "assistd::agent",
                 iteration,
@@ -500,20 +554,13 @@ async fn dispatch_tool_call(
                 error = %e,
                 "tool invocation errored"
             );
-            let raw = serde_json::json!({
-                "output": content,
-                "exit_code": -1,
-                "duration_ms": duration_ms,
-                "truncated": false,
-            });
-            return (
-                ToolResultPayload {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    content,
-                    attachments: Vec::new(),
-                },
-                raw,
+            return error_tool_result(
+                call,
+                format!(
+                    "[error] {}: tool invocation failed. Check: {e}. Try: a different command.",
+                    call.name
+                ),
+                duration_ms,
             );
         }
     };

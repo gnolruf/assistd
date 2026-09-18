@@ -1,8 +1,8 @@
 //! `handle_query`: per-turn agent loop driver.
 
-use super::AppState;
 use super::context::combine_context_blocks;
 use super::wire::decode_wire_attachments;
+use super::{AppState, send_error};
 use crate::Agent;
 use crate::presence::{LlmStreamGuard, RequestGuard};
 use anyhow::Result;
@@ -86,7 +86,7 @@ impl AppState {
             );
         }
 
-        self.finalize_turn(turn_id, gen_result, speech_handle, &tx, id, done_emitted)
+        self.finalize_turn(id, turn_id, gen_result, speech_handle, &tx, done_emitted)
             .await
     }
 
@@ -102,12 +102,7 @@ impl AppState {
         match decode_wire_attachments(wire) {
             Ok(v) => Ok(Some(v)),
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id: id.to_string(),
-                        message: format!("invalid attachment: {e}"),
-                    })
-                    .await;
+                send_error(tx, id.to_string(), format!("invalid attachment: {e}")).await;
                 Err(anyhow::anyhow!("invalid attachment: {e}"))
             }
         }
@@ -126,12 +121,7 @@ impl AppState {
         {
             Ok(g) => g,
             Err(e) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id: id.to_string(),
-                        message: format!("wake failed: {e:#}"),
-                    })
-                    .await;
+                send_error(tx, id.to_string(), format!("wake failed: {e:#}")).await;
                 return Err(e);
             }
         };
@@ -496,11 +486,11 @@ impl AppState {
 
     async fn finalize_turn(
         &self,
+        id: String,
         turn_id: Option<TurnId>,
         gen_result: std::result::Result<Result<()>, tokio::task::JoinError>,
         speech_handle: JoinHandle<()>,
         tx: &mpsc::Sender<Event>,
-        id: String,
         done_emitted: bool,
     ) -> Result<()> {
         if let Some(t) = turn_id {
@@ -527,21 +517,11 @@ impl AppState {
                 Ok(())
             }
             Ok(Err(e)) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("llm backend error: {e}"),
-                    })
-                    .await;
+                send_error(tx, id, format!("llm backend error: {e}")).await;
                 Err(e)
             }
             Err(join_err) => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!("llm backend panicked: {join_err}"),
-                    })
-                    .await;
+                send_error(tx, id, format!("llm backend panicked: {join_err}")).await;
                 Err(anyhow::anyhow!("llm backend panicked: {join_err}"))
             }
         }

@@ -17,7 +17,7 @@ mod wm_bridge;
 pub use state::PopupState;
 pub use visibility::DriverInput;
 
-use visibility::{PlaceRequest, run as driver_run};
+use visibility::{PlaceRequest, drive_visibility};
 use wm_bridge::{
     WmBackendBundle, anchor_from_config, build_wm_backend, place_worker, popup_criteria,
 };
@@ -99,7 +99,7 @@ impl PopupHandle {
 }
 
 /// Spawn the popup subsystem; `Ok(None)` when disabled by config.
-pub async fn spawn(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupHandle>> {
+pub async fn spawn_popup(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupHandle>> {
     if !cfg.tray.popup.enabled {
         tracing::info!(target: "tray", "popup: disabled by config");
         return Ok(None);
@@ -163,7 +163,9 @@ pub async fn spawn(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupH
     ));
 
     let driver_cfg = popup_cfg.clone();
-    let driver_task = tokio::spawn(driver_run(state_tx, driver_rx, place_tx, driver_cfg, ipc));
+    let driver_task = tokio::spawn(drive_visibility(
+        state_tx, driver_rx, place_tx, driver_cfg, ipc,
+    ));
 
     let app_id = assistd_config::defaults::DEFAULT_TRAY_POPUP_APP_ID.to_string();
 
@@ -175,7 +177,7 @@ pub async fn spawn(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupH
     let gui_thread = std::thread::Builder::new()
         .name("assistd-popup-gui".into())
         .spawn(move || {
-            if let Err(e) = window::run(
+            if let Err(e) = window::run_gui_loop(
                 gui_state_rx,
                 gui_event_tx,
                 &app_id,

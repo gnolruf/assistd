@@ -20,7 +20,9 @@ pub mod socket;
 pub mod state;
 
 pub use agent::Agent;
-pub use recovery::{Component, RecoverySeverity, install_panic_hook, spawn_supervised};
+pub use recovery::{
+    Component, RecoverySeverity, drain_join_set, install_panic_hook, spawn_supervised,
+};
 
 pub use assistd_config as config;
 pub use assistd_config::{
@@ -45,6 +47,7 @@ pub use assistd_wm::{NoWindowManager, WindowManager};
 pub use presence::{PresenceManager, RequestGuard};
 pub use state::{
     AppState, ConversationContext, McpStartupFailure, MemoryStack, RuntimeState, Subsystems,
+    history_entries,
 };
 
 use anyhow::{Context, Result};

@@ -16,7 +16,7 @@ pub struct ListenDispatcherHandles {
     pub presence_gate: JoinHandle<()>,
 }
 
-pub fn spawn(
+pub fn spawn_dispatcher(
     state: Arc<AppState>,
     listener: Arc<dyn ContinuousListener>,
     presence: Arc<PresenceManager>,
@@ -125,38 +125,7 @@ async fn run_utterance_forwarder(
         }
     }
 
-    let in_flight = handlers.len();
-    if in_flight == 0 {
-        return;
-    }
-    info!(
-        target: "assistd::listen",
-        grace_secs = grace.as_secs(),
-        in_flight,
-        "draining in-flight listen-triggered queries"
-    );
-    let drained = tokio::time::timeout(grace, async {
-        while let Some(res) = handlers.join_next().await {
-            if let Err(e) = res
-                && e.is_panic()
-            {
-                error!(
-                    target: "assistd::listen",
-                    "listen-triggered query task panicked: {e}"
-                );
-            }
-        }
-    })
-    .await;
-    if drained.is_err() {
-        let remaining = handlers.len();
-        warn!(
-            target: "assistd::listen",
-            remaining,
-            "shutdown grace expired; aborting remaining listen handlers"
-        );
-        handlers.shutdown().await;
-    }
+    assistd_core::drain_join_set(&mut handlers, grace, "listen-triggered query").await;
 }
 
 async fn run_presence_gate(

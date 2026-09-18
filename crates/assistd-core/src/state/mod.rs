@@ -22,9 +22,14 @@ pub(crate) mod subsystems;
 pub(crate) mod voice_handlers;
 pub(crate) mod wire;
 
+pub use self::branches::history_entries;
 pub use self::memory_stack::MemoryStack;
 pub use self::runtime::{ConversationContext, RuntimeState};
 pub use self::subsystems::{McpStartupFailure, Subsystems};
+
+async fn send_error(tx: &mpsc::Sender<Event>, id: String, message: String) {
+    let _ = tx.send(Event::Error { id, message }).await;
+}
 
 /// Shared, long-lived daemon state handed to every request handler.
 pub struct AppState {
@@ -79,15 +84,15 @@ impl AppState {
                     timeout_secs = self.config.timeouts.dispatch_envelope_secs,
                     "dispatch envelope timeout exceeded; aborting request"
                 );
-                let _ = tx_for_timeout
-                    .send(Event::Error {
-                        id: req_id,
-                        message: format!(
-                            "request exceeded {}s envelope timeout",
-                            self.config.timeouts.dispatch_envelope_secs
-                        ),
-                    })
-                    .await;
+                send_error(
+                    &tx_for_timeout,
+                    req_id,
+                    format!(
+                        "request exceeded {}s envelope timeout",
+                        self.config.timeouts.dispatch_envelope_secs
+                    ),
+                )
+                .await;
                 Ok(())
             }
         }
@@ -141,15 +146,15 @@ impl AppState {
             Request::NewSession { id } => self.handle_new_session(id, tx).await,
             Request::Subscribe { id, filter } => self.handle_subscribe(id, filter, tx).await,
             Request::ConfirmResponse { id, confirm_id, .. } => {
-                let _ = tx
-                    .send(Event::Error {
-                        id,
-                        message: format!(
-                            "ConfirmResponse(confirm_id={confirm_id}) received with no \
-                             matching ConfirmRequest in flight on this connection"
-                        ),
-                    })
-                    .await;
+                send_error(
+                    &tx,
+                    id,
+                    format!(
+                        "ConfirmResponse(confirm_id={confirm_id}) received with no matching \
+                         ConfirmRequest in flight on this connection"
+                    ),
+                )
+                .await;
                 Ok(())
             }
         }
