@@ -71,6 +71,40 @@ fn workspace_id_parse_or_name() {
 }
 
 #[test]
+fn focus_and_move_use_con_id_criteria() {
+    let id = WindowId::new(42).unwrap();
+    assert_eq!(format_focus(&id), r#"[con_id="42"] focus"#);
+    assert_eq!(
+        format_move_to_workspace(&id, &WorkspaceId::Num(3)),
+        r#"[con_id="42"] move container to workspace number 3"#
+    );
+}
+
+#[test]
+fn resize_payload_uses_con_id_criteria() {
+    let p = format_resize_width(&WindowId::new(42).unwrap(), ResizeDir::Grow, 50);
+    assert_eq!(p, r#"[con_id="42"] resize grow width 50 px or 0 ppt"#);
+    let p = format_resize_width(&WindowId::new(1234567890).unwrap(), ResizeDir::Shrink, 5);
+    assert_eq!(
+        p,
+        r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#
+    );
+}
+
+#[test]
+fn layout_payload_emits_bare_form() {
+    for (l, expected) in [
+        (Layout::Default, "layout default"),
+        (Layout::Tabbed, "layout tabbed"),
+        (Layout::Stacking, "layout stacking"),
+        (Layout::SplitH, "layout splith"),
+        (Layout::SplitV, "layout splitv"),
+    ] {
+        assert_eq!(format_layout(l), expected);
+    }
+}
+
+#[test]
 fn format_criteria_clause_each_variant() {
     assert_eq!(
         format_criteria_clause(&PlacementCriteria::AppId("dev.assistd.popup".into())),

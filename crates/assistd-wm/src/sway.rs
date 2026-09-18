@@ -17,14 +17,18 @@ use swayipc_async::{
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 
-use crate::criteria::{format_place_floating_pixels, format_workspace_target};
+use crate::criteria::{
+    format_focus, format_layout, format_move_to_workspace, format_place_floating_pixels,
+    format_resize_width,
+};
 use crate::error::ipc_ctx;
 use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
 use crate::{
     FocusedWindowContext, Layout, OutputInfo, PlacementAnchor, PlacementCriteria, Rect, ResizeDir,
-    Window, WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
+    WM_IPC_TIMEOUT, Window, WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId,
+    WorkspaceInfo,
 };
 
 const WINDOW_EVENTS_CAPACITY: usize = 32;
@@ -133,61 +137,69 @@ impl SwayBackend {
     }
 
     async fn find_window_rect_once(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let tree = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_tree()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_TREE (window rect)"));
-            }
-            Ok(Ok(t)) => t,
-        };
-        drop(guard);
+        let tree = self.tree("sway GET_TREE (window rect)").await?;
         find_sway_node_rect(&tree, criteria)
             .ok_or_else(|| WmError::Rejected(format!("no window matches {criteria:?}")))
     }
 
-    async fn run(&self, payload: &str) -> WmResult<()> {
+    /// Run one IPC call on the command socket under [`WM_IPC_TIMEOUT`].
+    /// A timeout or transport error drops the connection and wakes the
+    /// supervisor to reconnect.
+    async fn with_conn<T>(
+        &self,
+        ctx: &'static str,
+        op: impl AsyncFnOnce(&mut Connection) -> swayipc_async::Fallible<T>,
+    ) -> WmResult<T> {
         let mut guard = self.cmd.lock().await;
         let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let outcomes =
-            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.run_command(payload)).await {
-                Err(_) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-                }
-                Ok(Err(e)) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(ipc_ctx(e, "sway RUN_COMMAND"));
-                }
-                Ok(Ok(v)) => v,
-            };
+        let outcome = tokio::time::timeout(WM_IPC_TIMEOUT, op(conn)).await;
+        let err = match outcome {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(e)) => ipc_ctx(e, ctx),
+            Err(_) => WmError::Timeout(WM_IPC_TIMEOUT),
+        };
+        *guard = None;
+        self.reconnect.notify_one();
+        Err(err)
+    }
+
+    async fn run_command(&self, payload: &str) -> WmResult<()> {
+        let outcomes = self
+            .with_conn("sway RUN_COMMAND", async |conn| {
+                conn.run_command(payload).await
+            })
+            .await?;
         for r in outcomes {
             r.map_err(|e| WmError::Rejected(format!("{payload}: {e}")))?;
         }
         Ok(())
+    }
+
+    async fn workspaces(&self, ctx: &'static str) -> WmResult<Vec<swayipc_async::Workspace>> {
+        self.with_conn(ctx, async |conn| conn.get_workspaces().await)
+            .await
+    }
+
+    async fn outputs(&self, ctx: &'static str) -> WmResult<Vec<swayipc_async::Output>> {
+        self.with_conn(ctx, async |conn| conn.get_outputs().await)
+            .await
+    }
+
+    async fn tree(&self, ctx: &'static str) -> WmResult<Node> {
+        self.with_conn(ctx, async |conn| conn.get_tree().await)
+            .await
     }
 }
 
 #[async_trait]
 impl WindowManager for SwayBackend {
     async fn focus(&self, window: &WindowId) -> WmResult<()> {
-        let cmd = format!(r#"[con_id="{}"] focus"#, window.get());
-        self.run(&cmd).await
+        self.run_command(&format_focus(window)).await
     }
 
     async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
-        let target = format_workspace_target(workspace);
-        let cmd = format!(r#"[con_id="{}"] move container to {target}"#, window.get());
-        self.run(&cmd).await
+        self.run_command(&format_move_to_workspace(window, workspace))
+            .await
     }
 
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
@@ -199,44 +211,16 @@ impl WindowManager for SwayBackend {
     }
 
     async fn list_windows(&self) -> WmResult<Vec<Window>> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let tree = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_tree()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_TREE"));
-            }
-            Ok(Ok(t)) => t,
-        };
-        drop(guard);
+        let tree = self.tree("sway GET_TREE").await?;
         let mut out = Vec::new();
         collect_windows(&tree, None, &mut out);
         Ok(out)
     }
 
     async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let ws = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_WORKSPACES"));
-            }
-            Ok(Ok(w)) => w,
-        };
-        Ok(ws
+        Ok(self
+            .workspaces("sway GET_WORKSPACES")
+            .await?
             .into_iter()
             .map(|w| WorkspaceInfo {
                 num: w.num,
@@ -253,33 +237,17 @@ impl WindowManager for SwayBackend {
         direction: ResizeDir,
         pixels: u32,
     ) -> WmResult<()> {
-        self.run(&sway_resize_payload(window, direction, pixels))
+        self.run_command(&format_resize_width(window, direction, pixels))
             .await
     }
 
     async fn set_layout(&self, layout: Layout) -> WmResult<()> {
-        self.run(&sway_layout_payload(layout)).await
+        self.run_command(&format_layout(layout)).await
     }
 
     async fn focused_workspace_rect(&self) -> WmResult<Rect> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let workspaces =
-            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
-                Err(_) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-                }
-                Ok(Err(e)) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(ipc_ctx(e, "sway GET_WORKSPACES (focused rect)"));
-                }
-                Ok(Ok(w)) => w,
-            };
-        drop(guard);
-        workspaces
+        self.workspaces("sway GET_WORKSPACES (focused rect)")
+            .await?
             .into_iter()
             .find(|w| w.focused)
             .map(|w| Rect {
@@ -318,29 +286,16 @@ impl WindowManager for SwayBackend {
                 anchor
             }
         };
-        self.run(&format_place_floating_pixels(
+        self.run_command(&format_place_floating_pixels(
             criteria, effective, workspace,
         ))
         .await
     }
 
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let outputs = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_outputs()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_OUTPUTS"));
-            }
-            Ok(Ok(v)) => v,
-        };
-        Ok(outputs
+        Ok(self
+            .outputs("sway GET_OUTPUTS")
+            .await?
             .into_iter()
             .map(|o| OutputInfo {
                 name: o.name,
@@ -360,23 +315,9 @@ impl WindowManager for SwayBackend {
     }
 
     async fn focused_output_scale(&self) -> WmResult<f64> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let outputs = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_outputs()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "sway GET_OUTPUTS (focused scale)"));
-            }
-            Ok(Ok(v)) => v,
-        };
-        drop(guard);
-        Ok(outputs
+        Ok(self
+            .outputs("sway GET_OUTPUTS (focused scale)")
+            .await?
             .into_iter()
             .find(|o| o.focused)
             .and_then(|o| o.scale)
@@ -570,19 +511,6 @@ fn sway_node_matches(node: &Node, criteria: &PlacementCriteria) -> bool {
     }
 }
 
-fn sway_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
-    format!(
-        r#"[con_id="{}"] resize {} width {} px or 0 ppt"#,
-        window.get(),
-        direction.as_str(),
-        pixels,
-    )
-}
-
-fn sway_layout_payload(layout: Layout) -> String {
-    format!("layout {}", layout.as_str())
-}
-
 fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>) {
     let next_ws = if matches!(node.node_type, NodeType::Workspace) {
         node.name.as_deref()
@@ -688,41 +616,11 @@ fn walk_focused(node: &Node) -> Option<&Node> {
 mod tests {
     use super::*;
 
-    fn id(n: u64) -> WindowId {
-        WindowId::new(n).expect("test ids are non-zero")
-    }
-
-    #[test]
-    fn resize_payload_uses_con_id_criteria() {
-        let p = sway_resize_payload(&id(42), ResizeDir::Grow, 50);
-        assert_eq!(p, r#"[con_id="42"] resize grow width 50 px or 0 ppt"#);
-    }
-
-    #[test]
-    fn resize_payload_renders_id_in_decimal() {
-        let p = sway_resize_payload(&id(1234567890), ResizeDir::Shrink, 5);
-        assert_eq!(
-            p,
-            r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#
-        );
-    }
-
     #[test]
     fn sway_id_rejects_non_positive() {
         assert!(sway_id(0).is_none());
         assert!(sway_id(-1).is_none());
         assert!(sway_id(-12345).is_none());
         assert_eq!(sway_id(42), WindowId::new(42));
-    }
-
-    #[test]
-    fn layout_payload_emits_bare_form() {
-        for (l, expected) in [
-            (Layout::Default, "layout default"),
-            (Layout::Tabbed, "layout tabbed"),
-            (Layout::SplitH, "layout splith"),
-        ] {
-            assert_eq!(sway_layout_payload(l), expected);
-        }
     }
 }

@@ -19,6 +19,7 @@ use crate::whisper::WhisperTranscriberBuilder;
 
 pub mod capture;
 pub mod consumer;
+pub(crate) mod resample;
 
 pub use capture::AudioCaptureError;
 

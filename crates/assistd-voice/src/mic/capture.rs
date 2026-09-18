@@ -157,43 +157,34 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     }
 
     let host = cpal::default_host();
+    let requested = cfg.mic_device.as_deref();
+    let names: Vec<String> = match host.input_devices() {
+        Ok(devices) => devices
+            .map(|d| name_of(&d).unwrap_or_else(|_| "<unknown>".to_string()))
+            .collect(),
+        Err(e) => match requested {
+            Some(requested) => anyhow::bail!(
+                "failed to enumerate cpal input devices while validating voice.mic_device \
+                 = {requested:?}: {e}"
+            ),
+            None => return Ok(()),
+        },
+    };
     let default_name = host
         .default_input_device()
         .and_then(|d| name_of(&d).ok())
         .unwrap_or_else(|| "<none>".to_string());
-    if let Ok(devices) = host.input_devices() {
-        let names: Vec<String> = devices.filter_map(|d| name_of(&d).ok()).collect();
-        tracing::info!(
-            target: "assistd::voice::mic",
-            default = %default_name,
-            available = ?names,
-            "cpal input devices"
-        );
-    }
+    tracing::info!(
+        target: "assistd::voice::mic",
+        default = %default_name,
+        available = ?names,
+        "cpal input devices"
+    );
 
-    let Some(requested) = cfg.mic_device.as_deref() else {
+    let Some(requested) = requested else {
         return Ok(());
     };
-
-    let devices = match host.input_devices() {
-        Ok(d) => d,
-        Err(e) => {
-            anyhow::bail!(
-                "failed to enumerate cpal input devices while validating voice.mic_device \
-                 = {requested:?}: {e}"
-            );
-        }
-    };
-    let mut names: Vec<String> = Vec::new();
-    let mut matched = false;
-    for d in devices {
-        let name = name_of(&d).unwrap_or_else(|_| "<unknown>".to_string());
-        if name == requested {
-            matched = true;
-        }
-        names.push(name);
-    }
-    if matched {
+    if names.iter().any(|n| n == requested) {
         return Ok(());
     }
 
@@ -250,47 +241,34 @@ fn build_stream(
     producer: RbProd,
     overrun: Arc<AtomicU64>,
 ) -> Result<Stream, AudioCaptureError> {
-    let err_cb = |e: CpalError| {
-        warn!(target: "assistd::voice::mic", "cpal stream error: {e}");
-    };
+    let state = CallbackState::new(producer, channels, overrun);
+    match format {
+        SampleFormat::F32 => build_input_stream(device, config, state, |s: f32| s),
+        SampleFormat::I16 => build_input_stream(device, config, state, |s: i16| {
+            f32::from(s) / f32::from(i16::MAX)
+        }),
+        // u16 is offset-binary: 32768 is silence.
+        SampleFormat::U16 => build_input_stream(device, config, state, |s: u16| {
+            (f32::from(s) - 32768.0) / 32768.0
+        }),
+        _ => Err(AudioCaptureError::UnsupportedFormat),
+    }
+}
 
-    let stream = match format {
-        SampleFormat::F32 => {
-            let state = CallbackState::new(producer, channels, overrun);
-            device
-                .build_input_stream(
-                    *config,
-                    move |data: &[f32], _| state.push_f32(data),
-                    err_cb,
-                    None,
-                )
-                .map_err(|e| AudioCaptureError::BuildStream(e.to_string()))?
-        }
-        SampleFormat::I16 => {
-            let state = CallbackState::new(producer, channels, overrun);
-            device
-                .build_input_stream(
-                    *config,
-                    move |data: &[i16], _| state.push_i16(data),
-                    err_cb,
-                    None,
-                )
-                .map_err(|e| AudioCaptureError::BuildStream(e.to_string()))?
-        }
-        SampleFormat::U16 => {
-            let state = CallbackState::new(producer, channels, overrun);
-            device
-                .build_input_stream(
-                    *config,
-                    move |data: &[u16], _| state.push_u16(data),
-                    err_cb,
-                    None,
-                )
-                .map_err(|e| AudioCaptureError::BuildStream(e.to_string()))?
-        }
-        _ => return Err(AudioCaptureError::UnsupportedFormat),
-    };
-    Ok(stream)
+fn build_input_stream<T: cpal::SizedSample>(
+    device: &Device,
+    config: &StreamConfig,
+    state: CallbackState,
+    to_f32: impl Fn(T) -> f32 + Send + 'static,
+) -> Result<Stream, AudioCaptureError> {
+    device
+        .build_input_stream(
+            *config,
+            move |data: &[T], _| state.push(data, &to_f32),
+            |e: CpalError| warn!(target: "assistd::voice::mic", "cpal stream error: {e}"),
+            None,
+        )
+        .map_err(|e| AudioCaptureError::BuildStream(e.to_string()))
 }
 
 struct CallbackState {
@@ -311,51 +289,16 @@ impl CallbackState {
         }
     }
 
-    fn push_f32(&self, data: &[f32]) {
+    /// Downmix `data` to mono f32 and push it onto the ring.
+    fn push<T: Copy>(&self, data: &[T], to_f32: impl Fn(T) -> f32) {
         let mut scratch = self.scratch.lock();
         scratch.clear();
         if self.channels <= 1 {
-            scratch.extend_from_slice(data);
+            scratch.extend(data.iter().map(|&s| to_f32(s)));
         } else {
             let ch = self.channels;
             for frame in data.chunks_exact(ch) {
-                let sum: f32 = frame.iter().copied().sum();
-                scratch.push(sum / ch as f32);
-            }
-        }
-        self.push_mono(&scratch);
-    }
-
-    fn push_i16(&self, data: &[i16]) {
-        let mut scratch = self.scratch.lock();
-        scratch.clear();
-        let scale = i16::MAX as f32;
-        if self.channels <= 1 {
-            for &s in data {
-                scratch.push(s as f32 / scale);
-            }
-        } else {
-            let ch = self.channels;
-            for frame in data.chunks_exact(ch) {
-                let sum: f32 = frame.iter().map(|&s| s as f32 / scale).sum();
-                scratch.push(sum / ch as f32);
-            }
-        }
-        self.push_mono(&scratch);
-    }
-
-    fn push_u16(&self, data: &[u16]) {
-        let mut scratch = self.scratch.lock();
-        scratch.clear();
-        // u16 is offset-binary: 32768 = silence.
-        if self.channels <= 1 {
-            for &s in data {
-                scratch.push((s as f32 - 32768.0) / 32768.0);
-            }
-        } else {
-            let ch = self.channels;
-            for frame in data.chunks_exact(ch) {
-                let sum: f32 = frame.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).sum();
+                let sum: f32 = frame.iter().map(|&s| to_f32(s)).sum();
                 scratch.push(sum / ch as f32);
             }
         }

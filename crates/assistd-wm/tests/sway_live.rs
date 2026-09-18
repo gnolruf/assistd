@@ -10,6 +10,8 @@
 //! shuts down. Does NOT issue `focus` or `move_to_workspace` against
 //! the live session.
 
+#![cfg(feature = "sway")]
+
 mod common;
 
 use std::sync::Arc;

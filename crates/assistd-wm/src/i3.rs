@@ -16,14 +16,18 @@ use tokio_i3ipc::{
     reply,
 };
 
-use crate::criteria::{format_place_floating_pixels, format_workspace_target};
+use crate::criteria::{
+    format_focus, format_layout, format_move_to_workspace, format_place_floating_pixels,
+    format_resize_width,
+};
 use crate::error::ipc_ctx;
 use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
 use crate::{
-    FocusedWindowContext, Layout, PlacementAnchor, PlacementCriteria, Rect, ResizeDir, Window,
-    WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
+    FocusedWindowContext, Layout, PlacementAnchor, PlacementCriteria, Rect, ResizeDir,
+    WM_IPC_TIMEOUT, Window, WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId,
+    WorkspaceInfo,
 };
 
 /// Window events buffered per subscriber. A lagged subscriber falls
@@ -94,23 +98,33 @@ impl I3Backend {
         })
     }
 
-    async fn run(&self, payload: &str) -> WmResult<()> {
+    /// Run one IPC call on the command socket under [`WM_IPC_TIMEOUT`].
+    /// A timeout or transport error drops the connection and wakes the
+    /// supervisor to reconnect.
+    async fn with_conn<T>(
+        &self,
+        ctx: &'static str,
+        op: impl AsyncFnOnce(&mut I3) -> std::io::Result<T>,
+    ) -> WmResult<T> {
         let mut guard = self.cmd.lock().await;
         let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let results =
-            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.run_command(payload)).await {
-                Err(_) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-                }
-                Ok(Err(e)) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(ipc_ctx(e, "i3 RUN_COMMAND"));
-                }
-                Ok(Ok(v)) => v,
-            };
+        let outcome = tokio::time::timeout(WM_IPC_TIMEOUT, op(conn)).await;
+        let err = match outcome {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(e)) => ipc_ctx(e, ctx),
+            Err(_) => WmError::Timeout(WM_IPC_TIMEOUT),
+        };
+        *guard = None;
+        self.reconnect.notify_one();
+        Err(err)
+    }
+
+    async fn run_command(&self, payload: &str) -> WmResult<()> {
+        let results = self
+            .with_conn("i3 RUN_COMMAND", async |conn| {
+                conn.run_command(payload).await
+            })
+            .await?;
         for r in results {
             if !r.success {
                 return Err(WmError::Rejected(format!(
@@ -121,19 +135,27 @@ impl I3Backend {
         }
         Ok(())
     }
+
+    async fn workspaces(&self, ctx: &'static str) -> WmResult<Vec<reply::Workspace>> {
+        self.with_conn(ctx, async |conn| conn.get_workspaces().await)
+            .await
+    }
+
+    async fn tree(&self, ctx: &'static str) -> WmResult<reply::Node> {
+        self.with_conn(ctx, async |conn| conn.get_tree().await)
+            .await
+    }
 }
 
 #[async_trait]
 impl WindowManager for I3Backend {
     async fn focus(&self, window: &WindowId) -> WmResult<()> {
-        let cmd = format!(r#"[con_id="{}"] focus"#, window.get());
-        self.run(&cmd).await
+        self.run_command(&format_focus(window)).await
     }
 
     async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
-        let target = format_workspace_target(workspace);
-        let cmd = format!(r#"[con_id="{}"] move container to {target}"#, window.get(),);
-        self.run(&cmd).await
+        self.run_command(&format_move_to_workspace(window, workspace))
+            .await
     }
 
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
@@ -145,44 +167,16 @@ impl WindowManager for I3Backend {
     }
 
     async fn list_windows(&self) -> WmResult<Vec<Window>> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let tree = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_tree()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "i3 GET_TREE"));
-            }
-            Ok(Ok(t)) => t,
-        };
-        drop(guard);
+        let tree = self.tree("i3 GET_TREE").await?;
         let mut out = Vec::new();
         collect_windows(&tree, None, &mut out);
         Ok(out)
     }
 
     async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let ws = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "i3 GET_WORKSPACES"));
-            }
-            Ok(Ok(w)) => w,
-        };
-        Ok(ws
+        Ok(self
+            .workspaces("i3 GET_WORKSPACES")
+            .await?
             .into_iter()
             .map(|w| WorkspaceInfo {
                 num: w.num,
@@ -199,33 +193,17 @@ impl WindowManager for I3Backend {
         direction: ResizeDir,
         pixels: u32,
     ) -> WmResult<()> {
-        self.run(&i3_resize_payload(window, direction, pixels))
+        self.run_command(&format_resize_width(window, direction, pixels))
             .await
     }
 
     async fn set_layout(&self, layout: Layout) -> WmResult<()> {
-        self.run(&i3_layout_payload(layout)).await
+        self.run_command(&format_layout(layout)).await
     }
 
     async fn focused_workspace_rect(&self) -> WmResult<Rect> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let workspaces =
-            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
-                Err(_) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-                }
-                Ok(Err(e)) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(ipc_ctx(e, "i3 GET_WORKSPACES (focused rect)"));
-                }
-                Ok(Ok(w)) => w,
-            };
-        drop(guard);
-        workspaces
+        self.workspaces("i3 GET_WORKSPACES (focused rect)")
+            .await?
             .into_iter()
             .find(|w| w.focused)
             .map(|w| Rect {
@@ -282,7 +260,7 @@ impl WindowManager for I3Backend {
                 anchor
             }
         };
-        self.run(&format_place_floating_pixels(
+        self.run_command(&format_place_floating_pixels(
             &translated,
             effective,
             workspace,
@@ -329,22 +307,7 @@ impl I3Backend {
     }
 
     async fn find_window_rect_once(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let tree = match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_tree()).await {
-            Err(_) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-            }
-            Ok(Err(e)) => {
-                *guard = None;
-                self.reconnect.notify_one();
-                return Err(ipc_ctx(e, "i3 GET_TREE (window rect)"));
-            }
-            Ok(Ok(t)) => t,
-        };
-        drop(guard);
+        let tree = self.tree("i3 GET_TREE (window rect)").await?;
         find_node_rect(&tree, criteria)
             .ok_or_else(|| WmError::Rejected(format!("no window matches {criteria:?}")))
     }
@@ -361,24 +324,12 @@ impl I3Backend {
 
     /// Output hosting the focused workspace; `Ok(None)` when none is.
     async fn focused_output_name(&self) -> WmResult<Option<String>> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let workspaces =
-            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
-                Err(_) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-                }
-                Ok(Err(e)) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(ipc_ctx(e, "i3 GET_WORKSPACES (focused output name)"));
-                }
-                Ok(Ok(w)) => w,
-            };
-        drop(guard);
-        Ok(workspaces.into_iter().find(|w| w.focused).map(|w| w.output))
+        Ok(self
+            .workspaces("i3 GET_WORKSPACES (focused output name)")
+            .await?
+            .into_iter()
+            .find(|w| w.focused)
+            .map(|w| w.output))
     }
 }
 
@@ -424,19 +375,6 @@ fn node_matches(node: &reply::Node, criteria: &PlacementCriteria) -> bool {
         // matched by id elsewhere. No-match so a misuse fails loudly.
         _ => false,
     }
-}
-
-fn i3_resize_payload(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
-    format!(
-        r#"[con_id="{}"] resize {} width {} px or 0 ppt"#,
-        window.get(),
-        direction.as_str(),
-        pixels,
-    )
-}
-
-fn i3_layout_payload(layout: Layout) -> String {
-    format!("layout {}", layout.as_str())
 }
 
 fn env_scale(name: &str) -> Option<f64> {
@@ -769,25 +707,6 @@ fn walk_focused(node: &reply::Node) -> Option<&reply::Node> {
 mod tests {
     use super::*;
 
-    fn id(n: u64) -> WindowId {
-        WindowId::new(n).expect("test ids are non-zero")
-    }
-
-    #[test]
-    fn resize_payload_uses_con_id_criteria() {
-        let p = i3_resize_payload(&id(42), ResizeDir::Grow, 50);
-        assert_eq!(p, r#"[con_id="42"] resize grow width 50 px or 0 ppt"#);
-    }
-
-    #[test]
-    fn resize_payload_renders_id_in_decimal() {
-        let p = i3_resize_payload(&id(1234567890), ResizeDir::Shrink, 5);
-        assert_eq!(
-            p,
-            r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#
-        );
-    }
-
     #[test]
     fn translate_criteria_rewrites_app_id_to_title() {
         let out = translate_criteria_for_i3(&PlacementCriteria::AppId("dev.assistd.popup".into()));
@@ -809,19 +728,6 @@ mod tests {
             translate_criteria_for_i3(&PlacementCriteria::ConId(con)),
             PlacementCriteria::ConId(con)
         );
-    }
-
-    #[test]
-    fn layout_payload_emits_bare_form() {
-        for (l, expected) in [
-            (Layout::Default, "layout default"),
-            (Layout::Tabbed, "layout tabbed"),
-            (Layout::Stacking, "layout stacking"),
-            (Layout::SplitH, "layout splith"),
-            (Layout::SplitV, "layout splitv"),
-        ] {
-            assert_eq!(i3_layout_payload(l), expected);
-        }
     }
 
     #[test]

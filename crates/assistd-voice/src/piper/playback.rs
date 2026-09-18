@@ -31,121 +31,11 @@ impl RodioPlaybackWorker {
     /// to the default with a warning.
     pub fn start(device_name: Option<&str>) -> Result<Self, PiperError> {
         let host = cpal::default_host();
-        match host.output_devices() {
-            Ok(devs) => {
-                let names: Vec<String> = devs
-                    .map(|d| {
-                        d.description()
-                            .map(|x| x.to_string())
-                            .unwrap_or_else(|_| "<no-description>".into())
-                    })
-                    .collect();
-                tracing::info!(
-                    target: "assistd::voice::piper",
-                    available = ?names,
-                    "cpal output devices (set `voice.synthesis.output_device` to one of these)"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "assistd::voice::piper",
-                    error = %e,
-                    "could not enumerate cpal output devices"
-                );
-            }
-        }
-        let selected = match device_name {
-            Some(name) => match host.output_devices() {
-                Ok(devs) => {
-                    let mut found = None;
-                    for d in devs {
-                        let dn = d.description().map(|x| x.to_string()).unwrap_or_default();
-                        if dn == name {
-                            found = Some(d);
-                            break;
-                        }
-                    }
-                    match found {
-                        Some(d) => {
-                            tracing::info!(
-                                target: "assistd::voice::piper",
-                                device = name,
-                                "cpal output device (configured)"
-                            );
-                            Some(d)
-                        }
-                        None => {
-                            tracing::warn!(
-                                target: "assistd::voice::piper",
-                                requested = name,
-                                "cpal output device not found by name; falling back to default"
-                            );
-                            host.default_output_device()
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "assistd::voice::piper",
-                        error = %e,
-                        "could not enumerate cpal output devices; falling back to default"
-                    );
-                    host.default_output_device()
-                }
-            },
-            None => {
-                let dev = host.default_output_device();
-                if let Some(d) = &dev {
-                    let desc = d
-                        .description()
-                        .map(|x| x.to_string())
-                        .unwrap_or_else(|_| "<no-description>".into());
-                    tracing::info!(
-                        target: "assistd::voice::piper",
-                        device = %desc,
-                        "cpal default output device"
-                    );
-                } else {
-                    tracing::warn!(
-                        target: "assistd::voice::piper",
-                        "cpal reports no default output device"
-                    );
-                }
-                dev
-            }
-        };
+        let selected = select_output_device(&host, device_name);
 
         let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<Player, String>>();
         let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
-
-        let device_thread = thread::Builder::new()
-            .name("piper-rodio".into())
-            .spawn(move || {
-                let opened = match selected {
-                    Some(dev) => DeviceSinkBuilder::from_device(dev)
-                        .and_then(|b| b.open_stream())
-                        .map_err(|e| format!("open configured device: {e}")),
-                    None => DeviceSinkBuilder::open_default_sink()
-                        .map_err(|e| format!("open default sink: {e}")),
-                };
-                let mut device_sink = match opened {
-                    Ok(d) => d,
-                    Err(msg) => {
-                        let _ = init_tx.send(Err(msg));
-                        return;
-                    }
-                };
-                device_sink.log_on_drop(false);
-
-                let player = Player::connect_new(device_sink.mixer());
-                if init_tx.send(Ok(player)).is_err() {
-                    return;
-                }
-
-                let _ = shutdown_rx.recv();
-                drop(device_sink);
-            })
-            .map_err(|e| PiperError::Audio(format!("spawn audio thread: {e}")))?;
+        let device_thread = spawn_device_thread(selected, init_tx, shutdown_rx)?;
 
         let player = init_rx
             .recv()
@@ -201,6 +91,112 @@ impl RodioPlaybackWorker {
         self.player.clear();
         self.player.play();
     }
+}
+
+fn describe(device: &cpal::Device) -> String {
+    device
+        .description()
+        .map(|d| d.to_string())
+        .unwrap_or_else(|_| "<no-description>".into())
+}
+
+/// Log the available outputs, then pick the named one or the default.
+/// A name that isn't found falls back to the default with a warning.
+fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
+    let devices: Vec<(cpal::Device, String)> = match host.output_devices() {
+        Ok(devices) => devices
+            .map(|d| {
+                let desc = describe(&d);
+                (d, desc)
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                target: "assistd::voice::piper",
+                error = %e,
+                "could not enumerate cpal output devices; falling back to default"
+            );
+            return host.default_output_device();
+        }
+    };
+    let names: Vec<&str> = devices.iter().map(|(_, n)| n.as_str()).collect();
+    tracing::info!(
+        target: "assistd::voice::piper",
+        available = ?names,
+        "cpal output devices (set `voice.synthesis.output_device` to one of these)"
+    );
+
+    let Some(name) = name else {
+        let device = host.default_output_device();
+        match &device {
+            Some(d) => tracing::info!(
+                target: "assistd::voice::piper",
+                device = %describe(d),
+                "cpal default output device"
+            ),
+            None => tracing::warn!(
+                target: "assistd::voice::piper",
+                "cpal reports no default output device"
+            ),
+        }
+        return device;
+    };
+    match devices.into_iter().find(|(_, n)| n == name) {
+        Some((device, _)) => {
+            tracing::info!(
+                target: "assistd::voice::piper",
+                device = name,
+                "cpal output device (configured)"
+            );
+            Some(device)
+        }
+        None => {
+            tracing::warn!(
+                target: "assistd::voice::piper",
+                requested = name,
+                "cpal output device not found by name; falling back to default"
+            );
+            host.default_output_device()
+        }
+    }
+}
+
+/// Spawn the thread that owns the device sink. It reports the
+/// connected player (or the open error) on `init_tx`, then parks until
+/// `shutdown_rx` fires or hangs up.
+fn spawn_device_thread(
+    device: Option<cpal::Device>,
+    init_tx: std::sync::mpsc::Sender<Result<Player, String>>,
+    shutdown_rx: std::sync::mpsc::Receiver<()>,
+) -> Result<thread::JoinHandle<()>, PiperError> {
+    thread::Builder::new()
+        .name("piper-rodio".into())
+        .spawn(move || {
+            let opened = match device {
+                Some(dev) => DeviceSinkBuilder::from_device(dev)
+                    .and_then(|b| b.open_stream())
+                    .map_err(|e| format!("open configured device: {e}")),
+                None => DeviceSinkBuilder::open_default_sink()
+                    .map_err(|e| format!("open default sink: {e}")),
+            };
+            let mut device_sink = match opened {
+                Ok(d) => d,
+                Err(msg) => {
+                    let _ = init_tx.send(Err(msg));
+                    return;
+                }
+            };
+            device_sink.log_on_drop(false);
+
+            let player = Player::connect_new(device_sink.mixer());
+            if init_tx.send(Ok(player)).is_err() {
+                return;
+            }
+
+            let _ = shutdown_rx.recv();
+            drop(device_sink);
+        })
+        .map_err(|e| PiperError::Audio(format!("spawn audio thread: {e}")))
 }
 
 /// How long `Drop` waits for the device thread before abandoning the

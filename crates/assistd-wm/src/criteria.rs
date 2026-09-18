@@ -1,7 +1,10 @@
 //! Formatting for the `[key="value"] action` command syntax that i3
 //! and Sway share.
 
-use crate::{AnchorCorner, PlacementAnchor, PlacementCriteria, Rect, WorkspaceId};
+use crate::{
+    AnchorCorner, Layout, PlacementAnchor, PlacementCriteria, Rect, ResizeDir, WindowId,
+    WorkspaceId,
+};
 
 /// Escape `\` and `"` inside a quoted criteria value. Backslashes go
 /// first so the ones inserted before quotes aren't doubled.
@@ -15,6 +18,32 @@ pub fn format_workspace_target(ws: &WorkspaceId) -> String {
         WorkspaceId::Num(n) => format!("workspace number {n}"),
         WorkspaceId::Name(s) => format!(r#"workspace "{}""#, escape_for_criteria(s)),
     }
+}
+
+pub fn format_focus(window: &WindowId) -> String {
+    format!(r#"[con_id="{}"] focus"#, window.get())
+}
+
+pub fn format_move_to_workspace(window: &WindowId, workspace: &WorkspaceId) -> String {
+    format!(
+        r#"[con_id="{}"] move container to {}"#,
+        window.get(),
+        format_workspace_target(workspace)
+    )
+}
+
+pub fn format_resize_width(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
+    format!(
+        r#"[con_id="{}"] resize {} width {} px or 0 ppt"#,
+        window.get(),
+        direction.as_str(),
+        pixels,
+    )
+}
+
+/// Acts on the focused container.
+pub fn format_layout(layout: Layout) -> String {
+    format!("layout {}", layout.as_str())
 }
 
 /// The `[key="value"]` prefix for a [`PlacementCriteria`]. `Title` is

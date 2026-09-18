@@ -1,6 +1,5 @@
 //! The [`Transcriber`] trait and the GPU-or-CPU [`QueuedTranscriber`].
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,22 +32,8 @@ pub enum TranscriptionError {
     #[error("invalid model identifier {id:?}: {reason}")]
     ModelParse { id: String, reason: String },
 
-    #[error("failed to download model from {url}: {source}")]
-    ModelDownload {
-        url: String,
-        #[source]
-        source: reqwest::Error,
-    },
-
-    #[error("model download returned HTTP {status} from {url}")]
-    ModelHttp { url: String, status: u16 },
-
-    #[error("model I/O error at {path}: {source}")]
-    ModelIo {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error(transparent)]
+    Download(#[from] crate::hf_download::DownloadError),
 
     #[error("failed to initialize whisper context: {0}")]
     WhisperInit(String),

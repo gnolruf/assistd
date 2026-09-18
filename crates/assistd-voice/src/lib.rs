@@ -20,8 +20,8 @@ pub use assistd_ipc::VoiceCaptureState;
 
 #[cfg(feature = "whisper")]
 pub mod gpu;
-#[cfg(feature = "whisper")]
-pub mod model_cache;
+#[cfg(any(feature = "whisper", feature = "tts"))]
+pub mod hf_download;
 #[cfg(feature = "whisper")]
 pub mod transcribe;
 #[cfg(feature = "whisper")]

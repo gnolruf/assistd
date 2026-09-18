@@ -11,7 +11,7 @@ use whisper_rs::{
 };
 
 use crate::gpu;
-use crate::model_cache::{self, default_cache_dir};
+use crate::hf_download;
 use crate::transcribe::{Transcriber, TranscriptionError};
 
 #[derive(Debug, Clone)]
@@ -224,9 +224,11 @@ impl WhisperTranscriberBuilder {
             id: String::new(),
             reason: "model identifier is required".into(),
         })?;
-        let cache_dir = self.cache_dir.unwrap_or_else(default_cache_dir);
+        let cache_dir = self
+            .cache_dir
+            .unwrap_or_else(|| hf_download::default_cache_dir("whisper"));
 
-        let model_path = model_cache::ensure_model(&model, &cache_dir).await?;
+        let model_path = hf_download::ensure_cached(&model, &cache_dir).await?;
         let vad_runtime = if self.vad_enabled {
             let vad_id = self
                 .vad_model
@@ -234,7 +236,7 @@ impl WhisperTranscriberBuilder {
                     id: String::new(),
                     reason: "vad_model identifier is required when vad_enabled".into(),
                 })?;
-            let vad_path = model_cache::ensure_model(&vad_id, &cache_dir).await?;
+            let vad_path = hf_download::ensure_cached(&vad_id, &cache_dir).await?;
             Some(VadRuntime {
                 model_path: vad_path.to_string_lossy().into_owned(),
                 silence_secs: self.vad_silence_secs.max(0.0),
