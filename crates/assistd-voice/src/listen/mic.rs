@@ -32,14 +32,14 @@ pub struct MicContinuousListener {
     active: Arc<AtomicBool>,
     state_tx: watch::Sender<bool>,
     utterances: broadcast::Sender<String>,
-    inner: Arc<Mutex<InnerState>>,
+    inner: Arc<Mutex<ListenState>>,
 }
 
-struct InnerState {
-    session: Option<ActiveSession>,
+struct ListenState {
+    session: Option<ListenSession>,
 }
 
-struct ActiveSession {
+struct ListenSession {
     capture_stop: Arc<AtomicBool>,
     capture_handle: CaptureJoin,
     vad_handle: JoinHandle<()>,
@@ -58,7 +58,7 @@ impl MicContinuousListener {
             active: Arc::new(AtomicBool::new(false)),
             state_tx,
             utterances,
-            inner: Arc::new(Mutex::new(InnerState { session: None })),
+            inner: Arc::new(Mutex::new(ListenState { session: None })),
         }
     }
 
@@ -102,10 +102,10 @@ impl ContinuousListener for MicContinuousListener {
         let transcriber = self.transcriber.clone();
         let utterances = self.utterances.clone();
         let vad_handle = tokio::task::spawn_blocking(move || {
-            run_vad_blocking(tuning, transcriber, utterances, frame_rx, rt_handle);
+            vad_loop(tuning, transcriber, utterances, frame_rx, rt_handle);
         });
 
-        inner.session = Some(ActiveSession {
+        inner.session = Some(ListenSession {
             capture_stop,
             capture_handle,
             vad_handle,
@@ -153,7 +153,7 @@ impl ContinuousListener for MicContinuousListener {
 }
 
 /// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer.
-fn run_vad_blocking(
+fn vad_loop(
     tuning: VadTuning,
     transcriber: Arc<dyn Transcriber>,
     utterances: broadcast::Sender<String>,

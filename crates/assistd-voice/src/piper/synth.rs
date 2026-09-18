@@ -1,16 +1,20 @@
 //! Per-utterance Piper subprocess.
 
 use std::collections::VecDeque;
-use std::process::Stdio;
+use std::path::PathBuf;
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStderr, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 
 use crate::piper::config::PiperRuntimeConfig;
 use crate::piper::error::PiperError;
+
+/// Stderr lines kept for the error message when piper exits non-zero.
+const STDERR_TAIL_LINES: usize = 20;
 
 /// Signed 16-bit PCM plus its sample rate.
 #[derive(Debug, Clone)]
@@ -33,34 +37,7 @@ impl OneShotSynth {
     /// exit the error carries piper's last stderr lines.
     pub async fn synthesize(&self, text: &str) -> Result<SynthOutput, PiperError> {
         let cfg = &*self.cfg;
-        let mut cmd = Command::new(&cfg.binary_path);
-        cmd.arg("--model")
-            .arg(&cfg.voice_files.onnx)
-            .arg("--output-raw")
-            .arg("--length-scale")
-            .arg(format!("{}", cfg.length_scale))
-            .arg("--noise-scale")
-            .arg(format!("{}", cfg.noise_scale))
-            .arg("--noise-w")
-            .arg(format!("{}", cfg.noise_w))
-            .arg("--sentence-silence")
-            .arg(format!("{}", cfg.sentence_silence_secs));
-        if cfg.use_cuda {
-            cmd.arg("--cuda");
-        }
-        if let Some(ref dir) = cfg.espeak_data_dir {
-            cmd.arg("--espeak-data").arg(dir);
-        }
-
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let mut child = cmd.spawn().map_err(|source| PiperError::Spawn {
+        let child = self.command().spawn().map_err(|source| PiperError::Spawn {
             binary: cfg.binary_path.clone(),
             source,
         })?;
@@ -70,64 +47,25 @@ impl OneShotSynth {
             "voice latency stage"
         );
 
-        let mut stdin = child.stdin.take().expect("stdin piped");
-        let stdout = child.stdout.take().expect("stdout piped");
-        let stderr = child.stderr.take().expect("stderr piped");
-
-        let stderr_tail = Arc::new(Mutex::new(VecDeque::<String>::with_capacity(20)));
-        let stderr_tail_for_drain = stderr_tail.clone();
-
-        // stderr must be drained alongside stdout or a full pipe stalls
-        // piper. The child is moved into the future so a timeout drops
-        // it and `kill_on_drop` reaps the process.
-        let deadline = cfg.deadline;
-        let binary = cfg.binary_path.clone();
-        let text_owned = text.replace('\n', " ");
-        let synth_fut = async move {
-            let write_res = stdin.write_all(format!("{text_owned}\n").as_bytes()).await;
-            drop(stdin);
-            if let Err(e) = write_res {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                return Err::<(std::process::ExitStatus, Vec<u8>), PiperError>(PiperError::Io {
-                    path: std::path::PathBuf::from("<piper stdin>"),
-                    source: e,
-                });
-            }
-
-            let stdout_drain = drain_stdout(stdout);
-            let stderr_drain = drain_stderr(stderr, stderr_tail_for_drain);
-            let wait_fut = async {
-                child.wait().await.map_err(|source| PiperError::Io {
-                    path: std::path::PathBuf::from("<piper child>"),
-                    source,
-                })
-            };
-
-            let (status_res, pcm_res, _) = tokio::join!(wait_fut, stdout_drain, stderr_drain);
-            let status = status_res?;
-            let pcm = pcm_res?;
-            Ok((status, pcm))
-        };
-
-        let (status, pcm) = match tokio::time::timeout(deadline, synth_fut).await {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => return Err(e),
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+        let run = run_child(child, text, stderr_tail.clone());
+        let (status, pcm) = match tokio::time::timeout(cfg.deadline, run).await {
+            Ok(result) => result?,
             Err(_) => {
                 tracing::warn!(
                     target: "assistd::voice::piper",
-                    deadline_secs = deadline.as_secs(),
-                    binary = %binary.display(),
+                    deadline_secs = cfg.deadline.as_secs(),
+                    binary = %cfg.binary_path.display(),
                     "piper synthesis exceeded deadline"
                 );
                 return Err(PiperError::Deadline {
-                    secs: deadline.as_secs(),
+                    secs: cfg.deadline.as_secs(),
                 });
             }
         };
 
         if !status.success() {
-            let tail_joined = stderr_tail
+            let stderr_tail = stderr_tail
                 .lock()
                 .iter()
                 .cloned()
@@ -136,26 +74,49 @@ impl OneShotSynth {
             return Err(PiperError::SynthFailed {
                 status,
                 bytes: pcm.len(),
-                stderr_tail: tail_joined,
+                stderr_tail,
             });
         }
 
-        if pcm.len() % 2 != 0 {
-            return Err(PiperError::OddPcmLength { bytes: pcm.len() });
-        }
-
-        let (words, _) = pcm.as_chunks::<2>();
-        let samples: Vec<i16> = words.iter().copied().map(i16::from_le_bytes).collect();
+        let samples = decode_pcm(&pcm)?;
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "piper_synth_done",
             "voice latency stage"
         );
-
         Ok(SynthOutput {
             samples,
             sample_rate: cfg.voice_files.sample_rate,
         })
+    }
+
+    fn command(&self) -> Command {
+        let cfg = &*self.cfg;
+        let mut cmd = Command::new(&cfg.binary_path);
+        cmd.arg("--model")
+            .arg(&cfg.voice_files.onnx)
+            .arg("--output-raw")
+            .arg("--length-scale")
+            .arg(cfg.length_scale.to_string())
+            .arg("--noise-scale")
+            .arg(cfg.noise_scale.to_string())
+            .arg("--noise-w")
+            .arg(cfg.noise_w.to_string())
+            .arg("--sentence-silence")
+            .arg(cfg.sentence_silence_secs.to_string());
+        if cfg.use_cuda {
+            cmd.arg("--cuda");
+        }
+        if let Some(dir) = &cfg.espeak_data_dir {
+            cmd.arg("--espeak-data").arg(dir);
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd
     }
 
     /// Synthesize a short probe so a missing binary or corrupt model
@@ -173,6 +134,57 @@ impl OneShotSynth {
     }
 }
 
+/// Write `text` to piper's stdin and drain stdout to EOF. The future
+/// owns the child, so dropping it on timeout lets `kill_on_drop` reap
+/// the process. stderr is drained concurrently because a full pipe
+/// would stall piper.
+async fn run_child(
+    mut child: Child,
+    text: &str,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+) -> Result<(ExitStatus, Vec<u8>), PiperError> {
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+
+    let line = format!("{}\n", text.replace('\n', " "));
+    let written = stdin.write_all(line.as_bytes()).await;
+    drop(stdin);
+    if let Err(source) = written {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(pipe_error("<piper stdin>", source));
+    }
+
+    let wait = async {
+        child
+            .wait()
+            .await
+            .map_err(|source| pipe_error("<piper child>", source))
+    };
+    let (status, pcm, ()) = tokio::join!(
+        wait,
+        drain_stdout(stdout),
+        drain_stderr(stderr, stderr_tail)
+    );
+    Ok((status?, pcm?))
+}
+
+fn pipe_error(what: &str, source: std::io::Error) -> PiperError {
+    PiperError::Io {
+        path: PathBuf::from(what),
+        source,
+    }
+}
+
+fn decode_pcm(bytes: &[u8]) -> Result<Vec<i16>, PiperError> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err(PiperError::OddPcmLength { bytes: bytes.len() });
+    }
+    let (words, _) = bytes.as_chunks::<2>();
+    Ok(words.iter().copied().map(i16::from_le_bytes).collect())
+}
+
 async fn drain_stdout(mut stdout: ChildStdout) -> Result<Vec<u8>, PiperError> {
     // Chunked rather than `read_to_end` so the first PCM byte can be
     // timestamped.
@@ -183,10 +195,7 @@ async fn drain_stdout(mut stdout: ChildStdout) -> Result<Vec<u8>, PiperError> {
         let n = stdout
             .read(&mut chunk)
             .await
-            .map_err(|source| PiperError::Io {
-                path: std::path::PathBuf::from("<piper stdout>"),
-                source,
-            })?;
+            .map_err(|source| pipe_error("<piper stdout>", source))?;
         if n == 0 {
             break;
         }
@@ -208,7 +217,7 @@ async fn drain_stderr(stderr: ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) {
     while let Ok(Some(line)) = lines.next_line().await {
         tracing::debug!(target: "assistd::voice::piper", "{line}");
         let mut guard = tail.lock();
-        if guard.len() == 20 {
+        if guard.len() == STDERR_TAIL_LINES {
             guard.pop_front();
         }
         guard.push_back(line);

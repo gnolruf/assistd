@@ -64,7 +64,7 @@ pub fn open_producer_stream(
 ) -> Result<ProducerStream, AudioCaptureError> {
     let host = cpal::default_host();
     let device = select_device(&host, device_hint)?;
-    let device_name = name_of(&device).unwrap_or_else(|_| "<unknown>".to_string());
+    let device_name = device_name(&device).unwrap_or_else(|_| "<unknown>".to_string());
 
     let supported = device
         .default_input_config()
@@ -74,10 +74,10 @@ pub fn open_producer_stream(
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
 
-    let rb = HeapRb::<f32>::new(ring_capacity_samples.max(sample_rate as usize));
-    let (prod, cons) = rb.split();
+    let ring = HeapRb::<f32>::new(ring_capacity_samples.max(sample_rate as usize));
+    let (producer, consumer) = ring.split();
 
-    let stream = build_stream(&device, &config, sample_format, channels, prod, overrun)?;
+    let stream = build_stream(&device, &config, sample_format, channels, producer, overrun)?;
     stream
         .play()
         .map_err(|e| AudioCaptureError::PlayStream(e.to_string()))?;
@@ -93,7 +93,7 @@ pub fn open_producer_stream(
     );
 
     Ok(ProducerStream {
-        consumer: cons,
+        consumer,
         native_rate: sample_rate,
         stream,
     })
@@ -109,7 +109,7 @@ pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSessi
     let worker_stop = Arc::clone(&stop_flag);
     let worker_overrun = Arc::clone(&overrun);
     let handle = tokio::task::spawn_blocking(move || {
-        capture_worker(
+        capture_ptt(
             device_hint_owned.as_deref(),
             max_recording_secs,
             worker_stop,
@@ -124,7 +124,7 @@ pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSessi
     }
 }
 
-fn capture_worker(
+fn capture_ptt(
     device_hint: Option<&str>,
     max_recording_secs: u32,
     stop_flag: Arc<AtomicBool>,
@@ -136,13 +136,13 @@ fn capture_worker(
         .saturating_mul((max_recording_secs as usize).saturating_add(1))
         .max(conservative_rate * 2);
     let ProducerStream {
-        consumer: cons,
+        consumer,
         native_rate,
         stream,
     } = open_producer_stream(device_hint, ring_cap, overrun)?;
 
     let max_pcm_samples = (TARGET_SAMPLE_RATE as usize).saturating_mul(max_recording_secs as usize);
-    let pcm = consumer::drain_loop(cons, native_rate, max_pcm_samples, stop_flag)?;
+    let pcm = consumer::drain_to_pcm(consumer, native_rate, max_pcm_samples, stop_flag)?;
     drop(stream);
     Ok(pcm)
 }
@@ -160,7 +160,7 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     let requested = cfg.mic_device.as_deref();
     let names: Vec<String> = match host.input_devices() {
         Ok(devices) => devices
-            .map(|d| name_of(&d).unwrap_or_else(|_| "<unknown>".to_string()))
+            .map(|d| device_name(&d).unwrap_or_else(|_| "<unknown>".to_string()))
             .collect(),
         Err(e) => match requested {
             Some(requested) => anyhow::bail!(
@@ -172,7 +172,7 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     };
     let default_name = host
         .default_input_device()
-        .and_then(|d| name_of(&d).ok())
+        .and_then(|d| device_name(&d).ok())
         .unwrap_or_else(|| "<none>".to_string());
     tracing::info!(
         target: "assistd::voice::mic",
@@ -203,7 +203,7 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
     );
 }
 
-fn name_of(device: &Device) -> Result<String, CpalError> {
+fn device_name(device: &Device) -> Result<String, CpalError> {
     device.description().map(|d| {
         d.driver()
             .map(str::to_string)
@@ -218,15 +218,12 @@ pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, Au
             .default_input_device()
             .ok_or(AudioCaptureError::NoDefaultDevice),
         Some(name) => {
-            let devices = host
+            let mut devices = host
                 .input_devices()
                 .map_err(|e| AudioCaptureError::DefaultConfig(e.to_string()))?;
-            for d in devices {
-                if name_of(&d).map(|n| n == name).unwrap_or(false) {
-                    return Ok(d);
-                }
-            }
-            Err(AudioCaptureError::NoMatchingDevice(name.to_string()))
+            devices
+                .find(|d| device_name(d).is_ok_and(|n| n == name))
+                .ok_or_else(|| AudioCaptureError::NoMatchingDevice(name.to_string()))
         }
     }
 }

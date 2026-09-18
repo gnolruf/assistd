@@ -18,11 +18,11 @@ use crate::transcribe::{Transcriber, TranscriptionError};
 struct InferenceConfig {
     threads: Option<u32>,
     beams: u32,
-    vad: Option<VadRuntime>,
+    vad: Option<SileroVadParams>,
 }
 
 #[derive(Debug, Clone)]
-struct VadRuntime {
+struct SileroVadParams {
     model_path: String,
     silence_secs: f32,
 }
@@ -104,21 +104,21 @@ fn run_inference(
     if let Some(vad) = &cfg.vad {
         params.set_vad_model_path(Some(vad.model_path.as_str()));
         params.enable_vad(true);
-        let mut vp = WhisperVadParams::default();
+        let mut vad_params = WhisperVadParams::default();
         let ms = (vad.silence_secs * 1000.0)
             .round()
             .clamp(0.0, i32::MAX as f32) as i32;
-        vp.set_min_silence_duration(ms);
-        params.set_vad_params(vp);
+        vad_params.set_min_silence_duration(ms);
+        params.set_vad_params(vad_params);
     }
 
     state
         .full(params, &audio)
         .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
 
-    let n = state.full_n_segments();
+    let segment_count = state.full_n_segments();
     let mut out = String::new();
-    for i in 0..n {
+    for i in 0..segment_count {
         let Some(segment) = state.get_segment(i) else {
             continue;
         };
@@ -237,7 +237,7 @@ impl WhisperTranscriberBuilder {
                     reason: "vad_model identifier is required when vad_enabled".into(),
                 })?;
             let vad_path = hf_download::ensure_cached(&vad_id, &cache_dir).await?;
-            Some(VadRuntime {
+            Some(SileroVadParams {
                 model_path: vad_path.to_string_lossy().into_owned(),
                 silence_secs: self.vad_silence_secs.max(0.0),
             })
@@ -245,7 +245,7 @@ impl WhisperTranscriberBuilder {
             None
         };
 
-        let use_gpu = decide_use_gpu(self.prefer_gpu);
+        let use_gpu = should_use_gpu(self.prefer_gpu);
         let model_path_str = model_path.to_string_lossy().into_owned();
         let ctx = tokio::task::spawn_blocking(move || {
             let mut params = WhisperContextParameters::new();
@@ -281,7 +281,7 @@ pub async fn build_cpu_fallback(
         .await
 }
 
-fn decide_use_gpu(prefer: bool) -> bool {
+fn should_use_gpu(prefer: bool) -> bool {
     if !cfg!(feature = "cuda") {
         tracing::info!(
             target: "assistd::voice::whisper",

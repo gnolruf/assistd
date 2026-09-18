@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use super::consumer::stream_frames;
+use super::consumer::drain_to_frames;
 use super::vad::FRAME_SAMPLES;
 use crate::mic::capture::{AudioCaptureError, ProducerStream, open_producer_stream};
 
@@ -35,7 +35,7 @@ pub fn start(
     let worker_stop = Arc::clone(&stop_flag);
     let worker_overrun = Arc::clone(&overrun);
     let handle = tokio::task::spawn_blocking(move || {
-        listen_worker(
+        capture_continuous(
             device_hint_owned.as_deref(),
             worker_stop,
             worker_overrun,
@@ -50,7 +50,7 @@ pub fn start(
     }
 }
 
-fn listen_worker(
+fn capture_continuous(
     device_hint: Option<&str>,
     stop_flag: Arc<AtomicBool>,
     overrun: Arc<AtomicU64>,
@@ -69,7 +69,7 @@ fn listen_worker(
         "listen capture started"
     );
 
-    let result = stream_frames(consumer, native_rate, stop_flag, frame_tx);
+    let result = drain_to_frames(consumer, native_rate, stop_flag, frame_tx);
 
     let total_overrun = overrun.load(Ordering::Relaxed);
     if total_overrun > 0 {

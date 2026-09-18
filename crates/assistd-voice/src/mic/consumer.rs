@@ -15,7 +15,7 @@ const IDLE_PARK: Duration = Duration::from_millis(10);
 
 /// Drain the ring until `stop_flag` is set or `max_pcm_samples` is
 /// reached, returning 16 kHz i16 PCM.
-pub fn drain_loop(
+pub fn drain_to_pcm(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
     max_pcm_samples: usize,

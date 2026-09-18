@@ -45,10 +45,10 @@ pub struct MicVoiceInput {
     /// Bumped per press so a stale transition from an aborted press
     /// cannot clobber the state of a newer one.
     active_session_id: Arc<AtomicU64>,
-    inner: Arc<Mutex<InnerState>>,
+    inner: Arc<Mutex<PttState>>,
 }
 
-struct InnerState {
+struct PttState {
     session: Option<capture::CaptureSession>,
     forwarder: Option<JoinHandle<()>>,
 }
@@ -81,7 +81,7 @@ impl MicVoiceInput {
             max_recording_secs,
             state_tx,
             active_session_id: Arc::new(AtomicU64::new(0)),
-            inner: Arc::new(Mutex::new(InnerState {
+            inner: Arc::new(Mutex::new(PttState {
                 session: None,
                 forwarder: None,
             })),
@@ -108,9 +108,9 @@ impl MicVoiceInput {
     }
 
     async fn cleanup_forwarder_and_idle(&self, forwarder: Option<JoinHandle<()>>) {
-        if let Some(h) = forwarder {
-            h.abort();
-            let _ = h.await;
+        if let Some(handle) = forwarder {
+            handle.abort();
+            let _ = handle.await;
         }
         let _ = self.state_tx.send(VoiceCaptureState::Idle);
     }
@@ -138,16 +138,16 @@ impl VoiceInput for MicVoiceInput {
                     if rx.changed().await.is_err() {
                         return;
                     }
-                    let s = *rx.borrow_and_update();
+                    let state = *rx.borrow_and_update();
                     if counter.load(Ordering::SeqCst) != session_id_at_spawn {
                         return;
                     }
                     // `stop_and_transcribe` owns the terminal Idle.
                     if matches!(
-                        s,
+                        state,
                         VoiceCaptureState::Queued | VoiceCaptureState::Transcribing
                     ) {
-                        let _ = state_tx.send(s);
+                        let _ = state_tx.send(state);
                     }
                 }
             });
@@ -165,7 +165,7 @@ impl VoiceInput for MicVoiceInput {
         let (session, forwarder) = {
             let mut inner = self.inner.lock().await;
             match inner.session.take() {
-                Some(s) => (s, inner.forwarder.take()),
+                Some(session) => (session, inner.forwarder.take()),
                 None => return Ok(String::new()),
             }
         };
@@ -219,10 +219,7 @@ impl VoiceInput for MicVoiceInput {
         let result = self.transcriber.transcribe(&pcm).await;
         self.cleanup_forwarder_and_idle(forwarder).await;
 
-        let text = match result {
-            Ok(t) => t,
-            Err(e) => return Err(anyhow!(VoiceInputError::from(e))),
-        };
+        let text = result.map_err(|e| anyhow!(VoiceInputError::from(e)))?;
 
         info!(
             target: "assistd::voice::mic",

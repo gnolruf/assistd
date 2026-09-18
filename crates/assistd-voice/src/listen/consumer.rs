@@ -18,7 +18,7 @@ const IDLE_PARK: Duration = Duration::from_millis(10);
 
 /// Emit 20 ms frames on `frame_tx` until `stop_flag` is set. A dropped
 /// receiver is a silent stop.
-pub fn stream_frames(
+pub fn drain_to_frames(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
     stop_flag: Arc<AtomicBool>,

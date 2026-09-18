@@ -92,8 +92,8 @@ impl SentenceBuffer {
     /// fence is dropped silently.
     pub fn finish(&mut self) -> Option<String> {
         if !self.in_code_fence && !self.pending.is_empty() {
-            let p = std::mem::take(&mut self.pending);
-            self.buf.push_str(&strip_inline(&p));
+            let pending = std::mem::take(&mut self.pending);
+            self.buf.push_str(&strip_inline(&pending));
         }
         self.in_code_fence = false;
         self.pending.clear();
@@ -129,45 +129,11 @@ impl SentenceBuffer {
 
     fn feed_char(&mut self, ch: char, out: &mut Vec<String>) {
         if ch == '`' {
-            self.pending.push('`');
-            if self.pending.ends_with("```") {
-                let opening = !self.in_code_fence;
-                self.in_code_fence = !self.in_code_fence;
-                self.pending.truncate(self.pending.len() - 3);
-                if opening {
-                    self.flush_buf_to_out(out);
-                    self.capturing_lang = matches!(self.mode, CodeBlockMode::Summarize);
-                    self.lang_buf.clear();
-                } else {
-                    self.pending.clear();
-                    if matches!(self.mode, CodeBlockMode::Summarize) {
-                        let phrase = if self.lang_buf.is_empty() {
-                            "Code block.".to_string()
-                        } else {
-                            format!("Code block in {}.", self.lang_buf)
-                        };
-                        out.push(phrase);
-                    }
-                    self.capturing_lang = false;
-                    self.lang_buf.clear();
-                }
-            }
+            self.feed_backtick(out);
             return;
         }
-
         if self.in_code_fence {
-            if self.capturing_lang {
-                if ch.is_whitespace() {
-                    self.capturing_lang = false;
-                } else if self.lang_buf.len() < MAX_LANG_LEN
-                    && (ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '_')
-                {
-                    self.lang_buf.push(ch);
-                } else {
-                    self.capturing_lang = false;
-                }
-            }
-            self.pending.clear();
+            self.feed_fenced(ch);
             return;
         }
 
@@ -182,6 +148,59 @@ impl SentenceBuffer {
         }
         self.buf.push(ch);
         self.scan_boundaries(out);
+    }
+
+    /// Backticks accumulate in `pending`; the third in a row toggles
+    /// the fence.
+    fn feed_backtick(&mut self, out: &mut Vec<String>) {
+        self.pending.push('`');
+        if !self.pending.ends_with("```") {
+            return;
+        }
+        self.pending.truncate(self.pending.len() - 3);
+        if self.in_code_fence {
+            self.close_fence(out);
+        } else {
+            self.open_fence(out);
+        }
+    }
+
+    fn open_fence(&mut self, out: &mut Vec<String>) {
+        self.in_code_fence = true;
+        self.flush_buf_to_out(out);
+        self.capturing_lang = matches!(self.mode, CodeBlockMode::Summarize);
+        self.lang_buf.clear();
+    }
+
+    fn close_fence(&mut self, out: &mut Vec<String>) {
+        self.in_code_fence = false;
+        self.pending.clear();
+        if matches!(self.mode, CodeBlockMode::Summarize) {
+            let phrase = if self.lang_buf.is_empty() {
+                "Code block.".to_string()
+            } else {
+                format!("Code block in {}.", self.lang_buf)
+            };
+            out.push(phrase);
+        }
+        self.capturing_lang = false;
+        self.lang_buf.clear();
+    }
+
+    /// Inside a fence only the language tag after the opener is kept.
+    fn feed_fenced(&mut self, ch: char) {
+        if self.capturing_lang {
+            if ch.is_whitespace() {
+                self.capturing_lang = false;
+            } else if self.lang_buf.len() < MAX_LANG_LEN
+                && (ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '_')
+            {
+                self.lang_buf.push(ch);
+            } else {
+                self.capturing_lang = false;
+            }
+        }
+        self.pending.clear();
     }
 
     fn flush_buf_to_out(&mut self, out: &mut Vec<String>) {

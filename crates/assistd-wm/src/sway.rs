@@ -365,10 +365,10 @@ async fn drive_events(
                             let _ = window_events.send(ev);
                         }
                     }
-                    Some(Ok(Event::Workspace(d))) => {
-                        if matches!(d.change, WorkspaceChange::Focus) {
-                            let ws = d.current.as_ref().and_then(|n| n.name.clone());
-                            apply_workspace_focus(&snapshot, ws).await;
+                    Some(Ok(Event::Workspace(data))) => {
+                        if matches!(data.change, WorkspaceChange::Focus) {
+                            let name = data.current.as_ref().and_then(|n| n.name.clone());
+                            apply_workspace_focus(&snapshot, name).await;
                         }
                     }
                     Some(Ok(_)) => {}
