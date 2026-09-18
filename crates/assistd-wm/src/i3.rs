@@ -208,7 +208,33 @@ impl WindowManager for I3Backend {
     }
 
     async fn focused_workspace_rect(&self) -> WmResult<Rect> {
-        self.focused_workspace_rect_inner().await
+        let mut guard = self.cmd.lock().await;
+        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
+        let workspaces =
+            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
+                Err(_) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
+                }
+                Ok(Err(e)) => {
+                    *guard = None;
+                    self.reconnect.notify_one();
+                    return Err(ipc_ctx(e, "i3 GET_WORKSPACES (focused rect)"));
+                }
+                Ok(Ok(w)) => w,
+            };
+        drop(guard);
+        workspaces
+            .into_iter()
+            .find(|w| w.focused)
+            .map(|w| Rect {
+                x: w.rect.x as i32,
+                y: w.rect.y as i32,
+                width: w.rect.width.max(0) as u32,
+                height: w.rect.height.max(0) as u32,
+            })
+            .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
     }
 
     async fn focused_output_scale(&self) -> WmResult<f64> {
@@ -232,7 +258,7 @@ impl WindowManager for I3Backend {
         anchor: PlacementAnchor,
     ) -> WmResult<()> {
         let translated = translate_criteria_for_i3(criteria);
-        let workspace = self.focused_workspace_rect_inner().await?;
+        let workspace = self.focused_workspace_rect().await?;
         // DPI scaling can map a 360-logical-px request to 420 physical
         // px, so place using the window's actual rect.
         let effective = match self.find_window_rect_by_criteria(&translated).await {
@@ -321,36 +347,6 @@ impl I3Backend {
         drop(guard);
         find_node_rect(&tree, criteria)
             .ok_or_else(|| WmError::Rejected(format!("no window matches {criteria:?}")))
-    }
-
-    async fn focused_workspace_rect_inner(&self) -> WmResult<Rect> {
-        let mut guard = self.cmd.lock().await;
-        let conn = guard.as_mut().ok_or(WmError::Disconnected)?;
-        let workspaces =
-            match tokio::time::timeout(crate::WM_IPC_TIMEOUT, conn.get_workspaces()).await {
-                Err(_) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(WmError::Timeout(crate::WM_IPC_TIMEOUT));
-                }
-                Ok(Err(e)) => {
-                    *guard = None;
-                    self.reconnect.notify_one();
-                    return Err(ipc_ctx(e, "i3 GET_WORKSPACES (focused rect)"));
-                }
-                Ok(Ok(w)) => w,
-            };
-        drop(guard);
-        workspaces
-            .into_iter()
-            .find(|w| w.focused)
-            .map(|w| Rect {
-                x: w.rect.x as i32,
-                y: w.rect.y as i32,
-                width: w.rect.width.max(0) as u32,
-                height: w.rect.height.max(0) as u32,
-            })
-            .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
     }
 
     /// Scale factor derived from the focused output's physical size in

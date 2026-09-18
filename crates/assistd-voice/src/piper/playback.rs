@@ -201,12 +201,6 @@ impl RodioPlaybackWorker {
         self.player.clear();
         self.player.play();
     }
-
-    /// True when the queue has completely drained.
-    #[allow(dead_code)]
-    pub fn empty(&self) -> bool {
-        self.player.empty()
-    }
 }
 
 /// How long `Drop` waits for the device thread before abandoning the

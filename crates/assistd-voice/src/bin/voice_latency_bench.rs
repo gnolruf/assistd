@@ -11,7 +11,6 @@
 //! that produced them.
 
 #![cfg(feature = "test-support")]
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use parking_lot::Mutex;
 use std::collections::HashMap;

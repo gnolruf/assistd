@@ -271,41 +271,12 @@ pub async fn build_cpu_fallback(
     cfg: &assistd_config::TranscriptionConfig,
     cache_dir_override: Option<PathBuf>,
 ) -> Result<WhisperTranscriber, TranscriptionError> {
-    whisper_rs::install_logging_hooks();
-
-    let cache_dir = cache_dir_override
-        .or_else(|| cfg.model_cache_dir.clone())
-        .unwrap_or_else(default_cache_dir);
-    let model_path = model_cache::ensure_model(&cfg.model, &cache_dir).await?;
-
-    let vad_runtime = if cfg.vad_enabled {
-        let vad_path = model_cache::ensure_model(&cfg.vad_model, &cache_dir).await?;
-        Some(VadRuntime {
-            model_path: vad_path.to_string_lossy().into_owned(),
-            silence_secs: VAD_SILENCE_SECS,
-        })
-    } else {
-        None
-    };
-
-    let model_path_str = model_path.to_string_lossy().into_owned();
-    let ctx = tokio::task::spawn_blocking(move || {
-        let mut params = WhisperContextParameters::new();
-        params.use_gpu(false);
-        WhisperContext::new_with_params(&model_path_str, params)
-    })
-    .await?
-    .map_err(|err| TranscriptionError::WhisperInit(err.to_string()))?;
-
-    Ok(WhisperTranscriber {
-        ctx: Arc::new(ctx),
-        cfg: InferenceConfig {
-            threads: cfg.threads.map(NonZeroU32::get),
-            beams: cfg.beams.get(),
-            vad: vad_runtime,
-        },
-        is_gpu: false,
-    })
+    let cache_dir = cache_dir_override.or_else(|| cfg.model_cache_dir.clone());
+    WhisperTranscriberBuilder::from_config(cfg)
+        .cache_dir(cache_dir)
+        .prefer_gpu(false)
+        .build()
+        .await
 }
 
 fn decide_use_gpu(prefer: bool) -> bool {
