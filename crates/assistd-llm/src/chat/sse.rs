@@ -22,12 +22,10 @@ pub struct SseLineReader {
 }
 
 impl SseLineReader {
-    /// Creates a new reader with an empty internal buffer.
     pub fn new() -> Self {
         Self { buf: Vec::new() }
     }
 
-    /// Appends `chunk` to the internal buffer.
     pub fn feed(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
     }

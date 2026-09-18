@@ -67,8 +67,6 @@ impl Command for UniqCommand {
             Err(failure) => return Ok(failure),
         };
         let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
-        // `split` on newline-terminated input leaves a trailing empty
-        // element that is not a line; blank lines in the middle are.
         if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }

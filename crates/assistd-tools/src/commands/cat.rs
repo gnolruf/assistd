@@ -13,7 +13,6 @@ use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_
 /// - `-n` prefix each output line with its 1-based number
 pub struct CatCommand;
 
-/// Recognized `cat` flags, split out of argv by [`parse_flags`].
 #[derive(Default)]
 struct Flags {
     metadata_only: bool,
@@ -138,10 +137,8 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
     Ok((flags, files))
 }
 
-/// `Some(mime)` if the bytes look binary, `None` if they're plausibly
-/// text. First asks the `infer` crate (magic-byte sniff); on unknown,
-/// falls back to a NUL-byte scan of the first 8 KB, the same heuristic
-/// GNU grep uses.
+/// `Some(mime)` if the bytes look binary: a recognised non-text magic
+/// number, or a NUL byte in the first 8 KB (GNU grep's heuristic).
 pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
     if let Some(t) = infer::get(bytes) {
         let mime = t.mime_type();

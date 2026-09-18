@@ -1,17 +1,7 @@
-//! `screenshot [--full|--focused]`: capture the screen as a PNG and
-//! attach it as a vision input for the next LLM turn.
-//!
-//! Mirrors `SeeCommand` in shape: returns a [`crate::Attachment::Image`]
-//! on success. The bytes come from `maim` (X11) or `grim` (Wayland) instead
-//! of `tokio::fs::read`. Backend is auto-detected from `XDG_SESSION_TYPE`
-//! / `WAYLAND_DISPLAY` / `DISPLAY` unless the policy overrides it.
-//!
-//! For `--focused` we delegate window/region resolution to the platform's
-//! native tools (xdotool on X11; swaymsg / hyprctl on Wayland) and feed
-//! the resulting geometry to grim. Compositors we don't recognise return
-//! a descriptive error pointing at `--full`.
-//!
-//! In-memory only: PNG bytes never touch disk on the way out.
+//! `screenshot [--full|--focused|--monitor=NAME]`: capture the screen
+//! through `maim` (X11) or `grim` (Wayland) and attach the PNG as a
+//! vision input. `--focused` resolves the window geometry through
+//! xdotool, swaymsg, or hyprctl. The PNG bytes never touch disk.
 
 use std::collections::VecDeque;
 use std::process::Stdio;
@@ -30,17 +20,13 @@ use crate::commands::cat::human_size;
 
 const SPAWN_FAILED_EXIT: i32 = 127;
 const TIMEOUT_EXIT: i32 = 137;
-/// Cap on stderr captured per backend invocation. Prevents a chatty
-/// child from filling memory if something goes badly wrong.
 const STDERR_TAIL_LINES: usize = 20;
 
 /// Configuration for the screenshot command.
 #[derive(Debug, Clone)]
 pub struct ScreenshotPolicyCfg {
-    /// Force a specific backend. `None` = auto-detect on every call.
+    /// Force a specific backend; `None` auto-detects on every call.
     pub backend: Option<Backend>,
-    /// Subprocess timeout. Capture is fast on a healthy compositor; the
-    /// timeout exists to prevent a wedged child from locking the agent.
     pub timeout: Duration,
 }
 
@@ -53,8 +39,7 @@ impl Default for ScreenshotPolicyCfg {
     }
 }
 
-/// Display-server backend. The capture binary depends on this:
-/// `maim` for X11, `grim` for Wayland.
+/// Display-server backend, which selects the capture binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     X11,
@@ -65,9 +50,6 @@ pub enum Backend {
 enum Target {
     Full,
     Focused,
-    /// Capture only the named monitor/output. On X11 the name is
-    /// resolved through `xrandr` to a geometry passed to maim; on
-    /// Wayland it's passed verbatim to grim's `-o` flag.
     Monitor(String),
 }
 
@@ -82,14 +64,10 @@ enum WaylandCompositor {
 /// and attach it as a vision input for the next LLM turn.
 pub struct ScreenshotCommand {
     cfg: Arc<ScreenshotPolicyCfg>,
-    /// Shared, runtime-mutable vision flag. See [`crate::VisionGate`].
-    /// Read on every `run()` so a model swap (revalidated by the daemon)
-    /// can flip the gate without rebuilding the registry.
     gate: Arc<crate::VisionGate>,
 }
 
 impl ScreenshotCommand {
-    /// Construct a `ScreenshotCommand` with the given policy and vision gate.
     pub fn new(cfg: Arc<ScreenshotPolicyCfg>, gate: Arc<crate::VisionGate>) -> Self {
         Self { cfg, gate }
     }
@@ -97,9 +75,6 @@ impl ScreenshotCommand {
 
 #[cfg(test)]
 impl Default for ScreenshotCommand {
-    /// Test-only default: auto-detect backend, 5-second timeout, vision
-    /// enabled. Lets the convention-compliance harness in `command.rs`
-    /// construct an instance without config plumbing.
     fn default() -> Self {
         Self::new(
             Arc::new(ScreenshotPolicyCfg::default()),
@@ -290,8 +265,6 @@ fn backend_label(b: Backend) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------- detection
-
 fn detect_backend() -> Result<Backend, &'static str> {
     detect_backend_from_env(
         std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
@@ -309,13 +282,12 @@ fn detect_backend_from_env(
         match s {
             "wayland" => return Ok(Backend::Wayland),
             "x11" => return Ok(Backend::X11),
-            _ => {} // unrecognised; fall through to env-var check
+            _ => {}
         }
     }
     match (has_wayland, has_x) {
-        // Hybrid (Wayland + XWayland) sessions: prefer Wayland tooling.
-        // X-only programs still get caught by grim if they're on a
-        // Wayland output; the inverse is not true.
+        // In a Wayland + XWayland session grim still captures X clients;
+        // the inverse is not true.
         (true, _) => Ok(Backend::Wayland),
         (false, true) => Ok(Backend::X11),
         (false, false) => Err("no display server detected (no WAYLAND_DISPLAY or DISPLAY)"),
@@ -348,8 +320,6 @@ fn detect_wayland_compositor_from_env(
         _ => WaylandCompositor::Unknown(xdg.to_string()),
     }
 }
-
-// ------------------------------------------------------------------ capture
 
 #[derive(Debug)]
 enum CaptureError {
@@ -394,29 +364,20 @@ async fn capture(
     }
 }
 
-/// Parse `xrandr --listmonitors` output. Each non-header line looks
-/// like:
-///   ` 0: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1`
-/// or:
-///   ` 1: +DP-2 2560/600x1440/340+1920+0  DP-2`
-/// We extract the `WIDTH/...xHEIGHT/...+X+Y` triple, drop the
-/// physical-size denominators, and return `WxH+X+Y` formatted for
-/// maim's `-g` flag. Match by trailing connector name (last whitespace
-/// token on the line) since the asterisks/pluses on the leading
-/// connector field vary.
+/// Find `monitor` in `xrandr --listmonitors` output and return its
+/// geometry as `WxH+X+Y` for maim's `-g` flag. Lines look like
+/// ` 0: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1`; the trailing
+/// connector name is matched because the flags on the leading one vary.
 fn parse_xrandr_monitor_geom(listing: &str, monitor: &str) -> Option<String> {
     for line in listing.lines() {
-        // Skip the `Monitors: N` header.
         if !line.starts_with(|c: char| c.is_whitespace() || c.is_ascii_digit()) {
             continue;
         }
         let trimmed = line.trim();
-        // Last whitespace-separated token is the connector name.
         let name = trimmed.split_whitespace().next_back()?;
         if name != monitor {
             continue;
         }
-        // The geometry token is the one matching `<num>/<num>x<num>/<num>+<num>+<num>`.
         for tok in trimmed.split_whitespace() {
             if let Some(geom) = strip_xrandr_geom_token(tok) {
                 return Some(geom);
@@ -426,41 +387,23 @@ fn parse_xrandr_monitor_geom(listing: &str, monitor: &str) -> Option<String> {
     None
 }
 
-/// Strip a single xrandr geometry token like `1920/598x1200/336+0+0`
-/// down to maim's `1920x1200+0+0` form. Returns `None` if the token
-/// doesn't match the expected shape.
+/// Reduce an xrandr geometry token `<w>/<wmm>x<h>/<hmm>±<x>±<y>` to
+/// maim's `<w>x<h>±<x>±<y>`.
 fn strip_xrandr_geom_token(tok: &str) -> Option<String> {
-    // Required structure: `<w>/<wmm>x<h>/<hmm>+<x>+<y>` (the second
-    // `+` may be `-` for monitors positioned off-zero, but we accept
-    // any sign).
     let (lhs, after_x) = tok.split_once('x')?;
     let (w_with_mm, _) = lhs.split_once('/')?;
     let w: u32 = w_with_mm.parse().ok()?;
-    // After 'x' we have `<h>/<hmm>+<x>+<y>`. Take the first '+' or
-    // '-' as the start of the offset block (after the height/mm).
     let h_end = after_x.find(['+', '-']).filter(|i| *i > 0)?;
-    let height_with_mm = &after_x[..h_end];
-    let offsets = &after_x[h_end..];
-    let (h_with_mm, _) = height_with_mm.split_once('/')?;
+    let (h_with_mm, _) = after_x[..h_end].split_once('/')?;
     let h: u32 = h_with_mm.parse().ok()?;
-    // `offsets` begins with the sign of x. Must contain exactly one
-    // more sign-prefixed number for y.
-    let mut chars = offsets.char_indices().peekable();
-    chars.next()?; // consume leading sign
-    let next_sign_idx = chars.find(|(_, c)| *c == '+' || *c == '-')?.0;
-    let x_part = &offsets[..next_sign_idx];
-    let y_part = &offsets[next_sign_idx..];
-    // Validate both parts parse as signed integers.
+    let offsets = &after_x[h_end..];
+    let y_start = offsets[1..].find(['+', '-'])? + 1;
+    let (x_part, y_part) = offsets.split_at(y_start);
     x_part.parse::<i32>().ok()?;
     y_part.parse::<i32>().ok()?;
     Some(format!("{w}x{h}{x_part}{y_part}"))
 }
 
-/// Look up `monitor`'s geometry via `xrandr --listmonitors` and feed
-/// it to maim as `-g WxH+X+Y`. xrandr emits one line per active
-/// monitor in the form:
-///   `1: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1`
-/// We need the `1920x1200+0+0` triple for maim.
 async fn capture_x11_monitor(monitor: &str, deadline: Duration) -> Result<Vec<u8>, CaptureError> {
     let raw = spawn_subprocess("xrandr", &["--listmonitors"], deadline).await?;
     let listing = String::from_utf8_lossy(&raw);
@@ -635,8 +578,6 @@ fn parse_hyprland_geom(v: &Value) -> Option<String> {
     let h = size.get(1)?.as_i64()?;
     Some(format!("{x},{y} {w}x{h}"))
 }
-
-// ----------------------------------------------------- error -> CommandOutput
 
 fn capture_error_to_output(err: CaptureError) -> CommandOutput {
     match err {
@@ -1083,11 +1024,6 @@ mod tests {
         assert!(strip_xrandr_geom_token("1920/598x1200/336").is_none());
     }
 
-    // ---- missing-binary path ---------------------------------------------
-
-    /// AC #4: a missing capture binary returns a descriptive error. Drives
-    /// the BinaryMissing branch directly via `spawn_subprocess` with a
-    /// guaranteed-missing executable name (no env mutation needed).
     #[tokio::test]
     async fn missing_binary_returns_127_with_install_hint() {
         let err = spawn_subprocess(
@@ -1168,9 +1104,6 @@ mod tests {
         assert!(s.len() <= 80, "summary is {} chars: {s:?}", s.len());
     }
 
-    /// AC #3: when vision is disabled, `screenshot` short-circuits with
-    /// the exact wording "vision not available: model does not support
-    /// images" without spawning maim/grim.
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
         let cmd = ScreenshotCommand::new(

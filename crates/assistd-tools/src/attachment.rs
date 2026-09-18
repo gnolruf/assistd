@@ -1,47 +1,45 @@
-//! Shared image-attachment loading. Used by:
-//! - `SeeCommand` (LLM-invoked `see PATH` tool call)
-//! - The TUI's `/attach` slash command
-//!
-//! Both call paths need identical validation so error messages match
-//! and the allowlisted MIME types stay in sync.
-
 use std::path::Path;
 
 use crate::command::Attachment;
 
-/// Image MIME types accepted by llama.cpp's vision adapters today.
-/// `infer::is_image` is too permissive (accepts GIF, BMP, TIFF, HEIC) so
-/// we filter explicitly.
+/// Image MIME types llama.cpp's vision adapters accept. `infer::is_image`
+/// also passes GIF, BMP, TIFF and HEIC, so the list is explicit.
 const SUPPORTED_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 
-/// Hard upper bound on image size we'll accept from disk or a screenshot.
-/// 32 MiB is generous for a 4K PNG screenshot (~16 MiB uncompressed) but
-/// catches accidental video-or-RAW attaches before they reach the LLM
-/// pipeline and OOM the daemon.
+/// Upper bound on an attached image. Generous for a 4K PNG screenshot,
+/// but small enough to catch a video or RAW file before it is read.
 pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Error returned by [`load_image_attachment`] when the file cannot be loaded
-/// or is not a supported image format.
+/// Why [`load_image_attachment`] refused a file.
 #[derive(Debug)]
 pub enum LoadImageError {
-    /// File missing, unreadable, or other I/O failure.
     Io {
         path: String,
         source: std::io::Error,
     },
     /// File exceeds [`MAX_IMAGE_BYTES`].
-    TooLarge { path: String, size: u64, max: u64 },
-    /// `infer` couldn't identify the file type from its magic bytes.
-    Unrecognized { path: String },
-    /// `infer` identified a non-image type.
-    NotAnImage { path: String, detected: String },
-    /// `infer` identified an image, but it's not in [`SUPPORTED_MIMES`].
-    UnsupportedFormat { path: String, mime: String },
+    TooLarge {
+        path: String,
+        size: u64,
+        max: u64,
+    },
+    /// No magic number matched.
+    Unrecognized {
+        path: String,
+    },
+    NotAnImage {
+        path: String,
+        detected: String,
+    },
+    /// An image, but not one of [`SUPPORTED_MIMES`].
+    UnsupportedFormat {
+        path: String,
+        mime: String,
+    },
 }
 
 impl LoadImageError {
-    /// One-line user-facing message. Caller decorates with a prefix like
-    /// `[error] /attach: ` or `[error] see: ` as appropriate.
+    /// One-line message without any `[error] <cmd>:` prefix.
     pub fn user_message(&self) -> String {
         match self {
             LoadImageError::Io { path, source } => match source.kind() {
@@ -68,16 +66,10 @@ impl LoadImageError {
     }
 }
 
-/// Read `path` from disk and validate it's a supported image format.
-///
-/// On success returns the [`Attachment`] (ready to hand to the LLM
-/// conversation layer) plus the file size in bytes (so the caller can
-/// render a "12 KB" annotation without re-stat-ing).
+/// Read `path` and validate it is a supported image. Returns the
+/// attachment and its size in bytes.
 pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), LoadImageError> {
-    // Stat first so a multi-gigabyte file is rejected before we allocate
-    // a buffer for it. `metadata` resolves symlinks, matching what `read`
-    // would do, so the size check can't disagree with what we end up
-    // reading.
+    // Stat first so a huge file is rejected before a buffer is allocated.
     let meta = tokio::fs::metadata(path)
         .await
         .map_err(|e| LoadImageError::Io {

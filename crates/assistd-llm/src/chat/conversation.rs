@@ -1,10 +1,7 @@
-//! Multi-turn conversation state owned by `LlamaChatClient`.
-//!
-//! The daemon holds a single `Conversation` behind a `tokio::sync::Mutex`;
-//! every query from every client contributes a turn to the same ongoing
-//! dialogue. Token budgeting is best-effort, driven by a bytes-per-token
-//! heuristic that intentionally over-counts multi-byte text so we summarize
-//! early rather than overflow the server's context window.
+//! Multi-turn conversation state. Token budgeting is best-effort,
+//! driven by a bytes-per-token heuristic that intentionally over-counts
+//! multi-byte text so summarization runs early rather than the server's
+//! context window overflowing.
 
 use assistd_config::{ChatConfig, ModelConfig};
 use assistd_tools::Attachment;
@@ -52,11 +49,9 @@ impl Role {
     }
 }
 
-/// One tool call recorded on an assistant turn. Mirrors the OpenAI shape
-/// `{id, type: "function", function: {name, arguments}}`. `arguments` is the
-/// JSON-encoded argument string the model emitted, stored verbatim so the
-/// replayed wire payload preserves whatever whitespace/formatting the model
-/// used; some servers compare it against their own re-serialization.
+/// One tool call recorded on an assistant turn. `arguments` is the
+/// JSON-encoded string the model emitted, stored verbatim because some
+/// servers compare the replayed text against their own serialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRecord {
     pub id: String,
@@ -69,30 +64,19 @@ pub struct ToolCallRecord {
 pub struct Message {
     pub role: Role,
     pub content: String,
-    /// Image attachments carried by this turn. Empty for every classic
-    /// text-only message; populated by `push_user_with_attachments` when
-    /// a tool-call (typically `see`) produced an image the model should
-    /// see on its next turn.
     pub attachments: Vec<Attachment>,
     /// Non-empty only on assistant messages that requested tool calls.
-    /// When present, the outgoing wire message renders its narration (if
-    /// any) as `content` plus a `tool_calls` array.
     pub tool_calls: Vec<ToolCallRecord>,
     /// Set only on [`Role::Tool`] messages: the id of the assistant tool
-    /// call this message answers. Chat templates use it to line the
-    /// result up with its call.
+    /// call this message answers.
     pub tool_call_id: Option<String>,
 }
 
-/// Summarizer trait so unit tests can inject a fake without spinning up
-/// an HTTP server. [`crate::LlamaChatClient`] implements this trait for itself.
+/// Condenses a stretch of dialogue into a summary when the conversation
+/// outgrows its token budget.
 #[async_trait]
 pub trait Summarizer: Send + Sync {
     /// Summarize `dialogue` into at most `max_tokens`, targeting `target_tokens`.
-    ///
-    /// # Errors
-    /// Returns [`ChatClientError`] if the underlying HTTP call fails or the
-    /// server returns a non-success status.
     async fn summarize(
         &self,
         dialogue: String,
@@ -104,16 +88,14 @@ pub trait Summarizer: Send + Sync {
 /// Mutable conversation state.
 ///
 /// Layout invariants:
-/// - `system_prompt` is injected at the head of `as_wire_messages()` only when
-///   non-empty.
-/// - `transient_context`, if `Some`, is rendered as a *second* system message
-///   immediately after `system_prompt` and is intended to live for exactly
-///   one [`crate::LlmBackend::step`] call. The chat client clears it via
-///   [`Self::consume_transient_context`] once the stream commits, so a
-///   follow-up turn re-runs retrieval rather than reusing stale context.
-/// - `messages` never contains a pre-baked system-prompt message; it holds
-///   user/assistant turns plus at most one synthetic summary message (role
-///   `System`, content prefixed with `SUMMARY_PREFIX`) that sits at index 0.
+/// - `system_prompt` heads `as_wire_messages()` only when non-empty.
+/// - `transient_context`, if `Some`, renders as a second system message
+///   right after `system_prompt` and lives for one request; the caller
+///   clears it with [`Self::consume_transient_context`] once that
+///   request commits.
+/// - `messages` never holds the system prompt itself; it holds the
+///   turns plus at most one summary message (role `System`, content
+///   prefixed with `SUMMARY_PREFIX`) at index 0.
 #[derive(Debug)]
 pub struct Conversation {
     system_prompt: String,
@@ -132,23 +114,16 @@ impl Conversation {
     }
 
     /// Set a one-shot system message rendered between the static
-    /// `system_prompt` and the conversation history. Overwrites any
-    /// existing pending transient (the auto-injection path always
-    /// rewrites the whole block, so the latest retrieval wins).
+    /// `system_prompt` and the history, replacing any pending one.
     pub fn set_transient_context(&mut self, text: String) {
         self.transient_context = Some(text);
     }
 
-    /// Take the pending transient context, leaving `None` behind. The
-    /// chat client calls this from `commit_step` after a successful
-    /// stream so the next turn starts clean. On `PreEmitError` the
-    /// transient is *not* consumed; a retry should see the same context.
+    /// Take the pending transient context, leaving `None` behind.
     pub fn consume_transient_context(&mut self) -> Option<String> {
         self.transient_context.take()
     }
 
-    /// Test/diag helper. Production callers should use the consume
-    /// path so the transient is read at most once per turn.
     #[cfg(test)]
     pub fn transient_context(&self) -> Option<&str> {
         self.transient_context.as_deref()
@@ -165,10 +140,9 @@ impl Conversation {
         });
     }
 
-    /// Append a user turn that carries one or more attachments alongside
-    /// its text. When rendered to the wire, the message becomes a
-    /// multimodal `content` array with one `text` part followed by one
-    /// `image_url` part per attachment.
+    /// Append a user turn whose wire form is a multimodal `content`
+    /// array: one `text` part followed by one `image_url` part per
+    /// attachment.
     pub fn push_user_with_attachments(&mut self, content: String, attachments: Vec<Attachment>) {
         self.messages.push(Message {
             role: Role::User,
@@ -190,12 +164,9 @@ impl Conversation {
         });
     }
 
-    /// Append an assistant turn that requested tool calls. `content` is the
-    /// assistant's narration — the text it streamed to the user before
-    /// calling the tool. Keeping it means the model can see what it
-    /// already said on the next iteration instead of repeating itself.
-    /// `calls` must be non-empty; on the wire the message renders with
-    /// `tool_calls: [...]` and `content` omitted when narration is absent.
+    /// Append an assistant turn that requested tool calls. `content` is
+    /// the narration streamed before the call, kept so the model does not
+    /// repeat itself on the next step. `calls` must be non-empty.
     pub fn push_assistant_with_tool_calls(
         &mut self,
         content: Option<String>,
@@ -229,29 +200,25 @@ impl Conversation {
         });
     }
 
-    /// Drop the most recent message if and only if it's a user message.
-    /// Called after a pre-emit HTTP failure to keep history consistent with
-    /// what the model actually saw.
+    /// Drop the most recent message if and only if it is a user message,
+    /// keeping history consistent with what the model actually saw after
+    /// a request fails before any output.
     pub fn rollback_last_user(&mut self) {
         if matches!(self.messages.last().map(|m| m.role), Some(Role::User)) {
             self.messages.pop();
         }
     }
 
-    /// Replace the running message list wholesale and clear any pending
-    /// transient context. Used by branch /switch and daemon-startup
-    /// resume to repopulate the conversation from persisted history.
+    /// Replace the message list wholesale and clear any pending
+    /// transient context.
     pub fn replace_messages(&mut self, msgs: Vec<Message>) {
         self.messages = msgs;
         self.transient_context = None;
     }
 
-    /// Drop everything after (and including) the latest "real" user
-    /// message. A "real" user message is [`Role::User`] whose content
-    /// does NOT start with [`TOOL_RESULT_PREFIX`]; tool-result rows
-    /// share the User role but are part of the assistant's reply, so
-    /// they get dropped alongside it. Also clears `transient_context`
-    /// (we are at a turn boundary). Returns the count of removed
+    /// Drop everything from the latest real user message onward, where
+    /// a tool result riding on the user role does not count as one.
+    /// Also clears `transient_context`. Returns the number of removed
     /// entries; 0 when no real user message exists.
     pub fn truncate_to_last_real_user(&mut self) -> usize {
         let mut last_real_user = None;
@@ -288,13 +255,9 @@ impl Conversation {
         total
     }
 
-    /// Render current state as wire messages. Drops the system prompt if
-    /// the user explicitly configured it empty. Messages with attachments
-    /// are rendered as a multimodal `content` array (text part + one
-    /// `image_url` part per attachment); text-only messages stay as plain
-    /// strings for compatibility with non-vision models. Assistant messages
-    /// carrying `tool_calls` render with a populated `tool_calls` array and
-    /// their narration as `content`, omitted entirely when there is none.
+    /// Render the current state as wire messages. Text-only messages
+    /// stay plain strings for compatibility with non-vision models;
+    /// messages with attachments become multimodal `content` arrays.
     pub fn as_wire_messages(&self) -> Vec<wire::ChatMessage<'_>> {
         let mut out = Vec::with_capacity(self.messages.len() + 2);
         if !self.system_prompt.is_empty() {
@@ -306,9 +269,6 @@ impl Conversation {
             });
         }
         if let Some(ctx) = &self.transient_context {
-            // `&self` keeps `as_wire_messages` idempotent: rendering twice
-            // before `consume_transient_context` produces the same payload.
-            // The chat client consumes after the stream commits.
             out.push(wire::ChatMessage {
                 role: Role::System.as_wire(),
                 content: Some(wire::ContentBody::Text(ctx)),
@@ -370,9 +330,9 @@ impl Conversation {
         out
     }
 
-    /// Ensure total approximate tokens stay under the configured budget.
-    /// Triggers a summarization call if needed; on summarizer failure the
-    /// caller is expected to fall back to `truncate_to_budget`.
+    /// Keep the approximate token total under budget, summarizing the
+    /// oldest turns if needed. On summarizer failure the caller falls
+    /// back to [`Self::truncate_to_budget`].
     pub async fn ensure_budget(
         &mut self,
         summarizer: &dyn Summarizer,
@@ -466,12 +426,11 @@ impl Conversation {
         }
     }
 
-    /// Remove `idx` and, when it is an assistant-with-tool_calls, every
-    /// tool result that immediately follows it — one per call the
-    /// message requested — so the wire payload never carries a
-    /// `tool_calls` message without its results.
-    /// `first_droppable_index` always returns the assistant half first,
-    /// so the reverse direction never needs handling.
+    /// Remove `idx` and, when it is an assistant message with tool
+    /// calls, the tool results that follow it, so the wire payload never
+    /// carries `tool_calls` without their results. `first_droppable_index`
+    /// always yields the assistant half first, so the reverse direction
+    /// never needs handling.
     fn drop_with_pair(&mut self, idx: usize) {
         if idx >= self.messages.len() {
             return;
@@ -577,9 +536,6 @@ fn approx_tokens(text: &str) -> u32 {
 
 fn approx_message_tokens(m: &Message) -> u32 {
     let image_cost = (m.attachments.len() as u32).saturating_mul(TOKENS_PER_IMAGE);
-    // Each tool-call entry contributes its id + name + arguments verbatim
-    // plus a small per-entry structural overhead (braces, type, field
-    // names). `approx_tokens` over-counts slightly on purpose.
     let tool_call_bytes: usize = m
         .tool_calls
         .iter()

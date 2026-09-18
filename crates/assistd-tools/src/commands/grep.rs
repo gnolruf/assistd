@@ -41,7 +41,7 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
         }
         if let Some(rest) = a.strip_prefix('-') {
             if rest.is_empty() {
-                break; // bare `-` = stdin sentinel; treat as positional
+                break;
             }
             for ch in rest.chars() {
                 match ch {
@@ -233,14 +233,12 @@ fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Ve
     count
 }
 
-/// BRE metacharacters spelled with a backslash. Rust's regex crate
-/// reads each as the literal character, so a pattern carrying one
-/// usually came from a caller writing GNU `grep` syntax.
+/// BRE metacharacters spelled with a backslash, which the regex crate
+/// reads as the literal character.
 const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"];
 
-/// A zero-match result is the only moment a dialect mismatch is visible,
-/// so that is where the explanation goes. Output and exit code are
-/// untouched; only stderr gains a line.
+/// A zero-match result is the only moment a dialect mismatch is
+/// visible, so that is where the explanation goes.
 fn annotate_dialect(mut out: CommandOutput, pattern: &str) -> CommandOutput {
     if out.exit_code != 1 || !out.stderr.is_empty() {
         return out;
@@ -270,7 +268,6 @@ fn outcome(count: usize, stdout: Vec<u8>) -> CommandOutput {
     }
 }
 
-/// Why a path named on the command line could not be searched.
 enum TargetError {
     Unreadable {
         path: String,

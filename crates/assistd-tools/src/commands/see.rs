@@ -1,10 +1,3 @@
-//! `see PATH`: read an image file and attach it as an
-//! [`crate::Attachment::Image`] on the command output. The chain
-//! executor threads the attachment through pipes, and `RunTool` surfaces
-//! it in the JSON tool result; the chat loop (separate ticket) is
-//! responsible for turning that into a vision input on the model's
-//! next turn.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,14 +11,10 @@ use crate::vision::VisionGate;
 
 /// `see PATH`: read an image file and attach it as a vision input.
 pub struct SeeCommand {
-    /// Shared, runtime-mutable vision flag. Read on every `run()` so a
-    /// model swap on the running llama-server (revalidated by the
-    /// daemon) flips the gate without rebuilding the registry.
     gate: Arc<VisionGate>,
 }
 
 impl SeeCommand {
-    /// Construct a `SeeCommand` with the given vision gate.
     pub fn new(gate: Arc<VisionGate>) -> Self {
         Self { gate }
     }
@@ -33,10 +22,6 @@ impl SeeCommand {
 
 #[cfg(test)]
 impl Default for SeeCommand {
-    /// Test-only default: vision enabled. Lets the
-    /// convention-compliance harness in `command.rs` and the
-    /// per-command tests construct an instance without rethreading the
-    /// flag through every call site.
     fn default() -> Self {
         Self::new(VisionGate::new(true))
     }
@@ -266,11 +251,8 @@ mod tests {
         assert!(stderr.contains("Use: see <PATH>"), "{stderr}");
     }
 
-    /// AC #3: when vision is disabled, `see` short-circuits with the
-    /// exact wording "vision not available: model does not support
-    /// images" and never touches the filesystem (so a real path
-    /// argument is irrelevant; we still pass one to mirror normal
-    /// usage).
+    /// With vision disabled `see` never touches the filesystem, so the
+    /// path argument is irrelevant.
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
         let out = SeeCommand::new(VisionGate::new(false))

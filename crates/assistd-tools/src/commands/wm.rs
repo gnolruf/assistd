@@ -1,33 +1,7 @@
-//! `wm <subcommand> [args]`: drive the active [`WindowManager`] backend
-//! from the LLM's `run` tool.
-//!
-//! Subcommand surface:
-//!
-//! - `wm focus <class>` - focus the named window
-//! - `wm move <class> <workspace>` - move window to workspace
-//! - `wm open <app> [args...]` - launch a process (does not go through
-//!   the WindowManager; i3/sway/hyprland don't spawn processes, they
-//!   only manage already-mapped windows). The argv comes from the model,
-//!   so it runs under the same policy as `bash`: denylist,
-//!   destructive-pattern confirmation, and bubblewrap. The launched
-//!   application is left running once it survives a startup probe.
-//! - `wm active` - class of the focused window
-//! - `wm resize <class> <grow|shrink> <px>` - width-only resize
-//! - `wm list` - TSV `<class>\t<workspace>\t<title>`
-//! - `wm workspaces` - TSV `<num>\t<name>\t<focused>\t<output>`
-//! - `wm outputs` - TSV `<name>\t<active>\t<primary>\t<mode>\t<scale>\t<focused_workspace>`
-//! - `wm layout <default|tabbed|stacking|splith|splitv>` - set the
-//!   focused container's layout
-//!
-//! Discovery: `wm` (no args) returns the help block on stdout (exit 2).
-//! Every subcommand with too few args returns its own usage block on
-//! stdout (exit 2). All real failures emit a convention-compliant
-//! `[error] wm: …. <Hint>: <recovery>` line on stderr.
-//!
-//! When the backend is [`assistd_wm::NoWindowManager`] (no compositor
-//! configured / connect failure / Sway+Hyprland not yet implemented),
-//! every subcommand short-circuits with `[error] wm: compositor not
-//! connected. …` so the LLM gets one uniform error to recover from.
+//! `wm <subcommand> [args]`: drive the active [`WindowManager`] from the
+//! LLM's `run` tool. `wm open` spawns model-chosen argv, so it runs
+//! under the same policy as `bash`. When no compositor is connected
+//! every subcommand fails with one uniform error.
 
 use std::sync::Arc;
 
@@ -45,11 +19,6 @@ use crate::policy::{
     matches_destructive,
 };
 
-/// Pick the `(label, hint)` pair attached to a [`WmError`] for the
-/// `[error] wm: …. <label>: <hint>` line the LLM sees. The variant
-/// determines the recovery action; the handler-specific operation is
-/// already in the message body (`"focus 'Firefox' failed: …"`), so the
-/// hint stays per-variant rather than per-handler.
 fn hint_for(err: &WmError) -> (&'static str, &'static str) {
     match err {
         WmError::Disconnected => (
@@ -82,12 +51,9 @@ pub struct WmCommand {
 }
 
 impl WmCommand {
-    /// Construct a `WmCommand` backed by the given [`WindowManager`] implementation.
-    ///
-    /// `cfg`, `sandbox`, and `gate` are the same values handed to
-    /// [`crate::commands::BashCommand`]. `wm open` spawns argv the model
-    /// chose, so it is gated by the identical `[tools.bash]` policy
-    /// rather than a parallel one that could drift out of step.
+    /// `cfg`, `sandbox`, and `gate` are the same policy `bash` runs
+    /// under; `wm open` is gated identically rather than by a parallel
+    /// policy that could drift.
     pub fn new(
         wm: Arc<dyn WindowManager>,
         cfg: Arc<BashPolicyCfg>,
@@ -105,9 +71,6 @@ impl WmCommand {
 
 #[cfg(test)]
 impl WmCommand {
-    /// Test-only constructor: default policy (no denylist, no destructive
-    /// patterns), no sandbox, allow-all gate. Production paths always go
-    /// through [`WmCommand::new`] with the daemon's real config.
     pub(crate) fn for_test(wm: Arc<dyn WindowManager>) -> Self {
         use crate::policy::AlwaysAllowGate;
         Self::new(
@@ -199,8 +162,6 @@ impl Command for WmCommand {
     }
 }
 
-// --------- subcommand handlers ---------
-
 const FOCUS_HELP: &str = "usage: wm focus <id>\n\
     \n\
     Focus the window with the given decimal con_id. Run `wm list` \
@@ -234,9 +195,6 @@ async fn handle_focus(wm: &dyn WindowManager, args: &[String]) -> Result<Command
     }
 }
 
-/// Render the `[error] wm: <op>: …` line for "user passed a non-numeric
-/// or non-positive id". Centralized so focus / move / resize stay in
-/// sync. Exit code 2 mirrors the validation errors elsewhere in `wm`.
 fn parse_id_error(op: &'static str, raw: &str) -> CommandOutput {
     CommandOutput::failed(
         2,
@@ -487,8 +445,6 @@ async fn handle_list(wm: &dyn WindowManager) -> Result<CommandOutput> {
     use std::fmt::Write;
     match wm.list_windows().await {
         Ok(mut windows) => {
-            // Sort by workspace then app so the LLM can find an id by
-            // app+title without scanning unrelated rows.
             windows.sort_by(|a, b| {
                 a.workspace
                     .as_deref()
@@ -539,8 +495,7 @@ async fn handle_outputs(wm: &dyn WindowManager) -> Result<CommandOutput> {
                 out.push('\t');
                 match o.current_mode {
                     Some((w, h, hz)) => {
-                        // Sway reports refresh in mHz; emit integer Hz when
-                        // the fractional part is zero, else 3-decimal form.
+                        // Sway reports refresh in mHz.
                         let hz_int = hz / 1000;
                         let hz_frac = hz % 1000;
                         if hz_frac == 0 {
@@ -892,9 +847,6 @@ mod tests {
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("[error] wm: focus 42 failed"), "{stderr}");
-        // Backend Ipc errors route through the "Check: compositor
-        // connection" hint, different from the static "Use: wm list"
-        // hint that the pre-WmError handler emitted unconditionally.
         assert!(stderr.contains("Check:"), "{stderr}");
     }
 

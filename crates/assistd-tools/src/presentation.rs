@@ -1,21 +1,8 @@
-//! Layer 2: the LLM presentation layer. Runs once on the final
-//! [`CommandOutput`] of a completed chain (Layer 1's output). Responsible for:
-//!
-//! - Binary guarding: refuses to surface null-byte / non-UTF-8 / control-heavy
-//!   bytes to the model.
-//! - Overflow spill: line/byte-truncates the body, writes the raw stdout to a
-//!   temp file under `overflow_dir`, and appends exploration hints.
-//! - `[stderr]` attachment whenever a stage wrote to it, so the model sees
-//!   *why* a command failed. Keying this off the exit code hid the common
-//!   pipeline case: `find . | head` reports the exit code of `head`, so a
-//!   failing `find` left the model an empty, successful-looking result.
-//! - `[exit:N | Mms]` metadata footer on every successful presentation so the
-//!   model can distinguish a cache hit from a timeout.
-//!
-//! This layer is deliberately kept out of the chain executor: Layer 1 (pipes,
-//! sequencing, and-or) threads raw bytes between stages without any of these
-//! transforms, so `cat bigfile | grep foo | wc -l` sees the full cat output
-//! flow into grep; truncation only kicks in on the final `wc -l` result.
+//! Renders a completed chain's [`CommandOutput`] for the model: refuses
+//! binary bytes, truncates long output while spilling the full text to
+//! a file, attaches stderr whenever any stage wrote to it (not only on
+//! failure, since `find . | head` reports `head`'s exit code), and ends
+//! with an `[exit:N | Mms]` footer.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,25 +11,19 @@ use std::time::Duration;
 use crate::command::{Attachment, CommandOutput};
 use crate::commands::cat::{human_size, sniff_binary};
 
-/// Limits and destinations for Layer 2 output rendering. Built from
-/// `config.tools.output` in `daemon.rs`.
+/// Limits and destinations for output rendering.
 #[derive(Debug, Clone)]
 pub struct PresentSpec {
-    /// Max lines of stdout surfaced to the LLM before truncation. Config:
-    /// `tools.output.max_lines` (default 200).
+    /// Max lines of stdout surfaced before truncation.
     pub max_lines: usize,
-    /// Max bytes of the truncated head. Defense-in-depth against a
-    /// single-line command emitting megabytes. Config: `tools.output.max_kb`
-    /// × 1024 (default 50 KB = 51200 bytes).
+    /// Max bytes of the truncated head, so a single huge line is also
+    /// bounded.
     pub max_bytes: usize,
     /// Directory where full overflow output is spilled as `cmd-<n>.txt`.
-    /// Cleared + recreated by the daemon on startup.
     pub overflow_dir: PathBuf,
 }
 
 impl Default for PresentSpec {
-    /// Returns a spec with 200 max lines, 50 KiB max bytes, and
-    /// `/tmp/assistd-output` as the overflow directory.
     fn default() -> Self {
         Self {
             max_lines: 200,
@@ -52,35 +33,26 @@ impl Default for PresentSpec {
     }
 }
 
-/// Structured output of a single Layer 2 presentation. `RunTool` projects
-/// this into the JSON surface the LLM consumes.
+/// A rendered chain result.
 #[derive(Debug, Clone)]
 pub struct PresentResult {
-    /// Full LLM-facing body: truncated head (or binary-guard error) + optional
-    /// `[stderr] ...` block + `[exit:N | Mms]` footer as the final line.
+    /// Full LLM-facing body: head or binary-guard error, optional
+    /// `[stderr]` block, and the `[exit:N | Mms]` footer.
     pub output: String,
-    /// Lossy-decoded stdout head surfaced to programmatic consumers. Equals
-    /// the truncated head in overflow mode (full content lives in
-    /// `overflow_file`). Empty when `binary_guard` suppressed stdout.
+    /// Lossy-decoded stdout head; empty when the binary guard fired.
     pub stdout_raw: String,
-    /// Lossy-decoded full stderr (preserving the chain executor's per-stage
-    /// `[name]\t` prefix).
+    /// Lossy-decoded full stderr with per-stage `[name]\t` prefixes.
     pub stderr_raw: String,
     pub exit_code: i32,
     pub duration_ms: u128,
-    /// `true` iff line or byte threshold was hit and the body contains a
-    /// `--- output truncated ---` banner.
     pub truncated: bool,
-    /// `Some(path)` iff overflow fired AND the write succeeded. `None` on a
-    /// degraded-write failure (the body still shows the head + banner, but
-    /// omits the `Full output:` / `Explore:` lines).
+    /// Set when output overflowed and the spill file was written.
     pub overflow_file: Option<PathBuf>,
     pub attachments: Vec<Attachment>,
 }
 
-/// Render a completed chain's `CommandOutput` into an LLM-facing
-/// `PresentResult`. Measures nothing itself; `duration` is whatever the
-/// caller timed around their `execute()` call.
+/// Render a completed chain's output. `duration` is whatever the caller
+/// measured around execution.
 pub fn present(
     out: CommandOutput,
     spec: &PresentSpec,
@@ -91,7 +63,7 @@ pub fn present(
     let footer = format!("[exit:{} | {}ms]", out.exit_code, duration_ms);
     let stderr_raw = String::from_utf8_lossy(&out.stderr).into_owned();
 
-    if let Some(label) = binary_guard(&out.stdout) {
+    if let Some(label) = binary_label(&out.stdout) {
         let mut body = format!(
             "[error] binary output ({}, {}). Use: cat -b <path>",
             label,
@@ -179,14 +151,11 @@ pub fn present(
     }
 }
 
-/// Return `Some(label)` if `raw` should not be surfaced verbatim to the LLM:
-/// any NUL byte, invalid UTF-8, or >10% non-whitespace control characters.
-/// Returns `None` for empty input (empty is not binary).
-///
-/// Label is either a MIME type (from magic-byte sniff), or one of the
-/// synthetic tags `"application/octet-stream"`, `"invalid-utf8"`,
-/// `"control-chars"`.
-pub(crate) fn binary_guard(raw: &[u8]) -> Option<String> {
+/// Why `raw` must not reach the model verbatim: a sniffed MIME type or
+/// `application/octet-stream` for NUL bytes, `invalid-utf8`, or
+/// `control-chars` when over 10% of characters are non-whitespace
+/// controls. `None` when it is plain text (or empty).
+pub(crate) fn binary_label(raw: &[u8]) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
@@ -200,7 +169,6 @@ pub(crate) fn binary_guard(raw: &[u8]) -> Option<String> {
         Err(_) => return Some("invalid-utf8".into()),
     };
 
-    // Count over chars (not bytes) so multibyte UTF-8 runes aren't double-counted.
     let total = s.chars().count();
     if total == 0 {
         return None;
@@ -221,8 +189,7 @@ fn is_suspicious_control(c: char) -> bool {
     cp <= 0x1F || cp == 0x7F
 }
 
-/// Count lines in `s`. A trailing non-newline-terminated line counts as a
-/// line: `"a"` is 1 line, `"a\n"` is 1, `"a\nb"` is 2, `""` is 0.
+/// Count lines, where an unterminated final line still counts.
 pub(crate) fn count_lines(s: &str) -> usize {
     if s.is_empty() {
         return 0;
@@ -235,9 +202,8 @@ pub(crate) fn count_lines(s: &str) -> usize {
     }
 }
 
-/// Truncate `s` to at most `max_lines` lines and at most `max_bytes` bytes.
-/// The byte clamp respects UTF-8 char boundaries so multibyte runes are never
-/// split. Returns an owned `String`.
+/// Truncate `s` to at most `max_lines` lines and `max_bytes` bytes,
+/// never splitting a UTF-8 character.
 pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) -> String {
     if max_lines == 0 || max_bytes == 0 {
         return String::new();
@@ -265,9 +231,6 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
     s[..cut].to_string()
 }
 
-/// Write `raw` to `<dir>/cmd-<n>.txt`. Caller is responsible for ensuring
-/// `dir` exists; the daemon creates it at startup. Degraded-write failure
-/// (disk full, bad perms) is handled one level up in `present`.
 fn write_overflow_file(raw: &[u8], dir: &Path, n: u64) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("cmd-{n}.txt"));
     std::fs::write(&path, raw)?;
@@ -309,7 +272,7 @@ mod tests {
 
     #[test]
     fn binary_guard_rejects_nul_byte_with_mime_label() {
-        let label = binary_guard(PNG_BYTES).expect("png should be flagged");
+        let label = binary_label(PNG_BYTES).expect("png should be flagged");
         assert_eq!(label, "image/png");
     }
 
@@ -317,14 +280,14 @@ mod tests {
     fn binary_guard_rejects_nul_without_magic_match() {
         let mut bytes = b"plain text".to_vec();
         bytes.push(0);
-        let label = binary_guard(&bytes).expect("NUL should be flagged");
+        let label = binary_label(&bytes).expect("NUL should be flagged");
         assert_eq!(label, "application/octet-stream");
     }
 
     #[test]
     fn binary_guard_rejects_invalid_utf8() {
         let bytes: &[u8] = &[0xC3, 0x28, b' ', b'h', b'i']; // 0xC3 0x28 is invalid
-        let label = binary_guard(bytes).expect("invalid utf-8 should be flagged");
+        let label = binary_label(bytes).expect("invalid utf-8 should be flagged");
         assert_eq!(label, "invalid-utf8");
     }
 
@@ -333,7 +296,7 @@ mod tests {
         // 20 chars: 2 non-whitespace control chars (\x01, \x02) = 10%. Must
         // exceed 10% to reject, so add one more (15%).
         let bytes = b"abcdef\x01\x02\x03ghijklmnopq".to_vec();
-        let label = binary_guard(&bytes).expect("control ratio should trip");
+        let label = binary_label(&bytes).expect("control ratio should trip");
         assert_eq!(label, "control-chars");
     }
 
@@ -341,24 +304,24 @@ mod tests {
     fn binary_guard_accepts_tabs_and_newlines() {
         // 50% whitespace-controls; none are "suspicious".
         let bytes = b"a\tb\nc\td\ne\tf\n".to_vec();
-        assert!(binary_guard(&bytes).is_none());
+        assert!(binary_label(&bytes).is_none());
     }
 
     #[test]
     fn binary_guard_accepts_empty_input() {
-        assert!(binary_guard(&[]).is_none());
+        assert!(binary_label(&[]).is_none());
     }
 
     #[test]
     fn binary_guard_accepts_normal_text() {
         let bytes = b"hello world\nthis is fine\n".to_vec();
-        assert!(binary_guard(&bytes).is_none());
+        assert!(binary_label(&bytes).is_none());
     }
 
     #[test]
     fn binary_guard_accepts_utf8_multibyte() {
         let bytes = "héllo wörld ñ 日本語\n".as_bytes().to_vec();
-        assert!(binary_guard(&bytes).is_none());
+        assert!(binary_label(&bytes).is_none());
     }
 
     #[test]
@@ -366,7 +329,7 @@ mod tests {
         // 20 chars, exactly 2 controls (10%). Rule is strict >10% → accept.
         let bytes = b"abcdefgh\x01\x02ijklmnopqr".to_vec();
         assert_eq!(bytes.len(), 20);
-        assert!(binary_guard(&bytes).is_none());
+        assert!(binary_label(&bytes).is_none());
     }
 
     // --- count_lines -------------------------------------------------------

@@ -1,33 +1,8 @@
-//! The escape hatch: spawns a real `bash -c <script>` subprocess, gated by
-//! a configurable policy (denylist, destructive-pattern confirmation,
-//! timeout) and optionally wrapped in a bubblewrap sandbox.
-//!
-//! Spawn, output capture, and timeout live in [`crate::exec`], shared
-//! with `wm open` (which uses that module's detached counterpart).
-//!
-//! ## Policy layering
-//!
-//! 1. **Denylist** (synchronous, before spawn): literal substring match.
-//!    On match, return `exit 126` with the matched pattern in the error
-//!    line so the LLM can pick a different approach. Never consults the
-//!    confirmation gate; these patterns are too dangerous to prompt for.
-//! 2. **Destructive patterns** (awaits `ConfirmationGate::confirm`):
-//!    shlex-tokenized word-prefix match against each command segment. On
-//!    match, the gate decides. If the gate returns `false`, return `exit
-//!    126` with a cancellation message.
-//! 3. **Sandbox wrap**: if the resolved sandbox mode is `Bwrap`, prefix
-//!    the argv with `bwrap <default-flags> <extra-args> -- bash -c <script>`.
-//! 4. **Timeout**: the spawn itself is wrapped in `tokio::time::timeout`.
-//!    Exceeding the limit SIGKILLs the child's process group and returns
-//!    `exit 137` with the AC-specified format.
-//!
-//! ## Honest scope note
-//!
-//! Any syntactic check here (denylist / destructive patterns) can be
-//! defeated by a sufficiently clever caller: variable expansion,
-//! `$(echo rm) -rf /`, here-docs, base64 decoding. The sandbox is the
-//! real defense; the pattern checks are a backstop that catches the
-//! *obvious* cases the user expects blocked.
+//! `bash SCRIPT`: spawn a real `bash -c <script>` subprocess behind the
+//! denylist, destructive-pattern confirmation, sandbox, and timeout
+//! policy. Denylist hits exit 126 without prompting; destructive hits
+//! prompt through the gate and exit 126 when refused; a timeout kills
+//! the process group and exits 137.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,15 +18,8 @@ use crate::policy::{
     matches_destructive,
 };
 
-/// Policy bundle for the commands that spawn subprocesses: timeout,
-/// denylist substrings, tokenized destructive patterns. Caller (e.g.
-/// `assistd-core::build_tools`) shlex-tokenizes the config's destructive
-/// patterns once at startup and passes the result here as
-/// `Vec<Vec<String>>` to avoid re-parsing on every invocation.
-///
-/// Shared with [`crate::commands::WmCommand`], whose `open` subcommand
-/// spawns model-chosen argv and is gated by the same `[tools.bash]`
-/// policy.
+/// Policy for the commands that spawn subprocesses. Destructive
+/// patterns are pre-tokenized so no invocation re-parses them.
 #[derive(Debug, Clone)]
 pub struct BashPolicyCfg {
     pub timeout: Duration,
@@ -77,7 +45,6 @@ pub struct BashCommand {
 }
 
 impl BashCommand {
-    /// Construct a `BashCommand` with the given policy, sandbox, and confirmation gate.
     pub fn new(
         cfg: Arc<BashPolicyCfg>,
         sandbox: Arc<SandboxInfo>,
@@ -89,9 +56,6 @@ impl BashCommand {
 
 #[cfg(test)]
 impl Default for BashCommand {
-    /// Test-only default: 30s timeout, no denylist, no destructive
-    /// patterns, no sandbox, allow-all gate. Production paths always go
-    /// through `BashCommand::new` with real config.
     fn default() -> Self {
         use crate::policy::AlwaysAllowGate;
         Self::new(

@@ -34,17 +34,13 @@ pub struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
     /// OpenAI-compatible tool schemas: `[{"type": "function", "function": {...}}]`.
-    /// Only emitted when non-None so requests without tool use remain
-    /// byte-identical to the pre-agent-loop format.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Value>>,
-    /// Controls whether the model is allowed/required to call tools.
-    /// `"auto"` lets the model decide; `"none"` forces a text reply.
+    /// `"auto"` lets the model decide whether to call tools; `"none"`
+    /// forces a text reply.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<&'a str>,
-    /// Extra variables handed to llama.cpp's Jinja chat template
-    /// (`--jinja`). Omitted unless a caller needs one, so requests stay
-    /// byte-identical for servers running a template that ignores them.
+    /// Extra variables handed to llama.cpp's Jinja chat template.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<ChatTemplateKwargs>,
 }
@@ -70,10 +66,8 @@ pub struct ChatMessage<'a> {
     /// that finish with `finish_reason: "tool_calls"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallSpec<'a>>>,
-    /// Only set on messages with `role: "tool"`. We currently route tool
-    /// results back through synthetic user messages instead, so this is
-    /// usually absent, but keeping the field on the wire type lets the
-    /// client interop if a future change flips back.
+    /// Only set on messages with `role: "tool"`: the id of the assistant
+    /// tool call this message answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<&'a str>,
 }
@@ -167,11 +161,9 @@ pub struct ChatChunkDelta {
     pub role: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
-    /// llama.cpp's "separated" reasoning channel. Present when the
-    /// server runs with `--reasoning-format` set; otherwise reasoning
-    /// arrives inline in `content` between `<think>...</think>` tags
-    /// (handled by `ThinkSplitter` in the SSE loop). Streams
-    /// independently of `content` chunk-by-chunk.
+    /// llama.cpp's separated reasoning channel, present when the server
+    /// runs with `--reasoning-format`; otherwise reasoning arrives inline
+    /// in `content` between `<think>...</think>` tags.
     #[serde(default)]
     pub reasoning_content: Option<String>,
     /// Tool-call fragments streamed across multiple chunks; accumulate by `index`.

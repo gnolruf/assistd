@@ -8,13 +8,10 @@
 //!   failed startup, then leaves it running. Used by `wm open`, whose
 //!   contract is "launch this and leave the window open".
 //!
-//! [`supervise`] puts the child in its own process group
-//! (`process_group(0)`) and signals that whole group on timeout or
-//! overflow, as in `assistd-llm/src/llama_server/process.rs`, so a
-//! forked grandchild can't leak. [`spawn_detached`] cannot do that and
-//! stay useful;
-//! bubblewrap's `--die-with-parent` bounds a launched application
-//! instead.
+//! [`supervise`] puts the child in its own process group and signals
+//! the whole group on timeout or overflow so a forked grandchild can't
+//! leak. [`spawn_detached`] cannot do that and stay useful; bubblewrap's
+//! `--die-with-parent` bounds a launched application instead.
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;

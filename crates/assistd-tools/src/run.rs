@@ -1,13 +1,7 @@
-//! The single LLM-facing tool: `run`. Parses a command-line string,
-//! routes each stage through a [`CommandRegistry`] (Layer 1), then hands the
-//! final [`CommandOutput`] to the [`crate::presentation`] module (Layer 2) for
-//! binary guarding, overflow spill-to-file, stderr attachment, and the
-//! metadata footer.
-//!
-//! The split between the two layers matters: pipes operate on raw bytes
-//! (Layer 1), so `cat bigfile | grep foo | wc -l` feeds grep the full cat
-//! output without any LLM-presentation truncation. Only the final chain
-//! result is condensed into a model-friendly body.
+//! The single LLM-facing tool: `run`. Parses a command line, executes
+//! the chain over raw bytes, and hands only the final output to
+//! [`crate::presentation`] for truncation, so `cat bigfile | grep foo`
+//! feeds grep the whole file.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -34,19 +28,12 @@ pub struct RunTool {
     registry: Arc<CommandRegistry>,
     spec: PresentSpec,
     counter: Arc<AtomicU64>,
-    /// Level-0 description, built once in `new` from
-    /// `registry.sorted_summaries()`. Returned by reference from
-    /// [`Tool::description`]; owned here so the trait's `&str` signature
-    /// is honored without requiring a static string.
     description: String,
 }
 
 impl RunTool {
-    /// Construct a `RunTool` from a command registry, output limits, and overflow directory.
-    ///
-    /// `output` provides the line/byte truncation caps; `overflow_dir` is
-    /// the resolved on-disk location chosen by the caller (daemon and chat
-    /// TUI use different dirs so their startup resets don't race).
+    /// `output` provides the truncation caps; `overflow_dir` is where
+    /// truncated output is spilled in full.
     pub fn new(
         registry: Arc<CommandRegistry>,
         output: &ToolsOutputConfig,
@@ -67,11 +54,6 @@ impl RunTool {
     }
 }
 
-/// Build the Level-0 description the LLM sees in its tool schema. The
-/// header/footer are static; the middle block is a bulleted list of
-/// `(name, summary)` pairs pulled from every registered command. The
-/// "run a command with no arguments" footer is the discovery hook: the
-/// LLM learns that calling a command bare returns Level-1 usage.
 fn build_description(registry: &CommandRegistry) -> String {
     let mut s = String::with_capacity(1024);
     s.push_str(
@@ -137,9 +119,6 @@ impl Tool for RunTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("`command` (string) is required"))?;
-        // Surface the command name as a span field for filtering. The
-        // full command line can be long; the first whitespace-bounded
-        // token is the most useful identifier in trace output.
         let cmd_token = command.split_whitespace().next().unwrap_or("");
         tracing::Span::current().record("cmd", cmd_token);
 
@@ -153,9 +132,6 @@ impl Tool for RunTool {
     }
 }
 
-/// Translate a [`ParseError`] into a convention-compliant stderr line.
-/// The error's own message is the what-clause; each variant adds a
-/// targeted recovery hint.
 fn parse_error_line(e: &ParseError) -> String {
     let (hint, recovery) = match e {
         ParseError::Empty => ("Use", "run <cmd>"),
@@ -282,8 +258,6 @@ mod tests {
         0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
-    // --- acceptance criteria ----------------------------------------------
-
     #[test]
     fn run_cat_returns_file_contents() {
         let dir = fresh_dir();
@@ -361,8 +335,6 @@ mod tests {
 
     /// The pipelines the model actually writes: flags on the built-in
     /// commands, a glob, and the stream filters composed end to end.
-    /// Regression guard for the era when every one of these forced a
-    /// fallback to `bash`.
     #[test]
     fn run_composes_flags_globs_and_stream_filters() {
         let dir = fresh_dir();
@@ -607,8 +579,6 @@ mod tests {
             "attachments key should be absent when empty"
         );
     }
-
-    // --- new: Layer 2 acceptance criteria --------------------------------
 
     /// Fake command: emits a configurable number of lines.
     struct Lines(usize);

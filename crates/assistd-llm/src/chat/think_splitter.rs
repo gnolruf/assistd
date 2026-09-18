@@ -50,8 +50,6 @@ pub struct ThinkSplitter {
 }
 
 impl ThinkSplitter {
-    /// Create a fresh splitter that starts in the "outside reasoning"
-    /// state — the common case at the start of a turn.
     pub fn new() -> Self {
         Self::default()
     }
@@ -64,8 +62,6 @@ impl ThinkSplitter {
         if chunk.is_empty() && self.pending.is_empty() {
             return out;
         }
-        // Combine carryover prefix with new bytes; cheap because
-        // `pending` is at most 7 chars.
         let mut buf = std::mem::take(&mut self.pending);
         buf.push_str(chunk);
 
@@ -92,9 +88,7 @@ impl ThinkSplitter {
                 };
                 continue;
             }
-            // No complete tag in the remainder. Check whether the
-            // tail is a non-empty prefix of `target`; if so, hold it
-            // back for the next `feed()`.
+            // Hold back a tail that could be the start of `target`.
             let tail = &buf[cursor..];
             let mut hold = 0usize;
             for n in (1..target.len()).rev() {
@@ -119,10 +113,8 @@ impl ThinkSplitter {
         out
     }
 
-    /// Drain on stream end. Emits any pending bytes as a segment of
-    /// the current state (defensive: models rarely leave an open tag
-    /// dangling; if they do, classifying by current state keeps the
-    /// content addressable rather than silently swallowed).
+    /// Drain on stream end, classifying any held-back bytes by the
+    /// current state so a dangling partial tag is never swallowed.
     pub fn finish(&mut self) -> Option<Segment> {
         if self.pending.is_empty() {
             return None;

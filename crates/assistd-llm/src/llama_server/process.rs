@@ -18,16 +18,12 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
-    /// Spawns a new llama-server child with the given config, wires up stdout/stderr
-    /// forwarding to tracing, and returns the handle.
-    ///
-    /// # Errors
-    /// Returns [`LlamaServerError::Spawn`] if the OS cannot fork/exec the binary.
+    /// Spawn a llama-server child and forward its stdout/stderr to tracing.
     pub fn spawn(cfg: &LlamaServerConfig, model: &ModelConfig) -> Result<Self, LlamaServerError> {
-        // Router mode: start with no `--hf-repo`. The presence state machine
-        // calls `POST /models/load` with `model.name` to bring weights in on
-        // demand, and `POST /models/unload` to drop them while keeping the
-        // process alive. `-c` still controls the server-wide context window.
+        // Router mode: no `--hf-repo`, so weights are loaded on demand
+        // through `POST /models/load` and dropped through `/models/unload`
+        // while the process stays alive. `-c` still sets the server-wide
+        // context window.
         let mut cmd = Command::new(&cfg.binary_path);
         cmd.arg("--jinja")
             .arg("-ngl")
@@ -93,18 +89,14 @@ impl ChildProcess {
             cmd.process_group(0);
         }
 
-        // Orphan prevention: when the daemon dies (including the SIGKILL
-        // path that bypasses Drop and `kill_on_drop`), the kernel
-        // delivers SIGTERM to this child. `pre_exec` runs in the forked
-        // child between fork() and exec(); `prctl(PR_SET_PDEATHSIG)` is
-        // async-signal-safe.
+        // Orphan prevention: when the daemon dies, including by SIGKILL
+        // (which bypasses Drop and `kill_on_drop`), the kernel delivers
+        // SIGTERM to this child.
         #[cfg(target_os = "linux")]
         {
-            // SAFETY: prctl is async-signal-safe; the closure captures
-            // nothing that could be in an inconsistent state across
-            // fork(). On error we surface the libc errno so the caller
-            // sees the spawn failure rather than a silently-orphaned
-            // child.
+            // SAFETY: `pre_exec` runs between fork() and exec(); prctl is
+            // async-signal-safe and the closure captures nothing that
+            // could be inconsistent across fork().
             unsafe {
                 cmd.pre_exec(|| {
                     if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
@@ -145,28 +137,24 @@ impl ChildProcess {
         })
     }
 
-    /// Returns the OS PID of the running child, or `None` if it has already exited.
+    /// OS PID of the child, or `None` once it has exited.
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }
 
-    /// Wait for the child to exit. Used inside the supervisor's `select!`.
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait().await
     }
 
-    /// Send SIGTERM to the child's process group, wait up to `term_timeout`,
-    /// then fall back to SIGKILL if the child is still running. Both log
-    /// forwarding tasks are awaited (briefly) so their buffered output lands
-    /// in the journal before returning.
+    /// SIGTERM the child's process group, wait up to `term_timeout`, then
+    /// SIGKILL if it is still running. Both log forwarders are awaited
+    /// briefly so their buffered output lands before returning.
     pub async fn shutdown(mut self, term_timeout: Duration) -> Result<(), LlamaServerError> {
         #[cfg(unix)]
         if let Some(pid) = self.child.id()
             && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
         {
-            // The child was put in its own process group at spawn time
-            // (see `process_group(0)` above), so pgid == pid. Errors are
-            // ignored: the child may have already exited.
+            // The child leads its own process group, so pgid == pid.
             let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
         }
 

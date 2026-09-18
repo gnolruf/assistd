@@ -1,6 +1,4 @@
-//! Built-in commands dispatched by the chain executor. Each command is
-//! a small in-process Rust handler; `bash` is the escape hatch to the
-//! real shell.
+//! Built-in commands dispatched by the chain executor.
 
 pub mod bash;
 pub mod cat;
@@ -79,8 +77,6 @@ pub(crate) async fn collect_input(
     Ok(Some(out))
 }
 
-/// The daemon's production command set, built with test-only policy
-/// stand-ins, for tests that need every name to flow through.
 #[cfg(test)]
 pub(crate) fn test_registry() -> crate::command::CommandRegistry {
     use assistd_wm::NoWindowManager;

@@ -1,12 +1,8 @@
-//! Internal command abstraction. `Command`s are Rust handlers that the
-//! chain executor dispatches to after the parser has converted a command
-//! line into a [`crate::chain::Chain`] AST. They operate on raw bytes
-//! (stdin → stdout) and surface a Unix-style `exit_code` so `&&`/`||`
-//! composition works the way users expect.
-//!
-//! A `Command` is distinct from a [`crate::Tool`]: the LLM only ever sees
-//! one `Tool` (`run`); the `CommandRegistry` is an internal lookup table
-//! that `run` consults as it walks each chain stage.
+//! Internal command abstraction: Rust handlers the chain executor
+//! dispatches to, operating on raw bytes with a Unix-style exit code so
+//! `&&`/`||` composition works as users expect. The LLM never sees a
+//! `Command` directly; it sees one [`crate::Tool`] (`run`) that walks
+//! the chain.
 //!
 //! # Error-message-as-navigation convention
 //!
@@ -117,11 +113,9 @@ pub struct CommandInput {
     pub stdin: Option<Vec<u8>>,
 }
 
-/// A side-channel payload a command can attach alongside its stdout. The
-/// chain executor threads attachments through pipes untouched so `see X |
-/// wc` still surfaces the image; `RunTool` base64-encodes them into the
-/// JSON result so a caller (eventually the chat loop) can inject them
-/// into the model's next turn as a vision input.
+/// A side-channel payload a command attaches alongside its stdout. The
+/// chain executor threads attachments through pipes untouched, so
+/// `see X | wc` still surfaces the image.
 #[derive(Debug, Clone)]
 pub enum Attachment {
     Image { mime: String, bytes: Vec<u8> },
@@ -245,16 +239,12 @@ impl CommandRegistry {
         self.commands.is_empty()
     }
 
-    /// Command names, sorted alphabetically. Used to format the
-    /// "Available: …" line in the unknown-command error so there's a
-    /// single source of truth.
+    /// Command names, sorted alphabetically.
     pub fn sorted_names(&self) -> Vec<&str> {
         self.commands.keys().map(String::as_str).collect()
     }
 
-    /// `(name, summary)` pairs, sorted alphabetically by name. Consumed
-    /// by `RunTool::new` to build the dynamic Level-0 description the
-    /// LLM sees in its tool schema.
+    /// `(name, summary)` pairs, sorted alphabetically by name.
     pub fn sorted_summaries(&self) -> Vec<(&str, &'static str)> {
         self.commands
             .values()
@@ -425,10 +415,8 @@ mod tests {
                     vec!["file:///etc/passwd".into()],
                 )),
             ),
-            // bash denylist rejection exercises the policy error path,
-            // which is a convention-compliant `[error] bash: … Try: …`
-            // line. (The separate AC #2 timeout path deliberately emits a
-            // fixed, hint-free format and is not covered by this test.)
+            // The timeout path deliberately emits a fixed, hint-free
+            // line and is not covered here.
             (
                 "bash",
                 rt.block_on(run_cmd(

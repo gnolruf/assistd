@@ -2,11 +2,9 @@
 //! [`crate::CommandRegistry`] and gluing the results together according to
 //! Unix pipeline semantics.
 //!
-//! Pipelining is sequential for simplicity: the left stage runs to
-//! completion, its stdout buffer becomes the right stage's stdin. That
-//! trades throughput for determinism and lets unit tests assert byte
-//! equality. [`PIPE_BUF_MAX`] caps the inter-stage buffer so a runaway
-//! stage (e.g. `bash "cat /dev/urandom" | wc -l`) can't OOM the daemon.
+//! Pipelining is sequential: the left stage runs to completion and its
+//! stdout becomes the right stage's stdin. [`PIPE_BUF_MAX`] caps that
+//! buffer so a runaway stage can't exhaust daemon memory.
 
 use anyhow::Result;
 use std::future::Future;
@@ -16,9 +14,8 @@ use super::expand::expand_args;
 use super::{Chain, Word};
 use crate::command::{CommandInput, CommandOutput, CommandRegistry, error_line};
 
-/// Maximum bytes we buffer between pipe stages. Prevents one command
-/// from exhausting daemon memory. On overflow we return exit 141 (the
-/// canonical "SIGPIPE" code) so `||` fallbacks still fire.
+/// Maximum bytes buffered between pipe stages. Overflow exits 141, the
+/// SIGPIPE code, so `||` fallbacks still fire.
 pub const PIPE_BUF_MAX: usize = 10 * 1024 * 1024;
 
 /// Execute a parsed command chain.

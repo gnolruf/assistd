@@ -1,13 +1,6 @@
-//! Internal CRUD façade over the persistent memory subsystem.
-//!
-//! Wraps [`assistd_memory::MemoryStore`] and
-//! [`assistd_memory::ConversationStore`] in a single struct so the
-//! daemon's IPC handlers and the `assistd memory ...` CLI hit one
-//! object instead of juggling two trait objects.
-//!
-//! No LLM-callable [`crate::Tool`] impls live here; the model gets
-//! access to memory only via the daemon's `run` chain or via `Tool`
-//! impls a future milestone might layer on top of this façade.
+//! CRUD façade over [`assistd_memory::MemoryStore`] and
+//! [`assistd_memory::ConversationStore`]. The LLM-callable tools built
+//! on it live in [`crate::memory_tools`].
 
 use std::sync::Arc;
 
@@ -16,10 +9,7 @@ use assistd_memory::{ConversationStore, MemoryStore, TurnSummary};
 
 pub use assistd_memory::MemoryRecord;
 
-/// Default cap on `recent_turns` / semantic-search result sizes when
-/// the IPC client asks for `limit = 0` (the wire default for variants
-/// that omit a cap). Big enough to be useful for casual inspection;
-/// the LLM-facing path passes an explicit smaller limit.
+/// Result cap applied when a caller passes `limit = 0`.
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 
 /// Combined CRUD handle over both the flat KV store and the richer
@@ -31,7 +21,6 @@ pub struct MemoryOps {
 }
 
 impl MemoryOps {
-    /// Construct a `MemoryOps` from the provided store and conversation backends.
     pub fn new(store: Arc<dyn MemoryStore>, conversations: Arc<dyn ConversationStore>) -> Self {
         Self {
             store,
@@ -39,10 +28,7 @@ impl MemoryOps {
         }
     }
 
-    /// Save a key/value memory. Returns the row id of the saved memory
-    /// so the caller (typically `RememberTool`) can enqueue an embed
-    /// job that FKs the new row. The IPC `MemorySave` handler discards
-    /// the id; the LLM-callable `remember` tool consumes it.
+    /// Save a key/value memory and return its row id.
     pub async fn save(&self, key: &str, value: String) -> Result<i64> {
         self.store.save(key, value).await
     }
@@ -62,19 +48,13 @@ impl MemoryOps {
         self.store.delete(key).await
     }
 
-    /// Delete a memory by row id. Returns `Some(key)` of the deleted
-    /// row on hit, `None` when no row matched. Used by the IPC
-    /// `MemoryForget` handler so the CLI can echo the key back to the
-    /// user (`forgot id=N key=...`) and distinguish hit/miss without
-    /// a second probe.
+    /// Delete a memory by row id, returning its key on a hit.
     pub async fn forget(&self, id: i64) -> Result<Option<String>> {
         self.store.delete_by_id(id).await
     }
 
     /// Like [`MemoryOps::list`] but returns full `(id, key, value)`
-    /// rows in one round trip; used by the `assistd memory list` CLI.
-    /// Order is whatever the backend yields (lexicographic by key for
-    /// the SQLite impl).
+    /// rows, in whatever order the backend yields.
     pub async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
         self.store.list_full(prefix).await
     }

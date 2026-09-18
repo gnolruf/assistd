@@ -6,17 +6,12 @@ use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line, io_error_nav};
 
-/// Exit code for policy denial. POSIX "command found but not executable" is
-/// the closest semantic match to "we recognize the command but refuse it".
-/// Shared with `BashCommand` so the LLM sees a consistent signal.
-const POLICY_DENIED_EXIT: i32 = 126;
+use crate::exec::POLICY_DENIED_EXIT;
 
-/// Write-command policy, constructed by `assistd-core::build_tools` from
-/// `config.tools.write` at daemon startup. Path strings are canonicalized
-/// once here; runtime checks are fast `Path::starts_with` comparisons.
-///
-/// The allowlist is non-empty by construction: a policy with no permitted
-/// prefixes would gate nothing, so that state is not representable.
+/// Writable-path allowlist, non-empty by construction: a policy with no
+/// permitted prefixes would gate nothing, so that state is not
+/// representable. Prefixes are canonical paths compared with
+/// `Path::starts_with`.
 #[derive(Debug, Clone)]
 pub struct WritePolicyCfg {
     first: PathBuf,
@@ -64,13 +59,10 @@ pub struct WriteCommand {
 }
 
 impl WriteCommand {
-    /// Construct a `WriteCommand` with the given policy configuration.
     pub fn new(cfg: Arc<WritePolicyCfg>) -> Self {
         Self { cfg }
     }
 
-    /// Test-only constructor: allowlists the filesystem root, so any
-    /// absolute path is writable. Never used in production.
     #[cfg(test)]
     pub fn permissive_for_tests() -> Self {
         Self {
@@ -185,8 +177,6 @@ impl Command for WriteCommand {
     }
 }
 
-/// Failure modes for [`resolve_for_allowlist`], turned into distinct error
-/// messages by the caller so the LLM can recover accurately.
 #[derive(Debug)]
 enum PathResolveError {
     Relative,
@@ -218,9 +208,8 @@ fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveErr
     }
 }
 
-/// Pure-Rust path normalization: collapses `.` and `..` components. Does
-/// not touch disk. On absolute paths, a leading `/..` is silently discarded
-/// (same as the kernel's behaviour).
+/// Collapse `.` and `..` components without touching disk. A leading
+/// `/..` is discarded, as the kernel does.
 pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
     let mut out: Vec<Component<'_>> = Vec::new();
     for comp in path.components() {
@@ -230,15 +219,8 @@ pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
                 Some(Component::Normal(_)) => {
                     out.pop();
                 }
-                Some(Component::RootDir) => {
-                    // `/..` == `/`: don't pop past root.
-                }
-                _ => {
-                    // Leading `..` on a relative path: keep, since the
-                    // caller (above) already rejects relatives. Still
-                    // preserve for completeness
-                    out.push(comp);
-                }
+                Some(Component::RootDir) => {}
+                _ => out.push(comp),
             },
             _ => out.push(comp),
         }

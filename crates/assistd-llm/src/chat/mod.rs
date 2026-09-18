@@ -1,9 +1,6 @@
-//! Streaming chat client for the locally-managed llama-server process.
-//!
-//! The daemon holds a single `LlamaChatClient` as `Arc<dyn LlmBackend>`.
-//! Each query contributes a turn to one daemon-wide conversation guarded by
-//! a `tokio::sync::Mutex`. Tokens are streamed back to the caller as
-//! `LlmEvent::Delta` events followed by a terminal `LlmEvent::Done`.
+//! Streaming chat client for the locally-managed llama-server process:
+//! one conversation, wire types for `/v1/chat/completions`, and the SSE
+//! and `<think>` decoders the stream runs through.
 
 pub mod client;
 pub mod conversation;

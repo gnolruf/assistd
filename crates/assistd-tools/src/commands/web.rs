@@ -1,7 +1,3 @@
-//! `web URL`: HTTP GET, return response body as stdout. http(s) only,
-//! 30s default timeout, 10 MiB body cap. Non-2xx statuses exit 1 so
-//! `||` fallbacks fire; transport errors also exit 1.
-
 use std::time::Duration;
 
 use anyhow::Result;
@@ -9,9 +5,7 @@ use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, error_line};
 
-/// Hard cap on response bytes. Mirrors the chain executor's
-/// `PIPE_BUF_MAX` so a multi-megabyte page doesn't blow the next
-/// stage either.
+/// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
 
 /// `web URL`: HTTP GET a URL and return the response body as stdout.
@@ -20,12 +14,11 @@ pub struct WebCommand {
 }
 
 impl WebCommand {
-    /// Create a `WebCommand` with the default 30-second timeout.
+    /// A client with a 30-second request timeout.
     pub fn new() -> Self {
         Self::with_timeout(Duration::from_secs(30))
     }
 
-    /// Create a `WebCommand` with a custom request timeout.
     pub fn with_timeout(timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()

@@ -49,11 +49,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-/// Prefix every MCP-adapted tool's `name()` carries. Maintained by
-/// `assistd/src/mcp_init.rs` when registering `adapt_handle_as_tools`
-/// (which builds names of the form `mcp__<server>__<tool>`). Exposed
-/// here so the daemon's prompt-augmentation step can partition the
-/// unified registry into native vs MCP without re-deriving the literal.
+/// Prefix every MCP-adapted tool's `name()` carries
+/// (`mcp__<server>__<tool>`), so a registry can be partitioned into
+/// native and MCP tools.
 pub const MCP_TOOL_NAME_PREFIX: &str = "mcp__";
 
 /// A single tool the LLM can invoke.
@@ -92,9 +90,7 @@ impl ToolRegistry {
         self.tools.push(Box::new(tool));
     }
 
-    /// Register an already-boxed tool. Used by code that builds tools
-    /// dynamically (the MCP adapter, where each server's tool set is
-    /// discovered at runtime and returned as `Vec<Box<dyn Tool>>`).
+    /// Register an already-boxed tool.
     pub fn register_boxed(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
     }
@@ -122,9 +118,7 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.name())
     }
 
-    /// Iterator over every registered tool as a borrowed trait object.
-    /// Used by the daemon to render tool listings into the system prompt
-    /// at startup.
+    /// Iterator over every registered tool.
     pub fn iter_tools(&self) -> impl Iterator<Item = &dyn Tool> {
         self.tools.iter().map(|t| t.as_ref())
     }
@@ -151,7 +145,7 @@ impl ToolRegistry {
     }
 }
 
-/// Crate version string from `Cargo.toml`.
+/// Crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
