@@ -188,8 +188,8 @@ fn deserializes_content_with_inline_think_tags() {
 fn deserializes_role_only_first_chunk() {
     let payload = r#"{"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#;
     let parsed: ChatCompletionChunk = serde_json::from_str(payload).unwrap();
-    assert_eq!(parsed.choices[0].delta.role.as_deref(), Some("assistant"));
     assert!(parsed.choices[0].delta.content.is_none());
+    assert!(parsed.choices[0].delta.tool_calls.is_none());
 }
 
 #[test]

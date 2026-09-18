@@ -17,9 +17,8 @@ use tokio::time::timeout;
 
 use crate::command::{Attachment, Command, CommandInput, CommandOutput, error_line};
 use crate::commands::cat::human_size;
+use crate::exec::{SPAWN_FAILED_EXIT, TIMEOUT_EXIT};
 
-const SPAWN_FAILED_EXIT: i32 = 127;
-const TIMEOUT_EXIT: i32 = 137;
 const STDERR_TAIL_LINES: usize = 20;
 
 /// Configuration for the screenshot command.

@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::command::Attachment;
+use crate::commands::cat::human_size;
 
 /// Image MIME types llama.cpp's vision adapters accept. `infer::is_image`
 /// also passes GIF, BMP, TIFF and HEIC, so the list is explicit.
@@ -49,8 +50,8 @@ impl LoadImageError {
             },
             LoadImageError::TooLarge { path, size, max } => format!(
                 "image too large: {path} ({} > {} max)",
-                human_mib(*size),
-                human_mib(*max),
+                human_size(*size as usize),
+                human_size(*max as usize),
             ),
             LoadImageError::Unrecognized { path } => {
                 format!("not a recognized image file: {path}")
@@ -117,27 +118,11 @@ pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), L
     ))
 }
 
-fn human_mib(n: u64) -> String {
-    const MIB: u64 = 1024 * 1024;
-    if n >= MIB {
-        format!("{:.1} MiB", n as f64 / MIB as f64)
-    } else {
-        format!("{} B", n)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures::PNG_BYTES;
     use tempfile::tempdir;
-
-    const PNG_BYTES: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
-        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-    ];
 
     // Minimal GIF89a header → infer reports image/gif → must be rejected
     // by the supported-format allowlist.

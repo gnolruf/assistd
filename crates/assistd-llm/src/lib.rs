@@ -1,13 +1,3 @@
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::print_stdout,
-        clippy::print_stderr
-    )
-)]
-
 //! LLM backend trait, the llama-server chat client that implements it,
 //! and the child-process supervisor that keeps llama-server alive.
 

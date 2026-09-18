@@ -126,16 +126,11 @@ pub struct ChatResponse {
 #[derive(Debug, Deserialize)]
 pub struct ChatChoice {
     pub message: ChatChoiceMessage,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub finish_reason: Option<String>,
 }
 
 /// The assistant message inside a non-streaming choice.
 #[derive(Debug, Deserialize)]
 pub struct ChatChoiceMessage {
-    #[allow(dead_code)]
-    pub role: String,
     pub content: String,
 }
 
@@ -157,9 +152,6 @@ pub struct ChatChunkChoice {
 #[derive(Debug, Deserialize, Default)]
 pub struct ChatChunkDelta {
     #[serde(default)]
-    #[allow(dead_code)]
-    pub role: Option<String>,
-    #[serde(default)]
     pub content: Option<String>,
     /// llama.cpp's separated reasoning channel, present when the server
     /// runs with `--reasoning-format`; otherwise reasoning arrives inline
@@ -180,9 +172,6 @@ pub struct ToolCallDelta {
     pub index: u32,
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(default, rename = "type")]
-    #[allow(dead_code)]
-    pub kind: Option<String>,
     #[serde(default)]
     pub function: Option<FunctionCallDelta>,
 }
