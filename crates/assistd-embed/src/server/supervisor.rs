@@ -25,6 +25,13 @@ enum CycleResult {
     },
 }
 
+enum Startup {
+    Ready,
+    ChildExited(ExitStatus),
+    ShuttingDown,
+    Failed(EmbedServerError),
+}
+
 /// Drives the embed-server lifecycle: spawn, health check, restart on
 /// crash, graceful shutdown.
 pub struct Supervisor {
@@ -121,37 +128,30 @@ impl Supervisor {
             ready_timeout,
         )?;
 
-        enum Phase1 {
-            Ready,
-            ChildExited(ExitStatus),
-            ShuttingDown,
-            StartupError(EmbedServerError),
-        }
-
-        let phase1 = tokio::select! {
+        let startup = tokio::select! {
             res = health.wait_ready(&mut self.shutdown_rx) => match res {
-                Ok(()) => Phase1::Ready,
-                Err(EmbedServerError::ShutdownDuringHealth) => Phase1::ShuttingDown,
-                Err(e) => Phase1::StartupError(e),
+                Ok(()) => Startup::Ready,
+                Err(EmbedServerError::ShutdownDuringHealth) => Startup::ShuttingDown,
+                Err(e) => Startup::Failed(e),
             },
             exit = child.wait() => match exit {
-                Ok(status) => Phase1::ChildExited(status),
-                Err(e) => Phase1::StartupError(EmbedServerError::Io(e)),
+                Ok(status) => Startup::ChildExited(status),
+                Err(e) => Startup::Failed(EmbedServerError::Io(e)),
             }
         };
 
-        match phase1 {
-            Phase1::Ready => { /* fall through */ }
-            Phase1::ChildExited(status) => {
+        match startup {
+            Startup::Ready => {}
+            Startup::ChildExited(status) => {
                 *self.pid.lock() = None;
                 return Ok(CycleResult::FailedToStart { status });
             }
-            Phase1::ShuttingDown => {
+            Startup::ShuttingDown => {
                 child.shutdown(TERM_TIMEOUT).await?;
                 *self.pid.lock() = None;
                 return Ok(CycleResult::ShutdownRequested);
             }
-            Phase1::StartupError(e) => {
+            Startup::Failed(e) => {
                 child.shutdown(TERM_TIMEOUT).await?;
                 *self.pid.lock() = None;
                 return Err(e);

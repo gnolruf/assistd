@@ -133,7 +133,7 @@ pub fn spawn_writer(
                 biased;
                 op = rx.recv() => {
                     match op {
-                        Some(op) => handle_op(&conn, op).await,
+                        Some(op) => execute(&conn, op).await,
                         None => {
                             tracing::debug!(
                                 target: "assistd::memory",
@@ -154,7 +154,7 @@ pub fn spawn_writer(
                         let drain_deadline = Duration::from_secs(2);
                         loop {
                             match tokio::time::timeout(drain_deadline, rx.recv()).await {
-                                Ok(Some(op)) => handle_op(&conn, op).await,
+                                Ok(Some(op)) => execute(&conn, op).await,
                                 Ok(None) => break,
                                 Err(_) => {
                                     tracing::debug!(
@@ -173,23 +173,20 @@ pub fn spawn_writer(
     })
 }
 
-async fn handle_op(conn: &Connection, op: WriteOp) {
+async fn execute(conn: &Connection, op: WriteOp) {
     match op {
         WriteOp::EndSession { session_id, ack } => {
-            let res = end_session(conn, session_id).await;
-            let _ = ack.send(res);
+            reply(ack, end_session(conn, session_id).await);
         }
         WriteOp::BeginTurn {
             session_id,
             user_text,
             ack,
         } => {
-            let res = begin_turn(conn, session_id, user_text).await;
-            let _ = ack.send(res);
+            reply(ack, begin_turn(conn, session_id, user_text).await);
         }
         WriteOp::EndTurn { turn_id, ack } => {
-            let res = end_turn(conn, turn_id).await;
-            let _ = ack.send(res);
+            reply(ack, end_turn(conn, turn_id).await);
         }
         WriteOp::SaveMemory {
             key,
@@ -197,16 +194,16 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
             source_conversation_id,
             ack,
         } => {
-            let res = save_memory(conn, key, value, source_conversation_id).await;
-            let _ = ack.send(res);
+            reply(
+                ack,
+                save_memory(conn, key, value, source_conversation_id).await,
+            );
         }
         WriteOp::DeleteMemory { key, ack } => {
-            let res = delete_memory(conn, key).await;
-            let _ = ack.send(res);
+            reply(ack, delete_memory(conn, key).await);
         }
         WriteOp::DeleteMemoryById { id, ack } => {
-            let res = delete_memory_by_id(conn, id).await;
-            let _ = ack.send(res);
+            reply(ack, delete_memory_by_id(conn, id).await);
         }
         WriteOp::StoreChunk {
             conversation_id,
@@ -215,8 +212,10 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
             token_count,
             ack,
         } => {
-            let res = store_chunk(conn, conversation_id, chunk_index, content, token_count).await;
-            let _ = ack.send(res);
+            reply(
+                ack,
+                store_chunk(conn, conversation_id, chunk_index, content, token_count).await,
+            );
         }
         WriteOp::StoreChunkEmbedding {
             chunk_id,
@@ -225,8 +224,10 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
             vector,
             ack,
         } => {
-            let res = store_chunk_embedding(conn, chunk_id, model, dim, vector).await;
-            let _ = ack.send(res);
+            reply(
+                ack,
+                store_chunk_embedding(conn, chunk_id, model, dim, vector).await,
+            );
         }
         WriteOp::StoreMemoryEmbedding {
             memory_id,
@@ -235,16 +236,20 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
             vector,
             ack,
         } => {
-            let res = store_memory_embedding(conn, memory_id, model, dim, vector).await;
-            let _ = ack.send(res);
+            reply(
+                ack,
+                store_memory_embedding(conn, memory_id, model, dim, vector).await,
+            );
         }
         WriteOp::BeginSessionWithMainBranch {
             session_id,
             daemon_pid,
             ack,
         } => {
-            let res = begin_session_with_main_branch(conn, session_id, daemon_pid).await;
-            let _ = ack.send(res);
+            reply(
+                ack,
+                begin_session_with_main_branch(conn, session_id, daemon_pid).await,
+            );
         }
         WriteOp::CreateBranch {
             session_id,
@@ -253,16 +258,17 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
             fork_point_seq,
             ack,
         } => {
-            let res = create_branch(conn, session_id, name, parent_branch_id, fork_point_seq).await;
-            let _ = ack.send(res);
+            reply(
+                ack,
+                create_branch(conn, session_id, name, parent_branch_id, fork_point_seq).await,
+            );
         }
         WriteOp::SetCurrentBranch {
             session_id,
             branch_id,
             ack,
         } => {
-            let res = set_current_branch(conn, session_id, branch_id).await;
-            let _ = ack.send(res);
+            reply(ack, set_current_branch(conn, session_id, branch_id).await);
         }
         WriteOp::AppendMessageToBranch {
             session_id,
@@ -271,30 +277,33 @@ async fn handle_op(conn: &Connection, op: WriteOp) {
             msg,
             ack,
         } => {
-            let res = append_message_to_branch(conn, session_id, branch_id, turn_id, msg).await;
-            let _ = ack.send(res);
+            reply(
+                ack,
+                append_message_to_branch(conn, session_id, branch_id, turn_id, msg).await,
+            );
         }
         WriteOp::ForkBranch {
             src_branch_id,
             new_name,
             ack,
         } => {
-            let res = fork_branch(conn, src_branch_id, new_name).await;
-            let _ = ack.send(res);
+            reply(ack, fork_branch(conn, src_branch_id, new_name).await);
         }
         WriteOp::UndoLastTurn { branch_id, ack } => {
-            let res = undo_last_turn(conn, branch_id).await;
-            let _ = ack.send(res);
+            reply(ack, undo_last_turn(conn, branch_id).await);
         }
         WriteOp::SetSessionTitle {
             session_id,
             title,
             ack,
         } => {
-            let res = set_session_title(conn, session_id, title).await;
-            let _ = ack.send(res);
+            reply(ack, set_session_title(conn, session_id, title).await);
         }
     }
+}
+
+fn reply<T>(ack: oneshot::Sender<Result<T>>, result: Result<T>) {
+    let _ = ack.send(result);
 }
 
 async fn set_session_title(conn: &Connection, session_id: String, title: String) -> Result<()> {
