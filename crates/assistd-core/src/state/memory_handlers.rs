@@ -1,8 +1,8 @@
 //! Handlers for the `Memory*` variants of `Request`.
 
-use super::{AppState, send_error};
+use super::{AppState, send_error, wire_role};
 use anyhow::Result;
-use assistd_ipc::Event;
+use assistd_ipc::{Event, ReindexKind};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -46,7 +46,7 @@ impl AppState {
                             chunk_id: h.chunk_id,
                             session_id: h.session_id,
                             timestamp: h.timestamp,
-                            role: h.role.as_wire().into(),
+                            role: wire_role(h.role),
                             content: h.content,
                             similarity: h.similarity,
                         })
@@ -253,7 +253,7 @@ impl AppState {
         let _ = tx
             .send(Event::ReindexProgress {
                 id: id.clone(),
-                kind: "chunks".to_string(),
+                kind: ReindexKind::Chunks,
                 done: 0,
                 total: chunks_total,
             })
@@ -261,20 +261,24 @@ impl AppState {
         let _ = tx
             .send(Event::ReindexProgress {
                 id: id.clone(),
-                kind: "memories".to_string(),
+                kind: ReindexKind::Memories,
                 done: 0,
                 total: memories_total,
             })
             .await;
 
         let semantic = &self.memory.semantic;
-        self.reindex_items(&id, &tx, "chunks", chunks, |chunk_id, blob| {
+        self.reindex_items(&id, &tx, ReindexKind::Chunks, chunks, |chunk_id, blob| {
             semantic.store_chunk_embedding(chunk_id, model.clone(), dim, blob)
         })
         .await;
-        self.reindex_items(&id, &tx, "memories", memories, |memory_id, blob| {
-            semantic.store_memory_embedding(memory_id, model.clone(), dim, blob)
-        })
+        self.reindex_items(
+            &id,
+            &tx,
+            ReindexKind::Memories,
+            memories,
+            |memory_id, blob| semantic.store_memory_embedding(memory_id, model.clone(), dim, blob),
+        )
         .await;
 
         let _ = tx.send(Event::Done { id }).await;
@@ -285,7 +289,7 @@ impl AppState {
         &self,
         id: &str,
         tx: &mpsc::Sender<Event>,
-        kind: &str,
+        kind: ReindexKind,
         items: Vec<(i64, String)>,
         store: F,
     ) where
@@ -299,7 +303,7 @@ impl AppState {
                     if let Err(e) = store(item_id, assistd_memory::vector_to_blob(&vec)).await {
                         tracing::warn!(
                             target: "assistd::memory",
-                            kind,
+                            kind = kind.as_str(),
                             item_id,
                             error = %e,
                             "reindex: store embedding failed"
@@ -309,7 +313,7 @@ impl AppState {
                 Err(e) => {
                     tracing::warn!(
                         target: "assistd::memory",
-                        kind,
+                        kind = kind.as_str(),
                         item_id,
                         error = %e,
                         "reindex: embed failed"
@@ -319,7 +323,7 @@ impl AppState {
             let _ = tx
                 .send(Event::ReindexProgress {
                     id: id.to_string(),
-                    kind: kind.to_string(),
+                    kind,
                     done,
                     total,
                 })

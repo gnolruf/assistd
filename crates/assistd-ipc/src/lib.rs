@@ -409,6 +409,146 @@ impl Request {
     }
 }
 
+/// Severity of an [`Event::Status`] update; maps 1:1 to a `tracing` level.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+impl StatusSeverity {
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusSeverity::Info => "info",
+            StatusSeverity::Warning => "warning",
+            StatusSeverity::Error => "error",
+        }
+    }
+}
+
+impl std::fmt::Display for StatusSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// Daemon subsystem an [`Event::Status`] update is attributed to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Component {
+    Agent,
+    Llm,
+    Mcp,
+    Voice,
+    Memory,
+    Wm,
+    Embed,
+    Hotkey,
+    Daemon,
+    IdleMonitor,
+    GpuMonitor,
+    ListenDispatcher,
+}
+
+impl Component {
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Component::Agent => "agent",
+            Component::Llm => "llm",
+            Component::Mcp => "mcp",
+            Component::Voice => "voice",
+            Component::Memory => "memory",
+            Component::Wm => "wm",
+            Component::Embed => "embed",
+            Component::Hotkey => "hotkey",
+            Component::Daemon => "daemon",
+            Component::IdleMonitor => "idle_monitor",
+            Component::GpuMonitor => "gpu_monitor",
+            Component::ListenDispatcher => "listen_dispatcher",
+        }
+    }
+}
+
+impl std::fmt::Display for Component {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// What an [`Event::Status`] update reports.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusKind {
+    /// The LLM server died mid-turn and is being restarted.
+    Restarting,
+    /// The LLM server is back; the interrupted step is being replayed.
+    Replaying,
+    /// Recovery failed; the turn will not complete.
+    Degraded,
+    /// The tool schema was withdrawn so the model answers from what it has.
+    ToolsWithdrawn,
+    /// The model is still loading after a wake.
+    ModelLoading,
+    /// A subsystem failed to start and is unavailable this run.
+    StartupFailed,
+}
+
+/// Author of a persisted conversation message.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl Role {
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        }
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// Which table a [`Event::ReindexProgress`] item belongs to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReindexKind {
+    Chunks,
+    Memories,
+}
+
+impl ReindexKind {
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReindexKind::Chunks => "chunks",
+            ReindexKind::Memories => "memories",
+        }
+    }
+}
+
+impl std::fmt::Display for ReindexKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
 /// Events streamed from the daemon to a client, as JSON lines with a
 /// `"type"` discriminant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -471,7 +611,7 @@ pub enum Event {
         chunk_id: i64,
         session_id: String,
         timestamp: String,
-        role: String,
+        role: Role,
         content: String,
         similarity: f32,
     },
@@ -504,11 +644,10 @@ pub enum Event {
         deleted: bool,
         key: Option<String>,
     },
-    /// Progress of a `MemoryReindex` run, one per item. `kind` is
-    /// `"chunks"` or `"memories"`.
+    /// Progress of a `MemoryReindex` run, one per item.
     ReindexProgress {
         id: String,
-        kind: String,
+        kind: ReindexKind,
         done: u32,
         total: u32,
     },
@@ -532,14 +671,12 @@ pub enum Event {
         model_name: String,
     },
     /// Non-terminal status update for a recoverable condition; a `Done`
-    /// or `Error` still follows. `severity` is `info`, `warning` or
-    /// `error`; `event` is a short machine-readable identifier such as
-    /// `restarting`.
+    /// or `Error` still follows.
     Status {
         id: String,
-        severity: String,
-        component: String,
-        event: String,
+        severity: StatusSeverity,
+        component: Component,
+        event: StatusKind,
         message: String,
     },
     /// One branch emitted by [`Request::Branches`], active session
@@ -572,12 +709,11 @@ pub enum Event {
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
     },
-    /// One message of branch history. `role` is `system`, `user`,
-    /// `assistant` or `tool`.
+    /// One message of branch history.
     HistoryEntry {
         id: String,
         seq: i64,
-        role: String,
+        role: Role,
         content: String,
         tool_name: Option<String>,
     },

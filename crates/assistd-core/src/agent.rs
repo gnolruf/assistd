@@ -7,9 +7,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::recovery::{Component, RecoverySeverity};
+use crate::recovery::{Component, StatusSeverity};
 use crate::recovery_event;
 use anyhow::Result;
+use assistd_ipc::StatusKind;
 use assistd_llm::{
     HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
     ToolResultPayload,
@@ -267,7 +268,7 @@ impl Agent {
 
     async fn withdraw_tools(&self, turn: &mut Turn, why: ToolBudgetExhausted) {
         recovery_event!(
-            RecoverySeverity::Warning,
+            StatusSeverity::Warning,
             Component::Agent,
             "tools_withdrawn",
             iteration = turn.iteration,
@@ -277,9 +278,9 @@ impl Agent {
         let _ = turn
             .tx
             .send(status_event(
-                RecoverySeverity::Warning,
+                StatusSeverity::Warning,
                 Component::Agent,
-                "tools_withdrawn",
+                StatusKind::ToolsWithdrawn,
                 format!(
                     "Agent stopped using tools ({}); answering with what it has",
                     why.reason()
@@ -324,7 +325,7 @@ enum Replay {
 /// it back, and report whether the step can be replayed.
 async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &str) -> Replay {
     recovery_event!(
-        RecoverySeverity::Warning,
+        StatusSeverity::Warning,
         Component::Llm,
         "crash_detected",
         iteration = turn.iteration,
@@ -334,9 +335,9 @@ async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &st
     let _ = turn
         .tx
         .send(status_event(
-            RecoverySeverity::Warning,
+            StatusSeverity::Warning,
             Component::Llm,
-            "restarting",
+            StatusKind::Restarting,
             "LLM crashed: restarting and replaying your query".to_string(),
         ))
         .await;
@@ -357,7 +358,7 @@ async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &st
     match wait_result {
         Ok(()) => {
             recovery_event!(
-                RecoverySeverity::Info,
+                StatusSeverity::Info,
                 Component::Llm,
                 "replay_ready",
                 iteration = turn.iteration,
@@ -366,9 +367,9 @@ async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &st
             let _ = turn
                 .tx
                 .send(status_event(
-                    RecoverySeverity::Info,
+                    StatusSeverity::Info,
                     Component::Llm,
-                    "replaying",
+                    StatusKind::Replaying,
                     "LLM restored: replaying your query".to_string(),
                 ))
                 .await;
@@ -376,7 +377,7 @@ async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &st
         }
         Err(wait_err) => {
             recovery_event!(
-                RecoverySeverity::Error,
+                StatusSeverity::Error,
                 Component::Llm,
                 "replay_abandoned",
                 iteration = turn.iteration,
@@ -393,9 +394,9 @@ async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &st
             let _ = turn
                 .tx
                 .send(status_event(
-                    RecoverySeverity::Error,
+                    StatusSeverity::Error,
                     Component::Llm,
-                    "degraded",
+                    StatusKind::Degraded,
                     final_msg.to_string(),
                 ))
                 .await;
@@ -415,15 +416,15 @@ async fn fail_turn(tx: &mpsc::Sender<LlmEvent>, message: &str) {
 }
 
 fn status_event(
-    severity: RecoverySeverity,
+    severity: StatusSeverity,
     component: Component,
-    event: &str,
+    event: StatusKind,
     message: String,
 ) -> LlmEvent {
     LlmEvent::Status {
-        severity: severity.as_str().to_string(),
-        component: component.as_str().to_string(),
-        event: event.to_string(),
+        severity,
+        component,
+        event,
         message,
     }
 }

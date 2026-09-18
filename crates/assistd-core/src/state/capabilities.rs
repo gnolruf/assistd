@@ -1,9 +1,8 @@
 //! `GetCapabilities` handler.
 
 use super::AppState;
-use crate::recovery::{Component, RecoverySeverity};
 use anyhow::Result;
-use assistd_ipc::Event;
+use assistd_ipc::{Component, Event, StatusKind, StatusSeverity};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -20,9 +19,9 @@ impl AppState {
             let _ = tx
                 .send(Event::Status {
                     id: id.clone(),
-                    severity: RecoverySeverity::Warning.as_str().to_string(),
-                    component: Component::Mcp.as_str().to_string(),
-                    event: "startup_failed".to_string(),
+                    severity: StatusSeverity::Warning,
+                    component: Component::Mcp,
+                    event: StatusKind::StartupFailed,
                     message: format!(
                         "MCP server '{}' is not available: {}",
                         failure.server_name, failure.reason

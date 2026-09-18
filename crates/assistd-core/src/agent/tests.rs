@@ -238,9 +238,15 @@ async fn piped_command_completes_in_one_iteration() {
 }
 
 fn withdrawn_status(events: &[LlmEvent]) -> bool {
-    events
-        .iter()
-        .any(|e| matches!(e, LlmEvent::Status { event, .. } if event == "tools_withdrawn"))
+    events.iter().any(|e| {
+        matches!(
+            e,
+            LlmEvent::Status {
+                event: StatusKind::ToolsWithdrawn,
+                ..
+            }
+        )
+    })
 }
 
 #[tokio::test]
@@ -936,11 +942,27 @@ async fn replay_once_on_server_restarting() {
     let events = collect(&mut rx).await;
     let restart_count = events
         .iter()
-        .filter(|e| matches!(e, LlmEvent::Status { event, .. } if event == "restarting"))
+        .filter(|e| {
+            matches!(
+                e,
+                LlmEvent::Status {
+                    event: StatusKind::Restarting,
+                    ..
+                }
+            )
+        })
         .count();
     let replaying_count = events
         .iter()
-        .filter(|e| matches!(e, LlmEvent::Status { event, .. } if event == "replaying"))
+        .filter(|e| {
+            matches!(
+                e,
+                LlmEvent::Status {
+                    event: StatusKind::Replaying,
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(restart_count, 1, "expected one restarting Status event");
     assert_eq!(replaying_count, 1, "expected one replaying Status event");
@@ -977,7 +999,15 @@ async fn replay_does_not_loop_on_repeated_server_restarting() {
     let events = collect(&mut rx).await;
     let restart_count = events
         .iter()
-        .filter(|e| matches!(e, LlmEvent::Status { event, .. } if event == "restarting"))
+        .filter(|e| {
+            matches!(
+                e,
+                LlmEvent::Status {
+                    event: StatusKind::Restarting,
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(
         restart_count, 1,
@@ -1005,9 +1035,13 @@ async fn replay_abandons_on_degraded_supervisor() {
 
     let events = collect(&mut rx).await;
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, LlmEvent::Status { event, .. } if event == "degraded")),
+        events.iter().any(|e| matches!(
+            e,
+            LlmEvent::Status {
+                event: StatusKind::Degraded,
+                ..
+            }
+        )),
         "expected a degraded Status event"
     );
     assert!(matches!(events.last(), Some(LlmEvent::Done)));

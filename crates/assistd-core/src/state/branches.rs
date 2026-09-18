@@ -1,6 +1,6 @@
 //! Branch and session handlers, plus the session-title generator.
 
-use super::{AppState, send_error};
+use super::{AppState, send_error, wire_role};
 use anyhow::Result;
 use assistd_ipc::Event;
 use assistd_llm::{HistoryEntry, HistoryRole};
@@ -442,7 +442,7 @@ impl AppState {
                 .send(Event::HistoryEntry {
                     id: id.clone(),
                     seq: r.seq,
-                    role: r.role.as_wire().to_string(),
+                    role: wire_role(r.role),
                     content: r.content,
                     tool_name: r.tool_name,
                 })

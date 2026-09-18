@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 #[cfg(test)]
 use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
-use assistd_ipc::PresenceState;
+use assistd_ipc::{Component, PresenceState, StatusKind, StatusSeverity};
 use assistd_llm::{HealthWaitError, LlamaServerControl, LlamaService, LlmHealthProbe, ReadyState};
 use async_trait::async_trait;
 use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, watch};
@@ -646,9 +646,9 @@ fn spawn_load_progress_emitter(
             if tx
                 .send(assistd_ipc::Event::Status {
                     id: request_id.clone(),
-                    severity: crate::recovery::RecoverySeverity::Info.as_str().to_string(),
-                    component: crate::recovery::Component::Llm.as_str().to_string(),
-                    event: "model_loading".to_string(),
+                    severity: StatusSeverity::Info,
+                    component: Component::Llm,
+                    event: StatusKind::ModelLoading,
                     message: format!("loading model ({elapsed_secs}s elapsed)"),
                 })
                 .await

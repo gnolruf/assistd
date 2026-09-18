@@ -11,6 +11,7 @@ pub use llama_server::{
     detect_vision_support, probe_capabilities, probe_capabilities_routed,
 };
 
+use assistd_ipc::{Component, StatusKind, StatusSeverity};
 use assistd_tools::Attachment;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -112,9 +113,9 @@ pub enum LlmEvent {
     },
     /// Non-terminal recovery or status update.
     Status {
-        severity: String,
-        component: String,
-        event: String,
+        severity: StatusSeverity,
+        component: Component,
+        event: StatusKind,
         message: String,
     },
     /// The model has finished generating.

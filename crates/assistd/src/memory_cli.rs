@@ -3,7 +3,7 @@
 //! writer.
 
 use anyhow::Result;
-use assistd_ipc::{Event, Request};
+use assistd_ipc::{Event, ReindexKind, Request};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
@@ -87,7 +87,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
     let reindex_quiet = matches!(&args.action, MemoryAction::Reindex { quiet: true });
 
     let req = args.action.into_request(Uuid::new_v4().to_string());
-    let mut last_reindex_kind: Option<String> = None;
+    let mut last_reindex_kind: Option<ReindexKind> = None;
     run_one_shot(req, |event| {
         match event {
             Event::SemanticHit {
@@ -143,11 +143,11 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             } if !reindex_quiet => {
                 use std::io::Write;
                 let mut err = std::io::stderr();
-                let kind_changed = last_reindex_kind.as_deref() != Some(kind.as_str());
+                let kind_changed = last_reindex_kind != Some(*kind);
                 if kind_changed && last_reindex_kind.is_some() {
                     let _ = writeln!(err);
                 }
-                last_reindex_kind = Some(kind.clone());
+                last_reindex_kind = Some(*kind);
                 let _ = write!(err, "\rreindex {kind}: {done}/{total}");
                 let _ = err.flush();
             }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_core::{PresenceState, SleepConfig};
-use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
+use assistd_ipc::{Event, IpcClient, Request, Role, StatusKind, StatusSeverity, VoiceCaptureState};
 use assistd_tools::{Attachment, ConfirmationRequest, load_image_attachment};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui_image::picker::Picker;
@@ -737,11 +737,11 @@ impl App {
                 ..
             } => {
                 self.set_notice(&message);
-                if event == "restarting" {
+                if event == StatusKind::Restarting {
                     self.output.finish_thinking();
                     self.output.finish_assistant();
                     self.output.push_info(&format!("[{component} restarting…]"));
-                } else if severity == "error" {
+                } else if severity == StatusSeverity::Error {
                     self.output.push_info(&format!("[{component}: {message}]"));
                 }
             }
@@ -783,7 +783,7 @@ impl App {
                 content,
                 tool_name,
                 ..
-            } => self.on_history_entry(&role, content, tool_name),
+            } => self.on_history_entry(role, content, tool_name),
             Event::UndoApplied {
                 removed_messages,
                 last_user_text,
@@ -850,21 +850,21 @@ impl App {
         }
     }
 
-    fn on_history_entry(&mut self, role: &str, content: String, tool_name: Option<String>) {
+    fn on_history_entry(&mut self, role: Role, content: String, tool_name: Option<String>) {
         match role {
-            "user" => self.output.push_user(&content),
-            "assistant" => {
+            Role::User => self.output.push_user(&content),
+            Role::Assistant => {
                 if !content.is_empty() {
                     self.output.begin_assistant();
                     self.output.append_assistant(&content);
                     self.output.finish_assistant();
                 }
             }
-            "tool" => {
+            Role::Tool => {
                 self.output
                     .push_tool_block(tool_name.unwrap_or_default(), content, 0, 0);
             }
-            _ => self.output.push_info(&content),
+            Role::System => self.output.push_info(&content),
         }
     }
 

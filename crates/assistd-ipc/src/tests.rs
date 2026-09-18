@@ -122,7 +122,7 @@ fn history_entry_event_round_trips() {
     let ev = Event::HistoryEntry {
         id: "r-3".into(),
         seq: 3,
-        role: "assistant".into(),
+        role: Role::Assistant,
         content: "hello".into(),
         tool_name: None,
     };
@@ -285,7 +285,7 @@ fn memory_reindex_request_round_trips() {
 fn reindex_progress_event_round_trips() {
     let ev = Event::ReindexProgress {
         id: "r".into(),
-        kind: "chunks".into(),
+        kind: ReindexKind::Chunks,
         done: 3,
         total: 10,
     };
@@ -305,7 +305,7 @@ fn memory_event_roundtrip() {
             chunk_id: 7,
             session_id: "s".into(),
             timestamp: "2026-04-28T00:00:00Z".into(),
-            role: "user".into(),
+            role: Role::User,
             content: "the rust embeddings daemon".into(),
             similarity: 0.87,
         },
@@ -986,7 +986,7 @@ fn event_kind_returns_none_for_dialog_local_variants() {
         },
         Event::ReindexProgress {
             id: "q".into(),
-            kind: "chunks".into(),
+            kind: ReindexKind::Chunks,
             done: 0,
             total: 0,
         },
@@ -1004,9 +1004,9 @@ fn event_kind_returns_none_for_dialog_local_variants() {
         },
         Event::Status {
             id: "q".into(),
-            severity: "info".into(),
-            component: "llm".into(),
-            event: "ok".into(),
+            severity: StatusSeverity::Info,
+            component: Component::Llm,
+            event: StatusKind::Restarting,
             message: "".into(),
         },
     ];

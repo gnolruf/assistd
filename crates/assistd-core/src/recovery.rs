@@ -1,4 +1,4 @@
-//! Recovery vocabulary ([`Component`], [`RecoverySeverity`]), supervised
+//! Supervised
 //! task spawning, and the daemon panic hook. Recovery events log under
 //! `target = "assistd::recovery"`.
 
@@ -13,67 +13,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::PresenceManager;
 
-/// Severity of a recovery event; maps 1:1 to a `tracing` level and to the
-/// `severity` field of `Event::Status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecoverySeverity {
-    /// Routine recovery progress.
-    Info,
-    /// A recoverable failure was observed.
-    Warning,
-    /// The recovery itself failed; the operation will not complete.
-    Error,
-}
-
-impl RecoverySeverity {
-    /// Lowercase wire string.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RecoverySeverity::Info => "info",
-            RecoverySeverity::Warning => "warning",
-            RecoverySeverity::Error => "error",
-        }
-    }
-}
-
-/// Subsystem a recovery event is attributed to. A fixed vocabulary so log
-/// filters can rely on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Component {
-    Agent,
-    Llm,
-    Mcp,
-    Voice,
-    Memory,
-    Wm,
-    Embed,
-    Hotkey,
-    /// Top-level orchestration, and panics with no more specific home.
-    Daemon,
-    IdleMonitor,
-    GpuMonitor,
-    ListenDispatcher,
-}
-
-impl Component {
-    /// Lowercase wire string.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Component::Agent => "agent",
-            Component::Llm => "llm",
-            Component::Mcp => "mcp",
-            Component::Voice => "voice",
-            Component::Memory => "memory",
-            Component::Wm => "wm",
-            Component::Embed => "embed",
-            Component::Hotkey => "hotkey",
-            Component::Daemon => "daemon",
-            Component::IdleMonitor => "idle_monitor",
-            Component::GpuMonitor => "gpu_monitor",
-            Component::ListenDispatcher => "listen_dispatcher",
-        }
-    }
-}
+pub use assistd_ipc::{Component, StatusSeverity};
 
 /// Emit a structured recovery event: the `tracing` macro for the
 /// severity, under `target = "assistd::recovery"`, with `severity`,
@@ -81,7 +21,7 @@ impl Component {
 ///
 /// ```ignore
 /// recovery_event!(
-///     RecoverySeverity::Warning,
+///     StatusSeverity::Warning,
 ///     Component::Llm,
 ///     "crash_detected",
 ///     pid = old_pid,
@@ -94,21 +34,21 @@ macro_rules! recovery_event {
         let __component_str: &'static str = $crate::recovery::Component::as_str($component);
         let __event_str: &'static str = $event;
         match $severity {
-            $crate::recovery::RecoverySeverity::Info => ::tracing::info!(
+            $crate::recovery::StatusSeverity::Info => ::tracing::info!(
                 target: "assistd::recovery",
                 severity = "info",
                 component = __component_str,
                 event = __event_str,
                 $($($field)*)?
             ),
-            $crate::recovery::RecoverySeverity::Warning => ::tracing::warn!(
+            $crate::recovery::StatusSeverity::Warning => ::tracing::warn!(
                 target: "assistd::recovery",
                 severity = "warning",
                 component = __component_str,
                 event = __event_str,
                 $($($field)*)?
             ),
-            $crate::recovery::RecoverySeverity::Error => ::tracing::error!(
+            $crate::recovery::StatusSeverity::Error => ::tracing::error!(
                 target: "assistd::recovery",
                 severity = "error",
                 component = __component_str,
@@ -133,7 +73,7 @@ where
                 let payload = join_err.into_panic();
                 let msg = panic_message(&payload);
                 recovery_event!(
-                    RecoverySeverity::Error,
+                    StatusSeverity::Error,
                     component,
                     "task_panic",
                     task = name,
@@ -171,7 +111,7 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
         let payload_msg = panic_message(info.payload());
 
         recovery_event!(
-            RecoverySeverity::Error,
+            StatusSeverity::Error,
             Component::Daemon,
             "panic",
             location = %location,
@@ -189,7 +129,7 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
         {
             let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
             recovery_event!(
-                RecoverySeverity::Warning,
+                StatusSeverity::Warning,
                 Component::Llm,
                 "panic_kill",
                 pid = pid,
@@ -255,9 +195,9 @@ mod tests {
 
     #[test]
     fn severity_as_str_matches_tracing_levels() {
-        assert_eq!(RecoverySeverity::Info.as_str(), "info");
-        assert_eq!(RecoverySeverity::Warning.as_str(), "warning");
-        assert_eq!(RecoverySeverity::Error.as_str(), "error");
+        assert_eq!(StatusSeverity::Info.as_str(), "info");
+        assert_eq!(StatusSeverity::Warning.as_str(), "warning");
+        assert_eq!(StatusSeverity::Error.as_str(), "error");
     }
 
     #[tokio::test]

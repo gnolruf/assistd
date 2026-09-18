@@ -21,7 +21,7 @@ pub mod state;
 
 pub use agent::Agent;
 pub use recovery::{
-    Component, RecoverySeverity, drain_join_set, install_panic_hook, spawn_supervised,
+    Component, StatusSeverity, drain_join_set, install_panic_hook, spawn_supervised,
 };
 
 pub use assistd_config as config;

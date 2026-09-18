@@ -1,7 +1,8 @@
 use crate::{Config, PresenceManager};
 use anyhow::Result;
-use assistd_ipc::{Event, Request};
+use assistd_ipc::{Event, Request, Role};
 use assistd_llm::LlmBackend;
+use assistd_memory::PersistedRole;
 use assistd_tools::ToolRegistry;
 use assistd_voice::{ContinuousListener, VoiceInput, VoiceOutputController};
 use std::sync::Arc;
@@ -29,6 +30,15 @@ pub use self::subsystems::{McpStartupFailure, Subsystems};
 
 async fn send_error(tx: &mpsc::Sender<Event>, id: String, message: String) {
     let _ = tx.send(Event::Error { id, message }).await;
+}
+
+fn wire_role(role: PersistedRole) -> Role {
+    match role {
+        PersistedRole::System => Role::System,
+        PersistedRole::User => Role::User,
+        PersistedRole::Assistant => Role::Assistant,
+        PersistedRole::Tool => Role::Tool,
+    }
 }
 
 /// Shared, long-lived daemon state handed to every request handler.

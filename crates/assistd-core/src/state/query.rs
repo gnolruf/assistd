@@ -6,7 +6,7 @@ use super::{AppState, send_error};
 use crate::Agent;
 use crate::presence::{LlmStreamGuard, RequestGuard};
 use anyhow::Result;
-use assistd_ipc::Event;
+use assistd_ipc::{Event, StatusKind};
 use assistd_llm::LlmEvent;
 use assistd_memory::{PersistedMessage, SessionId, TurnId};
 use assistd_tools::Attachment;
@@ -421,7 +421,7 @@ impl AppState {
                     event,
                     message,
                 } => {
-                    if event == "restarting" {
+                    if matches!(event, StatusKind::Restarting) {
                         assistant_accum.clear();
                         let _ = sentence_buf.finish();
                     }
