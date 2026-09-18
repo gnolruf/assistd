@@ -28,8 +28,10 @@ enum CycleResult {
 /// Drives the embed-server process lifecycle: spawn, health-check, restart on crash,
 /// and graceful shutdown.
 pub struct Supervisor {
-    /// Embedding server configuration (host, port, model, timeouts).
+    /// Embedding server configuration (host, port, model).
     pub cfg: EmbeddingConfig,
+    /// Backstop on the child reporting healthy after spawn.
+    pub ready_timeout: Duration,
     /// Daemon-wide shutdown signal; `true` means stop.
     pub shutdown_rx: watch::Receiver<bool>,
     /// Channel used to publish the current [`ReadyState`] to [`EmbedService`].
@@ -116,7 +118,7 @@ impl Supervisor {
     async fn supervise_once(&mut self) -> Result<CycleResult, EmbedServerError> {
         let mut child = ChildProcess::spawn(&self.cfg)?;
         *self.pid.lock() = child.pid();
-        let ready_timeout = Duration::from_secs(self.cfg.ready_timeout_secs);
+        let ready_timeout = self.ready_timeout;
         let health = HealthChecker::new(&self.cfg.host, self.cfg.port, ready_timeout)?;
 
         enum Phase1 {

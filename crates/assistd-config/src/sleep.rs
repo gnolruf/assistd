@@ -17,9 +17,6 @@ pub struct SleepConfig {
     /// than `idle_to_drowsy_mins` when both are non-zero. `0` disables
     /// this transition.
     pub idle_to_sleep_mins: u64,
-    /// Whether to suspend the machine (true) or just deactivate (false).
-    pub suspend: bool,
-
     /// Enable the automatic GPU contention monitor. When true, a background
     /// task polls NVML for other processes using VRAM and transitions the
     /// daemon to Sleeping when a configurable threshold is exceeded.
@@ -46,7 +43,6 @@ impl Default for SleepConfig {
         Self {
             idle_to_drowsy_mins: DEFAULT_IDLE_TO_DROWSY_MINS,
             idle_to_sleep_mins: DEFAULT_IDLE_TO_SLEEP_MINS,
-            suspend: false,
             gpu_monitor_enabled: DEFAULT_GPU_MONITOR_ENABLED,
             gpu_poll_secs: DEFAULT_GPU_POLL_SECS,
             gpu_vram_threshold_mb: DEFAULT_GPU_VRAM_THRESHOLD_MB,

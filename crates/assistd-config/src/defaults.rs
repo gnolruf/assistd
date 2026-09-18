@@ -19,7 +19,6 @@ pub const DEFAULT_CHAT_SUMMARY_TARGET_TOKENS: u32 = 1000;
 pub const DEFAULT_CHAT_PRESERVE_RECENT_TURNS: u32 = 4;
 pub const DEFAULT_CHAT_TEMPERATURE: f32 = 0.7;
 pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: u32 = 1024;
-pub const DEFAULT_CHAT_MAX_SUMMARY_TOKENS: u32 = 1200;
 pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
 /// Slim role-and-voice prose. Tool surface (native + MCP) is appended at
@@ -43,18 +42,12 @@ pub const DEFAULT_WHISPER_VAD_MODEL: &str = "ggml-org/whisper-vad:ggml-silero-v6
 pub const DEFAULT_WHISPER_PREFER_GPU: bool = true;
 pub const DEFAULT_WHISPER_BEAMS: u32 = 1;
 pub const DEFAULT_WHISPER_VAD_ENABLED: bool = true;
-pub const DEFAULT_WHISPER_VAD_SILENCE_SECS: f32 = 0.5;
-pub const DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS: u32 = 300;
-pub const DEFAULT_WHISPER_CPU_FALLBACK_ENABLED: bool = true;
 
 pub const DEFAULT_PIPER_ENABLED: bool = false;
 pub const DEFAULT_PIPER_BINARY: &str = "piper";
 pub const DEFAULT_PIPER_VOICE: &str =
     "rhasspy/piper-voices:en/en_US/lessac/medium/en_US-lessac-medium.onnx";
 pub const DEFAULT_PIPER_LENGTH_SCALE: f32 = 1.0;
-pub const DEFAULT_PIPER_NOISE_SCALE: f32 = 0.667;
-pub const DEFAULT_PIPER_NOISE_W: f32 = 0.8;
-pub const DEFAULT_PIPER_SENTENCE_SILENCE_SECS: f32 = 0.2;
 pub const DEFAULT_PIPER_DEADLINE_SECS: u32 = 30;
 pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: u32 = 400;
 /// Idle gap (ms) between LLM deltas after which the sentence buffer is
@@ -76,14 +69,7 @@ pub const DEFAULT_LISTEN_ENABLED: bool = false;
 pub const DEFAULT_LISTEN_START_ON_LAUNCH: bool = false;
 pub const DEFAULT_LISTEN_HOTKEY: &str = "";
 pub const DEFAULT_LISTEN_SILENCE_MS: u32 = 800;
-pub const DEFAULT_LISTEN_MIN_UTTERANCE_MS: u32 = 400;
 pub const DEFAULT_LISTEN_MAX_UTTERANCE_SECS: u32 = 30;
-pub const DEFAULT_LISTEN_PREROLL_MS: u32 = 300;
-pub const DEFAULT_LISTEN_ONSET_CONFIRM_MS: u32 = 60;
-pub const DEFAULT_LISTEN_AGGRESSIVENESS: u8 = 3;
-
-pub const DEFAULT_REMOTE_BIND_ADDRESS: &str = "127.0.0.1";
-pub const DEFAULT_REMOTE_PORT: u16 = 8384;
 
 pub const DEFAULT_PRESENCE_HOTKEY: &str = "Super+Escape";
 
@@ -104,12 +90,8 @@ pub const DEFAULT_TOOLS_MAX_LINES: u32 = 200;
 pub const DEFAULT_TOOLS_MAX_KB: u32 = 50;
 pub const DEFAULT_TOOLS_OVERFLOW_DIR: &str = "/tmp/assistd-output";
 pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 30;
-pub const DEFAULT_SCREENSHOT_TIMEOUT_SECS: u64 = 5;
 
 pub const DEFAULT_MEMORY_ENABLED: bool = true;
-/// `0` means keep forever. The retention sweeper isn't shipped yet; the
-/// field exists so future work doesn't need a schema-version bump.
-pub const DEFAULT_MEMORY_RETENTION_DAYS: u32 = 0;
 
 pub const DEFAULT_EMBEDDING_ENABLED: bool = true;
 /// HuggingFace id passed verbatim to the embed server's `--hf-repo`.
@@ -118,17 +100,13 @@ pub const DEFAULT_EMBEDDING_ENABLED: bool = true;
 /// misleading "no GGUF files found". 768-dim, ~140 MB Q4.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M";
 pub const DEFAULT_EMBEDDING_HOST: &str = "127.0.0.1";
-/// Distinct from `DEFAULT_LLAMA_PORT` (8385) and `DEFAULT_REMOTE_PORT`
-/// (8384). Validated for collisions in `Config::validate()`.
+/// Distinct from `DEFAULT_LLAMA_PORT` (8385). Validated for collisions in
+/// `Config::validate()`.
 pub const DEFAULT_EMBEDDING_PORT: u16 = 8386;
 /// CPU-only by default: small embedders are CPU-fast, and pinning them
 /// off the GPU prevents VRAM contention with the chat model.
 pub const DEFAULT_EMBEDDING_GPU_LAYERS: u32 = 0;
-pub const DEFAULT_EMBEDDING_READY_TIMEOUT_SECS: u64 = 300;
-pub const DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_EMBEDDING_TOP_K: u32 = 5;
-pub const DEFAULT_EMBEDDING_CHUNK_CHARS: usize = 512;
-pub const DEFAULT_EMBEDDING_CHUNK_OVERLAP: usize = 64;
 pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 
 /// MCP (Model Context Protocol), opt-in. Existing users on upgrade
@@ -137,22 +115,6 @@ pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 /// `[[mcp.servers]]` block.
 pub const DEFAULT_MCP_ENABLED: bool = false;
 pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: u64 = 30;
-/// SSE-only. Catches a server that holds the SSE socket open while
-/// sitting wedged. Per-read deadline applied via `reqwest::ClientBuilder::read_timeout`.
-pub const DEFAULT_MCP_SSE_READ_TIMEOUT_SECS: u64 = 30;
-/// SSE-only. Period of the separate ping task that detects "socket
-/// open but server not processing requests".
-pub const DEFAULT_MCP_SSE_PING_INTERVAL_SECS: u64 = 15;
-
-/// System-tray icon-theme names. Picked to be present in every major
-/// icon theme (Adwaita, Breeze, Papirus) so a fresh install shows
-/// recognizable icons without shipping any image assets in the repo.
-pub const DEFAULT_TRAY_ICON_ACTIVE: &str = "user-available";
-pub const DEFAULT_TRAY_ICON_DROWSY: &str = "user-away";
-pub const DEFAULT_TRAY_ICON_SLEEPING: &str = "user-offline";
-pub const DEFAULT_TRAY_ICON_LISTENING: &str = "audio-input-microphone";
-pub const DEFAULT_TRAY_ICON_GENERATING: &str = "system-run";
-pub const DEFAULT_TRAY_ICON_DISCONNECTED: &str = "network-offline";
 
 /// Borderless floating popup spawned by `assistd tray` (feature
 /// `tray-popup`). Geometry is in CSS pixels at the compositor's logical
@@ -166,11 +128,6 @@ pub const DEFAULT_TRAY_POPUP_HEIGHT: u32 = 120;
 pub const DEFAULT_TRAY_POPUP_OFFSET_X: i32 = -10;
 pub const DEFAULT_TRAY_POPUP_OFFSET_Y: i32 = 10;
 pub const DEFAULT_TRAY_POPUP_AUTO_HIDE_MS: u64 = 3000;
-/// Idle timeout used while the daemon's continuous listener is active.
-/// The popup gives the user a longer hands-free window to verbally
-/// reply before dismissing itself.
-pub const DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS: u64 = 10000;
-pub const DEFAULT_TRAY_POPUP_TRUNCATE_CHARS: usize = 300;
 /// X11 `WM_CLASS` and Wayland `app_id` of the popup window. The popup
 /// GUI builder sets it; the `[app_id="…"]` placement criteria sent
 /// through `assistd-wm` matches against it. Not exposed in

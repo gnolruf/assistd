@@ -19,6 +19,11 @@ pub mod client;
 pub mod embedder_task;
 pub mod server;
 
+/// Per-request HTTP deadline against `/v1/embeddings`. Embedding a short
+/// text on CPU is sub-second for the small models this is built around;
+/// the headroom is for a cold cache on the first call.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub use client::LlamaEmbedder;
 pub use embedder_task::{EmbedJob, spawn_embedder_task};
 pub use server::{EmbedServerError, EmbedService, ReadyState};

@@ -37,7 +37,7 @@ pub async fn run(
     let mut was_busy = false;
     let mut was_speaking = false;
     let auto_hide_default = Duration::from_millis(cfg.auto_hide_ms);
-    let auto_hide_listening = Duration::from_millis(cfg.listen_auto_hide_ms);
+    let auto_hide_listening = Duration::from_millis(cfg.listen_auto_hide_ms());
     let mut ticker = interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -52,10 +52,10 @@ pub async fn run(
                         tracker.set_disconnected();
                         was_busy = false;
                         was_speaking = false;
-                        push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
+                        push_with_visibility(&state_tx, tracker.snapshot(), visible);
                     }
                     DriverInput::Event(ev) => {
-                        let snap = tracker.ingest(&ev, &cfg);
+                        let snap = tracker.ingest(&ev);
                         if visible {
                             last_activity = Instant::now();
                         }
@@ -76,14 +76,14 @@ pub async fn run(
                         last_activity = Instant::now();
                         if !visible {
                             visible = true;
-                            push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
+                            push_with_visibility(&state_tx, tracker.snapshot(), visible);
                             let _ = place_tx.send(PlaceRequest);
                         }
                     }
                     DriverInput::Dismiss => {
                         if visible {
                             visible = false;
-                            push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
+                            push_with_visibility(&state_tx, tracker.snapshot(), visible);
                         }
                         spawn_interrupt(ipc.clone());
                     }
@@ -104,7 +104,7 @@ pub async fn run(
                 };
                 if last_activity.elapsed() >= auto_hide {
                     visible = false;
-                    push_with_visibility(&state_tx, tracker.snapshot(&cfg), visible);
+                    push_with_visibility(&state_tx, tracker.snapshot(), visible);
                 }
             }
         }
@@ -251,11 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn listening_swaps_in_the_longer_auto_hide_window() {
-        let popup_cfg = TrayPopupConfig {
-            auto_hide_ms: 500,
-            listen_auto_hide_ms: 2000,
-            ..TrayPopupConfig::default()
-        };
+        let popup_cfg = cfg(500);
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();

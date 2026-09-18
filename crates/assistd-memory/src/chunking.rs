@@ -21,13 +21,25 @@ use serde::{Deserialize, Serialize};
 
 /// Chunking policy shared between the persistence hook and any future
 /// backfill pass. `chunk_chars` is the upper bound; `overlap_chars` is
-/// strictly less than it (validated at config load time).
+/// strictly less than it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkingConfig {
     /// Maximum number of Unicode characters per chunk.
     pub chunk_chars: usize,
     /// Number of characters shared between consecutive chunks.
     pub overlap_chars: usize,
+}
+
+impl Default for ChunkingConfig {
+    /// Sized against the embedding models this is built for: a 512-char
+    /// window sits comfortably inside their token limit, and the overlap
+    /// keeps a semantically coherent run from being cut at a boundary.
+    fn default() -> Self {
+        Self {
+            chunk_chars: 512,
+            overlap_chars: 64,
+        }
+    }
 }
 
 /// Split `content` into one or more chunks bounded by `cfg.chunk_chars`.

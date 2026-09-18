@@ -88,14 +88,7 @@ impl MicContinuousListener {
 }
 
 fn tuning_from_config(cfg: &ContinuousListenConfig) -> VadTuning {
-    VadTuning::from_ms(
-        cfg.silence_ms,
-        cfg.min_utterance_ms,
-        cfg.max_utterance_secs,
-        cfg.preroll_ms,
-        cfg.onset_confirm_ms,
-        cfg.aggressiveness,
-    )
+    VadTuning::from_ms(cfg.silence_ms, cfg.max_utterance_secs)
 }
 
 #[async_trait]

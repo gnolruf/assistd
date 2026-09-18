@@ -1,17 +1,13 @@
 use std::path::PathBuf;
 
 use crate::defaults::{
-    DEFAULT_LISTEN_AGGRESSIVENESS, DEFAULT_LISTEN_ENABLED, DEFAULT_LISTEN_HOTKEY,
-    DEFAULT_LISTEN_MAX_UTTERANCE_SECS, DEFAULT_LISTEN_MIN_UTTERANCE_MS,
-    DEFAULT_LISTEN_ONSET_CONFIRM_MS, DEFAULT_LISTEN_PREROLL_MS, DEFAULT_LISTEN_SILENCE_MS,
-    DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_PIPER_BINARY, DEFAULT_PIPER_DEADLINE_SECS,
-    DEFAULT_PIPER_ENABLED, DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS,
-    DEFAULT_PIPER_NOISE_SCALE, DEFAULT_PIPER_NOISE_W, DEFAULT_PIPER_PARTIAL_FLUSH_MS,
-    DEFAULT_PIPER_SENTENCE_SILENCE_SECS, DEFAULT_PIPER_SKIP_HOTKEY, DEFAULT_PIPER_TOGGLE_HOTKEY,
-    DEFAULT_PIPER_VOICE, DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS,
-    DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_CPU_FALLBACK_ENABLED,
-    DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
-    DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL, DEFAULT_WHISPER_VAD_SILENCE_SECS,
+    DEFAULT_LISTEN_ENABLED, DEFAULT_LISTEN_HOTKEY, DEFAULT_LISTEN_MAX_UTTERANCE_SECS,
+    DEFAULT_LISTEN_SILENCE_MS, DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_PIPER_BINARY,
+    DEFAULT_PIPER_DEADLINE_SECS, DEFAULT_PIPER_ENABLED, DEFAULT_PIPER_LENGTH_SCALE,
+    DEFAULT_PIPER_MAX_SENTENCE_CHARS, DEFAULT_PIPER_PARTIAL_FLUSH_MS, DEFAULT_PIPER_SKIP_HOTKEY,
+    DEFAULT_PIPER_TOGGLE_HOTKEY, DEFAULT_PIPER_VOICE, DEFAULT_VOICE_HOTKEY,
+    DEFAULT_VOICE_MAX_RECORDING_SECS, DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL,
+    DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL,
 };
 use serde::{Deserialize, Serialize};
 
@@ -81,23 +77,9 @@ pub struct TranscriptionConfig {
     /// HuggingFace identifier for the VAD GGML model. Only used when
     /// `vad_enabled = true`.
     pub vad_model: String,
-    /// Approximate minimum silence length (in seconds) required to split
-    /// or trim a segment. Maps to whisper.cpp's VAD
-    /// `min_silence_duration_ms`.
-    pub vad_silence_secs: f32,
     /// Override for the on-disk model cache directory. `None` uses
     /// `$XDG_CACHE_HOME/assistd/whisper/` (or `~/.cache/assistd/whisper/`).
     pub model_cache_dir: Option<PathBuf>,
-    /// How long Whisper will wait for an in-flight LLM stream to finish
-    /// before falling back to a lazily-built CPU context. Only consulted
-    /// when the primary Whisper context is GPU-backed and
-    /// [`Self::cpu_fallback_enabled`] is true. `0` means "use CPU
-    /// immediately whenever any LLM stream is inflight".
-    pub gpu_busy_timeout_ms: u32,
-    /// Build a CPU fallback context on demand when the GPU is busy.
-    /// Disable to force strict GPU-only transcription (users wait for
-    /// the LLM stream to finish before their utterance is transcribed).
-    pub cpu_fallback_enabled: bool,
 }
 
 impl Default for TranscriptionConfig {
@@ -109,10 +91,7 @@ impl Default for TranscriptionConfig {
             beams: DEFAULT_WHISPER_BEAMS,
             vad_enabled: DEFAULT_WHISPER_VAD_ENABLED,
             vad_model: DEFAULT_WHISPER_VAD_MODEL.to_string(),
-            vad_silence_secs: DEFAULT_WHISPER_VAD_SILENCE_SECS,
             model_cache_dir: None,
-            gpu_busy_timeout_ms: DEFAULT_WHISPER_GPU_BUSY_TIMEOUT_MS,
-            cpu_fallback_enabled: DEFAULT_WHISPER_CPU_FALLBACK_ENABLED,
         }
     }
 }
@@ -137,23 +116,9 @@ pub struct ContinuousListenConfig {
     /// milliseconds. Shorter values respond faster; longer values
     /// tolerate mid-sentence pauses.
     pub silence_ms: u32,
-    /// Utterances shorter than this are dropped without transcription;
-    /// filters clicks and single-phoneme bursts.
-    pub min_utterance_ms: u32,
     /// Force-flush a utterance to whisper after this many seconds even
     /// if the user keeps speaking. Bounds memory use.
     pub max_utterance_secs: u32,
-    /// Audio kept in a rolling pre-roll ring and prepended to a new
-    /// utterance so the first syllable isn't clipped between VAD onset
-    /// confirmation and buffer start.
-    pub preroll_ms: u32,
-    /// Consecutive voiced-frame duration needed to confirm speech
-    /// onset. Guards against single-frame noise spikes (keyboard
-    /// clicks, fan pops).
-    pub onset_confirm_ms: u32,
-    /// webrtc-vad aggressiveness level `0..=3`. Higher is more
-    /// aggressive at rejecting non-speech.
-    pub aggressiveness: u8,
 }
 
 impl Default for ContinuousListenConfig {
@@ -163,11 +128,7 @@ impl Default for ContinuousListenConfig {
             start_on_launch: DEFAULT_LISTEN_START_ON_LAUNCH,
             hotkey: DEFAULT_LISTEN_HOTKEY.to_string(),
             silence_ms: DEFAULT_LISTEN_SILENCE_MS,
-            min_utterance_ms: DEFAULT_LISTEN_MIN_UTTERANCE_MS,
             max_utterance_secs: DEFAULT_LISTEN_MAX_UTTERANCE_SECS,
-            preroll_ms: DEFAULT_LISTEN_PREROLL_MS,
-            onset_confirm_ms: DEFAULT_LISTEN_ONSET_CONFIRM_MS,
-            aggressiveness: DEFAULT_LISTEN_AGGRESSIVENESS,
         }
     }
 }
@@ -197,15 +158,6 @@ pub struct SynthesisConfig {
     /// Speaking-rate scale. `1.0` is the voice's natural rate; lower
     /// values speak faster, higher values speak slower.
     pub length_scale: f32,
-    /// Sampling noise scale (Piper `--noise-scale`). Higher = more
-    /// variation in pitch/intonation.
-    pub noise_scale: f32,
-    /// Phoneme noise scale (Piper `--noise-w`). Higher = more variation
-    /// in cadence/stress.
-    pub noise_w: f32,
-    /// Trailing silence (seconds) Piper inserts after each utterance.
-    /// Maps to `--sentence-silence`.
-    pub sentence_silence_secs: f32,
     /// Optional override for Piper's espeak-ng data directory. Most
     /// distro packages set this themselves; only set when piper logs
     /// "Failed to load espeak-ng".
@@ -277,9 +229,6 @@ impl Default for SynthesisConfig {
             voice: DEFAULT_PIPER_VOICE.to_string(),
             model_cache_dir: None,
             length_scale: DEFAULT_PIPER_LENGTH_SCALE,
-            noise_scale: DEFAULT_PIPER_NOISE_SCALE,
-            noise_w: DEFAULT_PIPER_NOISE_W,
-            sentence_silence_secs: DEFAULT_PIPER_SENTENCE_SILENCE_SECS,
             espeak_data_dir: None,
             deadline_secs: DEFAULT_PIPER_DEADLINE_SECS,
             max_sentence_chars: DEFAULT_PIPER_MAX_SENTENCE_CHARS,

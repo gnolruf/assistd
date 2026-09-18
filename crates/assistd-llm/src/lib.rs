@@ -324,7 +324,7 @@ pub trait LlmBackend: Send + Sync + 'static {
     /// summarisation prompt cannot leak into the user's chat history.
     /// Returns the model's final text concatenated; reasoning output is
     /// discarded. Answers here are short by construction, so
-    /// implementations budget them from `chat.max_summary_tokens`
+    /// implementations budget them from `chat.max_summary_tokens()`
     /// rather than the full per-response allowance — which is why
     /// callers wanting an answer rather than a train of thought pass
     /// [`Thinking::Disabled`].

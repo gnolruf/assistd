@@ -2,14 +2,17 @@ use crate::defaults::{
     DEFAULT_TIMEOUT_DISPATCH_ENVELOPE_SECS, DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS,
     DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS, DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS,
 };
-use serde::{Deserialize, Serialize};
 
 /// Hard deadlines for operations that cross a process boundary
 /// (HTTP, child stdin/stdout, SSE chunk reads). Every value is a
 /// safety valve, not a normal-case latency budget; defaults are
 /// generous and a trip should always be logged at `warn!`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+///
+/// Not part of the TOML surface — `Config` skips this field. A user has
+/// no basis for picking these, and each one that trips is a bug to fix
+/// rather than a number to raise. They stay a struct so tests can shorten
+/// a deadline instead of waiting out the real one.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimeoutsConfig {
     /// Cap on `PresenceManager::sleep`'s `service.shutdown()` call.
     /// Covers the SIGTERM grace plus slack for the supervisor to

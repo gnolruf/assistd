@@ -407,7 +407,7 @@ impl Conversation {
             .summarize(
                 dialogue,
                 chat.summary_target_tokens,
-                chat.max_summary_tokens,
+                chat.max_summary_tokens(),
             )
             .await?;
         let trimmed = summary.trim();
@@ -697,7 +697,6 @@ mod tests {
             preserve_recent_turns: preserve,
             temperature: 0.7,
             max_response_tokens: 512,
-            max_summary_tokens: max_history / 2,
             request_timeout_secs: 60,
             summary_temperature: 0.3,
             top_p: None,

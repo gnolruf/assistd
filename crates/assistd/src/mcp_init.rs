@@ -113,8 +113,6 @@ fn build_transport_config(s: &McpServerConfig) -> TransportConfig {
             let mut cfg = SseConfig::new(s.name.clone(), s.url.clone().unwrap_or_default());
             cfg.headers = s.headers.clone();
             cfg.request_timeout = Duration::from_secs(s.request_timeout_secs);
-            cfg.read_timeout = Duration::from_secs(s.sse_read_timeout_secs);
-            cfg.ping_interval = Duration::from_secs(s.sse_ping_interval_secs);
             TransportConfig::Sse(cfg)
         }
     }

@@ -137,6 +137,10 @@ fn run_inference(
 }
 
 /// Builder for [`WhisperTranscriber`]. `build()` is async because it may
+/// Minimum trailing silence, in seconds, that Silero VAD needs before it
+/// will trim a segment. Maps to whisper.cpp's `min_silence_duration_ms`.
+pub const VAD_SILENCE_SECS: f32 = 0.5;
+
 /// download model files and probe NVML.
 #[derive(Debug, Default, Clone)]
 pub struct WhisperTranscriberBuilder {
@@ -213,7 +217,7 @@ impl WhisperTranscriberBuilder {
             beams: cfg.beams.max(1),
             vad_enabled: cfg.vad_enabled,
             vad_model: Some(cfg.vad_model.clone()),
-            vad_silence_secs: cfg.vad_silence_secs,
+            vad_silence_secs: VAD_SILENCE_SECS,
         }
     }
 
@@ -292,7 +296,7 @@ pub async fn build_cpu_fallback(
         let vad_path = model_cache::ensure_model(&cfg.vad_model, &cache_dir).await?;
         Some(VadRuntime {
             model_path: vad_path.to_string_lossy().into_owned(),
-            silence_secs: cfg.vad_silence_secs.max(0.0),
+            silence_secs: VAD_SILENCE_SECS,
         })
     } else {
         None

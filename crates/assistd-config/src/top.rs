@@ -12,7 +12,6 @@ use crate::mcp::{McpConfig, McpTransport};
 use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
 use crate::presence::PresenceConfig;
-use crate::remote::RemoteConfig;
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::ToolsConfig;
@@ -29,13 +28,13 @@ pub struct Config {
     pub voice: VoiceConfig,
     pub compositor: CompositorConfig,
     pub sleep: SleepConfig,
-    pub remote: RemoteConfig,
     pub presence: PresenceConfig,
     pub daemon: DaemonConfig,
     pub tools: ToolsConfig,
     pub memory: MemoryConfig,
     pub embedding: EmbeddingConfig,
     pub mcp: McpConfig,
+    #[serde(skip)]
     pub timeouts: TimeoutsConfig,
     pub tray: TrayConfig,
 }
@@ -92,13 +91,6 @@ impl Config {
             errors.push(
                 "chat.max_response_tokens must be strictly less than model.context_length".into(),
             );
-        }
-        if self.chat.max_summary_tokens == 0 {
-            errors.push("chat.max_summary_tokens must be greater than 0".into());
-        }
-        if self.model.context_length > 0 && self.chat.max_summary_tokens > self.model.context_length
-        {
-            errors.push("chat.max_summary_tokens must not exceed model.context_length".into());
         }
         if self.chat.request_timeout_secs == 0 {
             errors.push("chat.request_timeout_secs must be greater than 0".into());
@@ -169,21 +161,10 @@ impl Config {
             if t.beams == 0 {
                 errors.push("voice.transcription.beams must be at least 1".into());
             }
-            if !t.vad_silence_secs.is_finite() || t.vad_silence_secs < 0.0 {
-                errors.push(
-                    "voice.transcription.vad_silence_secs must be a non-negative, finite number"
-                        .into(),
-                );
-            }
             if let Some(th) = t.threads
                 && th == 0
             {
                 errors.push("voice.transcription.threads must be greater than 0 when set".into());
-            }
-            if t.gpu_busy_timeout_ms > 10_000 {
-                errors.push(
-                    "voice.transcription.gpu_busy_timeout_ms must not exceed 10000 (10 s)".into(),
-                );
             }
 
             let c = &self.voice.continuous;
@@ -198,16 +179,6 @@ impl Config {
                         "voice.continuous.max_utterance_secs must be greater than 0 when enabled"
                             .into(),
                     );
-                }
-                if c.min_utterance_ms >= c.max_utterance_secs.saturating_mul(1000) {
-                    errors.push(
-                        "voice.continuous.min_utterance_ms must be less than max_utterance_secs * 1000"
-                            .into(),
-                    );
-                }
-                if c.aggressiveness > 3 {
-                    errors
-                        .push("voice.continuous.aggressiveness must be in the range 0..=3".into());
                 }
             }
         }
@@ -233,18 +204,6 @@ impl Config {
             if !s.length_scale.is_finite() || s.length_scale <= 0.0 {
                 errors
                     .push("voice.synthesis.length_scale must be a positive, finite number".into());
-            }
-            if !s.noise_scale.is_finite() || !(0.0..=5.0).contains(&s.noise_scale) {
-                errors.push("voice.synthesis.noise_scale must be in the range 0.0..=5.0".into());
-            }
-            if !s.noise_w.is_finite() || !(0.0..=5.0).contains(&s.noise_w) {
-                errors.push("voice.synthesis.noise_w must be in the range 0.0..=5.0".into());
-            }
-            if !s.sentence_silence_secs.is_finite() || s.sentence_silence_secs < 0.0 {
-                errors.push(
-                    "voice.synthesis.sentence_silence_secs must be a non-negative, finite number"
-                        .into(),
-                );
             }
             if s.deadline_secs == 0 {
                 errors.push("voice.synthesis.deadline_secs must be greater than 0".into());
@@ -279,17 +238,6 @@ impl Config {
             }
         }
 
-        if self.remote.enabled {
-            if self.remote.port == 0 {
-                errors.push("remote.port must not be 0 when remote access is enabled".into());
-            }
-            if self.remote.bind_address.is_empty() {
-                errors.push(
-                    "remote.bind_address must not be empty when remote access is enabled".into(),
-                );
-            }
-        }
-
         if self.tools.output.max_lines == 0 {
             errors.push("tools.output.max_lines must be greater than 0".into());
         }
@@ -309,18 +257,9 @@ impl Config {
                     .into(),
             );
         }
-        if self.tools.screenshot.timeout_secs == 0 {
-            errors.push("tools.screenshot.timeout_secs must be greater than 0".into());
-        }
 
         if self.memory.enabled && self.memory.db_path.is_empty() {
             errors.push("memory.db_path must not be empty when memory.enabled".into());
-        }
-        if self.memory.retention_days > 36500 {
-            errors.push(
-                "memory.retention_days exceeds 100 years; check for a typo (use 0 for forever)"
-                    .into(),
-            );
         }
 
         if self.embedding.enabled {
@@ -340,29 +279,8 @@ impl Config {
                     "embedding.port must differ from llama_server.port (the chat server)".into(),
                 );
             }
-            if self.remote.enabled && self.embedding.port == self.remote.port {
-                errors.push(
-                    "embedding.port must differ from remote.port when remote access is enabled"
-                        .into(),
-                );
-            }
             if self.embedding.top_k == 0 {
                 errors.push("embedding.top_k must be greater than 0".into());
-            }
-            if self.embedding.chunk_chars == 0 {
-                errors.push("embedding.chunk_chars must be greater than 0".into());
-            }
-            if self.embedding.chunk_overlap_chars >= self.embedding.chunk_chars {
-                errors.push(
-                    "embedding.chunk_overlap_chars must be strictly less than embedding.chunk_chars"
-                        .into(),
-                );
-            }
-            if self.embedding.ready_timeout_secs == 0 {
-                errors.push("embedding.ready_timeout_secs must be greater than 0".into());
-            }
-            if self.embedding.request_timeout_secs == 0 {
-                errors.push("embedding.request_timeout_secs must be greater than 0".into());
             }
         }
 
@@ -421,18 +339,6 @@ impl Config {
                 if s.request_timeout_secs == 0 {
                     errors.push(format!("mcp.servers[{i}].request_timeout_secs must be > 0"));
                 }
-                if matches!(s.transport, McpTransport::Sse) {
-                    if s.sse_read_timeout_secs == 0 {
-                        errors.push(format!(
-                            "mcp.servers[{i}].sse_read_timeout_secs must be > 0"
-                        ));
-                    }
-                    if s.sse_ping_interval_secs == 0 {
-                        errors.push(format!(
-                            "mcp.servers[{i}].sse_ping_interval_secs must be > 0"
-                        ));
-                    }
-                }
             }
         }
 
@@ -447,27 +353,6 @@ impl Config {
             if !(500..=60_000).contains(&p.auto_hide_ms) {
                 errors.push("tray.popup.auto_hide_ms must be in the range 500..=60000".into());
             }
-            if !(500..=60_000).contains(&p.listen_auto_hide_ms) {
-                errors
-                    .push("tray.popup.listen_auto_hide_ms must be in the range 500..=60000".into());
-            }
-            if !(1..=10_000).contains(&p.truncate_chars) {
-                errors.push("tray.popup.truncate_chars must be in the range 1..=10000".into());
-            }
-        }
-
-        let t = &self.timeouts;
-        if t.presence_sleep_secs == 0 {
-            errors.push("timeouts.presence_sleep_secs must be greater than 0".into());
-        }
-        if t.presence_drowse_secs == 0 {
-            errors.push("timeouts.presence_drowse_secs must be greater than 0".into());
-        }
-        if t.dispatch_envelope_secs == 0 {
-            errors.push("timeouts.dispatch_envelope_secs must be greater than 0".into());
-        }
-        if t.stream_inactivity_secs == 0 {
-            errors.push("timeouts.stream_inactivity_secs must be greater than 0".into());
         }
 
         if errors.is_empty() {

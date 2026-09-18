@@ -21,10 +21,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::{
-    DEFAULT_MCP_ENABLED, DEFAULT_MCP_REQUEST_TIMEOUT_SECS, DEFAULT_MCP_SSE_PING_INTERVAL_SECS,
-    DEFAULT_MCP_SSE_READ_TIMEOUT_SECS,
-};
+use crate::defaults::{DEFAULT_MCP_ENABLED, DEFAULT_MCP_REQUEST_TIMEOUT_SECS};
 
 /// `[mcp]` section of `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,12 +75,6 @@ pub struct McpServerConfig {
     /// Per-request JSON-RPC timeout in seconds.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
-    /// Per-chunk inactivity deadline for SSE byte reads, in seconds.
-    #[serde(default = "default_sse_read_timeout_secs")]
-    pub sse_read_timeout_secs: u64,
-    /// Period of the background ping task that detects wedged SSE connections, in seconds.
-    #[serde(default = "default_sse_ping_interval_secs")]
-    pub sse_ping_interval_secs: u64,
 }
 
 /// Wire transport for an MCP server connection.
@@ -98,12 +89,6 @@ pub enum McpTransport {
 
 fn default_request_timeout_secs() -> u64 {
     DEFAULT_MCP_REQUEST_TIMEOUT_SECS
-}
-fn default_sse_read_timeout_secs() -> u64 {
-    DEFAULT_MCP_SSE_READ_TIMEOUT_SECS
-}
-fn default_sse_ping_interval_secs() -> u64 {
-    DEFAULT_MCP_SSE_PING_INTERVAL_SECS
 }
 
 #[cfg(test)]
@@ -195,8 +180,6 @@ mod tests {
             url: None,
             headers: HashMap::new(),
             request_timeout_secs: DEFAULT_MCP_REQUEST_TIMEOUT_SECS,
-            sse_read_timeout_secs: DEFAULT_MCP_SSE_READ_TIMEOUT_SECS,
-            sse_ping_interval_secs: DEFAULT_MCP_SSE_PING_INTERVAL_SECS,
         };
         let toml = toml::to_string(&s).unwrap();
         assert!(toml.contains("transport = \"stdio\""));

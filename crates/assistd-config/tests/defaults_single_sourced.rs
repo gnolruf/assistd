@@ -32,7 +32,6 @@ fn llama_server_defaults_match_constants() {
 fn memory_defaults_match_constants() {
     let c = MemoryConfig::default();
     assert_eq!(c.enabled, DEFAULT_MEMORY_ENABLED);
-    assert_eq!(c.retention_days, DEFAULT_MEMORY_RETENTION_DAYS);
     assert_eq!(c.db_path, default_memory_db_path());
     // Default path resolution always ends in `assistd/memory.db`
     // regardless of whether $XDG_DATA_HOME is set in the test env.
@@ -51,14 +50,7 @@ fn embedding_defaults_match_constants() {
     assert_eq!(c.host, DEFAULT_EMBEDDING_HOST);
     assert_eq!(c.port, DEFAULT_EMBEDDING_PORT);
     assert_eq!(c.gpu_layers, DEFAULT_EMBEDDING_GPU_LAYERS);
-    assert_eq!(c.ready_timeout_secs, DEFAULT_EMBEDDING_READY_TIMEOUT_SECS);
-    assert_eq!(
-        c.request_timeout_secs,
-        DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS
-    );
     assert_eq!(c.top_k, DEFAULT_EMBEDDING_TOP_K);
-    assert_eq!(c.chunk_chars, DEFAULT_EMBEDDING_CHUNK_CHARS);
-    assert_eq!(c.chunk_overlap_chars, DEFAULT_EMBEDDING_CHUNK_OVERLAP);
     assert_eq!(c.auto_inject, DEFAULT_EMBEDDING_AUTO_INJECT);
 }
 
@@ -78,8 +70,11 @@ fn chat_defaults_match_constants() {
     assert_eq!(c.preserve_recent_turns, DEFAULT_CHAT_PRESERVE_RECENT_TURNS);
     assert_eq!(c.temperature, DEFAULT_CHAT_TEMPERATURE);
     assert_eq!(c.max_response_tokens, DEFAULT_CHAT_MAX_RESPONSE_TOKENS);
-    assert_eq!(c.max_summary_tokens, DEFAULT_CHAT_MAX_SUMMARY_TOKENS);
     assert_eq!(c.request_timeout_secs, DEFAULT_CHAT_REQUEST_TIMEOUT_SECS);
+    assert!(
+        c.max_summary_tokens() > c.summary_target_tokens,
+        "the summarize call needs headroom above the target it asks for"
+    );
     assert_eq!(c.summary_temperature, DEFAULT_CHAT_SUMMARY_TEMPERATURE);
     assert!(c.top_p.is_none());
     assert!(c.top_k.is_none());
@@ -102,11 +97,7 @@ fn continuous_listen_defaults_match_constants() {
     assert_eq!(c.start_on_launch, DEFAULT_LISTEN_START_ON_LAUNCH);
     assert_eq!(c.hotkey, DEFAULT_LISTEN_HOTKEY);
     assert_eq!(c.silence_ms, DEFAULT_LISTEN_SILENCE_MS);
-    assert_eq!(c.min_utterance_ms, DEFAULT_LISTEN_MIN_UTTERANCE_MS);
     assert_eq!(c.max_utterance_secs, DEFAULT_LISTEN_MAX_UTTERANCE_SECS);
-    assert_eq!(c.preroll_ms, DEFAULT_LISTEN_PREROLL_MS);
-    assert_eq!(c.onset_confirm_ms, DEFAULT_LISTEN_ONSET_CONFIRM_MS);
-    assert_eq!(c.aggressiveness, DEFAULT_LISTEN_AGGRESSIVENESS);
 }
 
 #[test]
@@ -118,16 +109,7 @@ fn transcription_defaults_match_constants() {
     assert!(c.threads.is_none());
     assert_eq!(c.beams, DEFAULT_WHISPER_BEAMS);
     assert_eq!(c.vad_enabled, DEFAULT_WHISPER_VAD_ENABLED);
-    assert_eq!(c.vad_silence_secs, DEFAULT_WHISPER_VAD_SILENCE_SECS);
     assert!(c.model_cache_dir.is_none());
-}
-
-#[test]
-fn remote_defaults_match_constants() {
-    let c = RemoteConfig::default();
-    assert!(!c.enabled);
-    assert_eq!(c.bind_address, DEFAULT_REMOTE_BIND_ADDRESS);
-    assert_eq!(c.port, DEFAULT_REMOTE_PORT);
 }
 
 #[test]
@@ -162,7 +144,6 @@ fn sleep_defaults_match_constants() {
     let c = SleepConfig::default();
     assert_eq!(c.idle_to_drowsy_mins, DEFAULT_IDLE_TO_DROWSY_MINS);
     assert_eq!(c.idle_to_sleep_mins, DEFAULT_IDLE_TO_SLEEP_MINS);
-    assert!(!c.suspend);
     assert_eq!(c.gpu_monitor_enabled, DEFAULT_GPU_MONITOR_ENABLED);
     assert_eq!(c.gpu_poll_secs, DEFAULT_GPU_POLL_SECS);
     assert_eq!(c.gpu_vram_threshold_mb, DEFAULT_GPU_VRAM_THRESHOLD_MB);
@@ -194,9 +175,6 @@ fn synthesis_defaults_match_constants() {
     assert_eq!(c.voice, DEFAULT_PIPER_VOICE);
     assert!(c.model_cache_dir.is_none());
     assert_eq!(c.length_scale, DEFAULT_PIPER_LENGTH_SCALE);
-    assert_eq!(c.noise_scale, DEFAULT_PIPER_NOISE_SCALE);
-    assert_eq!(c.noise_w, DEFAULT_PIPER_NOISE_W);
-    assert_eq!(c.sentence_silence_secs, DEFAULT_PIPER_SENTENCE_SILENCE_SECS);
     assert!(c.espeak_data_dir.is_none());
     assert_eq!(c.deadline_secs, DEFAULT_PIPER_DEADLINE_SECS);
     assert_eq!(c.max_sentence_chars, DEFAULT_PIPER_MAX_SENTENCE_CHARS);

@@ -41,10 +41,7 @@ impl AppState {
         let chunks_handle = self.memory.chunks.clone();
         let embed_tx = self.memory.embed_tx.clone();
         let embedding_enabled = self.memory.embedding_cfg.enabled;
-        let chunking_cfg = ChunkingConfig {
-            chunk_chars: self.memory.embedding_cfg.chunk_chars,
-            overlap_chars: self.memory.embedding_cfg.chunk_overlap_chars,
-        };
+        let chunking_cfg = ChunkingConfig::default();
         let should_embed = embedding_enabled
             && chunks_handle.is_some()
             && matches!(msg.role, PersistedRole::User | PersistedRole::Assistant)

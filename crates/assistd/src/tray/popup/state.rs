@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use assistd_config::TrayPopupConfig;
 use assistd_ipc::Event;
 use serde_json::Value;
 
@@ -62,7 +61,7 @@ pub struct PopupTracker {
 }
 
 impl PopupTracker {
-    pub fn snapshot(&self, cfg: &TrayPopupConfig) -> PopupState {
+    pub fn snapshot(&self) -> PopupState {
         let displayed_id = self.displayed.as_deref();
         let displayed = displayed_id.and_then(|id| self.turns.get(id));
         let displayed_in_flight = displayed_id
@@ -70,7 +69,7 @@ impl PopupTracker {
             .unwrap_or(false);
         PopupState {
             body: displayed
-                .map(|t| truncate_chars_from_end(&t.body, cfg.truncate_chars))
+                .map(|t| truncate_chars_from_end(&t.body, BODY_CHARS))
                 .unwrap_or_default(),
             footer: displayed.and_then(|t| t.footer.clone()),
             activity: self.activity(displayed, displayed_in_flight),
@@ -117,7 +116,7 @@ impl PopupTracker {
         PopupActivity::Idle
     }
 
-    pub fn ingest(&mut self, ev: &Event, cfg: &TrayPopupConfig) -> PopupState {
+    pub fn ingest(&mut self, ev: &Event) -> PopupState {
         match ev {
             Event::Delta { id, .. } => {
                 // LastDelta carries the full coalesced body; appending
@@ -174,7 +173,7 @@ impl PopupTracker {
             }
             _ => {}
         }
-        self.snapshot(cfg)
+        self.snapshot()
     }
 
     fn bring_turn_to_front(&mut self, id: &str) {
@@ -255,6 +254,12 @@ fn flatten_whitespace(s: &str) -> String {
     out
 }
 
+/// Cap on the body text rendered in the popup: the last `BODY_CHARS`
+/// codepoints of the running reply. Sized to what fits the popup's
+/// default 360x120 geometry — more text would just be clipped by the
+/// window, less would truncate a reply that still fits.
+const BODY_CHARS: usize = 300;
+
 fn truncate_chars_from_end(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -282,10 +287,6 @@ fn truncate_chars_from_start(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn cfg() -> TrayPopupConfig {
-        TrayPopupConfig::default()
-    }
 
     #[test]
     fn summarize_args_object_renders_key_equals_value() {
@@ -366,120 +367,102 @@ mod tests {
     #[test]
     fn tracker_body_comes_only_from_last_delta() {
         let mut t = PopupTracker::default();
-        t.ingest(&delta("a", "hello "), &cfg());
-        t.ingest(&delta("a", "world"), &cfg());
-        assert_eq!(
-            t.snapshot(&cfg()).body,
-            "",
-            "Delta must not populate the body"
-        );
-        t.ingest(&last_delta("a", "the coalesced reply"), &cfg());
-        assert_eq!(t.snapshot(&cfg()).body, "the coalesced reply");
+        t.ingest(&delta("a", "hello "));
+        t.ingest(&delta("a", "world"));
+        assert_eq!(t.snapshot().body, "", "Delta must not populate the body");
+        t.ingest(&last_delta("a", "the coalesced reply"));
+        assert_eq!(t.snapshot().body, "the coalesced reply");
     }
 
     #[test]
     fn tracker_interleaved_last_delta_and_delta_does_not_double_count() {
         let mut t = PopupTracker::default();
-        t.ingest(&last_delta("a", "A"), &cfg());
-        t.ingest(&delta("a", "A"), &cfg());
-        assert_eq!(t.snapshot(&cfg()).body, "A");
-        t.ingest(&delta("a", "B"), &cfg());
-        t.ingest(&delta("a", "C"), &cfg());
-        assert_eq!(t.snapshot(&cfg()).body, "A", "raw deltas must not append");
-        t.ingest(&last_delta("a", "ABCD"), &cfg());
-        t.ingest(&delta("a", "D"), &cfg());
-        assert_eq!(t.snapshot(&cfg()).body, "ABCD");
+        t.ingest(&last_delta("a", "A"));
+        t.ingest(&delta("a", "A"));
+        assert_eq!(t.snapshot().body, "A");
+        t.ingest(&delta("a", "B"));
+        t.ingest(&delta("a", "C"));
+        assert_eq!(t.snapshot().body, "A", "raw deltas must not append");
+        t.ingest(&last_delta("a", "ABCD"));
+        t.ingest(&delta("a", "D"));
+        assert_eq!(t.snapshot().body, "ABCD");
     }
 
     #[test]
     fn tracker_keeps_displayed_turn_after_done() {
         let mut t = PopupTracker::default();
-        t.ingest(&last_delta("a", "the reply"), &cfg());
-        t.ingest(&done("a"), &cfg());
-        let s = t.snapshot(&cfg());
+        t.ingest(&last_delta("a", "the reply"));
+        t.ingest(&done("a"));
+        let s = t.snapshot();
         assert_eq!(s.body, "the reply");
     }
 
     #[test]
     fn tracker_switches_to_new_turn_and_drops_old() {
         let mut t = PopupTracker::default();
-        t.ingest(&last_delta("a", "turn a body"), &cfg());
-        t.ingest(&done("a"), &cfg());
-        t.ingest(&last_delta("b", "turn b body"), &cfg());
-        let s = t.snapshot(&cfg());
+        t.ingest(&last_delta("a", "turn a body"));
+        t.ingest(&done("a"));
+        t.ingest(&last_delta("b", "turn b body"));
+        let s = t.snapshot();
         assert_eq!(s.body, "turn b body");
     }
 
     #[test]
     fn tracker_renders_tool_call_footer_with_args_summary() {
         let mut t = PopupTracker::default();
-        t.ingest(
-            &tool_call("a", "bash", json!({"command": "ls /tmp"})),
-            &cfg(),
-        );
-        let s = t.snapshot(&cfg());
+        t.ingest(&tool_call("a", "bash", json!({"command": "ls /tmp"})));
+        let s = t.snapshot();
         let footer = s.footer.expect("footer present");
         assert_eq!(footer.name, "bash");
         assert!(footer.args_summary.contains("command="), "got: {footer:?}");
     }
 
     #[test]
-    fn tracker_truncates_body_to_configured_n() {
+    fn tracker_truncates_body_to_the_last_body_chars() {
         let mut t = PopupTracker::default();
-        let long = "x".repeat(1000);
-        t.ingest(&last_delta("a", &long), &cfg());
-        let mut narrow = cfg();
-        narrow.truncate_chars = 50;
-        let s = t.snapshot(&narrow);
-        assert_eq!(s.body.chars().count(), 51);
+        let long = "x".repeat(BODY_CHARS * 2);
+        t.ingest(&last_delta("a", &long));
+        let s = t.snapshot();
+        assert_eq!(s.body.chars().count(), BODY_CHARS + 1);
         assert!(s.body.starts_with('…'));
     }
 
     #[test]
     fn tracker_ignores_unrelated_event_kinds() {
         let mut t = PopupTracker::default();
-        let before = t.snapshot(&cfg());
-        t.ingest(
-            &Event::Capabilities {
-                id: "a".into(),
-                vision: false,
-                model_name: "test".into(),
-            },
-            &cfg(),
-        );
-        let after = t.snapshot(&cfg());
+        let before = t.snapshot();
+        t.ingest(&Event::Capabilities {
+            id: "a".into(),
+            vision: false,
+            model_name: "test".into(),
+        });
+        let after = t.snapshot();
         assert_eq!(before, after);
     }
 
     #[test]
     fn tool_result_marks_displayed_turn_as_thinking() {
         let mut t = PopupTracker::default();
-        t.ingest(
-            &tool_call("a", "bash", json!({"command": "sleep 30"})),
-            &cfg(),
-        );
+        t.ingest(&tool_call("a", "bash", json!({"command": "sleep 30"})));
         assert!(matches!(
-            t.snapshot(&cfg()).activity,
+            t.snapshot().activity,
             PopupActivity::RunningTool { .. }
         ));
-        t.ingest(
-            &Event::ToolResult {
-                id: "a".into(),
-                name: "bash".into(),
-                result: json!({"ok": true}),
-            },
-            &cfg(),
-        );
-        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Thinking);
+        t.ingest(&Event::ToolResult {
+            id: "a".into(),
+            name: "bash".into(),
+            result: json!({"ok": true}),
+        });
+        assert_eq!(t.snapshot().activity, PopupActivity::Thinking);
     }
 
     #[test]
     fn tracker_marks_busy_while_turn_in_flight() {
         let mut t = PopupTracker::default();
         assert!(!t.is_busy());
-        t.ingest(&delta("a", "hi"), &cfg());
+        t.ingest(&delta("a", "hi"));
         assert!(t.is_busy());
-        t.ingest(&done("a"), &cfg());
+        t.ingest(&done("a"));
         assert!(!t.is_busy());
     }
 
@@ -487,32 +470,26 @@ mod tests {
     fn tracker_tracks_listen_state_and_surfaces_listening_activity() {
         let mut t = PopupTracker::default();
         assert!(!t.is_listening());
-        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Idle);
+        assert_eq!(t.snapshot().activity, PopupActivity::Idle);
 
-        t.ingest(
-            &Event::ListenState {
-                id: "x".into(),
-                active: true,
-            },
-            &cfg(),
-        );
+        t.ingest(&Event::ListenState {
+            id: "x".into(),
+            active: true,
+        });
         assert!(t.is_listening());
-        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Listening);
+        assert_eq!(t.snapshot().activity, PopupActivity::Listening);
 
-        t.ingest(&delta("a", "hi"), &cfg());
-        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Streaming);
-        t.ingest(&done("a"), &cfg());
-        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Listening);
+        t.ingest(&delta("a", "hi"));
+        assert_eq!(t.snapshot().activity, PopupActivity::Streaming);
+        t.ingest(&done("a"));
+        assert_eq!(t.snapshot().activity, PopupActivity::Listening);
 
-        t.ingest(
-            &Event::ListenState {
-                id: "x".into(),
-                active: false,
-            },
-            &cfg(),
-        );
+        t.ingest(&Event::ListenState {
+            id: "x".into(),
+            active: false,
+        });
         assert!(!t.is_listening());
-        assert_eq!(t.snapshot(&cfg()).activity, PopupActivity::Idle);
+        assert_eq!(t.snapshot().activity, PopupActivity::Idle);
     }
 
     #[test]
@@ -520,53 +497,38 @@ mod tests {
         let mut t = PopupTracker::default();
         assert!(!t.is_speaking());
 
-        t.ingest(
-            &Event::SpeakingState {
-                id: "a".into(),
-                speaking: true,
-            },
-            &cfg(),
-        );
+        t.ingest(&Event::SpeakingState {
+            id: "a".into(),
+            speaking: true,
+        });
         assert!(t.is_speaking());
 
-        t.ingest(
-            &Event::SpeakingState {
-                id: "b".into(),
-                speaking: true,
-            },
-            &cfg(),
-        );
+        t.ingest(&Event::SpeakingState {
+            id: "b".into(),
+            speaking: true,
+        });
         assert!(t.is_speaking());
 
-        t.ingest(
-            &Event::SpeakingState {
-                id: "a".into(),
-                speaking: false,
-            },
-            &cfg(),
-        );
+        t.ingest(&Event::SpeakingState {
+            id: "a".into(),
+            speaking: false,
+        });
         assert!(t.is_speaking());
 
-        t.ingest(
-            &Event::SpeakingState {
-                id: "b".into(),
-                speaking: false,
-            },
-            &cfg(),
-        );
+        t.ingest(&Event::SpeakingState {
+            id: "b".into(),
+            speaking: false,
+        });
         assert!(!t.is_speaking());
     }
 
     #[test]
     fn tracker_disconnect_clears_speaking_state() {
         let mut t = PopupTracker::default();
-        t.ingest(
-            &Event::SpeakingState {
-                id: "a".into(),
-                speaking: true,
-            },
-            &cfg(),
-        );
+        t.ingest(&Event::SpeakingState {
+            id: "a".into(),
+            speaking: true,
+        });
         assert!(t.is_speaking());
         t.set_disconnected();
         assert!(!t.is_speaking());
@@ -575,9 +537,9 @@ mod tests {
     #[test]
     fn tracker_disconnect_clears_turn_state() {
         let mut t = PopupTracker::default();
-        t.ingest(&last_delta("a", "x"), &cfg());
+        t.ingest(&last_delta("a", "x"));
         t.set_disconnected();
-        let s = t.snapshot(&cfg());
+        let s = t.snapshot();
         assert_eq!(s.body, "");
         assert!(s.footer.is_none());
     }

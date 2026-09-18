@@ -1,59 +1,18 @@
 use crate::defaults::{
-    DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_DISCONNECTED, DEFAULT_TRAY_ICON_DROWSY,
-    DEFAULT_TRAY_ICON_GENERATING, DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
     DEFAULT_TRAY_POPUP_AUTO_HIDE_MS, DEFAULT_TRAY_POPUP_ENABLED, DEFAULT_TRAY_POPUP_HEIGHT,
-    DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS, DEFAULT_TRAY_POPUP_OFFSET_X,
-    DEFAULT_TRAY_POPUP_OFFSET_Y, DEFAULT_TRAY_POPUP_TRUNCATE_CHARS, DEFAULT_TRAY_POPUP_WAKE_DELTA,
+    DEFAULT_TRAY_POPUP_OFFSET_X, DEFAULT_TRAY_POPUP_OFFSET_Y, DEFAULT_TRAY_POPUP_WAKE_DELTA,
     DEFAULT_TRAY_POPUP_WAKE_ERROR, DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL, DEFAULT_TRAY_POPUP_WIDTH,
 };
 use serde::{Deserialize, Serialize};
 
-/// System-tray icon settings for `assistd tray`.
-///
-/// Each field is the name of an icon in the user's freedesktop icon
-/// theme. The defaults pick names that ship in every major theme
-/// (Adwaita, Breeze, Papirus); users who want assistd-branded artwork
-/// install custom icons under `~/.local/share/icons/<theme>/` and
-/// reference them by name here.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// System-tray settings for `assistd tray`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrayConfig {
-    /// Daemon presence is `Active` and no query is in flight.
-    pub icon_active: String,
-
-    /// Daemon presence is `Drowsy`.
-    pub icon_drowsy: String,
-
-    /// Daemon presence is `Sleeping`.
-    pub icon_sleeping: String,
-
-    /// Continuous listening is active.
-    pub icon_listening: String,
-
-    /// At least one query is currently streaming.
-    pub icon_generating: String,
-
-    /// Daemon socket is unreachable (not running, or connection dropped).
-    pub icon_disconnected: String,
-
     /// Floating activity popup spawned alongside the tray icon (feature
     /// `tray-popup`). Configuration is parsed regardless of the build
     /// feature so a config file authored once works on every build.
     pub popup: TrayPopupConfig,
-}
-
-impl Default for TrayConfig {
-    fn default() -> Self {
-        Self {
-            icon_active: DEFAULT_TRAY_ICON_ACTIVE.to_string(),
-            icon_drowsy: DEFAULT_TRAY_ICON_DROWSY.to_string(),
-            icon_sleeping: DEFAULT_TRAY_ICON_SLEEPING.to_string(),
-            icon_listening: DEFAULT_TRAY_ICON_LISTENING.to_string(),
-            icon_generating: DEFAULT_TRAY_ICON_GENERATING.to_string(),
-            icon_disconnected: DEFAULT_TRAY_ICON_DISCONNECTED.to_string(),
-            popup: TrayPopupConfig::default(),
-        }
-    }
 }
 
 /// Geometry and wake-up policy for the floating activity popup.
@@ -97,21 +56,18 @@ pub struct TrayPopupConfig {
     /// mid-response). Validated to 500..=60000.
     pub auto_hide_ms: u64,
 
-    /// Idle timeout used while the daemon's continuous listener is
-    /// active. The user can verbally reply without pressing a key, so
-    /// the popup hangs around longer than the regular `auto_hide_ms`.
-    /// Validated to 500..=60000.
-    pub listen_auto_hide_ms: u64,
-
-    /// Cap on the body text rendered in the popup. The displayed text
-    /// is the **last** `truncate_chars` codepoints of the running
-    /// reply, so partial Unicode is never split. Validated to
-    /// 1..=10000.
-    pub truncate_chars: usize,
-
     /// Which events automatically open the popup. The tray-icon
     /// left-click always shows it regardless of these flags.
     pub wake_on: TrayPopupWakeConfig,
+}
+
+impl TrayPopupConfig {
+    /// Idle timeout while the daemon's continuous listener is active. The
+    /// user can reply verbally without touching a key, so the popup has to
+    /// outlast the time it takes to hear it and start speaking.
+    pub fn listen_auto_hide_ms(&self) -> u64 {
+        self.auto_hide_ms.saturating_mul(3)
+    }
 }
 
 impl Default for TrayPopupConfig {
@@ -124,8 +80,6 @@ impl Default for TrayPopupConfig {
             width: DEFAULT_TRAY_POPUP_WIDTH,
             height: DEFAULT_TRAY_POPUP_HEIGHT,
             auto_hide_ms: DEFAULT_TRAY_POPUP_AUTO_HIDE_MS,
-            listen_auto_hide_ms: DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS,
-            truncate_chars: DEFAULT_TRAY_POPUP_TRUNCATE_CHARS,
             wake_on: TrayPopupWakeConfig::default(),
         }
     }
@@ -203,11 +157,7 @@ mod tests {
         assert_eq!(p.width, DEFAULT_TRAY_POPUP_WIDTH);
         assert_eq!(p.height, DEFAULT_TRAY_POPUP_HEIGHT);
         assert_eq!(p.auto_hide_ms, DEFAULT_TRAY_POPUP_AUTO_HIDE_MS);
-        assert_eq!(
-            p.listen_auto_hide_ms,
-            DEFAULT_TRAY_POPUP_LISTEN_AUTO_HIDE_MS
-        );
-        assert_eq!(p.truncate_chars, DEFAULT_TRAY_POPUP_TRUNCATE_CHARS);
+        assert!(p.listen_auto_hide_ms() > p.auto_hide_ms);
         assert_eq!(p.wake_on.tool_call, DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL);
         assert_eq!(p.wake_on.delta, DEFAULT_TRAY_POPUP_WAKE_DELTA);
         assert_eq!(p.wake_on.error, DEFAULT_TRAY_POPUP_WAKE_ERROR);
@@ -222,8 +172,6 @@ mod tests {
             width: 500,
             height: 200,
             auto_hide_ms: 7000,
-            listen_auto_hide_ms: 12000,
-            truncate_chars: 1024,
             enabled: false,
             wake_on: TrayPopupWakeConfig {
                 tool_call: false,
@@ -266,17 +214,7 @@ mod tests {
 
     #[test]
     fn missing_popup_section_uses_defaults() {
-        // Mimic an upgrade: existing config has [tray] without
-        // [tray.popup]. Defaults must fill in.
-        let toml_src = r#"
-            icon_active = "user-available"
-            icon_drowsy = "user-away"
-            icon_sleeping = "user-offline"
-            icon_listening = "audio-input-microphone"
-            icon_generating = "system-run"
-            icon_disconnected = "network-offline"
-        "#;
-        let t: TrayConfig = toml::from_str(toml_src).expect("deserialize");
+        let t: TrayConfig = toml::from_str("").expect("deserialize");
         assert_eq!(t.popup, TrayPopupConfig::default());
     }
 

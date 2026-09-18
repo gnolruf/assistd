@@ -1,8 +1,8 @@
 use crate::defaults::{
     DEFAULT_CHAT_MAX_HISTORY_TOKENS, DEFAULT_CHAT_MAX_RESPONSE_TOKENS,
-    DEFAULT_CHAT_MAX_SUMMARY_TOKENS, DEFAULT_CHAT_PRESERVE_RECENT_TURNS,
-    DEFAULT_CHAT_REQUEST_TIMEOUT_SECS, DEFAULT_CHAT_SUMMARY_TARGET_TOKENS,
-    DEFAULT_CHAT_SUMMARY_TEMPERATURE, DEFAULT_CHAT_TEMPERATURE, DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_CHAT_PRESERVE_RECENT_TURNS, DEFAULT_CHAT_REQUEST_TIMEOUT_SECS,
+    DEFAULT_CHAT_SUMMARY_TARGET_TOKENS, DEFAULT_CHAT_SUMMARY_TEMPERATURE, DEFAULT_CHAT_TEMPERATURE,
+    DEFAULT_SYSTEM_PROMPT,
 };
 use crate::model::ModelConfig;
 use serde::{Deserialize, Serialize};
@@ -27,9 +27,6 @@ pub struct ChatConfig {
     pub temperature: f32,
     /// Maximum tokens the model may emit in a single streamed response.
     pub max_response_tokens: u32,
-    /// Maximum tokens for the summarization (non-streaming) call. Typically a
-    /// bit above `summary_target_tokens`.
-    pub max_summary_tokens: u32,
     /// HTTP request timeout for a single chat call, in seconds.
     pub request_timeout_secs: u64,
     /// Sampling temperature for the (non-streaming) summarization call.
@@ -57,7 +54,6 @@ impl Default for ChatConfig {
             preserve_recent_turns: DEFAULT_CHAT_PRESERVE_RECENT_TURNS,
             temperature: DEFAULT_CHAT_TEMPERATURE,
             max_response_tokens: DEFAULT_CHAT_MAX_RESPONSE_TOKENS,
-            max_summary_tokens: DEFAULT_CHAT_MAX_SUMMARY_TOKENS,
             request_timeout_secs: DEFAULT_CHAT_REQUEST_TIMEOUT_SECS,
             summary_temperature: DEFAULT_CHAT_SUMMARY_TEMPERATURE,
             top_p: None,
@@ -69,6 +65,13 @@ impl Default for ChatConfig {
 }
 
 impl ChatConfig {
+    /// Hard `max_tokens` cap on the summarization call. The target is what
+    /// the prompt asks for; this is the headroom that lets the model land
+    /// near it instead of being cut off mid-sentence.
+    pub fn max_summary_tokens(&self) -> u32 {
+        self.summary_target_tokens.saturating_mul(6) / 5
+    }
+
     /// Effective budget for the entire request, after applying a 10% safety
     /// margin against the real model context length. Protects us from the
     /// token heuristic (bytes/4) under-counting relative to the real BPE

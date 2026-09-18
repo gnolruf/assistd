@@ -345,7 +345,6 @@ fn chat_spec(port: u16) -> ClientCfg {
             preserve_recent_turns: 2,
             temperature: 0.5,
             max_response_tokens: 256,
-            max_summary_tokens: 500,
             request_timeout_secs: 5,
             summary_temperature: 0.3,
             top_p: None,
@@ -1234,7 +1233,8 @@ async fn complete_oneshot_uses_the_summary_budget() {
     let captured = script.captured().await;
     assert_eq!(captured.len(), 1);
     assert_eq!(
-        captured[0].body["max_tokens"], cfg.chat.max_summary_tokens,
+        captured[0].body["max_tokens"],
+        cfg.chat.max_summary_tokens(),
         "one-shot should use max_summary_tokens, not max_response_tokens"
     );
 }

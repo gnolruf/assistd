@@ -111,8 +111,7 @@ impl BusyProbe for NullBusyProbe {
     }
 }
 
-/// Runtime knobs for [`QueuedTranscriber`]. Populated from
-/// [`assistd_config::TranscriptionConfig`].
+/// Runtime knobs for [`QueuedTranscriber`].
 #[derive(Debug, Clone, Copy)]
 pub struct QueueConfig {
     /// How long to wait for the LLM to finish streaming before falling
@@ -122,6 +121,18 @@ pub struct QueueConfig {
     /// transcriber waits indefinitely (well, up to the timeout) and
     /// then runs on the primary anyway.
     pub cpu_fallback_enabled: bool,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            // Long enough to ride out the tail of a streaming response,
+            // short enough that an utterance doesn't sit queued behind a
+            // multi-minute generation.
+            gpu_busy_timeout_ms: 300,
+            cpu_fallback_enabled: true,
+        }
+    }
 }
 
 /// Async factory for the CPU fallback context. Built once at daemon

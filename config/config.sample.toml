@@ -16,7 +16,7 @@ context_length = 8192
 binary_path = "llama-server"
 # Host llama-server binds to. Should be a loopback address.
 host = "127.0.0.1"
-# TCP port llama-server binds to. Must differ from remote.port.
+# TCP port llama-server binds to. Must differ from embedding.port.
 port = 8385
 # GPU layer count passed as -ngl. Default 9999 offloads all layers; reduce if
 # running out of VRAM.
@@ -91,9 +91,6 @@ temperature = 0.7
 # presence_penalty = 1.5
 # Maximum tokens the model may emit in a single streamed response.
 max_response_tokens = 1024
-# Maximum tokens for the summarization (non-streaming) call. Typically a bit
-# above summary_target_tokens.
-max_summary_tokens = 1200
 # HTTP request timeout for a single /v1/chat/completions call.
 request_timeout_secs = 120
 # Sampling temperature for the non-streaming summarization call. Lower
@@ -139,22 +136,8 @@ hotkey = "Super+Space"
 # vad_enabled = true
 # VAD GGML model (HF identifier).
 # vad_model = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin"
-# Approximate minimum silence length (seconds) required to split or
-# trim a speech segment. Maps to whisper.cpp's min_silence_duration_ms.
-# vad_silence_secs = 0.5
 # Override the on-disk model cache directory. Omit for the XDG default.
 # model_cache_dir = "/var/cache/assistd/whisper"
-# When the primary Whisper context is GPU-backed and the daemon is
-# currently streaming an LLM response on the same GPU, Whisper briefly
-# waits for the stream to drain before running inference. After this
-# many milliseconds, it falls back to a lazily-built CPU context for
-# that utterance. Set to 0 to always prefer CPU when any LLM stream is
-# in flight; cap is 10000 (10 s).
-# gpu_busy_timeout_ms = 300
-# Build a CPU fallback context on demand when the GPU is busy. Disable
-# to force strict GPU-only transcription (users wait for the LLM stream
-# to finish before their utterance is transcribed).
-# cpu_fallback_enabled = true
 
 [voice.continuous]
 # Hands-free continuous listening. When enabled, the daemon keeps the
@@ -171,19 +154,8 @@ enabled = false
 # Trailing silence (ms) that ends an utterance. Larger values tolerate
 # longer mid-sentence pauses.
 # silence_ms = 800
-# Utterances shorter than this are dropped without transcription.
-# min_utterance_ms = 400
 # Force-flush cap, in seconds, to bound per-utterance memory use.
 # max_utterance_secs = 30
-# Rolling pre-roll appended to a new utterance so onset confirmation
-# doesn't clip the first syllable.
-# preroll_ms = 300
-# Voiced frames required to confirm onset (guards against keystroke
-# clicks and fan pops).
-# onset_confirm_ms = 60
-# webrtc-vad aggressiveness, 0..=3. Higher is more aggressive at
-# rejecting non-speech.
-# aggressiveness = 3
 
 [voice.synthesis]
 # Speak LLM responses aloud through a local Piper TTS subprocess. When
@@ -205,12 +177,6 @@ enabled = false
 # model_cache_dir = "/var/cache/assistd/piper"
 # Speaking-rate scale. 1.0 is the voice's natural rate; lower = faster.
 # length_scale = 1.0
-# Sampling noise scale (--noise-scale). Higher = more pitch variation.
-# noise_scale = 0.667
-# Phoneme noise scale (--noise-w). Higher = more cadence variation.
-# noise_w = 0.8
-# Trailing silence (seconds) Piper inserts after each utterance.
-# sentence_silence_secs = 0.2
 # Optional override for Piper's espeak-ng data directory. Only set when
 # piper logs "Failed to load espeak-ng"; most distro packages handle
 # this themselves.
@@ -243,9 +209,6 @@ enabled = false
 type = "auto"
 
 [sleep]
-# Whether to suspend the machine (true) or just deactivate (false).
-suspend = false
-
 # ---- Idle-based auto-sleep ----
 # Minutes of no user interaction after which the daemon drops Active → Drowsy
 # (model weights unloaded, server stays alive). 0 disables this transition.
@@ -277,14 +240,6 @@ suspend = false
 #                  "kwin_wayland", "firefox", "chromium", "chrome"]
 # Process basenames that always trigger sleep regardless of VRAM usage.
 # gpu_denylist = []
-
-[remote]
-# Enable the remote access API.
-enabled = false
-# IP address to bind to.
-bind_address = "127.0.0.1"
-# TCP port to listen on. Must not be 0 when remote is enabled.
-port = 8384
 
 [presence]
 # Global hotkey that cycles Active → Drowsy → Sleeping → Active.
@@ -413,10 +368,6 @@ hotkey = "Super+Escape"
 #   wayland: always use grim (--focused requires sway or Hyprland).
 # backend = "auto"
 
-# Capture subprocess timeout in seconds. Must be > 0. A wedged compositor
-# is killed at the deadline and the command returns exit 137.
-# timeout_secs = 5
-
 [memory]
 # Persistent memory: SQLite-backed conversation history + saved facts (the
 # `remember` / `recall` LLM tools). Master switch: when false, the daemon
@@ -425,10 +376,6 @@ hotkey = "Super+Escape"
 # Path to the SQLite database file. Default resolves to
 # $XDG_DATA_HOME/assistd/memory.db (or $HOME/.local/share/assistd/memory.db).
 # db_path = "/home/you/.local/share/assistd/memory.db"
-# Days to retain history. 0 means keep forever. (The retention sweeper
-# isn't shipped yet; the field exists so future work doesn't need a
-# schema-version bump.)
-# retention_days = 0
 
 [embedding]
 # Semantic memory search: a separate, dedicated llama-server instance
@@ -452,26 +399,17 @@ hotkey = "Super+Escape"
 # model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"
 # Bind host. Should be loopback.
 # host = "127.0.0.1"
-# Bind port. MUST differ from llama_server.port and remote.port.
+# Bind port. MUST differ from llama_server.port.
 # port = 8386
 # -ngl count for the embed server. Default 0 (CPU only) so the embed
 # model never competes with the chat model for VRAM. Small embedders
 # are CPU-fast; only raise this if your chat model leaves VRAM headroom.
 # gpu_layers = 0
-# Seconds to wait for /health to come up after spawn. First-time HF
-# downloads may need minutes.
-# ready_timeout_secs = 300
-# Per-request HTTP timeout against /v1/embeddings.
-# request_timeout_secs = 30
+# The embed server shares llama_server.ready_timeout_secs as its
+# come-up backstop; a slow first-time HF download affects both alike.
 # How many nearest-neighbor matches to retrieve per query for
 # auto-injection and the reminisce tool's default.
 # top_k = 5
-# Char-window size for chunking conversation messages. Messages
-# shorter than this become a single chunk.
-# chunk_chars = 512
-# Char-overlap between consecutive chunks so semantically coherent
-# runs don't get cut at chunk boundaries. Must be < chunk_chars.
-# chunk_overlap_chars = 64
 # When true, every user query auto-injects the top-K conversation
 # chunks as a "Relevant past context: …" system message. Set false
 # to require explicit `reminisce` tool invocations only.
@@ -490,8 +428,8 @@ hotkey = "Super+Escape"
 #     JSON-RPC over its stdin/stdout. Required: `command` (and optional
 #     `args` / `env`).
 #   * "sse":   daemon connects to an HTTP+SSE endpoint. Required: `url`
-#     (and optional `headers`). Read timeout + periodic ping detect a
-#     wedged remote server even when the SSE socket stays open.
+#     (and optional `headers`). A read timeout and a periodic ping detect
+#     a wedged remote server even when the SSE socket stays open.
 #
 # Crash handling: if a server dies, the supervisor restarts it with
 # exponential backoff (1s, 2s, 4s, ..., 60s); after 5 consecutive
@@ -513,8 +451,6 @@ hotkey = "Super+Escape"
 # transport = "sse"
 # url = "https://mcp.example.com/sse"
 # request_timeout_secs = 30
-# sse_read_timeout_secs = 30
-# sse_ping_interval_secs = 15
 #
 # [mcp.servers.headers]
 # Authorization = "Bearer YOUR_TOKEN_HERE"

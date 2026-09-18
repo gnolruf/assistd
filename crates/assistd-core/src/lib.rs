@@ -48,9 +48,9 @@ pub use assistd_config as config;
 pub use assistd_config::{
     BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config, ConfigError,
     ContinuousListenConfig, DaemonConfig, LlamaServerConfig, McpConfig, McpServerConfig,
-    McpTransport, ModelConfig, PresenceConfig, RemoteConfig, ScreenshotBackend, SleepConfig,
-    SynthesisConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScreenshotConfig,
-    ToolsWriteConfig, VoiceConfig,
+    McpTransport, ModelConfig, PresenceConfig, ScreenshotBackend, SleepConfig, SynthesisConfig,
+    ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScreenshotConfig, ToolsWriteConfig,
+    VoiceConfig,
 };
 
 pub use assistd_ipc as ipc;
@@ -222,7 +222,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
             ScreenshotBackend::X11 => Some(ScreenshotBackendKind::X11),
             ScreenshotBackend::Wayland => Some(ScreenshotBackendKind::Wayland),
         },
-        timeout: Duration::from_secs(config.tools.screenshot.timeout_secs),
+        timeout: ScreenshotPolicyCfg::default().timeout,
     });
 
     let mut commands = CommandRegistry::new();

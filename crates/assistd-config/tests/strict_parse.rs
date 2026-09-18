@@ -22,7 +22,6 @@ fn every_section_may_be_declared_empty() {
 [voice.synthesis]
 [compositor]
 [sleep]
-[remote]
 [presence]
 [daemon]
 [tools]
@@ -33,13 +32,28 @@ fn every_section_may_be_declared_empty() {
 [memory]
 [embedding]
 [mcp]
-[timeouts]
 [tray]
 [tray.popup]
 [tray.popup.wake_on]
 ";
     let cfg: Config = toml::from_str(toml_src).expect("empty sections must parse");
     assert_eq!(cfg, Config::default());
+}
+
+/// `[remote]` was never read by anything and `[timeouts]` has moved off
+/// the TOML surface. Both have to fail loudly rather than be accepted and
+/// silently ignored.
+#[test]
+fn deleted_sections_are_rejected() {
+    for section in ["[remote]", "[timeouts]"] {
+        let err = toml::from_str::<Config>(section)
+            .err()
+            .unwrap_or_else(|| panic!("{section} must not parse"));
+        assert!(
+            err.to_string().contains(section.trim_matches(['[', ']'])),
+            "{err}"
+        );
+    }
 }
 
 #[test]

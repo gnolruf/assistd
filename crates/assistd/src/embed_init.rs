@@ -78,7 +78,13 @@ pub async fn init(
         return EmbeddingSubsystem::disabled(None);
     }
 
-    let svc = match EmbedService::start(config.embedding.clone(), shutdown_tx.subscribe()).await {
+    let svc = match EmbedService::start(
+        config.embedding.clone(),
+        Duration::from_secs(config.llama_server.ready_timeout_secs),
+        shutdown_tx.subscribe(),
+    )
+    .await
+    {
         Ok(svc) => svc,
         Err(e) => {
             tracing::warn!("embedding: failed to start ({e:#}); semantic search disabled this run");
@@ -90,7 +96,7 @@ pub async fn init(
         &config.embedding.host,
         config.embedding.port,
         config.embedding.model.clone(),
-        Duration::from_secs(config.embedding.request_timeout_secs),
+        assistd_embed::REQUEST_TIMEOUT,
     )
     .await
     {

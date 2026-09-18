@@ -7,9 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::defaults::{
-    DEFAULT_MEMORY_ENABLED, DEFAULT_MEMORY_RETENTION_DAYS, default_memory_db_path,
-};
+use crate::defaults::{DEFAULT_MEMORY_ENABLED, default_memory_db_path};
 
 /// `[memory]` section of `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -25,10 +23,6 @@ pub struct MemoryConfig {
     /// because `Config` round-trips through TOML and `PathBuf` is
     /// quirkier across that boundary; converted to a `Path` at use site.
     pub db_path: String,
-    /// Days to retain history. `0` means keep forever. The daemon does
-    /// not yet ship a sweeper that honours this; present so adding one
-    /// later doesn't need a schema-version bump.
-    pub retention_days: u32,
 }
 
 impl Default for MemoryConfig {
@@ -36,7 +30,6 @@ impl Default for MemoryConfig {
         Self {
             enabled: DEFAULT_MEMORY_ENABLED,
             db_path: default_memory_db_path(),
-            retention_days: DEFAULT_MEMORY_RETENTION_DAYS,
         }
     }
 }

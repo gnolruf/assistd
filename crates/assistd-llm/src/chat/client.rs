@@ -606,7 +606,7 @@ impl LlmBackend for LlamaChatClient {
                 }],
                 stream: true,
                 temperature: self.chat.temperature,
-                max_tokens: self.chat.max_summary_tokens,
+                max_tokens: self.chat.max_summary_tokens(),
                 top_p: self.chat.top_p,
                 top_k: self.chat.top_k,
                 min_p: self.chat.min_p,

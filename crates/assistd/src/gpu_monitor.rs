@@ -313,7 +313,6 @@ mod tests {
         SleepConfig {
             idle_to_drowsy_mins: 30,
             idle_to_sleep_mins: 120,
-            suspend: false,
             gpu_monitor_enabled: true,
             gpu_poll_secs: 5,
             gpu_vram_threshold_mb: 2048,
