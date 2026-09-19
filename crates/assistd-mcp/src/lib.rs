@@ -26,7 +26,6 @@ pub mod error;
 pub mod handle;
 pub mod health_route;
 pub mod jsonrpc;
-pub mod prompt;
 mod protocol;
 pub mod sse;
 pub mod stdio;

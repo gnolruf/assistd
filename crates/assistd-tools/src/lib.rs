@@ -17,7 +17,6 @@ pub mod memory;
 pub mod memory_tools;
 pub mod policy;
 pub mod presentation;
-pub mod prompt;
 pub mod run;
 pub mod vision;
 
