@@ -10,12 +10,14 @@ fn serializes_chat_request_with_expected_fields() {
                 content: Some(ContentBody::Text("you are helpful")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user",
                 content: Some(ContentBody::Text("hi")),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             },
         ],
         stream: true,
@@ -65,6 +67,7 @@ fn serializes_multimodal_content_as_parts_array() {
             ])),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }],
         stream: false,
         temperature: 0.5,
@@ -131,6 +134,7 @@ fn serializes_assistant_with_tool_calls_omits_content() {
             },
         }]),
         tool_call_id: None,
+        reasoning_content: None,
     };
     let json = serde_json::to_value(&msg).unwrap();
     assert_eq!(json["role"], "assistant");

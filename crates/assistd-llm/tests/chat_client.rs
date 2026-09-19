@@ -1241,3 +1241,103 @@ async fn complete_oneshot_uses_the_summary_budget() {
         "one-shot should use max_summary_tokens, not max_response_tokens"
     );
 }
+
+#[tokio::test]
+async fn transient_note_is_the_last_wire_message_for_exactly_one_step() {
+    let script = Script::new();
+    for reply in ["first", "second"] {
+        script
+            .push_stream(StreamResponse::Deltas(vec![reply.into()]))
+            .await;
+    }
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client.push_user("go".into(), Vec::new()).await.unwrap();
+    client
+        .set_transient_note("answer now".into())
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let (tx, mut rx) = mpsc::channel(32);
+        client.step(Vec::new(), tx).await.unwrap();
+        drain(&mut rx).await;
+    }
+
+    let captured = script.captured().await;
+    let first = captured[0].body["messages"].as_array().unwrap();
+    let last = first.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"], "answer now");
+
+    let second = captured[1].body["messages"].as_array().unwrap();
+    assert!(
+        second.iter().all(|m| m["content"] != "answer now"),
+        "note must not outlive the step it was set for: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_rides_along_with_its_tool_call_until_the_next_user_turn() {
+    let script = Script::new();
+    let mut frames = tool_call_frames("call-1", "run", &[r#"{"command":"ls"}"#]);
+    frames.insert(
+        1,
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"list it, \"}}]}\n\n".into(),
+    );
+    frames.insert(
+        2,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"<think>then read</think>\"}}]}\n\n".into(),
+    );
+    script.push_stream(StreamResponse::RawFrames(frames)).await;
+    for reply in ["done", "sure"] {
+        script
+            .push_stream(StreamResponse::Deltas(vec![reply.into()]))
+            .await;
+    }
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client.push_user("look".into(), Vec::new()).await.unwrap();
+    let (tx, mut rx) = mpsc::channel(32);
+    let outcome = client.step(Vec::new(), tx).await.unwrap();
+    assert!(matches!(outcome, StepOutcome::ToolCalls(_)));
+    drain(&mut rx).await;
+    client
+        .push_tool_results(vec![assistd_llm::ToolResultPayload {
+            call_id: "call-1".into(),
+            name: "run".into(),
+            content: "a.txt".into(),
+            attachments: Vec::new(),
+        }])
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel(32);
+    client.step(Vec::new(), tx).await.unwrap();
+    drain(&mut rx).await;
+
+    client.push_user("thanks".into(), Vec::new()).await.unwrap();
+    let (tx, mut rx) = mpsc::channel(32);
+    client.step(Vec::new(), tx).await.unwrap();
+    drain(&mut rx).await;
+
+    let captured = script.captured().await;
+    let calling = |request: &CapturedRequest| {
+        request.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m.get("tool_calls").is_some())
+            .cloned()
+            .expect("assistant tool-call message")
+    };
+    assert_eq!(
+        calling(&captured[1])["reasoning_content"],
+        "list it, then read",
+        "both reasoning channels must reach the next step of the loop"
+    );
+    assert!(
+        calling(&captured[2]).get("reasoning_content").is_none(),
+        "a new user turn ends the loop the reasoning belonged to"
+    );
+}

@@ -70,6 +70,11 @@ pub struct ChatMessage<'a> {
     /// tool call this message answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<&'a str>,
+    /// The reasoning that led to an assistant message's `tool_calls`.
+    /// Reasoning-model chat templates render it back inside the think
+    /// block of each step of the tool loop in progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<&'a str>,
 }
 
 /// Wire shape of a message's `content` field.

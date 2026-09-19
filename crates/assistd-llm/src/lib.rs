@@ -205,6 +205,13 @@ pub trait LlmBackend: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Stash a one-shot instruction rendered by the next [`Self::step`]
+    /// as the final message of the conversation, then discarded once
+    /// that request commits.
+    async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
+        Ok(())
+    }
+
     /// Replace the in-memory conversation with `entries`, preserving the
     /// static system prompt.
     async fn replace_history(&self, _entries: Vec<HistoryEntry>) -> LlmResult<()> {
