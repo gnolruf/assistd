@@ -66,9 +66,9 @@ port = 8385
 [chat]
 # System prompt injected as the first message of every request. Leave empty
 # (system_prompt = "") to skip system-prompt injection entirely.
-# Do not enumerate tool names here: the daemon appends the live native and
-# MCP tool listings at startup, so a hand-written roster only drifts from
-# the registry.
+# Do not enumerate tool names here: every request already carries the live
+# native and MCP tool schemas, so a hand-written roster only duplicates them
+# and drifts from the registry.
 system_prompt = "You are assistd, a concise local desktop assistant running on a Linux workstation. When a question is about this machine or its files, prefer calling a tool over guessing. Answer precisely and in a conversational tone."
 # Approximate token budget for the full request (system + history). Must be
 # strictly less than model.context_length. When exceeded, older messages are

@@ -45,8 +45,8 @@ pub const DEFAULT_CHAT_TEMPERATURE: f32 = 0.7;
 pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: NonZeroU32 = nz32(1024);
 pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(120);
 pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
-/// Role-and-voice prose only. The tool listing is appended at daemon
-/// startup from the live registry, so this must not name tools.
+/// Role-and-voice prose only. Tools reach the model through each
+/// request's `tools` array, so this must not name them.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local desktop assistant \
      running on a Linux workstation. When a question is about this machine or its files, \
      prefer calling a tool over guessing. Answer precisely and in a conversational tone.";

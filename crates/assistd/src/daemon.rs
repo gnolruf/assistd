@@ -150,10 +150,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         overflow_dir.display()
     );
 
-    let mut chat_cfg = config.chat.clone();
-    chat_cfg.system_prompt = build_system_prompt(&config, &tools);
     let chat = LlamaChatClient::new(
-        &chat_cfg,
+        &config.chat,
         &config.llama_server,
         &config.model,
         &config.timeouts,
@@ -301,25 +299,6 @@ fn spawn_hotkeys(
     )
 }
 
-/// The configured system prompt followed by the native and MCP tool
-/// listings.
-fn build_system_prompt(config: &Config, tools: &assistd_core::ToolRegistry) -> String {
-    let (native_refs, mcp_refs): (Vec<&dyn assistd_tools::Tool>, Vec<&dyn assistd_tools::Tool>) =
-        tools
-            .iter_tools()
-            .partition(|t| !t.name().starts_with(assistd_tools::MCP_TOOL_NAME_PREFIX));
-    let mut prompt = config.chat.system_prompt.clone();
-    append_prompt_block(
-        &mut prompt,
-        &assistd_tools::prompt::format_tool_listing(&native_refs),
-    );
-    append_prompt_block(
-        &mut prompt,
-        &assistd_mcp::prompt::format_mcp_listing(&mcp_refs),
-    );
-    prompt
-}
-
 fn spawn_signal_handler(shutdown_tx: &watch::Sender<bool>) {
     let signal_tx = shutdown_tx.clone();
     assistd_core::spawn_supervised(
@@ -355,16 +334,6 @@ async fn replay_history(chat: &dyn assistd_llm::LlmBackend, rows: &[assistd_memo
     } else {
         info!("memory: resumed {count} message(s) from prior branch");
     }
-}
-
-fn append_prompt_block(prompt: &mut String, block: &str) {
-    if block.is_empty() {
-        return;
-    }
-    if !prompt.is_empty() {
-        prompt.push_str("\n\n");
-    }
-    prompt.push_str(block);
 }
 
 struct DaemonShutdown {
