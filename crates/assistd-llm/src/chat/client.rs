@@ -107,7 +107,10 @@ impl LlamaChatClient {
     ) -> StreamOutcome {
         if self.looks_like_server_crash(pid_at_request) {
             let pre_emit = !accum.has_output();
-            return StreamOutcome::ServerRestart { accum, pre_emit };
+            return StreamOutcome::ServerRestart {
+                accum: Box::new(accum),
+                pre_emit,
+            };
         }
         if accum.has_output() {
             warn!(
@@ -116,7 +119,7 @@ impl LlamaChatClient {
                 accum.text.len(),
                 accum.tool_calls.len()
             );
-            StreamOutcome::PartialAfterEmit(accum)
+            StreamOutcome::PartialAfterEmit(Box::new(accum))
         } else {
             StreamOutcome::PreEmitError(err)
         }
@@ -169,6 +172,7 @@ impl LlamaChatClient {
         }
         match accum.splitter.finish() {
             Some(Segment::Reasoning(text)) => {
+                accum.reasoning.push_str(&text);
                 let _ = tx.send(LlmEvent::ReasoningDelta { text }).await;
             }
             Some(Segment::Visible(text)) if !text.is_empty() => {
@@ -178,7 +182,7 @@ impl LlamaChatClient {
             }
             _ => {}
         }
-        StreamOutcome::Ok(accum)
+        StreamOutcome::Ok(Box::new(accum))
     }
 
     /// POST the request and return the response once it is known to be
@@ -210,7 +214,7 @@ impl LlamaChatClient {
         if self.looks_like_server_crash(pid_at_request) {
             // A 200 that raced the supervisor's teardown.
             return Err(StreamOutcome::ServerRestart {
-                accum: StreamAccum::default(),
+                accum: Box::default(),
                 pre_emit: true,
             });
         }
@@ -303,7 +307,7 @@ impl LlamaChatClient {
         if let Some(text) = choice.delta.reasoning_content
             && !text.is_empty()
         {
-            forward(tx, LlmEvent::ReasoningDelta { text }, accum).await?;
+            forward_reasoning(tx, text, accum).await?;
         }
         if let Some(text) = choice.delta.content
             && !text.is_empty()
@@ -323,7 +327,7 @@ async fn forward_segment(
     accum: &mut StreamAccum,
 ) -> Result<(), StreamOutcome> {
     match segment {
-        Segment::Reasoning(text) => forward(tx, LlmEvent::ReasoningDelta { text }, accum).await,
+        Segment::Reasoning(text) => forward_reasoning(tx, text, accum).await,
         Segment::Visible(text) => {
             if text.is_empty() {
                 return Ok(());
@@ -342,6 +346,15 @@ async fn forward_segment(
     }
 }
 
+async fn forward_reasoning(
+    tx: &mpsc::Sender<LlmEvent>,
+    text: String,
+    accum: &mut StreamAccum,
+) -> Result<(), StreamOutcome> {
+    accum.reasoning.push_str(&text);
+    forward(tx, LlmEvent::ReasoningDelta { text }, accum).await
+}
+
 /// Send `event`, or hand back everything accumulated so far when the
 /// consumer has gone away.
 async fn forward(
@@ -351,7 +364,7 @@ async fn forward(
 ) -> Result<(), StreamOutcome> {
     if tx.send(event).await.is_err() {
         debug!(target: "assistd::chat", "client disconnected mid-stream");
-        return Err(StreamOutcome::ClientDisconnected(take(accum)));
+        return Err(StreamOutcome::ClientDisconnected(Box::new(take(accum))));
     }
     Ok(())
 }
@@ -465,10 +478,11 @@ impl LlmBackend for LlamaChatClient {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)
             | StreamOutcome::ClientDisconnected(accum) => {
-                let result = commit_step(&mut conv, accum);
-                // `PreEmitError` leaves the transient in place so a retry
-                // sees the same injected block.
+                let result = commit_step(&mut conv, *accum);
+                // `PreEmitError` leaves the transients in place so a retry
+                // sees the same injected blocks.
                 let _ = conv.consume_transient_context();
+                let _ = conv.consume_transient_note();
                 result
             }
             StreamOutcome::PreEmitError(e) => Err(LlmError::Chat(e)),
@@ -492,6 +506,12 @@ impl LlmBackend for LlamaChatClient {
         Ok(())
     }
 
+    async fn set_transient_note(&self, text: String) -> LlmResult<()> {
+        let mut conv = self.conv.lock().await;
+        conv.set_transient_note(text);
+        Ok(())
+    }
+
     async fn replace_history(&self, entries: Vec<HistoryEntry>) -> LlmResult<()> {
         let mut msgs = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -502,6 +522,7 @@ impl LlmBackend for LlamaChatClient {
                     attachments: Vec::new(),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
+                    reasoning: String::new(),
                 }),
                 HistoryRole::User => msgs.push(Message {
                     role: Role::User,
@@ -509,6 +530,7 @@ impl LlmBackend for LlamaChatClient {
                     attachments: Vec::new(),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
+                    reasoning: String::new(),
                 }),
                 HistoryRole::Assistant => {
                     let calls = parse_tool_calls(&entry.tool_calls_json)?;
@@ -518,6 +540,7 @@ impl LlmBackend for LlamaChatClient {
                         attachments: Vec::new(),
                         tool_calls: calls,
                         tool_call_id: None,
+                        reasoning: String::new(),
                     });
                 }
                 // A row with no call id was written by the vision path;
@@ -530,6 +553,7 @@ impl LlmBackend for LlamaChatClient {
                         attachments: Vec::new(),
                         tool_calls: Vec::new(),
                         tool_call_id: Some(call_id),
+                        reasoning: String::new(),
                     }),
                     None => {
                         let name = entry.tool_name.unwrap_or_default();
@@ -539,6 +563,7 @@ impl LlmBackend for LlamaChatClient {
                             attachments: Vec::new(),
                             tool_calls: Vec::new(),
                             tool_call_id: None,
+                            reasoning: String::new(),
                         });
                     }
                 },
@@ -561,6 +586,7 @@ impl LlmBackend for LlamaChatClient {
                 content: Some(wire::ContentBody::Text(prompt.as_str())),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }]);
             payload.max_tokens = self.chat.max_summary_tokens();
             payload.chat_template_kwargs = match thinking {
@@ -654,9 +680,11 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
         );
     }
     let narration = std::mem::take(&mut accum.text);
+    let reasoning = std::mem::take(&mut accum.reasoning);
     let (records, parsed) = accum.finalize_tool_calls()?;
     conv.push_assistant_with_tool_calls(
         (!narration.trim().is_empty()).then_some(narration),
+        reasoning,
         records,
     );
     Ok(StepOutcome::ToolCalls(parsed))
@@ -679,12 +707,14 @@ impl Summarizer for LlamaChatClient {
                     content: Some(wire::ContentBody::Text(SUMMARY_SYSTEM_PROMPT)),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 },
                 wire::ChatMessage {
                     role: "user",
                     content: Some(wire::ContentBody::Text(&dialogue)),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 },
             ],
             stream: false,
@@ -724,6 +754,7 @@ impl Summarizer for LlamaChatClient {
 #[derive(Debug, Default)]
 struct StreamAccum {
     text: String,
+    reasoning: String,
     /// Keyed by the model's `index` so finalization keeps emission order.
     tool_calls: BTreeMap<u32, ToolCallBuilder>,
     finish_reason: Option<String>,
@@ -799,16 +830,19 @@ struct ToolCallBuilder {
 
 enum StreamOutcome {
     /// Stream completed cleanly with a `[DONE]` marker (or EOF after deltas).
-    Ok(StreamAccum),
+    Ok(Box<StreamAccum>),
     /// Stream errored after we'd already forwarded deltas; return what we have.
-    PartialAfterEmit(StreamAccum),
+    PartialAfterEmit(Box<StreamAccum>),
     /// The consumer dropped the receiver mid-stream; stop quietly.
-    ClientDisconnected(StreamAccum),
+    ClientDisconnected(Box<StreamAccum>),
     /// Stream errored before any deltas were forwarded; propagate as `Err`.
     PreEmitError(ChatClientError),
     /// The failure coincided with a supervisor restart. `pre_emit` is
     /// true when nothing had been streamed to the consumer yet.
-    ServerRestart { accum: StreamAccum, pre_emit: bool },
+    ServerRestart {
+        accum: Box<StreamAccum>,
+        pre_emit: bool,
+    },
 }
 
 async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> String {

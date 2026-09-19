@@ -29,7 +29,7 @@ use tracing::{debug, info, instrument, warn};
 const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 
 /// Consecutive identical tool calls after which the model is treated
-/// as stuck and its tools are withdrawn.
+/// as stuck and told to stop calling tools.
 const DUPLICATE_CALL_LIMIT: usize = 3;
 
 /// Ceiling on tool-calling steps per turn. Only bounds a turn that keeps
@@ -287,14 +287,13 @@ impl Agent {
                 ),
             ))
             .await;
-        if let Err(e) = self.backend.set_transient_context(why.model_note()).await {
+        if let Err(e) = self.backend.set_transient_note(why.model_note()).await {
             warn!(
                 target: "assistd::agent",
                 error = %e,
-                "set_transient_context failed; answering without the note"
+                "set_transient_note failed; answering without the note"
             );
         }
-        turn.schemas = Vec::new();
         turn.tools_withdrawn = true;
     }
 }
@@ -429,8 +428,11 @@ fn status_event(
     }
 }
 
-/// Why the loop stopped offering tools to the model for the rest of
-/// the turn.
+/// Why the loop stopped accepting tool calls for the rest of the turn.
+///
+/// The schemas stay in the request after withdrawal. Without them the
+/// server stops parsing tool-call markup, so a model that calls a tool
+/// anyway would stream the raw markup to the user as its answer.
 #[derive(Debug, Clone, Copy)]
 enum ToolBudgetExhausted {
     Repeating,

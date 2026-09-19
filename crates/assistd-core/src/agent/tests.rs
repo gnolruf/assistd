@@ -20,8 +20,7 @@ struct MockBackend {
     /// Optional artificial delay inside `step` so cancellation
     /// tests can fire while the step is still pending.
     slow_step: StdMutex<Option<std::time::Duration>>,
-    /// Number of tool schemas offered on each completed `step`, so
-    /// tests can see when the loop withdrew tools.
+    /// Number of tool schemas offered on each completed `step`.
     step_tool_counts: StdMutex<Vec<usize>>,
     transient_notes: StdMutex<Vec<String>>,
 }
@@ -100,7 +99,7 @@ impl LlmBackend for MockBackend {
         Ok(outcome)
     }
 
-    async fn set_transient_context(&self, text: String) -> assistd_llm::LlmResult<()> {
+    async fn set_transient_note(&self, text: String) -> assistd_llm::LlmResult<()> {
         self.transient_notes.lock().push(text);
         Ok(())
     }
@@ -253,7 +252,7 @@ fn withdrawn_status(events: &[LlmEvent]) -> bool {
 async fn repeated_identical_calls_withdraw_tools_then_answer() {
     // Same command every step; once the queue drains the mock
     // answers with text, standing in for a model that honours the
-    // withdrawn tool schema.
+    // withdrawal note.
     let outcomes: Vec<StepOutcome> = (0..DUPLICATE_CALL_LIMIT)
         .map(|i| StepOutcome::ToolCalls(vec![call(&format!("c-{i}"), "echo same")]))
         .collect();
@@ -268,9 +267,10 @@ async fn repeated_identical_calls_withdraw_tools_then_answer() {
 
     assert!(withdrawn_status(&events), "expected tools_withdrawn status");
     assert!(matches!(events.last(), Some(LlmEvent::Done)));
-    // Three dispatched duplicates, then one tool-less answer step.
+    // Three dispatched duplicates, then one answer step. The schema is
+    // still offered on it so a disobedient call is parsed, not leaked.
     assert_eq!(backend.pushed_results.lock().len(), DUPLICATE_CALL_LIMIT);
-    assert_eq!(*backend.step_tool_counts.lock(), vec![1, 1, 1, 0]);
+    assert_eq!(*backend.step_tool_counts.lock(), vec![1, 1, 1, 1]);
     let notes = backend.transient_notes.lock();
     assert_eq!(notes.len(), 1);
     assert!(
@@ -315,7 +315,7 @@ async fn step_ceiling_withdraws_tools_then_answer() {
     assert!(matches!(events.last(), Some(LlmEvent::Done)));
     let counts = backend.step_tool_counts.lock();
     assert_eq!(counts.len(), MAX_TOOL_STEPS as usize + 1);
-    assert_eq!(counts.last(), Some(&0));
+    assert_eq!(counts.last(), Some(&1));
     let notes = backend.transient_notes.lock();
     assert!(
         notes[0].contains("ceiling"),

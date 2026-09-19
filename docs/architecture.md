@@ -142,8 +142,11 @@ One per-query state machine, single-threaded per turn. The loop:
    back as a user message tagged `[tool:<name>]`.
 5. Loop back to step 2 until the model emits text. If the model
    repeats the same call several times in a row, or the turn runs
-   past a hard-coded step ceiling, the loop withdraws the tool schema
-   and lets the model answer from what it has already gathered.
+   past a hard-coded step ceiling, the loop tells the model, in a
+   one-shot message at the end of the conversation, to stop calling
+   tools and answer from what it has already gathered. The tool schema
+   stays in the request so a call made anyway is still parsed (and ends
+   the turn) rather than streamed to the user as raw markup.
 
 The loop does not parallelize tool calls. Tools execute serially, and
 their results land in the conversation in the order the model

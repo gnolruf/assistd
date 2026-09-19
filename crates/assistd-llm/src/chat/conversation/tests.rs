@@ -118,6 +118,76 @@ fn render_is_idempotent_until_consumed() {
 }
 
 #[test]
+fn reasoning_is_sent_with_its_tool_call_and_dropped_by_the_next_user_turn() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("look".into());
+    c.push_assistant_with_tool_calls(None, "list first".into(), vec![mk_call("c-1", "{}")]);
+    c.push_tool_result("c-1".into(), "out".into());
+
+    let reasoning_on_wire = |c: &Conversation| {
+        c.as_wire_messages()
+            .iter()
+            .find(|m| m.tool_calls.is_some())
+            .and_then(|m| m.reasoning_content.map(str::to_string))
+    };
+    assert_eq!(reasoning_on_wire(&c).as_deref(), Some("list first"));
+    let in_loop = c.approx_total_tokens();
+
+    c.push_assistant("done".into());
+    c.push_user("thanks".into());
+    assert_eq!(reasoning_on_wire(&c), None);
+    assert!(
+        c.approx_total_tokens() < in_loop + approx_tokens("donethanks") + 8,
+        "cleared reasoning must stop counting toward the budget"
+    );
+}
+
+#[test]
+fn transient_note_renders_as_final_user_message_for_one_request() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("hello".into());
+    c.push_assistant_with_tool_calls(
+        None,
+        String::new(),
+        vec![ToolCallRecord {
+            id: "c-1".into(),
+            name: "run".into(),
+            arguments: "{}".into(),
+        }],
+    );
+    c.push_tool_result("c-1".into(), "out".into());
+    c.set_transient_note("stop calling tools".into());
+
+    let wire = c.as_wire_messages();
+    let last = wire.last().expect("messages");
+    assert_eq!(last.role, "user");
+    match &last.content {
+        Some(wire::ContentBody::Text(t)) => assert_eq!(*t, "stop calling tools"),
+        other => panic!("expected text body on transient note, got {other:?}"),
+    }
+    let with_note = wire.len();
+
+    assert_eq!(
+        c.consume_transient_note().as_deref(),
+        Some("stop calling tools")
+    );
+    assert_eq!(c.as_wire_messages().len(), with_note - 1);
+    assert_eq!(c.as_wire_messages().last().map(|m| m.role), Some("tool"));
+}
+
+#[test]
+fn transient_note_counts_toward_budget_and_is_cleared_with_history() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("hello".into());
+    let baseline = c.approx_total_tokens();
+    c.set_transient_note("a".repeat(100));
+    assert!(c.approx_total_tokens() > baseline);
+
+    c.replace_messages(Vec::new());
+    assert_eq!(c.consume_transient_note(), None);
+}
+
+#[test]
 fn approx_total_tokens_includes_transient_context() {
     let mut c = Conversation::new("sys".into());
     let baseline = c.approx_total_tokens();
@@ -141,6 +211,7 @@ fn replace_messages_swaps_history_and_clears_transient() {
             attachments: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning: String::new(),
         },
         Message {
             role: Role::Assistant,
@@ -148,6 +219,7 @@ fn replace_messages_swaps_history_and_clears_transient() {
             attachments: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning: String::new(),
         },
     ]);
     let wire = c.as_wire_messages();
@@ -183,6 +255,7 @@ fn truncate_to_last_real_user_skips_tool_results_to_real_user() {
     // Tool-call pair, ending with a tool-result user message.
     c.push_assistant_with_tool_calls(
         None,
+        String::new(),
         vec![ToolCallRecord {
             id: "c-1".into(),
             name: "run".into(),
@@ -451,7 +524,11 @@ fn mk_call(id: &str, args: &str) -> ToolCallRecord {
 fn push_assistant_with_tool_calls_records_calls() {
     let mut c = Conversation::new(String::new());
     c.push_user("do it".into());
-    c.push_assistant_with_tool_calls(None, vec![mk_call("call-1", r#"{"command":"ls"}"#)]);
+    c.push_assistant_with_tool_calls(
+        None,
+        String::new(),
+        vec![mk_call("call-1", r#"{"command":"ls"}"#)],
+    );
     let last = c.messages.last().unwrap();
     assert_eq!(last.role, Role::Assistant);
     assert_eq!(last.content, "");
@@ -465,7 +542,11 @@ fn push_assistant_with_tool_calls_records_calls() {
 fn as_wire_messages_renders_tool_calls_with_content_absent() {
     let mut c = Conversation::new(String::new());
     c.push_user("do it".into());
-    c.push_assistant_with_tool_calls(None, vec![mk_call("call-1", r#"{"command":"ls"}"#)]);
+    c.push_assistant_with_tool_calls(
+        None,
+        String::new(),
+        vec![mk_call("call-1", r#"{"command":"ls"}"#)],
+    );
     let wire = c.as_wire_messages();
     assert_eq!(wire.len(), 2);
     assert_eq!(wire[1].role, "assistant");
@@ -493,6 +574,7 @@ fn as_wire_messages_keeps_narration_alongside_tool_calls() {
     c.push_user("do it".into());
     c.push_assistant_with_tool_calls(
         Some("Got it, listing the directory.".into()),
+        String::new(),
         vec![mk_call("call-1", r#"{"command":"ls"}"#)],
     );
     let wire = c.as_wire_messages();
@@ -505,7 +587,11 @@ fn as_wire_messages_keeps_narration_alongside_tool_calls() {
 fn tool_results_render_on_the_tool_role_with_their_call_id() {
     let mut c = Conversation::new(String::new());
     c.push_user("do it".into());
-    c.push_assistant_with_tool_calls(None, vec![mk_call("call-1", r#"{"command":"ls"}"#)]);
+    c.push_assistant_with_tool_calls(
+        None,
+        String::new(),
+        vec![mk_call("call-1", r#"{"command":"ls"}"#)],
+    );
     c.push_tool_result("call-1".into(), "a\nb\n[exit:0 | 1ms]".into());
     let wire = c.as_wire_messages();
     let json = serde_json::to_value(&wire[2]).unwrap();
@@ -519,7 +605,11 @@ fn tool_results_render_on_the_tool_role_with_their_call_id() {
 fn dropping_a_tool_call_message_drops_all_of_its_results() {
     let mut c = Conversation::new("sys".into());
     c.push_user("first question".into());
-    c.push_assistant_with_tool_calls(None, vec![mk_call("c-1", "{}"), mk_call("c-2", "{}")]);
+    c.push_assistant_with_tool_calls(
+        None,
+        String::new(),
+        vec![mk_call("c-1", "{}"), mk_call("c-2", "{}")],
+    );
     c.push_tool_result("c-1".into(), "one".into());
     c.push_tool_result("c-2".into(), "two".into());
     c.push_assistant("answer".into());
@@ -546,7 +636,11 @@ fn tool_results_do_not_count_as_preserved_turns() {
     let mut c = Conversation::new("sys".into());
     c.push_user("real question with enough length to count".into());
     for i in 0..6 {
-        c.push_assistant_with_tool_calls(None, vec![mk_call(&format!("c-{i}"), "{}")]);
+        c.push_assistant_with_tool_calls(
+            None,
+            String::new(),
+            vec![mk_call(&format!("c-{i}"), "{}")],
+        );
         c.push_tool_result(format!("c-{i}"), format!("output {i} with padding"));
     }
     c.push_assistant("done".into());
@@ -569,7 +663,7 @@ fn tool_results_do_not_count_as_preserved_turns() {
 fn truncate_to_last_real_user_skips_tool_role_results() {
     let mut c = Conversation::new("sys".into());
     c.push_user("real q".into());
-    c.push_assistant_with_tool_calls(None, vec![mk_call("c-1", "{}")]);
+    c.push_assistant_with_tool_calls(None, String::new(), vec![mk_call("c-1", "{}")]);
     c.push_tool_result("c-1".into(), "output".into());
     c.push_assistant("final".into());
     let removed = c.truncate_to_last_real_user();
@@ -587,6 +681,7 @@ fn tool_calls_contribute_to_token_budget() {
     c2.push_user("q".into());
     c2.push_assistant_with_tool_calls(
         None,
+        String::new(),
         vec![mk_call(
             "call-1",
             r#"{"command":"a very long command string here to make the call nontrivial"}"#,
@@ -604,7 +699,11 @@ fn truncate_drops_tool_call_pair_atomically() {
     let mut c = Conversation::new(String::new());
     // Old messages we'll summarize/truncate:
     c.push_user("old q".into());
-    c.push_assistant_with_tool_calls(None, vec![mk_call("c-1", r#"{"command":"ls"}"#)]);
+    c.push_assistant_with_tool_calls(
+        None,
+        String::new(),
+        vec![mk_call("c-1", r#"{"command":"ls"}"#)],
+    );
     c.push_user_with_attachments("[tool:run]\nsome output\n".into(), Vec::new());
     c.push_assistant("old reply".into());
     // The latest turn (kept by preserve):
@@ -650,7 +749,11 @@ async fn summarize_preserves_tool_call_pair_boundary() {
         ));
     }
     // A tool-call pair in the recent tail.
-    c.push_assistant_with_tool_calls(None, vec![mk_call("c-99", r#"{"command":"ls"}"#)]);
+    c.push_assistant_with_tool_calls(
+        None,
+        String::new(),
+        vec![mk_call("c-99", r#"{"command":"ls"}"#)],
+    );
     c.push_user_with_attachments("[tool:run]\nfoo\nbar\n".into(), Vec::new());
     c.push_user("latest".into());
 

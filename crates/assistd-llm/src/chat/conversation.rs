@@ -70,6 +70,11 @@ pub struct Message {
     /// Set only on [`Role::Tool`] messages: the id of the assistant tool
     /// call this message answers.
     pub tool_call_id: Option<String>,
+    /// The reasoning behind an assistant message's `tool_calls`. Held
+    /// only while the tool loop it belongs to is in progress: the next
+    /// user turn clears it, because chat templates stop rendering it
+    /// from that point on.
+    pub reasoning: String,
 }
 
 /// Condenses a stretch of dialogue into a summary when the conversation
@@ -93,6 +98,10 @@ pub trait Summarizer: Send + Sync {
 ///   right after `system_prompt` and lives for one request; the caller
 ///   clears it with [`Self::consume_transient_context`] once that
 ///   request commits.
+/// - `transient_note`, if `Some`, renders as a final user message and
+///   has the same one-request lifetime. The tail is where a mid-turn
+///   instruction has to go: a model deep in a tool loop follows what it
+///   read last, not a system prompt thousands of tokens upstream.
 /// - `messages` never holds the system prompt itself; it holds the
 ///   turns plus at most one summary message (role `System`, content
 ///   prefixed with `SUMMARY_PREFIX`) at index 0.
@@ -100,6 +109,7 @@ pub trait Summarizer: Send + Sync {
 pub struct Conversation {
     system_prompt: String,
     transient_context: Option<String>,
+    transient_note: Option<String>,
     messages: Vec<Message>,
 }
 
@@ -109,6 +119,7 @@ impl Conversation {
         Self {
             system_prompt,
             transient_context: None,
+            transient_note: None,
             messages: Vec::new(),
         }
     }
@@ -124,6 +135,17 @@ impl Conversation {
         self.transient_context.take()
     }
 
+    /// Set a one-shot note rendered as the final user message,
+    /// replacing any pending one.
+    pub fn set_transient_note(&mut self, text: String) {
+        self.transient_note = Some(text);
+    }
+
+    /// Take the pending transient note, leaving `None` behind.
+    pub fn consume_transient_note(&mut self) -> Option<String> {
+        self.transient_note.take()
+    }
+
     #[cfg(test)]
     pub fn transient_context(&self) -> Option<&str> {
         self.transient_context.as_deref()
@@ -131,12 +153,14 @@ impl Conversation {
 
     /// Appends a plain-text user turn.
     pub fn push_user(&mut self, content: String) {
+        self.end_tool_loop();
         self.messages.push(Message {
             role: Role::User,
             content,
             attachments: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning: String::new(),
         });
     }
 
@@ -150,6 +174,7 @@ impl Conversation {
             attachments,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning: String::new(),
         });
     }
 
@@ -161,15 +186,21 @@ impl Conversation {
             attachments: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning: String::new(),
         });
     }
 
     /// Append an assistant turn that requested tool calls. `content` is
     /// the narration streamed before the call, kept so the model does not
-    /// repeat itself on the next step. `calls` must be non-empty.
+    /// repeat itself on the next step. `reasoning` is what the model
+    /// thought before calling; a reasoning model that is shown its earlier
+    /// steps with the thinking stripped out starts skipping the thinking
+    /// itself, and then ends turns it had just said it would continue.
+    /// `calls` must be non-empty.
     pub fn push_assistant_with_tool_calls(
         &mut self,
         content: Option<String>,
+        reasoning: String,
         calls: Vec<ToolCallRecord>,
     ) {
         debug_assert!(
@@ -182,6 +213,7 @@ impl Conversation {
             attachments: Vec::new(),
             tool_calls: calls,
             tool_call_id: None,
+            reasoning,
         });
     }
 
@@ -197,7 +229,14 @@ impl Conversation {
             attachments: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id),
+            reasoning: String::new(),
         });
+    }
+
+    fn end_tool_loop(&mut self) {
+        for message in &mut self.messages {
+            message.reasoning.clear();
+        }
     }
 
     /// Drop the most recent message if and only if it is a user message,
@@ -210,16 +249,17 @@ impl Conversation {
     }
 
     /// Replace the message list wholesale and clear any pending
-    /// transient context.
+    /// transient context or note.
     pub fn replace_messages(&mut self, msgs: Vec<Message>) {
         self.messages = msgs;
         self.transient_context = None;
+        self.transient_note = None;
     }
 
     /// Drop everything from the latest real user message onward, where
     /// a tool result riding on the user role does not count as one.
-    /// Also clears `transient_context`. Returns the number of removed
-    /// entries; 0 when no real user message exists.
+    /// Also clears `transient_context` and `transient_note`. Returns the
+    /// number of removed entries; 0 when no real user message exists.
     pub fn truncate_to_last_real_user(&mut self) -> usize {
         let mut last_real_user = None;
         for (i, m) in self.messages.iter().enumerate().rev() {
@@ -234,6 +274,7 @@ impl Conversation {
         let removed = self.messages.len() - idx;
         self.messages.truncate(idx);
         self.transient_context = None;
+        self.transient_note = None;
         removed
     }
 
@@ -245,9 +286,10 @@ impl Conversation {
                 TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(&self.system_prompt)),
             );
         }
-        if let Some(ctx) = &self.transient_context {
-            total = total
-                .saturating_add(TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(ctx)));
+        for transient in self.transient_context.iter().chain(&self.transient_note) {
+            total = total.saturating_add(
+                TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(transient)),
+            );
         }
         for m in &self.messages {
             total = total.saturating_add(approx_message_tokens(m));
@@ -259,13 +301,14 @@ impl Conversation {
     /// stay plain strings for compatibility with non-vision models;
     /// messages with attachments become multimodal `content` arrays.
     pub fn as_wire_messages(&self) -> Vec<wire::ChatMessage<'_>> {
-        let mut out = Vec::with_capacity(self.messages.len() + 2);
+        let mut out = Vec::with_capacity(self.messages.len() + 3);
         if !self.system_prompt.is_empty() {
             out.push(wire::ChatMessage {
                 role: Role::System.as_wire(),
                 content: Some(wire::ContentBody::Text(&self.system_prompt)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
         if let Some(ctx) = &self.transient_context {
@@ -274,6 +317,7 @@ impl Conversation {
                 content: Some(wire::ContentBody::Text(ctx)),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
         for message in &self.messages {
@@ -299,6 +343,8 @@ impl Conversation {
                         .then(|| wire::ContentBody::Text(&message.content)),
                     tool_calls: Some(specs),
                     tool_call_id: None,
+                    reasoning_content: (!message.reasoning.is_empty())
+                        .then_some(message.reasoning.as_str()),
                 });
                 continue;
             }
@@ -308,6 +354,7 @@ impl Conversation {
                     content: Some(wire::ContentBody::Text(&message.content)),
                     tool_calls: None,
                     tool_call_id: message.tool_call_id.as_deref(),
+                    reasoning_content: None,
                 });
                 continue;
             }
@@ -328,6 +375,16 @@ impl Conversation {
                 content: Some(content),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
+        if let Some(note) = &self.transient_note {
+            out.push(wire::ChatMessage {
+                role: Role::User.as_wire(),
+                content: Some(wire::ContentBody::Text(note)),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
             });
         }
         out
@@ -393,6 +450,7 @@ impl Conversation {
             attachments: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning: String::new(),
         };
 
         let drop_end = preserve_from;
@@ -550,6 +608,7 @@ fn approx_message_tokens(m: &Message) -> u32 {
     let tool_call_cost = approx_tokens_bytes(tool_call_bytes);
     TOKENS_PER_MESSAGE_OVERHEAD
         .saturating_add(approx_tokens(&m.content))
+        .saturating_add(approx_tokens(&m.reasoning))
         .saturating_add(image_cost)
         .saturating_add(tool_call_cost)
 }
