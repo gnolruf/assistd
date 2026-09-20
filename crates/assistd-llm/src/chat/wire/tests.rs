@@ -7,14 +7,14 @@ fn serializes_chat_request_with_expected_fields() {
         messages: vec![
             ChatMessage {
                 role: "system",
-                content: Some(ContentBody::Text("you are helpful")),
+                content: Some(ContentBody::Text("you are helpful".into())),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
             },
             ChatMessage {
                 role: "user",
-                content: Some(ContentBody::Text("hi")),
+                content: Some(ContentBody::Text("hi".into())),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
@@ -57,7 +57,7 @@ fn serializes_multimodal_content_as_parts_array() {
             role: "user",
             content: Some(ContentBody::Parts(vec![
                 ContentPart::Text {
-                    text: "what's in this image?",
+                    text: "what's in this image?".into(),
                 },
                 ContentPart::ImageUrl {
                     image_url: ImageUrl {

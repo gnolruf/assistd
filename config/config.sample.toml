@@ -413,7 +413,7 @@ hotkey = "Super+Escape"
 # (port distinct from llama_server.port) that serves /v1/embeddings.
 # Independent of the chat router, so embeddings keep working when chat
 # is Drowsy/Sleeping. Each user query auto-injects the top-K most
-# similar past chunks as a "Relevant past context: …" system message,
+# similar past chunks as a "Relevant past context: …" block on the turn,
 # and the LLM gets the `recall` (saved facts) and `reminisce` (past
 # conversation) tools, both backed by semantic search.
 #
@@ -442,7 +442,7 @@ hotkey = "Super+Escape"
 # auto-injection and the reminisce tool's default.
 # top_k = 5
 # When true, every user query auto-injects the top-K conversation
-# chunks as a "Relevant past context: …" system message. Set false
+# chunks as a "Relevant past context: …" block on the turn. Set false
 # to require explicit `reminisce` tool invocations only.
 # auto_inject = true
 

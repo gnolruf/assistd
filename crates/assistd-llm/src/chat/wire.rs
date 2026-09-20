@@ -13,11 +13,13 @@
 //! templates reject `"content": null` but accept an omitted key;
 //! `skip_serializing_if` takes care of that.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Outgoing chat request. Uses borrowed strings so history can be rendered
-/// into wire messages without copying.
+/// Outgoing chat request. Borrows from the history wherever a message
+/// goes out verbatim, so rendering copies only the text it has to build.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatRequest<'a> {
     pub model: &'a str,
@@ -85,7 +87,7 @@ pub struct ChatMessage<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum ContentBody<'a> {
-    Text(&'a str),
+    Text(Cow<'a, str>),
     Parts(Vec<ContentPart<'a>>),
 }
 
@@ -93,7 +95,7 @@ pub enum ContentBody<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart<'a> {
-    Text { text: &'a str },
+    Text { text: Cow<'a, str> },
     ImageUrl { image_url: ImageUrl },
 }
 

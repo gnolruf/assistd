@@ -3,6 +3,8 @@
 //! multi-byte text so summarization runs early rather than the server's
 //! context window overflowing.
 
+use std::borrow::Cow;
+
 use assistd_config::{ChatConfig, ModelConfig};
 use assistd_tools::Attachment;
 use async_trait::async_trait;
@@ -20,6 +22,14 @@ const SUMMARY_PREFIX: &str = "[Conversation summary] ";
 /// the truncator can pair them with their assistant `tool_calls`
 /// predecessor. Text-only results use [`Role::Tool`] instead.
 pub const TOOL_RESULT_PREFIX: &str = "[tool:";
+/// Delimiters around a context block folded into its user turn. Plain
+/// text, because chat templates disagree about system messages anywhere
+/// but the head of the list: some drop them silently and some reject the
+/// request, while every template renders the text of a user turn. The
+/// opening line says who wrote the block so the model does not read it
+/// as the user speaking.
+const CONTEXT_OPEN: &str = "[Context: added automatically, not written by the user]\n";
+const CONTEXT_CLOSE: &str = "\n[End of context]\n\n";
 const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
 /// Conservative per-image token weight for budget math. Real usage
 /// depends on the vision model, but 1000 tokens errs on the side of
@@ -75,8 +85,9 @@ pub struct Message {
     /// user turn clears it, because chat templates stop rendering it
     /// from that point on.
     pub reasoning: String,
-    /// Set only on user messages: Anchoring context here rather than beside
-    /// the static system prompt keeps every earlier turn byte-identical
+    /// Set only on user messages, and rendered at the head of that
+    /// message's text. Anchoring context here rather than beside the
+    /// static system prompt keeps every earlier turn byte-identical
     /// across requests, so the server's prefix cache covers the whole
     /// history instead of only the system prompt.
     pub context: Option<String>,
@@ -98,10 +109,12 @@ pub trait Summarizer: Send + Sync {
 /// Mutable conversation state.
 ///
 /// Layout invariants:
-/// - `system_prompt` heads `as_wire_messages()` only when non-empty.
 /// - `pending_context`, if `Some`, is attached to the next user turn
-///   pushed and renders as a system message immediately before it for
-///   the rest of that turn (see [`Message::context`]).
+///   pushed and renders inside that message, ahead of the user's own
+///   text, for the rest of that turn (see [`Message::context`]).
+/// - `as_wire_messages()` carries at most one system message, at its
+///   head: the prompt with the summary appended. Chat templates do not
+///   reliably render a second one or one further down.
 /// - `transient_note`, if `Some`, renders as a final user message and
 ///   lives for one request; the caller clears it with
 ///   [`Self::consume_transient_note`] once that request commits. The
@@ -131,8 +144,8 @@ impl Conversation {
     }
 
     /// Stash the context block for the next user turn, replacing any
-    /// pending one. It attaches when that turn is pushed and renders as
-    /// a system message right before it until the following user turn.
+    /// pending one. It attaches when that turn is pushed and renders at
+    /// the head of its text until the following user turn.
     pub fn set_transient_context(&mut self, text: String) {
         self.pending_context = Some(text);
     }
@@ -324,26 +337,27 @@ impl Conversation {
     /// stay plain strings for compatibility with non-vision models;
     /// messages with attachments become multimodal `content` arrays.
     pub fn as_wire_messages(&self) -> Vec<wire::ChatMessage<'_>> {
-        let mut out = Vec::with_capacity(self.messages.len() + 3);
-        if !self.system_prompt.is_empty() {
+        let mut out = Vec::with_capacity(self.messages.len() + 2);
+        let turns_start = self.summary_insertion_index();
+        let summary = self.messages[..turns_start]
+            .first()
+            .map(|m| m.content.as_str());
+        let head = match (self.system_prompt.as_str(), summary) {
+            ("", None) => None,
+            ("", Some(summary)) => Some(Cow::Borrowed(summary)),
+            (prompt, None) => Some(Cow::Borrowed(prompt)),
+            (prompt, Some(summary)) => Some(Cow::Owned(format!("{prompt}\n\n{summary}"))),
+        };
+        if let Some(head) = head {
             out.push(wire::ChatMessage {
                 role: Role::System.as_wire(),
-                content: Some(wire::ContentBody::Text(&self.system_prompt)),
+                content: Some(wire::ContentBody::Text(head)),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
             });
         }
-        for message in &self.messages {
-            if let Some(ctx) = &message.context {
-                out.push(wire::ChatMessage {
-                    role: Role::System.as_wire(),
-                    content: Some(wire::ContentBody::Text(ctx)),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                });
-            }
+        for message in &self.messages[turns_start..] {
             if !message.tool_calls.is_empty() {
                 // Narration-free tool calls omit `content` entirely: the
                 // OpenAI spec allows null/absent and some chat templates
@@ -363,7 +377,7 @@ impl Conversation {
                 out.push(wire::ChatMessage {
                     role: message.role.as_wire(),
                     content: (!message.content.is_empty())
-                        .then(|| wire::ContentBody::Text(&message.content)),
+                        .then(|| wire::ContentBody::Text(Cow::Borrowed(&message.content))),
                     tool_calls: Some(specs),
                     tool_call_id: None,
                     reasoning_content: (!message.reasoning.is_empty())
@@ -374,20 +388,19 @@ impl Conversation {
             if message.role == Role::Tool {
                 out.push(wire::ChatMessage {
                     role: message.role.as_wire(),
-                    content: Some(wire::ContentBody::Text(&message.content)),
+                    content: Some(wire::ContentBody::Text(Cow::Borrowed(&message.content))),
                     tool_calls: None,
                     tool_call_id: message.tool_call_id.as_deref(),
                     reasoning_content: None,
                 });
                 continue;
             }
+            let text = wire_text(message);
             let content = if message.attachments.is_empty() {
-                wire::ContentBody::Text(&message.content)
+                wire::ContentBody::Text(text)
             } else {
                 let mut parts = Vec::with_capacity(message.attachments.len() + 1);
-                parts.push(wire::ContentPart::Text {
-                    text: &message.content,
-                });
+                parts.push(wire::ContentPart::Text { text });
                 for attachment in &message.attachments {
                     parts.push(attachment_to_part(attachment));
                 }
@@ -404,7 +417,7 @@ impl Conversation {
         if let Some(note) = &self.transient_note {
             out.push(wire::ChatMessage {
                 role: Role::User.as_wire(),
-                content: Some(wire::ContentBody::Text(note)),
+                content: Some(wire::ContentBody::Text(Cow::Borrowed(note))),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
@@ -633,7 +646,7 @@ fn approx_message_tokens(m: &Message) -> u32 {
     let context_cost = m
         .context
         .as_deref()
-        .map(|ctx| TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(ctx)))
+        .map(|ctx| approx_tokens_bytes(CONTEXT_OPEN.len() + ctx.len() + CONTEXT_CLOSE.len()))
         .unwrap_or(0);
     TOKENS_PER_MESSAGE_OVERHEAD
         .saturating_add(approx_tokens(&m.content))
@@ -645,6 +658,17 @@ fn approx_message_tokens(m: &Message) -> u32 {
 
 fn approx_tokens_bytes(n: usize) -> u32 {
     ((n as u32).saturating_add(3)) / 4
+}
+
+fn wire_text(message: &Message) -> Cow<'_, str> {
+    match &message.context {
+        Some(ctx) => Cow::Owned(format!(
+            "{CONTEXT_OPEN}{}{CONTEXT_CLOSE}{}",
+            ctx.trim_end(),
+            message.content
+        )),
+        None => Cow::Borrowed(&message.content),
+    }
 }
 
 fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
