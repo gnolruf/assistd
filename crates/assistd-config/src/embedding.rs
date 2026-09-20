@@ -31,8 +31,8 @@ pub struct EmbeddingConfig {
     /// auto-injection and the `reminisce` tool's default.
     pub top_k: NonZeroU32,
     /// When `true`, every user query embeds the prompt and prepends
-    /// the top-K conversation chunks as a "Relevant past context:"
-    /// system message. Disable to require explicit `reminisce` tool
+    /// the top-K conversation chunks to it as a "Relevant past
+    /// context:" block. Disable to require explicit `reminisce` tool
     /// invocations instead.
     pub auto_inject: bool,
 }

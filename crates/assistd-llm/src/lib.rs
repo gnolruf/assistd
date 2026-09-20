@@ -201,8 +201,8 @@ pub trait LlmBackend: Send + Sync + 'static {
     /// [`StepOutcome::Final`].
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome>;
 
-    /// Stash a context block for the next user turn. It renders as a
-    /// system message immediately before that turn on every
+    /// Stash a context block for the next user turn. It renders inside
+    /// that turn's message, ahead of the user's own text, on every
     /// [`Self::step`] or [`Self::generate`] until the following user
     /// turn replaces it, so earlier turns stay cacheable as a prefix.
     async fn set_transient_context(&self, _text: String) -> LlmResult<()> {

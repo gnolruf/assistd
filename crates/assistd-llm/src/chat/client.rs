@@ -586,7 +586,7 @@ impl LlmBackend for LlamaChatClient {
         let body_bytes = {
             let mut payload = self.base_request(vec![wire::ChatMessage {
                 role: "user",
-                content: Some(wire::ContentBody::Text(prompt.as_str())),
+                content: Some(wire::ContentBody::Text(prompt.as_str().into())),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
@@ -707,14 +707,14 @@ impl Summarizer for LlamaChatClient {
             messages: vec![
                 wire::ChatMessage {
                     role: "system",
-                    content: Some(wire::ContentBody::Text(SUMMARY_SYSTEM_PROMPT)),
+                    content: Some(wire::ContentBody::Text(SUMMARY_SYSTEM_PROMPT.into())),
                     tool_calls: None,
                     tool_call_id: None,
                     reasoning_content: None,
                 },
                 wire::ChatMessage {
                     role: "user",
-                    content: Some(wire::ContentBody::Text(&dialogue)),
+                    content: Some(wire::ContentBody::Text(dialogue.as_str().into())),
                     tool_calls: None,
                     tool_call_id: None,
                     reasoning_content: None,

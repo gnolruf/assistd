@@ -72,25 +72,63 @@ fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) 
     (chat, model)
 }
 
+fn user_text(message: &wire::ChatMessage<'_>) -> String {
+    assert_eq!(message.role, "user");
+    match &message.content {
+        Some(wire::ContentBody::Text(t)) => t.to_string(),
+        Some(wire::ContentBody::Parts(parts)) => match &parts[0] {
+            wire::ContentPart::Text { text } => text.to_string(),
+            other => panic!("first part must be text, got {other:?}"),
+        },
+        None => panic!("user message without content"),
+    }
+}
+
 #[test]
-fn transient_context_renders_as_system_message_before_its_user_turn() {
+fn transient_context_renders_inside_its_user_turn() {
     let mut c = Conversation::new("sys".into());
     c.push_user("earlier".into());
     c.push_assistant("reply".into());
-    c.set_transient_context("Relevant past context: …".into());
+    c.set_transient_context("Relevant past context:\n- foo\n".into());
     c.push_user("hello".into());
     let wire = c.as_wire_messages();
-    // Expect: [system=sys, user=earlier, assistant=reply, system=ctx, user=hello]
-    assert_eq!(wire.len(), 5);
-    assert_eq!(wire[0].role, "system");
-    assert_eq!(wire[1].role, "user");
-    assert_eq!(wire[2].role, "assistant");
-    assert_eq!(wire[3].role, "system");
-    match &wire[3].content {
-        Some(wire::ContentBody::Text(t)) => assert!(t.starts_with("Relevant past context")),
-        _ => panic!("expected text body on context system message"),
-    }
-    assert_eq!(wire[4].role, "user");
+    let roles: Vec<_> = wire.iter().map(|m| m.role).collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    assert_eq!(user_text(&wire[1]), "earlier");
+    assert_eq!(
+        user_text(&wire[3]),
+        "[Context: added automatically, not written by the user]\n\
+         Relevant past context:\n- foo\n\
+         [End of context]\n\n\
+         hello"
+    );
+}
+
+#[test]
+fn wire_carries_a_single_leading_system_message() {
+    let mut c = Conversation::new("sys".into());
+    c.replace_messages(vec![Message {
+        role: Role::System,
+        content: format!("{SUMMARY_PREFIX}earlier talk"),
+        attachments: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        reasoning: String::new(),
+        context: None,
+    }]);
+    c.push_user("one".into());
+    c.push_assistant("two".into());
+    c.set_transient_context("ctx".into());
+    c.push_user("three".into());
+    let wire = c.as_wire_messages();
+    let roles: Vec<_> = wire.iter().map(|m| m.role).collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    assert_eq!(
+        wire[0].content,
+        Some(wire::ContentBody::Text(
+            "sys\n\n[Conversation summary] earlier talk".into()
+        ))
+    );
 }
 
 #[test]
@@ -105,9 +143,10 @@ fn transient_context_attaches_to_image_turns_too() {
         }],
     );
     let wire = c.as_wire_messages();
-    assert_eq!(wire.len(), 3);
-    assert_eq!(wire[1].role, "system");
-    assert_eq!(wire[2].role, "user");
+    assert_eq!(wire.len(), 2);
+    assert!(matches!(wire[1].content, Some(wire::ContentBody::Parts(_))));
+    let text = user_text(&wire[1]);
+    assert!(text.contains("ctx") && text.ends_with("what is this?"));
     assert!(c.pending_context().is_none());
 }
 
@@ -128,24 +167,22 @@ fn transient_context_survives_the_tool_loop_and_is_dropped_by_the_next_user_turn
     c.set_transient_context("ctx".into());
     c.push_user("look".into());
     let before_call = serde_json::to_value(c.as_wire_messages()).unwrap();
-    assert_eq!(before_call.as_array().unwrap().len(), 3);
+    assert_eq!(before_call.as_array().unwrap().len(), 2);
 
     c.push_assistant_with_tool_calls(None, String::new(), vec![mk_call("c-1", "{}")]);
     c.push_tool_result("c-1".into(), "out".into());
     let mid_loop = serde_json::to_value(c.as_wire_messages()).unwrap();
     let mid_loop = mid_loop.as_array().unwrap();
-    assert_eq!(mid_loop.len(), 5);
+    assert_eq!(mid_loop.len(), 4);
     // Everything the previous request sent is still there, unchanged and
     // in the same order, so the server's prefix cache covers it.
-    assert_eq!(&mid_loop[..3], before_call.as_array().unwrap());
+    assert_eq!(&mid_loop[..2], before_call.as_array().unwrap());
 
     c.push_assistant("done".into());
     c.push_user("thanks".into());
     let next_turn = c.as_wire_messages();
-    assert!(
-        next_turn.iter().skip(1).all(|m| m.role != "system"),
-        "context must not linger into the next turn: {next_turn:?}"
-    );
+    assert_eq!(user_text(&next_turn[1]), "look");
+    assert_eq!(user_text(next_turn.last().expect("messages")), "thanks");
 }
 
 #[test]
@@ -157,7 +194,7 @@ fn rollback_last_user_returns_its_context_to_the_pending_slot() {
     c.rollback_last_user();
     assert_eq!(c.pending_context(), Some("ctx"));
     c.push_user("hi again".into());
-    assert_eq!(c.as_wire_messages()[1].role, "system");
+    assert!(user_text(&c.as_wire_messages()[1]).contains("ctx"));
 }
 
 #[test]
@@ -175,7 +212,7 @@ fn image_tool_results_do_not_close_the_turn() {
         }],
     );
     let wire = c.as_wire_messages();
-    assert_eq!(wire[1].role, "system");
+    assert!(user_text(&wire[1]).contains("ctx"));
     assert_eq!(
         wire.iter().find_map(|m| m.reasoning_content),
         Some("thinking")
@@ -383,7 +420,7 @@ fn as_wire_messages_injects_system_first() {
     let wire = c.as_wire_messages();
     assert_eq!(wire.len(), 2);
     assert_eq!(wire[0].role, "system");
-    assert_eq!(wire[0].content, Some(wire::ContentBody::Text("sys")));
+    assert_eq!(wire[0].content, Some(wire::ContentBody::Text("sys".into())));
     assert_eq!(wire[1].role, "user");
 }
 
@@ -439,10 +476,10 @@ fn plain_text_user_still_renders_as_string_content() {
     let mut c = Conversation::new(String::new());
     c.push_user("hello".into());
     let wire = c.as_wire_messages();
-    assert!(matches!(
+    assert_eq!(
         wire[0].content,
-        Some(wire::ContentBody::Text("hello"))
-    ));
+        Some(wire::ContentBody::Text("hello".into()))
+    );
 }
 
 #[test]
