@@ -114,10 +114,12 @@ impl PersistedMessage {
         }
     }
 
-    pub fn assistant_tool_calls(calls: serde_json::Value) -> Self {
+    /// One model step that requested tools: `content` is the text the
+    /// model produced alongside the calls, empty when there was none.
+    pub fn assistant_tool_calls(content: impl Into<String>, calls: serde_json::Value) -> Self {
         Self {
             role: PersistedRole::Assistant,
-            content: String::new(),
+            content: content.into(),
             tool_calls: Some(calls),
             tool_call_id: None,
             tool_name: None,

@@ -199,7 +199,8 @@ impl Agent {
         }
     }
 
-    /// Dispatch every call in order, emitting `ToolCall` and `ToolResult`
+    /// Announce the step's calls with one `ToolCallsRequested`, then
+    /// dispatch each in order, emitting `ToolCall` and `ToolResult`
     /// events. Stops early, with cancelled payloads for the rest, when the
     /// client goes away or the turn is cancelled. The flag is `true` when
     /// a call repeated [`DUPLICATE_CALL_LIMIT`] times in a row.
@@ -210,6 +211,12 @@ impl Agent {
     ) -> (Vec<ToolResultPayload>, bool) {
         let mut results = Vec::with_capacity(calls.len());
         let mut stuck = false;
+        let _ = turn
+            .tx
+            .send(LlmEvent::ToolCallsRequested {
+                calls: calls.clone(),
+            })
+            .await;
         for call in calls {
             stuck |= turn.streak.record(&call) >= DUPLICATE_CALL_LIMIT;
             if turn.stop_requested() {

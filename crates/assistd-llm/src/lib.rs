@@ -99,6 +99,9 @@ pub enum LlmEvent {
     /// A streamed chunk of the model's reasoning, kept apart from
     /// `Delta` so it is neither persisted as reply text nor spoken.
     ReasoningDelta { text: String },
+    /// Every tool call the model requested in one step, in request
+    /// order; emitted once, before the first of them runs.
+    ToolCallsRequested { calls: Vec<ToolCall> },
     /// The model asked to invoke a tool; emitted before the tool runs.
     ToolCall {
         id: String,
@@ -123,7 +126,7 @@ pub enum LlmEvent {
 }
 
 /// One tool call the model requested during a `step`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCall {
     /// Server-assigned call ID, echoed back on the matching result.
     pub id: String,

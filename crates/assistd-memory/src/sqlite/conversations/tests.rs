@@ -60,7 +60,7 @@ async fn assistant_with_tool_calls_persists_json() {
             &session,
             branch,
             Some(turn),
-            PersistedMessage::assistant_tool_calls(calls.clone()),
+            PersistedMessage::assistant_tool_calls("", calls.clone()),
         )
         .await
         .unwrap();
