@@ -379,7 +379,8 @@ async fn run_one(
             // can't trigger. ReasoningDelta is silently dropped: this
             // bench measures TTS latency for the visible reply, and
             // chain-of-thought tokens are never read aloud.
-            LlmEvent::ToolCall { .. }
+            LlmEvent::ToolCallsRequested { .. }
+            | LlmEvent::ToolCall { .. }
             | LlmEvent::ToolResult { .. }
             | LlmEvent::Status { .. }
             | LlmEvent::ReasoningDelta { .. } => {}

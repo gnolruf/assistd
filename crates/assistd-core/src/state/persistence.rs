@@ -30,8 +30,7 @@ impl AppState {
         let should_embed = embedding_enabled
             && chunks_handle.is_some()
             && matches!(msg.role, PersistedRole::User | PersistedRole::Assistant)
-            && !msg.content.is_empty()
-            && msg.tool_calls.is_none();
+            && !msg.content.is_empty();
         let content_for_chunks = if should_embed {
             Some(msg.content.clone())
         } else {

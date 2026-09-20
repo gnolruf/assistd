@@ -7,7 +7,7 @@ use crate::Agent;
 use crate::presence::{LlmStreamGuard, RequestGuard};
 use anyhow::Result;
 use assistd_ipc::{Event, StatusKind};
-use assistd_llm::LlmEvent;
+use assistd_llm::{LlmEvent, ToolCall};
 use assistd_memory::{PersistedMessage, SessionId, TurnId};
 use assistd_tools::Attachment;
 use assistd_voice::{SentenceBuffer, SpeakDecision};
@@ -19,6 +19,19 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
 const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
+
+fn tool_calls_message(narration: String, calls: &[ToolCall]) -> PersistedMessage {
+    let content = if narration.trim().is_empty() {
+        String::new()
+    } else {
+        narration
+    };
+    let calls_json = calls
+        .iter()
+        .map(|c| serde_json::json!({"id": c.id, "name": c.name, "arguments": c.arguments}))
+        .collect();
+    PersistedMessage::assistant_tool_calls(content, calls_json)
+}
 
 struct QueryGuards {
     _request: RequestGuard,
@@ -356,32 +369,24 @@ impl AppState {
                     },
                     Vec::new(),
                 ),
-                LlmEvent::ToolCall {
-                    id: call_id,
-                    name,
-                    arguments,
-                } => {
-                    awaiting_tool_result = true;
-                    if !assistant_accum.is_empty() {
-                        let pre_text = std::mem::take(&mut assistant_accum);
+                LlmEvent::ToolCallsRequested { calls } => {
+                    let narration = std::mem::take(&mut assistant_accum);
+                    if !narration.is_empty() {
                         let _ = events_bus.send(Event::LastDelta {
                             id: id.clone(),
-                            text: pre_text.clone(),
+                            text: narration.clone(),
                         });
-                        self.persist_message_fire_and_forget(
-                            turn_id,
-                            PersistedMessage::assistant_text(pre_text),
-                        );
                     }
-                    let calls_json = serde_json::json!([{
-                        "id":        call_id,
-                        "name":      name,
-                        "arguments": arguments,
-                    }]);
                     self.persist_message_fire_and_forget(
                         turn_id,
-                        PersistedMessage::assistant_tool_calls(calls_json),
+                        tool_calls_message(narration, &calls),
                     );
+                    continue;
+                }
+                LlmEvent::ToolCall {
+                    name, arguments, ..
+                } => {
+                    awaiting_tool_result = true;
                     (
                         Event::ToolCall {
                             id: id.clone(),

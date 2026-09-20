@@ -5,7 +5,7 @@ use crate::state::context::{combine_context_blocks, format_window_context_block}
 use assistd_config::ToolsOutputConfig;
 use assistd_ipc::{PresenceState, VoiceCaptureState};
 use assistd_llm::{EchoBackend, FailedBackend, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
-use assistd_memory::ConversationStore;
+use assistd_memory::{ConversationStore, PersistedRole};
 use assistd_tools::{CommandRegistry, RunTool, commands::EchoCommand};
 use parking_lot::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -256,7 +256,7 @@ impl LlmBackend for ScriptedBackend {
     }
 }
 
-fn state_with_echo_tools(backend: Arc<dyn LlmBackend>) -> Arc<AppState> {
+fn echo_tools() -> Arc<ToolRegistry> {
     let mut commands = CommandRegistry::new();
     commands.register(EchoCommand);
     let mut tools = ToolRegistry::new();
@@ -265,11 +265,15 @@ fn state_with_echo_tools(backend: Arc<dyn LlmBackend>) -> Arc<AppState> {
         &ToolsOutputConfig::default(),
         std::env::temp_dir().join(format!("assistd-state-test-{}", std::process::id())),
     ));
+    Arc::new(tools)
+}
+
+fn state_with_echo_tools(backend: Arc<dyn LlmBackend>) -> Arc<AppState> {
     Arc::new(AppState::new(
         Config::default(),
         backend,
         PresenceManager::stub(PresenceState::Active),
-        Arc::new(tools),
+        echo_tools(),
         Arc::new(assistd_voice::NoVoiceInput::new()),
         Arc::new(assistd_voice::NoContinuousListener::new()),
         VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
@@ -1470,6 +1474,22 @@ async fn fresh_branch_state() -> (
     assistd_memory::SessionId,
     assistd_memory::BranchId,
 ) {
+    branch_state_with(
+        Arc::new(EchoBackend::new()),
+        Arc::new(ToolRegistry::default()),
+    )
+    .await
+}
+
+async fn branch_state_with(
+    backend: Arc<dyn LlmBackend>,
+    tools: Arc<ToolRegistry>,
+) -> (
+    Arc<AppState>,
+    Arc<dyn ConversationStore>,
+    assistd_memory::SessionId,
+    assistd_memory::BranchId,
+) {
     use assistd_memory::{SqliteConversationStore, SqliteHandle};
     use tokio::sync::watch;
     let temp = tempfile::tempdir().unwrap();
@@ -1483,9 +1503,9 @@ async fn fresh_branch_state() -> (
     let ctx = Arc::new(ConversationContext::new(session.clone(), branch));
     let config = Config::default();
     let subsystems = Subsystems::new(
-        Arc::new(EchoBackend::new()),
+        backend,
         PresenceManager::stub(PresenceState::Active),
-        Arc::new(ToolRegistry::default()),
+        tools,
         Arc::new(assistd_voice::NoVoiceInput::new()),
         Arc::new(assistd_voice::NoContinuousListener::new()),
         VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
@@ -1743,4 +1763,66 @@ async fn undo_on_empty_branch_returns_zero() {
         })
         .expect("expected UndoApplied even on empty branch");
     assert_eq!(applied, 0);
+}
+
+#[tokio::test]
+async fn step_with_parallel_calls_persists_as_one_assistant_row() {
+    let call = |id: &str, command: &str| ToolCall {
+        id: id.into(),
+        name: "run".into(),
+        arguments: serde_json::json!({ "command": command }),
+    };
+    let backend = ToolCallBackend::new(
+        "Checking both.",
+        "All done.",
+        vec![StepOutcome::ToolCalls(vec![
+            call("call-a", "echo a"),
+            call("call-b", "echo b"),
+        ])],
+    );
+    let (state, conv, _session, branch) = branch_state_with(backend, echo_tools()).await;
+    let (tx, rx) = mpsc::channel::<Event>(32);
+    state
+        .clone()
+        .dispatch(
+            Request::Query {
+                id: "rq".into(),
+                text: "go".into(),
+                attachments: Vec::new(),
+            },
+            tx,
+        )
+        .await
+        .unwrap();
+    drain_events(rx).await;
+    state.drain_persistence_inflight().await;
+
+    let rows = conv.load_branch_history(branch).await.unwrap();
+    let shape: Vec<_> = rows
+        .iter()
+        .map(|r| (r.role, r.content.as_str(), r.tool_call_id.as_deref()))
+        .collect();
+    assert_eq!(shape.len(), 5, "unexpected rows: {shape:?}");
+    assert_eq!(shape[0], (PersistedRole::User, "go", None));
+    assert_eq!(shape[1], (PersistedRole::Assistant, "Checking both.", None));
+    assert_eq!(
+        (shape[2].0, shape[2].2),
+        (PersistedRole::Tool, Some("call-a"))
+    );
+    assert_eq!(
+        (shape[3].0, shape[3].2),
+        (PersistedRole::Tool, Some("call-b"))
+    );
+    assert_eq!(shape[4], (PersistedRole::Assistant, "All done.", None));
+
+    let ids: Vec<_> = rows[1]
+        .tool_calls
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .expect("step row carries its calls")
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["call-a", "call-b"]);
+    assert!(rows[4].tool_calls.is_none());
 }
