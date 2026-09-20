@@ -73,20 +73,42 @@ fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) 
 }
 
 #[test]
-fn transient_context_renders_as_second_system_message() {
+fn transient_context_renders_as_system_message_before_its_user_turn() {
     let mut c = Conversation::new("sys".into());
-    c.push_user("hello".into());
+    c.push_user("earlier".into());
+    c.push_assistant("reply".into());
     c.set_transient_context("Relevant past context: …".into());
+    c.push_user("hello".into());
     let wire = c.as_wire_messages();
-    // Expect: [system=sys, system=transient, user=hello]
-    assert_eq!(wire.len(), 3);
+    // Expect: [system=sys, user=earlier, assistant=reply, system=ctx, user=hello]
+    assert_eq!(wire.len(), 5);
     assert_eq!(wire[0].role, "system");
-    assert_eq!(wire[1].role, "system");
-    match &wire[1].content {
+    assert_eq!(wire[1].role, "user");
+    assert_eq!(wire[2].role, "assistant");
+    assert_eq!(wire[3].role, "system");
+    match &wire[3].content {
         Some(wire::ContentBody::Text(t)) => assert!(t.starts_with("Relevant past context")),
-        _ => panic!("expected text body on transient system message"),
+        _ => panic!("expected text body on context system message"),
     }
+    assert_eq!(wire[4].role, "user");
+}
+
+#[test]
+fn transient_context_attaches_to_image_turns_too() {
+    let mut c = Conversation::new("sys".into());
+    c.set_transient_context("ctx".into());
+    c.push_user_with_attachments(
+        "what is this?".into(),
+        vec![Attachment::Image {
+            mime: "image/png".into(),
+            bytes: vec![0xAB],
+        }],
+    );
+    let wire = c.as_wire_messages();
+    assert_eq!(wire.len(), 3);
+    assert_eq!(wire[1].role, "system");
     assert_eq!(wire[2].role, "user");
+    assert!(c.pending_context().is_none());
 }
 
 #[test]
@@ -101,20 +123,72 @@ fn transient_context_omitted_when_unset() {
 }
 
 #[test]
-fn render_is_idempotent_until_consumed() {
+fn transient_context_survives_the_tool_loop_and_is_dropped_by_the_next_user_turn() {
     let mut c = Conversation::new("sys".into());
-    c.push_user("hi".into());
     c.set_transient_context("ctx".into());
-    let n1 = c.as_wire_messages().len();
-    let n2 = c.as_wire_messages().len();
-    assert_eq!(n1, n2, "as_wire_messages must be idempotent");
-    // Consume clears the slot.
-    let consumed = c.consume_transient_context();
-    assert_eq!(consumed.as_deref(), Some("ctx"));
-    let n3 = c.as_wire_messages().len();
-    assert_eq!(n3, n1 - 1, "after consume, transient is gone");
-    // Subsequent consume returns None.
-    assert_eq!(c.consume_transient_context(), None);
+    c.push_user("look".into());
+    let before_call = serde_json::to_value(c.as_wire_messages()).unwrap();
+    assert_eq!(before_call.as_array().unwrap().len(), 3);
+
+    c.push_assistant_with_tool_calls(None, String::new(), vec![mk_call("c-1", "{}")]);
+    c.push_tool_result("c-1".into(), "out".into());
+    let mid_loop = serde_json::to_value(c.as_wire_messages()).unwrap();
+    let mid_loop = mid_loop.as_array().unwrap();
+    assert_eq!(mid_loop.len(), 5);
+    // Everything the previous request sent is still there, unchanged and
+    // in the same order, so the server's prefix cache covers it.
+    assert_eq!(&mid_loop[..3], before_call.as_array().unwrap());
+
+    c.push_assistant("done".into());
+    c.push_user("thanks".into());
+    let next_turn = c.as_wire_messages();
+    assert!(
+        next_turn.iter().skip(1).all(|m| m.role != "system"),
+        "context must not linger into the next turn: {next_turn:?}"
+    );
+}
+
+#[test]
+fn rollback_last_user_returns_its_context_to_the_pending_slot() {
+    let mut c = Conversation::new("sys".into());
+    c.set_transient_context("ctx".into());
+    c.push_user("hi".into());
+    assert!(c.pending_context().is_none());
+    c.rollback_last_user();
+    assert_eq!(c.pending_context(), Some("ctx"));
+    c.push_user("hi again".into());
+    assert_eq!(c.as_wire_messages()[1].role, "system");
+}
+
+#[test]
+fn image_tool_results_do_not_close_the_turn() {
+    let mut c = Conversation::new("sys".into());
+    c.set_transient_context("ctx".into());
+    c.push_user("look".into());
+    c.push_assistant_with_tool_calls(None, "thinking".into(), vec![mk_call("c-1", "{}")]);
+    c.push_tool_result_with_attachments(
+        "see",
+        "a picture".into(),
+        vec![Attachment::Image {
+            mime: "image/png".into(),
+            bytes: vec![0xAB],
+        }],
+    );
+    let wire = c.as_wire_messages();
+    assert_eq!(wire[1].role, "system");
+    assert_eq!(
+        wire.iter().find_map(|m| m.reasoning_content),
+        Some("thinking")
+    );
+    let result = wire.last().expect("messages");
+    assert_eq!(result.role, "user");
+    match &result.content {
+        Some(wire::ContentBody::Parts(parts)) => match &parts[0] {
+            wire::ContentPart::Text { text } => assert_eq!(*text, "[tool:see]\na picture"),
+            other => panic!("first part must be text, got {other:?}"),
+        },
+        other => panic!("expected multimodal body, got {other:?}"),
+    }
 }
 
 #[test]
@@ -192,10 +266,16 @@ fn approx_total_tokens_includes_transient_context() {
     let mut c = Conversation::new("sys".into());
     let baseline = c.approx_total_tokens();
     c.set_transient_context("a".repeat(100));
-    let with_ctx = c.approx_total_tokens();
+    let pending = c.approx_total_tokens();
     assert!(
-        with_ctx > baseline,
-        "transient context must contribute to budget math: {baseline} → {with_ctx}"
+        pending > baseline,
+        "pending context must contribute to budget math: {baseline} → {pending}"
+    );
+    c.push_user("q".into());
+    let attached = c.approx_total_tokens();
+    assert!(
+        attached > pending,
+        "attached context must keep counting: {pending} → {attached}"
     );
 }
 
@@ -212,6 +292,7 @@ fn replace_messages_swaps_history_and_clears_transient() {
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: String::new(),
+            context: None,
         },
         Message {
             role: Role::Assistant,
@@ -220,10 +301,11 @@ fn replace_messages_swaps_history_and_clears_transient() {
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: String::new(),
+            context: None,
         },
     ]);
     let wire = c.as_wire_messages();
-    // [system=sys, user=loaded user, assistant=loaded assistant]; transient gone.
+    // [system=sys, user=loaded user, assistant=loaded assistant]; context gone.
     assert_eq!(wire.len(), 3);
     assert_eq!(wire[0].role, "system");
     assert_eq!(wire[1].role, "user");
@@ -231,7 +313,7 @@ fn replace_messages_swaps_history_and_clears_transient() {
         Some(wire::ContentBody::Text(t)) => assert_eq!(*t, "loaded user"),
         _ => panic!("expected text body"),
     }
-    assert!(c.transient_context().is_none());
+    assert!(c.pending_context().is_none());
 }
 
 #[test]
@@ -704,7 +786,7 @@ fn truncate_drops_tool_call_pair_atomically() {
         String::new(),
         vec![mk_call("c-1", r#"{"command":"ls"}"#)],
     );
-    c.push_user_with_attachments("[tool:run]\nsome output\n".into(), Vec::new());
+    c.push_tool_result_with_attachments("run", "some output\n".into(), Vec::new());
     c.push_assistant("old reply".into());
     // The latest turn (kept by preserve):
     c.push_user("latest".into());
@@ -754,7 +836,7 @@ async fn summarize_preserves_tool_call_pair_boundary() {
         String::new(),
         vec![mk_call("c-99", r#"{"command":"ls"}"#)],
     );
-    c.push_user_with_attachments("[tool:run]\nfoo\nbar\n".into(), Vec::new());
+    c.push_tool_result_with_attachments("run", "foo\nbar\n".into(), Vec::new());
     c.push_user("latest".into());
 
     let fake = FakeSummarizer::new("summary");

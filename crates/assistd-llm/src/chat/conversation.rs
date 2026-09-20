@@ -75,6 +75,11 @@ pub struct Message {
     /// user turn clears it, because chat templates stop rendering it
     /// from that point on.
     pub reasoning: String,
+    /// Set only on user messages: Anchoring context here rather than beside
+    /// the static system prompt keeps every earlier turn byte-identical
+    /// across requests, so the server's prefix cache covers the whole
+    /// history instead of only the system prompt.
+    pub context: Option<String>,
 }
 
 /// Condenses a stretch of dialogue into a summary when the conversation
@@ -94,21 +99,22 @@ pub trait Summarizer: Send + Sync {
 ///
 /// Layout invariants:
 /// - `system_prompt` heads `as_wire_messages()` only when non-empty.
-/// - `transient_context`, if `Some`, renders as a second system message
-///   right after `system_prompt` and lives for one request; the caller
-///   clears it with [`Self::consume_transient_context`] once that
-///   request commits.
+/// - `pending_context`, if `Some`, is attached to the next user turn
+///   pushed and renders as a system message immediately before it for
+///   the rest of that turn (see [`Message::context`]).
 /// - `transient_note`, if `Some`, renders as a final user message and
-///   has the same one-request lifetime. The tail is where a mid-turn
-///   instruction has to go: a model deep in a tool loop follows what it
-///   read last, not a system prompt thousands of tokens upstream.
+///   lives for one request; the caller clears it with
+///   [`Self::consume_transient_note`] once that request commits. The
+///   tail is where a mid-turn instruction has to go: a model deep in a
+///   tool loop follows what it read last, not a system prompt thousands
+///   of tokens upstream.
 /// - `messages` never holds the system prompt itself; it holds the
 ///   turns plus at most one summary message (role `System`, content
 ///   prefixed with `SUMMARY_PREFIX`) at index 0.
 #[derive(Debug)]
 pub struct Conversation {
     system_prompt: String,
-    transient_context: Option<String>,
+    pending_context: Option<String>,
     transient_note: Option<String>,
     messages: Vec<Message>,
 }
@@ -118,21 +124,17 @@ impl Conversation {
     pub fn new(system_prompt: String) -> Self {
         Self {
             system_prompt,
-            transient_context: None,
+            pending_context: None,
             transient_note: None,
             messages: Vec::new(),
         }
     }
 
-    /// Set a one-shot system message rendered between the static
-    /// `system_prompt` and the history, replacing any pending one.
+    /// Stash the context block for the next user turn, replacing any
+    /// pending one. It attaches when that turn is pushed and renders as
+    /// a system message right before it until the following user turn.
     pub fn set_transient_context(&mut self, text: String) {
-        self.transient_context = Some(text);
-    }
-
-    /// Take the pending transient context, leaving `None` behind.
-    pub fn consume_transient_context(&mut self) -> Option<String> {
-        self.transient_context.take()
+        self.pending_context = Some(text);
     }
 
     /// Set a one-shot note rendered as the final user message,
@@ -147,27 +149,20 @@ impl Conversation {
     }
 
     #[cfg(test)]
-    pub fn transient_context(&self) -> Option<&str> {
-        self.transient_context.as_deref()
+    pub fn pending_context(&self) -> Option<&str> {
+        self.pending_context.as_deref()
     }
 
-    /// Appends a plain-text user turn.
+    /// Appends a plain-text user turn, closing the previous turn.
     pub fn push_user(&mut self, content: String) {
-        self.end_tool_loop();
-        self.messages.push(Message {
-            role: Role::User,
-            content,
-            attachments: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            reasoning: String::new(),
-        });
+        self.push_user_with_attachments(content, Vec::new());
     }
 
     /// Append a user turn whose wire form is a multimodal `content`
     /// array: one `text` part followed by one `image_url` part per
-    /// attachment.
+    /// attachment. Closes the previous turn like [`Self::push_user`].
     pub fn push_user_with_attachments(&mut self, content: String, attachments: Vec<Attachment>) {
+        self.close_previous_turn();
         self.messages.push(Message {
             role: Role::User,
             content,
@@ -175,6 +170,27 @@ impl Conversation {
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: String::new(),
+            context: self.pending_context.take(),
+        });
+    }
+
+    /// Append an image-carrying tool result as a tagged user message
+    /// (see [`TOOL_RESULT_PREFIX`]). Unlike a real user turn this does
+    /// not close the tool loop it belongs to.
+    pub fn push_tool_result_with_attachments(
+        &mut self,
+        name: &str,
+        content: String,
+        attachments: Vec<Attachment>,
+    ) {
+        self.messages.push(Message {
+            role: Role::User,
+            content: format!("{TOOL_RESULT_PREFIX}{name}]\n{content}"),
+            attachments,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            reasoning: String::new(),
+            context: None,
         });
     }
 
@@ -187,6 +203,7 @@ impl Conversation {
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: String::new(),
+            context: None,
         });
     }
 
@@ -214,6 +231,7 @@ impl Conversation {
             tool_calls: calls,
             tool_call_id: None,
             reasoning,
+            context: None,
         });
     }
 
@@ -230,35 +248,40 @@ impl Conversation {
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id),
             reasoning: String::new(),
+            context: None,
         });
     }
 
-    fn end_tool_loop(&mut self) {
+    fn close_previous_turn(&mut self) {
         for message in &mut self.messages {
             message.reasoning.clear();
+            message.context = None;
         }
     }
 
     /// Drop the most recent message if and only if it is a user message,
     /// keeping history consistent with what the model actually saw after
-    /// a request fails before any output.
+    /// a request fails before any output. Its context block, if any,
+    /// goes back to pending so a retried turn still carries it.
     pub fn rollback_last_user(&mut self) {
-        if matches!(self.messages.last().map(|m| m.role), Some(Role::User)) {
-            self.messages.pop();
+        if matches!(self.messages.last().map(|m| m.role), Some(Role::User))
+            && let Some(user) = self.messages.pop()
+        {
+            self.pending_context = user.context;
         }
     }
 
     /// Replace the message list wholesale and clear any pending
-    /// transient context or note.
+    /// context or note.
     pub fn replace_messages(&mut self, msgs: Vec<Message>) {
         self.messages = msgs;
-        self.transient_context = None;
+        self.pending_context = None;
         self.transient_note = None;
     }
 
     /// Drop everything from the latest real user message onward, where
     /// a tool result riding on the user role does not count as one.
-    /// Also clears `transient_context` and `transient_note`. Returns the
+    /// Also clears `pending_context` and `transient_note`. Returns the
     /// number of removed entries; 0 when no real user message exists.
     pub fn truncate_to_last_real_user(&mut self) -> usize {
         let mut last_real_user = None;
@@ -273,7 +296,7 @@ impl Conversation {
         };
         let removed = self.messages.len() - idx;
         self.messages.truncate(idx);
-        self.transient_context = None;
+        self.pending_context = None;
         self.transient_note = None;
         removed
     }
@@ -286,7 +309,7 @@ impl Conversation {
                 TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(&self.system_prompt)),
             );
         }
-        for transient in self.transient_context.iter().chain(&self.transient_note) {
+        for transient in self.pending_context.iter().chain(&self.transient_note) {
             total = total.saturating_add(
                 TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(transient)),
             );
@@ -311,16 +334,16 @@ impl Conversation {
                 reasoning_content: None,
             });
         }
-        if let Some(ctx) = &self.transient_context {
-            out.push(wire::ChatMessage {
-                role: Role::System.as_wire(),
-                content: Some(wire::ContentBody::Text(ctx)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
         for message in &self.messages {
+            if let Some(ctx) = &message.context {
+                out.push(wire::ChatMessage {
+                    role: Role::System.as_wire(),
+                    content: Some(wire::ContentBody::Text(ctx)),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                });
+            }
             if !message.tool_calls.is_empty() {
                 // Narration-free tool calls omit `content` entirely: the
                 // OpenAI spec allows null/absent and some chat templates
@@ -451,6 +474,7 @@ impl Conversation {
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: String::new(),
+            context: None,
         };
 
         let drop_end = preserve_from;
@@ -606,11 +630,17 @@ fn approx_message_tokens(m: &Message) -> u32 {
         .map(|c| c.id.len() + c.name.len() + c.arguments.len() + 32)
         .sum();
     let tool_call_cost = approx_tokens_bytes(tool_call_bytes);
+    let context_cost = m
+        .context
+        .as_deref()
+        .map(|ctx| TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(ctx)))
+        .unwrap_or(0);
     TOKENS_PER_MESSAGE_OVERHEAD
         .saturating_add(approx_tokens(&m.content))
         .saturating_add(approx_tokens(&m.reasoning))
         .saturating_add(image_cost)
         .saturating_add(tool_call_cost)
+        .saturating_add(context_cost)
 }
 
 fn approx_tokens_bytes(n: usize) -> u32 {

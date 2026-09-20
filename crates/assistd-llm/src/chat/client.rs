@@ -446,8 +446,7 @@ impl LlmBackend for LlamaChatClient {
             } else {
                 // Image parts only render on a user turn, so a result
                 // carrying one keeps the tagged user-message shape.
-                let content = format!("[tool:{}]\n{}", r.name, r.content);
-                conv.push_user_with_attachments(content, r.attachments);
+                conv.push_tool_result_with_attachments(&r.name, r.content, r.attachments);
             }
         }
         Ok(())
@@ -479,9 +478,8 @@ impl LlmBackend for LlamaChatClient {
             | StreamOutcome::PartialAfterEmit(accum)
             | StreamOutcome::ClientDisconnected(accum) => {
                 let result = commit_step(&mut conv, *accum);
-                // `PreEmitError` leaves the transients in place so a retry
-                // sees the same injected blocks.
-                let _ = conv.consume_transient_context();
+                // `PreEmitError` leaves the note in place so a retry
+                // sees the same injected block.
                 let _ = conv.consume_transient_note();
                 result
             }
@@ -523,6 +521,7 @@ impl LlmBackend for LlamaChatClient {
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     reasoning: String::new(),
+                    context: None,
                 }),
                 HistoryRole::User => msgs.push(Message {
                     role: Role::User,
@@ -531,6 +530,7 @@ impl LlmBackend for LlamaChatClient {
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     reasoning: String::new(),
+                    context: None,
                 }),
                 HistoryRole::Assistant => {
                     let calls = parse_tool_calls(&entry.tool_calls_json)?;
@@ -541,6 +541,7 @@ impl LlmBackend for LlamaChatClient {
                         tool_calls: calls,
                         tool_call_id: None,
                         reasoning: String::new(),
+                        context: None,
                     });
                 }
                 // A row with no call id was written by the vision path;
@@ -554,6 +555,7 @@ impl LlmBackend for LlamaChatClient {
                         tool_calls: Vec::new(),
                         tool_call_id: Some(call_id),
                         reasoning: String::new(),
+                        context: None,
                     }),
                     None => {
                         let name = entry.tool_name.unwrap_or_default();
@@ -564,6 +566,7 @@ impl LlmBackend for LlamaChatClient {
                             tool_calls: Vec::new(),
                             tool_call_id: None,
                             reasoning: String::new(),
+                            context: None,
                         });
                     }
                 },
