@@ -27,14 +27,35 @@ fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
 
     let plain = io_error_nav("ls", "/tmp/notes.txt", &e);
     assert!(plain.contains("file not found: /tmp/notes.txt"), "{plain}");
+    assert!(plain.contains("Use: ls /tmp to see"), "{plain}");
 }
 
 #[test]
-fn glob_parent_stops_at_the_first_metacharacter() {
-    assert_eq!(glob_parent("/tmp/*.db-shm"), "/tmp");
-    assert_eq!(glob_parent("docs/*.md"), "docs");
-    assert_eq!(glob_parent("/a*/b*"), "/");
-    assert_eq!(glob_parent("*.rs"), ".");
+fn path_through_a_file_points_at_the_offending_parent() {
+    let e = std::io::Error::from(std::io::ErrorKind::NotADirectory);
+    let line = io_error_nav("cat", "notes.txt/sub", &e);
+    assert!(
+        line.contains("notes.txt/sub: a parent component is not a directory"),
+        "{line}"
+    );
+    assert!(line.contains("Check: ls notes.txt\n"), "{line}");
+}
+
+#[test]
+fn parent_dir_stops_at_the_first_metacharacter() {
+    assert_eq!(parent_dir("/tmp/*.db-shm"), "/tmp");
+    assert_eq!(parent_dir("docs/*.md"), "docs");
+    assert_eq!(parent_dir("docs/*/"), "docs");
+    assert_eq!(parent_dir("/a*/b*"), "/");
+    assert_eq!(parent_dir("*.rs"), ".");
+}
+
+#[test]
+fn parent_dir_of_a_plain_path_ignores_trailing_slashes() {
+    assert_eq!(parent_dir("/tmp/notes.txt"), "/tmp");
+    assert_eq!(parent_dir("/tmp/missing/"), "/tmp");
+    assert_eq!(parent_dir("/notes.txt"), "/");
+    assert_eq!(parent_dir("notes.txt"), ".");
 }
 
 #[test]

@@ -90,13 +90,19 @@ pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
             cmd,
             format_args!("no file matches {path}"),
             Hint::Try,
-            format_args!("ls {} to see what is there", glob_parent(path)),
+            format_args!("ls {} to see what is there", parent_dir(path)),
         ),
         ErrorKind::NotFound => error_line(
             cmd,
             format_args!("file not found: {path}"),
             Hint::Use,
-            "ls to check the path",
+            format_args!("ls {} to see what is there", parent_dir(path)),
+        ),
+        ErrorKind::NotADirectory => error_line(
+            cmd,
+            format_args!("{path}: a parent component is not a directory"),
+            Hint::Check,
+            format_args!("ls {}", parent_dir(path)),
         ),
         ErrorKind::PermissionDenied => error_line(
             cmd,
@@ -117,13 +123,13 @@ fn has_glob_meta(path: &str) -> bool {
     path.contains(['*', '?', '['])
 }
 
-/// Longest leading directory of `pattern` that precedes the first
-/// metacharacter, so the hint points at a directory the caller can
+/// Directory containing `path`, cut before the first glob metacharacter
+/// when there is one, so the hint points at a directory the caller can
 /// actually list.
-fn glob_parent(pattern: &str) -> &str {
-    let head = pattern
+fn parent_dir(path: &str) -> &str {
+    let head = path
         .find(['*', '?', '['])
-        .map_or(pattern, |i| &pattern[..i]);
+        .map_or_else(|| path.trim_end_matches('/'), |i| &path[..i]);
     match head.rfind('/') {
         Some(0) => "/",
         Some(cut) => &head[..cut],
