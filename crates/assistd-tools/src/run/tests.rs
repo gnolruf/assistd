@@ -710,6 +710,23 @@ fn run_tool_description_auto_updates_when_command_added() {
     );
 }
 
+#[test]
+fn run_tool_description_states_configured_truncation_limits() {
+    let dir = fresh_dir();
+    let tight = ToolsOutputConfig {
+        max_lines: nz32(3),
+        max_kb: nz32(10),
+        overflow_dir: PathBuf::new(),
+    };
+    let tool = RunTool::new(registry(), &tight, dir.path().to_path_buf());
+    let desc = tool.description();
+    assert!(desc.contains("exceeds 3 lines or 10KB"), "{desc}");
+    assert!(
+        desc.contains(&format!("{}/cmd-N.txt", dir.path().display())),
+        "{desc}"
+    );
+}
+
 /// Acceptance #1, wire-level: the OpenAI-compatible schema (what the
 /// LLM actually consumes) exposes the dynamic description verbatim.
 #[test]
