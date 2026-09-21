@@ -1,3 +1,5 @@
+use std::io::ErrorKind;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -6,7 +8,8 @@ use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
 /// `ls [-al] [PATH]`: list directory entries alphabetically, one per
 /// line, formatted as `<type>\t<size>\t<name>`. Type is `dir`, `file`,
 /// or `symlink`; size is raw bytes from the entry's (symlink-preserving)
-/// metadata. Defaults to the daemon's CWD if no path given.
+/// metadata. A PATH that is not a directory yields a single row named
+/// by PATH as given. Defaults to the daemon's CWD if no path given.
 ///
 /// Flags:
 /// - `-a` include entries whose name starts with `.`
@@ -34,6 +37,28 @@ fn parse_flags(argv: &[String]) -> Result<(bool, &str), String> {
     Ok((show_hidden, path.unwrap_or(".")))
 }
 
+fn kind_and_size(md: &std::fs::Metadata) -> (&'static str, u64) {
+    let ft = md.file_type();
+    let kind = if ft.is_symlink() {
+        "symlink"
+    } else if ft.is_dir() {
+        "dir"
+    } else {
+        "file"
+    };
+    (kind, md.len())
+}
+
+async fn list_file(path: &str) -> CommandOutput {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(md) => {
+            let (kind, size) = kind_and_size(&md);
+            CommandOutput::ok(format!("{kind}\t{size}\t{path}\n").into_bytes())
+        }
+        Err(e) => CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes()),
+    }
+}
+
 #[async_trait]
 impl Command for LsCommand {
     fn name(&self) -> &str {
@@ -41,7 +66,7 @@ impl Command for LsCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "list directory entries (type, size, name); -a for dot-entries"
+        "list a directory, or one file (type, size, name); -a for dot-entries"
     }
 
     fn help(&self) -> String {
@@ -50,6 +75,7 @@ impl Command for LsCommand {
          List directory entries alphabetically, one per line, formatted as \
          `<type>\\t<size>\\t<name>`. `<type>` is `dir`, `file`, or `symlink`; \
          `<size>` is bytes from the entry's (symlink-preserving) metadata. \
+         A PATH that is not a directory prints one row for that path. \
          Defaults to the daemon's CWD if PATH is omitted.\n\
          \n\
          Flags:\n  \
@@ -65,6 +91,7 @@ impl Command for LsCommand {
         };
         let mut reader = match tokio::fs::read_dir(path).await {
             Ok(r) => r,
+            Err(e) if e.kind() == ErrorKind::NotADirectory => return Ok(list_file(path).await),
             Err(e) => {
                 return Ok(CommandOutput::failed(
                     1,
@@ -80,20 +107,9 @@ impl Command for LsCommand {
                     if !show_hidden && name.starts_with('.') {
                         continue;
                     }
-                    let (kind, size) = match tokio::fs::symlink_metadata(entry.path()).await {
-                        Ok(md) => {
-                            let ft = md.file_type();
-                            let kind = if ft.is_symlink() {
-                                "symlink"
-                            } else if ft.is_dir() {
-                                "dir"
-                            } else {
-                                "file"
-                            };
-                            (kind, md.len())
-                        }
-                        Err(_) => ("file", 0),
-                    };
+                    let (kind, size) = tokio::fs::symlink_metadata(entry.path())
+                        .await
+                        .map_or(("file", 0), |md| kind_and_size(&md));
                     rows.push((name, kind, size));
                 }
                 Ok(None) => break,
@@ -250,6 +266,58 @@ mod tests {
             stderr.contains("[error] ls: file not found: /definitely/not/here"),
             "{stderr}"
         );
-        assert!(stderr.contains("Use: ls to check the path"), "{stderr}");
+        assert!(
+            stderr.contains("Use: ls /definitely/not to see what is there"),
+            "{stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ls_file_emits_a_single_row_named_by_the_given_path() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".notes.txt");
+        tokio::fs::write(&file, b"hello").await.unwrap();
+        let path = file.to_string_lossy().into_owned();
+
+        let out = run_ls(&[&path]).await;
+        assert_eq!(out.exit_code, 0, "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("file\t5\t{path}\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ls_symlink_to_file_reports_the_link_itself() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        tokio::fs::write(&target, b"hello").await.unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let path = link.to_string_lossy().into_owned();
+
+        let out = run_ls(&[&path]).await;
+        assert_eq!(out.exit_code, 0, "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.starts_with("symlink\t"), "{stdout}");
+        assert!(stdout.ends_with(&format!("\t{path}\n")), "{stdout}");
+    }
+
+    #[tokio::test]
+    async fn ls_path_through_a_file_names_the_offending_parent() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        tokio::fs::write(&file, b"hello").await.unwrap();
+        let file = file.to_string_lossy().into_owned();
+
+        let out = run_ls(&[&format!("{file}/sub")]).await;
+        assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("a parent component is not a directory"),
+            "{stderr}"
+        );
+        assert!(stderr.contains(&format!("Check: ls {file}\n")), "{stderr}");
     }
 }

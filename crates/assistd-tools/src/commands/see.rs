@@ -207,7 +207,7 @@ mod tests {
             stderr.contains("[error] see: file not found: /nonexistent/image.png"),
             "{stderr}"
         );
-        assert!(stderr.contains("Use: ls to check the path"), "{stderr}");
+        assert!(stderr.contains("Use: ls /nonexistent to see"), "{stderr}");
         assert!(out.attachments.is_empty());
     }
 

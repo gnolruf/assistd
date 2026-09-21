@@ -86,7 +86,10 @@ async fn cat_missing_file_exits_1() {
         stderr.contains("[error] cat: file not found: /nonexistent/path/xyz"),
         "{stderr}"
     );
-    assert!(stderr.contains("Use: ls to check the path"), "{stderr}");
+    assert!(
+        stderr.contains("Use: ls /nonexistent/path to see"),
+        "{stderr}"
+    );
 }
 
 #[tokio::test]
