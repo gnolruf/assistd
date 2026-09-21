@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use crate::Tool;
 use crate::chain::{ParseError, Redirection, execute, parse_chain};
 use crate::command::{Attachment, CommandOutput, CommandRegistry, Hint, error_line};
+use crate::commands::cat::human_size;
 use crate::presentation::{PresentResult, PresentSpec, present};
 use assistd_config::ToolsOutputConfig;
 #[cfg(test)]
@@ -44,7 +45,7 @@ impl RunTool {
             max_bytes: output.max_bytes(),
             overflow_dir,
         };
-        let description = build_description(&registry);
+        let description = build_description(&registry, &spec);
         Self {
             registry,
             spec,
@@ -54,7 +55,7 @@ impl RunTool {
     }
 }
 
-fn build_description(registry: &CommandRegistry) -> String {
+fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
     let mut s = String::with_capacity(1024);
     s.push_str(
         "Execute a shell-style command in the daemon's working directory. \
@@ -63,12 +64,19 @@ fn build_description(registry: &CommandRegistry) -> String {
          it through literally, including a `|` that belongs to the \
          argument rather than the pipeline (`grep \"a|b\" f.txt`). Redirections (>, <), env expansion ($VAR), \
          and backgrounding (&) are NOT supported; use `bash \"…\"` for a \
-         real shell when needed. \
-         Large outputs are truncated; the truncation notice includes a \
-         `Full output: /tmp/assistd-output/cmd-N.txt` path that subsequent \
-         `run` calls can grep/cat to read the full content.\n\n\
-         Available commands:\n",
+         real shell when needed. ",
     );
+    s.push_str(&format!(
+        "Output is returned whole unless its stdout exceeds {max_lines} \
+         lines or {max_size}; only then is it cut to that head and the \
+         full text saved, with the truncation notice giving a \
+         `Full output: {dir}/cmd-N.txt` path that subsequent `run` calls \
+         can grep/cat. No such file exists for output under those \
+         limits.\n\nAvailable commands:\n",
+        max_lines = spec.max_lines,
+        max_size = human_size(spec.max_bytes),
+        dir = spec.overflow_dir.display(),
+    ));
     let pairs = registry.sorted_summaries();
     let name_width = pairs.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     for (name, summary) in pairs {
