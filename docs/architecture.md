@@ -223,8 +223,12 @@ first (configurable in `[voice.synthesis]`).
 
 Pure abstraction over the compositor IPC. The daemon optionally
 queries the active window at the start of each turn (title + class +
-geometry) and injects it into the system prompt, so the model knows
-what you're looking at. The `wm` command surfaces this same backend
+workspace) and folds it into that turn's user message, inside a
+delimited context block labelled as untrusted, so the model knows
+what you're looking at. Titles are application-controlled (a web
+page sets its tab's title), so they are flattened to one bounded
+line and any copy of the block's delimiters inside them is
+neutralised before the text reaches the model. The `wm` command surfaces this same backend
 to the model as a tool: `run wm list`, `run wm focus 'firefox'`, and
 similar.
 

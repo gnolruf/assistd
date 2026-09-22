@@ -28,8 +28,8 @@ pub async fn assert_focused_window_present(wm: &Arc<dyn WindowManager>) {
 }
 
 /// `focused_context().class` should agree with `focused_window()`.
-/// This is the contract the daemon relies on when injecting passive
-/// desktop context into the LLM's per-turn system prompt.
+/// This is the contract the daemon relies on when folding passive
+/// desktop context into each user turn.
 pub async fn assert_focused_context_agrees(wm: &Arc<dyn WindowManager>) {
     let focused = wm
         .focused_window()
