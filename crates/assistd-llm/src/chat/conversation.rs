@@ -664,11 +664,24 @@ fn wire_text(message: &Message) -> Cow<'_, str> {
     match &message.context {
         Some(ctx) => Cow::Owned(format!(
             "{CONTEXT_OPEN}{}{CONTEXT_CLOSE}{}",
-            ctx.trim_end(),
+            neutralise_context_markers(ctx.trim_end()),
             message.content
         )),
         None => Cow::Borrowed(&message.content),
     }
+}
+
+fn neutralise_context_markers(ctx: &str) -> Cow<'_, str> {
+    let open = CONTEXT_OPEN.trim();
+    let close = CONTEXT_CLOSE.trim();
+    if !ctx.contains(open) && !ctx.contains(close) {
+        return Cow::Borrowed(ctx);
+    }
+    let defang = |marker: &str| marker.replace('[', "(").replace(']', ")");
+    Cow::Owned(
+        ctx.replace(open, &defang(open))
+            .replace(close, &defang(close)),
+    )
 }
 
 fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
