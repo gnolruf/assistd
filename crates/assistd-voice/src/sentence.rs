@@ -281,8 +281,10 @@ fn length_cutoff(buf: &str, max_len: usize) -> Option<usize> {
     }
     let window = floor_char_boundary(buf, max_len);
     let cut = buf[..window]
-        .rfind(char::is_whitespace)
-        .map_or(window, |ws| ws + 1);
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(window, |(i, c)| i + c.len_utf8());
     Some(cut)
 }
 
@@ -854,5 +856,16 @@ mod tests {
         assert!(!out.is_empty());
         let combined = out.join("") + &b.finish().unwrap_or_default();
         assert_eq!(combined.matches('\u{1F600}').count(), 40);
+    }
+
+    #[test]
+    fn length_safety_net_cuts_after_multibyte_whitespace() {
+        for ws in ['\u{3000}', '\u{a0}'] {
+            let mut b = SentenceBuffer::new(50);
+            let blob = format!("{}{ws}{}", "a".repeat(45), "b".repeat(10));
+            let out = b.push(&blob);
+            assert_eq!(out, vec!["a".repeat(45)], "whitespace {ws:?}");
+            assert_eq!(b.finish().as_deref(), Some("bbbbbbbbbb"));
+        }
     }
 }
