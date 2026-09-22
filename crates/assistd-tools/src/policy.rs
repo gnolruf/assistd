@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -170,6 +171,17 @@ impl ConfirmationGate for AlwaysAllowGate {
 /// that never answers would otherwise leak a `oneshot::Sender` per ask.
 pub const MAX_PENDING_CONFIRMS: usize = 32;
 
+/// How long a prompt waits for the client's answer before it is denied.
+pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Default)]
+struct PendingPrompts {
+    /// Set once the client can no longer answer; every later ask is
+    /// denied without touching the wire.
+    closed: bool,
+    prompts: HashMap<String, oneshot::Sender<bool>>,
+}
+
 /// Per-connection routing table for in-flight confirmation prompts,
 /// installed in the [`CONFIRM_ROUTER`] task-local so
 /// [`IpcConfirmationGate`] can find it without plumbing. Each `ask`
@@ -180,37 +192,50 @@ pub struct ConfirmRouter {
     /// emitted [`Event::ConfirmRequest`].
     request_id: String,
     wire: mpsc::Sender<Event>,
-    pending: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    timeout: Duration,
+    pending: Mutex<PendingPrompts>,
 }
 
 impl ConfirmRouter {
-    pub fn new(request_id: String, wire: mpsc::Sender<Event>) -> Arc<Self> {
+    /// A router whose prompts are denied after `timeout` without an
+    /// answer.
+    pub fn new(request_id: String, wire: mpsc::Sender<Event>, timeout: Duration) -> Arc<Self> {
         Arc::new(Self {
             request_id,
             wire,
-            pending: Mutex::new(HashMap::new()),
+            timeout,
+            pending: Mutex::new(PendingPrompts::default()),
         })
     }
 
     /// Forward the prompt to the connected client and await the answer.
-    /// Every failure mode (channel drop, cap reached, disconnect) is
-    /// `false`.
+    /// Every failure mode (channel drop, cap reached, disconnect, closed
+    /// router, timeout) is `false`.
     pub async fn ask(&self, req: ConfirmationRequest) -> bool {
         let confirm_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock();
-            if pending.len() >= MAX_PENDING_CONFIRMS {
+            if pending.closed {
                 warn!(
                     target: "assistd::policy",
                     tool = %req.tool,
-                    in_flight = pending.len(),
+                    pattern = %req.matched_pattern,
+                    "destructive command denied: client cannot answer prompts"
+                );
+                return false;
+            }
+            if pending.prompts.len() >= MAX_PENDING_CONFIRMS {
+                warn!(
+                    target: "assistd::policy",
+                    tool = %req.tool,
+                    in_flight = pending.prompts.len(),
                     cap = MAX_PENDING_CONFIRMS,
                     "destructive command denied: pending-confirm cap reached"
                 );
                 return false;
             }
-            pending.insert(confirm_id.clone(), tx);
+            pending.prompts.insert(confirm_id.clone(), tx);
         }
 
         let event = Event::ConfirmRequest {
@@ -221,7 +246,7 @@ impl ConfirmRouter {
             matched_pattern: req.matched_pattern.clone(),
         };
         if self.wire.send(event).await.is_err() {
-            self.pending.lock().remove(&confirm_id);
+            self.pending.lock().prompts.remove(&confirm_id);
             warn!(
                 target: "assistd::policy",
                 tool = %req.tool,
@@ -230,14 +255,24 @@ impl ConfirmRouter {
             return false;
         }
 
-        match rx.await {
-            Ok(allow) => allow,
-            Err(_) => {
-                self.pending.lock().remove(&confirm_id);
+        match tokio::time::timeout(self.timeout, rx).await {
+            Ok(Ok(allow)) => allow,
+            Ok(Err(_)) => {
+                self.pending.lock().prompts.remove(&confirm_id);
                 warn!(
                     target: "assistd::policy",
                     tool = %req.tool,
                     "destructive command denied: confirmation channel dropped"
+                );
+                false
+            }
+            Err(_) => {
+                self.pending.lock().prompts.remove(&confirm_id);
+                warn!(
+                    target: "assistd::policy",
+                    tool = %req.tool,
+                    timeout_secs = self.timeout.as_secs(),
+                    "destructive command denied: no answer before timeout"
                 );
                 false
             }
@@ -247,7 +282,7 @@ impl ConfirmRouter {
     /// Deliver a client's answer to the matching pending prompt. `Err`
     /// means no prompt with that id is in flight.
     pub fn route_response(&self, confirm_id: &str, allow: bool) -> Result<(), &'static str> {
-        let sender = self.pending.lock().remove(confirm_id);
+        let sender = self.pending.lock().prompts.remove(confirm_id);
         match sender {
             Some(tx) => {
                 let _ = tx.send(allow);
@@ -256,12 +291,44 @@ impl ConfirmRouter {
             None => Err("no pending confirm for this confirm_id"),
         }
     }
+
+    /// Deny every prompt in flight and every later ask. Called once the
+    /// client's write side is closed, since no answer can follow.
+    pub fn close(&self) {
+        let drained = {
+            let mut pending = self.pending.lock();
+            pending.closed = true;
+            std::mem::take(&mut pending.prompts)
+        };
+        for (_, tx) in drained {
+            let _ = tx.send(false);
+        }
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.pending.lock().prompts.len()
+    }
 }
 
 tokio::task_local! {
     /// The [`ConfirmRouter`] of the IPC connection whose request is
     /// being dispatched.
     pub static CONFIRM_ROUTER: Arc<ConfirmRouter>;
+}
+
+/// Wrap `fut` so it runs under the caller's [`CONFIRM_ROUTER`], if one
+/// is in scope. Task-locals do not survive `tokio::spawn`; call this at
+/// the spawn site so the spawned agent turn can still reach the
+/// connection that asked for it.
+pub fn inherit_confirm_router<F: Future>(fut: F) -> impl Future<Output = F::Output> {
+    let router = CONFIRM_ROUTER.try_with(Arc::clone).ok();
+    async move {
+        match router {
+            Some(router) => CONFIRM_ROUTER.scope(router, fut).await,
+            None => fut.await,
+        }
+    }
 }
 
 /// Gate that round-trips prompts through the [`CONFIRM_ROUTER`] in
@@ -585,6 +652,76 @@ fn is_executable_file(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
 
+    fn sample_request() -> ConfirmationRequest {
+        ConfirmationRequest {
+            tool: "bash".into(),
+            script: "rm -rf foo".into(),
+            matched_pattern: "rm -rf".into(),
+        }
+    }
+
+    async fn recv_confirm_id(rx: &mut mpsc::Receiver<Event>) -> String {
+        match rx.recv().await.expect("prompt on the wire") {
+            Event::ConfirmRequest { confirm_id, .. } => confirm_id,
+            other => panic!("expected ConfirmRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn router_denies_and_forgets_prompt_after_timeout() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_millis(50));
+        let ask = router.ask(sample_request());
+        let (allowed, confirm_id) = tokio::join!(ask, recv_confirm_id(&mut rx));
+        assert!(!allowed);
+        assert_eq!(router.pending_len(), 0);
+        assert!(router.route_response(&confirm_id, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn router_close_denies_in_flight_prompt_and_later_asks() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60));
+        let asker = Arc::clone(&router);
+        let in_flight = tokio::spawn(async move { asker.ask(sample_request()).await });
+        let _confirm_id = recv_confirm_id(&mut rx).await;
+
+        router.close();
+        assert!(!in_flight.await.expect("ask task"));
+        assert_eq!(router.pending_len(), 0);
+
+        assert!(!router.ask(sample_request()).await);
+        assert!(
+            rx.try_recv().is_err(),
+            "a closed router must not put prompts on the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn inherit_confirm_router_carries_router_across_spawn() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60));
+        let answer = CONFIRM_ROUTER.sync_scope(Arc::clone(&router), || {
+            tokio::spawn(inherit_confirm_router(async {
+                IpcConfirmationGate.confirm(sample_request()).await
+            }))
+        });
+        let confirm_id = recv_confirm_id(&mut rx).await;
+        router.route_response(&confirm_id, true).expect("routed");
+        assert!(answer.await.expect("spawned gate"));
+    }
+
+    #[tokio::test]
+    async fn bare_spawn_loses_router_and_gate_denies() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60));
+        let answer = CONFIRM_ROUTER.sync_scope(router, || {
+            tokio::spawn(async { IpcConfirmationGate.confirm(sample_request()).await })
+        });
+        assert!(!answer.await.expect("spawned gate"));
+        assert!(rx.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn deny_all_gate_refuses_everything() {
         let gate = DenyAllGate;
@@ -614,7 +751,7 @@ mod tests {
         // rather than insert and leak. Using a wide channel so the
         // wire send doesn't block (the cap path triggers before send).
         let (wire_tx, _wire_rx) = mpsc::channel::<Event>(MAX_PENDING_CONFIRMS * 2);
-        let router = ConfirmRouter::new("req-cap-test".into(), wire_tx);
+        let router = ConfirmRouter::new("req-cap-test".into(), wire_tx, CONFIRM_TIMEOUT);
 
         // Pre-load the pending map up to the cap. Bypass `ask` so we
         // don't have to keep the wire sender alive; we just want the
@@ -623,7 +760,7 @@ mod tests {
             let mut pending = router.pending.lock();
             for i in 0..MAX_PENDING_CONFIRMS {
                 let (tx, _rx) = oneshot::channel();
-                pending.insert(format!("preloaded-{i}"), tx);
+                pending.prompts.insert(format!("preloaded-{i}"), tx);
             }
         }
 
@@ -635,7 +772,7 @@ mod tests {
         let result = router.ask(req).await;
         assert!(!result, "ask must deny when pending cap is reached");
         // The cap path returns before insert, so the map size is unchanged.
-        let pending_len = router.pending.lock().len();
+        let pending_len = router.pending_len();
         assert_eq!(
             pending_len, MAX_PENDING_CONFIRMS,
             "denied ask must not insert into pending"

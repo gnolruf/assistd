@@ -380,29 +380,64 @@ fn presence_event_updates_state() {
     assert_eq!(app.presence_state, Some(PresenceState::Active));
 }
 
-#[tokio::test]
-async fn modal_approve_on_y() {
-    let (mut app, _rx) = test_app();
+fn open_test_modal(app: &mut App) {
     app.open_confirmation_modal(
         "c1".into(),
         "bash".into(),
         "rm -rf /tmp/junk".into(),
         "rm -rf".into(),
     );
+}
+
+#[tokio::test]
+async fn modal_approve_on_y_once_armed() {
+    let (mut app, _rx) = test_app();
+    open_test_modal(&mut app);
     assert!(app.has_modal());
+    app.arm_modal();
     app.on_key(typed('y'));
     assert!(!app.has_modal(), "modal should close on approve");
 }
 
 #[tokio::test]
+async fn modal_ignores_approval_before_armed() {
+    let (mut app, _rx) = test_app();
+    open_test_modal(&mut app);
+    app.on_key(typed('y'));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.has_modal(), "keys still in flight must not approve");
+}
+
+#[tokio::test]
+async fn modal_enter_never_approves() {
+    let (mut app, _rx) = test_app();
+    open_test_modal(&mut app);
+    app.arm_modal();
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.has_modal());
+}
+
+#[tokio::test]
+async fn modal_deny_before_armed() {
+    let (mut app, _rx) = test_app();
+    open_test_modal(&mut app);
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.has_modal());
+}
+
+#[test]
+fn modal_closes_when_the_turn_ends() {
+    let (mut app, _rx) = test_app();
+    app.on_chat_event(reply(delta("hi")));
+    open_test_modal(&mut app);
+    app.on_chat_event(reply(done()));
+    assert!(!app.has_modal(), "a finished turn cannot be answered");
+}
+
+#[tokio::test]
 async fn modal_deny_on_n() {
     let (mut app, _rx) = test_app();
-    app.open_confirmation_modal(
-        "c1".into(),
-        "bash".into(),
-        "rm -rf /tmp/junk".into(),
-        "rm -rf".into(),
-    );
+    open_test_modal(&mut app);
     app.on_key(typed('n'));
     assert!(!app.has_modal());
 }
@@ -410,12 +445,8 @@ async fn modal_deny_on_n() {
 #[tokio::test]
 async fn modal_swallows_unrelated_keys() {
     let (mut app, _rx) = test_app();
-    app.open_confirmation_modal(
-        "c1".into(),
-        "bash".into(),
-        "rm -rf /tmp/junk".into(),
-        "rm -rf".into(),
-    );
+    open_test_modal(&mut app);
+    app.arm_modal();
     app.on_key(typed('x'));
     app.on_key(typed('z'));
     assert!(app.has_modal());

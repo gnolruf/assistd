@@ -1,6 +1,6 @@
 use crate::AppState;
 use assistd_ipc::{Event, Request};
-use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter};
+use assistd_tools::{CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -250,7 +250,7 @@ async fn handle_connection(
 
     let span = tracing::info_span!("ipc", id = %req.id(), req = req.kind());
 
-    let router = ConfirmRouter::new(req.id().to_string(), tx.clone());
+    let router = ConfirmRouter::new(req.id().to_string(), tx.clone(), CONFIRM_TIMEOUT);
 
     let is_subscribe = matches!(req, Request::Subscribe { .. });
     let events_bus = state.runtime.events_bus().clone();
@@ -321,6 +321,7 @@ async fn handle_connection(
                 }
             }
         }
+        router.close();
     };
 
     let dispatch_and_read = async {

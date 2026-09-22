@@ -9,7 +9,7 @@ use anyhow::Result;
 use assistd_ipc::{Event, StatusKind};
 use assistd_llm::{LlmEvent, ToolCall};
 use assistd_memory::{PersistedMessage, SessionId, TurnId};
-use assistd_tools::Attachment;
+use assistd_tools::{Attachment, inherit_confirm_router};
 use assistd_voice::{SentenceBuffer, SpeakDecision};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -230,8 +230,10 @@ impl AppState {
         ));
         let agent = Agent::new(llm, tools, health);
         AbortOnDropHandle::new(tokio::spawn(
-            async move { agent.run_turn(text, attachments, llm_tx, cancel).await }
-                .in_current_span(),
+            inherit_confirm_router(async move {
+                agent.run_turn(text, attachments, llm_tx, cancel).await
+            })
+            .in_current_span(),
         ))
     }
 
