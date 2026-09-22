@@ -353,6 +353,10 @@ impl AppState {
             .await
             .ok()
             .flatten();
+        let window = i64::try_from(recency_secs)
+            .ok()
+            .and_then(chrono::Duration::try_seconds)
+            .unwrap_or(chrono::Duration::MAX);
         let keep_current = match latest.as_deref() {
             None => true,
             Some(s) => chrono::DateTime::parse_from_rfc3339(s)
@@ -360,8 +364,7 @@ impl AppState {
                 .map(|t| {
                     let age =
                         chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc));
-                    age >= chrono::Duration::zero()
-                        && age <= chrono::Duration::seconds(recency_secs as i64)
+                    age >= chrono::Duration::zero() && age <= window
                 })
                 .unwrap_or(false),
         };

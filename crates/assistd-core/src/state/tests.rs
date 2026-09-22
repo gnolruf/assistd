@@ -1680,6 +1680,39 @@ async fn switch_unknown_branch_emits_error() {
 }
 
 #[tokio::test]
+async fn resume_or_new_with_huge_window_resumes_instead_of_panicking() {
+    let (state, conv, session, main_branch) = fresh_branch_state().await;
+    let turn = conv.begin_turn(&session, "hello").await.unwrap();
+    conv.append_message_to_branch(
+        &session,
+        main_branch,
+        Some(turn),
+        assistd_memory::PersistedMessage::user("hello"),
+    )
+    .await
+    .unwrap();
+    let (tx, rx) = mpsc::channel::<Event>(16);
+    state
+        .clone()
+        .dispatch(
+            Request::ResumeOrNew {
+                id: "rq".into(),
+                recency_secs: i64::MAX as u64,
+            },
+            tx,
+        )
+        .await
+        .unwrap();
+    let events = drain_events(rx).await;
+    let history_count = events
+        .iter()
+        .filter(|e| matches!(e, Event::HistoryEntry { .. }))
+        .count();
+    assert_eq!(history_count, 1, "an unbounded window must keep the branch");
+    assert!(matches!(events.last(), Some(Event::Done { .. })));
+}
+
+#[tokio::test]
 async fn undo_drops_last_turn_and_emits_count() {
     let (state, conv, session, main_branch) = fresh_branch_state().await;
     // Two turns on main: "first" and "second".
