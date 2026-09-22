@@ -126,12 +126,26 @@ impl std::fmt::Debug for ChatEvent {
     }
 }
 
+/// Keys that approve are ignored for this long after the modal opens,
+/// so a keystroke aimed at the input line cannot approve a command the
+/// user has not yet seen.
+const CONFIRM_ARM_DELAY: Duration = Duration::from_millis(750);
+
 /// Destructive-command prompt shown as an overlay while the daemon's
 /// agent loop blocks on the answer.
 pub struct ConfirmationModal {
     pub request: ConfirmationRequest,
     /// Echoed back in the `Request::ConfirmResponse`.
     confirm_id: String,
+    opened_at: Instant,
+}
+
+impl ConfirmationModal {
+    /// Whether the modal has been visible long enough to accept approval.
+    /// Denial is accepted at any time.
+    pub fn armed(&self) -> bool {
+        self.opened_at.elapsed() >= CONFIRM_ARM_DELAY
+    }
 }
 
 pub struct App {
@@ -304,6 +318,7 @@ impl App {
                 matched_pattern,
             },
             confirm_id,
+            opened_at: Instant::now(),
         });
     }
 
@@ -340,6 +355,13 @@ impl App {
     #[cfg(test)]
     pub fn has_modal(&self) -> bool {
         self.modal.is_some()
+    }
+
+    #[cfg(test)]
+    fn arm_modal(&mut self) {
+        if let Some(modal) = self.modal.as_mut() {
+            modal.opened_at = Instant::now() - CONFIRM_ARM_DELAY;
+        }
     }
 
     pub fn should_quit(&self) -> bool {
@@ -518,8 +540,9 @@ impl App {
     }
 
     fn handle_modal_key(&mut self, ev: KeyEvent) {
+        let armed = self.modal.as_ref().is_some_and(ConfirmationModal::armed);
         match ev.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            KeyCode::Char('y') | KeyCode::Char('Y') if armed => {
                 self.resolve_modal(true);
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -951,6 +974,7 @@ impl App {
         self.output.finish_assistant();
         self.generating = false;
         self.active_reply = None;
+        self.modal = None;
         self.last_thinking_seconds = None;
     }
 

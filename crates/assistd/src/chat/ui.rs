@@ -195,9 +195,48 @@ fn render_slash_popup(
     frame.render_widget(para, area);
 }
 
+/// Script lines shown in the confirmation modal before the rest is
+/// summarised as a count.
+const CONFIRM_SCRIPT_MAX_LINES: usize = 12;
+
+/// One `Line` per script line, with control characters other than the
+/// newline shown as their escape so a script cannot hide a command
+/// behind a carriage return or terminal escape.
+fn script_lines(script: &str) -> Vec<Line<'static>> {
+    fn visible(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        for c in raw.chars() {
+            if c.is_control() {
+                out.extend(c.escape_default());
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+    let lines: Vec<&str> = script.split('\n').collect();
+    let shown = lines.len().min(CONFIRM_SCRIPT_MAX_LINES);
+    let mut out: Vec<Line<'static>> = lines[..shown]
+        .iter()
+        .map(|raw| Line::from(visible(raw)))
+        .collect();
+    if lines.len() > shown {
+        out.push(Line::from(Span::styled(
+            format!("… {} more line(s)", lines.len() - shown),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    out
+}
+
 fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &ConfirmationModal) {
+    let script = script_lines(&modal.request.script);
+    let line_count = modal.request.script.split('\n').count();
     let width = (area.width.saturating_mul(3) / 5).clamp(40, 100);
-    let height = 10u16.min(area.height.saturating_sub(2));
+    let body_rows = 3 + script.len();
+    let height = (body_rows + 3)
+        .max(6)
+        .min(area.height.saturating_sub(2) as usize) as u16;
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let modal_area = Rect {
@@ -219,8 +258,15 @@ fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &Confirma
         .border_style(Style::default().fg(Color::Yellow));
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
+    let [body_area, footer_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
 
-    let text = Text::from(vec![
+    let command_label = if line_count == 1 {
+        "command:".to_string()
+    } else {
+        format!("command ({line_count} lines):")
+    };
+    let mut body = vec![
         Line::from(vec![
             Span::styled("pattern: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
@@ -230,18 +276,26 @@ fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &Confirma
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "command:",
+            command_label,
             Style::default().fg(Color::DarkGray),
         )),
-        Line::from(modal.request.script.clone()),
-        Line::from(""),
-        Line::from(Span::styled(
-            "[Y]es / [N]o   (Enter = yes · Esc = no)",
+    ];
+    body.extend(script);
+    let para = Paragraph::new(Text::from(body)).wrap(Wrap { trim: false });
+    frame.render_widget(para, body_area);
+
+    let footer = if modal.armed() {
+        Span::styled(
+            "[y] run it   [n] / Esc cancel",
             Style::default().fg(Color::Green),
-        )),
-    ]);
-    let para = Paragraph::new(text).wrap(Wrap { trim: false });
-    frame.render_widget(para, inner);
+        )
+    } else {
+        Span::styled(
+            "read the command…   [n] / Esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+    frame.render_widget(Paragraph::new(Line::from(footer)), footer_area);
 }
 
 fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
@@ -607,6 +661,38 @@ fn locate_cursor(rows: &[(usize, usize)], cursor: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn script_lines_splits_multiline_scripts() {
+        let lines = script_lines("echo ok\nrm -rf ~");
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(texts, vec!["echo ok", "rm -rf ~"]);
+    }
+
+    #[test]
+    fn script_lines_make_control_characters_visible() {
+        let lines = script_lines("echo ok\r\x1b[2Krm -rf ~\tnow");
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(texts, vec!["echo ok\\r\\u{1b}[2Krm -rf ~\\tnow"]);
+    }
+
+    #[test]
+    fn script_lines_summarise_the_overflow() {
+        let script = (0..CONFIRM_SCRIPT_MAX_LINES + 5)
+            .map(|i| format!("cmd{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = script_lines(&script);
+        assert_eq!(lines.len(), CONFIRM_SCRIPT_MAX_LINES + 1);
+        assert_eq!(
+            line_text(&lines[CONFIRM_SCRIPT_MAX_LINES]),
+            "… 5 more line(s)"
+        );
+    }
 
     #[test]
     fn input_height_grows_when_buffer_overflows_width() {

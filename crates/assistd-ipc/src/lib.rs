@@ -653,7 +653,9 @@ pub enum Event {
     },
     /// Mid-stream prompt to authorize a destructive tool action. The
     /// turn is parked until a [`Request::ConfirmResponse`] with the same
-    /// `confirm_id` arrives on this connection; a dropped connection
+    /// `confirm_id` arrives on this connection. A client that has closed
+    /// its write side never receives the prompt; a dropped connection or
+    /// an unanswered prompt past the daemon's confirmation timeout
     /// denies.
     ConfirmRequest {
         id: String,

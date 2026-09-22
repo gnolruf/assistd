@@ -837,6 +837,187 @@ async fn unmatched_mid_stream_confirm_response_does_not_crash() {
     server.await.unwrap();
 }
 
+/// Backend whose first step asks for the `gated` tool and whose second
+/// step ends the turn.
+struct GatedToolBackend {
+    stepped: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl assistd_llm::LlmBackend for GatedToolBackend {
+    async fn generate(
+        &self,
+        _prompt: String,
+        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+    ) -> assistd_llm::LlmResult<()> {
+        let _ = tx.send(assistd_llm::LlmEvent::Done).await;
+        Ok(())
+    }
+
+    async fn push_user(
+        &self,
+        _text: String,
+        _attachments: Vec<assistd_tools::Attachment>,
+    ) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn push_tool_results(
+        &self,
+        _results: Vec<assistd_llm::ToolResultPayload>,
+    ) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn step(
+        &self,
+        _tools: Vec<serde_json::Value>,
+        _tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+    ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
+        if self.stepped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(assistd_llm::StepOutcome::Final);
+        }
+        Ok(assistd_llm::StepOutcome::ToolCalls(vec![
+            assistd_llm::ToolCall {
+                id: "call-1".into(),
+                name: "gated".into(),
+                arguments: serde_json::json!({}),
+            },
+        ]))
+    }
+}
+
+/// Tool that runs the production IPC gate and reports its verdict.
+struct GatedTool;
+
+#[async_trait::async_trait]
+impl assistd_tools::Tool for GatedTool {
+    fn name(&self) -> &str {
+        "gated"
+    }
+
+    fn description(&self) -> &str {
+        "asks for confirmation"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn invoke(&self, _args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let approved = assistd_tools::ConfirmationGate::confirm(
+            &assistd_tools::IpcConfirmationGate,
+            assistd_tools::ConfirmationRequest {
+                tool: "bash".into(),
+                script: "rm -rf /tmp/x".into(),
+                matched_pattern: "rm -rf".into(),
+            },
+        )
+        .await;
+        Ok(serde_json::json!({
+            "output": if approved { "approved" } else { "denied" },
+            "exit_code": 0,
+        }))
+    }
+}
+
+fn gated_tool_state() -> Arc<AppState> {
+    let mut tools = assistd_tools::ToolRegistry::new();
+    tools.register(GatedTool);
+    Arc::new(AppState::new(
+        Config::default(),
+        Arc::new(GatedToolBackend {
+            stepped: std::sync::atomic::AtomicBool::new(false),
+        }),
+        PresenceManager::stub(PresenceState::Active),
+        Arc::new(tools),
+        Arc::new(assistd_voice::NoVoiceInput::new()),
+        Arc::new(assistd_voice::NoContinuousListener::new()),
+        assistd_voice::VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
+    ))
+}
+
+async fn read_event(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> Option<Event> {
+    let mut line = String::new();
+    let n = reader.read_line(&mut line).await.unwrap();
+    (n > 0).then(|| serde_json::from_str(line.trim()).unwrap())
+}
+
+fn tool_output(ev: &Event) -> Option<&str> {
+    match ev {
+        Event::ToolResult { result, .. } => result.get("output").and_then(|v| v.as_str()),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn dialog_client_answer_reaches_gate_in_spawned_agent_turn() {
+    with_server(gated_tool_state(), |path| async move {
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(b"{\"type\":\"query\",\"id\":\"q1\",\"text\":\"go\"}\n")
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(read);
+
+        let mut outputs = Vec::new();
+        let run = async {
+            while let Some(ev) = read_event(&mut reader).await {
+                if let Event::ConfirmRequest { id, confirm_id, .. } = &ev {
+                    assert_eq!(id, "q1");
+                    let answer = format!(
+                        "{{\"type\":\"confirm_response\",\"id\":\"cr\",\"confirm_id\":\"{confirm_id}\",\"allow\":true}}\n"
+                    );
+                    write.write_all(answer.as_bytes()).await.unwrap();
+                }
+                if let Some(out) = tool_output(&ev) {
+                    outputs.push(out.to_string());
+                }
+                if ev.is_terminal() {
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("turn must finish once the prompt is answered");
+        assert_eq!(outputs, vec!["approved".to_string()]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn one_shot_client_eof_denies_prompt_without_waiting() {
+    with_server(gated_tool_state(), |path| async move {
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(b"{\"type\":\"query\",\"id\":\"q1\",\"text\":\"go\"}\n")
+            .await
+            .unwrap();
+        write.shutdown().await.unwrap();
+        let mut reader = BufReader::new(read);
+
+        let mut outputs = Vec::new();
+        let run = async {
+            while let Some(ev) = read_event(&mut reader).await {
+                if let Some(out) = tool_output(&ev) {
+                    outputs.push(out.to_string());
+                }
+                if ev.is_terminal() {
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("a client that closed its write side must not park the turn");
+        assert_eq!(outputs, vec!["denied".to_string()]);
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn get_voice_state_reports_default_enabled_true() {
     with_server(test_state(), |path| async move {
