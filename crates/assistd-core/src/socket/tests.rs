@@ -1389,3 +1389,119 @@ async fn subscribe_does_not_self_loop() {
     })
     .await;
 }
+
+/// Backend that streams 1 KiB deltas until its channel closes. Used to
+/// exercise clients that disconnect or stop reading mid-turn.
+struct FloodBackend;
+
+impl FloodBackend {
+    async fn flood(tx: &tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>) {
+        let text = "x".repeat(1024);
+        while tx
+            .send(assistd_llm::LlmEvent::Delta { text: text.clone() })
+            .await
+            .is_ok()
+        {}
+    }
+}
+
+#[async_trait::async_trait]
+impl assistd_llm::LlmBackend for FloodBackend {
+    async fn generate(
+        &self,
+        _prompt: String,
+        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+    ) -> assistd_llm::LlmResult<()> {
+        Self::flood(&tx).await;
+        Ok(())
+    }
+
+    async fn push_user(
+        &self,
+        _text: String,
+        _attachments: Vec<assistd_tools::Attachment>,
+    ) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn push_tool_results(
+        &self,
+        _results: Vec<assistd_llm::ToolResultPayload>,
+    ) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn step(
+        &self,
+        _tools: Vec<serde_json::Value>,
+        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+    ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
+        Self::flood(&tx).await;
+        Ok(assistd_llm::StepOutcome::Final)
+    }
+}
+
+/// Sends a query and returns the connection after its first event has
+/// arrived, so the caller controls when the client goes away.
+async fn open_query_and_read_first_event(
+    path: &Path,
+    id: &str,
+) -> (
+    Event,
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+) {
+    let stream = UnixStream::connect(path).await.unwrap();
+    let (read, mut write) = stream.into_split();
+    let body = format!("{{\"type\":\"query\",\"id\":\"{id}\",\"text\":\"go\"}}\n");
+    write.write_all(body.as_bytes()).await.unwrap();
+    let mut reader = BufReader::new(read);
+    let mut first = String::new();
+    let n = reader.read_line(&mut first).await.unwrap();
+    assert!(n > 0, "expected a first event for {id}");
+    let event: Event = serde_json::from_str(first.trim()).unwrap();
+    (event, reader, write)
+}
+
+#[tokio::test]
+async fn client_disconnect_mid_turn_releases_the_turn_lock() {
+    with_server(
+        state_with_backend_and_grace(Arc::new(FloodBackend), 0),
+        |path| async move {
+            let (first, reader, write) = open_query_and_read_first_event(&path, "gone").await;
+            assert!(matches!(first, Event::Delta { .. }), "got {first:?}");
+            drop(reader);
+            drop(write);
+
+            let (next, _reader, _write) = tokio::time::timeout(
+                Duration::from_secs(5),
+                open_query_and_read_first_event(&path, "after"),
+            )
+            .await
+            .expect("second query queued behind a turn whose client had disconnected");
+            assert!(matches!(next, Event::Delta { .. }), "got {next:?}");
+        },
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn write_event_times_out_when_the_client_stops_reading() {
+    let (server, _client_never_reads) = UnixStream::pair().unwrap();
+    let (_server_read, mut write_half) = server.into_split();
+    let event = Event::Delta {
+        id: "stalled".into(),
+        text: "x".repeat(1024),
+    };
+
+    let err = tokio::time::timeout(EVENT_WRITE_TIMEOUT * 4, async {
+        loop {
+            if let Err(e) = write_event(&mut write_half, &event).await {
+                break e;
+            }
+        }
+    })
+    .await
+    .expect("write to a stalled client never failed");
+    assert!(matches!(err, SocketError::WriteTimeout(_)), "got {err:?}");
+}
