@@ -14,6 +14,12 @@ use tracing::{Instrument, debug, error, info, warn};
 
 const EVENT_CHANNEL_CAPACITY: usize = 32;
 
+/// Longest a single event write may block on a client that has stopped
+/// reading. A query turn holds the agent turn lock while its events are
+/// forwarded, so a stalled reader would otherwise stall every later
+/// query behind it.
+const EVENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Hard cap on a single newline-delimited request frame. `read_line` is
 /// otherwise unbounded; a runaway client streaming a multi-GB prompt
 /// would OOM the daemon. 64 MiB fits a single 32 MiB image attachment
@@ -56,6 +62,9 @@ pub enum SocketError {
 
     #[error("socket I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("client did not accept an event within {0:?}")]
+    WriteTimeout(Duration),
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
@@ -261,7 +270,7 @@ async fn handle_connection(
             .scope(router_for_dispatch, dispatch_state.dispatch(req, tx))
             .await
     };
-    let forward_fut = async {
+    let forward_fut = async move {
         while let Some(event) = rx.recv().await {
             // Subscribe forwarders read from the bus; teeing back
             // onto it would loop.
@@ -363,8 +372,13 @@ async fn write_event(
 ) -> Result<(), SocketError> {
     let mut out = serde_json::to_string(event)?;
     out.push('\n');
-    write_half.write_all(out.as_bytes()).await?;
-    write_half.flush().await?;
+    let write = async {
+        write_half.write_all(out.as_bytes()).await?;
+        write_half.flush().await
+    };
+    tokio::time::timeout(EVENT_WRITE_TIMEOUT, write)
+        .await
+        .map_err(|_| SocketError::WriteTimeout(EVENT_WRITE_TIMEOUT))??;
     Ok(())
 }
 
