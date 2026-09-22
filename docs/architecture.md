@@ -92,8 +92,8 @@ and `tray`. The tray subcommand is a long-lived
 [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/)
 client (via the [`ksni`](https://crates.io/crates/ksni) crate): it
 holds a passive `Request::Subscribe` connection, translates the
-broadcast events into icon state (disconnected → generating →
-listening → presence), and provides a Sleep / Wake menu that issues
+broadcast events into icon state (config error → disconnected →
+generating → listening → presence), and provides a Sleep / Wake menu that issues
 `Request::SetPresence` on isolated one-shot connections. Like every
 other client it depends only on `assistd-ipc` + `assistd-config`, so
 client-only builds stay daemon-free.

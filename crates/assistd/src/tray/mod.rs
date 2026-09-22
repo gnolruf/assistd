@@ -1,9 +1,9 @@
 //! `assistd tray`: StatusNotifierItem client mirroring daemon state.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use assistd_config::Config;
+use anyhow::Result;
+use assistd_config::{Config, ConfigError};
 use assistd_ipc::IpcClient;
 use clap::Args;
 use ksni::TrayMethods;
@@ -32,10 +32,15 @@ pub async fn run(args: TrayArgs) -> Result<()> {
         Some(p) => p,
         None => Config::default_path()?,
     };
-    let config = Config::load_from_file(&config_path)
-        .with_context(|| format!("loading config from {}", config_path.display()))?;
-    config.validate()?;
-    tracing::info!(target: "tray", "loaded config from {}", config_path.display());
+    let config = load_config(&config_path);
+    match &config {
+        Ok(_) => tracing::info!(target: "tray", "loaded config from {}", config_path.display()),
+        Err(e) => tracing::error!(
+            target: "tray",
+            "config unusable; tray will flag it until fixed: {e}"
+        ),
+    }
+    let config_error = config.as_ref().err().map(ToString::to_string);
 
     if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
         anyhow::bail!(
@@ -47,7 +52,12 @@ pub async fn run(args: TrayArgs) -> Result<()> {
     let ipc = IpcClient::new();
 
     #[cfg(feature = "tray-popup")]
-    let popup_handle = popup::spawn_popup(&config, ipc.clone()).await?;
+    let popup_handle = match &config {
+        Ok(cfg) => popup::spawn_popup(cfg, ipc.clone()).await?,
+        Err(_) => None,
+    };
+    #[cfg(not(feature = "tray-popup"))]
+    let _ = &config;
     #[cfg(feature = "tray-popup")]
     let popup_sink = popup_handle.as_ref().map(|h| h.sink.clone());
     #[cfg(not(feature = "tray-popup"))]
@@ -55,7 +65,7 @@ pub async fn run(args: TrayArgs) -> Result<()> {
 
     let (actions_tx, actions_rx) = mpsc::unbounded_channel();
     let activate_cb = build_activate_callback(&popup_sink);
-    let item = TrayItem::new(actions_tx, activate_cb);
+    let item = TrayItem::new(actions_tx, activate_cb, config_error);
 
     let handle = item
         .assume_sni_available(true)
@@ -83,6 +93,12 @@ pub async fn run(args: TrayArgs) -> Result<()> {
         p.shutdown().await;
     }
     Ok(())
+}
+
+fn load_config(path: &Path) -> Result<Config, ConfigError> {
+    let config = Config::load_from_file(path)?;
+    config.validate()?;
+    Ok(config)
 }
 
 #[cfg(feature = "tray-popup")]
