@@ -7,6 +7,8 @@ use assistd_ipc::{Event, PresenceState};
 /// What the tray icon should currently display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayState {
+    /// The tray's own config file failed to load or validate.
+    ConfigError,
     /// Daemon socket is unreachable.
     Disconnected,
     /// At least one query turn is in flight.
@@ -21,6 +23,7 @@ pub enum TrayState {
 
 #[derive(Debug, Clone)]
 pub struct TrayTracker {
+    config_error: Option<String>,
     presence: PresenceState,
     listening: bool,
     in_flight: HashSet<String>,
@@ -29,18 +32,28 @@ pub struct TrayTracker {
 
 impl Default for TrayTracker {
     fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl TrayTracker {
+    /// A tracker that reports [`TrayState::ConfigError`] for as long as
+    /// `config_error` is `Some`, regardless of daemon state.
+    pub fn new(config_error: Option<String>) -> Self {
         Self {
+            config_error,
             presence: PresenceState::Active,
             listening: false,
             in_flight: HashSet::new(),
             connected: false,
         }
     }
-}
 
-impl TrayTracker {
-    /// Priority: disconnected, generating, listening, presence.
+    /// Priority: config error, disconnected, generating, listening, presence.
     pub fn current(&self) -> TrayState {
+        if self.config_error.is_some() {
+            return TrayState::ConfigError;
+        }
         if !self.connected {
             return TrayState::Disconnected;
         }
@@ -58,6 +71,14 @@ impl TrayTracker {
 
     pub fn presence(&self) -> PresenceState {
         self.presence
+    }
+
+    pub fn connected(&self) -> bool {
+        self.connected
+    }
+
+    pub fn config_error(&self) -> Option<&str> {
+        self.config_error.as_deref()
     }
 
     /// Returns `true` when the resolved [`TrayState`] changed.
@@ -103,6 +124,7 @@ impl TrayTracker {
 /// image assets ship.
 pub fn icon_name_for(state: TrayState) -> &'static str {
     match state {
+        TrayState::ConfigError => "dialog-error",
         TrayState::Disconnected => "network-offline",
         TrayState::Generating => "system-run",
         TrayState::Listening => "audio-input-microphone",
@@ -113,6 +135,7 @@ pub fn icon_name_for(state: TrayState) -> &'static str {
 
 pub fn tooltip_for(state: TrayState) -> &'static str {
     match state {
+        TrayState::ConfigError => "assistd: config error",
         TrayState::Disconnected => "assistd: daemon offline",
         TrayState::Generating => "assistd: thinking…",
         TrayState::Listening => "assistd: listening",
@@ -169,6 +192,22 @@ mod tests {
     fn disconnected_takes_top_priority() {
         let t = TrayTracker::default();
         assert_eq!(t.current(), TrayState::Disconnected);
+    }
+
+    #[test]
+    fn config_error_outranks_everything() {
+        let mut t = TrayTracker::new(Some("unknown field `foo`".into()));
+        assert_eq!(t.current(), TrayState::ConfigError);
+        assert_eq!(t.config_error(), Some("unknown field `foo`"));
+
+        assert!(!t.set_connected());
+        assert!(t.connected());
+        assert!(!t.ingest(&listen(true)));
+        assert!(!t.ingest(&delta("a")));
+        assert_eq!(t.current(), TrayState::ConfigError);
+
+        assert!(!t.set_disconnected());
+        assert_eq!(t.current(), TrayState::ConfigError);
     }
 
     #[test]
@@ -266,6 +305,7 @@ mod tests {
     #[test]
     fn every_state_maps_to_a_distinct_icon() {
         let names: Vec<_> = [
+            TrayState::ConfigError,
             TrayState::Disconnected,
             TrayState::Generating,
             TrayState::Listening,

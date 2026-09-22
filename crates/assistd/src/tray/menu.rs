@@ -10,7 +10,7 @@ use ksni::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 
-use super::state::{TrayState, TrayTracker, icon_name_for, tooltip_for};
+use super::state::{TrayTracker, icon_name_for, tooltip_for};
 
 #[derive(Debug, Clone, Copy)]
 pub enum MenuAction {
@@ -33,9 +33,10 @@ impl TrayItem {
     pub fn new(
         actions: UnboundedSender<MenuAction>,
         on_activate: Option<ActivateCallback>,
+        config_error: Option<String>,
     ) -> Self {
         Self {
-            tracker: TrayTracker::default(),
+            tracker: TrayTracker::new(config_error),
             actions,
             on_activate,
         }
@@ -89,13 +90,12 @@ impl Tray for TrayItem {
             icon_name: String::new(),
             icon_pixmap: Vec::new(),
             title: tooltip_for(self.tracker.current()).into(),
-            description: String::new(),
+            description: self.tracker.config_error().unwrap_or_default().into(),
         }
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let state = self.tracker.current();
-        let toggle_enabled = !matches!(state, TrayState::Disconnected);
+        let toggle_enabled = self.tracker.connected();
         let toggle_label = toggle_label_for(self.tracker.presence()).to_string();
         vec![
             StandardItem {
