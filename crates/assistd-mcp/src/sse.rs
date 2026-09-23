@@ -591,95 +591,82 @@ mod tests {
         events
     }
 
-    #[test]
-    fn single_message_event() {
-        let mut p = EventParser::new();
-        let events = drive(&mut p, &[b"event: message\ndata: hello\n\n"]);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "message");
-        assert_eq!(events[0].data, "hello");
+    fn ev(event_type: &str, data: &str, id: Option<&str>) -> SseEvent {
+        SseEvent {
+            event_type: event_type.into(),
+            data: data.into(),
+            id: id.map(Into::into),
+        }
     }
 
     #[test]
-    fn default_event_type_is_message() {
-        let mut p = EventParser::new();
-        let events = drive(&mut p, &[b"data: hi\n\n"]);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "message");
-        assert_eq!(events[0].data, "hi");
-    }
-
-    #[test]
-    fn multi_line_data_concatenated_with_newlines() {
-        let mut p = EventParser::new();
-        let events = drive(&mut p, &[b"data: line1\ndata: line2\ndata: line3\n\n"]);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data, "line1\nline2\nline3");
-    }
-
-    #[test]
-    fn comment_lines_ignored() {
-        let mut p = EventParser::new();
-        let events = drive(&mut p, &[b": keep-alive\n: another\ndata: x\n\n"]);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data, "x");
-    }
-
-    #[test]
-    fn handles_crlf_line_endings() {
-        let mut p = EventParser::new();
-        let events = drive(&mut p, &[b"event: endpoint\r\ndata: /msg?s=1\r\n\r\n"]);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "endpoint");
-        assert_eq!(events[0].data, "/msg?s=1");
-    }
-
-    #[test]
-    fn split_across_chunks() {
-        let mut p = EventParser::new();
-        let events = drive(
-            &mut p,
-            &[b"event: ", b"message\ndata: par", b"tial\n", b"\n"],
-        );
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "message");
-        assert_eq!(events[0].data, "partial");
-    }
-
-    #[test]
-    fn back_to_back_events() {
-        let mut p = EventParser::new();
-        let events = drive(&mut p, &[b"data: one\n\ndata: two\n\ndata: three\n\n"]);
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[0].data, "one");
-        assert_eq!(events[1].data, "two");
-        assert_eq!(events[2].data, "three");
-    }
-
-    #[test]
-    fn empty_lines_without_pending_event_dropped() {
-        let mut p = EventParser::new();
-        let events = drive(&mut p, &[b"\n\n\ndata: ok\n\n"]);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data, "ok");
-    }
-
-    #[test]
-    fn id_field_captured() {
-        let mut p = EventParser::new();
-        let events = drive(&mut p, &[b"id: 42\nevent: message\ndata: x\n\n"]);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].id.as_deref(), Some("42"));
-    }
-
-    #[test]
-    fn line_without_colon_treated_as_field_name() {
-        // SSE spec: a line without a colon is treated as a field with
-        // an empty value. "data" alone means empty data line.
-        let mut p = EventParser::new();
-        let events = drive(&mut p, &[b"data\ndata: rest\n\n"]);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data, "\nrest");
+    fn parses_events_from_chunks() {
+        type Case = (&'static str, &'static [&'static [u8]], Vec<SseEvent>);
+        let cases: [Case; 11] = [
+            (
+                "single message",
+                &[b"event: message\ndata: hello\n\n"],
+                vec![ev("message", "hello", None)],
+            ),
+            (
+                "default event type is message",
+                &[b"data: hi\n\n"],
+                vec![ev("message", "hi", None)],
+            ),
+            (
+                "multi-line data joined with newlines",
+                &[b"data: line1\ndata: line2\ndata: line3\n\n"],
+                vec![ev("message", "line1\nline2\nline3", None)],
+            ),
+            (
+                "comment lines ignored",
+                &[b": keep-alive\n: another\ndata: x\n\n"],
+                vec![ev("message", "x", None)],
+            ),
+            (
+                "crlf line endings",
+                &[b"event: endpoint\r\ndata: /msg?s=1\r\n\r\n"],
+                vec![ev("endpoint", "/msg?s=1", None)],
+            ),
+            (
+                "split across chunks",
+                &[b"event: ", b"message\ndata: par", b"tial\n", b"\n"],
+                vec![ev("message", "partial", None)],
+            ),
+            (
+                "back to back events",
+                &[b"data: one\n\ndata: two\n\ndata: three\n\n"],
+                vec![
+                    ev("message", "one", None),
+                    ev("message", "two", None),
+                    ev("message", "three", None),
+                ],
+            ),
+            (
+                "blank lines without a pending event dropped",
+                &[b"\n\n\ndata: ok\n\n"],
+                vec![ev("message", "ok", None)],
+            ),
+            (
+                "id field captured",
+                &[b"id: 42\nevent: message\ndata: x\n\n"],
+                vec![ev("message", "x", Some("42"))],
+            ),
+            (
+                "line without colon is a field with empty value",
+                &[b"data\ndata: rest\n\n"],
+                vec![ev("message", "\nrest", None)],
+            ),
+            (
+                "only one leading space after colon stripped",
+                &[b"data:nospaces\ndata: leading-space-stripped\n\n"],
+                vec![ev("message", "nospaces\nleading-space-stripped", None)],
+            ),
+        ];
+        for (label, chunks, expected) in cases {
+            let mut p = EventParser::new();
+            assert_eq!(drive(&mut p, chunks), expected, "{label}");
+        }
     }
 
     #[test]
@@ -712,44 +699,33 @@ mod tests {
     }
 
     #[test]
-    fn relative_endpoint_resolved_against_base() {
-        let base = Url::parse("http://127.0.0.1:8931/sse").unwrap();
-        let url = resolve_endpoint(&base, "/messages?sessionId=abc").unwrap();
-        assert_eq!(url.as_str(), "http://127.0.0.1:8931/messages?sessionId=abc");
-    }
-
-    #[test]
-    fn path_relative_endpoint_resolved_against_base_directory() {
-        let base = Url::parse("http://example.com/mcp/sse").unwrap();
-        let url = resolve_endpoint(&base, "messages/?session_id=1").unwrap();
-        assert_eq!(
-            url.as_str(),
-            "http://example.com/mcp/messages/?session_id=1"
-        );
-    }
-
-    #[test]
-    fn absolute_endpoint_replaces_base() {
-        let base = Url::parse("http://127.0.0.1:8931/sse").unwrap();
-        let url = resolve_endpoint(&base, "https://other.example/post").unwrap();
-        assert_eq!(url.as_str(), "https://other.example/post");
-    }
-
-    #[test]
-    fn endpoint_payload_is_trimmed() {
-        let base = Url::parse("http://127.0.0.1:8931/sse").unwrap();
-        let url = resolve_endpoint(&base, " /messages\r").unwrap();
-        assert_eq!(url.as_str(), "http://127.0.0.1:8931/messages");
-    }
-
-    #[test]
-    fn leading_space_after_colon_stripped() {
-        let mut p = EventParser::new();
-        let events = drive(
-            &mut p,
-            &[b"data:nospaces\ndata: leading-space-stripped\n\n"],
-        );
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data, "nospaces\nleading-space-stripped");
+    fn endpoint_resolves_against_base_url() {
+        let cases = [
+            (
+                "http://127.0.0.1:8931/sse",
+                "/messages?sessionId=abc",
+                "http://127.0.0.1:8931/messages?sessionId=abc",
+            ),
+            (
+                "http://example.com/mcp/sse",
+                "messages/?session_id=1",
+                "http://example.com/mcp/messages/?session_id=1",
+            ),
+            (
+                "http://127.0.0.1:8931/sse",
+                "https://other.example/post",
+                "https://other.example/post",
+            ),
+            (
+                "http://127.0.0.1:8931/sse",
+                " /messages\r",
+                "http://127.0.0.1:8931/messages",
+            ),
+        ];
+        for (base, data, expected) in cases {
+            let base = Url::parse(base).unwrap();
+            let url = resolve_endpoint(&base, data).unwrap();
+            assert_eq!(url.as_str(), expected, "{data:?} against {base}");
+        }
     }
 }

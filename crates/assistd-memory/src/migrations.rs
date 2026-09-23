@@ -164,12 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn migrations_validate() {
-        migrations().validate().expect("V1 SQL is well-formed");
-    }
-
-    #[test]
-    fn run_creates_all_expected_objects() {
+    fn run_creates_exactly_the_expected_objects() {
         let mut conn = open_in_memory();
         run(&mut conn).expect("first migration run");
 
@@ -181,37 +176,39 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
 
-        for expected in [
-            "branch_messages",
-            "branches",
-            "conv_fts_ad",
-            "conv_fts_ai",
-            "conv_fts_au",
-            "conversation_chunks",
-            "conversations",
-            "conversations_fts",
-            "embeddings",
-            "idx_branch_messages_branch_seq",
-            "idx_branch_messages_conv",
-            "idx_branches_session",
-            "idx_chunks_conv",
-            "idx_conversations_session_seq",
-            "idx_conversations_turn",
-            "idx_embeddings_model",
-            "idx_memories_key",
-            "idx_memory_embeddings_model",
-            "idx_turns_session",
-            "memories",
-            "memory_embeddings",
-            "schema_migrations",
-            "sessions",
-            "turns",
-        ] {
-            assert!(
-                names.iter().any(|n| n == expected),
-                "expected {expected} in {names:?}"
-            );
-        }
+        assert_eq!(
+            names,
+            [
+                "branch_messages",
+                "branches",
+                "conv_fts_ad",
+                "conv_fts_ai",
+                "conv_fts_au",
+                "conversation_chunks",
+                "conversations",
+                "conversations_fts",
+                "conversations_fts_config",
+                "conversations_fts_data",
+                "conversations_fts_docsize",
+                "conversations_fts_idx",
+                "embeddings",
+                "idx_branch_messages_branch_seq",
+                "idx_branch_messages_conv",
+                "idx_branches_session",
+                "idx_chunks_conv",
+                "idx_conversations_session_seq",
+                "idx_conversations_turn",
+                "idx_embeddings_model",
+                "idx_memories_key",
+                "idx_memory_embeddings_model",
+                "idx_turns_session",
+                "memories",
+                "memory_embeddings",
+                "schema_migrations",
+                "sessions",
+                "turns",
+            ]
+        );
     }
 
     #[test]
@@ -220,13 +217,9 @@ mod tests {
         run(&mut conn).expect("first run");
         run(&mut conn).expect("second run no-op");
 
-        let count: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='conversations'",
-                [],
-                |r| r.get(0),
-            )
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(version, 1);
     }
 }

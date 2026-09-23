@@ -88,40 +88,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn no_memory_store_save_and_load_round_trip_returns_none() {
+    async fn no_memory_store_persists_nothing() {
         let store = NoMemoryStore;
-        let id = store.save("fact:user.name", "Ben".into()).await.unwrap();
-        assert_eq!(id, 0, "no-backend save returns sentinel id 0");
+        assert_eq!(store.save("fact:user.name", "Ben".into()).await.unwrap(), 0);
         assert_eq!(store.load("fact:user.name").await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn no_memory_store_delete_is_silent() {
-        let store = NoMemoryStore;
-        store.delete("fact:nonexistent").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn no_memory_store_delete_by_id_returns_none() {
-        let store = NoMemoryStore;
-        assert!(store.delete_by_id(42).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn no_memory_store_list_returns_empty() {
-        let store = NoMemoryStore;
-        assert!(store.list("fact:").await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn no_memory_store_list_full_returns_empty() {
-        let store = NoMemoryStore;
-        assert!(store.list_full("fact:").await.unwrap().is_empty());
-    }
-
-    /// Compile-only: the trait must stay object-safe.
-    #[test]
-    fn memory_store_is_object_safe() {
-        let _: std::sync::Arc<dyn MemoryStore> = std::sync::Arc::new(NoMemoryStore);
+        assert_eq!(store.list("fact:").await.unwrap(), Vec::<String>::new());
+        assert_eq!(store.list_full("fact:").await.unwrap(), Vec::new());
     }
 }

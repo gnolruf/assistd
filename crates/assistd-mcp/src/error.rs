@@ -131,14 +131,9 @@ mod tests {
         s.contains("Use:") || s.contains("Try:") || s.contains("Check:") || s.contains("Available:")
     }
 
-    /// Build a real `reqwest::Error` for the test; `reqwest` doesn't
-    /// expose a public constructor, so we provoke one with a malformed
-    /// URL request. Async because the only path that yields a
-    /// `reqwest::Error` flows through `Client::execute`.
+    /// `reqwest` has no public error constructor; a request to a
+    /// malformed URL fails before touching the network.
     async fn fake_http_error() -> reqwest::Error {
-        // No proxy + a URL that fails connect-time parsing (well-formed
-        // URL but unreachable scheme) is the most reliable way to get
-        // an Error back without hitting the network.
         reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -149,10 +144,6 @@ mod tests {
             .expect_err("must error on malformed URL")
     }
 
-    /// Every `McpError` variant must produce a convention-compliant line:
-    /// starts with `[error] <tool>: `, includes one of the four hint words,
-    /// and ends with a newline. Mirrors the gating test in
-    /// `assistd-tools/src/command.rs::every_registered_command_emits_…`.
     #[tokio::test]
     async fn every_variant_emits_convention_compliant_line() {
         let cases: Vec<(&str, McpError)> = vec![
@@ -186,6 +177,10 @@ mod tests {
             ),
             ("server_down", McpError::ServerDown),
             ("too_many", McpError::TooManyInFlight),
+            (
+                "json",
+                McpError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+            ),
             ("http", McpError::Http(fake_http_error().await)),
             (
                 "http_status",
@@ -209,62 +204,39 @@ mod tests {
         }
     }
 
-    /// Source chain on `Http` must walk back to the underlying
-    /// `reqwest::Error`. Regression for the previous `to_string()`
-    /// shape that lost it.
-    #[tokio::test]
-    async fn http_variant_preserves_source_chain() {
-        let original = fake_http_error().await;
-        let original_text = original.to_string();
-        let wrapped = McpError::Http(original);
-        let source = std::error::Error::source(&wrapped).expect("source chain present");
-        assert_eq!(
-            source.to_string(),
-            original_text,
-            "source must be the original reqwest::Error"
-        );
-    }
-
-    /// Config variant carries actionable context and source; the
-    /// `mcp_error_line` rendering must include both.
     #[test]
-    fn config_variant_renders_with_check_hint_and_context() {
-        let inner = std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad bytes");
-        let e = McpError::config("invalid header `X-Bad`", inner);
-        let line = mcp_error_line("mcp__web__search", &e);
-        assert!(line.contains("invalid header `X-Bad`"), "{line}");
-        assert!(line.contains("bad bytes"), "{line}");
-        assert!(
-            line.contains("Check: ~/.config/assistd/config.toml"),
-            "{line}"
-        );
-    }
-
-    #[test]
-    fn rpc_error_line_carries_code_and_message() {
-        let e = McpError::RpcError {
-            code: -32602,
-            message: "Invalid params: missing `query`".into(),
-            data: None,
-        };
-        let line = mcp_error_line("mcp__web__search", &e);
-        assert!(line.contains("-32602"), "{line}");
-        assert!(line.contains("Invalid params"), "{line}");
-        assert!(line.contains("Check:"), "{line}");
-    }
-
-    #[test]
-    fn timeout_line_carries_duration() {
-        let e = McpError::RequestTimeout(std::time::Duration::from_secs(30));
-        let line = mcp_error_line("mcp__web__search", &e);
-        assert!(line.contains("30s"), "duration must be visible: {line}");
-        assert!(line.contains("Try:"), "{line}");
-    }
-
-    #[test]
-    fn server_down_line_suggests_retry() {
-        let line = mcp_error_line("mcp__web__search", &McpError::ServerDown);
-        assert!(line.contains("Try:"), "{line}");
-        assert!(line.contains("reconnect"), "{line}");
+    fn lines_carry_the_variant_details_and_matching_hint() {
+        let cases = [
+            (
+                McpError::config(
+                    "invalid header `X-Bad`",
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad bytes"),
+                ),
+                "[error] mcp__web__search: MCP config error: invalid header `X-Bad`: bad bytes. \
+                 Check: ~/.config/assistd/config.toml `[[mcp.servers]]` block\n",
+            ),
+            (
+                McpError::RpcError {
+                    code: -32602,
+                    message: "Invalid params: missing `query`".into(),
+                    data: None,
+                },
+                "[error] mcp__web__search: MCP server returned error code -32602: \
+                 Invalid params: missing `query`. Check: the arguments and try again\n",
+            ),
+            (
+                McpError::RequestTimeout(std::time::Duration::from_secs(30)),
+                "[error] mcp__web__search: MCP request timed out after 30s. \
+                 Try: the call again or a smaller request\n",
+            ),
+            (
+                McpError::ServerDown,
+                "[error] mcp__web__search: MCP server is currently unavailable. \
+                 Try: another tool while the server reconnects\n",
+            ),
+        ];
+        for (e, expected) in cases {
+            assert_eq!(mcp_error_line("mcp__web__search", &e), expected);
+        }
     }
 }

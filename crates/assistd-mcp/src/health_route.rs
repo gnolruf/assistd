@@ -99,33 +99,27 @@ mod tests {
         let result = tool.invoke(json!({})).await.unwrap();
 
         assert_eq!(result["type"], "text");
-        assert!(result["output"].as_str().unwrap().contains("search"));
+        assert_eq!(result["output"], "called search");
     }
 
     #[tokio::test]
-    async fn short_circuits_when_unhealthy() {
-        let (tool, _tx) = make_tool(HealthState::Unhealthy);
-        let result = tool.invoke(json!({})).await.unwrap();
-        assert_eq!(result["type"], "error");
-        assert_eq!(result["exit_code"], -1);
-        assert_eq!(result["truncated"], false);
-
-        assert_eq!(result["server_name"], "web");
-        let output = result["output"].as_str().unwrap();
-
-        assert!(output.starts_with("[error] mcp__web__search: "), "{output}");
-        assert!(
-            output.contains("Try:") || output.contains("Check:"),
-            "missing recovery hint: {output}"
-        );
-        assert!(output.ends_with('\n'));
-    }
-
-    #[tokio::test]
-    async fn short_circuits_when_restarting() {
-        let (tool, _tx) = make_tool(HealthState::Restarting);
-        let result = tool.invoke(json!({})).await.unwrap();
-        assert_eq!(result["type"], "error");
+    async fn short_circuits_with_server_down_envelope_when_not_healthy() {
+        for state in [HealthState::Unhealthy, HealthState::Restarting] {
+            let (tool, _tx) = make_tool(state);
+            let result = tool.invoke(json!({})).await.unwrap();
+            assert_eq!(
+                result,
+                json!({
+                    "type": "error",
+                    "output": mcp_error_line("mcp__web__search", &McpError::ServerDown),
+                    "exit_code": -1,
+                    "duration_ms": 0,
+                    "truncated": false,
+                    "server_name": "web",
+                }),
+                "{state:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -134,7 +128,7 @@ mod tests {
         let r = tool.invoke(json!({})).await.unwrap();
         assert_eq!(r["type"], "error");
 
-        let _ = tx.send(HealthState::Healthy);
+        tx.send(HealthState::Healthy).unwrap();
         let r = tool.invoke(json!({})).await.unwrap();
         assert_eq!(r["type"], "text");
         assert_eq!(r["exit_code"], 0);
