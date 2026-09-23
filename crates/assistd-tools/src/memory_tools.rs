@@ -452,7 +452,7 @@ mod tests {
 
     #[async_trait]
     impl Embedder for FixedEmbedder {
-        async fn embed(&self, _text: String) -> Result<Vec<f32>> {
+        async fn embed(&self, _text: String) -> Result<Vec<f32>, assistd_embed::EmbedError> {
             Ok(vec![1.0])
         }
         fn model(&self) -> &str {
@@ -477,7 +477,7 @@ mod tests {
             _k: usize,
             _model: &str,
             exclude_session: Option<&SessionId>,
-        ) -> Result<Vec<assistd_memory::EmbeddingHit>> {
+        ) -> Result<Vec<assistd_memory::EmbeddingHit>, assistd_memory::MemoryError> {
             *self.excluded.lock() = exclude_session.map(|s| s.0.clone());
             Ok(Vec::new())
         }
@@ -486,19 +486,31 @@ mod tests {
             _q: Vec<f32>,
             _k: usize,
             _model: &str,
-        ) -> Result<Vec<assistd_memory::MemoryHit>> {
+        ) -> Result<Vec<assistd_memory::MemoryHit>, assistd_memory::MemoryError> {
             Ok(Vec::new())
         }
-        async fn count_for_model(&self, _model: &str) -> Result<(i64, i64)> {
+        async fn count_for_model(
+            &self,
+            _model: &str,
+        ) -> Result<(i64, i64), assistd_memory::MemoryError> {
             Ok((0, 0))
         }
-        async fn count_stale(&self, _current: &str) -> Result<(i64, Vec<String>)> {
+        async fn count_stale(
+            &self,
+            _current: &str,
+        ) -> Result<(i64, Vec<String>), assistd_memory::MemoryError> {
             Ok((0, Vec::new()))
         }
-        async fn memories_missing_embedding(&self, _c: &str) -> Result<Vec<(i64, String)>> {
+        async fn memories_missing_embedding(
+            &self,
+            _c: &str,
+        ) -> Result<Vec<(i64, String)>, assistd_memory::MemoryError> {
             Ok(Vec::new())
         }
-        async fn chunks_missing_embedding(&self, _c: &str) -> Result<Vec<(i64, String)>> {
+        async fn chunks_missing_embedding(
+            &self,
+            _c: &str,
+        ) -> Result<Vec<(i64, String)>, assistd_memory::MemoryError> {
             Ok(Vec::new())
         }
         async fn store_chunk_embedding(
@@ -507,7 +519,7 @@ mod tests {
             _model: String,
             _dim: i64,
             _vector: Vec<u8>,
-        ) -> Result<()> {
+        ) -> Result<(), assistd_memory::MemoryError> {
             Ok(())
         }
         async fn store_memory_embedding(
@@ -516,7 +528,7 @@ mod tests {
             _model: String,
             _dim: i64,
             _vector: Vec<u8>,
-        ) -> Result<()> {
+        ) -> Result<(), assistd_memory::MemoryError> {
             Ok(())
         }
     }

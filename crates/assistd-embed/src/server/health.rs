@@ -30,10 +30,6 @@ impl HealthChecker {
         })
     }
 
-    pub fn ready_timeout(&self) -> Duration {
-        self.ready_timeout
-    }
-
     /// Poll until 200, `HealthTimeout` at the deadline, or
     /// `ShutdownDuringHealth` when the watch fires.
     pub async fn wait_ready(

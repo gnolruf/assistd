@@ -283,11 +283,9 @@ dependencies = [
 name = "assistd-embed"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "assistd-config",
  "assistd-memory",
  "async-trait",
- "parking_lot",
  "reqwest",
  "rustix 1.1.4",
  "serde",
@@ -357,7 +355,6 @@ dependencies = [
 name = "assistd-memory"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "rusqlite",

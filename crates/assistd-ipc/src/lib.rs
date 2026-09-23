@@ -1,13 +1,3 @@
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::print_stdout,
-        clippy::print_stderr
-    )
-)]
-
 //! Wire-level IPC types shared between the assistd daemon and its clients.
 //!
 //! Kept in its own crate so a client-only build can depend on just these

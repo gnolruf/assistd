@@ -30,33 +30,33 @@ impl MemoryOps {
 
     /// Save a key/value memory and return its row id.
     pub async fn save(&self, key: &str, value: String) -> Result<i64> {
-        self.store.save(key, value).await
+        Ok(self.store.save(key, value).await?)
     }
 
     /// Load the value for `key`, returning `None` if not present.
     pub async fn load(&self, key: &str) -> Result<Option<String>> {
-        self.store.load(key).await
+        Ok(self.store.load(key).await?)
     }
 
     /// List keys with the given `prefix`.
     pub async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        self.store.list(prefix).await
+        Ok(self.store.list(prefix).await?)
     }
 
     /// Delete the memory at `key`.
     pub async fn delete(&self, key: &str) -> Result<()> {
-        self.store.delete(key).await
+        Ok(self.store.delete(key).await?)
     }
 
     /// Delete a memory by row id, returning its key on a hit.
     pub async fn forget(&self, id: i64) -> Result<Option<String>> {
-        self.store.delete_by_id(id).await
+        Ok(self.store.delete_by_id(id).await?)
     }
 
     /// Like [`MemoryOps::list`] but returns full `(id, key, value)`
     /// rows, in whatever order the backend yields.
     pub async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
-        self.store.list_full(prefix).await
+        Ok(self.store.list_full(prefix).await?)
     }
 
     /// Return recent conversation turns, up to `limit` (or [`DEFAULT_SEARCH_LIMIT`] when `limit` is 0).
@@ -66,7 +66,7 @@ impl MemoryOps {
         } else {
             limit
         };
-        self.conversations.recent_turns(limit).await
+        Ok(self.conversations.recent_turns(limit).await?)
     }
 }
 

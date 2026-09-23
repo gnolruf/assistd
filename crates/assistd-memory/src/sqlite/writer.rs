@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::OptionalExtension;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -14,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_rusqlite::Connection;
 
 use super::conversations::{BranchId, PersistedMessage, TurnId, UndoOutcome};
+use crate::{MemoryError, Result};
 
 /// Mutations the writer task executes, each with a `oneshot` ack.
 pub enum WriteOp {
@@ -75,14 +75,6 @@ pub enum WriteOp {
     BeginSessionWithMainBranch {
         session_id: String,
         daemon_pid: u32,
-        ack: oneshot::Sender<Result<BranchId>>,
-    },
-    /// Insert one row into `branches`; acks the new id.
-    CreateBranch {
-        session_id: String,
-        name: String,
-        parent_branch_id: Option<BranchId>,
-        fork_point_seq: Option<i64>,
         ack: oneshot::Sender<Result<BranchId>>,
     },
     /// Update `sessions.current_branch_id`.
@@ -251,18 +243,6 @@ async fn execute(conn: &Connection, op: WriteOp) {
                 begin_session_with_main_branch(conn, session_id, daemon_pid).await,
             );
         }
-        WriteOp::CreateBranch {
-            session_id,
-            name,
-            parent_branch_id,
-            fork_point_seq,
-            ack,
-        } => {
-            reply(
-                ack,
-                create_branch(conn, session_id, name, parent_branch_id, fork_point_seq).await,
-            );
-        }
         WriteOp::SetCurrentBranch {
             session_id,
             branch_id,
@@ -315,7 +295,7 @@ async fn set_session_title(conn: &Connection, session_id: String, title: String)
         Ok(())
     })
     .await
-    .context("set_session_title")
+    .map_err(MemoryError::sqlite("set_session_title"))
 }
 
 async fn end_session(conn: &Connection, id: String) -> Result<()> {
@@ -328,7 +308,7 @@ async fn end_session(conn: &Connection, id: String) -> Result<()> {
         Ok(())
     })
     .await
-    .context("end_session")
+    .map_err(MemoryError::sqlite("end_session"))
 }
 
 async fn begin_turn(conn: &Connection, session: String, user_text: String) -> Result<TurnId> {
@@ -342,7 +322,7 @@ async fn begin_turn(conn: &Connection, session: String, user_text: String) -> Re
             Ok(c.last_insert_rowid())
         })
         .await
-        .context("begin_turn")?;
+        .map_err(MemoryError::sqlite("begin_turn"))?;
     Ok(TurnId(id))
 }
 
@@ -356,7 +336,7 @@ async fn end_turn(conn: &Connection, turn: TurnId) -> Result<()> {
         Ok(())
     })
     .await
-    .context("end_turn")
+    .map_err(MemoryError::sqlite("end_turn"))
 }
 
 async fn save_memory(
@@ -382,7 +362,7 @@ async fn save_memory(
             Ok(id)
         })
         .await
-        .context("save_memory")?;
+        .map_err(MemoryError::sqlite("save_memory"))?;
     Ok(id)
 }
 
@@ -395,7 +375,7 @@ async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
         Ok(())
     })
     .await
-    .context("delete_memory")
+    .map_err(MemoryError::sqlite("delete_memory"))
 }
 
 async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String>> {
@@ -408,7 +388,7 @@ async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String
         .optional()
     })
     .await
-    .context("delete_memory_by_id")
+    .map_err(MemoryError::sqlite("delete_memory_by_id"))
 }
 
 async fn store_chunk(
@@ -433,7 +413,7 @@ async fn store_chunk(
             Ok(id)
         })
         .await
-        .context("store_chunk")?;
+        .map_err(MemoryError::sqlite("store_chunk"))?;
     Ok(id)
 }
 
@@ -459,7 +439,7 @@ async fn store_chunk_embedding(
         Ok(())
     })
     .await
-    .context("store_chunk_embedding")
+    .map_err(MemoryError::sqlite("store_chunk_embedding"))
 }
 
 async fn store_memory_embedding(
@@ -484,7 +464,7 @@ async fn store_memory_embedding(
         Ok(())
     })
     .await
-    .context("store_memory_embedding")
+    .map_err(MemoryError::sqlite("store_memory_embedding"))
 }
 
 async fn begin_session_with_main_branch(
@@ -517,31 +497,8 @@ async fn begin_session_with_main_branch(
             Ok(branch_id)
         })
         .await
-        .context("begin_session_with_main_branch")?;
+        .map_err(MemoryError::sqlite("begin_session_with_main_branch"))?;
     Ok(BranchId(branch_rowid))
-}
-
-async fn create_branch(
-    conn: &Connection,
-    session_id: String,
-    name: String,
-    parent: Option<BranchId>,
-    fork_point_seq: Option<i64>,
-) -> Result<BranchId> {
-    let created = Utc::now().to_rfc3339();
-    let parent_id = parent.map(|b| b.0);
-    let id = conn
-        .call(move |c| -> rusqlite::Result<_> {
-            c.execute(
-                "INSERT INTO branches (session_id, name, parent_branch_id, fork_point_seq, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![session_id, name, parent_id, fork_point_seq, created],
-            )?;
-            Ok(c.last_insert_rowid())
-        })
-        .await
-        .context("create_branch")?;
-    Ok(BranchId(id))
 }
 
 async fn set_current_branch(
@@ -557,7 +514,7 @@ async fn set_current_branch(
         Ok(())
     })
     .await
-    .context("set_current_branch")
+    .map_err(MemoryError::sqlite("set_current_branch"))
 }
 
 async fn append_message_to_branch(
@@ -570,7 +527,7 @@ async fn append_message_to_branch(
     let timestamp = Utc::now().to_rfc3339();
     let role = msg.role.as_wire().to_string();
     let tool_calls_json = match msg.tool_calls {
-        Some(v) => Some(serde_json::to_string(&v).context("serialize tool_calls")?),
+        Some(v) => Some(serde_json::to_string(&v)?),
         None => None,
     };
     let turn_id = turn.map(|t| t.0);
@@ -612,7 +569,7 @@ async fn append_message_to_branch(
             Ok(conv_id)
         })
         .await
-        .context("append_message_to_branch")?;
+        .map_err(MemoryError::sqlite("append_message_to_branch"))?;
     Ok(id)
 }
 
@@ -647,7 +604,7 @@ async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Resu
             Ok(new_branch_id)
         })
         .await
-        .context("fork_branch")?;
+        .map_err(MemoryError::sqlite("fork_branch"))?;
     Ok(BranchId(id))
 }
 
@@ -730,7 +687,7 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
         })
     })
     .await
-    .context("undo_last_turn")
+    .map_err(MemoryError::sqlite("undo_last_turn"))
 }
 
 pub(super) async fn dispatch_write<T, F>(tx: &mpsc::Sender<WriteOp>, build: F) -> Result<T>
@@ -740,8 +697,6 @@ where
     let (ack_tx, ack_rx) = oneshot::channel();
     tx.send(build(ack_tx))
         .await
-        .map_err(|_| anyhow::anyhow!("memory writer task is gone"))?;
-    ack_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("memory writer task dropped ack channel"))?
+        .map_err(|_| MemoryError::WriterGone)?;
+    ack_rx.await.map_err(|_| MemoryError::AckDropped)?
 }

@@ -2,8 +2,6 @@ use super::backoff::MAX_CONSECUTIVE_FAILURES;
 use super::error::EmbedServerError;
 use super::supervisor::Supervisor;
 use assistd_config::EmbeddingConfig;
-use parking_lot::Mutex;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -28,8 +26,6 @@ pub enum ReadyState {
 /// watch first, then call [`EmbedService::shutdown`].
 pub struct EmbedService {
     task: Option<JoinHandle<()>>,
-    ready_rx: watch::Receiver<ReadyState>,
-    pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl EmbedService {
@@ -42,14 +38,11 @@ impl EmbedService {
         shutdown_rx: watch::Receiver<bool>,
     ) -> Result<Self, EmbedServerError> {
         let (ready_tx, mut ready_rx) = watch::channel(ReadyState::Starting);
-        let pid = Arc::new(Mutex::new(None));
-
         let supervisor = Supervisor {
             cfg,
             ready_timeout,
             shutdown_rx,
             ready_tx,
-            pid: pid.clone(),
         };
         let task = tokio::spawn(async move { supervisor.run().await });
 
@@ -63,11 +56,7 @@ impl EmbedService {
                     let state = *ready_rx.borrow();
                     match state {
                         ReadyState::Ready => {
-                            return Ok(Self {
-                                task: Some(task),
-                                ready_rx,
-                                pid,
-                            });
+                            return Ok(Self { task: Some(task) });
                         }
                         ReadyState::Degraded => {
                             task.abort();
@@ -80,18 +69,6 @@ impl EmbedService {
                 }
             }
         }
-    }
-
-    pub fn is_ready(&self) -> bool {
-        matches!(*self.ready_rx.borrow(), ReadyState::Ready)
-    }
-
-    pub fn state(&self) -> ReadyState {
-        *self.ready_rx.borrow()
-    }
-
-    pub fn pid(&self) -> Option<u32> {
-        *self.pid.lock()
     }
 
     /// Join the supervisor task; the shutdown watch must already be set.

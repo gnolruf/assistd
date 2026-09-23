@@ -71,10 +71,6 @@ impl ChildProcess {
         })
     }
 
-    pub fn pid(&self) -> Option<u32> {
-        self.child.id()
-    }
-
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait().await
     }

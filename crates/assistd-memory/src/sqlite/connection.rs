@@ -3,12 +3,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rusqlite::Connection;
 
-use crate::migrations;
+use crate::{MemoryError, Result, migrations};
 
 use super::writer::{WriteOp, dispatch_write, spawn_writer};
 
@@ -35,13 +34,18 @@ impl SqliteHandle {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .with_context(|| format!("create memory.db parent dir {}", parent.display()))?;
+                .map_err(|source| MemoryError::CreateDir {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
         }
 
-        let path_owned = path.to_path_buf();
-        let conn = Connection::open(path_owned.clone())
+        let conn = Connection::open(path)
             .await
-            .with_context(|| format!("open SQLite at {}", path_owned.display()))?;
+            .map_err(|source| MemoryError::Open {
+                path: path.to_path_buf(),
+                source,
+            })?;
 
         conn.call(|c| -> rusqlite::Result<_> {
             c.pragma_update(None, "journal_mode", "WAL")?;
@@ -50,9 +54,11 @@ impl SqliteHandle {
             Ok(())
         })
         .await
-        .context("apply SQLite pragmas")?;
+        .map_err(MemoryError::sqlite("apply SQLite pragmas"))?;
 
-        conn.call(migrations::run).await.context("run migrations")?;
+        conn.call(migrations::run)
+            .await
+            .map_err(MemoryError::Migration)?;
 
         let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_DEPTH);
         let writer_handle = spawn_writer(conn.clone(), writer_rx, shutdown);
@@ -87,7 +93,7 @@ impl SqliteHandle {
         chunk_index: i64,
         content: String,
         token_count: Option<i64>,
-    ) -> anyhow::Result<i64> {
+    ) -> Result<i64> {
         dispatch_write(self.writer(), |ack| WriteOp::StoreChunk {
             conversation_id,
             chunk_index,

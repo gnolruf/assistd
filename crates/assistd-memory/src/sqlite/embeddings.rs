@@ -10,12 +10,12 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use super::connection::SqliteHandle;
 use super::conversations::{PersistedRole, SessionId};
+use crate::{MemoryError, Result};
 
 /// One conversation-chunk hit. `content` is the full parent message,
 /// not the chunk text, since chunks may cut mid-sentence.
@@ -196,7 +196,7 @@ impl SemanticStore for SqliteSemanticStore {
                 )
             })
             .await
-            .context("nearest_chunks: scan embeddings")?;
+            .map_err(MemoryError::sqlite("nearest_chunks: scan embeddings"))?;
         if ranked.is_empty() {
             return Ok(Vec::new());
         }
@@ -230,7 +230,7 @@ impl SemanticStore for SqliteSemanticStore {
                 Ok(rows)
             })
             .await
-            .context("nearest_chunks: hydrate winners")?;
+            .map_err(MemoryError::sqlite("nearest_chunks: hydrate winners"))?;
         let by_id: HashMap<i64, (i64, String, String, String, String)> = raw
             .into_iter()
             .map(|(cc_id, c_id, sess, ts, role, content)| (cc_id, (c_id, sess, ts, role, content)))
@@ -241,7 +241,7 @@ impl SemanticStore for SqliteSemanticStore {
                 continue;
             };
             let role = PersistedRole::parse(role_str)
-                .with_context(|| format!("unknown role in DB: {role_str}"))?;
+                .ok_or_else(|| MemoryError::UnknownRole(role_str.clone()))?;
             out.push(EmbeddingHit {
                 conversation_id: *c_id,
                 chunk_id: cc_id,
@@ -279,7 +279,9 @@ impl SemanticStore for SqliteSemanticStore {
                 )
             })
             .await
-            .context("nearest_memories: scan memory_embeddings")?;
+            .map_err(MemoryError::sqlite(
+                "nearest_memories: scan memory_embeddings",
+            ))?;
         if ranked.is_empty() {
             return Ok(Vec::new());
         }
@@ -307,7 +309,7 @@ impl SemanticStore for SqliteSemanticStore {
                 Ok(rows)
             })
             .await
-            .context("nearest_memories: hydrate winners")?;
+            .map_err(MemoryError::sqlite("nearest_memories: hydrate winners"))?;
         let by_id: HashMap<i64, (String, String)> = raw
             .into_iter()
             .map(|(id, key, value)| (id, (key, value)))
@@ -345,7 +347,7 @@ impl SemanticStore for SqliteSemanticStore {
                 Ok((chunks, memories))
             })
             .await
-            .context("count_for_model")
+            .map_err(MemoryError::sqlite("count_for_model"))
     }
 
     async fn count_stale(&self, current: &str) -> Result<(i64, Vec<String>)> {
@@ -372,7 +374,7 @@ impl SemanticStore for SqliteSemanticStore {
                 Ok((total, models.into_iter().collect::<Vec<_>>()))
             })
             .await
-            .context("count_stale")
+            .map_err(MemoryError::sqlite("count_stale"))
     }
 
     async fn memories_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>> {
@@ -396,7 +398,7 @@ impl SemanticStore for SqliteSemanticStore {
                 Ok(rows)
             })
             .await
-            .context("memories_missing_embedding")
+            .map_err(MemoryError::sqlite("memories_missing_embedding"))
     }
 
     async fn chunks_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>> {
@@ -420,7 +422,7 @@ impl SemanticStore for SqliteSemanticStore {
                 Ok(rows)
             })
             .await
-            .context("chunks_missing_embedding")
+            .map_err(MemoryError::sqlite("chunks_missing_embedding"))
     }
 
     async fn store_chunk_embedding(

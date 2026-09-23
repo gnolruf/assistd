@@ -1,22 +1,14 @@
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::print_stdout,
-        clippy::print_stderr
-    )
-)]
-
 //! Persistent memory: the flat key/value [`MemoryStore`] trait, the
 //! conversation and semantic stores under [`sqlite`], and no-op
 //! fallbacks for when memory is disabled.
 
 pub mod chunking;
+mod error;
 pub mod migrations;
 pub mod sqlite;
 
 pub use chunking::{ChunkingConfig, chunk_message};
+pub use error::{MemoryError, Result};
 pub use sqlite::{
     BranchId, BranchInfo, ConversationStore, EmbeddingHit, HistoryRow, MemoryHit,
     NoConversationStore, NoSemanticStore, PersistedMessage, PersistedRole, ResumeCandidate,
@@ -24,7 +16,6 @@ pub use sqlite::{
     SqliteSemanticStore, TurnId, TurnSummary, UndoOutcome, WriteOp, vector_to_blob,
 };
 
-use anyhow::Result;
 use async_trait::async_trait;
 
 /// One row from the `memories` table.
@@ -92,11 +83,6 @@ impl MemoryStore for NoMemoryStore {
     }
 }
 
-/// Returns the crate version string from `CARGO_PKG_VERSION`.
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,11 +117,6 @@ mod tests {
     async fn no_memory_store_list_full_returns_empty() {
         let store = NoMemoryStore;
         assert!(store.list_full("fact:").await.unwrap().is_empty());
-    }
-
-    #[test]
-    fn version_is_not_empty() {
-        assert!(!version().is_empty());
     }
 
     /// Compile-only: the trait must stay object-safe.

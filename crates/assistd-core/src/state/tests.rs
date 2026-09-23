@@ -1630,12 +1630,9 @@ async fn fork_with_empty_name_emits_error() {
 
 #[tokio::test]
 async fn branches_lists_active_session_first() {
-    let (state, conv, session, _main_branch) = fresh_branch_state().await;
+    let (state, conv, _session, main_branch) = fresh_branch_state().await;
     // Create an extra branch so list isn't trivial.
-    let _alt = conv
-        .create_branch(&session, "alt", None, None)
-        .await
-        .unwrap();
+    let _alt = conv.fork_branch(main_branch, "alt").await.unwrap();
     let (tx, rx) = mpsc::channel::<Event>(16);
     state
         .clone()

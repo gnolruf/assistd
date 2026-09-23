@@ -1,11 +1,10 @@
 //! HTTP client for llama-server's `/v1/embeddings` endpoint.
 
-use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::Embedder;
+use crate::{EmbedError, Embedder};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -41,21 +40,19 @@ impl LlamaEmbedder {
         port: u16,
         model: String,
         request_timeout: Duration,
-    ) -> Result<Self> {
+    ) -> Result<Self, EmbedError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(request_timeout)
             .build()
-            .context("build embed reqwest client")?;
+            .map_err(EmbedError::Client)?;
         let base_url = format!("http://{host}:{port}");
 
         let probe = embed_raw(&client, &base_url, &model, "x").await?;
         let dim = probe.len();
         if dim == 0 {
-            return Err(anyhow!(
-                "embed server returned an empty vector during dim probe"
-            ));
+            return Err(EmbedError::DimProbeEmpty);
         }
         tracing::info!(
             target: "assistd::embed",
@@ -75,14 +72,13 @@ impl LlamaEmbedder {
 
 #[async_trait]
 impl Embedder for LlamaEmbedder {
-    async fn embed(&self, text: String) -> Result<Vec<f32>> {
+    async fn embed(&self, text: String) -> Result<Vec<f32>, EmbedError> {
         let raw = embed_raw(&self.client, &self.base_url, &self.model, &text).await?;
         if raw.len() != self.dim {
-            return Err(anyhow!(
-                "embed server returned dim {} but probe latched {}; refusing to mix",
-                raw.len(),
-                self.dim
-            ));
+            return Err(EmbedError::DimMismatch {
+                got: raw.len(),
+                expected: self.dim,
+            });
         }
         Ok(l2_normalize(raw))
     }
@@ -101,7 +97,7 @@ async fn embed_raw(
     base_url: &str,
     model: &str,
     text: &str,
-) -> Result<Vec<f32>> {
+) -> Result<Vec<f32>, EmbedError> {
     let url = format!("{base_url}/v1/embeddings");
     let body = EmbedRequest { input: text, model };
     let resp = client
@@ -109,24 +105,17 @@ async fn embed_raw(
         .json(&body)
         .send()
         .await
-        .with_context(|| format!("POST {url}"))?;
+        .map_err(|source| EmbedError::Request { url, source })?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "embed server returned {status} (body: {})",
-            body.chars().take(200).collect::<String>()
-        ));
+        return Err(EmbedError::Status {
+            status,
+            body: body.chars().take(200).collect(),
+        });
     }
-    let parsed: EmbedResponse = resp
-        .json()
-        .await
-        .context("parse /v1/embeddings response body")?;
-    let first = parsed
-        .data
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("embed response had no data entries"))?;
+    let parsed: EmbedResponse = resp.json().await.map_err(EmbedError::Decode)?;
+    let first = parsed.data.into_iter().next().ok_or(EmbedError::NoData)?;
     Ok(first.embedding)
 }
 

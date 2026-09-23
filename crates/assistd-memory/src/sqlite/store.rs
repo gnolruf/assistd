@@ -2,11 +2,10 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 
-use crate::{MemoryRecord, MemoryStore};
+use crate::{MemoryError, MemoryRecord, MemoryStore, Result};
 
 use super::connection::SqliteHandle;
 use super::writer::{WriteOp, dispatch_write};
@@ -60,7 +59,7 @@ impl MemoryStore for SqliteMemoryStore {
                 .optional()
             })
             .await
-            .context("memory load")
+            .map_err(MemoryError::sqlite("memory load"))
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
@@ -99,7 +98,7 @@ impl MemoryStore for SqliteMemoryStore {
                 Ok(rows)
             })
             .await
-            .context("memory list")
+            .map_err(MemoryError::sqlite("memory list"))
     }
 
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
@@ -127,7 +126,7 @@ impl MemoryStore for SqliteMemoryStore {
                 Ok(rows)
             })
             .await
-            .context("memory list_full")
+            .map_err(MemoryError::sqlite("memory list_full"))
     }
 }
 

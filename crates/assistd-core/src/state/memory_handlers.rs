@@ -28,7 +28,7 @@ impl AppState {
             Ok(v) => v,
             Err(e) => {
                 send_error(&tx, id, format!("embed failed: {e:#}")).await;
-                return Err(e);
+                return Err(e.into());
             }
         };
         match self
@@ -57,7 +57,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("semantic search failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -232,7 +232,7 @@ impl AppState {
             Ok(v) => v,
             Err(e) => {
                 send_error(&tx, id, format!("reindex: list missing chunks: {e:#}")).await;
-                return Err(e);
+                return Err(e.into());
             }
         };
         let memories = match self
@@ -244,7 +244,7 @@ impl AppState {
             Ok(v) => v,
             Err(e) => {
                 send_error(&tx, id, format!("reindex: list missing memories: {e:#}")).await;
-                return Err(e);
+                return Err(e.into());
             }
         };
         let chunks_total = chunks.len() as u32;
@@ -294,7 +294,7 @@ impl AppState {
         store: F,
     ) where
         F: Fn(i64, Vec<u8>) -> Fut,
-        Fut: std::future::Future<Output = Result<()>>,
+        Fut: std::future::Future<Output = Result<(), assistd_memory::MemoryError>>,
     {
         let total = items.len() as u32;
         for (done, (item_id, text)) in (1u32..).zip(items) {

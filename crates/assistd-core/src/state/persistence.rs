@@ -166,7 +166,7 @@ mod tests {
             _b: BranchId,
             _t: Option<TurnId>,
             m: PersistedMessage,
-        ) -> anyhow::Result<i64> {
+        ) -> assistd_memory::Result<i64> {
             let delay = {
                 let mut d = self.remaining_delay_ms.lock();
                 let taken = *d;
@@ -178,68 +178,79 @@ mod tests {
             Ok(0)
         }
 
-        async fn end_session(&self, _id: &SessionId) -> anyhow::Result<()> {
+        async fn end_session(&self, _id: &SessionId) -> assistd_memory::Result<()> {
             Ok(())
         }
-        async fn begin_turn(&self, _s: &SessionId, _t: &str) -> anyhow::Result<TurnId> {
+        async fn begin_turn(&self, _s: &SessionId, _t: &str) -> assistd_memory::Result<TurnId> {
             Ok(TurnId(0))
         }
-        async fn end_turn(&self, _t: TurnId) -> anyhow::Result<()> {
+        async fn end_turn(&self, _t: TurnId) -> assistd_memory::Result<()> {
             Ok(())
         }
-        async fn recent_turns(&self, _l: usize) -> anyhow::Result<Vec<TurnSummary>> {
+        async fn recent_turns(&self, _l: usize) -> assistd_memory::Result<Vec<TurnSummary>> {
             Ok(Vec::new())
         }
         async fn begin_session_with_main_branch(
             &self,
             _pid: u32,
-        ) -> anyhow::Result<(SessionId, BranchId)> {
+        ) -> assistd_memory::Result<(SessionId, BranchId)> {
             Ok((SessionId::new(), BranchId(0)))
         }
-        async fn create_branch(
+        async fn set_current_branch(
             &self,
             _s: &SessionId,
-            _name: &str,
-            _parent: Option<BranchId>,
-            _fp: Option<i64>,
-        ) -> anyhow::Result<BranchId> {
-            Ok(BranchId(0))
-        }
-        async fn set_current_branch(&self, _s: &SessionId, _b: BranchId) -> anyhow::Result<()> {
+            _b: BranchId,
+        ) -> assistd_memory::Result<()> {
             Ok(())
         }
-        async fn get_current_branch(&self, _s: &SessionId) -> anyhow::Result<Option<BranchId>> {
+        async fn get_current_branch(
+            &self,
+            _s: &SessionId,
+        ) -> assistd_memory::Result<Option<BranchId>> {
             Ok(None)
         }
-        async fn list_branches(&self) -> anyhow::Result<Vec<BranchInfo>> {
+        async fn list_branches(&self) -> assistd_memory::Result<Vec<BranchInfo>> {
             Ok(Vec::new())
         }
         async fn resolve_branch(
             &self,
             _t: &str,
             _p: Option<&SessionId>,
-        ) -> anyhow::Result<Option<(SessionId, BranchId)>> {
+        ) -> assistd_memory::Result<Option<(SessionId, BranchId)>> {
             Ok(None)
         }
-        async fn fork_branch(&self, _src: BranchId, _name: &str) -> anyhow::Result<BranchId> {
+        async fn fork_branch(
+            &self,
+            _src: BranchId,
+            _name: &str,
+        ) -> assistd_memory::Result<BranchId> {
             Ok(BranchId(0))
         }
-        async fn load_branch_history(&self, _b: BranchId) -> anyhow::Result<Vec<HistoryRow>> {
+        async fn load_branch_history(
+            &self,
+            _b: BranchId,
+        ) -> assistd_memory::Result<Vec<HistoryRow>> {
             Ok(Vec::new())
         }
-        async fn latest_branch_activity(&self, _b: BranchId) -> anyhow::Result<Option<String>> {
+        async fn latest_branch_activity(
+            &self,
+            _b: BranchId,
+        ) -> assistd_memory::Result<Option<String>> {
             Ok(None)
         }
-        async fn undo_last_turn(&self, _b: BranchId) -> anyhow::Result<UndoOutcome> {
+        async fn undo_last_turn(&self, _b: BranchId) -> assistd_memory::Result<UndoOutcome> {
             Ok(UndoOutcome::default())
         }
-        async fn find_resumable_session(&self) -> anyhow::Result<Option<ResumeCandidate>> {
+        async fn find_resumable_session(&self) -> assistd_memory::Result<Option<ResumeCandidate>> {
             Ok(None)
         }
-        async fn get_session_title(&self, _s: &SessionId) -> anyhow::Result<Option<String>> {
+        async fn get_session_title(
+            &self,
+            _s: &SessionId,
+        ) -> assistd_memory::Result<Option<String>> {
             Ok(None)
         }
-        async fn set_session_title(&self, _s: &SessionId, _t: &str) -> anyhow::Result<()> {
+        async fn set_session_title(&self, _s: &SessionId, _t: &str) -> assistd_memory::Result<()> {
             Ok(())
         }
     }
