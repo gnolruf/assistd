@@ -78,25 +78,40 @@ impl MemoryStack {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn with_memory_then_conversations_keeps_both_fields() {
-        let m1: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
-        let c1: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
-        let stack = MemoryStack::disabled(EmbeddingConfig::default())
-            .with_memory(m1.clone())
-            .with_conversations(c1.clone());
-        assert!(Arc::ptr_eq(&stack.memory, &m1));
-        assert!(Arc::ptr_eq(&stack.conversations, &c1));
+    fn assert_wired(
+        stack: &MemoryStack,
+        m: &Arc<dyn MemoryStore>,
+        c: &Arc<dyn ConversationStore>,
+        order: &str,
+    ) {
+        assert!(Arc::ptr_eq(&stack.memory, m), "{order}: memory");
+        assert!(
+            Arc::ptr_eq(&stack.conversations, c),
+            "{order}: conversations"
+        );
+        assert!(
+            Arc::ptr_eq(&stack.memory_ops.store, m),
+            "{order}: ops store"
+        );
+        assert!(
+            Arc::ptr_eq(&stack.memory_ops.conversations, c),
+            "{order}: ops conversations"
+        );
     }
 
-    #[tokio::test]
-    async fn with_conversations_before_memory_keeps_both_fields() {
-        let m1: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
-        let c1: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
+    #[test]
+    fn memory_ops_tracks_both_stores_in_either_builder_order() {
+        let m: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
+        let c: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
+
         let stack = MemoryStack::disabled(EmbeddingConfig::default())
-            .with_conversations(c1.clone())
-            .with_memory(m1.clone());
-        assert!(Arc::ptr_eq(&stack.memory, &m1));
-        assert!(Arc::ptr_eq(&stack.conversations, &c1));
+            .with_memory(m.clone())
+            .with_conversations(c.clone());
+        assert_wired(&stack, &m, &c, "memory first");
+
+        let stack = MemoryStack::disabled(EmbeddingConfig::default())
+            .with_conversations(c.clone())
+            .with_memory(m.clone());
+        assert_wired(&stack, &m, &c, "conversations first");
     }
 }
