@@ -174,8 +174,6 @@ impl ChildProcess {
                     target: "assistd::llama_server",
                     "llama-server did not exit within {term_timeout:?}; sending SIGKILL"
                 );
-                // A model worker mid-compute ignores SIGTERM until its
-                // graph finishes; killing only the router would orphan it.
                 #[cfg(unix)]
                 if let Some(pgid) = pgid {
                     let _ =
