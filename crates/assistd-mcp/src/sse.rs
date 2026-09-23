@@ -23,6 +23,10 @@ use crate::jsonrpc::{Correlator, Response, notification_line};
 use crate::protocol::closed_err;
 use crate::{McpClient, ToolResult, ToolSchema, protocol};
 
+/// The reader drops the connection rather than buffer an event past
+/// this, so a misbehaving server cannot exhaust memory.
+pub const MAX_EVENT_BYTES: usize = 1024 * 1024;
+
 /// Per-server SSE configuration.
 #[derive(Debug, Clone)]
 pub struct SseConfig {
@@ -192,7 +196,7 @@ impl SseMcpClient {
     }
 
     async fn call(&self, method: &'static str, params: Value) -> Result<Value, McpError> {
-        let pending = self.correlator.next_request(method, params)?;
+        let mut pending = self.correlator.next_request(method, params)?;
         let body = pending.frame_json()?;
         let post = self
             .post_url
@@ -217,7 +221,7 @@ impl SseMcpClient {
             )));
         }
 
-        protocol::await_reply(pending.rx, self.request_timeout).await
+        protocol::await_reply(&mut pending.rx, self.request_timeout).await
     }
 }
 
@@ -340,16 +344,30 @@ impl ReadLoop {
             match chunk {
                 Some(Ok(bytes)) => {
                     parser.push(&bytes);
-                    while let Some(event) = parser.next_event() {
-                        handle_event(
-                            event,
-                            &correlator,
-                            &base_url,
-                            &post_url,
-                            &mut endpoint_ready_tx,
-                            &label,
-                        )
-                        .await;
+                    let overflowed = loop {
+                        match parser.next_event() {
+                            Ok(Some(event)) => {
+                                handle_event(
+                                    event,
+                                    &correlator,
+                                    &base_url,
+                                    &post_url,
+                                    &mut endpoint_ready_tx,
+                                    &label,
+                                )
+                                .await;
+                            }
+                            Ok(None) => break false,
+                            Err(EventTooLarge) => break true,
+                        }
+                    };
+                    if overflowed {
+                        warn!(
+                            target: "assistd::mcp",
+                            server = %label,
+                            "SSE event over {MAX_EVENT_BYTES} bytes; dropping connection",
+                        );
+                        break;
                     }
                 }
                 Some(Err(e)) => {
@@ -482,6 +500,10 @@ pub struct SseEvent {
     pub id: Option<String>,
 }
 
+/// The event being assembled has grown past [`MAX_EVENT_BYTES`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct EventTooLarge;
+
 /// Incremental SSE parser: feed body chunks, pull complete events.
 #[derive(Default)]
 pub struct EventParser {
@@ -492,7 +514,7 @@ pub struct EventParser {
 #[derive(Default)]
 struct PartialEvent {
     event_type: Option<String>,
-    data_lines: Vec<String>,
+    data: String,
     id: Option<String>,
 }
 
@@ -506,27 +528,33 @@ impl EventParser {
     }
 
     /// The next complete event, or `None` until a blank-line terminator
-    /// has arrived.
-    pub fn next_event(&mut self) -> Option<SseEvent> {
+    /// has arrived. Errors once the event being assembled exceeds
+    /// [`MAX_EVENT_BYTES`]; the parser should then be discarded.
+    pub fn next_event(&mut self) -> Result<Option<SseEvent>, EventTooLarge> {
         loop {
-            let nl = self.buf.iter().position(|&b| b == b'\n')?;
+            let Some(nl) = self.buf.iter().position(|&b| b == b'\n') else {
+                return if self.buf.len() + self.cur.data.len() > MAX_EVENT_BYTES {
+                    Err(EventTooLarge)
+                } else {
+                    Ok(None)
+                };
+            };
             let mut line: Vec<u8> = self.buf.drain(..=nl).collect();
             line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
             if line.is_empty() {
-                let cur = std::mem::take(&mut self.cur);
-                if cur.event_type.is_none() && cur.data_lines.is_empty() && cur.id.is_none() {
+                let mut cur = std::mem::take(&mut self.cur);
+                if cur.event_type.is_none() && cur.data.is_empty() && cur.id.is_none() {
                     continue;
                 }
-                let event_type = cur.event_type.unwrap_or_else(|| "message".to_string());
-                let data = cur.data_lines.join("\n");
-                return Some(SseEvent {
-                    event_type,
-                    data,
+                cur.data.pop();
+                return Ok(Some(SseEvent {
+                    event_type: cur.event_type.unwrap_or_else(|| "message".to_string()),
+                    data: cur.data,
                     id: cur.id,
-                });
+                }));
             }
             if line.first() == Some(&b':') {
                 continue;
@@ -543,7 +571,13 @@ impl EventParser {
             };
             match field {
                 "event" => self.cur.event_type = Some(value.to_string()),
-                "data" => self.cur.data_lines.push(value.to_string()),
+                "data" => {
+                    self.cur.data.push_str(value);
+                    self.cur.data.push('\n');
+                    if self.cur.data.len() > MAX_EVENT_BYTES {
+                        return Err(EventTooLarge);
+                    }
+                }
                 "id" => self.cur.id = Some(value.to_string()),
                 _ => {}
             }
@@ -559,7 +593,7 @@ mod tests {
         let mut events = Vec::new();
         for chunk in chunks {
             parser.push(chunk);
-            while let Some(e) = parser.next_event() {
+            while let Some(e) = parser.next_event().unwrap() {
                 events.push(e);
             }
         }
@@ -655,6 +689,35 @@ mod tests {
         let events = drive(&mut p, &[b"data\ndata: rest\n\n"]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "\nrest");
+    }
+
+    #[test]
+    fn unterminated_line_past_cap_is_rejected() {
+        let mut p = EventParser::new();
+        p.push(&vec![b'x'; MAX_EVENT_BYTES + 1]);
+        assert_eq!(p.next_event(), Err(EventTooLarge));
+    }
+
+    #[test]
+    fn data_lines_past_cap_are_rejected() {
+        let mut p = EventParser::new();
+        let line = format!("data: {}\n", "x".repeat(1024));
+        let err = (0..=MAX_EVENT_BYTES / 1024).find_map(|_| {
+            p.push(line.as_bytes());
+            p.next_event().err()
+        });
+        assert_eq!(err, Some(EventTooLarge));
+    }
+
+    #[test]
+    fn events_under_cap_are_not_rejected_cumulatively() {
+        let mut p = EventParser::new();
+        let event = format!("data: {}\n\n", "x".repeat(MAX_EVENT_BYTES / 2));
+        let events = drive(
+            &mut p,
+            &[event.as_bytes(), event.as_bytes(), event.as_bytes()],
+        );
+        assert_eq!(events.len(), 3);
     }
 
     #[test]
