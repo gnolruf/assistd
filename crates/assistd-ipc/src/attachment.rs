@@ -75,6 +75,21 @@ impl LoadImageError {
     }
 }
 
+impl std::fmt::Display for LoadImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.user_message())
+    }
+}
+
+impl std::error::Error for LoadImageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LoadImageError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
 /// Read `path` and validate it is a supported image no larger than
 /// [`MAX_IMAGE_BYTES`].
 pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
