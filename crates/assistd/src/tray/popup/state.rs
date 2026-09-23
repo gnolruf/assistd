@@ -288,56 +288,38 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn summarize_args_object_renders_key_equals_value() {
-        let s = summarize_args(&json!({"a": 1, "b": "two"}), 100);
-        assert!(s.contains("a=1"), "missing a=1: {s}");
-        assert!(s.contains("b=two"), "missing b=two: {s}");
-    }
-
-    #[test]
-    fn summarize_args_collapses_newlines_to_spaces() {
-        let s = summarize_args(&json!({"command": "ls -la\n/tmp"}), 100);
-        assert!(!s.contains('\n'));
-        assert!(s.contains("ls -la /tmp"), "got: {s}");
-    }
-
-    #[test]
-    fn summarize_args_quotes_strings_with_whitespace_or_equals() {
-        let s = summarize_args(&json!({"q": "hello world"}), 100);
-        assert!(s.contains("q=\"hello world\""), "got: {s}");
+    fn summarize_args_renders_a_single_line_preview() {
+        for (args, expected) in [
+            (json!({"a": 1, "b": "two"}), "a=1 b=two"),
+            (
+                json!({"command": "ls -la\n/tmp"}),
+                "command=\"ls -la /tmp\"",
+            ),
+            (json!({"q": "hello world"}), "q=\"hello world\""),
+            (json!({"k": "a=b"}), "k=\"a=b\""),
+            (json!([1, 2, 3, 4, 5]), "[5 items]"),
+            (Value::Null, ""),
+        ] {
+            assert_eq!(summarize_args(&args, 100), expected, "{args}");
+        }
     }
 
     #[test]
     fn summarize_args_truncates_to_max_chars() {
-        let long = "x".repeat(1000);
-        let s = summarize_args(&json!({"a": long}), 30);
-        assert_eq!(s.chars().count(), 31);
-        assert!(s.ends_with('…'));
+        let s = summarize_args(&json!({"a": "x".repeat(1000)}), 30);
+        assert_eq!(s, format!("a={}…", "x".repeat(28)));
     }
 
     #[test]
-    fn summarize_args_array_reports_count() {
-        let s = summarize_args(&json!([1, 2, 3, 4, 5]), 100);
-        assert_eq!(s, "[5 items]");
-    }
-
-    #[test]
-    fn summarize_args_null_is_empty_string() {
-        assert_eq!(summarize_args(&Value::Null, 100), "");
-    }
-
-    #[test]
-    fn truncate_chars_from_end_keeps_last_n() {
-        assert_eq!(truncate_chars_from_end("hello world", 5), "…world");
-        assert_eq!(truncate_chars_from_end("short", 100), "short");
-        assert_eq!(truncate_chars_from_end("", 5), "");
-    }
-
-    #[test]
-    fn truncate_chars_from_end_preserves_unicode_codepoints() {
-        let s = "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀";
-        let truncated = truncate_chars_from_end(s, 3);
-        assert_eq!(truncated.chars().count(), 4);
+    fn truncate_chars_from_end_keeps_last_n_codepoints() {
+        for (input, max, expected) in [
+            ("hello world", 5, "…world"),
+            ("short", 100, "short"),
+            ("", 5, ""),
+            ("🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀", 3, "…🦀🦀🦀"),
+        ] {
+            assert_eq!(truncate_chars_from_end(input, max), expected, "{input:?}");
+        }
     }
 
     fn delta(id: &str, text: &str) -> Event {
@@ -366,16 +348,8 @@ mod tests {
     #[test]
     fn tracker_body_comes_only_from_last_delta() {
         let mut t = PopupTracker::default();
-        t.ingest(&delta("a", "hello "));
-        t.ingest(&delta("a", "world"));
+        t.ingest(&delta("a", "hello"));
         assert_eq!(t.snapshot().body, "", "Delta must not populate the body");
-        t.ingest(&last_delta("a", "the coalesced reply"));
-        assert_eq!(t.snapshot().body, "the coalesced reply");
-    }
-
-    #[test]
-    fn tracker_interleaved_last_delta_and_delta_does_not_double_count() {
-        let mut t = PopupTracker::default();
         t.ingest(&last_delta("a", "A"));
         t.ingest(&delta("a", "A"));
         assert_eq!(t.snapshot().body, "A");
@@ -402,8 +376,8 @@ mod tests {
         t.ingest(&last_delta("a", "turn a body"));
         t.ingest(&done("a"));
         t.ingest(&last_delta("b", "turn b body"));
-        let s = t.snapshot();
-        assert_eq!(s.body, "turn b body");
+        assert_eq!(t.snapshot().body, "turn b body");
+        assert!(!t.turns.contains_key("a"));
     }
 
     #[test]
@@ -411,19 +385,27 @@ mod tests {
         let mut t = PopupTracker::default();
         t.ingest(&tool_call("a", "bash", json!({"command": "ls /tmp"})));
         let s = t.snapshot();
-        let footer = s.footer.expect("footer present");
-        assert_eq!(footer.name, "bash");
-        assert!(footer.args_summary.contains("command="), "got: {footer:?}");
+        assert_eq!(
+            s.footer,
+            Some(ToolCallLine {
+                name: "bash".into(),
+                args_summary: "command=\"ls /tmp\"".into(),
+            })
+        );
+        assert_eq!(
+            s.activity,
+            PopupActivity::RunningTool {
+                name: "bash".into()
+            }
+        );
     }
 
     #[test]
     fn tracker_truncates_body_to_the_last_body_chars() {
         let mut t = PopupTracker::default();
-        let long = "x".repeat(BODY_CHARS * 2);
+        let long = "a".repeat(BODY_CHARS) + &"b".repeat(BODY_CHARS);
         t.ingest(&last_delta("a", &long));
-        let s = t.snapshot();
-        assert_eq!(s.body.chars().count(), BODY_CHARS + 1);
-        assert!(s.body.starts_with('…'));
+        assert_eq!(t.snapshot().body, format!("…{}", "b".repeat(BODY_CHARS)));
     }
 
     #[test]
@@ -443,10 +425,6 @@ mod tests {
     fn tool_result_marks_displayed_turn_as_thinking() {
         let mut t = PopupTracker::default();
         t.ingest(&tool_call("a", "bash", json!({"command": "sleep 30"})));
-        assert!(matches!(
-            t.snapshot().activity,
-            PopupActivity::RunningTool { .. }
-        ));
         t.ingest(&Event::ToolResult {
             id: "a".into(),
             name: "bash".into(),
@@ -522,24 +500,22 @@ mod tests {
     }
 
     #[test]
-    fn tracker_disconnect_clears_speaking_state() {
+    fn tracker_disconnect_clears_all_state() {
         let mut t = PopupTracker::default();
+        t.ingest(&last_delta("a", "x"));
+        t.ingest(&tool_call("a", "bash", json!({"command": "ls"})));
+        t.ingest(&Event::ListenState {
+            id: "x".into(),
+            active: true,
+        });
         t.ingest(&Event::SpeakingState {
             id: "a".into(),
             speaking: true,
         });
-        assert!(t.is_speaking());
         t.set_disconnected();
+        assert_eq!(t.snapshot(), PopupState::default());
+        assert!(!t.is_busy());
+        assert!(!t.is_listening());
         assert!(!t.is_speaking());
-    }
-
-    #[test]
-    fn tracker_disconnect_clears_turn_state() {
-        let mut t = PopupTracker::default();
-        t.ingest(&last_delta("a", "x"));
-        t.set_disconnected();
-        let s = t.snapshot();
-        assert_eq!(s.body, "");
-        assert!(s.footer.is_none());
     }
 }

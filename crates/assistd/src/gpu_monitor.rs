@@ -281,147 +281,125 @@ mod tests {
         }
     }
 
-    #[test]
-    fn active_with_foreign_process_above_threshold_sleeps() {
-        let s = [sample(42, 4096, "game")];
-        let a = decide(&s, PresenceState::Active, &cfg(), SleepCause::None);
-        assert_eq!(
-            a,
-            Action::Sleep {
-                pid: 42,
-                name: "game".into()
-            }
-        );
+    fn sleep(pid: u32, name: &str) -> Action {
+        Action::Sleep {
+            pid,
+            name: name.into(),
+        }
     }
 
     #[test]
-    fn drowsy_with_foreign_process_above_threshold_sleeps() {
-        let s = [sample(42, 4096, "game")];
-        let a = decide(&s, PresenceState::Drowsy, &cfg(), SleepCause::None);
-        assert!(matches!(a, Action::Sleep { .. }));
-    }
-
-    #[test]
-    fn active_below_threshold_no_action() {
-        let s = [sample(42, 500, "something")];
-        let a = decide(&s, PresenceState::Active, &cfg(), SleepCause::None);
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn active_no_processes_no_action() {
-        let a = decide(&[], PresenceState::Active, &cfg(), SleepCause::None);
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn sleeping_with_contender_stays_sleeping() {
-        let s = [sample(42, 4096, "game")];
-        let a = decide(
-            &s,
-            PresenceState::Sleeping,
-            &cfg(),
-            SleepCause::Contention { pid: 42 },
-        );
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn sleeping_contention_gone_with_auto_wake_wakes() {
+    fn decide_applies_threshold_allowlist_and_denylist() {
         let mut c = cfg();
-        c.gpu_auto_wake = true;
-        let a = decide(
-            &[],
-            PresenceState::Sleeping,
-            &c,
-            SleepCause::Contention { pid: 42 },
-        );
-        assert_eq!(a, Action::Wake);
-    }
-
-    #[test]
-    fn sleeping_contention_gone_without_auto_wake_no_action() {
-        let a = decide(
-            &[],
-            PresenceState::Sleeping,
-            &cfg(),
-            SleepCause::Contention { pid: 42 },
-        );
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn sleeping_from_user_never_auto_wakes_even_with_auto_wake_true() {
-        let mut c = cfg();
-        c.gpu_auto_wake = true;
-        let a = decide(&[], PresenceState::Sleeping, &c, SleepCause::None);
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn sleeping_from_user_with_contender_no_action() {
-        let s = [sample(42, 4096, "game")];
-        let a = decide(&s, PresenceState::Sleeping, &cfg(), SleepCause::None);
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn allowlist_suppresses_threshold_trigger() {
-        let s = [sample(42, 4096, "firefox")];
-        let a = decide(&s, PresenceState::Active, &cfg(), SleepCause::None);
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn denylist_fires_below_threshold() {
-        let mut c = cfg();
-        c.gpu_denylist = vec!["miner".into()];
-        let s = [sample(42, 10, "miner")];
-        let a = decide(&s, PresenceState::Active, &c, SleepCause::None);
-        assert_eq!(
-            a,
-            Action::Sleep {
-                pid: 42,
-                name: "miner".into()
-            }
-        );
-    }
-
-    #[test]
-    fn denylist_wins_over_allowlist_when_both_match() {
-        let mut c = cfg();
-        c.gpu_allowlist = vec!["firefox".into()];
-        c.gpu_denylist = vec!["firefox".into()];
-        let s = [sample(42, 10, "firefox")];
-        let a = decide(&s, PresenceState::Active, &c, SleepCause::None);
-        assert!(matches!(a, Action::Sleep { .. }));
-    }
-
-    #[test]
-    fn allowlist_entry_below_threshold_no_action() {
-        let s = [sample(42, 500, "firefox")];
-        let a = decide(&s, PresenceState::Active, &cfg(), SleepCause::None);
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn multi_sample_picks_a_triggering_entry() {
-        let s = [
-            sample(1, 100, "idle"),
-            sample(2, 8000, "firefox"),
-            sample(3, 3000, "game"),
+        c.gpu_denylist = vec!["miner".into(), "Xorg".into()];
+        let cases = [
+            (
+                "above threshold",
+                vec![sample(42, 4096, "game")],
+                sleep(42, "game"),
+            ),
+            (
+                "below threshold",
+                vec![sample(42, 500, "something")],
+                Action::None,
+            ),
+            ("no processes", vec![], Action::None),
+            (
+                "allowlisted above threshold",
+                vec![sample(42, 4096, "firefox")],
+                Action::None,
+            ),
+            (
+                "denylisted below threshold",
+                vec![sample(42, 10, "miner")],
+                sleep(42, "miner"),
+            ),
+            (
+                "denylist beats allowlist",
+                vec![sample(42, 10, "Xorg")],
+                sleep(42, "Xorg"),
+            ),
+            (
+                "first triggering sample wins",
+                vec![
+                    sample(1, 100, "idle"),
+                    sample(2, 8000, "firefox"),
+                    sample(3, 3000, "game"),
+                    sample(4, 9000, "other"),
+                ],
+                sleep(3, "game"),
+            ),
         ];
-        let a = decide(&s, PresenceState::Active, &cfg(), SleepCause::None);
-        assert!(matches!(
-            a,
-            Action::Sleep { pid: 3, .. } | Action::Sleep { .. }
-        ));
+        for (label, samples, expected) in cases {
+            let a = decide(&samples, PresenceState::Active, &c, SleepCause::None);
+            assert_eq!(a, expected, "{label}");
+        }
     }
 
     #[test]
-    fn read_comm_unknown_pid_does_not_panic() {
-        let name = read_comm(u32::MAX);
-        assert!(name.contains(&u32::MAX.to_string()));
+    fn decide_sleeps_from_drowsy_and_only_wakes_its_own_sleep() {
+        let contender = || vec![sample(42, 4096, "game")];
+        let contention = SleepCause::Contention { pid: 42 };
+        let cases = [
+            (
+                "drowsy with contender",
+                PresenceState::Drowsy,
+                contender(),
+                false,
+                SleepCause::None,
+                sleep(42, "game"),
+            ),
+            (
+                "sleeping, contender remains",
+                PresenceState::Sleeping,
+                contender(),
+                true,
+                contention,
+                Action::None,
+            ),
+            (
+                "contention gone, auto-wake",
+                PresenceState::Sleeping,
+                vec![],
+                true,
+                contention,
+                Action::Wake,
+            ),
+            (
+                "contention gone, no auto-wake",
+                PresenceState::Sleeping,
+                vec![],
+                false,
+                contention,
+                Action::None,
+            ),
+            (
+                "user sleep, auto-wake",
+                PresenceState::Sleeping,
+                vec![],
+                true,
+                SleepCause::None,
+                Action::None,
+            ),
+            (
+                "user sleep with contender",
+                PresenceState::Sleeping,
+                contender(),
+                false,
+                SleepCause::None,
+                Action::None,
+            ),
+        ];
+        for (label, state, samples, auto_wake, cause, expected) in cases {
+            let mut c = cfg();
+            c.gpu_auto_wake = auto_wake;
+            assert_eq!(decide(&samples, state, &c, cause), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn read_comm_falls_back_to_a_pid_label() {
+        assert_eq!(read_comm(u32::MAX), format!("<pid {}>", u32::MAX));
     }
 
     #[test]

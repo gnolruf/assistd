@@ -671,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_picker_renders_in_a_pane_narrower_than_its_floor() {
+    fn branch_picker_clamps_to_a_pane_narrower_than_its_floor() {
         let picker = BranchPickerModal {
             entries: Vec::new(),
             selected: 0,
@@ -681,6 +681,9 @@ mod tests {
         terminal
             .draw(|frame| render_branch_picker_modal(frame, frame.area(), &picker))
             .expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(19, 3)].symbol(), "┘");
     }
 
     #[test]
@@ -703,12 +706,12 @@ mod tests {
             .map(|i| format!("cmd{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let lines = script_lines(&script);
-        assert_eq!(lines.len(), CONFIRM_SCRIPT_MAX_LINES + 1);
-        assert_eq!(
-            line_text(&lines[CONFIRM_SCRIPT_MAX_LINES]),
-            "… 5 more line(s)"
-        );
+        let texts: Vec<String> = script_lines(&script).iter().map(line_text).collect();
+        let mut expected: Vec<String> = (0..CONFIRM_SCRIPT_MAX_LINES)
+            .map(|i| format!("cmd{i}"))
+            .collect();
+        expected.push("… 5 more line(s)".into());
+        assert_eq!(texts, expected);
     }
 
     #[test]
@@ -751,25 +754,15 @@ mod tests {
 
     #[test]
     fn wrap_input_hard_breaks_when_word_is_longer_than_row() {
-        // No whitespace anywhere → fall back to character break so the
-        // input still makes forward progress.
-        let buf = chars("hellotherefriend");
-        let rows = wrap_input(&buf, 2, 10);
-        // first row cap=8, then full width 10, plus phantom (no, 8+8=16 fits exactly)
-        // row 0: 0..8 ("hellothe"), row 1: 8..16 ("refriend"), then phantom since
-        // row 1 fills width=10? content is 8 chars, width 10, no phantom.
-        assert_eq!(rows.first(), Some(&(0, 8)));
-        assert_eq!(rows.get(1), Some(&(8, 16)));
+        let rows = wrap_input(&chars("hellotherefriend"), 2, 10);
+        assert_eq!(rows, vec![(0, 8), (8, 16)]);
     }
 
     #[test]
     fn wrap_input_adds_phantom_row_when_last_row_full() {
-        // 8 'a's with first-row cap=8 fills the visible width exactly →
-        // cursor at end needs a phantom row to remain visible.
+        // The cursor after a row that fills the width needs a row of its own.
         let rows = wrap_input(&chars("aaaaaaaa"), 2, 10);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], (0, 8));
-        assert_eq!(rows[1], (8, 8));
+        assert_eq!(rows, vec![(0, 8), (8, 8)]);
     }
 
     #[test]

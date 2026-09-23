@@ -387,32 +387,24 @@ mod tests {
 
     #[test]
     fn ctrl_w_kills_previous_word() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "hello  world");
-        i.on_key(ctrl('w'));
-        assert_eq!(i.buffer(), "hello  ");
+        for (typed, expected) in [
+            ("hello  world", "hello  "),
+            ("foo bar ", "foo "),
+            ("   ", ""),
+        ] {
+            let mut i = InputLine::new();
+            type_str(&mut i, typed);
+            i.on_key(ctrl('w'));
+            assert_eq!(i.buffer(), expected, "{typed:?}");
+        }
     }
 
     #[test]
-    fn ctrl_w_skips_trailing_whitespace_then_word() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "foo bar ");
-        i.on_key(ctrl('w'));
-        assert_eq!(i.buffer(), "foo ");
-    }
-
-    #[test]
-    fn ctrl_w_only_whitespace_clears() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "   ");
-        i.on_key(ctrl('w'));
-        assert_eq!(i.buffer(), "");
-    }
-
-    #[test]
-    fn ctrl_c_on_empty_quits() {
-        let mut i = InputLine::new();
-        assert_eq!(i.on_key(ctrl('c')), InputAction::Quit);
+    fn ctrl_c_and_ctrl_d_on_empty_quit() {
+        for c in ['c', 'd'] {
+            let mut i = InputLine::new();
+            assert_eq!(i.on_key(ctrl(c)), InputAction::Quit, "ctrl-{c}");
+        }
     }
 
     #[test]
@@ -421,12 +413,6 @@ mod tests {
         type_str(&mut i, "hello");
         assert_eq!(i.on_key(ctrl('c')), InputAction::None);
         assert_eq!(i.buffer(), "");
-    }
-
-    #[test]
-    fn ctrl_d_on_empty_quits() {
-        let mut i = InputLine::new();
-        assert_eq!(i.on_key(ctrl('d')), InputAction::Quit);
     }
 
     #[test]
@@ -445,7 +431,7 @@ mod tests {
         let action = i.on_key(key(KeyCode::Enter));
         assert_eq!(action, InputAction::Submit("hello".into()));
         assert_eq!(i.buffer(), "");
-        assert_eq!(i.history.len(), 1);
+        assert_eq!(i.history, ["hello"]);
     }
 
     #[test]
@@ -454,7 +440,7 @@ mod tests {
         type_str(&mut i, "   ");
         let action = i.on_key(key(KeyCode::Enter));
         assert_eq!(action, InputAction::None);
-        assert_eq!(i.history.len(), 0);
+        assert!(i.history.is_empty());
     }
 
     #[test]
@@ -464,7 +450,7 @@ mod tests {
         i.on_key(key(KeyCode::Enter));
         type_str(&mut i, "hello");
         i.on_key(key(KeyCode::Enter));
-        assert_eq!(i.history.len(), 1);
+        assert_eq!(i.history, ["hello"]);
     }
 
     #[test]
@@ -510,9 +496,7 @@ mod tests {
             type_str(&mut i, &format!("m{n}"));
             i.on_key(key(KeyCode::Enter));
         }
-        assert_eq!(i.history.len(), 3);
-        assert_eq!(i.history.front().map(String::as_str), Some("m2"));
-        assert_eq!(i.history.back().map(String::as_str), Some("m4"));
+        assert_eq!(i.history, ["m2", "m3", "m4"]);
     }
 
     #[test]
