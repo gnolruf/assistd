@@ -8,25 +8,22 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
-
-use anyhow::{Context, Result};
 use assistd_config::SynthesisConfig;
 use async_trait::async_trait;
+use parking_lot::Mutex;
 
-use crate::VoiceOutput;
 use crate::piper::cache::{default_cache_dir, ensure_voice};
 use crate::piper::config::{NOISE_SCALE, NOISE_W, PiperRuntimeConfig, SENTENCE_SILENCE_SECS};
 use crate::piper::error::PiperError;
 use crate::piper::playback::RodioPlaybackWorker;
 use crate::piper::synth::OneShotSynth;
+use crate::{VoiceOutput, VoiceOutputError};
 
 const FAILURE_THRESHOLD: usize = 3;
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 
-/// Current health state of the [`PiperVoiceOutput`] circuit breaker.
-#[derive(Debug, Clone)]
-pub enum ReadyState {
+#[derive(Debug)]
+enum ReadyState {
     /// Synthesis is operating normally.
     Ready,
     /// The breaker has tripped; `reason` is the last error.
@@ -94,10 +91,6 @@ impl PiperVoiceOutput {
             playback,
             state: Arc::new(Mutex::new(CircuitState::new())),
         })
-    }
-
-    pub fn ready_state(&self) -> ReadyState {
-        self.state.lock().ready.clone()
     }
 }
 
@@ -170,7 +163,7 @@ impl CircuitState {
 
 #[async_trait]
 impl VoiceOutput for PiperVoiceOutput {
-    async fn speak(&self, text: String) -> Result<()> {
+    async fn speak(&self, text: String) -> Result<(), VoiceOutputError> {
         if !self.state.lock().admit() {
             return Ok(());
         }
@@ -188,7 +181,7 @@ impl VoiceOutput for PiperVoiceOutput {
                     "piper synthesis failed"
                 );
                 self.state.lock().record_failure(&e);
-                return Err(anyhow::Error::new(e)).context("piper synthesis failed");
+                return Err(VoiceOutputError::Synthesis(e));
             }
         };
 
@@ -199,14 +192,14 @@ impl VoiceOutput for PiperVoiceOutput {
                 "piper playback enqueue failed"
             );
             self.state.lock().record_failure(&e);
-            return Err(anyhow::Error::new(e)).context("piper playback enqueue failed");
+            return Err(VoiceOutputError::Playback(e));
         }
 
         self.state.lock().record_success();
         Ok(())
     }
 
-    async fn wait_idle(&self) -> Result<()> {
+    async fn wait_idle(&self) -> Result<(), VoiceOutputError> {
         {
             let s = self.state.lock();
             if matches!(s.ready, ReadyState::Degraded { .. }) {
@@ -227,7 +220,7 @@ mod tests {
     use super::*;
 
     fn err() -> PiperError {
-        PiperError::Degraded("spawn failed".to_string())
+        PiperError::Deadline { secs: 1 }
     }
 
     fn trip(state: &mut CircuitState) {

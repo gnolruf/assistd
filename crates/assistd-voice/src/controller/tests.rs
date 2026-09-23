@@ -1,6 +1,5 @@
 use super::*;
-use crate::NoVoiceOutput;
-use anyhow::Result;
+use crate::{NoVoiceOutput, VoiceOutputError};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
@@ -13,11 +12,11 @@ struct RecordingOutput {
 
 #[async_trait]
 impl VoiceOutput for RecordingOutput {
-    async fn speak(&self, text: String) -> Result<()> {
+    async fn speak(&self, text: String) -> Result<(), VoiceOutputError> {
         self.spoken.lock().push(text);
         Ok(())
     }
-    async fn wait_idle(&self) -> Result<()> {
+    async fn wait_idle(&self) -> Result<(), VoiceOutputError> {
         self.wait_idles.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

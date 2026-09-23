@@ -6,7 +6,11 @@ use assistd_config::{
     CompositorType, Config,
     compositor::{SessionEnv, detect_from_env},
 };
-use assistd_wm::{I3Backend, NoWindowManager, SwayBackend, WindowManager, WmHandle};
+#[cfg(feature = "i3")]
+use assistd_wm::I3Backend;
+#[cfg(feature = "sway")]
+use assistd_wm::SwayBackend;
+use assistd_wm::{NoWindowManager, WindowManager, WmHandle};
 use tokio::sync::watch;
 
 pub struct WmBackend {
@@ -45,7 +49,11 @@ pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) 
         explicit => explicit,
     };
 
+    #[cfg(not(any(feature = "i3", feature = "sway")))]
+    drop(shutdown_rx);
+
     match resolved {
+        #[cfg(feature = "i3")]
         CompositorType::I3 => match I3Backend::start(shutdown_rx).await {
             Ok(handle) => {
                 tracing::info!(target: "assistd::wm", "i3 backend connected");
@@ -62,6 +70,7 @@ pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) 
                 WmBackend::disconnected()
             }
         },
+        #[cfg(feature = "sway")]
         CompositorType::Sway => match SwayBackend::start(shutdown_rx).await {
             Ok(handle) => {
                 tracing::info!(target: "assistd::wm", "sway backend connected");
@@ -78,6 +87,22 @@ pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) 
                 WmBackend::disconnected()
             }
         },
+        #[cfg(not(feature = "i3"))]
+        CompositorType::I3 => {
+            tracing::warn!(
+                target: "assistd::wm",
+                "i3 backend not compiled into this build (feature `i3`); window operations disabled"
+            );
+            WmBackend::disconnected()
+        }
+        #[cfg(not(feature = "sway"))]
+        CompositorType::Sway => {
+            tracing::warn!(
+                target: "assistd::wm",
+                "sway backend not compiled into this build (feature `sway`); window operations disabled"
+            );
+            WmBackend::disconnected()
+        }
         CompositorType::Hyprland => {
             tracing::info!(
                 target: "assistd::wm",

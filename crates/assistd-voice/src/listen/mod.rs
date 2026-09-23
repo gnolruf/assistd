@@ -3,8 +3,8 @@
 //! from [`crate::VoiceInput`] because the lifecycles differ: a press
 //! is one-shot, listening is a long-running stream.
 
-use anyhow::Result;
 use async_trait::async_trait;
+use thiserror::Error;
 use tokio::sync::{broadcast, watch};
 
 pub mod capture;
@@ -14,15 +14,23 @@ pub mod vad;
 
 pub use mic::MicContinuousListener;
 
+/// Errors surfaced by [`ContinuousListener`] implementations.
+#[derive(Debug, Error)]
+pub enum ListenError {
+    /// This build or configuration has no continuous listening.
+    #[error("continuous listening is not enabled in this build")]
+    Disabled,
+}
+
 /// A long-running, VAD-gated listener emitting completed utterance
 /// transcripts.
 #[async_trait]
 pub trait ContinuousListener: Send + Sync + 'static {
     /// Open the mic and start segmenting. A no-op when already active.
-    async fn start(&self) -> Result<()>;
+    async fn start(&self) -> Result<(), ListenError>;
 
     /// Close the mic and drain any in-flight utterance. Idempotent.
-    async fn stop(&self) -> Result<()>;
+    async fn stop(&self) -> Result<(), ListenError>;
 
     fn is_active(&self) -> bool;
 
@@ -59,11 +67,11 @@ impl NoContinuousListener {
 
 #[async_trait]
 impl ContinuousListener for NoContinuousListener {
-    async fn start(&self) -> Result<()> {
-        anyhow::bail!("continuous listening is not enabled in this build")
+    async fn start(&self) -> Result<(), ListenError> {
+        Err(ListenError::Disabled)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<(), ListenError> {
         Ok(())
     }
 

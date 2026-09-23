@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+i3 = ["assistd-wm/i3"]
+sway = ["assistd-wm/sway"]
 test-support = []
 
 [dependencies]
@@ -32,7 +34,6 @@ libc = { workspace = true }
 
 [dev-dependencies]
 assistd-tools = { workspace = true, features = ["test-support"] }
-anyhow = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

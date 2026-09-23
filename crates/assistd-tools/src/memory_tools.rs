@@ -418,7 +418,6 @@ impl Tool for ReminisceTool {
 mod tests {
     use super::*;
     use crate::ToolRegistry;
-    use anyhow::Result;
     use assistd_embed::NoEmbedder;
     use assistd_memory::{
         NoConversationStore, NoMemoryStore, NoSemanticStore, SqliteConversationStore, SqliteHandle,

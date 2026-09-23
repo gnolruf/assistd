@@ -8,7 +8,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use swayipc_async::{
@@ -21,7 +20,6 @@ use crate::criteria::{
     format_focus, format_layout, format_move_to_workspace, format_place_floating_pixels,
     format_resize_width,
 };
-use crate::error::ipc_ctx;
 use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
@@ -155,7 +153,7 @@ impl SwayBackend {
         let outcome = tokio::time::timeout(WM_IPC_TIMEOUT, op(conn)).await;
         let err = match outcome {
             Ok(Ok(value)) => return Ok(value),
-            Ok(Err(e)) => ipc_ctx(e, ctx),
+            Ok(Err(e)) => WmError::ipc(ctx, e),
             Err(_) => WmError::Timeout(WM_IPC_TIMEOUT),
         };
         *guard = None;
@@ -329,14 +327,14 @@ impl WindowManager for SwayBackend {
 async fn connect_pair() -> WmResult<(Connection, EventStream)> {
     let cmd = Connection::new()
         .await
-        .map_err(|e| ipc_ctx(e, "connect to sway IPC (cmd socket)"))?;
+        .map_err(|e| WmError::ipc("connect to sway IPC (cmd socket)", e))?;
     let events_conn = Connection::new()
         .await
-        .map_err(|e| ipc_ctx(e, "connect to sway IPC (events socket)"))?;
+        .map_err(|e| WmError::ipc("connect to sway IPC (events socket)", e))?;
     let stream = events_conn
         .subscribe([EventType::Window, EventType::Workspace])
         .await
-        .map_err(|e| ipc_ctx(e, "subscribe to sway window+workspace events"))?;
+        .map_err(|e| WmError::ipc("subscribe to sway window+workspace events", e))?;
     Ok((cmd, stream))
 }
 
@@ -544,11 +542,11 @@ fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>)
     }
 }
 
-async fn seed_snapshot(cmd: &mut Connection) -> Result<Snapshot> {
+async fn seed_snapshot(cmd: &mut Connection) -> WmResult<Snapshot> {
     let tree = cmd
         .get_tree()
         .await
-        .map_err(|e| anyhow::anyhow!("sway GET_TREE: {e}"))?;
+        .map_err(|e| WmError::ipc("sway GET_TREE", e))?;
     let focused = walk_focused(&tree);
     let focused_id = focused.and_then(|n| sway_id(n.id));
     let focused_class = focused.and_then(|n| {

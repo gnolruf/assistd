@@ -4,7 +4,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Result, anyhow};
 use assistd_config::{ContinuousListenConfig, VoiceConfig};
 use async_trait::async_trait;
 use tokio::sync::mpsc::error::TrySendError;
@@ -14,9 +13,9 @@ use tracing::{debug, info, warn};
 
 use crate::transcribe::Transcriber;
 
-use super::ContinuousListener;
 use super::capture::{self, ListenCaptureSession};
 use super::vad::{FRAME_SAMPLES, UtteranceVad, VadEvent, VadTuning};
+use super::{ContinuousListener, ListenError};
 
 type CaptureJoin = JoinHandle<Result<(), crate::mic::capture::AudioCaptureError>>;
 
@@ -35,7 +34,7 @@ pub struct MicContinuousListener {
     transcriber: Arc<dyn Transcriber>,
     mic_device: Option<String>,
     tuning: VadTuning,
-    active: Arc<AtomicBool>,
+    active: AtomicBool,
     state_tx: watch::Sender<bool>,
     utterances: broadcast::Sender<String>,
     inner: Arc<Mutex<ListenState>>,
@@ -62,16 +61,11 @@ impl MicContinuousListener {
             transcriber,
             mic_device: cfg.mic_device.clone(),
             tuning,
-            active: Arc::new(AtomicBool::new(false)),
+            active: AtomicBool::new(false),
             state_tx,
             utterances,
             inner: Arc::new(Mutex::new(ListenState { session: None })),
         }
-    }
-
-    /// Shared flag that is `true` while listening.
-    pub fn active_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.active)
     }
 }
 
@@ -81,20 +75,12 @@ fn tuning_from_config(cfg: &ContinuousListenConfig) -> VadTuning {
 
 #[async_trait]
 impl ContinuousListener for MicContinuousListener {
-    async fn start(&self) -> Result<()> {
+    async fn start(&self) -> Result<(), ListenError> {
         let mut inner = self.inner.lock().await;
         if inner.session.is_some() {
             return Ok(());
         }
-        if self
-            .active
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Err(anyhow!(
-                "continuous listening is already active on another subsystem"
-            ));
-        }
+        self.active.store(true, Ordering::SeqCst);
 
         let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
 
@@ -124,7 +110,7 @@ impl ContinuousListener for MicContinuousListener {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<(), ListenError> {
         let session = {
             let mut inner = self.inner.lock().await;
             inner.session.take()
