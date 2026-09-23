@@ -1,10 +1,10 @@
-//! Test-only fake llama-server. Only compiled under the `test-support`
-//! feature; used by `crates/assistd-llm/tests/supervisor.rs`,
-//! `crates/assistd-llm/tests/presence.rs`, and the cross-crate stress /
-//! latency tests to exercise lifecycle, presence, and chat-completion
-//! paths without needing a real llama-server binary.
+//! Test-only fake llama-server, compiled under the `test-support` feature,
+//! for exercising lifecycle, presence, and chat-completion paths without a
+//! real llama-server binary.
 //!
-//! Modes (via `--mode` or `FAKE_LLAMA_MODE`):
+//! The mode comes from `--mode`, else from a file named `mode` in the
+//! directory of the invoked path (`argv[0]`), so a symlink to this binary
+//! carries its own mode; else `normal`:
 //!   normal              - bind, serve 200 on /health, block until SIGTERM
 //!   never-ready         - bind, serve 503 on /health forever
 //!   crash-after=<secs>  - bind, serve 200 OK, then `exit(0)` after N seconds
@@ -28,6 +28,7 @@
 
 use std::collections::VecDeque;
 use std::env;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,15 +73,20 @@ struct Args {
     mode: Mode,
 }
 
+fn mode_beside(program: &str) -> Option<Mode> {
+    let text = std::fs::read_to_string(Path::new(program).with_file_name("mode")).ok()?;
+    Some(parse_mode(text.trim()).expect("invalid mode file"))
+}
+
 fn parse_args() -> Args {
     let mut host = "127.0.0.1".to_string();
     let mut port: u16 = 0;
-    let mut mode = env::var("FAKE_LLAMA_MODE")
-        .ok()
-        .and_then(|s| parse_mode(&s))
+    let argv: Vec<String> = env::args().collect();
+    let mut mode = argv
+        .first()
+        .and_then(|program| mode_beside(program))
         .unwrap_or(Mode::Normal);
 
-    let argv: Vec<String> = env::args().collect();
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {

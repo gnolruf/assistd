@@ -50,10 +50,6 @@ pub struct ThinkSplitter {
 }
 
 impl ThinkSplitter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Push the next `content` chunk and return zero or more
     /// classified segments in order. Pending bytes carried over from
     /// the previous call are prepended transparently.

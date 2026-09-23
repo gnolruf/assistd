@@ -1,5 +1,3 @@
-#![allow(unsafe_code)] // pre_exec closure invokes libc::prctl; see SAFETY note below.
-
 use super::error::LlamaServerError;
 use assistd_config::{LlamaServerConfig, ModelConfig};
 use std::process::{ExitStatus, Stdio};
@@ -93,19 +91,7 @@ impl ChildProcess {
         // (which bypasses Drop and `kill_on_drop`), the kernel delivers
         // SIGTERM to this child.
         #[cfg(target_os = "linux")]
-        {
-            // SAFETY: `pre_exec` runs between fork() and exec(); prctl is
-            // async-signal-safe and the closure captures nothing that
-            // could be inconsistent across fork().
-            unsafe {
-                cmd.pre_exec(|| {
-                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
+        set_parent_death_signal(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|source| LlamaServerError::Spawn {
             path: cfg.binary_path.clone(),
@@ -192,6 +178,21 @@ impl ChildProcess {
         }
 
         Ok(())
+    }
+}
+
+// `pre_exec` is the only way to set PDEATHSIG on a spawned child, and it is unsafe.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn set_parent_death_signal(cmd: &mut Command) {
+    // SAFETY: the closure runs in the child between fork() and exec(). It
+    // captures nothing and only issues the prctl(PR_SET_PDEATHSIG) syscall,
+    // which is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))
+                .map_err(Into::into)
+        });
     }
 }
 

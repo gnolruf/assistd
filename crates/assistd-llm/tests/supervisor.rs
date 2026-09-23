@@ -1,11 +1,3 @@
-#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::print_stdout,
-    clippy::print_stderr
-)]
-
 //! Integration tests for the llama-server supervisor.
 //!
 //! These tests are gated behind the `test-support` feature because they need
@@ -14,17 +6,18 @@
 
 #![cfg(feature = "test-support")]
 
+mod common;
+
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig};
 use assistd_llm::{LlamaService, ReadyState};
+use common::FakeLlama;
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-
-const FAKE_BIN: &str = env!("CARGO_BIN_EXE_fake_llama_server");
 
 fn init_tracing() {
     static ONCE: Once = Once::new();
@@ -48,9 +41,9 @@ async fn grab_port() -> u16 {
     port
 }
 
-fn server_spec(port: u16) -> LlamaServerConfig {
+fn server_spec(fake: &FakeLlama, port: u16) -> LlamaServerConfig {
     LlamaServerConfig {
-        binary_path: FAKE_BIN.into(),
+        binary_path: fake.binary_path(),
         host: Ipv4Addr::LOCALHOST.into(),
         port: NonZeroU16::new(port).expect("bound port is never 0"),
         gpu_layers: 0,
@@ -77,37 +70,9 @@ fn model_spec() -> ModelConfig {
     }
 }
 
-/// Appends `--mode <mode>` by wrapping the fake binary via a shell invocation.
-/// We need this because LlamaServerConfig doesn't expose extra args, but the fake
-/// binary parses args itself. Instead we rely on the binary tolerating the
-/// llama-server arg shape and parsing its own mode flag out of env.
-///
-/// Simpler: use an env var the fake binary reads.
-///
-/// Even simpler: make the fake binary look at its own args; `--mode <m>` is
-/// already parsed out of the command line. We put it at the end so the real
-/// llama-server-shaped args come first.
-///
-/// Since LlamaServerConfig just runs `binary_path` directly, we need a way to
-/// inject the mode. Two options: wrapper script, or env var.
-///
-/// Environment variable is cleanest.
-fn set_mode(mode: &str) {
-    // SAFETY: tests are single-threaded per-test, but integration tests run in
-    // parallel by default. We serialize test execution via the MODE_LOCK mutex
-    // below to make sure set_mode/spawn happen atomically.
-    unsafe { std::env::set_var("FAKE_LLAMA_MODE", mode) };
-}
-
-// Tests share a process, so set_mode / start must be serialized. Use tokio's
-// async-aware mutex so the guard is legal to hold across `.await` points.
-use tokio::sync::Mutex;
-static MODE_LOCK: Mutex<()> = Mutex::const_new(());
-
-async fn start_service(mode: &str, port: u16) -> (LlamaService, watch::Sender<bool>) {
+async fn start_service(fake: &FakeLlama, port: u16) -> (LlamaService, watch::Sender<bool>) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    set_mode(mode);
-    let service = LlamaService::start(server_spec(port), model_spec(), shutdown_rx)
+    let service = LlamaService::start(server_spec(fake, port), model_spec(), shutdown_rx)
         .await
         .expect("service should start");
     (service, shutdown_tx)
@@ -115,9 +80,9 @@ async fn start_service(mode: &str, port: u16) -> (LlamaService, watch::Sender<bo
 
 #[tokio::test]
 async fn brings_up_fake_server_and_reports_ready() {
-    let _guard = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("normal");
     let port = grab_port().await;
-    let (service, shutdown_tx) = start_service("normal", port).await;
+    let (service, shutdown_tx) = start_service(&fake, port).await;
 
     assert!(service.is_ready());
     assert!(service.pid().is_some());
@@ -128,9 +93,9 @@ async fn brings_up_fake_server_and_reports_ready() {
 
 #[tokio::test]
 async fn restarts_after_external_kill() {
-    let _guard = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("normal");
     let port = grab_port().await;
-    let (service, shutdown_tx) = start_service("normal", port).await;
+    let (service, shutdown_tx) = start_service(&fake, port).await;
 
     let first_pid = service.pid().expect("first pid");
     let pid = rustix::process::Pid::from_raw(first_pid as i32).expect("nonzero pid");
@@ -159,13 +124,12 @@ async fn restarts_after_external_kill() {
 #[tokio::test]
 async fn enters_degraded_after_five_failures() {
     init_tracing();
-    let _guard = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("bind-fail");
     let port = grab_port().await;
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    set_mode("bind-fail");
 
     let start_at = Instant::now();
-    let result = LlamaService::start(server_spec(port), model_spec(), shutdown_rx).await;
+    let result = LlamaService::start(server_spec(&fake, port), model_spec(), shutdown_rx).await;
     let elapsed = start_at.elapsed();
 
     let err = result.err().expect("start should fail");
@@ -188,10 +152,9 @@ async fn enters_degraded_after_five_failures() {
 
 #[tokio::test]
 async fn respects_shutdown_during_backoff() {
-    let _guard = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("bind-fail");
     let port = grab_port().await;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    set_mode("bind-fail");
 
     // Flip the shutdown watch after ~3 seconds: enough time to hit the first
     // backoff sleep but far short of the full 5-failure timeline.
@@ -202,7 +165,7 @@ async fn respects_shutdown_during_backoff() {
     });
 
     let start_at = Instant::now();
-    let result = LlamaService::start(server_spec(port), model_spec(), shutdown_rx).await;
+    let result = LlamaService::start(server_spec(&fake, port), model_spec(), shutdown_rx).await;
     let elapsed = start_at.elapsed();
 
     // start() should either error (ShutdownDuringHealth) or return quickly.
@@ -220,9 +183,9 @@ async fn respects_shutdown_during_backoff() {
 
 #[tokio::test]
 async fn shutdown_kills_running_child() {
-    let _guard = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("normal");
     let port = grab_port().await;
-    let (service, shutdown_tx) = start_service("normal", port).await;
+    let (service, shutdown_tx) = start_service(&fake, port).await;
 
     let pid = service.pid().expect("running child");
     assert!(
@@ -245,9 +208,9 @@ async fn shutdown_kills_running_child() {
 
 #[tokio::test]
 async fn reaches_ready_even_when_state_transitions() {
-    let _guard = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("normal");
     let port = grab_port().await;
-    let (service, shutdown_tx) = start_service("normal", port).await;
+    let (service, shutdown_tx) = start_service(&fake, port).await;
 
     assert_eq!(service.state(), ReadyState::Ready);
 

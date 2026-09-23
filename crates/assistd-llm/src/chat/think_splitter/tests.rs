@@ -1,7 +1,7 @@
 use super::*;
 
 fn run(chunks: &[&str]) -> Vec<Segment> {
-    let mut s = ThinkSplitter::new();
+    let mut s = ThinkSplitter::default();
     let mut out = Vec::new();
     for chunk in chunks {
         out.extend(s.feed(chunk));
@@ -80,7 +80,7 @@ fn tolerates_tag_split_byte_by_byte() {
 fn coalesces_adjacent_visible_chunks() {
     // Visible content arriving across several chunks (no tags)
     // should coalesce into one Visible segment per feed call.
-    let mut s = ThinkSplitter::new();
+    let mut s = ThinkSplitter::default();
     let mut out = Vec::new();
     out.extend(s.feed("hello"));
     out.extend(s.feed(" "));
@@ -124,7 +124,7 @@ fn dangling_open_tag_is_held_then_flushed_as_visible() {
     // Open-tag prefix that never completes ends up as Visible
     // (current state at finish is OutsideThink, so we don't
     // silently swallow content).
-    let mut s = ThinkSplitter::new();
+    let mut s = ThinkSplitter::default();
     let mut out = s.feed("trailing<thi");
     out.extend(s.finish());
     assert_eq!(
@@ -141,7 +141,7 @@ fn unmatched_close_tag_flips_to_visible_on_finish() {
     // Defensive: if a `</think>` appears while OutsideThink,
     // we treat the literal text as Visible since we never
     // entered InsideThink.
-    let mut s = ThinkSplitter::new();
+    let mut s = ThinkSplitter::default();
     let mut out = s.feed("a</think>b");
     out.extend(s.finish());
     // The splitter sees no `<think>` to switch state, so
@@ -170,7 +170,7 @@ fn handles_utf8_body_inside_block() {
 
 #[test]
 fn empty_feeds_are_no_ops() {
-    let mut s = ThinkSplitter::new();
+    let mut s = ThinkSplitter::default();
     assert!(s.feed("").is_empty());
     assert_eq!(s.feed("hi"), vec![Segment::Visible("hi".into())]);
     assert!(s.feed("").is_empty());
