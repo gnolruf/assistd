@@ -67,7 +67,7 @@ impl Command for CatCommand {
 
         let mut out = Vec::new();
         for path in &files {
-            let bytes = match tokio::fs::read(path).await {
+            let bytes = match super::read_regular_file(path).await {
                 Ok(b) => b,
                 Err(e) => {
                     return Ok(CommandOutput::failed(

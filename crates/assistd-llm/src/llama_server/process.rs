@@ -150,11 +150,14 @@ impl ChildProcess {
     /// SIGKILL if it is still running. Both log forwarders are awaited
     /// briefly so their buffered output lands before returning.
     pub async fn shutdown(mut self, term_timeout: Duration) -> Result<(), LlamaServerError> {
+        // The child leads its own process group, so pgid == pid.
         #[cfg(unix)]
-        if let Some(pid) = self.child.id()
-            && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
-        {
-            // The child leads its own process group, so pgid == pid.
+        let pgid = self
+            .child
+            .id()
+            .and_then(|pid| rustix::process::Pid::from_raw(pid as i32));
+        #[cfg(unix)]
+        if let Some(pgid) = pgid {
             let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
         }
 
@@ -171,6 +174,11 @@ impl ChildProcess {
                     target: "assistd::llama_server",
                     "llama-server did not exit within {term_timeout:?}; sending SIGKILL"
                 );
+                #[cfg(unix)]
+                if let Some(pgid) = pgid {
+                    let _ =
+                        rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+                }
                 let _ = self.child.start_kill();
                 let _ = self.child.wait().await;
             }

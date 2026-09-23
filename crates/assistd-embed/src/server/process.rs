@@ -29,6 +29,9 @@ impl ChildProcess {
             .arg(cfg.host.to_string())
             .arg("--port")
             .arg(cfg.port.to_string());
+        if cfg.gpu_layers == 0 {
+            cmd.env("CUDA_VISIBLE_DEVICES", "");
+        }
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())

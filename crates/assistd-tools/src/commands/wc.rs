@@ -113,6 +113,22 @@ fn unsupported(flag: &str) -> CommandOutput {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn wc_refuses_a_device_file() {
+        let out = super::WcCommand
+            .run(crate::command::CommandInput {
+                args: vec!["/dev/null".into()],
+                stdin: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, 1);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("not a regular file"),
+            "{out:?}"
+        );
+    }
+
     use super::*;
 
     #[tokio::test]

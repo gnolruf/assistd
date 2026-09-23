@@ -192,7 +192,7 @@ impl VoiceOutput for PiperVoiceOutput {
             }
         };
 
-        if let Err(e) = self.playback.play(output) {
+        if let Err(e) = self.playback.play(output).await {
             tracing::warn!(
                 target: "assistd::voice::piper",
                 error = %e,
@@ -213,19 +213,12 @@ impl VoiceOutput for PiperVoiceOutput {
                 return Ok(());
             }
         }
-        if let Err(e) = self.playback.drain().await {
-            tracing::warn!(
-                target: "assistd::voice::piper",
-                error = %e,
-                "piper playback drain failed"
-            );
-            return Ok(());
-        }
+        self.playback.drain().await;
         Ok(())
     }
 
     async fn cancel(&self) {
-        self.playback.clear();
+        self.playback.clear().await;
     }
 }
 

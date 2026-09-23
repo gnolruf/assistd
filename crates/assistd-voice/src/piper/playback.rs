@@ -1,21 +1,24 @@
 //! Audio playback via rodio. The device sink is `!Send` on ALSA and
 //! must outlive every utterance, so it lives on a dedicated
 //! `std::thread` rather than the `spawn_blocking` pool, which may
-//! retire idle threads. The `Player` is `Send + Sync`, so callers
-//! append samples to it directly.
+//! retire idle threads. The `Player` is `Send + Sync`, but its
+//! `append` and `clear` can block on rodio's internal queue mutex,
+//! so they run on the blocking pool rather than a runtime worker.
 
 use std::num::NonZero;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use rodio::buffer::SamplesBuffer;
 use rodio::cpal::traits::HostTrait;
 use rodio::stream::DeviceSinkBuilder;
 use rodio::{ChannelCount, DeviceTrait, Player, SampleRate, cpal};
-use tokio::sync::oneshot;
 
 use crate::piper::error::PiperError;
 use crate::piper::synth::SynthOutput;
+
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Owns the rodio playback path: a device thread and the player
 /// queued onto it.
@@ -51,7 +54,7 @@ impl RodioPlaybackWorker {
 
     /// Queue an utterance. Returns once enqueued; see
     /// [`drain`](Self::drain) to wait for playback.
-    pub fn play(&self, output: SynthOutput) -> Result<(), PiperError> {
+    pub async fn play(&self, output: SynthOutput) -> Result<(), PiperError> {
         let channels: ChannelCount = NonZero::new(1u16).expect("1 is non-zero");
         let sample_rate: SampleRate = NonZero::new(output.sample_rate).ok_or_else(|| {
             PiperError::Audio("voice config reports sample_rate=0; check the .onnx.json".into())
@@ -62,7 +65,10 @@ impl RodioPlaybackWorker {
             .map(|&s| s as f32 / (i16::MAX as f32))
             .collect();
         let buffer = SamplesBuffer::new(channels, sample_rate, samples_f32);
-        self.player.append(buffer);
+        let player = self.player.clone();
+        tokio::task::spawn_blocking(move || player.append(buffer))
+            .await
+            .map_err(|e| PiperError::Audio(format!("playback append task failed: {e}")))?;
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "playback_enqueued",
@@ -72,24 +78,25 @@ impl RodioPlaybackWorker {
     }
 
     /// Wait until the queue has finished playing.
-    pub async fn drain(&self) -> Result<(), PiperError> {
-        let player = self.player.clone();
-        let (tx, rx) = oneshot::channel();
-        thread::Builder::new()
-            .name("piper-rodio-drain".into())
-            .spawn(move || {
-                player.sleep_until_end();
-                let _ = tx.send(());
-            })
-            .map_err(|e| PiperError::Audio(format!("spawn drain thread: {e}")))?;
-        rx.await.map_err(|_| PiperError::PlaybackClosed)
+    ///
+    /// Polls rather than calling rodio's `sleep_until_end`, which holds
+    /// the player's queue mutex for the whole wait and would block every
+    /// later `append`.
+    pub async fn drain(&self) {
+        while !self.player.empty() {
+            tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+        }
     }
 
     /// Drop pending audio. rodio 0.22's `Player::clear` also pauses the
     /// player, so `play` must follow or later appends are silent.
-    pub fn clear(&self) {
-        self.player.clear();
-        self.player.play();
+    pub async fn clear(&self) {
+        let player = self.player.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            player.clear();
+            player.play();
+        })
+        .await;
     }
 }
 

@@ -872,3 +872,17 @@ fn parameters_schema_shape() {
     assert_eq!(schema["required"][0], "command");
     assert_eq!(schema["properties"]["command"]["type"], "string");
 }
+
+/// `/dev/stdin` is the daemon's own terminal; reading it would block the
+/// turn until someone typed there.
+#[test]
+fn run_refuses_to_read_the_daemon_terminal() {
+    let dir = fresh_dir();
+    let tool = tool_with(dir.path(), full_registry());
+    let result = invoke(
+        &tool,
+        "echo \"via stdin\" | cat /dev/stdin | head -c 0 || true",
+    );
+    let stderr = result["stderr"].as_str().unwrap();
+    assert!(stderr.contains("not a regular file"), "{result}");
+}
