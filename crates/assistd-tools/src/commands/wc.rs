@@ -110,101 +110,49 @@ fn unsupported(flag: &str) -> CommandOutput {
 
 #[cfg(test)]
 mod tests {
-    #[tokio::test]
-    async fn wc_refuses_a_device_file() {
-        let out = super::WcCommand
-            .run(crate::command::CommandInput {
-                args: vec!["/dev/null".into()],
-                stdin: None,
-            })
-            .await;
-        assert_eq!(out.exit_code, 1);
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("not a regular file"),
-            "{out:?}"
-        );
-    }
-
     use super::*;
 
-    #[tokio::test]
-    async fn wc_l_counts_newlines() {
-        let out = WcCommand
-            .run(CommandInput {
-                args: vec!["-l".into()],
-                stdin: Some(b"a\nb\nc\n".to_vec()),
-            })
-            .await;
-        assert_eq!(out.stdout, b"3\n");
-        assert_eq!(out.exit_code, 0);
-    }
-
-    #[tokio::test]
-    async fn wc_default_reports_lines_words_bytes() {
-        let out = WcCommand
-            .run(CommandInput {
-                args: Vec::new(),
-                stdin: Some(b"hello world\nagain\n".to_vec()),
-            })
-            .await;
-        // 2 lines, 3 words, 18 bytes
-        assert_eq!(out.stdout, b"2 3 18\n");
-    }
-
-    async fn run_wc(args: &[&str], stdin: &[u8]) -> CommandOutput {
+    async fn run_wc(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
         WcCommand
             .run(CommandInput {
                 args: args.iter().map(|s| s.to_string()).collect(),
-                stdin: Some(stdin.to_vec()),
+                stdin: stdin.map(<[u8]>::to_vec),
             })
             .await
     }
 
     #[tokio::test]
-    async fn wc_w_counts_words() {
-        assert_eq!(run_wc(&["-w"], b"a b\nc\n").await.stdout, b"3\n");
-    }
-
-    #[tokio::test]
-    async fn wc_c_counts_bytes() {
-        assert_eq!(run_wc(&["-c"], b"abc\n").await.stdout, b"4\n");
+    async fn counts_per_flags() {
+        let cases: [(&[&str], &[u8], &str); 6] = [
+            (&[], b"hello world\nagain\n", "2 3 18\n"),
+            (&["-l"], b"a\nb\nc\n", "3\n"),
+            (&["-w"], b"a b\nc\n", "3\n"),
+            (&["-c"], b"abc\n", "4\n"),
+            (&["-w"], b"a \xff b\n", "3\n"),
+            // Asked for words then lines; printed lines then words.
+            (&["-wl"], b"a b\nc\n", "2 3\n"),
+        ];
+        for (args, stdin, expected) in cases {
+            let out = run_wc(args, Some(stdin)).await;
+            assert_eq!(out.exit_code, 0, "{args:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{args:?}");
+        }
     }
 
     #[tokio::test]
     async fn wc_no_stdin_emits_usage() {
-        let out = WcCommand
-            .run(CommandInput {
-                args: Vec::new(),
-                stdin: None,
-            })
-            .await;
+        let out = run_wc(&[], None).await;
         assert_eq!(out.exit_code, 2);
         assert!(out.stdout.starts_with(b"usage: wc"), "{out:?}");
     }
 
     #[tokio::test]
-    async fn wc_counts_words_in_non_utf8_input() {
-        assert_eq!(run_wc(&["-w"], b"a \xff b\n").await.stdout, b"3\n");
-    }
-
-    #[tokio::test]
-    async fn wc_combined_flags_keep_canonical_order() {
-        // Asked for words then lines; printed lines then words.
-        assert_eq!(run_wc(&["-wl"], b"a b\nc\n").await.stdout, b"2 3\n");
-    }
-
-    #[tokio::test]
     async fn wc_unknown_flag_errors() {
-        let out = run_wc(&["-q"], b"").await;
+        let out = run_wc(&["-q"], Some(b"")).await;
         assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] wc: flag '-q' not supported"),
-            "{stderr}"
-        );
-        assert!(
-            stderr.contains("Use: wc, wc -l, wc -w or wc -c"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] wc: flag '-q' not supported. Use: wc, wc -l, wc -w or wc -c\n"
         );
     }
 
@@ -217,20 +165,30 @@ mod tests {
         std::fs::write(&b, b"three\n").unwrap();
         let out = run_wc(
             &["-l", a.to_str().unwrap(), b.to_str().unwrap()],
-            b"ignored\n",
+            Some(b"ignored\n"),
         )
         .await;
         assert_eq!(out.exit_code, 0);
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2");
+        assert_eq!(out.stdout, b"2\n");
     }
 
     #[tokio::test]
     async fn missing_file_reports_navigation_error() {
-        let out = run_wc(&["/nope/missing.txt"], b"").await;
+        let out = run_wc(&["/nope/missing.txt"], Some(b"")).await;
         assert_eq!(out.exit_code, 1);
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("[error] wc: file not found"),
-            "{out:?}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] wc: file not found: /nope/missing.txt. Use: ls /nope to see what is there\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn wc_refuses_a_device_file() {
+        let out = run_wc(&["/dev/null"], None).await;
+        assert_eq!(out.exit_code, 1);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] wc: /dev/null: not a regular file (device, pipe, or socket). Check: ls -l /dev/null\n"
         );
     }
 }

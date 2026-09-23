@@ -174,15 +174,18 @@ mod tests {
         (addr, server)
     }
 
+    async fn run_web(cmd: &WebCommand, args: &[&str]) -> CommandOutput {
+        cmd.run(CommandInput {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            stdin: None,
+        })
+        .await
+    }
+
     #[tokio::test]
     async fn fetches_response_body() {
         let (addr, server) = serve_once("HTTP/1.1 200 OK", b"hello from server").await;
-        let out = WebCommand::new()
-            .run(CommandInput {
-                args: vec![format!("http://{addr}/")],
-                stdin: None,
-            })
-            .await;
+        let out = run_web(&WebCommand::new(), &[&format!("http://{addr}/")]).await;
         server.await.unwrap();
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"hello from server");
@@ -191,56 +194,48 @@ mod tests {
     #[tokio::test]
     async fn non_2xx_exits_1_with_status_in_stderr() {
         let (addr, server) = serve_once("HTTP/1.1 404 Not Found", b"missing").await;
-        let out = WebCommand::new()
-            .run(CommandInput {
-                args: vec![format!("http://{addr}/")],
-                stdin: None,
-            })
-            .await;
+        let url = format!("http://{addr}/");
+        let out = run_web(&WebCommand::new(), &[&url]).await;
         server.await.unwrap();
         assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[error] web: HTTP 404"), "{stderr}");
-        assert!(stderr.contains("Try: "), "{stderr}");
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                "[error] web: HTTP 404 Not Found: {url}. \
+                 Try: a different URL or check the endpoint is reachable\n"
+            )
+        );
     }
 
     #[tokio::test]
     async fn rejects_non_http_scheme() {
-        let out = WebCommand::new()
-            .run(CommandInput {
-                args: vec!["file:///etc/passwd".into()],
-                stdin: None,
-            })
-            .await;
+        let out = run_web(&WebCommand::new(), &["file:///etc/hostname"]).await;
         assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] web: only http(s):// URLs are allowed"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] web: only http(s):// URLs are allowed: file:///etc/hostname. \
+             Use: web https://... or web http://...\n"
         );
-        assert!(stderr.contains("Use: web http"), "{stderr}");
     }
 
     #[tokio::test]
-    async fn no_args_errors() {
-        let out = WebCommand::new()
-            .run(CommandInput {
-                args: Vec::new(),
-                stdin: None,
-            })
-            .await;
+    async fn no_args_emits_usage() {
+        let out = run_web(&WebCommand::new(), &[]).await;
         assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: web"), "{out:?}");
     }
 
     #[tokio::test]
     async fn connection_failure_exits_1() {
         // 127.0.0.1:1 is reserved and won't answer.
-        let out = WebCommand::with_timeout(Duration::from_millis(200))
-            .run(CommandInput {
-                args: vec!["http://127.0.0.1:1/".into()],
-                stdin: None,
-            })
-            .await;
+        let cmd = WebCommand::with_timeout(Duration::from_millis(200));
+        let out = run_web(&cmd, &["http://127.0.0.1:1/"]).await;
         assert_eq!(out.exit_code, 1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with("[error] web: transport error: http://127.0.0.1:1/: "),
+            "{stderr}"
+        );
     }
 }

@@ -122,13 +122,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn echo_joins_args_with_space_and_newline() {
-        let out = run_echo(&["hello", "world"]).await;
-        assert_eq!(out.stdout, b"hello world\n");
-        assert_eq!(out.exit_code, 0);
-    }
-
-    #[tokio::test]
     async fn echo_no_args_emits_usage() {
         let out = run_echo(&[]).await;
         assert_eq!(out.exit_code, 2);
@@ -136,43 +129,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn n_flag_omits_trailing_newline() {
-        assert_eq!(run_echo(&["-n", "hi"]).await.stdout, b"hi");
-    }
-
-    #[tokio::test]
-    async fn e_flag_expands_escapes() {
-        assert_eq!(run_echo(&["-e", r"a\nb\tc"]).await.stdout, b"a\nb\tc\n");
-    }
-
-    #[tokio::test]
-    async fn escapes_are_literal_without_e() {
-        assert_eq!(run_echo(&[r"a\nb"]).await.stdout, b"a\\nb\n");
-    }
-
-    #[tokio::test]
-    async fn combined_ne_flag() {
-        assert_eq!(run_echo(&["-ne", r"a\nb"]).await.stdout, b"a\nb");
-    }
-
-    #[tokio::test]
-    async fn capital_e_disables_escapes() {
-        assert_eq!(run_echo(&["-e", "-E", r"a\nb"]).await.stdout, b"a\\nb\n");
-    }
-
-    #[tokio::test]
-    async fn unknown_escape_keeps_both_characters() {
-        assert_eq!(run_echo(&["-e", r"a\qb"]).await.stdout, b"a\\qb\n");
-    }
-
-    #[tokio::test]
-    async fn non_flag_argument_ends_flag_parsing() {
-        // `-n` after a word is data, not a flag, so the newline stays.
-        assert_eq!(run_echo(&["hi", "-n"]).await.stdout, b"hi -n\n");
-    }
-
-    #[tokio::test]
-    async fn lone_dash_is_data() {
-        assert_eq!(run_echo(&["-"]).await.stdout, b"-\n");
+    async fn echo_output_per_flags() {
+        let cases: [(&[&str], &[u8]); 9] = [
+            (&["hello", "world"], b"hello world\n"),
+            (&["-n", "hi"], b"hi"),
+            (&["-e", r"a\nb\tc"], b"a\nb\tc\n"),
+            (&[r"a\nb"], b"a\\nb\n"),
+            (&["-ne", r"a\nb"], b"a\nb"),
+            (&["-e", "-E", r"a\nb"], b"a\\nb\n"),
+            (&["-e", r"a\qb"], b"a\\qb\n"),
+            // A flag after a word is data, so the newline stays.
+            (&["hi", "-n"], b"hi -n\n"),
+            (&["-"], b"-\n"),
+        ];
+        for (args, expected) in cases {
+            let out = run_echo(args).await;
+            assert_eq!(out.exit_code, 0, "{args:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(expected),
+                "{args:?}"
+            );
+        }
     }
 }
