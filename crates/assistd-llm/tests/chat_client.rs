@@ -63,6 +63,9 @@ enum StreamResponse {
     /// the server. Used to exercise the per-chunk inactivity timeout in
     /// `LlamaChatClient::stream_openai`.
     StallAfterDeltas(Vec<String>),
+    /// Serve a 200 OK chunked SSE stream of the deltas, sleeping for the
+    /// given gap before each one, then `[DONE]`.
+    PacedDeltas(Vec<String>, Duration),
     /// Respond with a non-200 status and the given body.
     HttpError(u16, String),
 }
@@ -256,6 +259,19 @@ async fn handle_stream_response(
             // surface a streaming error. We sleep for far longer than
             // any test-side timeout so the client wins the race.
             tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+        StreamResponse::PacedDeltas(deltas, gap) => {
+            write_sse_headers(sock).await?;
+            for d in deltas {
+                tokio::time::sleep(gap).await;
+                let frame = format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
+                    serde_json::to_string(&d).unwrap()
+                );
+                write_chunk(sock, frame.as_bytes()).await?;
+            }
+            write_chunk(sock, b"data: [DONE]\n\n").await?;
+            write_final_chunk(sock).await?;
         }
         StreamResponse::HttpError(status, body) => {
             write_error(sock, status, &body).await?;
@@ -626,6 +642,42 @@ async fn slow_first_token_is_not_treated_as_a_stall() {
         "generate returned after {elapsed:?}; the inter-chunk deadline fired before the first byte"
     );
     assert!(drain(&mut rx).await.is_empty());
+}
+
+#[tokio::test]
+async fn generation_longer_than_request_timeout_is_not_truncated() {
+    let script = Script::new();
+    let deltas: Vec<String> = ["one", " two", " three", " four", " five"]
+        .map(String::from)
+        .to_vec();
+    script
+        .push_stream(StreamResponse::PacedDeltas(
+            deltas.clone(),
+            Duration::from_millis(400),
+        ))
+        .await;
+    let (port, _server) = spawn_fake(script).await;
+
+    let mut spec = chat_spec(port);
+    spec.chat.request_timeout_secs = nz64(1);
+    spec.timeouts.stream_inactivity_secs = 2;
+    let client = build_client(&spec);
+
+    let (tx, mut rx) = mpsc::channel(32);
+    tokio::time::timeout(Duration::from_secs(10), client.generate("hi".into(), tx))
+        .await
+        .expect("generate must return within outer 10s budget")
+        .expect("generate completed");
+
+    let texts: Vec<_> = drain(&mut rx)
+        .await
+        .into_iter()
+        .filter_map(|e| match e {
+            LlmEvent::Delta { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, deltas);
 }
 
 #[tokio::test]

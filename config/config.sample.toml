@@ -91,10 +91,12 @@ temperature = 0.7
 # presence_penalty = 1.5
 # Maximum tokens the model may emit in a single streamed response.
 max_response_tokens = 1024
-# HTTP request timeout for a single /v1/chat/completions call. This also
-# bounds the wait for the first streamed byte, which is prompt prefill
-# rather than a stall — raise it if a large model on CPU-offloaded
-# experts needs longer to reach its first token.
+# Deadline for the first streamed byte of a /v1/chat/completions call,
+# which is prompt prefill rather than a stall — raise it if a large model
+# on CPU-offloaded experts needs longer to reach its first token. Once
+# tokens are flowing only [timeouts] stream_inactivity_secs applies, so
+# long generations are never cut off. Also caps the whole (non-streaming)
+# summarization call.
 request_timeout_secs = 120
 # Sampling temperature for the non-streaming summarization call. Lower
 # than `temperature` by default because summaries should be deterministic.
