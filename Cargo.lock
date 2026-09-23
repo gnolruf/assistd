@@ -300,6 +300,7 @@ name = "assistd-ipc"
 version = "1.0.0"
 dependencies = [
  "base64 0.23.1",
+ "infer",
  "serde",
  "serde_json",
  "tempfile",

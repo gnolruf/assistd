@@ -8,7 +8,7 @@ license.workspace = true
 assistd-config = { workspace = true }
 assistd-embed = { workspace = true }
 assistd-memory = { workspace = true }
-assistd-ipc = { workspace = true }
+assistd-ipc = { workspace = true, features = ["client"] }
 assistd-wm = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

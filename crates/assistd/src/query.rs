@@ -1,8 +1,8 @@
 //! `query` subcommand.
 
 use anyhow::Result;
+use assistd_ipc::attachment::{LoadImageError, LoadedImage, MAX_IMAGE_BYTES, load_image};
 use assistd_ipc::{Event, ImageAttachment, Request};
-use assistd_tools::attachment::{LoadImageError, MAX_IMAGE_BYTES};
 use clap::Args;
 use std::io::Write;
 use std::path::PathBuf;
@@ -37,8 +37,8 @@ pub struct QueryArgs {
 pub async fn run(args: QueryArgs) -> Result<()> {
     let mut wire_attachments = Vec::with_capacity(args.images.len());
     for path in &args.images {
-        match assistd_tools::load_image_attachment(path).await {
-            Ok((assistd_tools::Attachment::Image { mime, bytes }, _)) => {
+        match load_image(path).await {
+            Ok(LoadedImage { mime, bytes }) => {
                 wire_attachments.push(ImageAttachment::from_bytes(mime, &bytes));
             }
             Err(e) => {

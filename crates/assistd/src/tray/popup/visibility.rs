@@ -6,6 +6,7 @@ use assistd_config::TrayPopupConfig;
 use assistd_ipc::{Event, IpcClient, Request};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tokio::time::interval;
 use uuid::Uuid;
 
@@ -40,6 +41,7 @@ pub async fn drive_visibility(
     let auto_hide_listening = Duration::from_millis(cfg.listen_auto_hide_ms());
     let mut ticker = interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut interrupts = JoinSet::new();
 
     loop {
         tokio::select! {
@@ -81,9 +83,14 @@ pub async fn drive_visibility(
                             visible = false;
                             push_with_visibility(&state_tx, tracker.snapshot(), visible);
                         }
-                        spawn_interrupt(ipc.clone());
+                        interrupts.spawn(interrupt_turn(ipc.clone()));
                     }
                     DriverInput::Mapped => {}
+                }
+            }
+            Some(res) = interrupts.join_next() => {
+                if let Err(e) = res {
+                    tracing::warn!(target: "tray", "popup dismiss: interrupt_turn task failed: {e}");
                 }
             }
             _ = ticker.tick() => {
@@ -119,22 +126,20 @@ fn push_with_visibility(tx: &watch::Sender<PopupState>, mut snap: PopupState, vi
     });
 }
 
-fn spawn_interrupt(ipc: IpcClient) {
-    tokio::spawn(async move {
-        let req = Request::InterruptTurn {
-            id: Uuid::new_v4().to_string(),
-        };
-        match ipc.one_shot(req).await {
-            Ok(stream) => {
-                if let Err(e) = stream.collect().await {
-                    tracing::warn!(target: "tray", "popup dismiss: interrupt_turn stream: {e}");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(target: "tray", "popup dismiss: interrupt_turn send failed: {e}");
+async fn interrupt_turn(ipc: IpcClient) {
+    let req = Request::InterruptTurn {
+        id: Uuid::new_v4().to_string(),
+    };
+    match ipc.one_shot(req).await {
+        Ok(stream) => {
+            if let Err(e) = stream.collect().await {
+                tracing::warn!(target: "tray", "popup dismiss: interrupt_turn stream: {e}");
             }
         }
-    });
+        Err(e) => {
+            tracing::warn!(target: "tray", "popup dismiss: interrupt_turn send failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
