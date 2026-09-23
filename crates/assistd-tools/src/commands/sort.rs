@@ -141,53 +141,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sorts_lexicographically() {
-        let out = run_sort(&[], b"pear\napple\nfig\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"apple\nfig\npear\n");
-    }
-
-    #[tokio::test]
-    async fn r_flag_reverses() {
-        let out = run_sort(&["-r"], b"apple\npear\nfig\n").await;
-        assert_eq!(out.stdout, b"pear\nfig\napple\n");
-    }
-
-    #[tokio::test]
-    async fn n_flag_orders_numerically() {
-        // Byte order would put "10" before "9"; -n must not.
-        let out = run_sort(&["-n"], b"9\n10\n2\n").await;
-        assert_eq!(out.stdout, b"2\n9\n10\n");
-    }
-
-    #[tokio::test]
-    async fn nr_combined_is_descending_numeric() {
-        let out = run_sort(&["-nr"], b"3\n10\n7\n").await;
-        assert_eq!(out.stdout, b"10\n7\n3\n");
-    }
-
-    #[tokio::test]
-    async fn numeric_key_reads_leading_count_of_a_uniq_c_line() {
-        let out = run_sort(&["-nr"], b"2\tbeta\n11\talpha\n").await;
-        assert_eq!(out.stdout, b"11\talpha\n2\tbeta\n");
-    }
-
-    #[tokio::test]
-    async fn f_flag_folds_case() {
-        // Byte order puts every capital before every lowercase letter.
-        let out = run_sort(&["-f"], b"beta\nAlpha\ngamma\n").await;
-        assert_eq!(out.stdout, b"Alpha\nbeta\ngamma\n");
-    }
-
-    #[tokio::test]
-    async fn unterminated_last_line_gets_a_newline() {
-        let out = run_sort(&[], b"b\na").await;
-        assert_eq!(out.stdout, b"a\nb\n");
-    }
-
-    #[tokio::test]
-    async fn empty_stdin_is_empty_output() {
-        assert!(run_sort(&[], b"").await.stdout.is_empty());
+    async fn orders_lines_per_flags() {
+        let cases: [(&[&str], &str, &str); 8] = [
+            (&[], "pear\napple\nfig\n", "apple\nfig\npear\n"),
+            (&["-r"], "apple\npear\nfig\n", "pear\nfig\napple\n"),
+            // Byte order would put "10" before "9".
+            (&["-n"], "9\n10\n2\n", "2\n9\n10\n"),
+            (&["-nr"], "3\n10\n7\n", "10\n7\n3\n"),
+            // `uniq -c` output orders by its leading count.
+            (&["-nr"], "2\tbeta\n11\talpha\n", "11\talpha\n2\tbeta\n"),
+            // Byte order puts every capital before every lowercase letter.
+            (&["-f"], "beta\nAlpha\ngamma\n", "Alpha\nbeta\ngamma\n"),
+            (&[], "b\na", "a\nb\n"),
+            (&[], "", ""),
+        ];
+        for (args, stdin, expected) in cases {
+            let label = format!("{args:?} {stdin:?}");
+            let out = run_sort(args, stdin.as_bytes()).await;
+            assert_eq!(out.exit_code, 0, "{label}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{label}");
+        }
     }
 
     #[tokio::test]
@@ -206,12 +179,10 @@ mod tests {
     async fn unknown_flag_errors() {
         let out = run_sort(&["-q"], b"a\n").await;
         assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] sort: unknown flag '-q'"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] sort: unknown flag '-q'. Use: sort (no args) for supported flags\n"
         );
-        assert!(stderr.contains("Use: "), "{stderr}");
     }
 
     #[tokio::test]
@@ -230,9 +201,9 @@ mod tests {
     async fn missing_file_reports_navigation_error() {
         let out = run_sort(&["/nope/missing.txt"], b"").await;
         assert_eq!(out.exit_code, 1);
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("[error] sort: file not found"),
-            "{out:?}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] sort: file not found: /nope/missing.txt. Use: ls /nope to see what is there\n"
         );
     }
 }

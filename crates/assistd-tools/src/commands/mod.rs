@@ -165,3 +165,36 @@ pub(crate) fn test_registry() -> crate::command::CommandRegistry {
     r.register(WmCommand::for_test(Arc::new(NoWindowManager)));
     r
 }
+
+/// Confirmation gate that answers every prompt the same way and records
+/// each prompt's `(tool, script, matched_pattern)`.
+#[cfg(test)]
+pub(crate) struct RecordingGate {
+    approve: bool,
+    prompts: parking_lot::Mutex<Vec<(String, String, String)>>,
+}
+
+#[cfg(test)]
+impl RecordingGate {
+    pub(crate) fn new(approve: bool) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            approve,
+            prompts: parking_lot::Mutex::default(),
+        })
+    }
+
+    pub(crate) fn prompts(&self) -> Vec<(String, String, String)> {
+        self.prompts.lock().clone()
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl crate::policy::ConfirmationGate for RecordingGate {
+    async fn confirm(&self, req: crate::policy::ConfirmationRequest) -> bool {
+        self.prompts
+            .lock()
+            .push((req.tool, req.script, req.matched_pattern));
+        self.approve
+    }
+}

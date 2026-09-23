@@ -144,139 +144,97 @@ mod tests {
     use crate::fixtures::PNG_BYTES;
     use tempfile::tempdir;
 
+    async fn run_see(cmd: &SeeCommand, args: &[&str]) -> CommandOutput {
+        cmd.run(CommandInput {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            stdin: None,
+        })
+        .await
+    }
+
     #[tokio::test]
     async fn attaches_png_image() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("shot.png");
-        tokio::fs::write(&path, PNG_BYTES).await.unwrap();
-        let out = SeeCommand::default()
-            .run(CommandInput {
-                args: vec![path.to_string_lossy().into_owned()],
-                stdin: None,
-            })
-            .await;
+        std::fs::write(&path, PNG_BYTES).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let out = run_see(&SeeCommand::default(), &[&path]).await;
         assert_eq!(out.exit_code, 0);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains("attached image/png"), "{stdout}");
-        assert_eq!(out.attachments.len(), 1);
-        match &out.attachments[0] {
-            Attachment::Image { mime, bytes } => {
-                assert_eq!(mime, "image/png");
-                assert_eq!(bytes.as_slice(), PNG_BYTES);
-            }
-        }
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("attached image/png ({}B) from {path}\n", PNG_BYTES.len())
+        );
+        let [Attachment::Image { mime, bytes }] = out.attachments.as_slice() else {
+            panic!("expected one attachment: {:?}", out.attachments);
+        };
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes.as_slice(), PNG_BYTES);
     }
 
     #[tokio::test]
     async fn rejects_non_image() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("notes.txt");
-        tokio::fs::write(&path, b"not an image").await.unwrap();
-        let out = SeeCommand::default()
-            .run(CommandInput {
-                args: vec![path.to_string_lossy().into_owned()],
-                stdin: None,
-            })
-            .await;
+        std::fs::write(&path, b"not an image").unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let out = run_see(&SeeCommand::default(), &[&path]).await;
         assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] see: not an image file:"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("[error] see: not an image file: {path}. Use: cat {path}\n")
         );
-        assert!(stderr.contains("Use: cat "), "{stderr}");
         assert!(out.attachments.is_empty());
     }
 
     #[tokio::test]
     async fn missing_file_exits_1() {
-        let out = SeeCommand::default()
-            .run(CommandInput {
-                args: vec!["/nonexistent/image.png".into()],
-                stdin: None,
-            })
-            .await;
+        let out = run_see(&SeeCommand::default(), &["/nonexistent/image.png"]).await;
         assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] see: file not found: /nonexistent/image.png"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] see: file not found: /nonexistent/image.png. \
+             Use: ls /nonexistent to see what is there\n"
         );
-        assert!(stderr.contains("Use: ls /nonexistent to see"), "{stderr}");
         assert!(out.attachments.is_empty());
     }
 
     #[tokio::test]
-    async fn no_args_errors() {
-        let out = SeeCommand::default()
-            .run(CommandInput {
-                args: Vec::new(),
-                stdin: None,
-            })
-            .await;
+    async fn no_args_emits_usage() {
+        let out = run_see(&SeeCommand::default(), &[]).await;
         assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: see"), "{out:?}");
     }
 
     #[tokio::test]
     async fn too_many_args_errors() {
-        let out = SeeCommand::default()
-            .run(CommandInput {
-                args: vec!["a.png".into(), "b.png".into()],
-                stdin: None,
-            })
-            .await;
+        let out = run_see(&SeeCommand::default(), &["a.png", "b.png"]).await;
         assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] see: expects exactly one path argument"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] see: expects exactly one path argument. Use: see <PATH>\n"
         );
-        assert!(stderr.contains("Use: see <PATH>"), "{stderr}");
     }
 
     /// With vision disabled `see` never touches the filesystem, so the
     /// path argument is irrelevant.
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
-        let out = SeeCommand::new(VisionGate::new(false))
-            .run(CommandInput {
-                args: vec!["/tmp/some-image.png".into()],
-                stdin: None,
-            })
-            .await;
+        let cmd = SeeCommand::new(VisionGate::new(false));
+        let out = run_see(&cmd, &["/tmp/some-image.png"]).await;
         assert_eq!(out.exit_code, 1);
         assert!(out.stdout.is_empty());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] see: vision not available: model does not support images"),
-            "{stderr}"
-        );
-        assert!(
-            stderr.contains("Use: a model with mmproj loaded"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] see: vision not available: model does not support images. \
+             Use: a model with mmproj loaded\n"
         );
         assert!(out.attachments.is_empty());
     }
 
-    #[test]
-    fn summary_changes_when_vision_disabled() {
-        assert!(
-            SeeCommand::new(VisionGate::new(true))
-                .summary()
-                .contains("attach an image")
-        );
-        assert!(
-            SeeCommand::new(VisionGate::new(false))
-                .summary()
-                .contains("unavailable")
-        );
-    }
-
+    /// A gate shared with the daemon's revalidation path flips a
+    /// long-lived command between available and unavailable.
     #[test]
     fn gate_flip_changes_summary_dynamically() {
-        // The whole point of VisionGate: a single Arc shared with the
-        // daemon's revalidation path can flip a long-lived command from
-        // "available" to "unavailable" mid-process without rebuilding.
         let gate = VisionGate::new(true);
         let cmd = SeeCommand::new(gate.clone());
         assert!(cmd.summary().contains("attach an image"));

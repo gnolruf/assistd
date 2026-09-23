@@ -95,27 +95,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collapses_adjacent_duplicates() {
-        let out = run_uniq(&[], b"a\na\nb\na\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"a\nb\na\n");
-    }
-
-    #[tokio::test]
-    async fn c_flag_prefixes_run_lengths() {
-        let out = run_uniq(&["-c"], b"a\na\nb\n").await;
-        assert_eq!(out.stdout, b"2\ta\n1\tb\n");
-    }
-
-    #[tokio::test]
-    async fn unterminated_last_line_gets_a_newline() {
-        let out = run_uniq(&[], b"a\nb").await;
-        assert_eq!(out.stdout, b"a\nb\n");
-    }
-
-    #[tokio::test]
-    async fn empty_stdin_is_empty_output() {
-        assert!(run_uniq(&[], b"").await.stdout.is_empty());
+    async fn collapses_adjacent_runs() {
+        let cases: [(&[&str], &str, &str); 5] = [
+            (&[], "a\na\nb\na\n", "a\nb\na\n"),
+            (&["-c"], "a\na\nb\n", "2\ta\n1\tb\n"),
+            (&[], "a\nb", "a\nb\n"),
+            (&[], "", ""),
+            (&["-c"], "a\n\n\nb\n", "1\ta\n2\t\n1\tb\n"),
+        ];
+        for (args, stdin, expected) in cases {
+            let label = format!("{args:?} {stdin:?}");
+            let out = run_uniq(args, stdin.as_bytes()).await;
+            assert_eq!(out.exit_code, 0, "{label}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{label}");
+        }
     }
 
     #[tokio::test]
@@ -131,12 +124,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blank_lines_are_lines() {
-        let out = run_uniq(&["-c"], b"a\n\n\nb\n").await;
-        assert_eq!(out.stdout, b"1\ta\n2\t\n1\tb\n");
-    }
-
-    #[tokio::test]
     async fn named_file_is_read_instead_of_stdin() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("lines.txt");
@@ -147,14 +134,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_flag_still_errors() {
+    async fn unknown_flag_errors() {
         let out = run_uniq(&["-q"], b"a\n").await;
         assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] uniq: unknown flag '-q'"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] uniq: unknown flag '-q'. Use: uniq or uniq -c\n"
         );
-        assert!(stderr.contains("Use: uniq or uniq -c"), "{stderr}");
     }
 }
