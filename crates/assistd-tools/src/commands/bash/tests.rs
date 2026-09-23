@@ -420,6 +420,58 @@ async fn output_overflow_kills_backgrounded_grandchild() {
     );
 }
 
+/// A clean exit must not wait on a background child that inherited the
+/// output pipes, and must not leave it running either.
+#[cfg(unix)]
+#[tokio::test]
+async fn normal_exit_kills_backgrounded_grandchild() {
+    let (out, pid) = run_leaving_background_child(BashPolicyCfg::default(), |pidfile| {
+        format!("sleep 300 & echo $! > {}; echo done", pidfile.display())
+    })
+    .await;
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout, b"done\n");
+    assert!(
+        waited_for_exit(&pid).await,
+        "grandchild {pid} survived the script's exit"
+    );
+}
+
+/// More stdin than a pipe buffers, fed to a script that never reads it,
+/// must not keep the timeout from arming.
+#[tokio::test]
+async fn unread_stdin_does_not_block_the_timeout() {
+    let cfg = BashPolicyCfg {
+        timeout: Duration::from_millis(200),
+        ..Default::default()
+    };
+    let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
+    let out = tokio::time::timeout(
+        Duration::from_secs(10),
+        cmd.run(CommandInput {
+            args: vec!["sleep 300".into()],
+            stdin: Some(vec![b'x'; 1024 * 1024]),
+        }),
+    )
+    .await
+    .expect("stdin write blocked before the timeout armed")
+    .unwrap();
+    assert_eq!(out.exit_code, 137);
+}
+
+#[tokio::test]
+async fn stdin_larger_than_a_pipe_buffer_arrives_whole() {
+    let out = BashCommand::default()
+        .run(CommandInput {
+            args: vec!["wc -c".into()],
+            stdin: Some(vec![b'x'; 1024 * 1024]),
+        })
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1048576");
+}
+
 /// Sandbox mode `None` executes bash directly with no wrapper.
 #[tokio::test]
 async fn bash_sandbox_none_runs_unsandboxed() {

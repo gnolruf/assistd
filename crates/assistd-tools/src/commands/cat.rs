@@ -60,27 +60,29 @@ impl Command for CatCommand {
                 return Ok(CommandOutput::usage(self.help()));
             };
             if flags.metadata_only {
-                return Ok(CommandOutput::ok(describe(&stdin, None)));
+                return Ok(CommandOutput::ok(describe(
+                    &stdin,
+                    stdin.len() as u64,
+                    None,
+                )));
             }
             return Ok(CommandOutput::ok(number_if(stdin, &flags)));
         }
 
         let mut out = Vec::new();
         for path in &files {
-            let bytes = match super::read_regular_file(path).await {
-                Ok(b) => b,
-                Err(e) => {
-                    return Ok(CommandOutput::failed(
-                        1,
-                        io_error_nav("cat", path, &e).into_bytes(),
-                    ));
-                }
-            };
-
             if flags.metadata_only {
-                out.extend_from_slice(&describe(&bytes, Some(path)));
+                match super::read_regular_head(path, SNIFF_LEN as u64).await {
+                    Ok((head, size)) => out.extend_from_slice(&describe(&head, size, Some(path))),
+                    Err(e) => return Ok(read_failed(path, &e)),
+                }
                 continue;
             }
+
+            let bytes = match super::read_regular_file(path).await {
+                Ok(b) => b,
+                Err(e) => return Ok(read_failed(path, &e)),
+            };
 
             if let Some(mime) = sniff_binary(&bytes) {
                 let size = human_size(bytes.len());
@@ -105,6 +107,10 @@ impl Command for CatCommand {
         }
         Ok(CommandOutput::ok(number_if(out, &flags)))
     }
+}
+
+fn read_failed(path: &str, e: &std::io::Error) -> CommandOutput {
+    CommandOutput::failed(1, io_error_nav("cat", path, e).into_bytes())
 }
 
 fn number_if(bytes: Vec<u8>, flags: &Flags) -> Vec<u8> {
@@ -138,6 +144,9 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
     Ok((flags, files))
 }
 
+/// How much of a file's head [`sniff_binary`] looks at for a NUL byte.
+const SNIFF_LEN: usize = 8192;
+
 /// `Some(mime)` if the bytes look binary: a recognised non-text magic
 /// number, or a NUL byte in the first 8 KB (GNU grep's heuristic).
 pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
@@ -147,25 +156,24 @@ pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
             return Some(mime.to_string());
         }
     }
-    let sniff_len = bytes.len().min(8192);
-    if bytes[..sniff_len].contains(&0u8) {
+    if bytes[..bytes.len().min(SNIFF_LEN)].contains(&0u8) {
         return Some("application/octet-stream".to_string());
     }
     None
 }
 
-fn describe(bytes: &[u8], path: Option<&str>) -> Vec<u8> {
-    let mime = infer::get(bytes)
+fn describe(head: &[u8], size: u64, path: Option<&str>) -> Vec<u8> {
+    let mime = infer::get(head)
         .map(|t| t.mime_type().to_string())
         .unwrap_or_else(|| {
-            if sniff_binary(bytes).is_some() {
+            if sniff_binary(head).is_some() {
                 "application/octet-stream".into()
             } else {
                 "text/plain".into()
             }
         });
     let prefix = path.map(|p| format!("{p}: ")).unwrap_or_default();
-    format!("{prefix}{mime}\n{prefix}{} bytes\n", bytes.len()).into_bytes()
+    format!("{prefix}{mime}\n{prefix}{size} bytes\n").into_bytes()
 }
 
 pub(crate) fn human_size(n: usize) -> String {

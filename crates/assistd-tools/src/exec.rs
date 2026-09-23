@@ -8,21 +8,22 @@
 //!   failed startup, then leaves it running. Used by `wm open`, whose
 //!   contract is "launch this and leave the window open".
 //!
-//! [`supervise`] puts the child in its own process group and signals
-//! the whole group on timeout or overflow so a forked grandchild can't
-//! leak. [`spawn_detached`] cannot do that and stay useful; bubblewrap's
+//! [`supervise`] puts the child in its own process group and kills the
+//! whole group once the child ends, however it ends, so a forked
+//! grandchild can't leak or hold the output pipes open.
+//! [`spawn_detached`] cannot do that and stay useful; bubblewrap's
 //! `--die-with-parent` bounds a launched application instead.
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
-use std::process::Stdio;
+use std::pin::pin;
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command as ProcCommand;
-use tokio::sync::Notify;
+use tokio::process::{Child, ChildStdin, Command as ProcCommand};
 use tokio::time::timeout;
 
 use crate::chain::PIPE_BUF_MAX;
@@ -83,10 +84,14 @@ pub(crate) struct Captured {
     pub(crate) outcome: WaitOutcome,
 }
 
-/// Spawn `cmd` in its own process group, write `stdin` to it, and
-/// collect up to `max_output` bytes per stream until it exits or
-/// `limit` elapses. Timeout and overflow kill the whole group. `Err` is
-/// returned only when the spawn itself fails.
+/// Spawn `cmd` in its own process group, feed it `stdin`, and collect
+/// up to `max_output` bytes per stream until it exits or `limit`
+/// elapses. `stdin` is written while the child runs, so a child that
+/// never reads it cannot stall the call. However the child ends, the
+/// whole group is then killed, and the output pipes get at most
+/// [`POST_EXIT_DRAIN`] to reach EOF, so a grandchild that escaped the
+/// group while holding them cannot stall it either. `Err` is returned
+/// only when the spawn itself fails.
 pub(crate) async fn capture(
     mut cmd: ProcCommand,
     stdin: &[u8],
@@ -101,47 +106,76 @@ pub(crate) async fn capture(
     cmd.process_group(0);
 
     let mut child = cmd.spawn()?;
-
-    if let Some(mut pipe) = child.stdin.take() {
-        if !stdin.is_empty() {
-            let _ = pipe.write_all(stdin).await;
-        }
-        drop(pipe);
-    }
-
+    let pgid = child.id();
+    let stdin_pipe = child.stdin.take();
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
-    let overflow = Arc::new(Notify::new());
-    let stdout_task = tokio::spawn(read_capped(stdout_pipe, max_output, overflow.clone()));
-    let stderr_task = tokio::spawn(read_capped(stderr_pipe, max_output, overflow.clone()));
 
-    let outcome = tokio::select! {
-        res = timeout(limit, child.wait()) => match res {
-            Ok(Ok(status)) => WaitOutcome::Exited(status),
-            Ok(Err(e)) => WaitOutcome::WaitErr(e),
-            Err(_) => WaitOutcome::Timeout,
-        },
-        _ = overflow.notified() => WaitOutcome::Overflow,
-    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let outcome = {
+        let mut readers = pin!(async {
+            tokio::try_join!(
+                read_capped(stdout_pipe, max_output, &mut stdout),
+                read_capped(stderr_pipe, max_output, &mut stderr),
+            )
+        });
 
-    if matches!(outcome, WaitOutcome::Timeout | WaitOutcome::Overflow) {
-        kill_group(&mut child);
-        let _ = child.wait().await;
-    }
+        let (mut outcome, drained) = {
+            let mut wait = pin!(timeout(limit, wait_feeding(&mut child, stdin_pipe, stdin)));
+            let mut drained = false;
+            loop {
+                tokio::select! {
+                    res = &mut wait => break (match res {
+                        Ok(Ok(status)) => WaitOutcome::Exited(status),
+                        Ok(Err(e)) => WaitOutcome::WaitErr(e),
+                        Err(_) => WaitOutcome::Timeout,
+                    }, drained),
+                    res = &mut readers, if !drained => match res {
+                        Ok(_) => drained = true,
+                        Err(Overflow) => break (WaitOutcome::Overflow, true),
+                    },
+                }
+            }
+        };
 
-    let (stdout, stdout_overflowed) = stdout_task.await.unwrap_or_default();
-    let (stderr, stderr_overflowed) = stderr_task.await.unwrap_or_default();
+        kill_group(pgid);
+        if !matches!(outcome, WaitOutcome::Exited(_)) {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
 
-    let outcome = if stdout_overflowed || stderr_overflowed {
-        WaitOutcome::Overflow
-    } else {
+        if !drained && let Ok(Err(Overflow)) = timeout(POST_EXIT_DRAIN, &mut readers).await {
+            outcome = WaitOutcome::Overflow;
+        }
         outcome
     };
+
     Ok(Captured {
         stdout,
         stderr,
         outcome,
     })
+}
+
+async fn wait_feeding(
+    child: &mut Child,
+    pipe: Option<ChildStdin>,
+    input: &[u8],
+) -> std::io::Result<ExitStatus> {
+    let feed = async move {
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.write_all(input).await;
+        }
+    };
+    let exited = tokio::select! {
+        status = child.wait() => Some(status),
+        () = feed => None,
+    };
+    match exited {
+        Some(status) => status,
+        None => child.wait().await,
+    }
 }
 
 /// Run `cmd` to completion with [`capture`] and render the result as a
@@ -310,19 +344,14 @@ async fn drain_into<R: tokio::io::AsyncRead + Unpin>(
 }
 
 #[cfg(unix)]
-fn kill_group(child: &mut tokio::process::Child) {
-    if let Some(pid) = child.id()
-        && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
-    {
+fn kill_group(pgid: Option<u32>) {
+    if let Some(pgid) = pgid.and_then(|p| rustix::process::Pid::from_raw(p as i32)) {
         let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
     }
-    let _ = child.start_kill();
 }
 
 #[cfg(not(unix))]
-fn kill_group(child: &mut tokio::process::Child) {
-    let _ = child.start_kill();
-}
+fn kill_group(_pgid: Option<u32>) {}
 
 /// Shell-style exit code: the status code, or 128 plus the signal that
 /// killed the child.
@@ -343,25 +372,25 @@ fn signal_exit_code(_status: &std::process::ExitStatus) -> Option<i32> {
     None
 }
 
+/// A stream passed its byte cap.
+struct Overflow;
+
 async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     limit: usize,
-    overflow: Arc<Notify>,
-) -> (Vec<u8>, bool) {
-    let mut buf: Vec<u8> = Vec::new();
+    buf: &mut Vec<u8>,
+) -> Result<(), Overflow> {
     let mut tmp = [0u8; 8192];
     loop {
         match reader.read(&mut tmp).await {
-            Ok(0) => return (buf, false),
+            Ok(0) | Err(_) => return Ok(()),
             Ok(n) => {
                 buf.extend_from_slice(&tmp[..n]);
                 if buf.len() > limit {
                     buf.truncate(limit);
-                    overflow.notify_one();
-                    return (buf, true);
+                    return Err(Overflow);
                 }
             }
-            Err(_) => return (buf, false),
         }
     }
 }

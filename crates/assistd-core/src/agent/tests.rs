@@ -105,6 +105,31 @@ impl LlmBackend for MockBackend {
     }
 }
 
+const TOOL_DEADLINE: Duration = Duration::from_secs(300);
+
+/// A `run` tool whose invocation never completes.
+struct HangingTool {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl assistd_tools::Tool for HangingTool {
+    fn name(&self) -> &str {
+        "run"
+    }
+    fn description(&self) -> &str {
+        "never returns"
+    }
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({"type":"object"})
+    }
+    async fn invoke(&self, _args: Value) -> anyhow::Result<Value> {
+        self.entered.notify_one();
+        std::future::pending::<()>().await;
+        unreachable!("hanging tool must never resolve")
+    }
+}
+
 fn call(id: &str, command: &str) -> ToolCall {
     ToolCall {
         id: id.into(),
@@ -139,7 +164,7 @@ async fn simple_query_one_step_final() {
     let backend = MockBackend::with(vec![StepOutcome::Final]);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(16);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn(
             "what is 2+2?".into(),
             Vec::new(),
@@ -163,7 +188,7 @@ async fn multi_step_tool_then_final() {
     ]);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(16);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn("say hello".into(), Vec::new(), tx, CancellationToken::new())
         .await
         .unwrap();
@@ -215,7 +240,7 @@ async fn piped_command_completes_in_one_iteration() {
     let tools = Arc::new(tools);
 
     let (tx, mut rx) = mpsc::channel(16);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn("how many?".into(), Vec::new(), tx, CancellationToken::new())
         .await
         .unwrap();
@@ -259,7 +284,7 @@ async fn repeated_identical_calls_withdraw_tools_then_answer() {
     let backend = MockBackend::with(outcomes);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(64);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn("loop it".into(), Vec::new(), tx, CancellationToken::new())
         .await
         .unwrap();
@@ -287,7 +312,7 @@ async fn distinct_calls_are_not_treated_as_repeats() {
     let backend = MockBackend::with(outcomes);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(64);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
         .await
         .unwrap();
@@ -306,7 +331,7 @@ async fn step_ceiling_withdraws_tools_then_answer() {
     let backend = MockBackend::with(outcomes);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(64);
-    let agent = Agent::new(backend.clone(), tools, None);
+    let agent = Agent::new(backend.clone(), tools, None, TOOL_DEADLINE);
     let turn = agent.run_turn("go".into(), Vec::new(), tx, CancellationToken::new());
     let (result, events) = tokio::join!(turn, collect(&mut rx));
     result.unwrap();
@@ -331,7 +356,7 @@ async fn tool_request_after_withdrawal_ends_turn_with_synthetic_results() {
     let backend = MockBackend::with(outcomes);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(64);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn("loop it".into(), Vec::new(), tx, CancellationToken::new())
         .await
         .unwrap();
@@ -365,7 +390,7 @@ async fn unknown_tool_passes_error_to_next_step() {
     ]);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(16);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
         .await
         .unwrap();
@@ -407,7 +432,7 @@ async fn tool_invoke_err_becomes_synthetic_error_result() {
         StepOutcome::Final,
     ]);
     let (tx, mut rx) = mpsc::channel(16);
-    Agent::new(backend.clone(), reg, None)
+    Agent::new(backend.clone(), reg, None, TOOL_DEADLINE)
         .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
         .await
         .unwrap();
@@ -435,7 +460,7 @@ async fn client_disconnect_between_iterations_stops_loop() {
     drop(rx);
     // Channel is closed from the start, so the very first is_closed
     // check bails the loop before any step runs.
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
         .await
         .unwrap();
@@ -457,7 +482,7 @@ async fn explicit_cancel_before_first_step_stops_loop_immediately() {
     let (tx, _rx) = mpsc::channel::<LlmEvent>(16);
     let token = CancellationToken::new();
     token.cancel();
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn("go".into(), Vec::new(), tx, token)
         .await
         .unwrap();
@@ -516,7 +541,7 @@ async fn agent_loop_routes_remember_then_recall() {
     ]);
 
     let (tx, mut rx) = mpsc::channel(32);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn(
             "I prefer vim over emacs".into(),
             Vec::new(),
@@ -621,7 +646,7 @@ async fn agent_loop_mixes_native_and_mcp_calls() {
     ]);
 
     let (tx, mut rx) = mpsc::channel(32);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn(
             "what's on my calendar tomorrow?".into(),
             Vec::new(),
@@ -685,7 +710,7 @@ async fn agent_loop_propagates_mcp_error_envelope_to_next_step() {
         StepOutcome::Final,
     ]);
     let (tx, mut rx) = mpsc::channel(16);
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn(
             "what's on my calendar?".into(),
             Vec::new(),
@@ -730,7 +755,7 @@ async fn cancellation_during_slow_step_preempts_loop() {
         token_for_kicker.cancel();
     });
     let started = std::time::Instant::now();
-    Agent::new(backend.clone(), tools, None)
+    Agent::new(backend.clone(), tools, None, TOOL_DEADLINE)
         .run_turn("go".into(), Vec::new(), tx, token)
         .await
         .unwrap();
@@ -743,27 +768,6 @@ async fn cancellation_during_slow_step_preempts_loop() {
 
 #[tokio::test]
 async fn cancellation_during_hung_tool_preempts_dispatch() {
-    struct HangingTool {
-        entered: Arc<tokio::sync::Notify>,
-    }
-    #[async_trait]
-    impl assistd_tools::Tool for HangingTool {
-        fn name(&self) -> &str {
-            "run"
-        }
-        fn description(&self) -> &str {
-            "never returns"
-        }
-        fn parameters_schema(&self) -> Value {
-            serde_json::json!({"type":"object"})
-        }
-        async fn invoke(&self, _args: Value) -> anyhow::Result<Value> {
-            self.entered.notify_one();
-            std::future::pending::<()>().await;
-            unreachable!("hanging tool must never resolve")
-        }
-    }
-
     let entered = Arc::new(tokio::sync::Notify::new());
     let mut reg = ToolRegistry::new();
     reg.register(HangingTool {
@@ -783,7 +787,7 @@ async fn cancellation_during_hung_tool_preempts_dispatch() {
         token_for_kicker.cancel();
     });
 
-    let agent = Agent::new(backend.clone(), Arc::new(reg), None);
+    let agent = Agent::new(backend.clone(), Arc::new(reg), None, TOOL_DEADLINE);
     let turn = agent.run_turn("go".into(), Vec::new(), tx, token);
     tokio::time::timeout(std::time::Duration::from_secs(5), turn)
         .await
@@ -811,6 +815,45 @@ async fn cancellation_during_hung_tool_preempts_dispatch() {
     assert!(
         pushed[0][0].content.contains("cancelled during dispatch"),
         "unexpected cancelled payload: {:?}",
+        pushed[0][0].content
+    );
+}
+
+#[tokio::test]
+async fn hung_tool_past_deadline_becomes_error_result_and_turn_continues() {
+    let mut reg = ToolRegistry::new();
+    reg.register(HangingTool {
+        entered: Arc::new(tokio::sync::Notify::new()),
+    });
+    let backend = MockBackend::with(vec![
+        StepOutcome::ToolCalls(vec![call("c-1", "hang")]),
+        StepOutcome::Final,
+    ]);
+    let (tx, _rx) = mpsc::channel::<LlmEvent>(16);
+
+    let agent = Agent::new(
+        backend.clone(),
+        Arc::new(reg),
+        None,
+        Duration::from_millis(100),
+    );
+    let turn = agent.run_turn("go".into(), Vec::new(), tx, CancellationToken::new());
+    tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("tool deadline did not fire")
+        .unwrap();
+
+    assert_eq!(
+        backend.step_calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "turn did not continue after the abandoned call"
+    );
+    let pushed = backend.pushed_results.lock();
+    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed[0][0].call_id, "c-1");
+    assert!(
+        pushed[0][0].content.contains("call abandoned"),
+        "unexpected payload: {:?}",
         pushed[0][0].content
     );
 }
@@ -934,7 +977,7 @@ async fn replay_once_on_server_restarting() {
     let probe = MockProbe::ready_with_wait_ok(123);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(32);
-    Agent::new(backend.clone(), tools, Some(probe.clone()))
+    Agent::new(backend.clone(), tools, Some(probe.clone()), TOOL_DEADLINE)
         .run_turn("hello".into(), Vec::new(), tx, CancellationToken::new())
         .await
         .expect("replay should succeed");
@@ -991,7 +1034,7 @@ async fn replay_does_not_loop_on_repeated_server_restarting() {
     let probe = MockProbe::ready_with_wait_ok(123);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(32);
-    let result = Agent::new(backend.clone(), tools, Some(probe))
+    let result = Agent::new(backend.clone(), tools, Some(probe), TOOL_DEADLINE)
         .run_turn("hello".into(), Vec::new(), tx, CancellationToken::new())
         .await;
     assert!(result.is_err(), "second ServerRestarting must be terminal");
@@ -1028,7 +1071,7 @@ async fn replay_abandons_on_degraded_supervisor() {
     let probe = MockProbe::ready_with_wait_err(assistd_llm::HealthWaitError::Degraded);
     let tools = tools_with_echo();
     let (tx, mut rx) = mpsc::channel(32);
-    let result = Agent::new(backend.clone(), tools, Some(probe))
+    let result = Agent::new(backend.clone(), tools, Some(probe), TOOL_DEADLINE)
         .run_turn("hello".into(), Vec::new(), tx, CancellationToken::new())
         .await;
     assert!(result.is_err(), "Degraded probe must surface as error");

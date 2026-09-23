@@ -110,6 +110,12 @@ pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
             Hint::Check,
             format_args!("ls -l {path}"),
         ),
+        ErrorKind::FileTooLarge => error_line(
+            cmd,
+            format_args!("{path}: {e}"),
+            Hint::Use,
+            format_args!("bash \"tail -n 200 {path}\" or bash \"grep PATTERN {path}\""),
+        ),
         ErrorKind::InvalidInput => error_line(
             cmd,
             format_args!("{path}: {e}"),
