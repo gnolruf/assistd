@@ -16,8 +16,7 @@ async fn bash_runs_echo() {
             args: vec!["echo hi".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"hi\n");
 }
@@ -29,8 +28,7 @@ async fn bash_propagates_nonzero_exit() {
             args: vec!["exit 3".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 3);
 }
 
@@ -41,8 +39,7 @@ async fn bash_receives_stdin() {
             args: vec!["tr a-z A-Z".into()],
             stdin: Some(b"hello".to_vec()),
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"HELLO");
 }
@@ -62,8 +59,7 @@ async fn bash_timeout_returns_137_with_ac_format() {
             args: vec!["sleep 5".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 137);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -80,8 +76,7 @@ async fn bash_missing_script_errors() {
             args: Vec::new(),
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 2);
 }
 
@@ -95,8 +90,7 @@ async fn bash_missing_dependency_forwards_subprocess_stderr() {
             args: vec!["assistd-definitely-not-a-real-binary-xyz".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 127);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("command not found"), "{stderr}");
@@ -122,8 +116,7 @@ async fn ac1_bash_rm_rf_root_rejected() {
             args: vec!["rm -rf /".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 126);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
@@ -144,8 +137,7 @@ async fn bash_denylist_is_case_insensitive() {
             args: vec!["MKFS.ext4 /dev/sda1".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 126);
 }
 
@@ -164,8 +156,7 @@ async fn destructive_pattern_invokes_gate_and_proceeds_when_approved() {
             args: vec!["true".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
 }
 
@@ -188,8 +179,7 @@ async fn destructive_pattern_invokes_gate_and_cancels_when_denied() {
             args: vec!["rm -rf /tmp/this-directory-does-not-exist-XYZ".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 126);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -225,8 +215,7 @@ async fn destructive_matcher_ignores_quoted_literals() {
             args: vec!["echo \"rm -rf\"".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"rm -rf\n");
 }
@@ -250,8 +239,7 @@ async fn bash_output_overflow_kills_child_and_returns_141() {
             args: vec!["yes".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
     assert!(
         out.stdout.len() <= OUTPUT_BUF_MAX,
@@ -280,8 +268,7 @@ async fn bash_stderr_overflow_also_caps() {
             args: vec!["yes 1>&2".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
     assert!(
         out.stderr.len() <= OUTPUT_BUF_MAX + 256,
@@ -301,8 +288,7 @@ async fn bash_below_cap_returns_full_output() {
             args: vec!["printf '%.0sx' {1..51200}".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout.len(), 51200);
 }
@@ -319,8 +305,7 @@ async fn bash_signal_death_reports_128_plus_signum_not_timeout() {
             args: vec!["kill -SEGV $$".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(
         out.exit_code, 139,
         "SIGSEGV should surface as 128+11=139, not the timeout sentinel"
@@ -367,8 +352,7 @@ async fn run_leaving_background_child(
         }),
     )
     .await
-    .expect("bash did not return: a grandchild kept the output pipe open")
-    .unwrap();
+    .expect("bash did not return: a grandchild kept the output pipe open");
     let pid = std::fs::read_to_string(&pidfile)
         .unwrap()
         .trim()
@@ -454,8 +438,7 @@ async fn unread_stdin_does_not_block_the_timeout() {
         }),
     )
     .await
-    .expect("stdin write blocked before the timeout armed")
-    .unwrap();
+    .expect("stdin write blocked before the timeout armed");
     assert_eq!(out.exit_code, 137);
 }
 
@@ -466,8 +449,7 @@ async fn stdin_larger_than_a_pipe_buffer_arrives_whole() {
             args: vec!["wc -c".into()],
             stdin: Some(vec![b'x'; 1024 * 1024]),
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1048576");
 }
@@ -486,8 +468,7 @@ async fn bash_sandbox_none_runs_unsandboxed() {
             args: vec!["echo sandboxed".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"sandboxed\n");
 }

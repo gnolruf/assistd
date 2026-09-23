@@ -6,7 +6,6 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use anyhow::{Result, anyhow};
 use assistd_embed::{EmbedJob, Embedder};
 use assistd_memory::{SemanticStore, SessionId};
 use async_trait::async_trait;
@@ -14,8 +13,8 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-use crate::Tool;
 use crate::memory::MemoryOps;
+use crate::{Tool, ToolError};
 
 const RECALL_LIMIT: usize = 50;
 
@@ -82,25 +81,25 @@ impl Tool for RememberTool {
     }
 
     #[tracing::instrument(skip(self, args), fields(key = tracing::field::Empty))]
-    async fn invoke(&self, args: Value) -> Result<Value> {
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
         let key = args
             .get("key")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("`key` (string) is required"))?
+            .ok_or_else(|| ToolError::InvalidArgs("`key` (string) is required".into()))?
             .to_string();
         let value = args
             .get("value")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("`value` (string) is required"))?
+            .ok_or_else(|| ToolError::InvalidArgs("`value` (string) is required".into()))?
             .to_string();
         tracing::Span::current().record("key", key.as_str());
 
         if !KEY_RE.is_match(&key) {
-            return Err(anyhow!(
+            return Err(ToolError::InvalidArgs(format!(
                 "`key` must match {KEY_PATTERN} (snake_case + dot \
                  namespacing, e.g. editor_preference or user.name)"
-            ));
+            )));
         }
 
         let memory_id = self.ops.save(&key, value.clone()).await?;
@@ -194,12 +193,12 @@ impl Tool for RecallTool {
     }
 
     #[tracing::instrument(skip(self, args))]
-    async fn invoke(&self, args: Value) -> Result<Value> {
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("`query` (string) is required"))?
+            .ok_or_else(|| ToolError::InvalidArgs("`query` (string) is required".into()))?
             .to_string();
 
         let (output, returned) = if self.embedding_model.is_empty() {
@@ -333,19 +332,21 @@ impl Tool for ReminisceTool {
     }
 
     #[tracing::instrument(skip(self, args), fields(limit = tracing::field::Empty))]
-    async fn invoke(&self, args: Value) -> Result<Value> {
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("`query` (string) is required"))?
+            .ok_or_else(|| ToolError::InvalidArgs("`query` (string) is required".into()))?
             .to_string();
         let limit = args
             .get("limit")
             .and_then(|v| v.as_i64())
-            .ok_or_else(|| anyhow!("`limit` (integer) is required"))?;
+            .ok_or_else(|| ToolError::InvalidArgs("`limit` (integer) is required".into()))?;
         if !(1..=20).contains(&limit) {
-            return Err(anyhow!("`limit` must be in 1..=20 (got {limit})"));
+            return Err(ToolError::InvalidArgs(format!(
+                "`limit` must be in 1..=20 (got {limit})"
+            )));
         }
         tracing::Span::current().record("limit", limit);
 
@@ -417,6 +418,7 @@ impl Tool for ReminisceTool {
 mod tests {
     use super::*;
     use crate::ToolRegistry;
+    use anyhow::Result;
     use assistd_embed::NoEmbedder;
     use assistd_memory::{
         NoConversationStore, NoMemoryStore, NoSemanticStore, SqliteConversationStore, SqliteHandle,

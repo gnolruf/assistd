@@ -1,14 +1,13 @@
 //! Tool wrapper that answers with a tool-error envelope, without an
 //! RPC, while the owning server is unhealthy.
 
-use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::error::{McpError, mcp_error_line};
 use crate::handle::HealthState;
-use crate::{McpToolAdapter, Tool};
+use crate::{McpToolAdapter, Tool, ToolError};
 
 /// Wraps an [`McpToolAdapter`] with a per-server health gate.
 pub struct HealthRoutedTool {
@@ -45,7 +44,7 @@ impl Tool for HealthRoutedTool {
         self.inner.parameters_schema()
     }
 
-    async fn invoke(&self, args: Value) -> AnyResult<Value> {
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let state = *self.health_rx.borrow();
         match state {
             HealthState::Healthy => self.inner.invoke(args).await,
@@ -65,6 +64,7 @@ impl Tool for HealthRoutedTool {
 mod tests {
     use super::*;
     use crate::{McpClient, ToolResult, ToolSchema};
+    use anyhow::Result as AnyResult;
     use serde_json::json;
     use std::sync::Arc;
 

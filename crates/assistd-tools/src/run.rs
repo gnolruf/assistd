@@ -7,17 +7,16 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
-use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
-use crate::Tool;
 use crate::chain::{ParseError, Redirection, execute, parse_chain};
 use crate::command::{Attachment, CommandOutput, CommandRegistry, Hint, error_line};
 use crate::commands::cat::human_size;
 use crate::presentation::{PresentResult, PresentSpec, present};
+use crate::{Tool, ToolError};
 use assistd_config::ToolsOutputConfig;
 #[cfg(test)]
 use assistd_config::defaults::nz32;
@@ -128,17 +127,17 @@ impl Tool for RunTool {
     }
 
     #[tracing::instrument(skip(self, args), fields(cmd = tracing::field::Empty))]
-    async fn invoke(&self, args: Value) -> Result<Value> {
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("`command` (string) is required"))?;
+            .ok_or_else(|| ToolError::InvalidArgs("`command` (string) is required".into()))?;
         let cmd_token = command.split_whitespace().next().unwrap_or("");
         tracing::Span::current().record("cmd", cmd_token);
 
         let start = Instant::now();
         let out = match parse_chain(command) {
-            Ok(chain) => execute(&chain, &self.registry, None).await?,
+            Ok(chain) => execute(&chain, &self.registry, None).await,
             Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
         let r = present(out, &self.spec, &self.counter, start.elapsed());

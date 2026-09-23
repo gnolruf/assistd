@@ -904,7 +904,10 @@ impl assistd_tools::Tool for GatedTool {
         serde_json::json!({"type": "object"})
     }
 
-    async fn invoke(&self, _args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    async fn invoke(
+        &self,
+        _args: serde_json::Value,
+    ) -> Result<serde_json::Value, assistd_tools::ToolError> {
         let approved = assistd_tools::ConfirmationGate::confirm(
             &assistd_tools::IpcConfirmationGate,
             assistd_tools::ConfirmationRequest {

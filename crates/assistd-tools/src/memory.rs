@@ -4,10 +4,11 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use assistd_memory::{ConversationStore, MemoryStore, TurnSummary};
+use assistd_memory::{ConversationStore, MemoryError, MemoryStore};
 
 pub use assistd_memory::MemoryRecord;
+
+type Result<T> = std::result::Result<T, MemoryError>;
 
 /// Result cap applied when a caller passes `limit = 0`.
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -30,43 +31,33 @@ impl MemoryOps {
 
     /// Save a key/value memory and return its row id.
     pub async fn save(&self, key: &str, value: String) -> Result<i64> {
-        Ok(self.store.save(key, value).await?)
+        self.store.save(key, value).await
     }
 
     /// Load the value for `key`, returning `None` if not present.
     pub async fn load(&self, key: &str) -> Result<Option<String>> {
-        Ok(self.store.load(key).await?)
+        self.store.load(key).await
     }
 
     /// List keys with the given `prefix`.
     pub async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        Ok(self.store.list(prefix).await?)
+        self.store.list(prefix).await
     }
 
     /// Delete the memory at `key`.
     pub async fn delete(&self, key: &str) -> Result<()> {
-        Ok(self.store.delete(key).await?)
+        self.store.delete(key).await
     }
 
     /// Delete a memory by row id, returning its key on a hit.
     pub async fn forget(&self, id: i64) -> Result<Option<String>> {
-        Ok(self.store.delete_by_id(id).await?)
+        self.store.delete_by_id(id).await
     }
 
     /// Like [`MemoryOps::list`] but returns full `(id, key, value)`
     /// rows, in whatever order the backend yields.
     pub async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
-        Ok(self.store.list_full(prefix).await?)
-    }
-
-    /// Return recent conversation turns, up to `limit` (or [`DEFAULT_SEARCH_LIMIT`] when `limit` is 0).
-    pub async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>> {
-        let limit = if limit == 0 {
-            DEFAULT_SEARCH_LIMIT
-        } else {
-            limit
-        };
-        Ok(self.conversations.recent_turns(limit).await?)
+        self.store.list_full(prefix).await
     }
 }
 
@@ -90,9 +81,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_backend_list_and_recent_turns_return_empty() {
+    async fn no_backend_list_returns_empty() {
         let ops = no_ops();
         assert!(ops.list("pref:").await.unwrap().is_empty());
-        assert!(ops.recent_turns(0).await.unwrap().is_empty());
     }
 }

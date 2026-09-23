@@ -139,9 +139,11 @@ pub trait ConfirmationGate: Send + Sync + 'static {
 }
 
 /// Gate that never approves, logging each denial.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default)]
 pub struct DenyAllGate;
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl ConfirmationGate for DenyAllGate {
     async fn confirm(&self, req: ConfirmationRequest) -> bool {
@@ -155,11 +157,12 @@ impl ConfirmationGate for DenyAllGate {
     }
 }
 
-/// Test-only gate that always approves. Do not use in production: it
-/// defeats the entire confirmation layer.
+/// Gate that always approves, defeating the confirmation layer.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default)]
 pub struct AlwaysAllowGate;
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl ConfirmationGate for AlwaysAllowGate {
     async fn confirm(&self, _req: ConfirmationRequest) -> bool {
@@ -181,6 +184,12 @@ struct PendingPrompts {
     closed: bool,
     prompts: HashMap<String, oneshot::Sender<bool>>,
 }
+
+/// A confirmation answer named a `confirm_id` with no prompt in flight:
+/// it never existed, was already answered, or was denied on timeout.
+#[derive(Debug, thiserror::Error)]
+#[error("no pending confirm for this confirm_id")]
+pub struct NoPendingConfirm;
 
 /// Per-connection routing table for in-flight confirmation prompts,
 /// installed in the [`CONFIRM_ROUTER`] task-local so
@@ -279,17 +288,20 @@ impl ConfirmRouter {
         }
     }
 
-    /// Deliver a client's answer to the matching pending prompt. `Err`
-    /// means no prompt with that id is in flight.
-    pub fn route_response(&self, confirm_id: &str, allow: bool) -> Result<(), &'static str> {
-        let sender = self.pending.lock().prompts.remove(confirm_id);
-        match sender {
-            Some(tx) => {
-                let _ = tx.send(allow);
-                Ok(())
-            }
-            None => Err("no pending confirm for this confirm_id"),
-        }
+    /// Deliver a client's answer to the matching pending prompt.
+    ///
+    /// # Errors
+    ///
+    /// [`NoPendingConfirm`] when no prompt with that id is in flight.
+    pub fn route_response(&self, confirm_id: &str, allow: bool) -> Result<(), NoPendingConfirm> {
+        let tx = self
+            .pending
+            .lock()
+            .prompts
+            .remove(confirm_id)
+            .ok_or(NoPendingConfirm)?;
+        let _ = tx.send(allow);
+        Ok(())
     }
 
     /// Deny every prompt in flight and every later ask. Called once the
@@ -654,13 +666,29 @@ fn session_bind_flags_for(runtime_dir: Option<String>) -> Vec<String> {
     }
 }
 
+/// Why [`probe_sandbox`] could not satisfy the requested sandbox.
+#[derive(Debug, thiserror::Error)]
+pub enum SandboxError {
+    /// `Bwrap` was required but no `bwrap` executable is on `PATH`.
+    #[error(
+        "tools.bash.sandbox = \"bwrap\" but `bwrap` was not found on PATH. \
+         Install bubblewrap or change sandbox to \"auto\" / \"none\"."
+    )]
+    BwrapNotFound,
+}
+
 /// Resolve `request` against the environment once, for the whole
 /// process lifetime. `Auto` falls back to unsandboxed with a warning
-/// when `bwrap` is missing; `Bwrap` errors instead.
+/// when `bwrap` is missing.
+///
+/// # Errors
+///
+/// [`SandboxError::BwrapNotFound`] when `request` is `Bwrap` and no
+/// `bwrap` is on `PATH`.
 pub fn probe_sandbox(
     request: SandboxRequest,
     extra_args: Vec<String>,
-) -> anyhow::Result<Arc<SandboxInfo>> {
+) -> Result<Arc<SandboxInfo>, SandboxError> {
     let path_env = std::env::var_os("PATH").unwrap_or_default();
     probe_sandbox_with_path(request, extra_args, &path_env)
 }
@@ -669,7 +697,7 @@ fn probe_sandbox_with_path(
     request: SandboxRequest,
     extra_args: Vec<String>,
     path_env: &std::ffi::OsStr,
-) -> anyhow::Result<Arc<SandboxInfo>> {
+) -> Result<Arc<SandboxInfo>, SandboxError> {
     let mode = match request {
         SandboxRequest::None => {
             info!(target: "assistd::policy", "bash sandbox: disabled by config");
@@ -702,12 +730,7 @@ fn probe_sandbox_with_path(
                 );
                 ResolvedSandboxMode::Bwrap { path }
             }
-            None => {
-                anyhow::bail!(
-                    "tools.bash.sandbox = \"bwrap\" but `bwrap` was not found on PATH. \
-                     Install bubblewrap or change sandbox to \"auto\" / \"none\"."
-                );
-            }
+            None => return Err(SandboxError::BwrapNotFound),
         },
     };
     Ok(Arc::new(SandboxInfo { mode, extra_args }))

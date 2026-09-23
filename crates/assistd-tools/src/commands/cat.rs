@@ -1,4 +1,3 @@
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
@@ -43,30 +42,22 @@ impl Command for CatCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         let (flags, files) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => {
-                return Ok(CommandOutput::usage_error(
-                    "cat",
-                    msg,
-                    "cat -b FILE or cat -n FILE",
-                ));
+                return CommandOutput::usage_error("cat", msg, "cat -b FILE or cat -n FILE");
             }
         };
 
         if files.is_empty() {
             let Some(stdin) = input.stdin else {
-                return Ok(CommandOutput::usage(self.help()));
+                return CommandOutput::usage(self.help());
             };
             if flags.metadata_only {
-                return Ok(CommandOutput::ok(describe(
-                    &stdin,
-                    stdin.len() as u64,
-                    None,
-                )));
+                return CommandOutput::ok(describe(&stdin, stdin.len() as u64, None));
             }
-            return Ok(CommandOutput::ok(number_if(stdin, &flags)));
+            return CommandOutput::ok(number_if(stdin, &flags));
         }
 
         let mut out = Vec::new();
@@ -74,14 +65,14 @@ impl Command for CatCommand {
             if flags.metadata_only {
                 match super::read_regular_head(path, SNIFF_LEN as u64).await {
                     Ok((head, size)) => out.extend_from_slice(&describe(&head, size, Some(path))),
-                    Err(e) => return Ok(read_failed(path, &e)),
+                    Err(e) => return read_failed(path, &e),
                 }
                 continue;
             }
 
             let bytes = match super::read_regular_file(path).await {
                 Ok(b) => b,
-                Err(e) => return Ok(read_failed(path, &e)),
+                Err(e) => return read_failed(path, &e),
             };
 
             if let Some(mime) = sniff_binary(&bytes) {
@@ -101,11 +92,11 @@ impl Command for CatCommand {
                         format_args!("cat -b {path}"),
                     )
                 };
-                return Ok(CommandOutput::failed(1, msg.into_bytes()));
+                return CommandOutput::failed(1, msg.into_bytes());
             }
             out.extend_from_slice(&bytes);
         }
-        Ok(CommandOutput::ok(number_if(out, &flags)))
+        CommandOutput::ok(number_if(out, &flags))
     }
 }
 

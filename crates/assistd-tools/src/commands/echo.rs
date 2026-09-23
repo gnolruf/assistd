@@ -1,4 +1,3 @@
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};
@@ -91,9 +90,9 @@ impl Command for EchoCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         if input.args.is_empty() {
-            return Ok(CommandOutput::usage(self.help()));
+            return CommandOutput::usage(self.help());
         }
         let (flags, words) = parse_flags(&input.args);
         let joined = words.join(" ");
@@ -105,7 +104,7 @@ impl Command for EchoCommand {
         if !flags.no_newline {
             out.push(b'\n');
         }
-        Ok(CommandOutput::ok(out))
+        CommandOutput::ok(out)
     }
 }
 
@@ -120,7 +119,6 @@ mod tests {
                 stdin: None,
             })
             .await
-            .expect("run returns Ok")
     }
 
     #[tokio::test]

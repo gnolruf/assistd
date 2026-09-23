@@ -1,6 +1,5 @@
 use std::io::ErrorKind;
 
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
@@ -84,19 +83,16 @@ impl Command for LsCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         let (show_hidden, path) = match parse_flags(&input.args) {
             Ok(v) => v,
-            Err(msg) => return Ok(CommandOutput::usage_error("ls", msg, "ls -al PATH")),
+            Err(msg) => return CommandOutput::usage_error("ls", msg, "ls -al PATH"),
         };
         let mut reader = match tokio::fs::read_dir(path).await {
             Ok(r) => r,
-            Err(e) if e.kind() == ErrorKind::NotADirectory => return Ok(list_file(path).await),
+            Err(e) if e.kind() == ErrorKind::NotADirectory => return list_file(path).await,
             Err(e) => {
-                return Ok(CommandOutput::failed(
-                    1,
-                    io_error_nav("ls", path, &e).into_bytes(),
-                ));
+                return CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes());
             }
         };
         let mut rows: Vec<(String, &'static str, u64)> = Vec::new();
@@ -114,10 +110,7 @@ impl Command for LsCommand {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    return Ok(CommandOutput::failed(
-                        1,
-                        io_error_nav("ls", path, &e).into_bytes(),
-                    ));
+                    return CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes());
                 }
             }
         }
@@ -126,7 +119,7 @@ impl Command for LsCommand {
         for (name, kind, size) in rows {
             out.extend_from_slice(format!("{kind}\t{size}\t{name}\n").as_bytes());
         }
-        Ok(CommandOutput::ok(out))
+        CommandOutput::ok(out)
     }
 }
 
@@ -142,7 +135,6 @@ mod tests {
                 stdin: None,
             })
             .await
-            .expect("ls runs")
     }
 
     #[tokio::test]
@@ -162,8 +154,7 @@ mod tests {
                 args: vec![dir.path().to_string_lossy().into_owned()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 0);
         let stdout = String::from_utf8_lossy(&out.stdout);
         let lines: Vec<&str> = stdout.lines().collect();
@@ -243,8 +234,7 @@ mod tests {
                 args: vec![dir.path().to_string_lossy().into_owned()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 0);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("symlink\t"), "{stdout}");
@@ -258,8 +248,7 @@ mod tests {
                 args: vec!["/definitely/not/here".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(

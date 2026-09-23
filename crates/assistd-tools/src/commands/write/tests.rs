@@ -23,8 +23,7 @@ async fn persists_stdin_to_file() {
             args: vec![path.to_string_lossy().into_owned()],
             stdin: Some(b"hi there\n".to_vec()),
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     let content = tokio::fs::read(&path).await.unwrap();
     assert_eq!(content, b"hi there\n");
@@ -43,8 +42,7 @@ async fn persists_args_content_to_file() {
             ],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     let content = tokio::fs::read(&path).await.unwrap();
     assert_eq!(content, b"hello world");
@@ -59,8 +57,7 @@ async fn args_content_wins_over_stdin() {
             args: vec![path.to_string_lossy().into_owned(), "args".into()],
             stdin: Some(b"stdin".to_vec()),
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     let content = tokio::fs::read(&path).await.unwrap();
     assert_eq!(content, b"args");
@@ -73,8 +70,7 @@ async fn no_args_errors() {
             args: Vec::new(),
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 2);
 }
 
@@ -87,8 +83,7 @@ async fn path_only_with_empty_stdin_creates_empty_file() {
             args: vec![path.to_string_lossy().into_owned()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     let content = tokio::fs::read(&path).await.unwrap();
     assert!(content.is_empty());
@@ -103,8 +98,7 @@ async fn write_rejected_outside_allowlist() {
             args: vec!["/etc/passwd".into(), "oops".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 126);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -126,8 +120,7 @@ async fn write_allowlist_permits_tmp() {
             args: vec![path.to_string_lossy().into_owned(), "ok".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
 }
 
@@ -140,8 +133,7 @@ async fn write_allowlist_resolves_dotdot() {
             args: vec![tricky, "oops".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 126);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("not in writable allowlist"), "{stderr}");
@@ -155,8 +147,7 @@ async fn write_allowlist_rejects_relative_path() {
             args: vec!["relative.txt".into(), "hi".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 126);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("relative paths not permitted"), "{stderr}");
@@ -192,8 +183,7 @@ async fn write_allowlist_handles_nonexistent_parent() {
             args: vec![target.to_string_lossy().into_owned(), "hi".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     // Policy must not reject (126); the I/O error path is exit 1.
     assert_ne!(out.exit_code, 126, "{:?}", out.stderr);
 }
@@ -211,8 +201,7 @@ async fn unwritable_path_exits_1() {
             ],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     // Parent-missing is a policy success but an I/O failure; exit 1.
     assert_eq!(out.exit_code, 1);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -246,8 +235,7 @@ async fn dangling_symlink_escaping_allowlist_is_rejected() {
             args: vec![link.to_string_lossy().into_owned(), "oops".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 126, "{:?}", out.stderr);
     assert!(!escape_target.exists());
 }
@@ -267,8 +255,7 @@ async fn dangling_symlink_directory_escaping_allowlist_is_rejected() {
             ],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 126, "{:?}", out.stderr);
 }
 
@@ -285,8 +272,7 @@ async fn symlink_to_allowlisted_file_writes_through() {
             args: vec![link.to_string_lossy().into_owned(), "new".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
     assert_eq!(std::fs::read(&real).unwrap(), b"new");
 }
@@ -315,8 +301,7 @@ async fn overwrites_existing_file() {
             args: vec![path.to_string_lossy().into_owned(), "new".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
     assert_eq!(std::fs::read(&path).unwrap(), b"new");
 }

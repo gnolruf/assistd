@@ -157,7 +157,6 @@ async fn run_wm(wm: Arc<dyn WindowManager>, args: &[&str]) -> CommandOutput {
             stdin: None,
         })
         .await
-        .unwrap()
 }
 
 #[tokio::test]
@@ -359,7 +358,6 @@ async fn run_open(cmd: &WmCommand, args: &[&str]) -> CommandOutput {
         stdin: None,
     })
     .await
-    .unwrap()
 }
 
 #[tokio::test]
@@ -507,8 +505,7 @@ async fn non_open_subcommands_skip_the_gate() {
             args: vec!["focus".into(), "42".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
 }
 

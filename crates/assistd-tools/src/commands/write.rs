@@ -1,7 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 
@@ -109,9 +108,9 @@ impl Command for WriteCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         if input.args.is_empty() {
-            return Ok(CommandOutput::usage(self.help()));
+            return CommandOutput::usage(self.help());
         }
         let raw_path = input.args[0].clone();
         let content: Vec<u8> = if input.args.len() > 1 {
@@ -124,19 +123,16 @@ impl Command for WriteCommand {
         let write_target = match self.cfg.resolve(&raw_path, home.as_deref()) {
             Ok(path) => path,
             Err(e) => {
-                return Ok(CommandOutput::failed(
+                return CommandOutput::failed(
                     POLICY_DENIED_EXIT,
                     e.error_line(&raw_path).into_bytes(),
-                ));
+                );
             }
         };
 
         match write_no_follow(&write_target, &content).await {
-            Ok(()) => Ok(CommandOutput::ok(Vec::new())),
-            Err(e) => Ok(CommandOutput::failed(
-                1,
-                io_error_nav("write", &raw_path, &e).into_bytes(),
-            )),
+            Ok(()) => CommandOutput::ok(Vec::new()),
+            Err(e) => CommandOutput::failed(1, io_error_nav("write", &raw_path, &e).into_bytes()),
         }
     }
 }

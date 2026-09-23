@@ -1125,7 +1125,10 @@ impl assistd_tools::Tool for SleepTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, _args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    async fn invoke(
+        &self,
+        _args: serde_json::Value,
+    ) -> Result<serde_json::Value, assistd_tools::ToolError> {
         tokio::time::sleep(Duration::from_millis(self.ms)).await;
         Ok(serde_json::json!({
             "output": "slept",
@@ -1163,7 +1166,10 @@ impl assistd_tools::Tool for HangingTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, _args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    async fn invoke(
+        &self,
+        _args: serde_json::Value,
+    ) -> Result<serde_json::Value, assistd_tools::ToolError> {
         let _flag = DropFlag(self.dropped.clone());
         self.entered.notify_one();
         std::future::pending::<()>().await;

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use assistd_tools::Tool;
+use assistd_tools::{Tool, ToolError};
 use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
@@ -98,7 +98,7 @@ impl Tool for McpToolAdapter {
 
     /// Always `Ok`: a failed call is rendered into the envelope by
     /// [`error_envelope`] so the model keeps its recovery hint.
-    async fn invoke(&self, args: Value) -> Result<Value> {
+    async fn invoke(&self, args: Value) -> std::result::Result<Value, ToolError> {
         let start = Instant::now();
         let outcome = self.client.invoke(&self.schema.name, args).await;
         let duration_ms = start.elapsed().as_millis();

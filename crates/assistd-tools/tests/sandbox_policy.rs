@@ -75,7 +75,7 @@ async fn denylist_blocks_rm_rf_root() {
         Arc::new(AlwaysAllowGate),
         no_sandbox(),
     );
-    let out = cmd.run(input("rm -rf /")).await.unwrap();
+    let out = cmd.run(input("rm -rf /")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -92,10 +92,7 @@ async fn denylist_matches_inside_chained_script() {
         Arc::new(AlwaysAllowGate),
         no_sandbox(),
     );
-    let out = cmd
-        .run(input("cd /tmp && mkfs.ext4 /dev/null"))
-        .await
-        .unwrap();
+    let out = cmd.run(input("cd /tmp && mkfs.ext4 /dev/null")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
 }
 
@@ -107,14 +104,14 @@ async fn denylist_is_case_insensitive_for_literal_match() {
         Arc::new(AlwaysAllowGate),
         no_sandbox(),
     );
-    let out = cmd.run(input("MKFS.EXT4 /dev/null")).await.unwrap();
+    let out = cmd.run(input("MKFS.EXT4 /dev/null")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
 }
 
 #[tokio::test]
 async fn denylist_blocks_dd_to_block_device() {
     let cmd = bash_with(vec!["dd"], vec![], Arc::new(AlwaysAllowGate), no_sandbox());
-    let out = cmd.run(input("dd if=/dev/zero of=/dev/sda")).await.unwrap();
+    let out = cmd.run(input("dd if=/dev/zero of=/dev/sda")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
 }
 
@@ -135,7 +132,7 @@ async fn denylist_bypasses_confirmation_gate() {
         Arc::new(PanicGate),
         no_sandbox(),
     );
-    let out = cmd.run(input("rm -rf /tmp/whatever")).await.unwrap();
+    let out = cmd.run(input("rm -rf /tmp/whatever")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
 }
 
@@ -151,10 +148,7 @@ async fn destructive_pattern_after_double_amp_is_blocked_when_gate_denies() {
         Arc::new(DenyAllGate),
         no_sandbox(),
     );
-    let out = cmd
-        .run(input("touch /tmp/x && rm -rf /tmp/x"))
-        .await
-        .unwrap();
+    let out = cmd.run(input("touch /tmp/x && rm -rf /tmp/x")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -176,10 +170,7 @@ async fn destructive_pattern_after_semicolon_is_blocked() {
         Arc::new(DenyAllGate),
         no_sandbox(),
     );
-    let out = cmd
-        .run(input("echo hi ; rm -rf /tmp/whatever"))
-        .await
-        .unwrap();
+    let out = cmd.run(input("echo hi ; rm -rf /tmp/whatever")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
 }
 
@@ -204,7 +195,7 @@ async fn glued_semicolon_evades_destructive_pattern() {
         no_sandbox(),
     );
     let script = format!("echo hi;rm -rf {}", target.display());
-    let out = cmd.run(input(&script)).await.unwrap();
+    let out = cmd.run(input(&script)).await;
 
     let cleaned = !target.exists();
     let denied = out.exit_code == POLICY_DENIED_EXIT;
@@ -224,10 +215,7 @@ async fn destructive_pattern_after_double_pipe_is_blocked() {
         Arc::new(DenyAllGate),
         no_sandbox(),
     );
-    let out = cmd
-        .run(input("false || rm -rf /tmp/whatever"))
-        .await
-        .unwrap();
+    let out = cmd.run(input("false || rm -rf /tmp/whatever")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
 }
 
@@ -239,7 +227,7 @@ async fn destructive_pattern_after_pipe_is_blocked() {
         Arc::new(DenyAllGate),
         no_sandbox(),
     );
-    let out = cmd.run(input("ls /tmp | rm /tmp/x")).await.unwrap();
+    let out = cmd.run(input("ls /tmp | rm /tmp/x")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
 }
 
@@ -254,7 +242,7 @@ async fn destructive_pattern_runs_when_gate_approves() {
         Arc::new(AlwaysAllowGate),
         no_sandbox(),
     );
-    let out = cmd.run(input("true")).await.unwrap();
+    let out = cmd.run(input("true")).await;
     assert_eq!(out.exit_code, 0);
 }
 
@@ -276,7 +264,7 @@ async fn quoted_literal_does_not_trigger_destructive_pattern() {
         Arc::new(PanicGate),
         no_sandbox(),
     );
-    let out = cmd.run(input("echo \"rm -rf /\"")).await.unwrap();
+    let out = cmd.run(input("echo \"rm -rf /\"")).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"rm -rf /\n");
 }
@@ -307,7 +295,7 @@ async fn command_substitution_evades_destructive_pattern() {
         no_sandbox(),
     );
     let script = format!("$(echo rm) -rf {}", target.display());
-    let out = cmd.run(input(&script)).await.unwrap();
+    let out = cmd.run(input(&script)).await;
 
     // Either: (a) the syntactic check missed it and bash ran it →
     // exit 0 and the file is gone, OR (b) the matcher tightened in a
@@ -337,10 +325,7 @@ async fn bwrap_allows_writes_to_tmp() {
     };
     let unique = format!("/tmp/assistd-sandbox-test-{}", std::process::id());
     let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd
-        .run(input(&format!("touch {unique} && echo ok")))
-        .await
-        .unwrap();
+    let out = cmd.run(input(&format!("touch {unique} && echo ok"))).await;
     let _ = std::fs::remove_file(&unique);
     assert_eq!(
         out.exit_code,
@@ -361,7 +346,7 @@ async fn bwrap_blocks_writes_to_read_only_root() {
     // fails with EROFS regardless of the host user's permissions.
     let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
     let unique = format!("/usr/assistd-sandbox-test-{}", std::process::id());
-    let out = cmd.run(input(&format!("touch {unique}"))).await.unwrap();
+    let out = cmd.run(input(&format!("touch {unique}"))).await;
     assert_ne!(
         out.exit_code,
         0,
@@ -394,7 +379,7 @@ async fn bwrap_unshares_pid_namespace() {
     // the bwrap version but the host PID would be in the thousands+,
     // so any single-digit value demonstrates the namespace was created.
     let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input("echo $$")).await.unwrap();
+    let out = cmd.run(input("echo $$")).await;
     assert_eq!(out.exit_code, 0);
     let pid_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let pid: u32 = pid_str
