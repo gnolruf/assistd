@@ -53,8 +53,6 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     idle_monitor::validate(&config.sleep)?;
     assistd_voice::mic_validate(&config.voice)?;
 
-    let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
-
     info!(
         "assistd v{}: local model agent OS assistant daemon",
         assistd_core::version()
@@ -68,6 +66,38 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     let (shutdown_tx, _) = watch::channel(false);
     spawn_signal_handler(&shutdown_tx);
+
+    let mut startup_shutdown_rx = shutdown_tx.subscribe();
+    let started = tokio::select! {
+        biased;
+        _ = startup_shutdown_rx.wait_for(|v| *v) => None,
+        started = start(config, args.client_mode, &shutdown_tx) => Some(started?),
+    };
+    let Some((state, subsystems)) = started else {
+        info!("shutdown requested during startup; assistd stopped");
+        return Ok(());
+    };
+
+    let mut socket_shutdown_rx = shutdown_tx.subscribe();
+    let socket_shutdown = async move {
+        let _ = socket_shutdown_rx.wait_for(|v| *v).await;
+    };
+
+    let serve_result = assistd_core::socket::serve(state, socket_shutdown).await;
+
+    shutdown_subsystems(subsystems).await;
+
+    serve_result?;
+    info!("assistd stopped");
+    Ok(())
+}
+
+async fn start(
+    config: Config,
+    client_mode: bool,
+    shutdown_tx: &watch::Sender<bool>,
+) -> Result<(Arc<AppState>, DaemonShutdown)> {
+    let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
 
     let presence = PresenceManager::new_active(
         config.llama_server.clone(),
@@ -91,7 +121,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     let voice = voice_init::init(&config, &presence).await;
 
-    let hotkey_handle = if args.client_mode {
+    let hotkey_handle = if client_mode {
         info!("hotkey: deferred to client (--client-mode)");
         None
     } else {
@@ -102,7 +132,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
 
-    let mut memory = memory_init::init(&config, &shutdown_tx).await;
+    let mut memory = memory_init::init(&config, shutdown_tx).await;
     let memory_store = memory.memory_store.clone();
     let conversation_store = memory.conversation_store.clone();
     let session_id_for_state = memory.session_id.clone();
@@ -112,16 +142,16 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     let memory_ops = Arc::new(MemoryOps::new(memory_store.clone(), conversation_store));
 
-    let embed = embed_init::init(&config, sqlite_handle.as_ref(), &shutdown_tx).await;
+    let embed = embed_init::init(&config, sqlite_handle.as_ref(), shutdown_tx).await;
     let embedder = embed.embedder.clone();
     let semantic_store = embed.semantic_store.clone();
     let embed_tx = embed.embed_tx.clone();
     let embedding_model_name = embed.model_name.clone();
 
-    let window = wm_init::init(&config, &shutdown_tx).await;
+    let window = wm_init::init(&config, shutdown_tx).await;
     let window_manager = window.manager.clone();
 
-    let mut mcp = mcp_init::init(&config, &shutdown_tx).await;
+    let mut mcp = mcp_init::init(&config, shutdown_tx).await;
     let mcp_tools = std::mem::take(&mut mcp.tools);
     let mcp_startup_failures = mcp.startup_failures.clone();
 
@@ -210,30 +240,21 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
         None
     };
 
-    let mut socket_shutdown_rx = shutdown_tx.subscribe();
-    let socket_shutdown = async move {
-        let _ = socket_shutdown_rx.wait_for(|v| *v).await;
-    };
-
-    let serve_result = assistd_core::socket::serve(state, socket_shutdown).await;
-
-    shutdown_subsystems(DaemonShutdown {
-        persistence_tracker,
-        presence: presence.clone(),
-        memory,
-        embed,
-        window,
-        mcp,
-        hotkey_handle,
-        gpu_monitor_handle,
-        idle_monitor_handle,
-        listen_handles,
-    })
-    .await;
-
-    serve_result?;
-    info!("assistd stopped");
-    Ok(())
+    Ok((
+        state,
+        DaemonShutdown {
+            persistence_tracker,
+            presence,
+            memory,
+            embed,
+            window,
+            mcp,
+            hotkey_handle,
+            gpu_monitor_handle,
+            idle_monitor_handle,
+            listen_handles,
+        },
+    ))
 }
 
 /// Write a default config file to the platform config directory.
@@ -305,18 +326,27 @@ fn spawn_signal_handler(shutdown_tx: &watch::Sender<bool>) {
         "signal_handler",
         assistd_core::Component::Daemon,
         async move {
-            let mut term = match signal(SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("failed to install SIGTERM handler: {e}");
+            let (mut int, mut term) = match (
+                signal(SignalKind::interrupt()),
+                signal(SignalKind::terminate()),
+            ) {
+                (Ok(int), Ok(term)) => (int, term),
+                (Err(e), _) | (_, Err(e)) => {
+                    tracing::error!("failed to install signal handlers: {e}");
                     return;
                 }
             };
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => info!("received SIGINT"),
-                _ = term.recv() => info!("received SIGTERM"),
+            loop {
+                let (name, exit_code) = tokio::select! {
+                    _ = int.recv() => ("SIGINT", 130),
+                    _ = term.recv() => ("SIGTERM", 143),
+                };
+                if signal_tx.send_replace(true) {
+                    tracing::warn!("received {name} again; exiting without cleanup");
+                    std::process::exit(exit_code);
+                }
+                info!("received {name}; shutting down (send again to force exit)");
             }
-            let _ = signal_tx.send(true);
         },
     );
 }
