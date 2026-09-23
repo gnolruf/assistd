@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::attachment::{LoadImageError, load_image_attachment};
@@ -55,9 +54,9 @@ impl Command for SeeCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         if !self.gate.supported() {
-            return Ok(CommandOutput::failed(
+            return CommandOutput::failed(
                 1,
                 error_line(
                     "see",
@@ -66,17 +65,17 @@ impl Command for SeeCommand {
                     "a model with mmproj loaded",
                 )
                 .into_bytes(),
-            ));
+            );
         }
         if input.args.is_empty() {
-            return Ok(CommandOutput::usage(self.help()));
+            return CommandOutput::usage(self.help());
         }
         if input.args.len() != 1 {
-            return Ok(CommandOutput::usage_error(
+            return CommandOutput::usage_error(
                 "see",
                 "expects exactly one path argument",
                 "see <PATH>",
-            ));
+            );
         }
         let path = &input.args[0];
         match load_image_attachment(Path::new(path)).await {
@@ -85,18 +84,17 @@ impl Command for SeeCommand {
                     Attachment::Image { mime, .. } => mime.clone(),
                 };
                 let stdout = format!("attached {mime} ({}) from {path}\n", human_size(size));
-                Ok(CommandOutput {
+                CommandOutput {
                     stdout: stdout.into_bytes(),
                     stderr: Vec::new(),
                     exit_code: 0,
                     attachments: vec![attachment],
-                })
+                }
             }
-            Err(LoadImageError::Io { source, .. }) => Ok(CommandOutput::failed(
-                1,
-                io_error_nav("see", path, &source).into_bytes(),
-            )),
-            Err(e @ LoadImageError::TooLarge { .. }) => Ok(CommandOutput::failed(
+            Err(LoadImageError::Io { source, .. }) => {
+                CommandOutput::failed(1, io_error_nav("see", path, &source).into_bytes())
+            }
+            Err(e @ LoadImageError::TooLarge { .. }) => CommandOutput::failed(
                 1,
                 error_line(
                     "see",
@@ -105,8 +103,8 @@ impl Command for SeeCommand {
                     "a smaller image (resize or crop)",
                 )
                 .into_bytes(),
-            )),
-            Err(LoadImageError::Unrecognized { .. }) => Ok(CommandOutput::failed(
+            ),
+            Err(LoadImageError::Unrecognized { .. }) => CommandOutput::failed(
                 1,
                 error_line(
                     "see",
@@ -115,8 +113,8 @@ impl Command for SeeCommand {
                     format_args!("cat {path}"),
                 )
                 .into_bytes(),
-            )),
-            Err(LoadImageError::NotAnImage { detected, .. }) => Ok(CommandOutput::failed(
+            ),
+            Err(LoadImageError::NotAnImage { detected, .. }) => CommandOutput::failed(
                 1,
                 error_line(
                     "see",
@@ -125,8 +123,8 @@ impl Command for SeeCommand {
                     format_args!("cat {path}"),
                 )
                 .into_bytes(),
-            )),
-            Err(LoadImageError::UnsupportedFormat { mime, .. }) => Ok(CommandOutput::failed(
+            ),
+            Err(LoadImageError::UnsupportedFormat { mime, .. }) => CommandOutput::failed(
                 1,
                 error_line(
                     "see",
@@ -135,7 +133,7 @@ impl Command for SeeCommand {
                     "PNG, JPEG, or WebP",
                 )
                 .into_bytes(),
-            )),
+            ),
         }
     }
 }
@@ -156,8 +154,7 @@ mod tests {
                 args: vec![path.to_string_lossy().into_owned()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 0);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("attached image/png"), "{stdout}");
@@ -180,8 +177,7 @@ mod tests {
                 args: vec![path.to_string_lossy().into_owned()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -199,8 +195,7 @@ mod tests {
                 args: vec!["/nonexistent/image.png".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -218,8 +213,7 @@ mod tests {
                 args: Vec::new(),
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 2);
     }
 
@@ -230,8 +224,7 @@ mod tests {
                 args: vec!["a.png".into(), "b.png".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 2);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -250,8 +243,7 @@ mod tests {
                 args: vec!["/tmp/some-image.png".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 1);
         assert!(out.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&out.stderr);

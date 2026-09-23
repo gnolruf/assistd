@@ -2,7 +2,6 @@
 //! share a flag parser because the only thing that differs between them
 //! is which end of the stream they keep.
 
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};
@@ -100,17 +99,17 @@ impl Command for HeadCommand {
         )
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         let (count, files) = match parse_flags("head", &input.args) {
             Ok(v) => v,
-            Err(e) => return Ok(count_error("head", e)),
+            Err(e) => return count_error("head", e),
         };
         let data = match collect_input("head", &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(CommandOutput::usage(self.help())),
-            Err(failure) => return Ok(failure),
+            Ok(None) => return CommandOutput::usage(self.help()),
+            Err(failure) => return failure,
         };
-        Ok(CommandOutput::ok(first_lines(&data, count)))
+        CommandOutput::ok(first_lines(&data, count))
     }
 }
 
@@ -138,17 +137,17 @@ impl Command for TailCommand {
         )
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         let (count, files) = match parse_flags("tail", &input.args) {
             Ok(v) => v,
-            Err(e) => return Ok(count_error("tail", e)),
+            Err(e) => return count_error("tail", e),
         };
         let data = match collect_input("tail", &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(CommandOutput::usage(self.help())),
-            Err(failure) => return Ok(failure),
+            Ok(None) => return CommandOutput::usage(self.help()),
+            Err(failure) => return failure,
         };
-        Ok(CommandOutput::ok(last_lines(&data, count)))
+        CommandOutput::ok(last_lines(&data, count))
     }
 }
 
@@ -162,7 +161,6 @@ mod tests {
             stdin: Some(stdin.to_vec()),
         })
         .await
-        .expect("run returns Ok")
     }
 
     const FIVE: &[u8] = b"one\ntwo\nthree\nfour\nfive\n";
@@ -221,8 +219,7 @@ mod tests {
                     args: vec!["-n".into(), "2".into()],
                     stdin: None,
                 })
-                .await
-                .unwrap();
+                .await;
             assert_eq!(out.exit_code, 2, "{name}");
             let usage = format!("usage: {name}");
             assert!(out.stdout.starts_with(usage.as_bytes()), "{name}: {out:?}");

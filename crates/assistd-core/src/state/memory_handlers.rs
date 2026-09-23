@@ -76,7 +76,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("memory save failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -101,7 +101,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("memory load failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -125,7 +125,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("memory list failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -143,7 +143,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("memory delete failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -177,7 +177,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("memory list_all failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -202,7 +202,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("memory forget failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }

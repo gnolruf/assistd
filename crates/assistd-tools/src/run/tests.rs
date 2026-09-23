@@ -358,7 +358,7 @@ fn run_rejects_wrong_argument_key() {
 fn run_parse_error_surfaces_as_present_result() {
     // Parse errors flow through `present()` like any other failure: the
     // LLM sees the usual `[stderr] ... [exit:N | Xms]` shape with a
-    // `[error] parse: ...` line, not a raw anyhow at the tool boundary.
+    // `[error] parse: ...` line, not a `ToolError` at the tool boundary.
     let dir = fresh_dir();
     let tool = tool_with_dir(dir.path());
     let result = invoke(&tool, "echo hi |");
@@ -394,12 +394,12 @@ impl Command for Lines {
     fn help(&self) -> String {
         "usage: lines".to_string()
     }
-    async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, _input: CommandInput) -> CommandOutput {
         let mut v = Vec::with_capacity(self.0 * 8);
         for i in 1..=self.0 {
             v.extend_from_slice(format!("line {i}\n").as_bytes());
         }
-        Ok(CommandOutput::ok(v))
+        CommandOutput::ok(v)
     }
 }
 
@@ -416,10 +416,8 @@ impl Command for ByteCount {
     fn help(&self) -> String {
         "usage: bytecount".to_string()
     }
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        Ok(CommandOutput::ok(
-            format!("{}\n", input.stdin.map_or(0, |s| s.len())).into_bytes(),
-        ))
+    async fn run(&self, input: CommandInput) -> CommandOutput {
+        CommandOutput::ok(format!("{}\n", input.stdin.map_or(0, |s| s.len())).into_bytes())
     }
 }
 
@@ -436,8 +434,8 @@ impl Command for EmitPng {
     fn help(&self) -> String {
         "usage: emitpng".to_string()
     }
-    async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
-        Ok(CommandOutput::ok(PNG_BYTES.to_vec()))
+    async fn run(&self, _input: CommandInput) -> CommandOutput {
+        CommandOutput::ok(PNG_BYTES.to_vec())
     }
 }
 
@@ -454,13 +452,13 @@ impl Command for Noisy {
     fn help(&self) -> String {
         "usage: noisy".to_string()
     }
-    async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
-        Ok(CommandOutput {
+    async fn run(&self, _input: CommandInput) -> CommandOutput {
+        CommandOutput {
             stdout: b"stdout content\n".to_vec(),
             stderr: b"stderr content\n".to_vec(),
             exit_code: 1,
             attachments: Vec::new(),
-        })
+        }
     }
 }
 
@@ -693,8 +691,8 @@ fn run_tool_description_auto_updates_when_command_added() {
         fn help(&self) -> String {
             "usage: frobnicate".to_string()
         }
-        async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
-            Ok(CommandOutput::ok(Vec::new()))
+        async fn run(&self, _input: CommandInput) -> CommandOutput {
+            CommandOutput::ok(Vec::new())
         }
     }
     let mut reg = CommandRegistry::new();

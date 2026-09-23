@@ -381,6 +381,7 @@ dependencies = [
  "assistd-embed",
  "assistd-ipc",
  "assistd-memory",
+ "assistd-tools",
  "assistd-wm",
  "async-trait",
  "base64 0.23.1",

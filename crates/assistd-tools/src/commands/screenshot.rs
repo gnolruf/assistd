@@ -6,7 +6,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::process::Command as ProcCommand;
@@ -130,9 +129,9 @@ impl Command for ScreenshotCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         if !self.gate.supported() {
-            return Ok(CommandOutput::failed(
+            return CommandOutput::failed(
                 1,
                 error_line(
                     "screenshot",
@@ -141,16 +140,16 @@ impl Command for ScreenshotCommand {
                     "a model with mmproj loaded",
                 )
                 .into_bytes(),
-            ));
+            );
         }
         let target = match parse_target(&input.args) {
             Ok(t) => t,
             Err(msg) => {
-                return Ok(CommandOutput::usage_error(
+                return CommandOutput::usage_error(
                     "screenshot",
                     msg,
                     "screenshot --full or screenshot --focused",
-                ));
+                );
             }
         };
 
@@ -159,7 +158,7 @@ impl Command for ScreenshotCommand {
             None => match detect_backend() {
                 Ok(b) => b,
                 Err(msg) => {
-                    return Ok(CommandOutput::failed(
+                    return CommandOutput::failed(
                         2,
                         error_line(
                             "screenshot",
@@ -168,7 +167,7 @@ impl Command for ScreenshotCommand {
                             "running this from a graphical session",
                         )
                         .into_bytes(),
-                    ));
+                    );
                 }
             },
         };
@@ -181,7 +180,7 @@ impl Command for ScreenshotCommand {
                     target_label(&target),
                     backend_label(backend),
                 );
-                Ok(CommandOutput {
+                CommandOutput {
                     stdout: stdout.into_bytes(),
                     stderr: Vec::new(),
                     exit_code: 0,
@@ -189,9 +188,9 @@ impl Command for ScreenshotCommand {
                         mime: "image/png".to_string(),
                         bytes: png,
                     }],
-                })
+                }
             }
-            Err(e) => Ok(capture_error_to_output(e)),
+            Err(e) => capture_error_to_output(e),
         }
     }
 }
@@ -711,8 +710,7 @@ mod tests {
                 args: vec!["--bogus-flag".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 2);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -1151,8 +1149,7 @@ mod tests {
                 args: vec!["--full".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 1);
         assert!(out.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&out.stderr);

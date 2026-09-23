@@ -21,21 +21,19 @@ pub mod run;
 pub mod vision;
 
 pub use attachment::{LoadImageError, load_image_attachment};
-pub use chain::{Chain, ParseError, execute, parse_chain};
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
-pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
+pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps, StoreError};
 pub use memory_tools::{RecallTool, RememberTool, ReminisceTool};
+#[cfg(any(test, feature = "test-support"))]
+pub use policy::{AlwaysAllowGate, DenyAllGate};
 pub use policy::{
-    AlwaysAllowGate, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate,
-    ConfirmationRequest, DenyAllGate, IpcConfirmationGate, ResolvedSandboxMode, SandboxAccess,
-    SandboxInfo, SandboxRequest, inherit_confirm_router, matches_denylist, matches_destructive,
-    probe_sandbox,
+    CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
+    IpcConfirmationGate, NoPendingConfirm, SandboxError, SandboxInfo, SandboxRequest,
+    inherit_confirm_router, probe_sandbox,
 };
-pub use presentation::{PresentResult, present};
 pub use run::RunTool;
 pub use vision::VisionGate;
 
-use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -43,6 +41,20 @@ use serde_json::{Value, json};
 /// (`mcp__<server>__<tool>`), so a registry can be partitioned into
 /// native and MCP tools.
 pub const MCP_TOOL_NAME_PREFIX: &str = "mcp__";
+
+/// Why [`Tool::invoke`] produced no result. A failure the model can
+/// recover from by running something else belongs in the returned
+/// result envelope instead.
+#[derive(Debug, thiserror::Error)]
+pub enum ToolError {
+    /// The model's arguments violate the tool's schema or constraints.
+    /// The message names the offending argument.
+    #[error("{0}")]
+    InvalidArgs(String),
+    /// A memory, conversation, or semantic store call failed.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
 
 /// A single tool the LLM can invoke.
 #[async_trait]
@@ -60,7 +72,7 @@ pub trait Tool: Send + Sync + 'static {
 
     /// Execute the tool with JSON-shaped arguments and return a
     /// JSON-shaped result.
-    async fn invoke(&self, args: Value) -> Result<Value>;
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError>;
 }
 
 /// Lookup table for tools registered with the daemon.
@@ -106,11 +118,6 @@ impl ToolRegistry {
     /// Iterator over every registered tool's name.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tools.iter().map(|t| t.name())
-    }
-
-    /// Iterator over every registered tool.
-    pub fn iter_tools(&self) -> impl Iterator<Item = &dyn Tool> {
-        self.tools.iter().map(|t| t.as_ref())
     }
 
     /// Render the registry as an OpenAI chat-completions `tools` array.
@@ -170,7 +177,7 @@ mod tests {
         fn parameters_schema(&self) -> Value {
             json!({"type": "object", "properties": {}, "additionalProperties": false})
         }
-        async fn invoke(&self, _args: Value) -> Result<Value> {
+        async fn invoke(&self, _args: Value) -> Result<Value, ToolError> {
             Ok(Value::Null)
         }
     }
@@ -204,39 +211,6 @@ mod tests {
         assert_eq!(entry["function"]["name"], "noop");
         assert_eq!(entry["function"]["strict"], true);
         assert_eq!(entry["function"]["parameters"]["type"], "object");
-    }
-
-    #[test]
-    fn iter_tools_yields_registered_tools_in_order() {
-        struct Named(&'static str);
-        #[async_trait]
-        impl Tool for Named {
-            fn name(&self) -> &str {
-                self.0
-            }
-            fn description(&self) -> &str {
-                "n/a"
-            }
-            fn parameters_schema(&self) -> Value {
-                json!({"type": "object"})
-            }
-            async fn invoke(&self, _args: Value) -> Result<Value> {
-                Ok(Value::Null)
-            }
-        }
-
-        let mut reg = ToolRegistry::new();
-        reg.register(Named("a"));
-        reg.register(Named("b"));
-        reg.register(Named("c"));
-        let names: Vec<&str> = reg.iter_tools().map(|t| t.name()).collect();
-        assert_eq!(names, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn iter_tools_empty_registry_yields_nothing() {
-        let reg = ToolRegistry::new();
-        assert_eq!(reg.iter_tools().count(), 0);
     }
 
     #[test]

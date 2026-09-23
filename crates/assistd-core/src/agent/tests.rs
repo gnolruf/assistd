@@ -123,7 +123,7 @@ impl assistd_tools::Tool for HangingTool {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object"})
     }
-    async fn invoke(&self, _args: Value) -> anyhow::Result<Value> {
+    async fn invoke(&self, _args: Value) -> Result<Value, assistd_tools::ToolError> {
         self.entered.notify_one();
         std::future::pending::<()>().await;
         unreachable!("hanging tool must never resolve")
@@ -419,8 +419,8 @@ async fn tool_invoke_err_becomes_synthetic_error_result() {
         fn parameters_schema(&self) -> Value {
             serde_json::json!({"type":"object"})
         }
-        async fn invoke(&self, _args: Value) -> anyhow::Result<Value> {
-            anyhow::bail!("boom")
+        async fn invoke(&self, _args: Value) -> Result<Value, assistd_tools::ToolError> {
+            Err(assistd_tools::ToolError::InvalidArgs("boom".into()))
         }
     }
     let mut reg = ToolRegistry::new();
@@ -603,7 +603,7 @@ impl assistd_tools::Tool for FakeMcpTool {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, _args: Value) -> anyhow::Result<Value> {
+    async fn invoke(&self, _args: Value) -> Result<Value, assistd_tools::ToolError> {
         Ok(self.result.clone())
     }
 }

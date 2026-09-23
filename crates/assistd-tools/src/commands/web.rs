@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
@@ -57,30 +56,30 @@ impl Command for WebCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         if input.args.is_empty() {
-            return Ok(CommandOutput::usage(self.help()));
+            return CommandOutput::usage(self.help());
         }
         if input.args.len() != 1 {
-            return Ok(CommandOutput::usage_error(
+            return CommandOutput::usage_error(
                 "web",
                 "expects exactly one URL argument",
                 "web <URL>",
-            ));
+            );
         }
         let url = &input.args[0];
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Ok(CommandOutput::usage_error(
+            return CommandOutput::usage_error(
                 "web",
                 format_args!("only http(s):// URLs are allowed: {url}"),
                 "web https://... or web http://...",
-            ));
+            );
         }
 
         let response = match self.client.get(url).send().await {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CommandOutput::failed(
+                return CommandOutput::failed(
                     1,
                     error_line(
                         "web",
@@ -89,12 +88,12 @@ impl Command for WebCommand {
                         "a different URL or check the endpoint is reachable",
                     )
                     .into_bytes(),
-                ));
+                );
             }
         };
         let status = response.status();
         if !status.is_success() {
-            return Ok(CommandOutput::failed(
+            return CommandOutput::failed(
                 1,
                 error_line(
                     "web",
@@ -107,13 +106,13 @@ impl Command for WebCommand {
                     "a different URL or check the endpoint is reachable",
                 )
                 .into_bytes(),
-            ));
+            );
         }
 
         let body = match response.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                return Ok(CommandOutput::failed(
+                return CommandOutput::failed(
                     1,
                     error_line(
                         "web",
@@ -122,11 +121,11 @@ impl Command for WebCommand {
                         "re-running or a different URL",
                     )
                     .into_bytes(),
-                ));
+                );
             }
         };
         if body.len() > BODY_MAX {
-            return Ok(CommandOutput::failed(
+            return CommandOutput::failed(
                 1,
                 error_line(
                     "web",
@@ -138,9 +137,9 @@ impl Command for WebCommand {
                     "a URL path that returns less content",
                 )
                 .into_bytes(),
-            ));
+            );
         }
-        Ok(CommandOutput::ok(body.to_vec()))
+        CommandOutput::ok(body.to_vec())
     }
 }
 
@@ -150,13 +149,17 @@ mod tests {
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
 
     /// Spin up a one-shot HTTP server that replies with `body`, then return
-    /// its address. Handles a single request then closes.
-    async fn serve_once(status_line: &'static str, body: &'static [u8]) -> SocketAddr {
+    /// its address and task. Handles a single request then closes.
+    async fn serve_once(
+        status_line: &'static str,
+        body: &'static [u8],
+    ) -> (SocketAddr, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             if let Ok((mut stream, _)) = listener.accept().await {
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf).await;
@@ -168,33 +171,33 @@ mod tests {
                 let _ = stream.write_all(body).await;
             }
         });
-        addr
+        (addr, server)
     }
 
     #[tokio::test]
     async fn fetches_response_body() {
-        let addr = serve_once("HTTP/1.1 200 OK", b"hello from server").await;
+        let (addr, server) = serve_once("HTTP/1.1 200 OK", b"hello from server").await;
         let out = WebCommand::new()
             .run(CommandInput {
                 args: vec![format!("http://{addr}/")],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
+        server.await.unwrap();
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"hello from server");
     }
 
     #[tokio::test]
     async fn non_2xx_exits_1_with_status_in_stderr() {
-        let addr = serve_once("HTTP/1.1 404 Not Found", b"missing").await;
+        let (addr, server) = serve_once("HTTP/1.1 404 Not Found", b"missing").await;
         let out = WebCommand::new()
             .run(CommandInput {
                 args: vec![format!("http://{addr}/")],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
+        server.await.unwrap();
         assert_eq!(out.exit_code, 1);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("[error] web: HTTP 404"), "{stderr}");
@@ -208,8 +211,7 @@ mod tests {
                 args: vec!["file:///etc/passwd".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 2);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -226,8 +228,7 @@ mod tests {
                 args: Vec::new(),
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 2);
     }
 
@@ -239,8 +240,7 @@ mod tests {
                 args: vec!["http://127.0.0.1:1/".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 1);
     }
 }

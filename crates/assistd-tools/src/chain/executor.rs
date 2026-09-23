@@ -6,7 +6,6 @@
 //! stdout becomes the right stage's stdin. [`PIPE_BUF_MAX`] caps that
 //! buffer so a runaway stage can't exhaust daemon memory.
 
-use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -29,12 +28,12 @@ pub fn execute<'a>(
     chain: &'a Chain,
     registry: &'a CommandRegistry,
     stdin: Option<Vec<u8>>,
-) -> Pin<Box<dyn Future<Output = Result<CommandOutput>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = CommandOutput> + Send + 'a>> {
     Box::pin(async move {
         match chain {
             Chain::Command(argv) => run_command(argv, registry, stdin).await,
             Chain::Pipe(l, r) => {
-                let mut left = execute(l, registry, stdin).await?;
+                let mut left = execute(l, registry, stdin).await;
                 let piped = std::mem::take(&mut left.stdout);
                 if piped.len() > PIPE_BUF_MAX {
                     let overflow = CommandOutput::failed(
@@ -47,24 +46,24 @@ pub fn execute<'a>(
                         )
                         .into_bytes(),
                     );
-                    return Ok(left.then(overflow));
+                    return left.then(overflow);
                 }
-                let right = execute(r, registry, Some(piped)).await?;
-                Ok(left.then(right))
+                let right = execute(r, registry, Some(piped)).await;
+                left.then(right)
             }
             Chain::And(l, r) | Chain::Or(l, r) => {
-                let left = execute(l, registry, stdin.clone()).await?;
+                let left = execute(l, registry, stdin.clone()).await;
                 let run_right = matches!(chain, Chain::And(..)) == (left.exit_code == 0);
                 if !run_right {
-                    return Ok(left);
+                    return left;
                 }
-                let right = execute(r, registry, stdin).await?;
-                Ok(left.then(right))
+                let right = execute(r, registry, stdin).await;
+                left.then(right)
             }
             Chain::Seq(l, r) => {
-                let left = execute(l, registry, stdin.clone()).await?;
-                let right = execute(r, registry, stdin).await?;
-                Ok(left.then(right))
+                let left = execute(l, registry, stdin.clone()).await;
+                let right = execute(r, registry, stdin).await;
+                left.then(right)
             }
         }
     })
@@ -74,10 +73,10 @@ async fn run_command(
     words: &[Word],
     registry: &CommandRegistry,
     stdin: Option<Vec<u8>>,
-) -> Result<CommandOutput> {
+) -> CommandOutput {
     let name = words.first().map(|w| w.text.as_str()).unwrap_or_default();
     if name.is_empty() {
-        return Ok(CommandOutput::failed(
+        return CommandOutput::failed(
             2,
             error_line(
                 "run",
@@ -86,13 +85,13 @@ async fn run_command(
                 "run <cmd> (see tool description for available commands)",
             )
             .into_bytes(),
-        ));
+        );
     }
 
     let Some(cmd) = registry.get(name) else {
         let avail = registry.sorted_names().join(", ");
         let msg = format!("[error] unknown command: {name}. Available: {avail}\n");
-        return Ok(CommandOutput::failed(127, msg.into_bytes()));
+        return CommandOutput::failed(127, msg.into_bytes());
     };
 
     // Every command answers `--help`, including the ones whose no-arg
@@ -100,22 +99,22 @@ async fn run_command(
     // usage text.
     let args = expand_args(&words[1..]);
     if args.iter().any(|a| a == "--help") {
-        return Ok(CommandOutput::usage(cmd.help()));
+        return CommandOutput::usage(cmd.help());
     }
 
-    let out = cmd.run(CommandInput { args, stdin }).await?;
+    let out = cmd.run(CommandInput { args, stdin }).await;
 
     let stderr = if out.stderr.is_empty() {
         Vec::new()
     } else {
         prefix_stderr(name, &out.stderr)
     };
-    Ok(CommandOutput {
+    CommandOutput {
         stdout: out.stdout,
         stderr,
         exit_code: out.exit_code,
         attachments: out.attachments,
-    })
+    }
 }
 
 fn prefix_stderr(name: &str, raw: &[u8]) -> Vec<u8> {

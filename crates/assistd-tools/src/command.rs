@@ -29,7 +29,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use anyhow::Result;
 use async_trait::async_trait;
 
 /// The recovery label on an error line. `Use` and `Try` introduce an
@@ -171,13 +170,11 @@ pub enum Attachment {
 
 /// Output of a single chain stage.
 ///
-/// Returning `CommandOutput` inside `Result::Ok` (rather than surfacing
-/// predictable failures as `Err`) is what lets `|| echo 'not found'`
-/// catch a missing file: the `cat` handler reports `exit_code = 1` with
-/// a friendly stderr, and the executor treats that as a triggerable
-/// failure for `||`. `Err` is reserved for *catastrophic* failures
-/// (spawn error, panic-in-trait, etc.) that should abort the whole
-/// chain.
+/// Every failure is reported here, as a non-zero `exit_code` with a
+/// stderr line, which is what lets `|| echo 'not found'` catch a
+/// missing file: the `cat` handler reports `exit_code = 1` with a
+/// friendly stderr, and the executor treats that as a triggerable
+/// failure for `||`.
 #[derive(Debug, Default, Clone)]
 pub struct CommandOutput {
     pub stdout: Vec<u8>,
@@ -258,7 +255,8 @@ pub trait Command: Send + Sync + 'static {
     /// output from a real `[<name>]\terror: …` failure.
     fn help(&self) -> String;
     /// Execute the command with the given input and return its output.
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput>;
+    /// Failures are reported through the output's exit code and stderr.
+    async fn run(&self, input: CommandInput) -> CommandOutput;
 }
 
 /// Lookup table of registered commands, keyed by name.

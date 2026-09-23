@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
 use async_trait::async_trait;
 use regex::{Regex, RegexBuilder};
 
@@ -101,22 +100,22 @@ impl Command for GrepCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         if input.args.is_empty() {
-            return Ok(CommandOutput::usage(self.help()));
+            return CommandOutput::usage(self.help());
         }
         let (flags, positional) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => {
-                return Ok(CommandOutput::usage_error(
+                return CommandOutput::usage_error(
                     "grep",
                     msg,
                     "grep (no args) for supported flags",
-                ));
+                );
             }
         };
         if positional.is_empty() {
-            return Ok(CommandOutput::usage(self.help()));
+            return CommandOutput::usage(self.help());
         }
 
         let pattern = &positional[0];
@@ -126,7 +125,7 @@ impl Command for GrepCommand {
         {
             Ok(r) => r,
             Err(e) => {
-                return Ok(CommandOutput::failed(
+                return CommandOutput::failed(
                     2,
                     error_line(
                         "grep",
@@ -135,26 +134,23 @@ impl Command for GrepCommand {
                         "escape regex metachars; run grep for usage",
                     )
                     .into_bytes(),
-                ));
+                );
             }
         };
 
         let paths = &positional[1..];
         if paths.is_empty() {
-            return Ok(match input.stdin {
+            return match input.stdin {
                 Some(stdin) => annotate_dialect(search_stdin(&re, &flags, stdin), pattern),
                 None => CommandOutput::usage(self.help()),
-            });
+            };
         }
 
         let targets = match collect_targets(paths, flags.recursive).await {
             Ok(t) => t,
-            Err(e) => return Ok(CommandOutput::failed(2, e.error_line().into_bytes())),
+            Err(e) => return CommandOutput::failed(2, e.error_line().into_bytes()),
         };
-        Ok(annotate_dialect(
-            search_files(&re, &flags, &targets).await,
-            pattern,
-        ))
+        annotate_dialect(search_files(&re, &flags, &targets).await, pattern)
     }
 }
 
@@ -366,7 +362,6 @@ mod tests {
                 stdin: Some(stdin.to_vec()),
             })
             .await
-            .unwrap()
     }
 
     #[tokio::test]
@@ -407,8 +402,7 @@ mod tests {
                 args: vec!["ERROR".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 2);
         assert!(out.stdout.starts_with(b"usage: grep"), "{out:?}");
     }
