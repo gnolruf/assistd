@@ -112,6 +112,21 @@ async fn nearest_chunks_top_k_caps_results() {
 }
 
 #[tokio::test]
+async fn nearest_chunks_huge_top_k_returns_all_rows() {
+    let (handle, _w) = fresh().await;
+    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
+    for i in 0..3 {
+        insert_chunk_with_vec(&handle, conv_id, i, &unit_vec((i as f32) * 0.1), "m").await;
+    }
+    let s = SqliteSemanticStore::new(handle);
+    let hits = s
+        .nearest_chunks(unit_vec(0.0), usize::MAX, "m", None)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 3);
+}
+
+#[tokio::test]
 async fn nearest_chunks_can_exclude_one_session() {
     let (handle, _w) = fresh().await;
     let mut sessions = Vec::new();
