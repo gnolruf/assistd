@@ -127,7 +127,7 @@ fn parse_content_entry(entry: Value) -> Result<ToolResult, McpError> {
 /// Await a correlated reply within `timeout`, mapping a dropped sender
 /// to `TransportClosed` and a server-side error to `RpcError`.
 pub(crate) async fn await_reply(
-    rx: oneshot::Receiver<Reply>,
+    rx: &mut oneshot::Receiver<Reply>,
     timeout: Duration,
 ) -> Result<Value, McpError> {
     match tokio::time::timeout(timeout, rx).await {

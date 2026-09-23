@@ -55,6 +55,7 @@ pub const MAX_IN_FLIGHT: usize = 256;
 pub type Reply = Result<Value, RpcError>;
 
 /// Matches outbound JSON-RPC request ids to their waiting [`oneshot`] receivers.
+#[derive(Debug)]
 pub struct Correlator {
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Reply>>>,
@@ -68,9 +69,14 @@ impl Correlator {
         }
     }
 
-    /// Reserve an id and a receiver for its reply. Errors with
+    /// Reserve an id and a receiver for its reply. The slot is held
+    /// until the returned [`Pending`] is dropped. Errors with
     /// `TooManyInFlight` once [`MAX_IN_FLIGHT`] requests are pending.
-    pub fn next_request(&self, method: &'static str, params: Value) -> Result<Pending, McpError> {
+    pub fn next_request(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<Pending<'_>, McpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
@@ -81,6 +87,7 @@ impl Correlator {
             guard.insert(id, tx);
         }
         Ok(Pending {
+            correlator: self,
             id,
             method,
             params,
@@ -132,16 +139,25 @@ impl Default for Correlator {
     }
 }
 
-/// A reserved request: frame it, send it, then await `rx`.
+/// A reserved request: frame it, send it, then await `rx`. Dropping it
+/// releases the id's slot, so a timed-out or abandoned request never
+/// counts against [`MAX_IN_FLIGHT`].
 #[derive(Debug)]
-pub struct Pending {
+pub struct Pending<'a> {
+    correlator: &'a Correlator,
     pub id: u64,
     method: &'static str,
     params: Value,
     pub rx: oneshot::Receiver<Reply>,
 }
 
-impl Pending {
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        self.correlator.pending.lock().remove(&self.id);
+    }
+}
+
+impl Pending<'_> {
     /// [`Self::frame_json`] plus a trailing newline.
     pub fn frame_line(&self) -> Result<Vec<u8>, McpError> {
         let mut bytes = self.frame_json()?;
@@ -188,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn round_trip_request_response() {
         let c = Correlator::new();
-        let pending = c.next_request("ping", json!({})).unwrap();
+        let mut pending = c.next_request("ping", json!({})).unwrap();
         let id = pending.id;
 
         c.deliver(Response {
@@ -197,14 +213,14 @@ mod tests {
             error: None,
         });
 
-        let value = pending.rx.await.unwrap().unwrap();
+        let value = (&mut pending.rx).await.unwrap().unwrap();
         assert_eq!(value, json!({"ok": true}));
     }
 
     #[tokio::test]
     async fn rpc_error_surfaces() {
         let c = Correlator::new();
-        let pending = c.next_request("bad", json!({})).unwrap();
+        let mut pending = c.next_request("bad", json!({})).unwrap();
         c.deliver(Response {
             id: Some(pending.id),
             result: None,
@@ -214,7 +230,7 @@ mod tests {
                 data: None,
             }),
         });
-        let err = pending.rx.await.unwrap().unwrap_err();
+        let err = (&mut pending.rx).await.unwrap().unwrap_err();
         assert_eq!(err.code, -32601);
     }
 
@@ -233,15 +249,15 @@ mod tests {
     #[tokio::test]
     async fn fail_all_wakes_pending() {
         let c = Correlator::new();
-        let p1 = c.next_request("a", json!({})).unwrap();
-        let p2 = c.next_request("b", json!({})).unwrap();
+        let mut p1 = c.next_request("a", json!({})).unwrap();
+        let mut p2 = c.next_request("b", json!({})).unwrap();
         assert_eq!(c.in_flight(), 2);
 
         c.fail_all(closed_err);
         assert_eq!(c.in_flight(), 0);
 
-        assert!(p1.rx.await.unwrap().is_err());
-        assert!(p2.rx.await.unwrap().is_err());
+        assert!((&mut p1.rx).await.unwrap().is_err());
+        assert!((&mut p2.rx).await.unwrap().is_err());
     }
 
     #[tokio::test]
@@ -255,6 +271,18 @@ mod tests {
             Err(McpError::TooManyInFlight) => {}
             other => panic!("expected TooManyInFlight, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dropping_pending_releases_its_slot() {
+        let c = Correlator::new();
+        let held: Vec<_> = (0..MAX_IN_FLIGHT)
+            .map(|_| c.next_request("x", json!({})).unwrap())
+            .collect();
+        assert_eq!(c.in_flight(), MAX_IN_FLIGHT);
+        drop(held);
+        assert_eq!(c.in_flight(), 0);
+        assert!(c.next_request("y", json!({})).is_ok());
     }
 
     #[test]

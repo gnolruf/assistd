@@ -174,14 +174,14 @@ impl StdioMcpClient {
     }
 
     async fn call(&self, method: &'static str, params: Value) -> Result<Value, McpError> {
-        let pending = self.correlator.next_request(method, params)?;
+        let mut pending = self.correlator.next_request(method, params)?;
         let bytes = pending.frame_line()?;
         self.write_tx
             .send(bytes)
             .await
             .map_err(|_| McpError::TransportClosed)?;
 
-        protocol::await_reply(pending.rx, self.request_timeout).await
+        protocol::await_reply(&mut pending.rx, self.request_timeout).await
     }
 }
 
@@ -623,6 +623,7 @@ mod tests {
         let err = client.list_tools().await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("timed out"), "{msg}");
+        assert_eq!(client.correlator.in_flight(), 0);
         handles.shutdown_and_join().await;
         let _ = silent.await;
     }
