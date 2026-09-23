@@ -13,7 +13,7 @@ use assistd_core::{
 };
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::{info, warn};
 
 /// The five hotkeys the listener can register.
@@ -196,6 +196,7 @@ async fn run_listener(
     let receiver = GlobalHotKeyEvent::receiver();
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut handlers = JoinSet::new();
 
     loop {
         tokio::select! {
@@ -206,8 +207,13 @@ async fn run_listener(
                         .find(|(_, h)| h.id() == event.id)
                         .map(|(b, _)| *b);
                     if let Some(binding) = binding {
-                        on_hotkey(binding, event.state, &subsystems);
+                        on_hotkey(binding, event.state, &subsystems, &mut handlers);
                     }
+                }
+            }
+            Some(res) = handlers.join_next() => {
+                if let Err(e) = res {
+                    warn!(target: "assistd::hotkey", "hotkey handler failed: {e}");
                 }
             }
             _ = shutdown.changed() => {
@@ -218,6 +224,7 @@ async fn run_listener(
         }
     }
 
+    handlers.shutdown().await;
     for (binding, hotkey) in registered {
         if let Err(e) = manager.unregister(hotkey) {
             warn!(
@@ -229,16 +236,21 @@ async fn run_listener(
     }
 }
 
-/// Route one hotkey event to its subsystem on a fresh task, so the
-/// listener never blocks on a slow transition.
-fn on_hotkey(binding: Binding, state: HotKeyState, subsystems: &Subsystems) {
+/// Route one hotkey event to its subsystem on a task in `handlers`, so
+/// the listener never blocks on a slow transition.
+fn on_hotkey(
+    binding: Binding,
+    state: HotKeyState,
+    subsystems: &Subsystems,
+    handlers: &mut JoinSet<()>,
+) {
     let pressed = state == HotKeyState::Pressed;
     match binding {
         Binding::Presence if pressed => {
             let Some(presence) = subsystems.presence.clone() else {
                 return;
             };
-            tokio::spawn(async move {
+            handlers.spawn(async move {
                 match presence.cycle().await {
                     Ok(target) => info!(
                         target: "assistd::hotkey",
@@ -254,7 +266,7 @@ fn on_hotkey(binding: Binding, state: HotKeyState, subsystems: &Subsystems) {
         Binding::Voice if pressed => {
             let voice = subsystems.voice.clone();
             let voice_output = subsystems.voice_output.clone();
-            tokio::spawn(async move {
+            handlers.spawn(async move {
                 if let Some(ctrl) = voice_output {
                     ctrl.interrupt().await;
                 }
@@ -268,7 +280,7 @@ fn on_hotkey(binding: Binding, state: HotKeyState, subsystems: &Subsystems) {
         }
         Binding::Voice => {
             let voice = subsystems.voice.clone();
-            tokio::spawn(async move {
+            handlers.spawn(async move {
                 match voice.stop_and_transcribe().await {
                     Ok(text) if text.trim().is_empty() => {
                         info!(
@@ -294,7 +306,7 @@ fn on_hotkey(binding: Binding, state: HotKeyState, subsystems: &Subsystems) {
             let Some(listener) = subsystems.listener.clone() else {
                 return;
             };
-            tokio::spawn(async move {
+            handlers.spawn(async move {
                 let result = if listener.is_active() {
                     listener.stop().await.map(|()| false)
                 } else {
@@ -317,7 +329,7 @@ fn on_hotkey(binding: Binding, state: HotKeyState, subsystems: &Subsystems) {
             let Some(ctrl) = subsystems.voice_output.clone() else {
                 return;
             };
-            tokio::spawn(async move {
+            handlers.spawn(async move {
                 let new_state = !ctrl.enabled();
                 ctrl.set_enabled(new_state).await;
                 info!(
@@ -331,7 +343,7 @@ fn on_hotkey(binding: Binding, state: HotKeyState, subsystems: &Subsystems) {
             let Some(ctrl) = subsystems.voice_output.clone() else {
                 return;
             };
-            tokio::spawn(async move {
+            handlers.spawn(async move {
                 ctrl.skip().await;
                 info!(
                     target: "assistd::hotkey",

@@ -4,6 +4,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, RichText, ViewportBuilder,
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::state::{PopupActivity, PopupState};
 use super::visibility::DriverInput;
@@ -46,8 +47,12 @@ pub fn run_gui_loop(
         &app_id_owned,
         options,
         Box::new(move |cc| {
-            runtime.spawn(wake_egui_on_state_change(waker_rx, cc.egui_ctx.clone()));
-            Ok(Box::new(PopupApp::new(state_rx, event_tx)))
+            let waker = runtime.spawn(wake_egui_on_state_change(waker_rx, cc.egui_ctx.clone()));
+            Ok(Box::new(PopupApp::new(
+                state_rx,
+                event_tx,
+                AbortOnDropHandle::new(waker),
+            )))
         }),
     )
 }
@@ -69,10 +74,15 @@ struct PopupApp {
     awaiting_first_paint: bool,
     first_frame: bool,
     current: PopupState,
+    _waker: AbortOnDropHandle<()>,
 }
 
 impl PopupApp {
-    fn new(state_rx: watch::Receiver<PopupState>, event_tx: UnboundedSender<DriverInput>) -> Self {
+    fn new(
+        state_rx: watch::Receiver<PopupState>,
+        event_tx: UnboundedSender<DriverInput>,
+        waker: AbortOnDropHandle<()>,
+    ) -> Self {
         Self {
             state_rx,
             event_tx,
@@ -80,6 +90,7 @@ impl PopupApp {
             awaiting_first_paint: false,
             first_frame: true,
             current: PopupState::default(),
+            _waker: waker,
         }
     }
 }

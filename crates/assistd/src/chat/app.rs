@@ -12,6 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use super::input::{InputAction, InputLine};
@@ -187,6 +188,9 @@ pub struct App {
     /// Rows of a `/resume` listing, handed to the picker on `Done`.
     branches_buffer: Vec<BranchListEntry>,
     chat_tx: mpsc::Sender<ChatEvent>,
+    /// Connection and attachment-loading tasks; aborted when the app is
+    /// dropped.
+    tasks: JoinSet<()>,
     slash_selected: usize,
     /// Set by Esc on the slash popup; cleared when the buffer leaves
     /// its `/` prefix.
@@ -290,6 +294,7 @@ impl App {
             in_flight_branch_op: None,
             branches_buffer: Vec::new(),
             chat_tx,
+            tasks: JoinSet::new(),
             slash_selected: 0,
             slash_dismissed: false,
             picker_modal: None,
@@ -328,7 +333,7 @@ impl App {
         }
     }
 
-    fn send_confirm_response(&self, confirm_id: &str, allow: bool) {
+    fn send_confirm_response(&mut self, confirm_id: &str, allow: bool) {
         let Some(writer) = self
             .active_reply
             .as_ref()
@@ -345,7 +350,7 @@ impl App {
             confirm_id: confirm_id.to_string(),
             allow,
         };
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             if let Err(e) = writer.send(req).await {
                 tracing::warn!("ConfirmResponse send failed: {e}");
             }
@@ -598,10 +603,10 @@ impl App {
     /// Send `req` on a fresh connection and pump its events into the
     /// reducer tagged `stream`, reporting connection or read failures as
     /// a `WireError` on the same stream.
-    fn spawn_one_shot(&self, req: Request, stream: WireStream, label: &'static str) {
+    fn spawn_one_shot(&mut self, req: Request, stream: WireStream, label: &'static str) {
         let ipc = self.ipc.clone();
         let chat_tx = self.chat_tx.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let wire_error = |message: String| ChatEvent::WireError { stream, message };
             let mut events = match ipc.one_shot(req).await {
                 Ok(s) => s,
@@ -990,6 +995,11 @@ impl App {
     }
 
     pub fn on_tick(&mut self) {
+        while let Some(res) = self.tasks.try_join_next() {
+            if let Err(e) = res {
+                tracing::warn!("chat task failed: {e}");
+            }
+        }
         self.spinner = self.spinner.wrapping_add(1);
         if let Some((_, at)) = &self.notice {
             if at.elapsed() > NOTICE_HOLD {
@@ -1155,7 +1165,7 @@ impl App {
         let tx = self.chat_tx.clone();
         let picker = self.picker.clone();
         let path_for_load = path.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             match load_image_attachment(std::path::Path::new(&path_for_load)).await {
                 Ok((Attachment::Image { mime, bytes }, size)) => {
                     let protocol = picker.and_then(|p| match image::load_from_memory(&bytes) {
@@ -1310,7 +1320,7 @@ impl App {
             Request::query_with_attachments(req_id, text, wire_attachments)
         };
 
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let mut conn = match ipc.open_dialog(req).await {
                 Ok(c) => c,
                 Err(e) => {

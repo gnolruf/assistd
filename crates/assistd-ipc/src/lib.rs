@@ -37,6 +37,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[cfg(feature = "client")]
+pub mod attachment;
+#[cfg(feature = "client")]
 pub mod client;
 #[cfg(feature = "client")]
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
