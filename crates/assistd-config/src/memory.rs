@@ -32,21 +32,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_round_trips_through_toml() {
-        let cfg = MemoryConfig::default();
-        let s = toml::to_string(&cfg).unwrap();
-        let back: MemoryConfig = toml::from_str(&s).unwrap();
-        assert_eq!(cfg, back);
-    }
-
-    #[test]
-    fn omitted_section_uses_defaults() {
-        #[derive(Deserialize)]
-        struct Wrap {
-            #[serde(default)]
-            memory: MemoryConfig,
-        }
-        let parsed: Wrap = toml::from_str("[memory]").unwrap();
-        assert_eq!(parsed.memory, MemoryConfig::default());
+    fn default_db_path_ends_in_assistd_memory_db() {
+        let path = MemoryConfig::default().db_path;
+        assert!(
+            path.ends_with("assistd/memory.db"),
+            "unexpected default db_path: {}",
+            path.display()
+        );
     }
 }

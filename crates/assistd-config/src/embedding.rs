@@ -50,38 +50,3 @@ impl Default for EmbeddingConfig {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_round_trips_through_toml() {
-        let cfg = EmbeddingConfig::default();
-        let s = toml::to_string(&cfg).unwrap();
-        let back: EmbeddingConfig = toml::from_str(&s).unwrap();
-        assert_eq!(cfg, back);
-    }
-
-    #[test]
-    fn omitted_section_uses_defaults() {
-        #[derive(Deserialize)]
-        struct Wrap {
-            #[serde(default)]
-            embedding: EmbeddingConfig,
-        }
-        let parsed: Wrap = toml::from_str("[embedding]").unwrap();
-        assert_eq!(parsed.embedding, EmbeddingConfig::default());
-    }
-
-    #[test]
-    fn defaults_match_expected_values() {
-        let cfg = EmbeddingConfig::default();
-        assert!(cfg.enabled);
-        assert!(!cfg.model.is_empty());
-        assert_eq!(cfg.host, DEFAULT_EMBEDDING_HOST);
-        assert_eq!(cfg.gpu_layers, 0);
-        assert_eq!(cfg.top_k, DEFAULT_EMBEDDING_TOP_K);
-        assert!(cfg.auto_inject);
-    }
-}

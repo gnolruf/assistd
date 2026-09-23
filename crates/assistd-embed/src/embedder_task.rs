@@ -131,6 +131,7 @@ mod tests {
     use crate::EmbedError;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     struct MockEmbedder {
         calls: AtomicUsize,
@@ -151,18 +152,56 @@ mod tests {
         }
     }
 
+    struct Harness {
+        embedder: Arc<MockEmbedder>,
+        jobs: mpsc::Sender<EmbedJob>,
+        writes: mpsc::Receiver<WriteOp>,
+        shutdown: watch::Sender<bool>,
+        task: JoinHandle<()>,
+    }
+
+    impl Harness {
+        fn spawn(vec: Vec<f32>) -> Self {
+            let embedder = Arc::new(MockEmbedder {
+                calls: AtomicUsize::new(0),
+                vec,
+            });
+            let (write_tx, writes) = mpsc::channel(8);
+            let (jobs, job_rx) = mpsc::channel(8);
+            let (shutdown, sd_rx) = watch::channel(false);
+            let task = spawn_embedder_task(embedder.clone(), Arc::new(write_tx), job_rx, sd_rx);
+            Self {
+                embedder,
+                jobs,
+                writes,
+                shutdown,
+                task,
+            }
+        }
+
+        async fn next_write(&mut self) -> WriteOp {
+            tokio::time::timeout(Duration::from_secs(2), self.writes.recv())
+                .await
+                .expect("write op arrived in time")
+                .expect("writer channel open")
+        }
+
+        /// Signal shutdown while keeping the job sender alive, so only
+        /// the shutdown path can end the worker.
+        async fn shut_down(self) -> usize {
+            self.shutdown.send_replace(true);
+            tokio::time::timeout(Duration::from_secs(2), self.task)
+                .await
+                .expect("worker exited after shutdown")
+                .expect("worker did not panic");
+            self.embedder.calls.load(Ordering::SeqCst)
+        }
+    }
+
     #[tokio::test]
     async fn worker_routes_chunk_job_to_storechunkembedding() {
-        let embedder = Arc::new(MockEmbedder {
-            calls: AtomicUsize::new(0),
-            vec: vec![1.0, 0.0],
-        });
-        let (write_tx, mut write_rx) = mpsc::channel::<WriteOp>(8);
-        let (job_tx, job_rx) = mpsc::channel::<EmbedJob>(8);
-        let (sd_tx, sd_rx) = watch::channel(false);
-        let task = spawn_embedder_task(embedder.clone(), Arc::new(write_tx), job_rx, sd_rx);
-
-        job_tx
+        let mut h = Harness::spawn(vec![1.0, 0.0]);
+        h.jobs
             .send(EmbedJob::Chunk {
                 chunk_id: 42,
                 text: "hello".into(),
@@ -170,7 +209,7 @@ mod tests {
             .await
             .unwrap();
 
-        match write_rx.recv().await.unwrap() {
+        match h.next_write().await {
             WriteOp::StoreChunkEmbedding {
                 chunk_id,
                 model,
@@ -181,30 +220,18 @@ mod tests {
                 assert_eq!(chunk_id, 42);
                 assert_eq!(model, "mock");
                 assert_eq!(dim, 2);
-                assert_eq!(vector.len(), 8); // 2 f32s = 8 bytes
-                let _ = ack.send(Ok(()));
+                assert_eq!(vector, vector_to_blob(&[1.0, 0.0]));
+                ack.send(Ok(())).unwrap();
             }
             _ => panic!("expected StoreChunkEmbedding"),
         }
-
-        sd_tx.send(true).unwrap();
-        drop(job_tx);
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
-        assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(h.shut_down().await, 1);
     }
 
     #[tokio::test]
     async fn worker_routes_memory_job_to_storememoryembedding() {
-        let embedder = Arc::new(MockEmbedder {
-            calls: AtomicUsize::new(0),
-            vec: vec![0.0, 1.0],
-        });
-        let (write_tx, mut write_rx) = mpsc::channel::<WriteOp>(8);
-        let (job_tx, job_rx) = mpsc::channel::<EmbedJob>(8);
-        let (sd_tx, sd_rx) = watch::channel(false);
-        let task = spawn_embedder_task(embedder.clone(), Arc::new(write_tx), job_rx, sd_rx);
-
-        job_tx
+        let mut h = Harness::spawn(vec![0.0, 1.0]);
+        h.jobs
             .send(EmbedJob::Memory {
                 memory_id: 7,
                 text: "vim".into(),
@@ -212,30 +239,30 @@ mod tests {
             .await
             .unwrap();
 
-        match write_rx.recv().await.unwrap() {
-            WriteOp::StoreMemoryEmbedding { memory_id, ack, .. } => {
+        match h.next_write().await {
+            WriteOp::StoreMemoryEmbedding {
+                memory_id,
+                model,
+                dim,
+                vector,
+                ack,
+            } => {
                 assert_eq!(memory_id, 7);
-                let _ = ack.send(Ok(()));
+                assert_eq!(model, "mock");
+                assert_eq!(dim, 2);
+                assert_eq!(vector, vector_to_blob(&[0.0, 1.0]));
+                ack.send(Ok(())).unwrap();
             }
             _ => panic!("expected StoreMemoryEmbedding"),
         }
-        sd_tx.send(true).unwrap();
-        drop(job_tx);
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
+        assert_eq!(h.shut_down().await, 1);
     }
 
     #[tokio::test]
-    async fn worker_drains_queue_on_shutdown() {
-        let embedder = Arc::new(MockEmbedder {
-            calls: AtomicUsize::new(0),
-            vec: vec![1.0],
-        });
-        let (write_tx, mut write_rx) = mpsc::channel::<WriteOp>(8);
-        let (job_tx, job_rx) = mpsc::channel::<EmbedJob>(8);
-        let (sd_tx, sd_rx) = watch::channel(false);
-
+    async fn worker_embeds_queued_jobs_before_honouring_shutdown() {
+        let mut h = Harness::spawn(vec![1.0]);
         for i in 0..3 {
-            job_tx
+            h.jobs
                 .send(EmbedJob::Chunk {
                     chunk_id: i,
                     text: format!("t{i}"),
@@ -243,24 +270,17 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let task = spawn_embedder_task(embedder.clone(), Arc::new(write_tx), job_rx, sd_rx);
-        // Trip shutdown immediately. The drain branch should still
-        // process the queued jobs.
-        sd_tx.send(true).unwrap();
-        drop(job_tx);
+        h.shutdown.send(true).unwrap();
 
-        for _ in 0..3 {
-            let op = tokio::time::timeout(std::time::Duration::from_secs(2), write_rx.recv())
-                .await
-                .expect("ack arrived in time")
-                .expect("write_rx open");
-            if let WriteOp::StoreChunkEmbedding { ack, .. } = op {
-                let _ = ack.send(Ok(()));
-            } else {
-                panic!("expected StoreChunkEmbedding");
+        for i in 0..3 {
+            match h.next_write().await {
+                WriteOp::StoreChunkEmbedding { chunk_id, ack, .. } => {
+                    assert_eq!(chunk_id, i);
+                    ack.send(Ok(())).unwrap();
+                }
+                _ => panic!("expected StoreChunkEmbedding"),
             }
         }
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
-        assert_eq!(embedder.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(h.shut_down().await, 3);
     }
 }

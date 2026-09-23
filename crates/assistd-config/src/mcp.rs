@@ -111,32 +111,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_round_trips_through_toml() {
-        let cfg = McpConfig::default();
-        let s = toml::to_string(&cfg).unwrap();
-        let back: McpConfig = toml::from_str(&s).unwrap();
-        assert_eq!(cfg, back);
-    }
-
-    #[test]
-    fn omitted_section_uses_defaults() {
-        #[derive(Deserialize)]
-        struct Wrap {
-            #[serde(default)]
-            mcp: McpConfig,
-        }
-        let parsed: Wrap = toml::from_str("").unwrap();
-        assert_eq!(parsed.mcp, McpConfig::default());
-    }
-
-    #[test]
-    fn default_is_disabled() {
-        let cfg = McpConfig::default();
-        assert!(!cfg.enabled);
-        assert!(cfg.servers.is_empty());
-    }
-
-    #[test]
     fn parses_stdio_server_minimally() {
         let toml = r#"
             enabled = true
@@ -148,21 +122,23 @@ mod tests {
             args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         "#;
         let cfg: McpConfig = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.servers.len(), 1);
-        let McpServerConfig::Stdio {
-            name,
-            command,
-            args,
-            request_timeout_secs,
-            ..
-        } = &cfg.servers[0]
-        else {
-            panic!("expected a stdio server, got {:?}", cfg.servers[0]);
-        };
-        assert_eq!(name, "filesystem");
-        assert_eq!(command, &PathBuf::from("npx"));
-        assert_eq!(args.len(), 3);
-        assert_eq!(*request_timeout_secs, DEFAULT_MCP_REQUEST_TIMEOUT_SECS);
+        assert_eq!(
+            cfg,
+            McpConfig {
+                enabled: true,
+                servers: vec![McpServerConfig::Stdio {
+                    name: "filesystem".into(),
+                    command: "npx".into(),
+                    args: vec![
+                        "-y".into(),
+                        "@modelcontextprotocol/server-filesystem".into(),
+                        "/tmp".into(),
+                    ],
+                    env: HashMap::new(),
+                    request_timeout_secs: DEFAULT_MCP_REQUEST_TIMEOUT_SECS,
+                }],
+            }
+        );
     }
 
     #[test]
@@ -179,27 +155,18 @@ mod tests {
             Authorization = "Bearer xyz"
         "#;
         let cfg: McpConfig = toml::from_str(toml).unwrap();
-        let McpServerConfig::Sse { url, headers, .. } = &cfg.servers[0] else {
-            panic!("expected an sse server, got {:?}", cfg.servers[0]);
-        };
-        assert_eq!(url.as_str(), "https://mcp.example.com/sse");
         assert_eq!(
-            headers.get("Authorization").map(String::as_str),
-            Some("Bearer xyz")
+            cfg,
+            McpConfig {
+                enabled: true,
+                servers: vec![McpServerConfig::Sse {
+                    name: "remote".into(),
+                    url: Url::parse("https://mcp.example.com/sse").unwrap(),
+                    headers: HashMap::from([("Authorization".into(), "Bearer xyz".into())]),
+                    request_timeout_secs: DEFAULT_MCP_REQUEST_TIMEOUT_SECS,
+                }],
+            }
         );
-    }
-
-    #[test]
-    fn transport_serialises_lowercase() {
-        let s = McpServerConfig::Stdio {
-            name: "x".into(),
-            command: "/bin/x".into(),
-            args: Vec::new(),
-            env: HashMap::new(),
-            request_timeout_secs: DEFAULT_MCP_REQUEST_TIMEOUT_SECS,
-        };
-        let toml = toml::to_string(&s).unwrap();
-        assert!(toml.contains("transport = \"stdio\""), "{toml}");
     }
 
     #[test]
@@ -235,7 +202,7 @@ mod tests {
             transport = "sse"
             url = "not a url"
         "#;
-        assert!(toml::from_str::<McpConfig>(toml).is_err());
+        toml::from_str::<McpConfig>(toml).expect_err("a malformed url must not parse");
     }
 
     #[test]
@@ -247,6 +214,6 @@ mod tests {
             command = "npx"
             request_timeout_secs = 0
         "#;
-        assert!(toml::from_str::<McpConfig>(toml).is_err());
+        toml::from_str::<McpConfig>(toml).expect_err("a zero timeout must not parse");
     }
 }

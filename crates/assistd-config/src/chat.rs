@@ -76,3 +76,18 @@ impl ChatConfig {
         self.summary_target_tokens.get().saturating_mul(6) / 5
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::defaults::nz32;
+
+    #[test]
+    fn max_summary_tokens_leaves_a_fifth_of_headroom_above_target() {
+        let cfg = ChatConfig {
+            summary_target_tokens: nz32(1000),
+            ..ChatConfig::default()
+        };
+        assert_eq!(cfg.max_summary_tokens(), 1200);
+    }
+}

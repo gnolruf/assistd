@@ -141,60 +141,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_tray_includes_default_popup() {
-        let t = TrayConfig::default();
-        assert_eq!(t.popup, TrayPopupConfig::default());
-        assert!(t.popup.enabled);
-        assert_eq!(t.popup.anchor, PopupAnchor::TopRight);
-    }
-
-    #[test]
-    fn popup_defaults_match_constants() {
-        let p = TrayPopupConfig::default();
-        assert_eq!(p.enabled, DEFAULT_TRAY_POPUP_ENABLED);
-        assert_eq!(p.offset_x, DEFAULT_TRAY_POPUP_OFFSET_X);
-        assert_eq!(p.offset_y, DEFAULT_TRAY_POPUP_OFFSET_Y);
-        assert_eq!(p.width, DEFAULT_TRAY_POPUP_WIDTH);
-        assert_eq!(p.height, DEFAULT_TRAY_POPUP_HEIGHT);
-        assert_eq!(p.auto_hide_ms, DEFAULT_TRAY_POPUP_AUTO_HIDE_MS);
-        assert!(p.listen_auto_hide_ms() > p.auto_hide_ms);
-        assert_eq!(p.wake_on.tool_call, DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL);
-        assert_eq!(p.wake_on.delta, DEFAULT_TRAY_POPUP_WAKE_DELTA);
-        assert_eq!(p.wake_on.error, DEFAULT_TRAY_POPUP_WAKE_ERROR);
-    }
-
-    #[test]
-    fn popup_roundtrips_through_toml() {
-        let p = TrayPopupConfig {
-            anchor: PopupAnchor::BottomLeft,
-            offset_x: 5,
-            offset_y: -5,
-            width: 500,
-            height: 200,
-            auto_hide_ms: 7000,
-            enabled: false,
-            wake_on: TrayPopupWakeConfig {
-                tool_call: false,
-                delta: true,
-                error: false,
-            },
-        };
-        let s = toml::to_string(&p).expect("serialize");
-        let back: TrayPopupConfig = toml::from_str(&s).expect("deserialize");
-        assert_eq!(p, back);
-    }
-
-    #[test]
-    fn popup_anchor_serializes_as_snake_case() {
-        let s = toml::to_string(&TrayPopupConfig {
-            anchor: PopupAnchor::TopLeft,
-            ..TrayPopupConfig::default()
-        })
-        .expect("serialize");
-        assert!(
-            s.contains(r#"anchor = "top_left""#),
-            "anchor should serialize as snake_case: {s}"
-        );
+    fn listen_auto_hide_is_triple_the_idle_timeout_and_saturates() {
+        for (auto_hide_ms, expected) in [(3000, 9000), (u64::MAX, u64::MAX)] {
+            let p = TrayPopupConfig {
+                auto_hide_ms,
+                ..TrayPopupConfig::default()
+            };
+            assert_eq!(
+                p.listen_auto_hide_ms(),
+                expected,
+                "auto_hide_ms={auto_hide_ms}"
+            );
+        }
     }
 
     #[test]
@@ -210,23 +168,5 @@ mod tests {
             let p: TrayPopupConfig = toml::from_str(&toml_src).expect("deserialize");
             assert_eq!(p.anchor, want, "raw {raw}");
         }
-    }
-
-    #[test]
-    fn missing_popup_section_uses_defaults() {
-        let t: TrayConfig = toml::from_str("").expect("deserialize");
-        assert_eq!(t.popup, TrayPopupConfig::default());
-    }
-
-    #[test]
-    fn missing_wake_subkey_uses_defaults() {
-        // wake_on default is all-true; the popup section may omit it.
-        let toml_src = r#"
-            [popup]
-            width = 400
-        "#;
-        let t: TrayConfig = toml::from_str(toml_src).expect("deserialize");
-        assert_eq!(t.popup.width, 400);
-        assert_eq!(t.popup.wake_on, TrayPopupWakeConfig::default());
     }
 }

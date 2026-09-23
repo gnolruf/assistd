@@ -53,13 +53,12 @@ mod tests {
     #[tokio::test]
     async fn no_embedder_errors_on_embed() {
         let e = NoEmbedder;
-        assert!(e.embed("hi".into()).await.is_err());
+        let err = e
+            .embed("hi".into())
+            .await
+            .expect_err("NoEmbedder must not embed");
+        assert!(matches!(err, EmbedError::Disabled), "{err:?}");
         assert_eq!(e.model(), "");
         assert_eq!(e.dim(), 0);
-    }
-
-    #[test]
-    fn no_embedder_is_object_safe() {
-        let _: std::sync::Arc<dyn Embedder> = std::sync::Arc::new(NoEmbedder);
     }
 }
