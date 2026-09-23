@@ -5,7 +5,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
@@ -20,7 +19,6 @@ use crate::criteria::{
     format_focus, format_layout, format_move_to_workspace, format_place_floating_pixels,
     format_resize_width,
 };
-use crate::error::ipc_ctx;
 use crate::snapshot::{
     self, Snapshot, WindowChangeKind, apply_window_event, apply_workspace_focus,
 };
@@ -111,7 +109,7 @@ impl I3Backend {
         let outcome = tokio::time::timeout(WM_IPC_TIMEOUT, op(conn)).await;
         let err = match outcome {
             Ok(Ok(value)) => return Ok(value),
-            Ok(Err(e)) => ipc_ctx(e, ctx),
+            Ok(Err(e)) => WmError::ipc(ctx, e),
             Err(_) => WmError::Timeout(WM_IPC_TIMEOUT),
         };
         *guard = None;
@@ -505,8 +503,11 @@ fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<W
     }
 }
 
-async fn seed_snapshot(cmd: &mut I3) -> Result<Snapshot> {
-    let tree = cmd.get_tree().await.context("i3 GET_TREE")?;
+async fn seed_snapshot(cmd: &mut I3) -> WmResult<Snapshot> {
+    let tree = cmd
+        .get_tree()
+        .await
+        .map_err(|e| WmError::ipc("i3 GET_TREE", e))?;
     let focused = walk_focused(&tree);
     let focused_id = focused.and_then(|n| WindowId::new(n.id as u64));
     let focused_class = focused
@@ -532,14 +533,14 @@ async fn seed_snapshot(cmd: &mut I3) -> Result<Snapshot> {
 async fn connect_pair() -> WmResult<(I3, I3)> {
     let cmd = I3::connect()
         .await
-        .map_err(|e| ipc_ctx(e, "connect to i3 IPC (cmd socket)"))?;
+        .map_err(|e| WmError::ipc("connect to i3 IPC (cmd socket)", e))?;
     let mut events_conn = I3::connect()
         .await
-        .map_err(|e| ipc_ctx(e, "connect to i3 IPC (events socket)"))?;
+        .map_err(|e| WmError::ipc("connect to i3 IPC (events socket)", e))?;
     events_conn
         .subscribe([Subscribe::Window, Subscribe::Workspace])
         .await
-        .map_err(|e| ipc_ctx(e, "subscribe to i3 window+workspace events"))?;
+        .map_err(|e| WmError::ipc("subscribe to i3 window+workspace events", e))?;
     Ok((cmd, events_conn))
 }
 

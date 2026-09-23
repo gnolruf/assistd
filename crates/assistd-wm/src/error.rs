@@ -1,9 +1,6 @@
 //! Typed error for the [`WindowManager`](crate::WindowManager) trait.
 
-use std::fmt::Display;
 use std::time::Duration;
-
-use crate::WindowId;
 
 /// Errors produced by [`WindowManager`](crate::WindowManager) methods.
 #[derive(thiserror::Error, Debug)]
@@ -12,9 +9,6 @@ pub enum WmError {
     /// reconnection supervisor is mid-backoff.
     #[error("compositor IPC disconnected")]
     Disconnected,
-
-    #[error("window {0:?} not found")]
-    NotFound(WindowId),
 
     /// The compositor accepted the IPC frame but rejected the command.
     #[error("compositor rejected command: {0}")]
@@ -28,14 +22,34 @@ pub enum WmError {
     #[error("backend does not support {0}")]
     Unsupported(&'static str),
 
-    /// Catch-all for unexpected backend errors.
+    /// The IPC exchange named by `op` failed in transport.
+    #[error("{op}: {source}")]
+    Ipc {
+        op: &'static str,
+        #[source]
+        source: TransportError,
+    },
+}
+
+/// Underlying failure of a compositor IPC exchange.
+#[derive(thiserror::Error, Debug)]
+pub enum TransportError {
     #[error(transparent)]
-    Ipc(#[from] anyhow::Error),
+    Io(#[from] std::io::Error),
+
+    #[cfg(feature = "sway")]
+    #[error(transparent)]
+    Sway(#[from] swayipc_async::Error),
+}
+
+#[cfg(any(feature = "i3", feature = "sway"))]
+impl WmError {
+    pub(crate) fn ipc(op: &'static str, source: impl Into<TransportError>) -> Self {
+        Self::Ipc {
+            op,
+            source: source.into(),
+        }
+    }
 }
 
 pub type WmResult<T> = std::result::Result<T, WmError>;
-
-/// Wrap a transport error with context as a [`WmError::Ipc`].
-pub fn ipc_ctx<E: Display>(err: E, ctx: &'static str) -> WmError {
-    WmError::Ipc(anyhow::anyhow!("{ctx}: {err}"))
-}

@@ -40,7 +40,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("ptt_start failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -72,7 +72,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("listen_start failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -95,7 +95,7 @@ impl AppState {
             }
             Err(e) => {
                 send_error(&tx, id, format!("listen_stop failed: {e:#}")).await;
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -239,7 +239,7 @@ impl AppState {
                     })
                     .await;
                 send_error(&tx, id, format!("ptt_stop failed: {e:#}")).await;
-                return Err(e);
+                return Err(e.into());
             }
         };
 

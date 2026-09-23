@@ -436,7 +436,6 @@ dependencies = [
 name = "assistd-wm"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "futures-util",
  "swayipc-async",

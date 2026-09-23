@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
+use assistd_voice::VoiceInputError;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
@@ -43,12 +44,12 @@ impl IpcVoiceProxy {
 
 #[async_trait]
 impl assistd_voice::VoiceInput for IpcVoiceProxy {
-    async fn start_recording(&self) -> anyhow::Result<()> {
+    async fn start_recording(&self) -> Result<(), VoiceInputError> {
         self.set_state(VoiceCaptureState::Recording);
         let req = Request::PttStart {
             id: Uuid::new_v4().to_string(),
         };
-        let mut stream = self.ipc.one_shot(req).await.map_err(anyhow::Error::from)?;
+        let mut stream = self.ipc.one_shot(req).await?;
 
         while let Some(ev) = stream.next_event().await? {
             let terminal = ev.is_terminal();
@@ -60,12 +61,12 @@ impl assistd_voice::VoiceInput for IpcVoiceProxy {
         Ok(())
     }
 
-    async fn stop_and_transcribe(&self) -> anyhow::Result<String> {
+    async fn stop_and_transcribe(&self) -> Result<String, VoiceInputError> {
         self.set_state(VoiceCaptureState::Transcribing);
         let req = Request::PttStop {
             id: Uuid::new_v4().to_string(),
         };
-        let mut stream = self.ipc.one_shot(req).await.map_err(anyhow::Error::from)?;
+        let mut stream = self.ipc.one_shot(req).await?;
         let mut transcript = String::new();
         while let Some(ev) = stream.next_event().await? {
             if let Event::Transcription { text, .. } = &ev {

@@ -10,7 +10,7 @@ name = "assistd"
 path = "src/main.rs"
 
 [features]
-default = ["daemon", "client", "chat", "tray", "tray-popup"]
+default = ["daemon", "client", "chat", "tray", "tray-popup", "i3", "sway"]
 daemon = [
     "dep:assistd-config",
     "dep:assistd-core",
@@ -29,6 +29,8 @@ daemon = [
     "dep:uuid",
 ]
 cuda = ["assistd-voice/cuda"]
+i3 = ["assistd-wm?/i3"]
+sway = ["assistd-wm?/sway"]
 client = ["dep:uuid"]
 chat = [
     "daemon",

@@ -35,7 +35,6 @@ fn hint_for(err: &WmError) -> (Hint, &'static str) {
             Hint::Check,
             "[compositor] in config.toml and that i3/sway/hyprland is running",
         ),
-        WmError::NotFound(_) => (Hint::Use, "wm list to find the right window"),
         WmError::Rejected(_) => (Hint::Try, "wm list to verify the window/workspace exists"),
         WmError::Timeout(_) => (
             Hint::Note,
@@ -45,7 +44,7 @@ fn hint_for(err: &WmError) -> (Hint, &'static str) {
             Hint::Note,
             "the active backend may not support this operation (i3 does not list outputs)",
         ),
-        WmError::Ipc(_) => (Hint::Check, "compositor connection (see daemon logs)"),
+        WmError::Ipc { .. } => (Hint::Check, "compositor connection (see daemon logs)"),
     }
 }
 

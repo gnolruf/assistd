@@ -7,6 +7,7 @@ use assistd_ipc::{PresenceState, VoiceCaptureState};
 use assistd_llm::{EchoBackend, FailedBackend, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 use assistd_memory::{ConversationStore, PersistedRole};
 use assistd_tools::{CommandRegistry, RunTool, commands::EchoCommand};
+use assistd_voice::{AudioCaptureError, ListenError, VoiceInputError, VoiceOutputError};
 use parking_lot::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -435,13 +436,13 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
 /// outcomes, used to exercise the PttStart / PttStop handlers
 /// without touching cpal or whisper.
 struct MockVoice {
-    start_result: parking_lot::Mutex<Option<anyhow::Result<()>>>,
-    stop_result: parking_lot::Mutex<Option<anyhow::Result<String>>>,
+    start_result: parking_lot::Mutex<Option<Result<(), VoiceInputError>>>,
+    stop_result: parking_lot::Mutex<Option<Result<String, VoiceInputError>>>,
     state_tx: tokio::sync::watch::Sender<assistd_voice::VoiceCaptureState>,
 }
 
 impl MockVoice {
-    fn new(start: anyhow::Result<()>, stop: anyhow::Result<String>) -> Self {
+    fn new(start: Result<(), VoiceInputError>, stop: Result<String, VoiceInputError>) -> Self {
         let (state_tx, _) = tokio::sync::watch::channel(assistd_voice::VoiceCaptureState::Idle);
         Self {
             start_result: parking_lot::Mutex::new(Some(start)),
@@ -453,10 +454,10 @@ impl MockVoice {
 
 #[async_trait::async_trait]
 impl assistd_voice::VoiceInput for MockVoice {
-    async fn start_recording(&self) -> anyhow::Result<()> {
+    async fn start_recording(&self) -> Result<(), VoiceInputError> {
         self.start_result.lock().take().unwrap_or_else(|| Ok(()))
     }
-    async fn stop_and_transcribe(&self) -> anyhow::Result<String> {
+    async fn stop_and_transcribe(&self) -> Result<String, VoiceInputError> {
         self.stop_result
             .lock()
             .take()
@@ -493,7 +494,7 @@ async fn dispatch_ptt_start_emits_recording_then_done() {
 #[tokio::test]
 async fn dispatch_ptt_start_error_emits_error_event() {
     let voice = Arc::new(MockVoice::new(
-        Err(anyhow::anyhow!("no mic")),
+        Err(AudioCaptureError::NoDefaultDevice.into()),
         Ok(String::new()),
     ));
     let state = state_with_voice(Arc::new(EchoBackend::new()), voice);
@@ -503,14 +504,14 @@ async fn dispatch_ptt_start_error_emits_error_event() {
         .dispatch(Request::PttStart { id: "p2".into() }, tx)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("no mic"));
+    assert!(err.to_string().contains("no default input device"));
 
     let events = collect_events(rx).await;
     assert_eq!(events.len(), 1);
     match &events[0] {
         Event::Error { id, message } => {
             assert_eq!(id, "p2");
-            assert!(message.contains("no mic"));
+            assert!(message.contains("no default input device"));
         }
         other => panic!("expected Error, got {other:?}"),
     }
@@ -609,15 +610,15 @@ impl MockListener {
 
 #[async_trait::async_trait]
 impl assistd_voice::ContinuousListener for MockListener {
-    async fn start(&self) -> anyhow::Result<()> {
+    async fn start(&self) -> Result<(), ListenError> {
         if self.start_fails.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("mock listener start failed");
+            return Err(ListenError::Disabled);
         }
         self.active.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.state_tx.send(true);
         Ok(())
     }
-    async fn stop(&self) -> anyhow::Result<()> {
+    async fn stop(&self) -> Result<(), ListenError> {
         self.active
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = self.state_tx.send(false);
@@ -734,7 +735,7 @@ async fn dispatch_listen_start_error_propagates() {
         .unwrap_err();
     let events = collect_events(rx).await;
     assert!(
-        matches!(events.last(), Some(Event::Error { message, .. }) if message.contains("mock listener start failed"))
+        matches!(events.last(), Some(Event::Error { message, .. }) if message.contains("continuous listening is not enabled"))
     );
 }
 
@@ -760,7 +761,7 @@ async fn ptt_start_rejected_while_listening_active() {
 async fn dispatch_ptt_stop_error_emits_error_event() {
     let voice = Arc::new(MockVoice::new(
         Ok(()),
-        Err(anyhow::anyhow!("device disappeared")),
+        Err(AudioCaptureError::DeviceError("device disappeared".into()).into()),
     ));
     let state = state_with_voice(Arc::new(EchoBackend::new()), voice);
     let (tx, rx) = mpsc::channel::<Event>(8);
@@ -823,11 +824,11 @@ impl MockSpeechRecorder {
 
 #[async_trait::async_trait]
 impl assistd_voice::VoiceOutput for MockSpeechRecorder {
-    async fn speak(&self, text: String) -> anyhow::Result<()> {
+    async fn speak(&self, text: String) -> Result<(), VoiceOutputError> {
         self.calls.lock().push(text);
         Ok(())
     }
-    async fn wait_idle(&self) -> anyhow::Result<()> {
+    async fn wait_idle(&self) -> Result<(), VoiceOutputError> {
         self.wait_idle_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
