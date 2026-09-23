@@ -1,10 +1,3 @@
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::print_stdout,
-    clippy::print_stderr
-)]
-
 //! Integration tests for the streaming chat client.
 //!
 //! These tests live behind the `test-support` feature because they rely on a

@@ -313,14 +313,12 @@ dependencies = [
 name = "assistd-llm"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "assistd-config",
  "assistd-core",
  "assistd-ipc",
  "assistd-tools",
  "async-trait",
  "base64 0.23.1",
- "libc",
  "parking_lot",
  "reqwest",
  "rustix 1.1.4",

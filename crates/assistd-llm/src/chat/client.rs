@@ -629,26 +629,12 @@ impl LlmBackend for LlamaChatClient {
             drop(tx);
             outcome
         };
-        let collect = async {
-            let mut buf = String::new();
-            while let Some(ev) = rx.recv().await {
-                if let LlmEvent::Delta { text } = ev {
-                    buf.push_str(&text);
-                }
-            }
-            buf
-        };
-        let (outcome, buf) = tokio::join!(stream, collect);
+        let drain = async { while rx.recv().await.is_some() {} };
+        let (outcome, ()) = tokio::join!(stream, drain);
         match outcome {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)
-            | StreamOutcome::ClientDisconnected(accum) => {
-                if !accum.text.is_empty() {
-                    Ok(accum.text)
-                } else {
-                    Ok(buf)
-                }
-            }
+            | StreamOutcome::ClientDisconnected(accum) => Ok(accum.text),
             StreamOutcome::PreEmitError(e) => Err(LlmError::Chat(e)),
             StreamOutcome::ServerRestart { .. } => Err(LlmError::ServerRestarting(
                 "llama-server crashed during complete_oneshot".into(),

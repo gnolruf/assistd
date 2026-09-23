@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::ExitStatus;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -15,9 +14,6 @@ pub enum LlamaServerError {
         #[source]
         source: std::io::Error,
     },
-
-    #[error("llama-server exited before reaching ready: {status}")]
-    ExitedBeforeReady { status: ExitStatus },
 
     #[error("llama-server did not become ready within {timeout:?}")]
     HealthTimeout { timeout: Duration },
