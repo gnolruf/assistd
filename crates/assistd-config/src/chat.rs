@@ -28,7 +28,10 @@ pub struct ChatConfig {
     pub temperature: f32,
     /// Maximum tokens the model may emit in a single streamed response.
     pub max_response_tokens: NonZeroU32,
-    /// HTTP request timeout for a single chat call, in seconds.
+    /// Deadline, in seconds, for a streamed chat call's first byte, which
+    /// covers prompt prefill. Once streaming starts, only
+    /// `timeouts.stream_inactivity_secs` applies, so generation length is
+    /// unbounded. Also caps the whole non-streaming summarization call.
     pub request_timeout_secs: NonZeroU64,
     /// Sampling temperature for the (non-streaming) summarization call.
     /// Lower than `temperature` by default because summaries should be

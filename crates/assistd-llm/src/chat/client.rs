@@ -16,7 +16,7 @@ use assistd_tools::Attachment;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{debug, warn};
 
 use super::conversation::{Conversation, Summarizer, ToolCallRecord};
@@ -62,7 +62,6 @@ impl LlamaChatClient {
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(chat.request_timeout_secs.get()))
             .build()?;
         let base_url = format!("http://{}:{}", server.host, server.port);
         let conv = Conversation::new(chat.system_prompt.clone());
@@ -150,13 +149,14 @@ impl LlamaChatClient {
             stage = "llm_request_sent",
             "voice latency stage"
         );
-        let mut response = match self.send_request(body, pid_at_request).await {
+        let first_byte_by = Instant::now() + self.request_timeout();
+        let mut response = match self.send_request(body, first_byte_by, pid_at_request).await {
             Ok(response) => response,
             Err(outcome) => return outcome,
         };
         let mut accum = StreamAccum::default();
         let saw_done = match self
-            .read_stream(&mut response, &mut accum, tx, pid_at_request)
+            .read_stream(&mut response, &mut accum, first_byte_by, tx, pid_at_request)
             .await
         {
             Ok(saw_done) => saw_done,
@@ -185,30 +185,42 @@ impl LlamaChatClient {
         StreamOutcome::Ok(Box::new(accum))
     }
 
+    fn request_timeout(&self) -> Duration {
+        Duration::from_secs(self.chat.request_timeout_secs.get())
+    }
+
     /// POST the request and return the response once it is known to be
     /// a success from a server that has not restarted underneath us.
+    /// Errors if the response headers have not arrived by `first_byte_by`.
     async fn send_request(
         &self,
         body: Vec<u8>,
+        first_byte_by: Instant,
         pid_at_request: Option<u32>,
     ) -> Result<reqwest::Response, StreamOutcome> {
         let url = format!("{}/v1/chat/completions", self.base_url);
-        let mut response = match self
+        let send = self
             .client
             .post(&url)
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json")
             .body(body)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(e) => {
+            .send();
+        let mut response = match timeout_at(first_byte_by, send).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
                 return Err(self.fail(
                     StreamAccum::default(),
                     ChatClientError::Http(e),
                     pid_at_request,
                 ));
+            }
+            Err(_) => {
+                let err = ChatClientError::Sse(format!(
+                    "no response headers within {}s",
+                    self.request_timeout().as_secs()
+                ));
+                return Err(self.fail(StreamAccum::default(), err, pid_at_request));
             }
         };
         if self.looks_like_server_crash(pid_at_request) {
@@ -231,21 +243,31 @@ impl LlamaChatClient {
     }
 
     /// Drive the SSE stream until `[DONE]` or EOF, forwarding events
-    /// through `tx`. Returns whether `[DONE]` was seen.
+    /// through `tx`. Returns whether `[DONE]` was seen. The first chunk
+    /// must arrive by `first_byte_by`; after that, each gap between
+    /// chunks is bounded by `stream_inactivity_secs`. The stream as a
+    /// whole has no deadline, so long generations are never truncated.
     async fn read_stream(
         &self,
         response: &mut reqwest::Response,
         accum: &mut StreamAccum,
+        first_byte_by: Instant,
         tx: &mpsc::Sender<LlmEvent>,
         pid_at_request: Option<u32>,
     ) -> Result<bool, StreamOutcome> {
         let mut reader = SseLineReader::new();
-        let first_byte = Duration::from_secs(self.chat.request_timeout_secs.get());
         let inter_chunk = Duration::from_secs(self.timeouts.stream_inactivity_secs);
         let mut saw_bytes = false;
         loop {
-            let deadline = if saw_bytes { inter_chunk } else { first_byte };
-            let chunk = match timeout(deadline, response.chunk()).await {
+            let (deadline, next) = if saw_bytes {
+                (inter_chunk, timeout(inter_chunk, response.chunk()).await)
+            } else {
+                (
+                    self.request_timeout(),
+                    timeout_at(first_byte_by, response.chunk()).await,
+                )
+            };
+            let chunk = match next {
                 Ok(Ok(Some(chunk))) => chunk,
                 Ok(Ok(None)) => return Ok(false),
                 Ok(Err(e)) => {
@@ -732,7 +754,13 @@ impl Summarizer for LlamaChatClient {
             chat_template_kwargs: None,
         };
 
-        let mut response = self.client.post(&url).json(&payload).send().await?;
+        let mut response = self
+            .client
+            .post(&url)
+            .timeout(self.request_timeout())
+            .json(&payload)
+            .send()
+            .await?;
         let status = response.status();
         if !status.is_success() {
             let body = read_body_capped(&mut response, ERROR_BODY_CAP).await;
