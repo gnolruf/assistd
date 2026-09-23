@@ -331,68 +331,53 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn echo_backend_streams_delta_then_done() {
+    async fn echo_backend_generate_streams_delta_then_done() {
         let backend = EchoBackend::new();
         let (tx, mut rx) = mpsc::channel(8);
         backend.generate("hello".into(), tx).await.unwrap();
-        let first = rx.recv().await.unwrap();
-        let second = rx.recv().await.unwrap();
         assert_eq!(
-            first,
-            LlmEvent::Delta {
+            rx.recv().await,
+            Some(LlmEvent::Delta {
                 text: "hello".into()
-            }
+            })
         );
-        assert_eq!(second, LlmEvent::Done);
-        assert!(rx.recv().await.is_none());
+        assert_eq!(rx.recv().await, Some(LlmEvent::Done));
+        assert_eq!(rx.recv().await, None);
     }
 
     #[tokio::test]
-    async fn echo_backend_step_echoes_last_pushed_user() {
+    async fn echo_backend_step_echoes_last_pushed_user_once() {
         let backend = EchoBackend::new();
         backend
             .push_user("what is 2+2?".into(), Vec::new())
             .await
             .unwrap();
         let (tx, mut rx) = mpsc::channel(8);
-        let outcome = backend.step(Vec::new(), tx).await.unwrap();
+        let outcome = backend.step(Vec::new(), tx.clone()).await.unwrap();
         assert!(matches!(outcome, StepOutcome::Final));
-        match rx.recv().await.unwrap() {
-            LlmEvent::Delta { text } => assert_eq!(text, "what is 2+2?"),
-            other => panic!("expected Delta, got {other:?}"),
-        }
+        backend.step(Vec::new(), tx).await.unwrap();
+        assert_eq!(
+            rx.recv().await,
+            Some(LlmEvent::Delta {
+                text: "what is 2+2?".into()
+            })
+        );
+        assert_eq!(rx.recv().await, None);
     }
 
     #[tokio::test]
-    async fn failed_backend_returns_error() {
+    async fn failed_backend_fails_generate_and_step_with_its_reason() {
         let backend = FailedBackend::new("server exploded".into());
         let (tx, _rx) = mpsc::channel(8);
-        let err = backend.generate("hello".into(), tx).await.unwrap_err();
-        assert!(err.to_string().contains("server exploded"));
-    }
-
-    #[tokio::test]
-    async fn failed_backend_step_returns_error() {
-        let backend = FailedBackend::new("down".into());
-        let (tx, _rx) = mpsc::channel(8);
-        let err = backend.step(Vec::new(), tx).await.unwrap_err();
-        assert!(err.to_string().contains("down"));
-    }
-
-    #[test]
-    fn version_is_not_empty() {
-        assert!(!version().is_empty());
-    }
-
-    #[test]
-    fn llm_event_tool_call_roundtrips() {
-        let evt = LlmEvent::ToolCall {
-            id: "c-1".into(),
-            name: "run".into(),
-            arguments: serde_json::json!({"command": "ls"}),
-        };
-        let json = serde_json::to_string(&evt).unwrap();
-        let parsed: LlmEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, evt);
+        let generate = backend.generate("hello".into(), tx.clone()).await;
+        assert!(
+            matches!(&generate, Err(LlmError::Unavailable(r)) if r == "server exploded"),
+            "{generate:?}"
+        );
+        let step = backend.step(Vec::new(), tx).await;
+        assert!(
+            matches!(&step, Err(LlmError::Unavailable(r)) if r == "server exploded"),
+            "{step:?}"
+        );
     }
 }

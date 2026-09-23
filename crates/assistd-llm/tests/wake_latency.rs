@@ -3,8 +3,8 @@
 //! full daemon stack: Unix socket → AppState → ensure_active() →
 //! LlamaChatClient → fake_llama_server. Thresholds are deliberately
 //! generous so transient CI jitter doesn't cause flakes; the goal is
-//! to fail loudly on a 10× regression. Actual durations are printed
-//! via `eprintln!` so logs surface drift over time.
+//! to fail loudly on a 10× regression. Actual durations are logged at
+//! `info` (set `RUST_LOG`) so drift can be tracked over time.
 //!
 //! Run with: `cargo test -p assistd-llm --features test-support --test wake_latency`
 
@@ -161,10 +161,10 @@ async fn build_running_daemon(
     (m, sock_path, stop_tx, server, dir)
 }
 
-/// Send a Query to the daemon and return (latency to first Delta,
-/// total event count, terminal event). The connection is dropped at
-/// the end so tests don't accumulate open sockets.
-async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Duration, usize, Event) {
+/// Send a Query to the daemon and return the latency to its first Delta
+/// and its terminal event. The connection is dropped at the end so tests
+/// don't accumulate open sockets.
+async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Duration, Event) {
     let stream = UnixStream::connect(sock_path).await.unwrap();
     let (read, mut write) = stream.into_split();
     let req = Request::Query {
@@ -180,7 +180,6 @@ async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Durati
     write.shutdown().await.unwrap();
 
     let mut reader = BufReader::new(read);
-    let mut count = 0usize;
     let mut first_delta_at: Option<Duration> = None;
     let mut terminal: Option<Event> = None;
     loop {
@@ -189,7 +188,6 @@ async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Durati
         if n == 0 {
             break;
         }
-        count += 1;
         let e: Event = serde_json::from_str(line.trim()).unwrap();
         if matches!(e, Event::Delta { .. }) && first_delta_at.is_none() {
             first_delta_at = Some(t0.elapsed());
@@ -201,7 +199,7 @@ async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Durati
         }
     }
     let latency = first_delta_at.expect("never received a Delta");
-    (latency, count, terminal.expect("no terminal event"))
+    (latency, terminal.expect("no terminal event"))
 }
 
 #[tokio::test]
@@ -212,12 +210,9 @@ async fn active_query_baseline_under_200ms() {
     let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
     assert_eq!(m.state(), PresenceState::Active);
 
-    let (latency, _count, terminal) = measure_query_latency(&sock_path, "active-baseline").await;
-    eprintln!("active baseline first-Delta latency = {latency:?}");
-    assert!(
-        matches!(terminal, Event::Done { .. }),
-        "expected terminal Done"
-    );
+    let (latency, terminal) = measure_query_latency(&sock_path, "active-baseline").await;
+    tracing::info!(?latency, "active baseline first-Delta latency");
+    assert!(matches!(terminal, Event::Done { .. }), "{terminal:?}");
     assert!(
         latency < Duration::from_millis(200),
         "active baseline regressed: first Delta took {latency:?}, expected <200ms"
@@ -238,12 +233,9 @@ async fn wake_from_drowsy_first_delta_under_1s() {
     m.drowse().await.expect("drowse");
     assert_eq!(m.state(), PresenceState::Drowsy);
 
-    let (latency, _count, terminal) = measure_query_latency(&sock_path, "wake-from-drowsy").await;
-    eprintln!("wake-from-Drowsy first-Delta latency = {latency:?}");
-    assert!(
-        matches!(terminal, Event::Done { .. }),
-        "expected terminal Done"
-    );
+    let (latency, terminal) = measure_query_latency(&sock_path, "wake-from-drowsy").await;
+    tracing::info!(?latency, "wake-from-Drowsy first-Delta latency");
+    assert!(matches!(terminal, Event::Done { .. }), "{terminal:?}");
     assert!(
         latency < Duration::from_secs(1),
         "wake-from-Drowsy regressed: first Delta took {latency:?}, expected <1s"
@@ -266,12 +258,9 @@ async fn wake_from_sleeping_first_delta_under_5s() {
     m.sleep().await.expect("sleep");
     assert_eq!(m.state(), PresenceState::Sleeping);
 
-    let (latency, _count, terminal) = measure_query_latency(&sock_path, "wake-from-sleeping").await;
-    eprintln!("wake-from-Sleeping first-Delta latency = {latency:?}");
-    assert!(
-        matches!(terminal, Event::Done { .. }),
-        "expected terminal Done"
-    );
+    let (latency, terminal) = measure_query_latency(&sock_path, "wake-from-sleeping").await;
+    tracing::info!(?latency, "wake-from-Sleeping first-Delta latency");
+    assert!(matches!(terminal, Event::Done { .. }), "{terminal:?}");
     assert!(
         latency < Duration::from_secs(5),
         "wake-from-Sleeping regressed: first Delta took {latency:?}, expected <5s"

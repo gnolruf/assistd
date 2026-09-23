@@ -167,94 +167,61 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn detects_modalities_vision_true() {
-        let body = json!({"modalities": {"vision": true}, "total_slots": 1});
-        assert!(parse_vision_supported(&body));
+    fn vision_requires_modalities_vision_true() {
+        let cases = [
+            (
+                json!({"modalities": {"vision": true}, "total_slots": 1}),
+                true,
+            ),
+            (json!({"modalities": {"vision": false}}), false),
+            (json!({"modalities": {"vision": "true"}}), false),
+            (json!({"modalities": {"audio": true}}), false),
+            (json!({"model_path": "/some/model.gguf"}), false),
+            (json!({}), false),
+        ];
+        for (body, expected) in cases {
+            assert_eq!(parse_vision_supported(&body), expected, "{body}");
+        }
     }
 
     #[test]
-    fn modalities_vision_false_does_not_promote_to_true() {
-        let body = json!({"modalities": {"vision": false}});
-        assert!(!parse_vision_supported(&body));
+    fn model_id_comes_from_the_first_string_field_present() {
+        let cases = [
+            (
+                json!({"model": "bartowski/Qwen3-14B-GGUF:Q4_K_M"}),
+                Some("bartowski/Qwen3-14B-GGUF:Q4_K_M"),
+            ),
+            (
+                json!({"model_path": "/var/cache/llm/qwen-vl.gguf"}),
+                Some("/var/cache/llm/qwen-vl.gguf"),
+            ),
+            (
+                json!({"default_generation_settings": {"model": "nested/model"}}),
+                Some("nested/model"),
+            ),
+            (json!({"total_slots": 1}), None),
+            (json!({"model": 42}), None),
+        ];
+        for (body, expected) in cases {
+            assert_eq!(parse_model_id(&body).as_deref(), expected, "{body}");
+        }
     }
 
     #[test]
-    fn ignores_non_bool_modalities_vision() {
-        let body = json!({"modalities": {"vision": "true"}});
-        assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn defaults_false_when_modalities_absent() {
-        let body = json!({"total_slots": 1, "model_path": "/some/model.gguf"});
-        assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn defaults_false_when_modalities_lacks_vision_key() {
-        let body = json!({"modalities": {"audio": true}});
-        assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn empty_object_is_not_vision_supported() {
-        let body = json!({});
-        assert!(!parse_vision_supported(&body));
-    }
-
-    #[test]
-    fn parses_top_level_model_field() {
-        let body = json!({"model": "bartowski/Qwen3-14B-GGUF:Q4_K_M"});
-        assert_eq!(
-            parse_model_id(&body).as_deref(),
-            Some("bartowski/Qwen3-14B-GGUF:Q4_K_M")
-        );
-    }
-
-    #[test]
-    fn parses_top_level_model_path_when_model_absent() {
-        let body = json!({"model_path": "/var/cache/llm/qwen-vl.gguf"});
-        assert_eq!(
-            parse_model_id(&body).as_deref(),
-            Some("/var/cache/llm/qwen-vl.gguf")
-        );
-    }
-
-    #[test]
-    fn parses_nested_default_generation_settings_model() {
-        let body = json!({
-            "default_generation_settings": {"model": "nested/model"},
-        });
-        assert_eq!(parse_model_id(&body).as_deref(), Some("nested/model"));
-    }
-
-    #[test]
-    fn returns_none_when_no_model_field_present() {
-        let body = json!({"total_slots": 1});
-        assert_eq!(parse_model_id(&body), None);
-    }
-
-    #[test]
-    fn ignores_non_string_model_value() {
-        let body = json!({"model": 42});
-        assert_eq!(parse_model_id(&body), None);
-    }
-
-    #[test]
-    fn detects_router_props_by_role_field() {
-        let body = json!({"role": "router", "max_instances": 4, "model_path": "none"});
-        assert!(is_router_props(&body));
-    }
-
-    #[test]
-    fn non_router_props_lack_router_role() {
-        let body = json!({"model": null, "model_path": "/some/model.gguf", "modalities": {"vision": true}});
-        assert!(!is_router_props(&body));
-    }
-
-    #[test]
-    fn non_router_props_with_unrelated_role_value() {
-        let body = json!({"role": "worker", "model_path": "/x.gguf"});
-        assert!(!is_router_props(&body));
+    fn router_props_are_identified_by_role() {
+        let cases = [
+            (
+                json!({"role": "router", "max_instances": 4, "model_path": "none"}),
+                true,
+            ),
+            (
+                json!({"model": null, "model_path": "/some/model.gguf", "modalities": {"vision": true}}),
+                false,
+            ),
+            (json!({"role": "worker", "model_path": "/x.gguf"}), false),
+        ];
+        for (body, expected) in cases {
+            assert_eq!(is_router_props(&body), expected, "{body}");
+        }
     }
 }

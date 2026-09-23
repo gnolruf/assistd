@@ -10,7 +10,7 @@ mod common;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig};
-use assistd_llm::{LlamaService, ReadyState};
+use assistd_llm::{LlamaServerError, LlamaService, ReadyState};
 use common::FakeLlama;
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
@@ -84,6 +84,7 @@ async fn brings_up_fake_server_and_reports_ready() {
     let port = grab_port().await;
     let (service, shutdown_tx) = start_service(&fake, port).await;
 
+    assert_eq!(service.state(), ReadyState::Ready);
     assert!(service.is_ready());
     assert!(service.pid().is_some());
 
@@ -133,10 +134,9 @@ async fn enters_degraded_after_five_failures() {
     let elapsed = start_at.elapsed();
 
     let err = result.err().expect("start should fail");
-    let msg = format!("{err}");
     assert!(
-        msg.contains("startup failed") || msg.contains("after"),
-        "unexpected error message: {msg}"
+        matches!(err, LlamaServerError::StartupFailed { attempts: 5 }),
+        "{err:?}"
     );
     // Backoff budget: 1 + 2 + 4 + 8 = 15s of sleeps between 4 retries. Add
     // generous slack for scheduler jitter + spawn time.
@@ -168,11 +168,10 @@ async fn respects_shutdown_during_backoff() {
     let result = LlamaService::start(server_spec(&fake, port), model_spec(), shutdown_rx).await;
     let elapsed = start_at.elapsed();
 
-    // start() should either error (ShutdownDuringHealth) or return quickly.
+    let err = result.err().expect("start should fail once shut down");
     assert!(
-        result.is_err(),
-        "expected an error, got {:?}",
-        result.is_ok()
+        matches!(err, LlamaServerError::ShutdownDuringHealth),
+        "{err:?}"
     );
     assert!(
         elapsed < Duration::from_secs(10),
@@ -204,16 +203,4 @@ async fn shutdown_kills_running_child() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("fake child {pid} still alive after shutdown");
-}
-
-#[tokio::test]
-async fn reaches_ready_even_when_state_transitions() {
-    let fake = FakeLlama::new("normal");
-    let port = grab_port().await;
-    let (service, shutdown_tx) = start_service(&fake, port).await;
-
-    assert_eq!(service.state(), ReadyState::Ready);
-
-    let _ = shutdown_tx.send(true);
-    service.shutdown().await.unwrap();
 }
