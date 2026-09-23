@@ -666,3 +666,12 @@ fn dismissal_resets_after_buffer_clears() {
     type_str(&mut app, "/");
     assert!(!app.slash_suggestions().is_empty());
 }
+
+#[test]
+fn longest_common_prefix_stops_at_char_boundaries() {
+    assert_eq!(longest_common_prefix(&["é1.txt", "è2.txt"]), "");
+    assert_eq!(longest_common_prefix(&["日本a", "日本b"]), "日本");
+    assert_eq!(longest_common_prefix(&["日本", "日本語"]), "日本");
+    assert_eq!(longest_common_prefix(&["abc"]), "abc");
+    assert_eq!(longest_common_prefix(&[]), "");
+}

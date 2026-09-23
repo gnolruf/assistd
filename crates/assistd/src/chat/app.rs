@@ -1443,17 +1443,16 @@ fn expand_tilde(p: &str) -> PathBuf {
 }
 
 fn longest_common_prefix<'a>(xs: &[&'a str]) -> &'a str {
-    let Some(first) = xs.first() else { return "" };
-    let mut end = first.len();
-    for s in &xs[1..] {
-        end = end.min(s.len());
-        while end > 0 && first.as_bytes()[..end] != s.as_bytes()[..end] {
-            end -= 1;
-        }
-        if end == 0 {
-            return "";
-        }
-    }
+    let Some((first, rest)) = xs.split_first() else {
+        return "";
+    };
+    let end = rest.iter().fold(first.len(), |end, s| {
+        first[..end]
+            .char_indices()
+            .zip(s.chars())
+            .find(|((_, a), b)| a != b)
+            .map_or(end.min(s.len()), |((i, _), _)| i)
+    });
     &first[..end]
 }
 

@@ -55,19 +55,23 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
 fn render_branch_picker_modal(frame: &mut Frame<'_>, area: Rect, picker: &BranchPickerModal) {
     let width = (area.width.saturating_mul(4) / 5).clamp(50, 120);
     let max_height = area.height.saturating_sub(2);
     let desired = picker.entries.len() as u16 + 4;
     let height = desired.min(max_height).max(6);
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    let modal_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
+    let modal_area = centered_rect(area, width, height);
 
     frame.render_widget(Clear, modal_area);
     let block = Block::default()
@@ -237,14 +241,7 @@ fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &Confirma
     let height = (body_rows + 3)
         .max(6)
         .min(area.height.saturating_sub(2) as usize) as u16;
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    let modal_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
+    let modal_area = centered_rect(area, width, height);
 
     frame.render_widget(Clear, modal_area);
     let block = Block::default()
@@ -664,6 +661,26 @@ mod tests {
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn centered_rect_fits_inside_a_narrow_area() {
+        let area = Rect::new(3, 2, 20, 5);
+        assert_eq!(centered_rect(area, 40, 8), area);
+        assert_eq!(centered_rect(area, 10, 3), Rect::new(8, 3, 10, 3));
+    }
+
+    #[test]
+    fn branch_picker_renders_in_a_pane_narrower_than_its_floor() {
+        let picker = BranchPickerModal {
+            entries: Vec::new(),
+            selected: 0,
+        };
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 4))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| render_branch_picker_modal(frame, frame.area(), &picker))
+            .expect("draw");
     }
 
     #[test]
