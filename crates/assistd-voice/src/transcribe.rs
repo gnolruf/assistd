@@ -319,109 +319,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_uses_primary_when_busy_probe_idle() {
-        let primary = StubTranscriber::on_gpu("GPU");
-        let cpu = StubTranscriber::with_text("CPU");
-        let probe = ScriptedProbe::new();
-        let q = QueuedTranscriber::new(
-            primary.clone() as Arc<dyn Transcriber>,
-            cpu_factory_for(cpu.clone()),
-            probe,
-            default_cfg(),
-        );
-        let text = q.transcribe(&[0i16; 16]).await.unwrap();
-        assert_eq!(text, "GPU");
-        assert_eq!(primary.calls(), 1);
-        assert_eq!(cpu.calls(), 0);
-    }
-
-    #[tokio::test]
-    async fn queued_falls_back_to_cpu_on_timeout() {
-        let primary = StubTranscriber::on_gpu("GPU");
-        let cpu = StubTranscriber::with_text("CPU");
-        let probe = ScriptedProbe::new();
-        probe.set_idle(false);
-        let q = QueuedTranscriber::new(
-            primary.clone() as Arc<dyn Transcriber>,
-            cpu_factory_for(cpu.clone()),
-            probe,
-            default_cfg(),
-        );
-        let text = q.transcribe(&[0i16; 16]).await.unwrap();
-        assert_eq!(text, "CPU");
-        assert_eq!(primary.calls(), 0);
-        assert_eq!(cpu.calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn queued_falls_back_to_cpu_on_foreign_gpu() {
-        let primary = StubTranscriber::on_gpu("GPU");
-        let cpu = StubTranscriber::with_text("CPU");
-        let probe = ScriptedProbe::new();
-        probe.set_foreign(true);
-        let q = QueuedTranscriber::new(
-            primary.clone() as Arc<dyn Transcriber>,
-            cpu_factory_for(cpu.clone()),
-            probe,
-            default_cfg(),
-        );
-        let text = q.transcribe(&[0i16; 16]).await.unwrap();
-        assert_eq!(text, "CPU");
-        assert_eq!(cpu.calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn queued_falls_back_to_cpu_when_presence_not_active() {
-        let primary = StubTranscriber::on_gpu("GPU");
-        let cpu = StubTranscriber::with_text("CPU");
-        let probe = ScriptedProbe::new();
-        probe.set_active(false);
-        let q = QueuedTranscriber::new(
-            primary.clone() as Arc<dyn Transcriber>,
-            cpu_factory_for(cpu.clone()),
-            probe,
-            default_cfg(),
-        );
-        let text = q.transcribe(&[0i16; 16]).await.unwrap();
-        assert_eq!(text, "CPU");
-        assert_eq!(cpu.calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn queued_skips_queue_when_primary_is_cpu() {
-        let primary = StubTranscriber::with_text("CPU-primary");
-        let cpu = StubTranscriber::with_text("CPU-fallback");
-        let probe = ScriptedProbe::new();
-        probe.set_idle(false); // would normally force fallback
-        let q = QueuedTranscriber::new(
-            primary.clone() as Arc<dyn Transcriber>,
-            cpu_factory_for(cpu.clone()),
-            probe,
-            default_cfg(),
-        );
-        let text = q.transcribe(&[0i16; 16]).await.unwrap();
-        assert_eq!(text, "CPU-primary");
-        assert_eq!(cpu.calls(), 0);
-    }
-
-    #[tokio::test]
-    async fn queued_skips_queue_when_fallback_disabled() {
-        let primary = StubTranscriber::on_gpu("GPU");
-        let cpu = StubTranscriber::with_text("CPU");
-        let probe = ScriptedProbe::new();
-        probe.set_idle(false);
-        let q = QueuedTranscriber::new(
-            primary.clone() as Arc<dyn Transcriber>,
-            cpu_factory_for(cpu.clone()),
-            probe,
-            QueueConfig {
-                gpu_busy_timeout_ms: 50,
-                cpu_fallback_enabled: false,
+    async fn queued_routes_between_primary_and_cpu_fallback() {
+        #[derive(Clone, Copy)]
+        struct Case {
+            name: &'static str,
+            primary_gpu: bool,
+            idle: bool,
+            foreign: bool,
+            active: bool,
+            fallback_enabled: bool,
+            uses_cpu: bool,
+        }
+        let base = Case {
+            name: "gpu idle",
+            primary_gpu: true,
+            idle: true,
+            foreign: false,
+            active: true,
+            fallback_enabled: true,
+            uses_cpu: false,
+        };
+        for c in [
+            base,
+            Case {
+                name: "llm busy past timeout",
+                idle: false,
+                uses_cpu: true,
+                ..base
             },
-        );
-        let text = q.transcribe(&[0i16; 16]).await.unwrap();
-        assert_eq!(text, "GPU");
-        assert_eq!(cpu.calls(), 0);
+            Case {
+                name: "foreign process holds vram",
+                foreign: true,
+                uses_cpu: true,
+                ..base
+            },
+            Case {
+                name: "presence not active",
+                active: false,
+                uses_cpu: true,
+                ..base
+            },
+            Case {
+                name: "cpu primary skips the queue",
+                primary_gpu: false,
+                idle: false,
+                ..base
+            },
+            Case {
+                name: "fallback disabled",
+                idle: false,
+                fallback_enabled: false,
+                ..base
+            },
+        ] {
+            let primary = if c.primary_gpu {
+                StubTranscriber::on_gpu("primary")
+            } else {
+                StubTranscriber::with_text("primary")
+            };
+            let cpu = StubTranscriber::with_text("cpu");
+            let probe = ScriptedProbe::new();
+            probe.set_idle(c.idle);
+            probe.set_foreign(c.foreign);
+            probe.set_active(c.active);
+            let q = QueuedTranscriber::new(
+                primary.clone(),
+                cpu_factory_for(cpu.clone()),
+                probe,
+                QueueConfig {
+                    cpu_fallback_enabled: c.fallback_enabled,
+                    ..default_cfg()
+                },
+            );
+            let text = q.transcribe(&[0i16; 16]).await.unwrap();
+            let (expected, primary_calls, cpu_calls) = if c.uses_cpu {
+                ("cpu", 0, 1)
+            } else {
+                ("primary", 1, 0)
+            };
+            assert_eq!(text, expected, "{}", c.name);
+            assert_eq!(primary.calls(), primary_calls, "{}: primary calls", c.name);
+            assert_eq!(cpu.calls(), cpu_calls, "{}: cpu calls", c.name);
+        }
     }
 
     struct GatedTranscriber {
@@ -481,21 +460,6 @@ mod tests {
         release.notify_one();
         let text = handle.await.unwrap().unwrap();
         assert_eq!(text, "CPU");
-
-        for _ in 0..20 {
-            if *rx.borrow() == VoiceCaptureState::Idle {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!("state never returned to Idle, current = {:?}", *rx.borrow());
-    }
-
-    #[tokio::test]
-    async fn null_busy_probe_reports_idle() {
-        let probe = NullBusyProbe;
-        assert!(probe.wait_until_llm_idle(Duration::from_millis(1)).await);
-        assert!(!probe.foreign_gpu_busy());
-        assert!(probe.presence_active());
+        assert_eq!(*rx.borrow(), VoiceCaptureState::Idle);
     }
 }

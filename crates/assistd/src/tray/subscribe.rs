@@ -186,34 +186,39 @@ mod tests {
         let f = subscribe_filter();
         for k in [
             EventKind::Delta,
+            EventKind::LastDelta,
+            EventKind::ReasoningDelta,
             EventKind::ToolCall,
+            EventKind::ToolResult,
             EventKind::Done,
             EventKind::Error,
             EventKind::Presence,
             EventKind::ListenState,
+            EventKind::SpeakingState,
         ] {
             assert!(f.kinds.contains(&k), "filter missing {k:?}");
         }
-        assert!(f.kinds.contains(&EventKind::LastDelta));
-        assert!(f.kinds.contains(&EventKind::ToolResult));
-        assert!(f.kinds.contains(&EventKind::SpeakingState));
     }
 
     #[test]
-    fn backoff_matches_spec_sequence() {
-        let expected = [1, 2, 4, 8, 16, 32, 60, 60, 60];
-        for (i, want) in expected.iter().enumerate() {
+    fn backoff_doubles_then_caps_at_a_minute() {
+        for (attempt, want) in [
+            (0, 1),
+            (1, 2),
+            (2, 4),
+            (3, 8),
+            (4, 16),
+            (5, 32),
+            (6, 60),
+            (8, 60),
+            (64, 60),
+            (u32::MAX, 60),
+        ] {
             assert_eq!(
-                backoff_delay(i as u32),
-                Duration::from_secs(*want),
-                "attempt {i}"
+                backoff_delay(attempt),
+                Duration::from_secs(want),
+                "attempt {attempt}"
             );
         }
-    }
-
-    #[test]
-    fn backoff_caps_for_large_attempts() {
-        assert_eq!(backoff_delay(64), Duration::from_secs(60));
-        assert_eq!(backoff_delay(u32::MAX), Duration::from_secs(60));
     }
 }

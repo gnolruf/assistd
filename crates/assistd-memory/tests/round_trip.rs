@@ -73,18 +73,34 @@ async fn turn_persists_across_store_reopen() {
         let mems = SqliteMemoryStore::new(handle);
 
         let history = convs.load_branch_history(branch).await.unwrap();
-        let roles: Vec<PersistedRole> = history.iter().map(|r| r.role).collect();
-        assert_eq!(roles, [PersistedRole::User, PersistedRole::Assistant]);
-        assert!(history[1].content.contains("systems programming"));
+        let messages: Vec<(PersistedRole, &str)> = history
+            .iter()
+            .map(|r| (r.role, r.content.as_str()))
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                (PersistedRole::User, "what is rust?"),
+                (
+                    PersistedRole::Assistant,
+                    "Rust is a systems programming language with a strong type system."
+                ),
+            ]
+        );
 
         assert_eq!(
             mems.load("fact:lang").await.unwrap().as_deref(),
             Some("rust")
         );
 
-        let turns = convs.recent_turns(5).await.unwrap();
-        assert!(!turns.is_empty());
-        assert_eq!(turns[0].user_text, "what is rust?");
+        let turns: Vec<String> = convs
+            .recent_turns(5)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.user_text)
+            .collect();
+        assert_eq!(turns, ["what is rust?"]);
 
         drop(convs);
         drop(mems);
@@ -142,11 +158,14 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
     let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
     let handle = Arc::new(handle);
     let convs = SqliteConversationStore::new(handle);
-    let history = convs.load_branch_history(branch).await.unwrap();
-    assert!(
-        history.iter().any(|r| r.content == "survived the drain"),
-        "post-shutdown append did not persist: {history:#?}"
-    );
+    let history: Vec<String> = convs
+        .load_branch_history(branch)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.content)
+        .collect();
+    assert_eq!(history, ["drain race", "survived the drain"]);
     drop(convs);
     writer.await.unwrap();
 }

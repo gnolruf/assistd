@@ -200,52 +200,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_single_gpu() {
-        let info = parse_output(b"1024, 24576\n").unwrap();
-        assert_eq!(info.used_mb, 1024);
-        assert_eq!(info.total_mb, 24576);
+    fn parse_output_sums_every_gpu() {
+        for (stdout, used_mb, total_mb) in [
+            ("1024, 24576\n", 1024, 24576),
+            ("1024, 24576\n2048, 24576\n", 3072, 49152),
+            ("  512 ,  8192  \n", 512, 8192),
+        ] {
+            assert_eq!(
+                parse_output(stdout.as_bytes()),
+                Ok(VramInfo { used_mb, total_mb }),
+                "{stdout:?}"
+            );
+        }
     }
 
     #[test]
-    fn parse_multi_gpu_sums() {
-        let info = parse_output(b"1024, 24576\n2048, 24576\n").unwrap();
-        assert_eq!(info.used_mb, 3072);
-        assert_eq!(info.total_mb, 49152);
+    fn parse_output_rejects_malformed_output() {
+        assert_eq!(
+            parse_output(b"\n\n"),
+            Err("nvidia-smi returned no GPUs".to_string())
+        );
+        assert_eq!(
+            parse_output(b"not, numbers\n"),
+            Err("unparsable used field: not, numbers".to_string())
+        );
     }
 
     #[test]
-    fn parse_rejects_empty() {
-        assert!(parse_output(b"\n\n").is_err());
-    }
-
-    #[test]
-    fn parse_rejects_non_numeric() {
-        assert!(parse_output(b"not, numbers\n").is_err());
-    }
-
-    #[test]
-    fn parse_handles_trailing_whitespace() {
-        let info = parse_output(b"  512 ,  8192  \n").unwrap();
-        assert_eq!(info.used_mb, 512);
-        assert_eq!(info.total_mb, 8192);
-    }
-
-    #[test]
-    fn meminfo_typical() {
+    fn meminfo_used_is_total_minus_available() {
         let content = "\
 MemTotal:       65536000 kB
 MemFree:         2048000 kB
 MemAvailable:   32768000 kB
 Buffers:          512000 kB
 ";
-        let info = parse_meminfo(content).unwrap();
-        assert_eq!(info.total_mb, 64000);
-        assert_eq!(info.used_mb, 32000);
+        assert_eq!(
+            parse_meminfo(content),
+            Ok(RamInfo {
+                used_mb: 32000,
+                total_mb: 64000,
+            })
+        );
     }
 
     #[test]
     fn meminfo_missing_available_errors() {
-        let content = "MemTotal:       65536000 kB\n";
-        assert!(parse_meminfo(content).is_err());
+        assert_eq!(
+            parse_meminfo("MemTotal:       65536000 kB\n"),
+            Err("MemAvailable not found in /proc/meminfo".to_string())
+        );
     }
 }

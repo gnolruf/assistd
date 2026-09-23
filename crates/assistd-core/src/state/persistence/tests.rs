@@ -128,7 +128,7 @@ fn state_with_store(store: Arc<dyn ConversationStore>) -> Arc<AppState> {
     })
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn messages_reach_the_store_in_the_order_they_were_queued() {
     let store = Arc::new(SlowingStore::new(60));
     let state = state_with_store(store.clone());
@@ -144,12 +144,7 @@ async fn messages_reach_the_store_in_the_order_they_were_queued() {
 
     assert_eq!(
         *store.arrivals.lock(),
-        vec![
-            "first".to_string(),
-            "second".to_string(),
-            "third".to_string(),
-            "fourth".to_string()
-        ],
+        ["first", "second", "third", "fourth"],
         "a slower early write must not let a later message take its seq"
     );
 }

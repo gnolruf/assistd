@@ -81,122 +81,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_is_default() {
-        assert_eq!(
-            CompositorConfig::default().compositor_type,
-            CompositorType::Auto
-        );
+    fn compositor_type_parses_lowercase_names() {
+        for (raw, want) in [
+            ("auto", CompositorType::Auto),
+            ("i3", CompositorType::I3),
+            ("sway", CompositorType::Sway),
+            ("hyprland", CompositorType::Hyprland),
+        ] {
+            let parsed: CompositorConfig =
+                toml::from_str(&format!("type = \"{raw}\"\n")).expect("deserialize");
+            assert_eq!(parsed.compositor_type, want, "raw {raw}");
+        }
     }
 
     #[test]
-    fn auto_serde_roundtrip() {
-        let toml_in = "type = \"auto\"\n";
-        let parsed: CompositorConfig = toml::from_str(toml_in).unwrap();
-        assert_eq!(parsed.compositor_type, CompositorType::Auto);
-        let toml_out = toml::to_string(&parsed).unwrap();
-        assert!(toml_out.contains("\"auto\""), "{toml_out}");
-    }
-
-    #[test]
-    fn explicit_sway_overrides_default() {
-        let parsed: CompositorConfig = toml::from_str("type = \"sway\"\n").unwrap();
-        assert_eq!(parsed.compositor_type, CompositorType::Sway);
-    }
-
-    #[test]
-    fn detect_swaysock_wins_over_i3sock() {
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                swaysock: true,
-                i3sock: true,
-                ..SessionEnv::default()
-            }),
-            Some(CompositorType::Sway)
-        );
-    }
-
-    #[test]
-    fn detect_i3sock_only() {
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                i3sock: true,
-                ..SessionEnv::default()
-            }),
-            Some(CompositorType::I3)
-        );
-    }
-
-    #[test]
-    fn detect_hypr_signature() {
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                hyprland_signature: true,
-                ..SessionEnv::default()
-            }),
-            Some(CompositorType::Hyprland)
-        );
-    }
-
-    #[test]
-    fn detect_falls_back_to_xdg_current_desktop() {
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                xdg_current_desktop: Some("sway".into()),
-                ..SessionEnv::default()
-            }),
-            Some(CompositorType::Sway)
-        );
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                xdg_current_desktop: Some("Hyprland".into()),
-                ..SessionEnv::default()
-            }),
-            Some(CompositorType::Hyprland)
-        );
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                xdg_current_desktop: Some("i3".into()),
-                ..SessionEnv::default()
-            }),
-            Some(CompositorType::I3)
-        );
-    }
-
-    #[test]
-    fn detect_returns_none_when_nothing_matches() {
-        assert_eq!(detect_from_env(&SessionEnv::default()), None);
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                xdg_current_desktop: Some(String::new()),
-                ..SessionEnv::default()
-            }),
-            None
-        );
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                xdg_current_desktop: Some("KDE".into()),
-                ..SessionEnv::default()
-            }),
-            None
-        );
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                xdg_current_desktop: Some("GNOME".into()),
-                ..SessionEnv::default()
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn detect_xdg_match_is_case_insensitive() {
-        // XDG_CURRENT_DESKTOP capitalization varies (`sway` vs `Sway`).
-        assert_eq!(
-            detect_from_env(&SessionEnv {
-                xdg_current_desktop: Some("SWAY".into()),
-                ..SessionEnv::default()
-            }),
-            Some(CompositorType::Sway)
-        );
+    fn detect_from_env_follows_priority_order() {
+        let xdg = |d: &str| SessionEnv {
+            xdg_current_desktop: Some(d.into()),
+            ..SessionEnv::default()
+        };
+        let cases = [
+            (
+                "swaysock beats i3sock",
+                SessionEnv {
+                    swaysock: true,
+                    i3sock: true,
+                    ..SessionEnv::default()
+                },
+                Some(CompositorType::Sway),
+            ),
+            (
+                "i3sock only",
+                SessionEnv {
+                    i3sock: true,
+                    ..SessionEnv::default()
+                },
+                Some(CompositorType::I3),
+            ),
+            (
+                "hyprland signature",
+                SessionEnv {
+                    hyprland_signature: true,
+                    ..SessionEnv::default()
+                },
+                Some(CompositorType::Hyprland),
+            ),
+            (
+                "socket beats xdg",
+                SessionEnv {
+                    i3sock: true,
+                    xdg_current_desktop: Some("sway".into()),
+                    ..SessionEnv::default()
+                },
+                Some(CompositorType::I3),
+            ),
+            ("xdg sway", xdg("sway"), Some(CompositorType::Sway)),
+            ("xdg i3", xdg("i3"), Some(CompositorType::I3)),
+            (
+                "xdg Hyprland",
+                xdg("Hyprland"),
+                Some(CompositorType::Hyprland),
+            ),
+            ("xdg SWAY", xdg("SWAY"), Some(CompositorType::Sway)),
+            ("nothing set", SessionEnv::default(), None),
+            ("xdg empty", xdg(""), None),
+            ("xdg KDE", xdg("KDE"), None),
+            ("xdg GNOME", xdg("GNOME"), None),
+        ];
+        for (label, env, want) in cases {
+            assert_eq!(detect_from_env(&env), want, "{label}");
+        }
     }
 }

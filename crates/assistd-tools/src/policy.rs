@@ -791,7 +791,9 @@ mod tests {
         let (allowed, confirm_id) = tokio::join!(ask, recv_confirm_id(&mut rx));
         assert!(!allowed);
         assert_eq!(router.pending_len(), 0);
-        assert!(router.route_response(&confirm_id, true).is_err());
+        router
+            .route_response(&confirm_id, true)
+            .expect_err("a timed-out prompt is no longer routable");
     }
 
     #[tokio::test]
@@ -800,17 +802,34 @@ mod tests {
         let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60));
         let asker = Arc::clone(&router);
         let in_flight = tokio::spawn(async move { asker.ask(sample_request()).await });
-        let _confirm_id = recv_confirm_id(&mut rx).await;
+        recv_confirm_id(&mut rx).await;
 
         router.close();
         assert!(!in_flight.await.expect("ask task"));
         assert_eq!(router.pending_len(), 0);
 
         assert!(!router.ask(sample_request()).await);
-        assert!(
-            rx.try_recv().is_err(),
-            "a closed router must not put prompts on the wire"
-        );
+        rx.try_recv()
+            .expect_err("a closed router must not put prompts on the wire");
+    }
+
+    #[tokio::test]
+    async fn router_denies_without_asking_once_pending_cap_is_reached() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let router = ConfirmRouter::new("r".into(), tx, CONFIRM_TIMEOUT);
+        {
+            let mut pending = router.pending.lock();
+            for i in 0..MAX_PENDING_CONFIRMS {
+                pending
+                    .prompts
+                    .insert(format!("preloaded-{i}"), oneshot::channel().0);
+            }
+        }
+
+        assert!(!router.ask(sample_request()).await);
+        assert_eq!(router.pending_len(), MAX_PENDING_CONFIRMS);
+        rx.try_recv()
+            .expect_err("a denied ask must not put a prompt on the wire");
     }
 
     #[tokio::test]
@@ -835,211 +854,85 @@ mod tests {
             tokio::spawn(async { IpcConfirmationGate.confirm(sample_request()).await })
         });
         assert!(!answer.await.expect("spawned gate"));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn deny_all_gate_refuses_everything() {
-        let gate = DenyAllGate;
-        let req = ConfirmationRequest {
-            tool: "bash".into(),
-            script: "rm -rf foo".into(),
-            matched_pattern: "rm -rf".into(),
-        };
-        assert!(!gate.confirm(req).await);
-    }
-
-    #[tokio::test]
-    async fn always_allow_gate_approves_everything() {
-        let gate = AlwaysAllowGate;
-        let req = ConfirmationRequest {
-            tool: "bash".into(),
-            script: "rm -rf /".into(),
-            matched_pattern: "rm -rf".into(),
-        };
-        assert!(gate.confirm(req).await);
-    }
-
-    #[tokio::test]
-    async fn confirm_router_denies_when_pending_cap_reached() {
-        // Drive `MAX_PENDING_CONFIRMS` into the pending map without
-        // letting them resolve. The next `ask` must deny immediately
-        // rather than insert and leak. Using a wide channel so the
-        // wire send doesn't block (the cap path triggers before send).
-        let (wire_tx, _wire_rx) = mpsc::channel::<Event>(MAX_PENDING_CONFIRMS * 2);
-        let router = ConfirmRouter::new("req-cap-test".into(), wire_tx, CONFIRM_TIMEOUT);
-
-        // Pre-load the pending map up to the cap. Bypass `ask` so we
-        // don't have to keep the wire sender alive; we just want the
-        // router to think it's full.
-        {
-            let mut pending = router.pending.lock();
-            for i in 0..MAX_PENDING_CONFIRMS {
-                let (tx, _rx) = oneshot::channel();
-                pending.prompts.insert(format!("preloaded-{i}"), tx);
-            }
-        }
-
-        let req = ConfirmationRequest {
-            tool: "bash".into(),
-            script: "rm -rf foo".into(),
-            matched_pattern: "rm -rf".into(),
-        };
-        let result = router.ask(req).await;
-        assert!(!result, "ask must deny when pending cap is reached");
-        // The cap path returns before insert, so the map size is unchanged.
-        let pending_len = router.pending_len();
-        assert_eq!(
-            pending_len, MAX_PENDING_CONFIRMS,
-            "denied ask must not insert into pending"
-        );
+        rx.try_recv()
+            .expect_err("a gate with no router must not reach the wire");
     }
 
     #[test]
-    fn denylist_matches_exact_substring() {
-        let patterns = vec!["rm -rf /".to_string()];
-        assert_eq!(matches_denylist("rm -rf /", &patterns), Some("rm -rf /"));
-    }
-
-    #[test]
-    fn denylist_matches_within_larger_script() {
-        let patterns = vec!["mkfs".to_string()];
-        assert_eq!(
-            matches_denylist("sudo mkfs.ext4 /dev/sda1", &patterns),
-            Some("mkfs")
-        );
-    }
-
-    #[test]
-    fn denylist_is_case_insensitive() {
-        let patterns = vec!["rm -rf /".to_string()];
-        assert_eq!(matches_denylist("RM -RF /", &patterns), Some("rm -rf /"));
-    }
-
-    #[test]
-    fn denylist_no_match_returns_none() {
-        let patterns = vec!["rm -rf /".to_string()];
-        assert!(matches_denylist("ls -l /tmp", &patterns).is_none());
-    }
-
-    #[test]
-    fn denylist_empty_pattern_is_ignored() {
-        let patterns = vec!["".to_string(), "mkfs".to_string()];
-        assert_eq!(matches_denylist("anything", &patterns), None);
-        assert_eq!(matches_denylist("mkfs.ext4", &patterns), Some("mkfs"));
-    }
-
-    #[test]
-    fn destructive_matches_command_prefix() {
-        let prefixes = vec![vec!["rm".into(), "-rf".into()]];
-        let m = matches_destructive("rm -rf foo", &prefixes).expect("match");
-        assert_eq!(m, &["rm".to_string(), "-rf".to_string()]);
-    }
-
-    #[test]
-    fn destructive_ignores_quoted_literal() {
-        // The bash script `echo "rm -rf"` tokenizes to three tokens:
-        // ["echo", "rm -rf"]; the second is a single quoted arg and must
-        // not match the prefix ["rm", "-rf"].
-        let prefixes = vec![vec!["rm".into(), "-rf".into()]];
-        assert!(matches_destructive("echo \"rm -rf\"", &prefixes).is_none());
-    }
-
-    #[test]
-    fn destructive_matches_second_command_in_chain() {
-        let prefixes = vec![vec!["rm".into(), "-rf".into()]];
-        // `touch foo && rm -rf bar`: the prefix should anchor at the
-        // start of the second command.
-        let m = matches_destructive("touch foo && rm -rf bar", &prefixes).expect("match");
-        assert_eq!(m, &["rm".to_string(), "-rf".to_string()]);
-    }
-
-    #[test]
-    fn destructive_matches_after_pipe() {
-        let prefixes = vec![vec!["rm".into()]];
-        let m = matches_destructive("ls | rm foo", &prefixes).expect("match");
-        assert_eq!(m, &["rm".to_string()]);
-    }
-
-    #[test]
-    fn destructive_no_match_on_distinct_command() {
-        let prefixes = vec![vec!["rm".into(), "-rf".into()]];
-        assert!(matches_destructive("ls -l /tmp", &prefixes).is_none());
-    }
-
-    #[test]
-    fn destructive_unparseable_script_returns_none() {
-        // Unterminated quote; shlex returns None.
-        let prefixes = vec![vec!["rm".into(), "-rf".into()]];
-        assert!(matches_destructive("rm -rf \"unterminated", &prefixes).is_none());
-    }
-
-    #[test]
-    fn destructive_single_word_prefix_matches_only_as_first_token() {
-        let prefixes = vec![vec!["shutdown".into()]];
-        assert!(matches_destructive("shutdown -h now", &prefixes).is_some());
-        // "shutdown" inside a quoted arg doesn't anchor at a command slot.
-        assert!(matches_destructive("echo 'shutdown'", &prefixes).is_none());
-    }
-
-    fn rm_rf() -> Vec<Vec<String>> {
-        vec![vec!["rm".into(), "-rf".into()]]
-    }
-
-    #[test]
-    fn destructive_matches_command_on_a_later_line() {
-        assert!(matches_destructive("true\nrm -rf ~", &rm_rf()).is_some());
-        assert!(matches_destructive("cd /tmp\n\n  rm -rf ~\n", &rm_rf()).is_some());
-    }
-
-    #[test]
-    fn destructive_ignores_newlines_inside_quotes_and_continuations() {
-        assert!(matches_destructive("echo \"a\nrm -rf ~\"", &rm_rf()).is_none());
-        assert!(matches_destructive("echo 'a\nrm -rf ~'", &rm_rf()).is_none());
-        assert!(matches_destructive("echo \\\nrm -rf ~", &rm_rf()).is_none());
-    }
-
-    #[test]
-    fn destructive_quote_in_comment_does_not_hide_later_lines() {
-        assert!(matches_destructive("true # it's fine\nrm -rf ~", &rm_rf()).is_some());
-        assert!(matches_destructive("rm -rf ~;# it's fine", &rm_rf()).is_some());
-    }
-
-    #[test]
-    fn destructive_unparseable_line_does_not_hide_earlier_lines() {
-        assert!(matches_destructive("rm -rf ~\necho \"oops", &rm_rf()).is_some());
-    }
-
-    #[test]
-    fn destructive_matches_through_pass_through_wrappers() {
-        for script in [
-            "sudo rm -rf ~",
-            "sudo -u root rm -rf ~",
-            "exec rm -rf ~",
-            "env FOO=1 rm -rf ~",
-            "find . -print0 | xargs -0 rm -rf",
-            "nice -n 10 sudo rm -rf ~",
-            "FOO=1 BAR=2 rm -rf ~",
+    fn denylist_returns_first_case_insensitive_substring_match() {
+        let patterns = ["".to_string(), "rm -rf /".to_string(), "mkfs".to_string()];
+        for (script, expected) in [
+            ("rm -rf /", Some("rm -rf /")),
+            ("RM -RF /", Some("rm -rf /")),
+            ("sudo mkfs.ext4 /dev/sda1", Some("mkfs")),
+            ("mkfs /dev/sda1 && rm -rf /", Some("rm -rf /")),
+            ("ls -l /tmp", None),
         ] {
-            assert!(
-                matches_destructive(script, &rm_rf()).is_some(),
-                "{script:?} must match"
+            assert_eq!(matches_denylist(script, &patterns), expected, "{script:?}");
+        }
+    }
+
+    /// The empty prefix would match every script if it were not skipped.
+    fn destructive_prefixes() -> Vec<Vec<String>> {
+        vec![
+            Vec::new(),
+            vec!["shutdown".into()],
+            vec!["rm".into(), "-rf".into()],
+        ]
+    }
+
+    fn destructive_match(script: &str) -> Option<String> {
+        matches_destructive(script, &destructive_prefixes()).map(|m| m.join(" "))
+    }
+
+    #[test]
+    fn destructive_matches_a_prefix_in_any_command_position() {
+        for (script, expected) in [
+            ("rm -rf foo", "rm -rf"),
+            ("RM -RF foo", "rm -rf"),
+            ("shutdown -h now", "shutdown"),
+            ("touch foo && rm -rf bar", "rm -rf"),
+            ("false || rm -rf bar", "rm -rf"),
+            ("echo hi ; rm -rf bar", "rm -rf"),
+            ("ls | rm -rf foo", "rm -rf"),
+            ("true\nrm -rf ~", "rm -rf"),
+            ("cd /tmp\n\n  rm -rf ~\n", "rm -rf"),
+            // A quote inside a comment must not open a string that
+            // swallows the following lines.
+            ("true # it's fine\nrm -rf ~", "rm -rf"),
+            ("rm -rf ~;# it's fine", "rm -rf"),
+            // An unparseable line does not hide the lines before it.
+            ("rm -rf ~\necho \"oops", "rm -rf"),
+            ("sudo rm -rf ~", "rm -rf"),
+            ("sudo -u root rm -rf ~", "rm -rf"),
+            ("exec rm -rf ~", "rm -rf"),
+            ("env FOO=1 rm -rf ~", "rm -rf"),
+            ("find . -print0 | xargs -0 rm -rf", "rm -rf"),
+            ("nice -n 10 sudo rm -rf ~", "rm -rf"),
+            ("FOO=1 BAR=2 rm -rf ~", "rm -rf"),
+        ] {
+            assert_eq!(
+                destructive_match(script).as_deref(),
+                Some(expected),
+                "{script:?}"
             );
         }
     }
 
     #[test]
-    fn destructive_arguments_of_ordinary_commands_do_not_anchor() {
-        assert!(matches_destructive("echo rm -rf ~", &rm_rf()).is_none());
-        assert!(matches_destructive("sudo true ; echo rm -rf ~", &rm_rf()).is_none());
-    }
-
-    fn bwrap_sandbox(extra_args: Vec<String>) -> SandboxInfo {
-        SandboxInfo {
-            mode: ResolvedSandboxMode::Bwrap {
-                path: PathBuf::from("/usr/bin/bwrap"),
-            },
-            extra_args,
+    fn destructive_ignores_words_outside_command_position() {
+        for script in [
+            "ls -l /tmp",
+            "echo \"rm -rf\"",
+            "echo 'shutdown'",
+            "echo rm -rf ~",
+            "sudo true ; echo rm -rf ~",
+            "echo \"a\nrm -rf ~\"",
+            "echo 'a\nrm -rf ~'",
+            "echo \\\nrm -rf ~",
+            "rm -rf \"unterminated",
+        ] {
+            assert_eq!(destructive_match(script), None, "{script:?}");
         }
     }
 
@@ -1052,58 +945,43 @@ mod tests {
 
     #[test]
     fn unsandboxed_command_passes_argv_through_verbatim() {
-        let info = SandboxInfo {
-            mode: ResolvedSandboxMode::None,
-            extra_args: Vec::new(),
-        };
-        let cmd = info.command(SandboxAccess::Default, "firefox", ["--new-window", "a b"]);
+        let cmd =
+            SandboxInfo::none().command(SandboxAccess::Default, "firefox", ["--new-window", "a b"]);
         assert_eq!(cmd.as_std().get_program(), "firefox");
-        assert_eq!(argv_of(&cmd), vec!["--new-window", "a b"]);
+        assert_eq!(argv_of(&cmd), ["--new-window", "a b"]);
     }
 
+    /// Operator extra args come last so they override the profile, and
+    /// session binds must follow `--tmpfs /run` or the tmpfs shadows them.
     #[test]
-    fn bwrap_command_puts_program_after_the_separator() {
-        let info = bwrap_sandbox(vec!["--unshare-net".into()]);
-        let cmd = info.command(SandboxAccess::Default, "firefox", ["--new-window"]);
-        assert_eq!(cmd.as_std().get_program(), "/usr/bin/bwrap");
-        let argv = argv_of(&cmd);
-        let sep = argv.iter().position(|a| a == "--").expect("separator");
-        assert_eq!(&argv[sep + 1..], &["firefox", "--new-window"]);
-        // Operator extra args are the last thing before `--`, so they
-        // override anything in the default profile.
-        assert_eq!(argv[sep - 1], "--unshare-net");
-    }
-
-    #[test]
-    fn default_access_leaves_the_run_tmpfs_empty() {
-        let info = bwrap_sandbox(Vec::new());
-        let argv = argv_of(&info.command(SandboxAccess::Default, "bash", ["-c", "true"]));
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
-        assert!(
-            runtime_dir.is_empty() || !argv.contains(&runtime_dir),
-            "default profile must not bind the session runtime dir: {argv:?}"
-        );
-    }
-
-    #[test]
-    fn session_bind_lands_after_the_run_tmpfs() {
-        // Order matters: a bind listed before `--tmpfs /run` would be
-        // shadowed by the tmpfs and the socket would be invisible.
-        let dir = std::env::temp_dir();
-        let dir_str = dir.to_string_lossy().into_owned();
-        let flags = session_bind_flags_for(Some(dir_str.clone()));
-        assert_eq!(flags, vec!["--bind".to_string(), dir_str.clone(), dir_str]);
-
+    fn bwrap_argv_is_profile_then_access_binds_then_extra_args_then_program() {
+        let info = SandboxInfo {
+            mode: ResolvedSandboxMode::Bwrap {
+                path: PathBuf::from("/usr/bin/bwrap"),
+            },
+            extra_args: vec!["--unshare-net".into()],
+        };
         let profile = default_bwrap_flags();
-        let tmpfs = profile
-            .iter()
-            .position(|f| f == "--tmpfs")
-            .expect("default profile mounts a tmpfs");
-        assert_eq!(profile[tmpfs + 1], "/run");
+        assert!(profile.windows(2).any(|w| w == ["--tmpfs", "/run"]));
+        let tail = ["--unshare-net", "--", "firefox", "--new-window"].map(String::from);
+        for (access, binds) in [
+            (SandboxAccess::Default, Vec::new()),
+            (SandboxAccess::Session, session_bind_flags()),
+        ] {
+            let cmd = info.command(access, "firefox", ["--new-window"]);
+            assert_eq!(cmd.as_std().get_program(), "/usr/bin/bwrap");
+            let expected = [profile.clone(), binds, tail.to_vec()].concat();
+            assert_eq!(argv_of(&cmd), expected, "{access:?}");
+        }
     }
 
     #[test]
-    fn session_bind_is_skipped_when_runtime_dir_is_unusable() {
+    fn session_binds_only_an_existing_runtime_dir() {
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        assert_eq!(
+            session_bind_flags_for(Some(dir.clone())),
+            ["--bind", &dir, &dir]
+        );
         assert!(session_bind_flags_for(None).is_empty());
         assert!(
             session_bind_flags_for(Some("/nonexistent/assistd-runtime-dir".into())).is_empty(),
@@ -1159,25 +1037,20 @@ mod tests {
     }
 
     #[test]
-    fn probe_sandbox_none_always_returns_none() {
-        let info = probe_sandbox(SandboxRequest::None, Vec::new()).expect("probe none");
-        assert!(matches!(info.mode, ResolvedSandboxMode::None));
+    fn probe_sandbox_runs_unwrapped_when_disabled_or_bwrap_is_absent() {
+        for request in [SandboxRequest::None, SandboxRequest::Auto] {
+            let info = probe_sandbox_with_path(request, Vec::new(), OsStr::new(""))
+                .unwrap_or_else(|e| panic!("{request:?}: {e}"));
+            assert!(
+                matches!(info.mode, ResolvedSandboxMode::None),
+                "{request:?}"
+            );
+        }
     }
 
     #[test]
     fn probe_sandbox_bwrap_missing_fails_startup() {
-        let result =
-            probe_sandbox_with_path(SandboxRequest::Bwrap, Vec::new(), std::ffi::OsStr::new(""));
-        assert!(
-            result.is_err(),
-            "expected bwrap probe to fail with empty PATH"
-        );
-    }
-
-    #[test]
-    fn sandbox_info_none_helper_is_usable() {
-        let info = SandboxInfo::none();
-        assert!(matches!(info.mode, ResolvedSandboxMode::None));
-        assert!(info.extra_args.is_empty());
+        probe_sandbox_with_path(SandboxRequest::Bwrap, Vec::new(), OsStr::new(""))
+            .expect_err("bwrap is required but absent from PATH");
     }
 }

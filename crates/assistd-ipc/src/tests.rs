@@ -1,146 +1,583 @@
 use super::*;
+use serde_json::json;
 
-#[test]
-fn request_roundtrip() {
-    let req = Request::Query {
-        id: "req-1".into(),
-        text: "ping".into(),
-        attachments: Vec::new(),
-    };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"query","id":"req-1","text":"ping"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
+fn id() -> String {
+    "r".into()
+}
+
+/// One of every [`Request`] variant with its exact wire form.
+fn request_cases() -> Vec<(Request, &'static str)> {
+    vec![
+        (
+            Request::query("r", "hi"),
+            r#"{"type":"query","id":"r","text":"hi"}"#,
+        ),
+        (
+            Request::query_with_attachments(
+                "r",
+                "describe this",
+                vec![ImageAttachment::from_bytes(
+                    "image/png",
+                    &[0xDE, 0xAD, 0xBE, 0xEF],
+                )],
+            ),
+            r#"{"type":"query","id":"r","text":"describe this","attachments":[{"mime":"image/png","data_base64":"3q2+7w=="}]}"#,
+        ),
+        (
+            Request::SetPresence {
+                id: id(),
+                target: PresenceState::Drowsy,
+            },
+            r#"{"type":"set_presence","id":"r","target":"drowsy"}"#,
+        ),
+        (
+            Request::GetPresence { id: id() },
+            r#"{"type":"get_presence","id":"r"}"#,
+        ),
+        (Request::Cycle { id: id() }, r#"{"type":"cycle","id":"r"}"#),
+        (
+            Request::PttStart { id: id() },
+            r#"{"type":"ptt_start","id":"r"}"#,
+        ),
+        (
+            Request::PttStop { id: id() },
+            r#"{"type":"ptt_stop","id":"r"}"#,
+        ),
+        (
+            Request::ListenStart { id: id() },
+            r#"{"type":"listen_start","id":"r"}"#,
+        ),
+        (
+            Request::ListenStop { id: id() },
+            r#"{"type":"listen_stop","id":"r"}"#,
+        ),
+        (
+            Request::ListenToggle { id: id() },
+            r#"{"type":"listen_toggle","id":"r"}"#,
+        ),
+        (
+            Request::GetListenState { id: id() },
+            r#"{"type":"get_listen_state","id":"r"}"#,
+        ),
+        (
+            Request::VoiceToggle { id: id() },
+            r#"{"type":"voice_toggle","id":"r"}"#,
+        ),
+        (
+            Request::VoiceSkip { id: id() },
+            r#"{"type":"voice_skip","id":"r"}"#,
+        ),
+        (
+            Request::InterruptTurn { id: id() },
+            r#"{"type":"interrupt_turn","id":"r"}"#,
+        ),
+        (
+            Request::GetVoiceState { id: id() },
+            r#"{"type":"get_voice_state","id":"r"}"#,
+        ),
+        (
+            Request::MemorySave {
+                id: id(),
+                key: "k".into(),
+                value: "v".into(),
+            },
+            r#"{"type":"memory_save","id":"r","key":"k","value":"v"}"#,
+        ),
+        (
+            Request::MemoryLoad {
+                id: id(),
+                key: "k".into(),
+            },
+            r#"{"type":"memory_load","id":"r","key":"k"}"#,
+        ),
+        (
+            Request::MemoryList {
+                id: id(),
+                prefix: "pref:".into(),
+            },
+            r#"{"type":"memory_list","id":"r","prefix":"pref:"}"#,
+        ),
+        (
+            Request::MemoryListAll {
+                id: id(),
+                prefix: "fact:".into(),
+                limit: 3,
+            },
+            r#"{"type":"memory_list_all","id":"r","prefix":"fact:","limit":3}"#,
+        ),
+        (
+            Request::MemoryDelete {
+                id: id(),
+                key: "k".into(),
+            },
+            r#"{"type":"memory_delete","id":"r","key":"k"}"#,
+        ),
+        (
+            Request::MemoryForget {
+                id: id(),
+                memory_id: 42,
+            },
+            r#"{"type":"memory_forget","id":"r","memory_id":42}"#,
+        ),
+        (
+            Request::MemorySemanticSearch {
+                id: id(),
+                query: "the rust thing".into(),
+                limit: 5,
+            },
+            r#"{"type":"memory_semantic_search","id":"r","query":"the rust thing","limit":5}"#,
+        ),
+        (
+            Request::MemoryReindex { id: id() },
+            r#"{"type":"memory_reindex","id":"r"}"#,
+        ),
+        (
+            Request::ConfirmResponse {
+                id: id(),
+                confirm_id: "c-abc".into(),
+                allow: true,
+            },
+            r#"{"type":"confirm_response","id":"r","confirm_id":"c-abc","allow":true}"#,
+        ),
+        (
+            Request::GetCapabilities { id: id() },
+            r#"{"type":"get_capabilities","id":"r"}"#,
+        ),
+        (
+            Request::Fork {
+                id: id(),
+                name: "experiment".into(),
+            },
+            r#"{"type":"fork","id":"r","name":"experiment"}"#,
+        ),
+        (
+            Request::Branches { id: id() },
+            r#"{"type":"branches","id":"r"}"#,
+        ),
+        (
+            Request::Switch {
+                id: id(),
+                target: "abc12345/main".into(),
+            },
+            r#"{"type":"switch","id":"r","target":"abc12345/main"}"#,
+        ),
+        (Request::Undo { id: id() }, r#"{"type":"undo","id":"r"}"#),
+        (
+            Request::ResumeOrNew {
+                id: id(),
+                recency_secs: 600,
+            },
+            r#"{"type":"resume_or_new","id":"r","recency_secs":600}"#,
+        ),
+        (
+            Request::NewSession { id: id() },
+            r#"{"type":"new_session","id":"r"}"#,
+        ),
+        (
+            Request::Subscribe {
+                id: id(),
+                filter: SubscribeFilter::default(),
+            },
+            r#"{"type":"subscribe","id":"r","filter":{"kinds":[]}}"#,
+        ),
+        (
+            Request::Subscribe {
+                id: id(),
+                filter: SubscribeFilter {
+                    kinds: vec![
+                        EventKind::Presence,
+                        EventKind::ListenState,
+                        EventKind::LastDelta,
+                    ],
+                },
+            },
+            r#"{"type":"subscribe","id":"r","filter":{"kinds":["presence","listen_state","last_delta"]}}"#,
+        ),
+    ]
 }
 
 #[test]
-fn request_query_with_attachments_roundtrip() {
-    let req = Request::query_with_attachments(
-        "req-2",
-        "describe this",
-        vec![ImageAttachment::from_bytes(
-            "image/png",
-            &[0xDE, 0xAD, 0xBE, 0xEF],
-        )],
-    );
-    let json = serde_json::to_string(&req).unwrap();
-    assert!(json.contains(r#""data_base64":"3q2+7w==""#));
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
+fn requests_match_pinned_wire_format() {
+    for (req, wire) in request_cases() {
+        assert_eq!(serde_json::to_string(&req).unwrap(), wire);
+        let parsed: Request = serde_json::from_str(wire).unwrap();
+        assert_eq!(parsed, req, "{wire}");
+        let tag: serde_json::Value = serde_json::from_str(wire).unwrap();
+        assert_eq!(tag["type"], req.kind(), "{wire}");
+        assert_eq!(req.id(), "r", "{wire}");
+    }
 }
 
 #[test]
-fn text_only_query_omits_attachments_on_the_wire() {
-    let json = serde_json::to_string(&Request::query("req-3", "hi")).unwrap();
-    assert_eq!(json, r#"{"type":"query","id":"req-3","text":"hi"}"#);
+fn request_optional_fields_default_when_absent() {
+    let cases = [
+        (
+            r#"{"type":"memory_list","id":"r"}"#,
+            Request::MemoryList {
+                id: id(),
+                prefix: String::new(),
+            },
+        ),
+        (
+            r#"{"type":"memory_list_all","id":"r"}"#,
+            Request::MemoryListAll {
+                id: id(),
+                prefix: String::new(),
+                limit: 0,
+            },
+        ),
+        (
+            r#"{"type":"memory_semantic_search","id":"r","query":"q"}"#,
+            Request::MemorySemanticSearch {
+                id: id(),
+                query: "q".into(),
+                limit: 0,
+            },
+        ),
+        (
+            r#"{"type":"subscribe","id":"r"}"#,
+            Request::Subscribe {
+                id: id(),
+                filter: SubscribeFilter::default(),
+            },
+        ),
+    ];
+    for (wire, expected) in cases {
+        let parsed: Request = serde_json::from_str(wire).unwrap();
+        assert_eq!(parsed, expected, "{wire}");
+    }
+}
+
+/// One of every [`Event`] variant with its exact wire form and its
+/// broadcast kind.
+fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+    vec![
+        (
+            Event::Delta {
+                id: id(),
+                text: "pong".into(),
+            },
+            r#"{"type":"delta","id":"r","text":"pong"}"#,
+            Some(EventKind::Delta),
+        ),
+        (
+            Event::ReasoningDelta {
+                id: id(),
+                text: "hmm".into(),
+            },
+            r#"{"type":"reasoning_delta","id":"r","text":"hmm"}"#,
+            Some(EventKind::ReasoningDelta),
+        ),
+        (
+            Event::ToolCall {
+                id: id(),
+                name: "echo".into(),
+                args: json!({"text": "hi"}),
+            },
+            r#"{"type":"tool_call","id":"r","name":"echo","args":{"text":"hi"}}"#,
+            Some(EventKind::ToolCall),
+        ),
+        (
+            Event::ToolResult {
+                id: id(),
+                name: "echo".into(),
+                result: json!("hi"),
+            },
+            r#"{"type":"tool_result","id":"r","name":"echo","result":"hi"}"#,
+            Some(EventKind::ToolResult),
+        ),
+        (
+            Event::Presence {
+                id: id(),
+                state: PresenceState::Sleeping,
+            },
+            r#"{"type":"presence","id":"r","state":"sleeping"}"#,
+            Some(EventKind::Presence),
+        ),
+        (
+            Event::VoiceState {
+                id: id(),
+                state: VoiceCaptureState::Recording,
+            },
+            r#"{"type":"voice_state","id":"r","state":"recording"}"#,
+            Some(EventKind::VoiceState),
+        ),
+        (
+            Event::VoiceState {
+                id: id(),
+                state: VoiceCaptureState::Queued,
+            },
+            r#"{"type":"voice_state","id":"r","state":"queued"}"#,
+            Some(EventKind::VoiceState),
+        ),
+        (
+            Event::Transcription {
+                id: id(),
+                text: "hello world".into(),
+            },
+            r#"{"type":"transcription","id":"r","text":"hello world"}"#,
+            None,
+        ),
+        (
+            Event::ListenState {
+                id: id(),
+                active: true,
+            },
+            r#"{"type":"listen_state","id":"r","active":true}"#,
+            Some(EventKind::ListenState),
+        ),
+        (
+            Event::VoiceOutputState {
+                id: id(),
+                enabled: true,
+            },
+            r#"{"type":"voice_output_state","id":"r","enabled":true}"#,
+            None,
+        ),
+        (
+            Event::SpeakingState {
+                id: id(),
+                speaking: true,
+            },
+            r#"{"type":"speaking_state","id":"r","speaking":true}"#,
+            Some(EventKind::SpeakingState),
+        ),
+        (
+            Event::SessionTitle {
+                id: id(),
+                session_id: "s".into(),
+                title: "cats".into(),
+            },
+            r#"{"type":"session_title","id":"r","session_id":"s","title":"cats"}"#,
+            Some(EventKind::SessionTitle),
+        ),
+        (
+            Event::SemanticHit {
+                id: id(),
+                conversation_id: 42,
+                chunk_id: 7,
+                session_id: "s".into(),
+                timestamp: "2026-04-28T00:00:00Z".into(),
+                role: Role::User,
+                content: "the rust embeddings daemon".into(),
+                similarity: 0.5,
+            },
+            r#"{"type":"semantic_hit","id":"r","conversation_id":42,"chunk_id":7,"session_id":"s","timestamp":"2026-04-28T00:00:00Z","role":"user","content":"the rust embeddings daemon","similarity":0.5}"#,
+            None,
+        ),
+        (
+            Event::MemoryValue {
+                id: id(),
+                key: "absent".into(),
+                value: None,
+            },
+            r#"{"type":"memory_value","id":"r","key":"absent","value":null}"#,
+            None,
+        ),
+        (
+            Event::MemoryKeys {
+                id: id(),
+                keys: vec!["a".into(), "b".into()],
+            },
+            r#"{"type":"memory_keys","id":"r","keys":["a","b"]}"#,
+            None,
+        ),
+        (
+            Event::MemoryRow {
+                id: id(),
+                memory_id: 17,
+                key: "fact:user.name".into(),
+                value: "Ben".into(),
+            },
+            r#"{"type":"memory_row","id":"r","memory_id":17,"key":"fact:user.name","value":"Ben"}"#,
+            None,
+        ),
+        (
+            Event::MemoryForgetResult {
+                id: id(),
+                deleted: true,
+                key: Some("fact:user.name".into()),
+            },
+            r#"{"type":"memory_forget_result","id":"r","deleted":true,"key":"fact:user.name"}"#,
+            None,
+        ),
+        (
+            Event::ReindexProgress {
+                id: id(),
+                kind: ReindexKind::Chunks,
+                done: 3,
+                total: 10,
+            },
+            r#"{"type":"reindex_progress","id":"r","kind":"chunks","done":3,"total":10}"#,
+            None,
+        ),
+        (
+            Event::ConfirmRequest {
+                id: id(),
+                confirm_id: "c-abc".into(),
+                tool: "bash".into(),
+                script: "rm -rf /tmp/foo".into(),
+                matched_pattern: "rm -rf".into(),
+            },
+            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"rm -rf /tmp/foo","matched_pattern":"rm -rf"}"#,
+            None,
+        ),
+        (
+            Event::Capabilities {
+                id: id(),
+                vision: true,
+                model_name: "Qwen3-14B-GGUF:Q4_K_M".into(),
+            },
+            r#"{"type":"capabilities","id":"r","vision":true,"model_name":"Qwen3-14B-GGUF:Q4_K_M"}"#,
+            None,
+        ),
+        (
+            Event::Status {
+                id: id(),
+                severity: StatusSeverity::Warning,
+                component: Component::IdleMonitor,
+                event: StatusKind::ToolsWithdrawn,
+                message: "m".into(),
+            },
+            r#"{"type":"status","id":"r","severity":"warning","component":"idle_monitor","event":"tools_withdrawn","message":"m"}"#,
+            None,
+        ),
+        (
+            Event::BranchInfo {
+                id: id(),
+                branch_id: 7,
+                session_id: "s".into(),
+                session_started_at: "2026-01-01T00:00:00Z".into(),
+                session_ended_at: None,
+                session_title: Some("cats".into()),
+                name: "main".into(),
+                parent_branch_name: None,
+                fork_point_seq: None,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                message_count: 4,
+                is_current_in_session: true,
+                is_active_session: false,
+            },
+            r#"{"type":"branch_info","id":"r","branch_id":7,"session_id":"s","session_started_at":"2026-01-01T00:00:00Z","session_ended_at":null,"session_title":"cats","name":"main","parent_branch_name":null,"fork_point_seq":null,"created_at":"2026-01-01T00:00:00Z","message_count":4,"is_current_in_session":true,"is_active_session":false}"#,
+            None,
+        ),
+        (
+            Event::BranchSwitched {
+                id: id(),
+                branch_id: 9,
+                session_id: "s".into(),
+                session_title: None,
+                name: "experiment".into(),
+                parent_branch_name: Some("main".into()),
+                fork_point_seq: Some(5),
+            },
+            r#"{"type":"branch_switched","id":"r","branch_id":9,"session_id":"s","session_title":null,"name":"experiment","parent_branch_name":"main","fork_point_seq":5}"#,
+            None,
+        ),
+        (
+            Event::HistoryEntry {
+                id: id(),
+                seq: 3,
+                role: Role::Assistant,
+                content: "hello".into(),
+                tool_name: None,
+            },
+            r#"{"type":"history_entry","id":"r","seq":3,"role":"assistant","content":"hello","tool_name":null}"#,
+            None,
+        ),
+        (
+            Event::UndoApplied {
+                id: id(),
+                removed_messages: 2,
+                last_user_text: Some("hi".into()),
+            },
+            r#"{"type":"undo_applied","id":"r","removed_messages":2,"last_user_text":"hi"}"#,
+            None,
+        ),
+        (
+            Event::Error {
+                id: id(),
+                message: "boom".into(),
+            },
+            r#"{"type":"error","id":"r","message":"boom"}"#,
+            Some(EventKind::Error),
+        ),
+        (
+            Event::Done { id: id() },
+            r#"{"type":"done","id":"r"}"#,
+            Some(EventKind::Done),
+        ),
+        (
+            Event::LastDelta {
+                id: id(),
+                text: "Hello world".into(),
+            },
+            r#"{"type":"last_delta","id":"r","text":"Hello world"}"#,
+            Some(EventKind::LastDelta),
+        ),
+    ]
 }
 
 #[test]
-fn fork_request_round_trips() {
-    let req = Request::Fork {
-        id: "r-1".into(),
-        name: "experiment".into(),
-    };
-    let json = serde_json::to_string(&req).unwrap();
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-    assert_eq!(req.kind(), "fork");
-    assert_eq!(req.id(), "r-1");
+fn events_match_pinned_wire_format() {
+    for (ev, wire, _) in event_cases() {
+        assert_eq!(serde_json::to_string(&ev).unwrap(), wire);
+        let parsed: Event = serde_json::from_str(wire).unwrap();
+        assert_eq!(parsed, ev, "{wire}");
+        assert_eq!(ev.id(), "r", "{wire}");
+    }
 }
 
 #[test]
-fn branches_request_round_trips() {
-    let req = Request::Branches { id: "r-2".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-    assert_eq!(req.kind(), "branches");
+fn only_done_and_error_are_terminal() {
+    for (ev, wire, _) in event_cases() {
+        let expected = matches!(ev, Event::Done { .. } | Event::Error { .. });
+        assert_eq!(ev.is_terminal(), expected, "{wire}");
+    }
 }
 
 #[test]
-fn switch_request_round_trips() {
-    let req = Request::Switch {
-        id: "r-3".into(),
-        target: "abc12345/main".into(),
-    };
-    let json = serde_json::to_string(&req).unwrap();
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-    assert_eq!(req.kind(), "switch");
+fn event_kind_matches_broadcast_eligibility() {
+    for (ev, wire, kind) in event_cases() {
+        assert_eq!(ev.kind(), kind, "{wire}");
+    }
 }
 
 #[test]
-fn undo_request_round_trips() {
-    let req = Request::Undo { id: "r-4".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-    assert_eq!(req.kind(), "undo");
-}
-
-#[test]
-fn branch_info_event_round_trips() {
-    let ev = Event::BranchInfo {
-        id: "r-1".into(),
-        branch_id: 7,
-        session_id: "abc12345-...".into(),
-        session_started_at: "2026-01-01T00:00:00Z".into(),
-        session_ended_at: None,
-        session_title: Some("a chat about cats".into()),
-        name: "main".into(),
-        parent_branch_name: None,
-        fork_point_seq: None,
-        created_at: "2026-01-01T00:00:00Z".into(),
-        message_count: 4,
-        is_current_in_session: true,
-        is_active_session: true,
-    };
-    let json = serde_json::to_string(&ev).unwrap();
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, ev);
-    assert_eq!(ev.id(), "r-1");
-}
-
-#[test]
-fn branch_switched_event_round_trips() {
-    let ev = Event::BranchSwitched {
-        id: "r-2".into(),
-        branch_id: 9,
-        session_id: "sess".into(),
-        session_title: Some("a chat about cats".into()),
-        name: "experiment".into(),
-        parent_branch_name: Some("main".into()),
-        fork_point_seq: Some(5),
-    };
-    let json = serde_json::to_string(&ev).unwrap();
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, ev);
-}
-
-#[test]
-fn history_entry_event_round_trips() {
-    let ev = Event::HistoryEntry {
-        id: "r-3".into(),
-        seq: 3,
-        role: Role::Assistant,
-        content: "hello".into(),
-        tool_name: None,
-    };
-    let json = serde_json::to_string(&ev).unwrap();
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, ev);
-}
-
-#[test]
-fn undo_applied_event_round_trips() {
-    let ev = Event::UndoApplied {
-        id: "r-4".into(),
-        removed_messages: 2,
-        last_user_text: Some("hi".into()),
-    };
-    let json = serde_json::to_string(&ev).unwrap();
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, ev);
+fn wire_spelling_helpers_agree_with_serde() {
+    fn check<T: Serialize + std::fmt::Display>(v: T, as_str: &str) {
+        assert_eq!(serde_json::to_value(&v).unwrap(), as_str);
+        assert_eq!(v.to_string(), as_str);
+    }
+    for v in [
+        StatusSeverity::Info,
+        StatusSeverity::Warning,
+        StatusSeverity::Error,
+    ] {
+        check(v, v.as_str());
+    }
+    for v in [
+        Component::Agent,
+        Component::Llm,
+        Component::Mcp,
+        Component::Voice,
+        Component::Memory,
+        Component::Wm,
+        Component::Embed,
+        Component::Hotkey,
+        Component::Daemon,
+        Component::IdleMonitor,
+        Component::GpuMonitor,
+        Component::ListenDispatcher,
+    ] {
+        check(v, v.as_str());
+    }
+    for v in [Role::System, Role::User, Role::Assistant, Role::Tool] {
+        check(v, v.as_str());
+    }
+    for v in [ReindexKind::Chunks, ReindexKind::Memories] {
+        check(v, v.as_str());
+    }
 }
 
 #[test]
@@ -151,309 +588,6 @@ fn image_attachment_round_trips_through_base64() {
 }
 
 #[test]
-fn delta_event_roundtrip() {
-    let evt = Event::Delta {
-        id: "req-1".into(),
-        text: "pong".into(),
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(json, r#"{"type":"delta","id":"req-1","text":"pong"}"#);
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn reasoning_delta_event_roundtrip() {
-    let evt = Event::ReasoningDelta {
-        id: "req-1".into(),
-        text: "let me think...".into(),
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"reasoning_delta","id":"req-1","text":"let me think..."}"#
-    );
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-    assert!(!evt.is_terminal());
-    assert_eq!(evt.id(), "req-1");
-}
-
-#[test]
-fn done_event_roundtrip() {
-    let evt = Event::Done { id: "req-1".into() };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(json, r#"{"type":"done","id":"req-1"}"#);
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn error_event_roundtrip() {
-    let evt = Event::Error {
-        id: "req-1".into(),
-        message: "boom".into(),
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(json, r#"{"type":"error","id":"req-1","message":"boom"}"#);
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn tool_call_event_roundtrip() {
-    let evt = Event::ToolCall {
-        id: "req-1".into(),
-        name: "echo".into(),
-        args: serde_json::json!({"text": "hi"}),
-    };
-    let parsed: Event = serde_json::from_str(&serde_json::to_string(&evt).unwrap()).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn memory_save_load_list_delete_request_roundtrip() {
-    let cases = vec![
-        Request::MemorySave {
-            id: "r1".into(),
-            key: "k".into(),
-            value: "v".into(),
-        },
-        Request::MemoryLoad {
-            id: "r2".into(),
-            key: "k".into(),
-        },
-        Request::MemoryList {
-            id: "r3".into(),
-            prefix: "pref:".into(),
-        },
-        Request::MemoryDelete {
-            id: "r4".into(),
-            key: "k".into(),
-        },
-        Request::MemoryListAll {
-            id: "r5".into(),
-            prefix: "fact:".into(),
-            limit: 0,
-        },
-        Request::MemoryForget {
-            id: "r6".into(),
-            memory_id: 42,
-        },
-    ];
-    for r in cases {
-        let parsed: Request = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
-        assert_eq!(parsed, r);
-    }
-}
-
-#[test]
-fn memory_list_all_request_omits_optional_fields() {
-    let json = r#"{"type":"memory_list_all","id":"r"}"#;
-    let parsed: Request = serde_json::from_str(json).unwrap();
-    match parsed {
-        Request::MemoryListAll { id, prefix, limit } => {
-            assert_eq!(id, "r");
-            assert_eq!(prefix, "");
-            assert_eq!(limit, 0);
-        }
-        _ => panic!("expected MemoryListAll"),
-    }
-}
-
-#[test]
-fn memory_forget_request_carries_id() {
-    let req = Request::MemoryForget {
-        id: "r".into(),
-        memory_id: 7,
-    };
-    assert_eq!(req.id(), "r");
-    assert_eq!(req.kind(), "memory_forget");
-}
-
-#[test]
-fn memory_reindex_request_round_trips() {
-    let req = Request::MemoryReindex { id: "r".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"memory_reindex","id":"r"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-    assert_eq!(req.kind(), "memory_reindex");
-}
-
-#[test]
-fn reindex_progress_event_round_trips() {
-    let ev = Event::ReindexProgress {
-        id: "r".into(),
-        kind: ReindexKind::Chunks,
-        done: 3,
-        total: 10,
-    };
-    let json = serde_json::to_string(&ev).unwrap();
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, ev);
-    assert_eq!(ev.id(), "r");
-    assert!(!ev.is_terminal());
-}
-
-#[test]
-fn memory_event_roundtrip() {
-    let cases = vec![
-        Event::SemanticHit {
-            id: "r".into(),
-            conversation_id: 42,
-            chunk_id: 7,
-            session_id: "s".into(),
-            timestamp: "2026-04-28T00:00:00Z".into(),
-            role: Role::User,
-            content: "the rust embeddings daemon".into(),
-            similarity: 0.87,
-        },
-        Event::MemoryValue {
-            id: "r".into(),
-            key: "k".into(),
-            value: Some("v".into()),
-        },
-        Event::MemoryValue {
-            id: "r".into(),
-            key: "absent".into(),
-            value: None,
-        },
-        Event::MemoryKeys {
-            id: "r".into(),
-            keys: vec!["a".into(), "b".into()],
-        },
-        Event::MemoryRow {
-            id: "r".into(),
-            memory_id: 17,
-            key: "fact:user.name".into(),
-            value: "Ben".into(),
-        },
-        Event::MemoryForgetResult {
-            id: "r".into(),
-            deleted: true,
-            key: Some("fact:user.name".into()),
-        },
-        Event::MemoryForgetResult {
-            id: "r".into(),
-            deleted: false,
-            key: None,
-        },
-    ];
-    for e in cases {
-        let parsed: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
-        assert_eq!(parsed, e);
-    }
-}
-
-#[test]
-fn memory_row_and_forget_result_are_not_terminal() {
-    let row = Event::MemoryRow {
-        id: "r".into(),
-        memory_id: 1,
-        key: "k".into(),
-        value: "v".into(),
-    };
-    assert!(!row.is_terminal());
-    assert_eq!(row.id(), "r");
-
-    let forget = Event::MemoryForgetResult {
-        id: "f".into(),
-        deleted: true,
-        key: Some("k".into()),
-    };
-    assert!(!forget.is_terminal());
-    assert_eq!(forget.id(), "f");
-}
-
-#[test]
-fn memory_semantic_search_request_roundtrip() {
-    let req = Request::MemorySemanticSearch {
-        id: "ms-1".into(),
-        query: "the rust thing we discussed".into(),
-        limit: 5,
-    };
-    let parsed: Request = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
-    assert_eq!(parsed, req);
-    assert_eq!(req.id(), "ms-1");
-    assert_eq!(req.kind(), "memory_semantic_search");
-}
-
-#[test]
-fn is_terminal_identifies_done_and_error() {
-    assert!(Event::Done { id: "x".into() }.is_terminal());
-    assert!(
-        Event::Error {
-            id: "x".into(),
-            message: "e".into()
-        }
-        .is_terminal()
-    );
-    assert!(
-        !Event::Delta {
-            id: "x".into(),
-            text: "t".into()
-        }
-        .is_terminal()
-    );
-}
-
-#[test]
-fn set_presence_request_roundtrip() {
-    let req = Request::SetPresence {
-        id: "p-1".into(),
-        target: PresenceState::Drowsy,
-    };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"set_presence","id":"p-1","target":"drowsy"}"#
-    );
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn get_presence_request_roundtrip() {
-    let req = Request::GetPresence { id: "p-2".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"get_presence","id":"p-2"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn presence_event_roundtrip() {
-    let evt = Event::Presence {
-        id: "p-1".into(),
-        state: PresenceState::Sleeping,
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(json, r#"{"type":"presence","id":"p-1","state":"sleeping"}"#);
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn presence_event_is_not_terminal() {
-    let evt = Event::Presence {
-        id: "p-1".into(),
-        state: PresenceState::Active,
-    };
-    assert!(!evt.is_terminal());
-    assert_eq!(evt.id(), "p-1");
-}
-
-#[test]
-fn cycle_request_roundtrip() {
-    let req = Request::Cycle { id: "c-1".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"cycle","id":"c-1"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
 fn presence_state_next_cycles() {
     assert_eq!(PresenceState::Active.next(), PresenceState::Drowsy);
     assert_eq!(PresenceState::Drowsy.next(), PresenceState::Sleeping);
@@ -461,355 +595,20 @@ fn presence_state_next_cycles() {
 }
 
 #[test]
-fn ptt_start_request_roundtrip() {
-    let req = Request::PttStart { id: "v-1".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"ptt_start","id":"v-1"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn ptt_stop_request_roundtrip() {
-    let req = Request::PttStop { id: "v-2".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"ptt_stop","id":"v-2"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn voice_state_event_roundtrip() {
-    let evt = Event::VoiceState {
-        id: "v-1".into(),
-        state: VoiceCaptureState::Recording,
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"voice_state","id":"v-1","state":"recording"}"#
-    );
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn voice_state_queued_roundtrip() {
-    let evt = Event::VoiceState {
-        id: "v-2".into(),
-        state: VoiceCaptureState::Queued,
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"voice_state","id":"v-2","state":"queued"}"#
-    );
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn transcription_event_roundtrip() {
-    let evt = Event::Transcription {
-        id: "v-1".into(),
-        text: "hello world".into(),
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"transcription","id":"v-1","text":"hello world"}"#
-    );
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn voice_state_and_transcription_are_not_terminal() {
-    let rec = Event::VoiceState {
-        id: "x".into(),
-        state: VoiceCaptureState::Recording,
-    };
-    assert!(!rec.is_terminal());
-    assert_eq!(rec.id(), "x");
-    let txt = Event::Transcription {
-        id: "y".into(),
-        text: "z".into(),
-    };
-    assert!(!txt.is_terminal());
-    assert_eq!(txt.id(), "y");
-}
-
-#[test]
-fn listen_start_request_roundtrip() {
-    let req = Request::ListenStart { id: "l-1".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"listen_start","id":"l-1"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn listen_stop_request_roundtrip() {
-    let req = Request::ListenStop { id: "l-2".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"listen_stop","id":"l-2"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn listen_toggle_request_roundtrip() {
-    let req = Request::ListenToggle { id: "l-3".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"listen_toggle","id":"l-3"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn get_listen_state_request_roundtrip() {
-    let req = Request::GetListenState { id: "l-4".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"get_listen_state","id":"l-4"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn listen_state_event_roundtrip() {
-    let evt = Event::ListenState {
-        id: "l-1".into(),
-        active: true,
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(json, r#"{"type":"listen_state","id":"l-1","active":true}"#);
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn listen_state_is_not_terminal() {
-    let evt = Event::ListenState {
-        id: "l-1".into(),
-        active: false,
-    };
-    assert!(!evt.is_terminal());
-    assert_eq!(evt.id(), "l-1");
-}
-
-#[test]
-fn voice_toggle_request_roundtrip() {
-    let req = Request::VoiceToggle { id: "vt-1".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"voice_toggle","id":"vt-1"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn voice_skip_request_roundtrip() {
-    let req = Request::VoiceSkip { id: "vs-1".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"voice_skip","id":"vs-1"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn interrupt_turn_request_roundtrip() {
-    let req = Request::InterruptTurn { id: "it-1".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"interrupt_turn","id":"it-1"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-    assert_eq!(req.kind(), "interrupt_turn");
-    assert_eq!(req.id(), "it-1");
-}
-
-#[test]
-fn get_voice_state_request_roundtrip() {
-    let req = Request::GetVoiceState { id: "vg-1".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"get_voice_state","id":"vg-1"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn voice_output_state_event_roundtrip() {
-    let evt = Event::VoiceOutputState {
-        id: "vt-1".into(),
-        enabled: true,
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"voice_output_state","id":"vt-1","enabled":true}"#
-    );
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn speaking_state_event_roundtrip() {
-    let evt = Event::SpeakingState {
-        id: "q-1".into(),
-        speaking: true,
-    };
-    let json = serde_json::to_string(&evt).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"speaking_state","id":"q-1","speaking":true}"#
-    );
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, evt);
-}
-
-#[test]
-fn speaking_state_is_bus_eligible_and_not_terminal() {
-    let evt = Event::SpeakingState {
-        id: "q-1".into(),
-        speaking: false,
-    };
-    assert!(!evt.is_terminal());
-    assert_eq!(evt.id(), "q-1");
-    assert_eq!(evt.kind(), Some(EventKind::SpeakingState));
-}
-
-#[test]
-fn voice_output_state_is_not_terminal() {
-    let evt = Event::VoiceOutputState {
-        id: "vt-1".into(),
-        enabled: false,
-    };
-    assert!(!evt.is_terminal());
-    assert_eq!(evt.id(), "vt-1");
-}
-
-#[test]
-fn confirm_request_event_roundtrip() {
-    let evt = Event::ConfirmRequest {
-        id: "req-1".into(),
-        confirm_id: "c-abc".into(),
-        tool: "bash".into(),
-        script: "rm -rf /tmp/foo".into(),
-        matched_pattern: "rm -rf".into(),
-    };
-    let parsed: Event = serde_json::from_str(&serde_json::to_string(&evt).unwrap()).unwrap();
-    assert_eq!(parsed, evt);
-    assert_eq!(evt.id(), "req-1");
-    assert!(!evt.is_terminal());
-}
-
-#[test]
-fn confirm_response_request_roundtrip() {
-    let req = Request::ConfirmResponse {
-        id: "req-1".into(),
-        confirm_id: "c-abc".into(),
-        allow: true,
-    };
-    let parsed: Request = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
-    assert_eq!(parsed, req);
-    assert_eq!(req.id(), "req-1");
-    assert_eq!(req.kind(), "confirm_response");
-}
-
-#[test]
-fn get_capabilities_request_roundtrip() {
-    let req = Request::GetCapabilities { id: "cap-1".into() };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(json, r#"{"type":"get_capabilities","id":"cap-1"}"#);
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-    assert_eq!(req.kind(), "get_capabilities");
-}
-
-#[test]
-fn capabilities_event_roundtrip() {
-    let evt = Event::Capabilities {
-        id: "cap-1".into(),
-        vision: true,
-        model_name: "Qwen3-14B-GGUF:Q4_K_M".into(),
-    };
-    let parsed: Event = serde_json::from_str(&serde_json::to_string(&evt).unwrap()).unwrap();
-    assert_eq!(parsed, evt);
-    assert!(!evt.is_terminal());
-}
-
-#[test]
-fn socket_path_uses_xdg_runtime_dir() {
-    let path = socket_path_for(Some(OsString::from("/run/user/1234")), None);
-    assert_eq!(path, PathBuf::from("/run/user/1234/assistd.sock"));
-}
-
-#[test]
-fn socket_path_falls_back_to_tmp_with_user() {
-    let path = socket_path_for(None, Some(OsString::from("alice")));
-    assert_eq!(path, PathBuf::from("/tmp/assistd-alice.sock"));
-}
-
-#[test]
-fn socket_path_falls_back_to_nobody_without_user() {
-    let path = socket_path_for(None, None);
-    assert_eq!(path, PathBuf::from("/tmp/assistd-nobody.sock"));
-}
-
-#[test]
-fn subscribe_request_roundtrip_empty_filter() {
-    let req = Request::Subscribe {
-        id: "s-1".into(),
-        filter: SubscribeFilter::default(),
-    };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"subscribe","id":"s-1","filter":{"kinds":[]}}"#
-    );
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn subscribe_request_accepts_missing_filter_field() {
-    let parsed: Request = serde_json::from_str(r#"{"type":"subscribe","id":"s-1"}"#).unwrap();
-    assert_eq!(
-        parsed,
-        Request::Subscribe {
-            id: "s-1".into(),
-            filter: SubscribeFilter::default(),
-        }
-    );
-}
-
-#[test]
-fn subscribe_request_roundtrip_populated_filter() {
-    let req = Request::Subscribe {
-        id: "s-2".into(),
-        filter: SubscribeFilter {
-            kinds: vec![
-                EventKind::Presence,
-                EventKind::ListenState,
-                EventKind::LastDelta,
-            ],
-        },
-    };
-    let json = serde_json::to_string(&req).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"subscribe","id":"s-2","filter":{"kinds":["presence","listen_state","last_delta"]}}"#
-    );
-    let parsed: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, req);
-}
-
-#[test]
-fn subscribe_request_id_and_kind() {
-    let req = Request::Subscribe {
-        id: "s-3".into(),
-        filter: SubscribeFilter::default(),
-    };
-    assert_eq!(req.id(), "s-3");
-    assert_eq!(req.kind(), "subscribe");
+fn socket_path_prefers_xdg_runtime_dir_then_user() {
+    let cases = [
+        (
+            Some("/run/user/1234"),
+            Some("alice"),
+            "/run/user/1234/assistd.sock",
+        ),
+        (None, Some("alice"), "/tmp/assistd-alice.sock"),
+        (None, None, "/tmp/assistd-nobody.sock"),
+    ];
+    for (xdg, user, expected) in cases {
+        let path = socket_path_for(xdg.map(OsString::from), user.map(OsString::from));
+        assert_eq!(path, PathBuf::from(expected), "xdg={xdg:?} user={user:?}");
+    }
 }
 
 #[test]
@@ -843,174 +642,4 @@ fn subscribe_filter_matches_listed_only() {
     assert!(!f.matches(EventKind::Delta));
     assert!(!f.matches(EventKind::ToolCall));
     assert!(!f.matches(EventKind::Done));
-}
-
-#[test]
-fn last_delta_event_roundtrip() {
-    let ev = Event::LastDelta {
-        id: "q-7".into(),
-        text: "Hello world".into(),
-    };
-    let json = serde_json::to_string(&ev).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"last_delta","id":"q-7","text":"Hello world"}"#
-    );
-    let parsed: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed, ev);
-}
-
-#[test]
-fn last_delta_is_not_terminal() {
-    let ev = Event::LastDelta {
-        id: "q-1".into(),
-        text: "snapshot".into(),
-    };
-    assert!(!ev.is_terminal());
-    assert_eq!(ev.id(), "q-1");
-}
-
-#[test]
-fn event_kind_classifies_broadcast_eligible_variants() {
-    let cases: Vec<(Event, EventKind)> = vec![
-        (
-            Event::Delta {
-                id: "q".into(),
-                text: "t".into(),
-            },
-            EventKind::Delta,
-        ),
-        (
-            Event::ReasoningDelta {
-                id: "q".into(),
-                text: "t".into(),
-            },
-            EventKind::ReasoningDelta,
-        ),
-        (
-            Event::ToolCall {
-                id: "q".into(),
-                name: "bash".into(),
-                args: serde_json::json!({}),
-            },
-            EventKind::ToolCall,
-        ),
-        (
-            Event::ToolResult {
-                id: "q".into(),
-                name: "bash".into(),
-                result: serde_json::json!({}),
-            },
-            EventKind::ToolResult,
-        ),
-        (
-            Event::Presence {
-                id: "q".into(),
-                state: PresenceState::Active,
-            },
-            EventKind::Presence,
-        ),
-        (
-            Event::VoiceState {
-                id: "q".into(),
-                state: VoiceCaptureState::Idle,
-            },
-            EventKind::VoiceState,
-        ),
-        (
-            Event::ListenState {
-                id: "q".into(),
-                active: false,
-            },
-            EventKind::ListenState,
-        ),
-        (
-            Event::SessionTitle {
-                id: "q".into(),
-                session_id: "s".into(),
-                title: "cats and dogs".into(),
-            },
-            EventKind::SessionTitle,
-        ),
-        (Event::Done { id: "q".into() }, EventKind::Done),
-        (
-            Event::Error {
-                id: "q".into(),
-                message: "m".into(),
-            },
-            EventKind::Error,
-        ),
-        (
-            Event::LastDelta {
-                id: "q".into(),
-                text: "t".into(),
-            },
-            EventKind::LastDelta,
-        ),
-    ];
-    for (ev, expected) in cases {
-        assert_eq!(ev.kind(), Some(expected), "wrong kind for {ev:?}");
-    }
-}
-
-#[test]
-fn event_kind_returns_none_for_dialog_local_variants() {
-    let dialog_local = vec![
-        Event::Transcription {
-            id: "q".into(),
-            text: "t".into(),
-        },
-        Event::VoiceOutputState {
-            id: "q".into(),
-            enabled: true,
-        },
-        Event::MemoryValue {
-            id: "q".into(),
-            key: "k".into(),
-            value: None,
-        },
-        Event::MemoryKeys {
-            id: "q".into(),
-            keys: Vec::new(),
-        },
-        Event::MemoryRow {
-            id: "q".into(),
-            memory_id: 0,
-            key: "k".into(),
-            value: "v".into(),
-        },
-        Event::MemoryForgetResult {
-            id: "q".into(),
-            deleted: false,
-            key: None,
-        },
-        Event::ReindexProgress {
-            id: "q".into(),
-            kind: ReindexKind::Chunks,
-            done: 0,
-            total: 0,
-        },
-        Event::ConfirmRequest {
-            id: "q".into(),
-            confirm_id: "c".into(),
-            tool: "bash".into(),
-            script: "ls".into(),
-            matched_pattern: "ls".into(),
-        },
-        Event::Capabilities {
-            id: "q".into(),
-            vision: false,
-            model_name: "m".into(),
-        },
-        Event::Status {
-            id: "q".into(),
-            severity: StatusSeverity::Info,
-            component: Component::Llm,
-            event: StatusKind::Restarting,
-            message: "".into(),
-        },
-    ];
-    for ev in dialog_local {
-        assert_eq!(ev.kind(), None, "expected None for {ev:?}");
-    }
 }

@@ -7,7 +7,8 @@
 use std::time::Duration;
 
 use assistd_mcp::{
-    HealthState, McpServerHandle, StdioConfig, TransportConfig, adapt_handle_as_tools,
+    HealthState, McpError, McpServerHandle, StdioConfig, TransportConfig, adapt_handle_as_tools,
+    mcp_error_line,
 };
 use serde_json::json;
 use tokio::sync::watch;
@@ -33,13 +34,13 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
         .await
         .expect("discovery should succeed");
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-    assert!(
-        names.contains(&"mcp__fake__echo"),
-        "expected echo tool, got {names:?}"
-    );
-    assert!(
-        names.contains(&"mcp__fake__crash_me"),
-        "expected crash_me tool, got {names:?}"
+    assert_eq!(
+        names,
+        [
+            "mcp__fake__echo",
+            "mcp__fake__crash_me",
+            "mcp__fake__flood_stdout"
+        ]
     );
 
     let echo = tools
@@ -55,33 +56,31 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
 }
 
 #[tokio::test]
-async fn external_shutdown_then_handle_shutdown_completes_quickly() {
-    // Daemon-style shutdown: the shared shutdown watch flips, then each
-    // handle's shutdown() is awaited. Both should finish well inside
-    // the 15s shutdown() ceiling.
+async fn external_shutdown_stops_the_supervisor() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
         .await
         .expect("server should start");
+    let mut health_rx = handle.watch_health();
 
-    let _ = shutdown_tx.send(true);
+    shutdown_tx.send(true).unwrap();
 
-    let start = std::time::Instant::now();
+    // The supervisor drops its health sender only when it exits.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while health_rx.changed().await.is_ok() {}
+    })
+    .await
+    .expect("supervisor must exit on daemon-wide shutdown");
+    let err = handle.client().list_tools().await.unwrap_err();
+    assert!(matches!(err, McpError::ServerDown), "{err}");
+
     tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
         .await
-        .expect("shutdown must not hit the 15s ceiling");
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "daemon-style shutdown took {elapsed:?}"
-    );
+        .expect("shutdown of an exited supervisor must return promptly");
 }
 
 #[tokio::test]
 async fn dropping_handle_without_shutdown_aborts_supervisor() {
-    // Dropping a handle aborts the supervisor task. Detect that by holding a watch_health
-    // receiver; once the supervisor is gone its health_tx is dropped
-    // and `changed()` returns Err.
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
         .await
@@ -90,14 +89,12 @@ async fn dropping_handle_without_shutdown_aborts_supervisor() {
     let mut health_rx = handle.watch_health();
     drop(handle);
 
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
+    // The supervisor drops its health sender only when it exits.
+    tokio::time::timeout(Duration::from_secs(2), async {
         while health_rx.changed().await.is_ok() {}
     })
-    .await;
-    assert!(
-        result.is_ok(),
-        "supervisor must release health_tx within 2s after Drop"
-    );
+    .await
+    .expect("supervisor must release health_tx within 2s after Drop");
 }
 
 #[tokio::test]
@@ -124,19 +121,13 @@ async fn server_crash_short_circuits_subsequent_calls() {
         .find(|t| t.name() == "mcp__fake__crash_me")
         .expect("crash_me present");
 
-    // Sanity: echo works pre-crash.
     let pre = echo.invoke(json!({"msg": "before"})).await.unwrap();
     assert_eq!(pre["output"], "echo:before");
 
-    // Trigger the crash. The fake server `exit(0)`s before sending a
-    // response, so this call returns a transport-level error envelope.
-    // We tolerate either outcome; we just need the supervisor to
-    // notice the death.
+    // The server exits without replying, so the call's own outcome is
+    // irrelevant; only the supervisor noticing the death matters.
     let _ = crasher.invoke(json!({})).await;
 
-    // Wait for the supervisor's lifeline-watcher to see the EOF and
-    // flip health. Backoff is exponential starting at 1s, so within
-    // ~2s the state should flip away from `Healthy`.
     let mut watch_health = handle.watch_health();
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
@@ -153,27 +144,16 @@ async fn server_crash_short_circuits_subsequent_calls() {
         "supervisor should have flipped health off Healthy after server exit"
     );
 
-    // Now invoke echo: the health-routed wrapper must short-circuit
-    // and produce the dispatch-shape error JSON synchronously, not
-    // hang on the dead transport.
     let post = tokio::time::timeout(Duration::from_secs(2), echo.invoke(json!({"msg": "after"})))
         .await
         .expect("invoke must not hang on a dead server")
         .expect("invoke returns Ok with a typed error JSON");
     assert_eq!(post["type"], "error");
     assert_eq!(post["exit_code"], -1);
-    // Server name carried out-of-band on `server_name` so the message
-    // body itself can stay convention-compliant without embedding the
-    // supervisor's identifier mid-sentence.
     assert_eq!(post["server_name"], "fake");
-    let output = post["output"].as_str().unwrap();
-    assert!(
-        output.starts_with("[error] mcp__fake__echo: "),
-        "convention prefix missing: {output}"
-    );
-    assert!(
-        output.contains("Try:") || output.contains("Check:"),
-        "recovery hint missing: {output}"
+    assert_eq!(
+        post["output"],
+        mcp_error_line("mcp__fake__echo", &McpError::ServerDown)
     );
 
     handle.shutdown().await;

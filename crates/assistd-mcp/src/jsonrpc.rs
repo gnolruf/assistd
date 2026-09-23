@@ -187,21 +187,22 @@ pub fn notification_line(method: &'static str, params: Value) -> Result<Vec<u8>,
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::sync::oneshot::error::TryRecvError;
 
     #[tokio::test]
-    async fn round_trip_request_response() {
+    async fn deliver_wakes_the_matching_request() {
         let c = Correlator::new();
         let mut pending = c.next_request("ping", json!({})).unwrap();
-        let id = pending.id;
 
         c.deliver(Response {
-            id: Some(id),
+            id: Some(pending.id),
             result: Some(json!({"ok": true})),
             error: None,
         });
 
         let value = (&mut pending.rx).await.unwrap().unwrap();
         assert_eq!(value, json!({"ok": true}));
+        assert_eq!(c.in_flight(), 0);
     }
 
     #[tokio::test]
@@ -218,23 +219,27 @@ mod tests {
             }),
         });
         let err = (&mut pending.rx).await.unwrap().unwrap_err();
-        assert_eq!(err.code, -32601);
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (-32601, "method not found")
+        );
     }
 
-    #[tokio::test]
-    async fn unknown_id_does_not_panic() {
+    #[test]
+    fn unknown_id_leaves_pending_requests_untouched() {
         let c = Correlator::new();
+        let mut pending = c.next_request("ping", json!({})).unwrap();
         c.deliver(Response {
-            id: Some(999),
+            id: Some(pending.id + 1),
             result: Some(Value::Null),
             error: None,
         });
-        // No panic, no waiter; pending stays empty.
-        assert_eq!(c.in_flight(), 0);
+        assert_eq!(c.in_flight(), 1);
+        assert!(matches!(pending.rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]
-    async fn fail_all_wakes_pending() {
+    async fn fail_all_closes_every_pending_reply_channel() {
         let c = Correlator::new();
         let mut p1 = c.next_request("a", json!({})).unwrap();
         let mut p2 = c.next_request("b", json!({})).unwrap();
@@ -243,54 +248,48 @@ mod tests {
         c.fail_all();
         assert_eq!(c.in_flight(), 0);
 
-        assert!((&mut p1.rx).await.is_err());
-        assert!((&mut p2.rx).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn rejects_when_in_flight_cap_reached() {
-        let c = Correlator::new();
-        let mut keep = Vec::new();
-        for _ in 0..MAX_IN_FLIGHT {
-            keep.push(c.next_request("x", json!({})).unwrap());
-        }
-        match c.next_request("y", json!({})) {
-            Err(McpError::TooManyInFlight) => {}
-            other => panic!("expected TooManyInFlight, got {other:?}"),
-        }
+        (&mut p1.rx).await.expect_err("sender dropped");
+        (&mut p2.rx).await.expect_err("sender dropped");
     }
 
     #[test]
-    fn dropping_pending_releases_its_slot() {
+    fn in_flight_cap_rejects_until_a_pending_request_is_dropped() {
         let c = Correlator::new();
         let held: Vec<_> = (0..MAX_IN_FLIGHT)
             .map(|_| c.next_request("x", json!({})).unwrap())
             .collect();
-        assert_eq!(c.in_flight(), MAX_IN_FLIGHT);
+        assert!(matches!(
+            c.next_request("y", json!({})),
+            Err(McpError::TooManyInFlight)
+        ));
         drop(held);
         assert_eq!(c.in_flight(), 0);
-        assert!(c.next_request("y", json!({})).is_ok());
+        c.next_request("y", json!({})).unwrap();
     }
 
     #[test]
-    fn frame_line_encodes_newline_terminated_json() {
+    fn frame_line_encodes_newline_terminated_request() {
         let c = Correlator::new();
         let pending = c.next_request("ping", json!({"echo": 1})).unwrap();
         let line = pending.frame_line().unwrap();
-        assert!(line.ends_with(b"\n"));
-        let parsed: serde_json::Value = serde_json::from_slice(&line[..line.len() - 1]).unwrap();
-        assert_eq!(parsed["jsonrpc"], "2.0");
-        assert_eq!(parsed["method"], "ping");
-        assert_eq!(parsed["params"], json!({"echo": 1}));
-        assert!(parsed["id"].is_number());
+        let (json_bytes, newline) = line.split_at(line.len() - 1);
+        assert_eq!(newline, b"\n");
+        let parsed: Value = serde_json::from_slice(json_bytes).unwrap();
+        assert_eq!(
+            parsed,
+            json!({"jsonrpc": "2.0", "id": pending.id, "method": "ping", "params": {"echo": 1}})
+        );
     }
 
     #[test]
-    fn notification_has_no_id() {
+    fn notification_line_has_no_id() {
         let line = notification_line("notifications/initialized", json!({})).unwrap();
-        let parsed: serde_json::Value = serde_json::from_slice(&line[..line.len() - 1]).unwrap();
-        assert_eq!(parsed["jsonrpc"], "2.0");
-        assert_eq!(parsed["method"], "notifications/initialized");
-        assert!(parsed.get("id").is_none());
+        let (json_bytes, newline) = line.split_at(line.len() - 1);
+        assert_eq!(newline, b"\n");
+        let parsed: Value = serde_json::from_slice(json_bytes).unwrap();
+        assert_eq!(
+            parsed,
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        );
     }
 }

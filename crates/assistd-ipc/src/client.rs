@@ -180,16 +180,14 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    /// Spin up a tiny mock daemon that reads one line, validates it
-    /// parses as a Request, then replies with the events from
-    /// `responses` (one per line) and shuts down the write half so
-    /// the client sees a clean EOF. Returns the socket path and a
-    /// JoinHandle the test should await once it's done.
-    async fn mock_server(responses: Vec<Event>) -> (PathBuf, tokio::task::JoinHandle<()>) {
+    /// Mock daemon that accepts one connection, reads and parses one
+    /// request line, writes `responses`, then closes its write half.
+    /// The returned `TempDir` owns the socket and must outlive the test.
+    fn mock_server(
+        responses: Vec<Event>,
+    ) -> (tempfile::TempDir, PathBuf, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mock.sock");
-        std::mem::forget(dir);
-
         let listener = UnixListener::bind(&path).unwrap();
         let h = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -205,33 +203,28 @@ mod tests {
             }
             write.flush().await.unwrap();
             write.shutdown().await.unwrap();
-            drop(listener);
         });
-
-        tokio::task::yield_now().await;
-        (path, h)
+        (dir, path, h)
     }
 
     #[tokio::test]
     async fn one_shot_collects_events_until_done() {
-        let (path, _h) = mock_server(vec![
+        let events = vec![
             Event::Delta {
                 id: "r".into(),
                 text: "hello".into(),
             },
             Event::Done { id: "r".into() },
-        ])
-        .await;
+        ];
+        let (_dir, path, h) = mock_server(events.clone());
 
         let client = IpcClient::with_path(path);
         let stream = client
             .one_shot(Request::query("r", "hi"))
             .await
             .expect("one_shot");
-        let events = stream.collect().await.expect("collect");
-        assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], Event::Delta { .. }));
-        assert!(matches!(events[1], Event::Done { .. }));
+        assert_eq!(stream.collect().await.expect("collect"), events);
+        h.await.unwrap();
     }
 
     #[tokio::test]
@@ -243,20 +236,23 @@ mod tests {
             .one_shot(Request::query("r", "x"))
             .await
             .expect_err("expected NotReachable");
-        assert!(matches!(err, IpcClientError::NotReachable { .. }));
+        assert!(
+            matches!(err, IpcClientError::NotReachable { .. }),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
     async fn collect_errors_on_premature_close() {
-        let (path, _h) = mock_server(vec![Event::Delta {
+        let (_dir, path, h) = mock_server(vec![Event::Delta {
             id: "r".into(),
             text: "incomplete".into(),
-        }])
-        .await;
+        }]);
         let client = IpcClient::with_path(path);
         let stream = client.one_shot(Request::query("r", "x")).await.unwrap();
         let err = stream.collect().await.expect_err("expected DaemonClosed");
-        assert!(matches!(err, IpcClientError::DaemonClosed));
+        assert!(matches!(err, IpcClientError::DaemonClosed), "{err:?}");
+        h.await.unwrap();
     }
 
     #[tokio::test]
@@ -296,8 +292,6 @@ mod tests {
             write.flush().await.unwrap();
         });
 
-        tokio::task::yield_now().await;
-
         let client = IpcClient::with_path(&path);
         let mut conn = client.open_dialog(Request::query("r", "go")).await.unwrap();
 
@@ -316,7 +310,7 @@ mod tests {
         }
 
         let done = conn.next_event().await.unwrap().expect("Done");
-        assert!(matches!(done, Event::Done { .. }));
+        assert_eq!(done, Event::Done { id: "r".into() });
         h.await.unwrap();
     }
 }

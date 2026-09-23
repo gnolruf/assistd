@@ -358,8 +358,20 @@ mod tests {
         handle.await.expect("driver join");
     }
 
+    #[test]
+    fn push_with_visibility_skips_unchanged_snapshots() {
+        let (tx, mut rx) = watch::channel(PopupState::default());
+        push_with_visibility(&tx, PopupState::default(), false);
+        assert!(!rx.has_changed().expect("sender alive"));
+        push_with_visibility(&tx, PopupState::default(), true);
+        assert!(rx.has_changed().expect("sender alive"));
+        assert!(rx.borrow_and_update().visible);
+        push_with_visibility(&tx, PopupState::default(), true);
+        assert!(!rx.has_changed().expect("sender alive"));
+    }
+
     #[tokio::test]
-    async fn tool_call_event_only_pushes_when_state_changed() {
+    async fn tool_call_event_pushes_the_tracker_snapshot() {
         let (state_tx, mut state_rx) = watch::channel(PopupState::default());
         let (in_tx, in_rx) = mpsc::unbounded_channel();
         let (place_tx, _place_rx) = mpsc::unbounded_channel();

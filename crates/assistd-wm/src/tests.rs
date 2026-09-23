@@ -1,182 +1,55 @@
 use super::*;
 
-#[tokio::test]
-async fn no_window_manager_reports_no_focused_window() {
-    assert!(NoWindowManager.focused_window().await.unwrap().is_none());
+fn id(n: u64) -> WindowId {
+    WindowId::new(n).expect("test ids are non-zero")
 }
 
-fn id1() -> WindowId {
-    WindowId::new(1).expect("1 is non-zero")
-}
-
-#[tokio::test]
-async fn no_window_manager_refuses_focus() {
-    assert!(NoWindowManager.focus(&id1()).await.is_err());
-}
-
-#[tokio::test]
-async fn no_window_manager_refuses_move() {
-    assert!(
-        NoWindowManager
-            .move_to_workspace(&id1(), &WorkspaceId::Num(3))
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn no_window_manager_refuses_list_windows() {
-    assert!(NoWindowManager.list_windows().await.is_err());
-}
-
-#[tokio::test]
-async fn no_window_manager_refuses_list_workspaces() {
-    assert!(NoWindowManager.list_workspaces().await.is_err());
-}
-
-#[tokio::test]
-async fn no_window_manager_refuses_resize() {
-    let err = NoWindowManager
-        .resize_width(&id1(), ResizeDir::Grow, 10)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, WmError::Disconnected));
-}
-
-#[tokio::test]
-async fn no_window_manager_refuses_layout() {
-    let err = NoWindowManager
-        .set_layout(Layout::Tabbed)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, WmError::Disconnected));
-}
-
-#[test]
-fn resize_dir_roundtrips() {
-    assert_eq!("grow".parse::<ResizeDir>().unwrap(), ResizeDir::Grow);
-    assert_eq!("shrink".parse::<ResizeDir>().unwrap(), ResizeDir::Shrink);
-    assert_eq!(ResizeDir::Grow.to_string(), "grow");
-    assert!("sideways".parse::<ResizeDir>().is_err());
-}
-
-#[test]
-fn window_id_parses_decimal_only() {
-    assert_eq!(
-        "42".parse::<WindowId>().unwrap(),
-        WindowId::new(42).unwrap()
-    );
-    assert!("0".parse::<WindowId>().is_err());
-    assert!("Firefox".parse::<WindowId>().is_err());
-    assert!("-1".parse::<WindowId>().is_err());
-    assert!("0x2a".parse::<WindowId>().is_err());
-}
-
-#[test]
-fn window_id_display_is_decimal() {
-    assert_eq!(WindowId::new(42).unwrap().to_string(), "42");
-}
-
-#[test]
-fn layout_roundtrips() {
-    for (s, l) in [
-        ("default", Layout::Default),
-        ("tabbed", Layout::Tabbed),
-        ("stacking", Layout::Stacking),
-        ("splith", Layout::SplitH),
-        ("splitv", Layout::SplitV),
-    ] {
-        assert_eq!(s.parse::<Layout>().unwrap(), l);
-        assert_eq!(l.to_string(), s);
+fn anchor() -> PlacementAnchor {
+    PlacementAnchor {
+        corner: AnchorCorner::TopRight,
+        offset_x: -10,
+        offset_y: 10,
+        width: 360,
+        height: 120,
     }
-    assert!("spinning".parse::<Layout>().is_err());
 }
 
 #[tokio::test]
-async fn no_window_manager_refuses_list_outputs() {
-    assert!(NoWindowManager.list_outputs().await.is_err());
-}
-
-#[tokio::test]
-async fn no_window_manager_refuses_place_floating() {
-    let err = NoWindowManager
-        .place_floating(
-            &PlacementCriteria::AppId("dev.assistd.popup".into()),
-            PlacementAnchor {
-                corner: AnchorCorner::TopRight,
-                offset_x: -10,
-                offset_y: 10,
-                width: 360,
-                height: 120,
-            },
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, WmError::Disconnected));
-}
-
-#[test]
-fn window_event_matches_opened_by_title() {
-    let ev = WindowEvent::Opened {
-        id: WindowId::new(7).unwrap(),
-        title: Some("dev.assistd.popup".into()),
-        class: None,
-        app_id: None,
-    };
-    assert_eq!(
-        ev.matches_opened(&PlacementCriteria::Title("dev.assistd.popup".into())),
-        WindowId::new(7)
-    );
-    assert_eq!(
-        ev.matches_opened(&PlacementCriteria::Title("other".into())),
-        None
-    );
-    assert_eq!(
-        ev.matches_opened(&PlacementCriteria::Class("dev.assistd.popup".into())),
-        None,
-        "title-only event should not match class criteria"
-    );
-}
-
-#[test]
-fn window_event_matches_opened_by_app_id_and_class_and_con_id() {
-    let id = WindowId::new(11).unwrap();
-    let ev = WindowEvent::Opened {
-        id,
-        title: None,
-        class: Some("Firefox".into()),
-        app_id: Some("org.mozilla.firefox".into()),
-    };
-    assert_eq!(
-        ev.matches_opened(&PlacementCriteria::Class("Firefox".into())),
-        Some(id)
-    );
-    assert_eq!(
-        ev.matches_opened(&PlacementCriteria::AppId("org.mozilla.firefox".into())),
-        Some(id)
-    );
-    assert_eq!(ev.matches_opened(&PlacementCriteria::ConId(id)), Some(id));
-    assert_eq!(
-        ev.matches_opened(&PlacementCriteria::ConId(WindowId::new(99).unwrap())),
-        None
-    );
-}
-
-#[test]
-fn window_event_non_opened_variants_never_match() {
-    let id = WindowId::new(3).unwrap();
-    assert_eq!(
-        WindowEvent::Closed { id }.matches_opened(&PlacementCriteria::ConId(id)),
-        None
-    );
-    assert_eq!(
-        WindowEvent::TitleChanged {
-            id,
-            new_title: Some("x".into())
-        }
-        .matches_opened(&PlacementCriteria::Title("x".into())),
-        None
-    );
+async fn no_window_manager_reports_disconnected_for_every_operation() {
+    let wm = NoWindowManager;
+    let criteria = PlacementCriteria::AppId("dev.assistd.popup".into());
+    let results = [
+        ("focus", wm.focus(&id(1)).await),
+        (
+            "move_to_workspace",
+            wm.move_to_workspace(&id(1), &WorkspaceId::Num(3)).await,
+        ),
+        ("list_windows", wm.list_windows().await.map(drop)),
+        ("list_workspaces", wm.list_workspaces().await.map(drop)),
+        (
+            "resize_width",
+            wm.resize_width(&id(1), ResizeDir::Grow, 10).await,
+        ),
+        ("set_layout", wm.set_layout(Layout::Tabbed).await),
+        ("list_outputs", wm.list_outputs().await.map(drop)),
+        (
+            "place_floating",
+            wm.place_floating(&criteria, anchor()).await,
+        ),
+        (
+            "focused_workspace_rect",
+            wm.focused_workspace_rect().await.map(drop),
+        ),
+    ];
+    for (op, result) in results {
+        assert!(
+            matches!(result, Err(WmError::Disconnected)),
+            "{op}: {result:?}"
+        );
+    }
+    assert_eq!(wm.focused_window().await.unwrap(), None);
+    assert_eq!(wm.focused_context().await.unwrap(), None);
+    assert!(!wm.is_connected());
 }
 
 /// Implements only the required methods, so every default is
@@ -211,61 +84,129 @@ impl WindowManager for MinimalWm {
 #[tokio::test]
 async fn default_place_floating_reports_unsupported() {
     let err = MinimalWm
-        .place_floating(
-            &PlacementCriteria::AppId("x".into()),
-            PlacementAnchor {
-                corner: AnchorCorner::Center,
-                offset_x: 0,
-                offset_y: 0,
-                width: 100,
-                height: 100,
-            },
-        )
+        .place_floating(&PlacementCriteria::AppId("x".into()), anchor())
         .await
         .unwrap_err();
-    assert!(matches!(err, WmError::Unsupported(op) if op == "floating placement"));
+    assert!(matches!(err, WmError::Unsupported("floating placement")));
 }
 
 #[tokio::test]
 async fn default_list_outputs_reports_unsupported() {
     let err = MinimalWm.list_outputs().await.unwrap_err();
-    assert!(matches!(err, WmError::Unsupported(op) if op == "output enumeration"));
+    assert!(matches!(err, WmError::Unsupported("output enumeration")));
 }
 
 #[test]
-fn no_window_manager_reports_disconnected() {
-    assert!(!NoWindowManager.is_connected());
+fn resize_dir_round_trips() {
+    for (s, dir) in [("grow", ResizeDir::Grow), ("shrink", ResizeDir::Shrink)] {
+        assert_eq!(s.parse::<ResizeDir>(), Ok(dir));
+        assert_eq!(dir.to_string(), s);
+    }
+    assert_eq!("sideways".parse::<ResizeDir>(), Err(ParseResizeDirError));
 }
 
 #[test]
-fn version_is_not_empty() {
-    assert!(!version().is_empty());
+fn layout_round_trips() {
+    for (s, l) in [
+        ("default", Layout::Default),
+        ("tabbed", Layout::Tabbed),
+        ("stacking", Layout::Stacking),
+        ("splith", Layout::SplitH),
+        ("splitv", Layout::SplitV),
+    ] {
+        assert_eq!(s.parse::<Layout>(), Ok(l));
+        assert_eq!(l.to_string(), s);
+    }
+    assert_eq!("spinning".parse::<Layout>(), Err(ParseLayoutError));
 }
 
 #[test]
-fn is_terminal_class_matches_known_emulators() {
-    assert!(is_terminal_class("Alacritty"));
-    assert!(is_terminal_class("kitty"));
-    assert!(is_terminal_class("WezTerm"));
-    assert!(is_terminal_class("foot"));
+fn window_id_round_trips_positive_decimal_only() {
+    assert_eq!("42".parse::<WindowId>(), Ok(id(42)));
+    assert_eq!(id(42).to_string(), "42");
+    for bad in ["0", "Firefox", "-1", "0x2a", ""] {
+        assert_eq!(bad.parse::<WindowId>(), Err(ParseWindowIdError), "{bad:?}");
+    }
 }
 
 #[test]
-fn is_terminal_class_is_case_insensitive() {
-    assert!(is_terminal_class("alacritty"));
-    assert!(is_terminal_class("XTERM"));
-    assert!(is_terminal_class("xterm"));
+fn window_event_matches_opened_by_each_criterion() {
+    let titled = WindowEvent::Opened {
+        id: id(7),
+        title: Some("dev.assistd.popup".into()),
+        class: None,
+        app_id: None,
+    };
+    let firefox = WindowEvent::Opened {
+        id: id(11),
+        title: None,
+        class: Some("Firefox".into()),
+        app_id: Some("org.mozilla.firefox".into()),
+    };
+    for (event, criteria, expected) in [
+        (
+            &titled,
+            PlacementCriteria::Title("dev.assistd.popup".into()),
+            Some(id(7)),
+        ),
+        (&titled, PlacementCriteria::Title("other".into()), None),
+        (
+            &titled,
+            PlacementCriteria::Class("dev.assistd.popup".into()),
+            None,
+        ),
+        (
+            &firefox,
+            PlacementCriteria::Class("Firefox".into()),
+            Some(id(11)),
+        ),
+        (
+            &firefox,
+            PlacementCriteria::AppId("org.mozilla.firefox".into()),
+            Some(id(11)),
+        ),
+        (&firefox, PlacementCriteria::ConId(id(11)), Some(id(11))),
+        (&firefox, PlacementCriteria::ConId(id(99)), None),
+    ] {
+        assert_eq!(
+            event.matches_opened(&criteria),
+            expected,
+            "{event:?} vs {criteria:?}"
+        );
+    }
 }
 
 #[test]
-fn is_terminal_class_rejects_non_terminals() {
-    assert!(!is_terminal_class("firefox"));
-    assert!(!is_terminal_class("code"));
-    assert!(!is_terminal_class(""));
-    assert!(!is_terminal_class("Slack"));
+fn window_event_non_opened_variants_never_match() {
+    assert_eq!(
+        WindowEvent::Closed { id: id(3) }.matches_opened(&PlacementCriteria::ConId(id(3))),
+        None
+    );
+    assert_eq!(
+        WindowEvent::TitleChanged {
+            id: id(3),
+            new_title: Some("x".into())
+        }
+        .matches_opened(&PlacementCriteria::Title("x".into())),
+        None
+    );
 }
 
-#[tokio::test]
-async fn no_window_manager_focused_context_is_none() {
-    assert!(NoWindowManager.focused_context().await.unwrap().is_none());
+#[test]
+fn is_terminal_class_matches_known_emulators_case_insensitively() {
+    for (class, expected) in [
+        ("Alacritty", true),
+        ("kitty", true),
+        ("WezTerm", true),
+        ("foot", true),
+        ("alacritty", true),
+        ("XTERM", true),
+        ("xterm", true),
+        ("firefox", false),
+        ("code", false),
+        ("Slack", false),
+        ("", false),
+    ] {
+        assert_eq!(is_terminal_class(class), expected, "{class:?}");
+    }
 }

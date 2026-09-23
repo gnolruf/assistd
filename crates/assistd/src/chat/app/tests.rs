@@ -128,23 +128,6 @@ async fn mock_daemon(
 }
 
 #[test]
-fn delta_keeps_generating_true() {
-    let (mut app, _rx) = test_app();
-    app.generating = true;
-    app.on_chat_event(reply(delta("hi")));
-    assert!(app.generating);
-}
-
-#[test]
-fn done_clears_generating() {
-    let (mut app, _rx) = test_app();
-    app.generating = true;
-    app.on_chat_event(reply(delta("hi")));
-    app.on_chat_event(reply(done()));
-    assert!(!app.generating);
-}
-
-#[test]
 fn reply_wire_error_clears_generating() {
     let (mut app, _rx) = test_app();
     app.generating = true;
@@ -238,7 +221,7 @@ fn another_turns_terminal_events_leave_the_owner_alone() {
         message: "voice turn rejected".into(),
     }));
     assert!(app.generating, "a foreign Error must not end the reply");
-    assert!(app.notice().is_some(), "but it is still surfaced");
+    assert_eq!(app.notice(), Some("voice turn rejected"));
 
     app.on_chat_event(reply(delta_for("typed", "written")));
     let lines = rendered(&mut app);
@@ -293,7 +276,7 @@ fn page_up_increments_scroll() {
     let (mut app, _rx) = test_app();
     app.last_output_height = 10;
     app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
-    assert!(app.output.scroll_offset() > 0);
+    assert_eq!(app.output.scroll_offset(), 5);
 }
 
 fn wheel(kind: MouseEventKind) -> MouseEvent {
@@ -306,28 +289,17 @@ fn wheel(kind: MouseEventKind) -> MouseEvent {
 }
 
 #[test]
-fn mouse_wheel_up_scrolls_history_up() {
+fn mouse_wheel_scrolls_by_a_fixed_step() {
     let (mut app, _rx) = test_app();
-    let before = app.output.scroll_offset();
-    app.on_mouse(wheel(MouseEventKind::ScrollUp));
-    let after = app.output.scroll_offset();
-    assert_eq!(after - before, MOUSE_WHEEL_STEP);
-}
-
-#[test]
-fn mouse_wheel_down_undoes_wheel_up() {
-    let (mut app, _rx) = test_app();
-    app.on_mouse(wheel(MouseEventKind::ScrollUp));
-    app.on_mouse(wheel(MouseEventKind::ScrollUp));
-    app.on_mouse(wheel(MouseEventKind::ScrollDown));
-    assert_eq!(app.output.scroll_offset(), MOUSE_WHEEL_STEP);
-}
-
-#[test]
-fn mouse_non_wheel_events_are_ignored() {
-    let (mut app, _rx) = test_app();
-    app.on_mouse(wheel(MouseEventKind::Moved));
-    assert_eq!(app.output.scroll_offset(), 0);
+    for (kind, expected) in [
+        (MouseEventKind::ScrollUp, MOUSE_WHEEL_STEP),
+        (MouseEventKind::ScrollUp, 2 * MOUSE_WHEEL_STEP),
+        (MouseEventKind::Moved, 2 * MOUSE_WHEEL_STEP),
+        (MouseEventKind::ScrollDown, MOUSE_WHEEL_STEP),
+    ] {
+        app.on_mouse(wheel(kind));
+        assert_eq!(app.output.scroll_offset(), expected, "after {kind:?}");
+    }
 }
 
 #[test]
@@ -344,7 +316,7 @@ fn enter_while_generating_sets_notice() {
     app.on_key(typed('h'));
     app.on_key(typed('i'));
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.notice().is_some());
+    assert_eq!(app.notice(), Some("still generating, please wait"));
 }
 
 #[test]
@@ -389,40 +361,64 @@ fn open_test_modal(app: &mut App) {
     );
 }
 
-#[tokio::test]
-async fn modal_approve_on_y_once_armed() {
-    let (mut app, _rx) = test_app();
+/// An app with an open modal whose answers land on the returned writer.
+fn app_with_modal() -> (App, mpsc::Receiver<ChatEvent>, mpsc::Receiver<Request>) {
+    let (mut app, rx) = test_app();
+    let (writer_tx, writer_rx) = mpsc::channel(4);
+    app.active_reply = Some(ActiveReply {
+        id: "r".into(),
+        writer: Some(writer_tx),
+    });
     open_test_modal(&mut app);
-    assert!(app.has_modal());
+    (app, rx, writer_rx)
+}
+
+async fn confirm_answer(writer_rx: &mut mpsc::Receiver<Request>) -> bool {
+    match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
+        Ok(Some(Request::ConfirmResponse {
+            confirm_id, allow, ..
+        })) => {
+            assert_eq!(confirm_id, "c1");
+            allow
+        }
+        other => panic!("expected a ConfirmResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn modal_approves_on_y_once_armed() {
+    let (mut app, _rx, mut writer_rx) = app_with_modal();
     app.arm_modal();
     app.on_key(typed('y'));
-    assert!(!app.has_modal(), "modal should close on approve");
+    assert!(!app.has_modal());
+    assert!(confirm_answer(&mut writer_rx).await);
 }
 
 #[tokio::test]
 async fn modal_ignores_approval_before_armed() {
-    let (mut app, _rx) = test_app();
-    open_test_modal(&mut app);
+    let (mut app, _rx, mut writer_rx) = app_with_modal();
     app.on_key(typed('y'));
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.has_modal(), "keys still in flight must not approve");
+    assert!(writer_rx.try_recv().is_err());
 }
 
 #[tokio::test]
 async fn modal_enter_never_approves() {
-    let (mut app, _rx) = test_app();
-    open_test_modal(&mut app);
+    let (mut app, _rx, _writer_rx) = app_with_modal();
     app.arm_modal();
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.has_modal());
 }
 
 #[tokio::test]
-async fn modal_deny_before_armed() {
-    let (mut app, _rx) = test_app();
-    open_test_modal(&mut app);
-    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(!app.has_modal());
+async fn modal_denies_on_n_or_esc_even_before_armed() {
+    for key in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
+        let (mut app, _rx, mut writer_rx) = app_with_modal();
+        app.on_key(KeyEvent::new(key, KeyModifiers::NONE));
+        assert!(!app.has_modal(), "{key:?}");
+        assert!(!confirm_answer(&mut writer_rx).await, "{key:?}");
+    }
 }
 
 #[test]
@@ -435,17 +431,8 @@ fn modal_closes_when_the_turn_ends() {
 }
 
 #[tokio::test]
-async fn modal_deny_on_n() {
-    let (mut app, _rx) = test_app();
-    open_test_modal(&mut app);
-    app.on_key(typed('n'));
-    assert!(!app.has_modal());
-}
-
-#[tokio::test]
 async fn modal_swallows_unrelated_keys() {
-    let (mut app, _rx) = test_app();
-    open_test_modal(&mut app);
+    let (mut app, _rx, _writer_rx) = app_with_modal();
     app.arm_modal();
     app.on_key(typed('x'));
     app.on_key(typed('z'));
@@ -473,13 +460,12 @@ fn tool_call_then_result_creates_one_block_with_command() {
         }),
     }));
     assert!(app.pending_tool_call.is_none());
-    let (lines, _) = app.output.render_view(80, 50);
-    let rendered: Vec<String> = lines
-        .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-        .collect();
-    assert!(rendered.iter().any(|l| l.contains("$ ls /tmp")));
-    assert!(rendered.iter().any(|l| l.contains("[exit:0 | 5ms]")));
+    let lines = rendered(&mut app);
+    assert!(lines.contains(&"▎ $ ls /tmp".to_string()), "{lines:#?}");
+    assert!(
+        lines.iter().any(|l| l.ends_with("[exit:0 | 5ms]")),
+        "{lines:#?}"
+    );
 }
 
 #[test]
@@ -492,8 +478,7 @@ fn confirm_request_event_opens_modal() {
         script: "rm -rf /tmp/foo".into(),
         matched_pattern: "rm -rf".into(),
     }));
-    assert!(app.has_modal());
-    let modal = app.modal.as_ref().unwrap();
+    let modal = app.modal.as_ref().expect("modal opened");
     assert_eq!(modal.confirm_id, "c-xyz");
     assert_eq!(modal.request.script, "rm -rf /tmp/foo");
 }
@@ -530,9 +515,7 @@ fn slash_popup_shows_after_slash() {
 fn slash_popup_filters_by_prefix() {
     let (mut app, _rx) = test_app();
     type_str(&mut app, "/fo");
-    let s = app.slash_suggestions();
-    assert_eq!(s.len(), 1);
-    assert_eq!(s[0].0, "/fork");
+    assert_eq!(app.slash_suggestions(), [&("/fork", "<name>")]);
 }
 
 #[test]
@@ -570,13 +553,6 @@ fn esc_dismisses_popup_without_clearing_buffer() {
     assert_eq!(app.input.buffer(), "/at");
 }
 
-#[test]
-fn slash_registry_contains_new_and_resume() {
-    let names: Vec<&str> = SLASH_COMMANDS.iter().map(|(c, _)| *c).collect();
-    assert!(names.contains(&"/new"));
-    assert!(names.contains(&"/resume"));
-}
-
 fn picker_entry(name: &str, session: &str, current: bool, active_sess: bool) -> BranchListEntry {
     BranchListEntry {
         name: name.into(),
@@ -607,10 +583,9 @@ fn open_branch_picker_highlights_active_current() {
 #[test]
 fn open_branch_picker_with_no_entries_sets_notice() {
     let (mut app, _rx) = test_app();
-    app.branches_buffer.clear();
     app.open_branch_picker();
     assert!(app.picker_modal.is_none());
-    assert!(app.notice.is_some());
+    assert_eq!(app.notice(), Some("no branches to resume"));
 }
 
 #[test]
@@ -652,6 +627,7 @@ fn picker_esc_cancels_without_dispatching() {
     });
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.picker_modal.is_none());
+    assert!(app.in_flight_branch_op.is_none());
 }
 
 #[test]
@@ -659,7 +635,6 @@ fn dismissal_resets_after_buffer_clears() {
     let (mut app, _rx) = test_app();
     type_str(&mut app, "/at");
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    // Wipe the buffer; popup should re-arm on the next `/`.
     for _ in 0..3 {
         app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
     }

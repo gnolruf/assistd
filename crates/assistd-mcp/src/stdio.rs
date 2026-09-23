@@ -396,9 +396,8 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex};
     use tokio::task::JoinHandle;
 
-    /// Pretend MCP server: reads requests from `client_to_server`, replies
-    /// on `server_to_client`. Hands back the spawned task so callers can
-    /// `await` it after they're done.
+    /// Pretend MCP server: answers every request read from
+    /// `client_to_server` with `handler(request)` on `server_to_client`.
     fn fake_server<F, Fut>(
         client_to_server: tokio::io::DuplexStream,
         server_to_client: tokio::io::DuplexStream,
@@ -423,7 +422,6 @@ mod tests {
                     Err(_) => continue,
                 };
                 if req.get("id").is_none() {
-                    // Notification (e.g. notifications/initialized). Ignore.
                     continue;
                 }
                 let resp = handler(req).await;
@@ -439,23 +437,15 @@ mod tests {
         })
     }
 
-    /// Helper: standard mock that replies to every request id with the
-    /// given closure-built `result`.
     async fn make_client_with_handler<F, Fut>(
         handler: F,
-    ) -> (
-        Arc<StdioMcpClient>,
-        TransportHandles,
-        JoinHandle<()>,
-        // Keep the server-side half alive so writes don't fail.
-        tokio::task::JoinHandle<()>,
-    )
+    ) -> (Arc<StdioMcpClient>, TransportHandles, JoinHandle<()>)
     where
         F: Fn(serde_json::Value) -> Fut + Send + Clone + 'static,
         Fut: std::future::Future<Output = serde_json::Value> + Send,
     {
-        let (client_write, server_read) = duplex(8192); // client -> server
-        let (server_write, client_read) = duplex(8192); // server -> client
+        let (client_write, server_read) = duplex(8192);
+        let (server_write, client_read) = duplex(8192);
 
         let server_task = fake_server(server_read, server_write, handler);
 
@@ -467,19 +457,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let dummy = tokio::spawn(async {});
-        (client, handles, server_task, dummy)
+        (client, handles, server_task)
     }
 
     #[tokio::test]
     async fn list_tools_round_trip() {
         let handler = |req: serde_json::Value| async move {
-            let id = req["id"].clone();
-            let method = req["method"].as_str().unwrap();
-            assert_eq!(method, "tools/list");
+            assert_eq!(req["method"], "tools/list");
             json!({
                 "jsonrpc": "2.0",
-                "id": id,
+                "id": req["id"],
                 "result": {
                     "tools": [
                         {
@@ -491,13 +478,18 @@ mod tests {
                 }
             })
         };
-        let (client, handles, server, _) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler).await;
 
         let tools = client.list_tools().await.unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "echo");
-        assert_eq!(tools[0].description, "echoes its input");
-        assert_eq!(tools[0].input_schema["type"], "object");
+        let [tool] = tools.as_slice() else {
+            panic!("expected one tool, got {tools:?}");
+        };
+        assert_eq!(tool.name, "echo");
+        assert_eq!(tool.description, "echoes its input");
+        assert_eq!(
+            tool.input_schema,
+            json!({"type": "object", "properties": {"x": {"type": "string"}}})
+        );
 
         handles.shutdown_and_join().await;
         let _ = server.await;
@@ -506,19 +498,21 @@ mod tests {
     #[tokio::test]
     async fn invoke_text_response() {
         let handler = |req: serde_json::Value| async move {
-            let id = req["id"].clone();
             assert_eq!(req["method"], "tools/call");
-            assert_eq!(req["params"]["name"], "echo");
+            assert_eq!(
+                req["params"],
+                json!({"name": "echo", "arguments": {"x": "hi"}})
+            );
             json!({
                 "jsonrpc": "2.0",
-                "id": id,
+                "id": req["id"],
                 "result": {
                     "content": [{"type": "text", "text": "hello"}],
                     "isError": false
                 }
             })
         };
-        let (client, handles, server, _) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler).await;
 
         let result = client.invoke("echo", json!({"x": "hi"})).await.unwrap();
         match result {
@@ -532,26 +526,25 @@ mod tests {
     #[tokio::test]
     async fn invoke_image_response_decodes_base64() {
         let handler = |req: serde_json::Value| async move {
-            let id = req["id"].clone();
             json!({
                 "jsonrpc": "2.0",
-                "id": id,
+                "id": req["id"],
                 "result": {
                     "content": [{
                         "type": "image",
                         "mimeType": "image/png",
-                        "data": "3q2+7w==" // 0xDE 0xAD 0xBE 0xEF
+                        "data": "3q2+7w=="
                     }],
                     "isError": false
                 }
             })
         };
-        let (client, handles, server, _) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler).await;
         let result = client.invoke("snap", json!({})).await.unwrap();
         match result {
             ToolResult::Image { mime, bytes } => {
                 assert_eq!(mime, "image/png");
-                assert_eq!(bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+                assert_eq!(bytes, [0xDE, 0xAD, 0xBE, 0xEF]);
             }
             other => panic!("expected Image, got {other:?}"),
         }
@@ -562,19 +555,20 @@ mod tests {
     #[tokio::test]
     async fn rpc_error_surfaces_as_error() {
         let handler = |req: serde_json::Value| async move {
-            let id = req["id"].clone();
             json!({
                 "jsonrpc": "2.0",
-                "id": id,
+                "id": req["id"],
                 "error": {"code": -32601, "message": "method not found"}
             })
         };
-        let (client, handles, server, _) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler).await;
         let err = client.list_tools().await.unwrap_err();
-        let msg = format!("{err:#}");
         assert!(
-            msg.contains("method not found"),
-            "expected RpcError to surface; got {msg}"
+            matches!(
+                &err,
+                McpError::RpcError { code: -32601, message, .. } if message == "method not found"
+            ),
+            "{err:?}"
         );
         handles.shutdown_and_join().await;
         let _ = server.await;
@@ -582,21 +576,9 @@ mod tests {
 
     #[tokio::test]
     async fn request_timeout_fires_when_server_silent() {
-        // Server that reads but never replies.
-        let (client_write, server_read) = duplex(8192);
-        let (server_write, client_read) = duplex(8192);
-        let silent = tokio::spawn(async move {
-            let mut reader = BufReader::new(server_read);
-            let mut line = String::new();
-            // Drain forever, never write a response.
-            loop {
-                line.clear();
-                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-                    break;
-                }
-            }
-            drop(server_write); // appease borrowck
-        });
+        // Both server halves stay alive but nothing ever answers.
+        let (client_write, _server_read) = duplex(8192);
+        let (_server_write, client_read) = duplex(8192);
 
         let (client, handles) = StdioMcpClient::from_streams(
             client_read,
@@ -608,11 +590,12 @@ mod tests {
         .unwrap();
 
         let err = client.list_tools().await.unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("timed out"), "{msg}");
+        assert!(
+            matches!(err, McpError::RequestTimeout(d) if d == Duration::from_millis(150)),
+            "{err:?}"
+        );
         assert_eq!(client.correlator.in_flight(), 0);
         handles.shutdown_and_join().await;
-        let _ = silent.await;
     }
 
     #[tokio::test]
@@ -655,13 +638,15 @@ mod tests {
         .await
         .unwrap();
 
-        // Issue a request, then drop the server side so the read loop EOFs.
         let call = tokio::spawn({
             let c = client.clone();
             async move { c.list_tools().await }
         });
-        // Give the client a beat to send the request before EOF'ing the server.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The request must be registered before the read loop sees EOF,
+        // or it would miss `fail_all` and wait out the timeout instead.
+        while client.correlator.in_flight() == 0 {
+            tokio::task::yield_now().await;
+        }
         drop(server_read);
         drop(server_write);
 

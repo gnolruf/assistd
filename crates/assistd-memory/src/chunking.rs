@@ -79,99 +79,92 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_input_returns_empty() {
-        assert!(chunk_message("", &cfg(64, 8)).is_empty());
-        assert!(chunk_message("   \n\t  ", &cfg(64, 8)).is_empty());
+    fn alphabet(len: usize) -> String {
+        (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect()
+    }
+
+    fn char_window(s: &str, start: usize, end: usize) -> String {
+        s.chars().skip(start).take(end - start).collect()
     }
 
     #[test]
-    fn short_input_returns_single_chunk() {
-        let r = chunk_message("hello world", &cfg(64, 8));
-        assert_eq!(r, vec!["hello world".to_string()]);
-    }
-
-    #[test]
-    fn exact_boundary_returns_single_chunk() {
-        let s = "a".repeat(64);
-        let r = chunk_message(&s, &cfg(64, 8));
-        assert_eq!(r.len(), 1);
-        assert_eq!(r[0], s);
-    }
-
-    #[test]
-    fn long_input_splits_with_overlap() {
-        let s: String = (0..100).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-        let r = chunk_message(&s, &cfg(40, 10));
-        assert_eq!(
-            r.len(),
-            3,
-            "{:?}",
-            r.iter().map(|c| c.len()).collect::<Vec<_>>()
-        );
-        for chunk in &r {
-            assert_eq!(chunk.chars().count(), 40);
+    fn inputs_that_fit_or_cannot_be_split_come_back_whole_or_empty() {
+        let a64 = "a".repeat(64);
+        let a50 = "a".repeat(50);
+        let spaces = " ".repeat(30);
+        let cases = [
+            ("empty", "", cfg(64, 8), vec![]),
+            ("whitespace only", "   \n\t  ", cfg(64, 8), vec![]),
+            ("long whitespace only", spaces.as_str(), cfg(10, 2), vec![]),
+            ("short", "hello world", cfg(64, 8), vec!["hello world"]),
+            (
+                "exactly at the limit",
+                a64.as_str(),
+                cfg(64, 8),
+                vec![a64.as_str()],
+            ),
+            (
+                "overlap >= chunk",
+                a50.as_str(),
+                cfg(10, 10),
+                vec![a50.as_str()],
+            ),
+        ];
+        for (label, input, cfg, expected) in cases {
+            assert_eq!(chunk_message(input, &cfg), expected, "{label}");
         }
     }
 
     #[test]
-    fn long_input_with_uneven_tail_keeps_tail_chunk() {
-        // 110 chars, chunk=40, overlap=10 → starts at 0, 30, 60, 90.
-        // Window 3 covers 90..110 = 20 chars (a real partial tail).
-        let s: String = (0..110).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-        let r = chunk_message(&s, &cfg(40, 10));
-        assert_eq!(r.len(), 4);
-        assert_eq!(r[0].chars().count(), 40);
-        assert_eq!(r[1].chars().count(), 40);
-        assert_eq!(r[2].chars().count(), 40);
-        assert_eq!(r[3].chars().count(), 20);
-    }
-
-    #[test]
-    fn overlap_is_actually_present() {
-        // Make a string where each chunk's last `overlap` chars equal the
-        // next chunk's first `overlap` chars.
-        let s: String = (0..50).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-        let r = chunk_message(&s, &cfg(20, 5));
-        // step=15, starts at 0, 15, 30, 45.
-        let chunk0_tail: String = r[0]
-            .chars()
-            .rev()
-            .take(5)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let chunk1_head: String = r[1].chars().take(5).collect();
-        assert_eq!(
-            chunk0_tail, chunk1_head,
-            "expected last 5 of chunk0 to equal first 5 of chunk1"
-        );
-    }
-
-    #[test]
-    fn multi_byte_utf8_never_panics_or_splits_chars() {
-        // Each char takes 3 bytes. 30 chars = 90 bytes. With chunk=10,
-        // overlap=2, step=8: starts at chars 0, 8, 16, 24; lengths 10, 10, 10, 6.
-        let s: String = (0..30).map(|_| '世').collect();
-        let r = chunk_message(&s, &cfg(10, 2));
-        for c in &r {
-            assert!(c.chars().all(|ch| ch == '世'));
+    fn long_inputs_slide_an_overlapping_window() {
+        let mixed_width: String = "a\u{e9}\u{4e16}".repeat(10);
+        let cases = [
+            (
+                "even split",
+                alphabet(100),
+                cfg(40, 10),
+                vec![(0, 40), (30, 70), (60, 100)],
+            ),
+            (
+                "short tail kept",
+                alphabet(110),
+                cfg(40, 10),
+                vec![(0, 40), (30, 70), (60, 100), (90, 110)],
+            ),
+            (
+                "small overlap",
+                alphabet(50),
+                cfg(20, 5),
+                vec![(0, 20), (15, 35), (30, 50)],
+            ),
+            (
+                "multi-byte chars never split",
+                mixed_width,
+                cfg(10, 2),
+                vec![(0, 10), (8, 18), (16, 26), (24, 30)],
+            ),
+        ];
+        for (label, input, cfg, windows) in cases {
+            let expected: Vec<String> = windows
+                .into_iter()
+                .map(|(start, end)| char_window(&input, start, end))
+                .collect();
+            assert_eq!(chunk_message(&input, &cfg), expected, "{label}");
         }
-        assert!(r.len() >= 3);
     }
 
     #[test]
-    fn pure_whitespace_chunk_is_dropped() {
-        let s = " ".repeat(30);
-        let r = chunk_message(&s, &cfg(10, 2));
-        assert!(r.is_empty());
-    }
-
-    #[test]
-    fn defensive_against_overlap_geq_chunk() {
-        let s = "a".repeat(50);
-        let r = chunk_message(&s, &cfg(10, 10));
-        assert_eq!(r, vec![s]);
+    fn whitespace_only_windows_are_dropped() {
+        let input = format!("{}{}{}", "a".repeat(10), " ".repeat(20), "b".repeat(10));
+        let chunks = chunk_message(&input, &cfg(10, 2));
+        assert_eq!(
+            chunks,
+            [
+                "a".repeat(10),
+                format!("aa{}", " ".repeat(8)),
+                format!("{}bbbb", " ".repeat(6)),
+                "b".repeat(8),
+            ]
+        );
     }
 }

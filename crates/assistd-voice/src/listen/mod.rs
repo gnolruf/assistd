@@ -93,17 +93,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn no_continuous_listener_start_errors() {
-        assert!(NoContinuousListener::new().start().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn no_continuous_listener_stop_ok() {
-        NoContinuousListener::new().stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn no_continuous_listener_is_inactive() {
-        assert!(!NoContinuousListener::new().is_active());
+    async fn no_continuous_listener_refuses_start_and_stays_inactive() {
+        let listener = NoContinuousListener::new();
+        assert!(matches!(listener.start().await, Err(ListenError::Disabled)));
+        assert!(!listener.is_active());
+        assert!(!*listener.subscribe_state().borrow());
+        listener.stop().await.unwrap();
     }
 }

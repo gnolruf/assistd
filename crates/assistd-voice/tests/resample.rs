@@ -1,15 +1,5 @@
-//! 48 kHz stereo → 16 kHz mono resampling coverage.
-//!
-//! Exercises `mic::consumer::drain_to_pcm` end-to-end by feeding a
-//! synthesised mono waveform into the same SPSC ring the cpal
-//! callback pushes into. Bypasses cpal entirely so the test is
-//! deterministic and runs on CI hosts without audio hardware.
-//!
-//! Stereo → mono downmix happens at runtime in the cpal callback
-//! (`mic::capture::CallbackState::push`). By the time a sample hits
-//! `drain_to_pcm`, it is already mono f32 at the device's native
-//! sample rate; the only remaining work is the rate conversion we
-//! verify here.
+//! `mic::consumer::drain_to_pcm` rate conversion to 16 kHz, fed from a
+//! ring buffer directly so no audio hardware is needed.
 
 #![cfg(feature = "mic")]
 
@@ -21,80 +11,49 @@ use assistd_voice::mic::consumer::drain_to_pcm;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Producer, Split};
 
-/// Synthesise `seconds` of a single-channel 440 Hz sine at `rate_hz`,
-/// push it into a ring buffer, close the producer, and drain through
-/// `drain_to_pcm` with the stop flag already set. Returns the produced
-/// 16 kHz i16 PCM.
-fn run_drain(rate_hz: u32, seconds: f32) -> Vec<i16> {
-    let n_in = (rate_hz as f32 * seconds).round() as usize;
-    let rb = HeapRb::<f32>::new(n_in + 16);
+/// Push one second of a 440 Hz mono sine at `rate_hz` into a ring and
+/// drain it with the stop flag already set.
+fn drain_one_second(rate_hz: u32) -> Vec<i16> {
+    let n_in = rate_hz as usize;
+    let rb = HeapRb::<f32>::new(n_in);
     let (mut prod, cons) = rb.split();
     for i in 0..n_in {
         let t = i as f32 / rate_hz as f32;
-        let s = (2.0 * PI * 440.0 * t).sin() * 0.5;
-        if prod.try_push(s).is_err() {
-            break;
-        }
+        prod.try_push((2.0 * PI * 440.0 * t).sin() * 0.5)
+            .expect("ring sized for the whole clip");
     }
-    drop(prod); // closes the producer side; consumer.occupied_len stays stable
+    drop(prod);
     let stop = Arc::new(AtomicBool::new(true));
-    // max_pcm_samples is generous: enough for a few seconds at 16 kHz.
     drain_to_pcm(cons, rate_hz, 16_000 * 4, stop).expect("drain_to_pcm error")
 }
 
-#[test]
-fn drain_loop_resamples_48k_to_16k() {
-    let pcm = run_drain(48_000, 1.0);
-    // 1 s at 48 kHz → ~16 000 samples at 16 kHz. Rubato's
-    // FastFixedIn operates in fixed 1024-sample input chunks with a
-    // final padded chunk, so we accept a few hundred samples of
-    // slack at the tail.
-    let expected = 16_000usize;
-    assert!(
-        (pcm.len() as i64 - expected as i64).unsigned_abs() as usize <= 600,
-        "resampled length {} should be within ±600 of {}",
-        pcm.len(),
-        expected,
-    );
-    // Energy: a non-zero sine must produce non-zero samples.
+fn assert_mostly_nonzero(pcm: &[i16], label: &str) {
     let nonzero = pcm.iter().filter(|s| **s != 0).count();
     assert!(
         nonzero > pcm.len() / 2,
-        "expected a majority of non-zero samples, got {nonzero} of {}",
+        "{label}: {nonzero} of {} samples non-zero",
         pcm.len()
     );
 }
 
 #[test]
-fn drain_loop_noop_when_rate_already_16k() {
-    let pcm = run_drain(16_000, 1.0);
-    // No resampling: output length equals input length modulo the
-    // final-chunk handling. No-op path preserves counts exactly.
-    let expected = 16_000usize;
-    assert!(
-        (pcm.len() as i64 - expected as i64).unsigned_abs() as usize <= 16,
-        "no-op path length {} should equal {}",
-        pcm.len(),
-        expected,
-    );
-    let nonzero = pcm.iter().filter(|s| **s != 0).count();
-    assert!(
-        nonzero > pcm.len() / 2,
-        "expected a majority of non-zero samples, got {nonzero} of {}",
-        pcm.len()
-    );
+fn drain_resamples_common_device_rates_to_16k() {
+    for rate in [48_000, 44_100] {
+        let pcm = drain_one_second(rate);
+        // The resampler consumes fixed 1024-sample chunks and zero-pads
+        // the last one, so the tail length is approximate.
+        assert!(
+            pcm.len().abs_diff(16_000) <= 600,
+            "{rate} Hz: resampled to {} samples",
+            pcm.len()
+        );
+        assert_mostly_nonzero(&pcm, &format!("{rate} Hz"));
+    }
 }
 
 #[test]
-fn drain_loop_resamples_44100_to_16k() {
-    // 44.1 kHz is the other common USB-class rate. Uses a
-    // non-integer ratio: a closer stress test of the resampler.
-    let pcm = run_drain(44_100, 1.0);
-    let expected = 16_000usize;
-    assert!(
-        (pcm.len() as i64 - expected as i64).unsigned_abs() as usize <= 600,
-        "resampled length {} should be within ±600 of {}",
-        pcm.len(),
-        expected,
-    );
+fn drain_passes_16k_through_unchanged_in_length() {
+    let pcm = drain_one_second(16_000);
+    assert_eq!(pcm.len(), 16_000);
+    assert_mostly_nonzero(&pcm, "16000 Hz");
 }

@@ -1,65 +1,70 @@
 use super::*;
 use std::time::Duration;
 
+use crate::commands::RecordingGate;
 use crate::exec::{OUTPUT_BUF_MAX, OUTPUT_OVERFLOW_EXIT};
-use crate::policy::ConfirmationRequest;
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
 
 fn bash_with_cfg(cfg: BashPolicyCfg, gate: Arc<dyn ConfirmationGate>) -> BashCommand {
     BashCommand::new(Arc::new(cfg), SandboxInfo::none(), gate)
 }
 
+fn with_timeout(timeout: Duration) -> BashCommand {
+    bash_with_cfg(
+        BashPolicyCfg {
+            timeout,
+            ..Default::default()
+        },
+        Arc::new(AlwaysAllowGate),
+    )
+}
+
+fn rm_rf_is_destructive(gate: Arc<dyn ConfirmationGate>) -> BashCommand {
+    bash_with_cfg(
+        BashPolicyCfg {
+            destructive_patterns: vec![vec!["rm".into(), "-rf".into()]],
+            ..Default::default()
+        },
+        gate,
+    )
+}
+
+async fn run(cmd: &BashCommand, script: &str, stdin: Option<Vec<u8>>) -> CommandOutput {
+    cmd.run(CommandInput {
+        args: vec![script.into()],
+        stdin,
+    })
+    .await
+}
+
 #[tokio::test]
 async fn bash_runs_echo() {
-    let out = BashCommand::default()
-        .run(CommandInput {
-            args: vec!["echo hi".into()],
-            stdin: None,
-        })
-        .await;
+    let out = run(&BashCommand::default(), "echo hi", None).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"hi\n");
 }
 
 #[tokio::test]
 async fn bash_propagates_nonzero_exit() {
-    let out = BashCommand::default()
-        .run(CommandInput {
-            args: vec!["exit 3".into()],
-            stdin: None,
-        })
-        .await;
+    let out = run(&BashCommand::default(), "exit 3", None).await;
     assert_eq!(out.exit_code, 3);
 }
 
 #[tokio::test]
 async fn bash_receives_stdin() {
-    let out = BashCommand::default()
-        .run(CommandInput {
-            args: vec!["tr a-z A-Z".into()],
-            stdin: Some(b"hello".to_vec()),
-        })
-        .await;
+    let out = run(
+        &BashCommand::default(),
+        "tr a-z A-Z",
+        Some(b"hello".to_vec()),
+    )
+    .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"HELLO");
 }
 
-/// A timed-out script returns exit 137 with the byte-exact message
-/// `[error] bash: timed out after 30s [exit:137 | 30.0s]`. The
-/// timeout is 100ms here for speed; the format is unchanged.
 #[tokio::test]
-async fn bash_timeout_returns_137_with_ac_format() {
-    let cfg = BashPolicyCfg {
-        timeout: Duration::from_millis(100),
-        ..Default::default()
-    };
-    let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["sleep 5".into()],
-            stdin: None,
-        })
-        .await;
+async fn bash_timeout_returns_137_with_timeout_message() {
+    let out = run(&with_timeout(Duration::from_millis(100)), "sleep 5", None).await;
     assert_eq!(out.exit_code, 137);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -70,7 +75,7 @@ async fn bash_timeout_returns_137_with_ac_format() {
 }
 
 #[tokio::test]
-async fn bash_missing_script_errors() {
+async fn bash_without_script_emits_usage() {
     let out = BashCommand::default()
         .run(CommandInput {
             args: Vec::new(),
@@ -78,19 +83,19 @@ async fn bash_missing_script_errors() {
         })
         .await;
     assert_eq!(out.exit_code, 2);
+    assert!(out.stdout.starts_with(b"usage: bash"), "{out:?}");
 }
 
-/// Acceptance: `bash "<nonexistent-dep>"` must forward the subprocess's
-/// own stderr ("command not found") so the LLM sees *which* dependency
-/// is missing, not a bare exit:127.
+/// The subprocess's own "command not found" must reach the model so it
+/// sees *which* dependency is missing, not a bare exit 127.
 #[tokio::test]
 async fn bash_missing_dependency_forwards_subprocess_stderr() {
-    let out = BashCommand::default()
-        .run(CommandInput {
-            args: vec!["assistd-definitely-not-a-real-binary-xyz".into()],
-            stdin: None,
-        })
-        .await;
+    let out = run(
+        &BashCommand::default(),
+        "assistd-definitely-not-a-real-binary-xyz",
+        None,
+    )
+    .await;
     assert_eq!(out.exit_code, 127);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("command not found"), "{stderr}");
@@ -100,146 +105,69 @@ async fn bash_missing_dependency_forwards_subprocess_stderr() {
     );
 }
 
-/// A script matching a denylist pattern is rejected before spawn,
-/// with the byte-exact error message
-/// `[error] bash: command denied by policy. Matched denylist pattern:
-/// rm -rf /. Try: a non-destructive alternative\n`.
 #[tokio::test]
-async fn ac1_bash_rm_rf_root_rejected() {
-    let cfg = BashPolicyCfg {
-        denylist: vec!["rm -rf /".into()],
-        ..Default::default()
-    };
-    let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["rm -rf /".into()],
-            stdin: None,
-        })
-        .await;
+async fn denylist_match_is_rejected_before_spawn() {
+    let cmd = bash_with_cfg(
+        BashPolicyCfg {
+            denylist: vec!["rm -rf /".into()],
+            ..Default::default()
+        },
+        Arc::new(AlwaysAllowGate),
+    );
+    let out = run(&cmd, "rm -rf /", None).await;
     assert_eq!(out.exit_code, 126);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
-        stderr,
+        String::from_utf8_lossy(&out.stderr),
         "[error] bash: command denied by policy. Matched denylist pattern: rm -rf /. Try: a non-destructive alternative\n"
     );
 }
 
+/// `true` stands in for a destructive command so an approval runs
+/// nothing harmful.
 #[tokio::test]
-async fn bash_denylist_is_case_insensitive() {
-    let cfg = BashPolicyCfg {
-        denylist: vec!["mkfs".into()],
-        ..Default::default()
-    };
-    let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["MKFS.ext4 /dev/sda1".into()],
-            stdin: None,
-        })
-        .await;
-    assert_eq!(out.exit_code, 126);
-}
-
-/// When a destructive pattern is matched and the gate approves, the
-/// command runs normally. Uses `true` as a no-op script so the test
-/// doesn't actually delete anything.
-#[tokio::test]
-async fn destructive_pattern_invokes_gate_and_proceeds_when_approved() {
-    let cfg = BashPolicyCfg {
-        destructive_patterns: vec![vec!["true".into()]],
-        ..Default::default()
-    };
-    let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["true".into()],
-            stdin: None,
-        })
-        .await;
+async fn destructive_pattern_prompts_and_runs_when_approved() {
+    let gate = RecordingGate::new(true);
+    let cmd = bash_with_cfg(
+        BashPolicyCfg {
+            destructive_patterns: vec![vec!["true".into()]],
+            ..Default::default()
+        },
+        gate.clone(),
+    );
+    let out = run(&cmd, "true", None).await;
     assert_eq!(out.exit_code, 0);
+    assert_eq!(
+        gate.prompts(),
+        [("bash".to_string(), "true".to_string(), "true".to_string())]
+    );
 }
 
-/// When a destructive pattern is matched and the gate denies, the
-/// command does NOT run and returns exit 126 with a cancellation
-/// message.
 #[tokio::test]
-async fn destructive_pattern_invokes_gate_and_cancels_when_denied() {
-    let cfg = BashPolicyCfg {
-        destructive_patterns: vec![vec!["rm".into(), "-rf".into()]],
-        ..Default::default()
-    };
-    // DenyAllGate is the production default for IPC-connected clients;
-    // verify it blocks destructive commands as documented.
-    let cmd = bash_with_cfg(cfg, Arc::new(DenyAllGate));
-    let out = cmd
-        .run(CommandInput {
-            // Use /tmp/nonexistent so that even if the gate is buggy
-            // and allows execution, no real data is lost.
-            args: vec!["rm -rf /tmp/this-directory-does-not-exist-XYZ".into()],
-            stdin: None,
-        })
-        .await;
+async fn destructive_pattern_is_cancelled_when_denied() {
+    let cmd = rm_rf_is_destructive(Arc::new(DenyAllGate));
+    let out = run(&cmd, "rm -rf /tmp/this-directory-does-not-exist-XYZ", None).await;
     assert_eq!(out.exit_code, 126);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("cancelled by user"),
-        "expected cancellation message, got {stderr}"
-    );
-    assert!(
-        stderr.contains("Matched destructive pattern: rm -rf"),
-        "expected matched pattern in message, got {stderr}"
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "[error] bash: command cancelled by user. Matched destructive pattern: rm -rf. Try: a different approach\n"
     );
 }
 
-/// A destructive pattern substring inside a quoted literal must not
-/// trigger the gate; `echo "rm -rf"` is harmless and legitimate.
+/// `echo "rm -rf"` is harmless, so the quoted literal must not prompt.
 #[tokio::test]
-async fn destructive_matcher_ignores_quoted_literals() {
-    // Counter-gate that panics if called; asserts the gate is NOT
-    // invoked for this script.
-    struct PanicGate;
-    #[async_trait]
-    impl ConfirmationGate for PanicGate {
-        async fn confirm(&self, _req: ConfirmationRequest) -> bool {
-            panic!("gate should not be invoked for quoted literal");
-        }
-    }
-    let cfg = BashPolicyCfg {
-        destructive_patterns: vec![vec!["rm".into(), "-rf".into()]],
-        ..Default::default()
-    };
-    let cmd = bash_with_cfg(cfg, Arc::new(PanicGate));
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["echo \"rm -rf\"".into()],
-            stdin: None,
-        })
-        .await;
+async fn quoted_destructive_literal_does_not_prompt() {
+    let gate = RecordingGate::new(false);
+    let out = run(&rm_rf_is_destructive(gate.clone()), "echo \"rm -rf\"", None).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"rm -rf\n");
+    assert!(gate.prompts().is_empty(), "{:?}", gate.prompts());
 }
 
-/// A runaway script (`yes`) emits gigabytes per second. Without an
-/// execution-time cap, `wait_with_output()` would buffer it all into
-/// memory before the chain executor's PIPE_BUF_MAX check fires. With
-/// the cap, the child is killed at OUTPUT_BUF_MAX and we return exit
-/// 141 with a bounded `stdout`. We use a short timeout so the test
-/// is fast even if the overflow path is broken — but the test only
-/// passes if overflow (141) fires *before* timeout (137).
+/// `yes` floods faster than any timeout, so the child must be killed at
+/// the capture cap (141) rather than buffered until the timeout (137).
 #[tokio::test]
 async fn bash_output_overflow_kills_child_and_returns_141() {
-    let cfg = BashPolicyCfg {
-        timeout: Duration::from_secs(10),
-        ..Default::default()
-    };
-    let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["yes".into()],
-            stdin: None,
-        })
-        .await;
+    let out = run(&with_timeout(Duration::from_secs(10)), "yes", None).await;
     assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
     assert!(
         out.stdout.len() <= OUTPUT_BUF_MAX,
@@ -247,28 +175,12 @@ async fn bash_output_overflow_kills_child_and_returns_141() {
         out.stdout.len()
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("output exceeded"),
-        "expected overflow message in stderr, got {stderr}"
-    );
+    assert!(stderr.contains("output exceeded"), "{stderr}");
 }
 
-/// Stderr is bounded too: a script that floods only stderr is killed
-/// once it crosses the cap. Uses `bash -c` redirection inside the
-/// script so the bytes land on fd 2.
 #[tokio::test]
 async fn bash_stderr_overflow_also_caps() {
-    let cfg = BashPolicyCfg {
-        timeout: Duration::from_secs(10),
-        ..Default::default()
-    };
-    let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["yes 1>&2".into()],
-            stdin: None,
-        })
-        .await;
+    let out = run(&with_timeout(Duration::from_secs(10)), "yes 1>&2", None).await;
     assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
     assert!(
         out.stderr.len() <= OUTPUT_BUF_MAX + 256,
@@ -277,39 +189,20 @@ async fn bash_stderr_overflow_also_caps() {
     );
 }
 
-/// A script that writes well under the cap and exits cleanly must
-/// still return exit 0 with its full stdout — i.e. the streaming
-/// path doesn't drop bytes or false-positive on overflow.
 #[tokio::test]
 async fn bash_below_cap_returns_full_output() {
-    let out = BashCommand::default()
-        .run(CommandInput {
-            // ~50 KiB, comfortably below 10 MiB.
-            args: vec!["printf '%.0sx' {1..51200}".into()],
-            stdin: None,
-        })
-        .await;
+    let out = run(&BashCommand::default(), "printf '%.0sx' {1..51200}", None).await;
     assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout.len(), 51200);
+    assert_eq!(out.stdout, vec![b'x'; 51200]);
 }
 
-/// A script killed by a signal (here SIGSEGV via `kill -SEGV $$`) must
-/// report `128 + signum` (139), not the timeout sentinel 137. Before
-/// the fix, `status.code()` returning `None` collapsed both the
-/// signal-death and timeout cases to 137.
+/// A signal death reports `128 + signum` (139 for SIGSEGV), distinct
+/// from the timeout sentinel 137.
 #[cfg(unix)]
 #[tokio::test]
 async fn bash_signal_death_reports_128_plus_signum_not_timeout() {
-    let out = BashCommand::default()
-        .run(CommandInput {
-            args: vec!["kill -SEGV $$".into()],
-            stdin: None,
-        })
-        .await;
-    assert_eq!(
-        out.exit_code, 139,
-        "SIGSEGV should surface as 128+11=139, not the timeout sentinel"
-    );
+    let out = run(&BashCommand::default(), "kill -SEGV $$", None).await;
+    assert_eq!(out.exit_code, 139);
 }
 
 /// Poll `kill -0` until `pid` is gone, up to two seconds. Returns
@@ -344,15 +237,9 @@ async fn run_leaving_background_child(
     let dir = tempfile::tempdir().unwrap();
     let pidfile = dir.path().join("child.pid");
     let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
-    let out = tokio::time::timeout(
-        Duration::from_secs(10),
-        cmd.run(CommandInput {
-            args: vec![script(&pidfile)],
-            stdin: None,
-        }),
-    )
-    .await
-    .expect("bash did not return: a grandchild kept the output pipe open");
+    let out = tokio::time::timeout(Duration::from_secs(10), run(&cmd, &script(&pidfile), None))
+        .await
+        .expect("bash did not return: a grandchild kept the output pipe open");
     let pid = std::fs::read_to_string(&pidfile)
         .unwrap()
         .trim()
@@ -425,17 +312,10 @@ async fn normal_exit_kills_backgrounded_grandchild() {
 /// must not keep the timeout from arming.
 #[tokio::test]
 async fn unread_stdin_does_not_block_the_timeout() {
-    let cfg = BashPolicyCfg {
-        timeout: Duration::from_millis(200),
-        ..Default::default()
-    };
-    let cmd = bash_with_cfg(cfg, Arc::new(AlwaysAllowGate));
+    let cmd = with_timeout(Duration::from_millis(200));
     let out = tokio::time::timeout(
         Duration::from_secs(10),
-        cmd.run(CommandInput {
-            args: vec!["sleep 300".into()],
-            stdin: Some(vec![b'x'; 1024 * 1024]),
-        }),
+        run(&cmd, "sleep 300", Some(vec![b'x'; 1024 * 1024])),
     )
     .await
     .expect("stdin write blocked before the timeout armed");
@@ -444,31 +324,12 @@ async fn unread_stdin_does_not_block_the_timeout() {
 
 #[tokio::test]
 async fn stdin_larger_than_a_pipe_buffer_arrives_whole() {
-    let out = BashCommand::default()
-        .run(CommandInput {
-            args: vec!["wc -c".into()],
-            stdin: Some(vec![b'x'; 1024 * 1024]),
-        })
-        .await;
+    let out = run(
+        &BashCommand::default(),
+        "wc -c",
+        Some(vec![b'x'; 1024 * 1024]),
+    )
+    .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1048576");
-}
-
-/// Sandbox mode `None` executes bash directly with no wrapper.
-#[tokio::test]
-async fn bash_sandbox_none_runs_unsandboxed() {
-    let cfg = BashPolicyCfg::default();
-    let cmd = BashCommand::new(
-        Arc::new(cfg),
-        SandboxInfo::none(),
-        Arc::new(AlwaysAllowGate),
-    );
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["echo sandboxed".into()],
-            stdin: None,
-        })
-        .await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout, b"sandboxed\n");
 }

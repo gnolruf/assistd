@@ -332,69 +332,59 @@ mod tests {
     use super::*;
     use assistd_llm::VisionState;
 
-    #[test]
-    fn version_is_not_empty() {
-        assert!(!version().is_empty());
-    }
-
-    fn make_revalidator(gate_initial: bool, cached_model: Option<&str>) -> Arc<VisionRevalidator> {
-        VisionRevalidator::new(
-            assistd_tools::VisionGate::new(gate_initial),
-            cached_model.map(str::to_string),
-            "127.0.0.1".to_string(),
-            0,
-            "test/model:Q4".to_string(),
-        )
-    }
-
     #[tokio::test]
-    async fn no_model_id_keeps_gate_unchanged() {
-        let rev = make_revalidator(true, Some("model-A"));
-        rev.apply_probe(VisionState::default()).await;
-        assert!(rev.gate.supported(), "gate must not flip on probe failure");
-    }
-
-    #[tokio::test]
-    async fn unchanged_model_id_keeps_gate_unchanged() {
-        let rev = make_revalidator(true, Some("model-A"));
-        rev.apply_probe(VisionState {
-            model_id: Some("model-A".into()),
-            vision_supported: false,
-        })
-        .await;
-        assert!(rev.gate.supported());
-    }
-
-    #[tokio::test]
-    async fn model_swap_flips_gate_off() {
-        let rev = make_revalidator(true, Some("vision-model"));
-        rev.apply_probe(VisionState {
-            model_id: Some("text-only-model".into()),
-            vision_supported: false,
-        })
-        .await;
-        assert!(!rev.gate.supported(), "gate must flip when model changes");
-    }
-
-    #[tokio::test]
-    async fn model_swap_flips_gate_on() {
-        let rev = make_revalidator(false, Some("text-only-model"));
-        rev.apply_probe(VisionState {
-            model_id: Some("vision-model".into()),
-            vision_supported: true,
-        })
-        .await;
-        assert!(rev.gate.supported());
-    }
-
-    #[tokio::test]
-    async fn fresh_revalidator_with_no_cached_model_still_picks_up_first_probe() {
-        let rev = make_revalidator(false, None);
-        rev.apply_probe(VisionState {
-            model_id: Some("vision-model".into()),
-            vision_supported: true,
-        })
-        .await;
-        assert!(rev.gate.supported());
+    async fn apply_probe_flips_gate_only_when_model_id_changes() {
+        let probe = |id: Option<&str>, vision| VisionState {
+            model_id: id.map(str::to_string),
+            vision_supported: vision,
+        };
+        let cases = [
+            (
+                "failed probe",
+                true,
+                Some("model-A"),
+                probe(None, false),
+                true,
+            ),
+            (
+                "same model",
+                true,
+                Some("model-A"),
+                probe(Some("model-A"), false),
+                true,
+            ),
+            (
+                "swap to text-only",
+                true,
+                Some("vision"),
+                probe(Some("text"), false),
+                false,
+            ),
+            (
+                "swap to vision",
+                false,
+                Some("text"),
+                probe(Some("vision"), true),
+                true,
+            ),
+            (
+                "first probe",
+                false,
+                None,
+                probe(Some("vision"), true),
+                true,
+            ),
+        ];
+        for (label, gate_initial, cached, probe, expected) in cases {
+            let rev = VisionRevalidator::new(
+                assistd_tools::VisionGate::new(gate_initial),
+                cached.map(str::to_string),
+                "127.0.0.1".to_string(),
+                0,
+                "test/model:Q4".to_string(),
+            );
+            rev.apply_probe(probe).await;
+            assert_eq!(rev.gate.supported(), expected, "{label}");
+        }
     }
 }

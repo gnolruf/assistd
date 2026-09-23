@@ -173,25 +173,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toggle_label_inverts_with_presence() {
-        assert_eq!(toggle_label_for(PresenceState::Active), "Sleep");
-        assert_eq!(toggle_label_for(PresenceState::Drowsy), "Sleep");
-        assert_eq!(toggle_label_for(PresenceState::Sleeping), "Wake");
-    }
-
-    #[test]
-    fn toggle_target_inverts_with_presence() {
-        assert_eq!(
-            toggle_target(PresenceState::Active),
-            PresenceState::Sleeping
-        );
-        assert_eq!(
-            toggle_target(PresenceState::Drowsy),
-            PresenceState::Sleeping
-        );
-        assert_eq!(
-            toggle_target(PresenceState::Sleeping),
-            PresenceState::Active
-        );
+    fn toggle_label_and_target_invert_presence() {
+        for (presence, label, target) in [
+            (PresenceState::Active, "Sleep", PresenceState::Sleeping),
+            (PresenceState::Drowsy, "Sleep", PresenceState::Sleeping),
+            (PresenceState::Sleeping, "Wake", PresenceState::Active),
+        ] {
+            assert_eq!(toggle_label_for(presence), label, "{presence:?}");
+            assert_eq!(toggle_target(presence), target, "{presence:?}");
+        }
     }
 }

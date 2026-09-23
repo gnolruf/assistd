@@ -330,6 +330,22 @@ mod tests {
         Chain::Command(args.iter().copied().map(Word::bare).collect())
     }
 
+    fn pipe(l: Chain, r: Chain) -> Chain {
+        Chain::Pipe(Box::new(l), Box::new(r))
+    }
+
+    fn and(l: Chain, r: Chain) -> Chain {
+        Chain::And(Box::new(l), Box::new(r))
+    }
+
+    fn or(l: Chain, r: Chain) -> Chain {
+        Chain::Or(Box::new(l), Box::new(r))
+    }
+
+    fn seq(l: Chain, r: Chain) -> Chain {
+        Chain::Seq(Box::new(l), Box::new(r))
+    }
+
     fn bare(text: &str) -> Token {
         Token::Word(Word::bare(text))
     }
@@ -342,94 +358,57 @@ mod tests {
         Token::Op(op)
     }
 
-    // -- tokenizer ----------------------------------------------------------
-
     #[test]
-    fn tokenize_plain_words() {
-        let t = tokenize("cat log.txt").unwrap();
-        assert_eq!(t, vec![bare("cat"), bare("log.txt")]);
+    fn tokenize_splits_words_and_prefers_two_char_operators() {
+        for (line, expected) in [
+            ("cat log.txt", vec![bare("cat"), bare("log.txt")]),
+            (
+                "a && b || c",
+                vec![bare("a"), op(Op::And), bare("b"), op(Op::Or), bare("c")],
+            ),
+            (
+                "a | b || c",
+                vec![bare("a"), op(Op::Pipe), bare("b"), op(Op::Or), bare("c")],
+            ),
+        ] {
+            assert_eq!(tokenize(line), Ok(expected), "{line:?}");
+        }
     }
 
     #[test]
-    fn tokenize_two_char_ops_preferred() {
-        let t = tokenize("a && b || c").unwrap();
-        assert_eq!(
-            t,
-            vec![bare("a"), op(Op::And), bare("b"), op(Op::Or), bare("c")]
-        );
+    fn tokenize_strips_quotes_and_marks_the_word_quoted() {
+        for (line, expected) in [
+            ("echo 'a|b'", vec![bare("echo"), quoted("a|b")]),
+            ("echo \"a|b\"", vec![bare("echo"), quoted("a|b")]),
+            (
+                "echo \"he said \\\"hi\\\"\"",
+                vec![bare("echo"), quoted("he said \"hi\"")],
+            ),
+            (r#"echo "a\\b""#, vec![bare("echo"), quoted(r"a\b")]),
+            // A backslash before anything but `"` or `\` is literal, so
+            // the regex the model writes reaches grep intact.
+            (r#"grep "\d+\s""#, vec![bare("grep"), quoted(r"\d+\s")]),
+            (
+                "grep '.*ERROR' log.txt",
+                vec![bare("grep"), quoted(".*ERROR"), bare("log.txt")],
+            ),
+            // An unquoted prefix glued to a quoted tail is treated as
+            // quoted as a whole: the safe reading for expansion.
+            ("echo pre\"fix\"", vec![bare("echo"), quoted("prefix")]),
+        ] {
+            assert_eq!(tokenize(line), Ok(expected), "{line:?}");
+        }
     }
 
     #[test]
-    fn tokenize_single_pipe_vs_double_pipe() {
-        let t = tokenize("a | b || c").unwrap();
-        assert_eq!(
-            t,
-            vec![bare("a"), op(Op::Pipe), bare("b"), op(Op::Or), bare("c")]
-        );
-    }
-
-    #[test]
-    fn tokenize_single_quotes_preserve_operators() {
-        let t = tokenize("echo 'a|b'").unwrap();
-        assert_eq!(t, vec![bare("echo"), quoted("a|b")]);
-    }
-
-    #[test]
-    fn tokenize_double_quotes_preserve_operators() {
-        let t = tokenize("echo \"a|b\"").unwrap();
-        assert_eq!(t, vec![bare("echo"), quoted("a|b")]);
-    }
-
-    #[test]
-    fn tokenize_double_quote_escape() {
-        let t = tokenize("echo \"he said \\\"hi\\\"\"").unwrap();
-        assert_eq!(t, vec![bare("echo"), quoted("he said \"hi\"")]);
-    }
-
-    #[test]
-    fn parse_keeps_a_quoted_pipe_inside_one_command() {
-        let chain = parse_chain(r#"grep "Command|Tool" docs/tools.md | wc -l"#).unwrap();
-        assert_eq!(
-            chain,
-            Chain::Pipe(
-                Box::new(Chain::Command(vec![
-                    Word::bare("grep"),
-                    Word::quoted("Command|Tool"),
-                    Word::bare("docs/tools.md"),
-                ])),
-                Box::new(cmd(&["wc", "-l"])),
-            )
-        );
-    }
-
-    #[test]
-    fn tokenize_double_quotes_keep_regex_backslashes() {
-        // The pattern the model actually writes must survive intact;
-        // eating the backslash here silently changes what grep matches.
-        let t = tokenize(r#"grep "\d+\s""#).unwrap();
-        assert_eq!(t, vec![bare("grep"), quoted(r"\d+\s")]);
-    }
-
-    #[test]
-    fn tokenize_double_quote_escapes_only_quote_and_backslash() {
-        let t = tokenize(r#"echo "a\\b""#).unwrap();
-        assert_eq!(t, vec![bare("echo"), quoted(r"a\b")]);
-    }
-
-    #[test]
-    fn tokenize_unterminated_single_quote() {
-        assert_eq!(tokenize("echo 'abc"), Err(ParseError::UnterminatedQuote));
-    }
-
-    #[test]
-    fn tokenize_unterminated_double_quote() {
-        assert_eq!(tokenize("echo \"abc"), Err(ParseError::UnterminatedQuote));
-    }
-
-    #[test]
-    fn tokenize_empty_is_empty() {
-        assert!(tokenize("").unwrap().is_empty());
-        assert!(tokenize("   ").unwrap().is_empty());
+    fn tokenize_rejects_unterminated_quotes() {
+        for line in ["echo 'abc", "echo \"abc"] {
+            assert_eq!(
+                tokenize(line),
+                Err(ParseError::UnterminatedQuote),
+                "{line:?}"
+            );
+        }
     }
 
     #[test]
@@ -443,9 +422,15 @@ mod tests {
             tokenize(r"grep -r TODO\|FIXME AGENTS.md"),
             Err(ParseError::UnquotedAlternation)
         );
-        // Quoted patterns are the caller's business, pipe and all.
-        assert!(tokenize(r#"grep -r "TODO\|FIXME" AGENTS.md"#).is_ok());
-        assert!(tokenize(r"ls | grep x").is_ok());
+        assert_eq!(
+            tokenize(r#"grep -r "TODO\|FIXME" AGENTS.md"#),
+            Ok(vec![
+                bare("grep"),
+                bare("-r"),
+                quoted(r"TODO\|FIXME"),
+                bare("AGENTS.md")
+            ])
+        );
     }
 
     #[test]
@@ -475,162 +460,59 @@ mod tests {
         );
     }
 
-    // -- parser -------------------------------------------------------------
-
+    /// Precedence, lowest first: `;` < `&&`/`||` < `|`, all
+    /// left-associative.
     #[test]
-    fn parse_single_command() {
-        let c = parse_chain("cat notes.md").unwrap();
-        assert_eq!(c, cmd(&["cat", "notes.md"]));
+    fn parse_builds_the_precedence_tree() {
+        for (line, expected) in [
+            ("cat notes.md", cmd(&["cat", "notes.md"])),
+            (
+                "cat a | grep b | wc -l",
+                pipe(
+                    pipe(cmd(&["cat", "a"]), cmd(&["grep", "b"])),
+                    cmd(&["wc", "-l"]),
+                ),
+            ),
+            (
+                "a | b && c",
+                and(pipe(cmd(&["a"]), cmd(&["b"])), cmd(&["c"])),
+            ),
+            (
+                "a && b | c",
+                and(cmd(&["a"]), pipe(cmd(&["b"]), cmd(&["c"]))),
+            ),
+            (
+                "a && b && c",
+                and(and(cmd(&["a"]), cmd(&["b"])), cmd(&["c"])),
+            ),
+            (
+                "a && b || c",
+                or(and(cmd(&["a"]), cmd(&["b"])), cmd(&["c"])),
+            ),
+            (
+                "a ; b && c",
+                seq(cmd(&["a"]), and(cmd(&["b"]), cmd(&["c"]))),
+            ),
+            ("echo a;", cmd(&["echo", "a"])),
+        ] {
+            assert_eq!(parse_chain(line), Ok(expected), "{line:?}");
+        }
     }
 
     #[test]
-    fn parse_pipeline() {
-        let c = parse_chain("cat a | grep b | wc -l").unwrap();
-        // Left-associative: ((cat | grep) | wc)
-        assert_eq!(
-            c,
-            Chain::Pipe(
-                Box::new(Chain::Pipe(
-                    Box::new(cmd(&["cat", "a"])),
-                    Box::new(cmd(&["grep", "b"])),
-                )),
-                Box::new(cmd(&["wc", "-l"])),
-            )
-        );
-    }
-
-    #[test]
-    fn parse_pipe_binds_tighter_than_andor() {
-        // `a | b && c` → And(Pipe(a, b), c)
-        let c = parse_chain("a | b && c").unwrap();
-        assert_eq!(
-            c,
-            Chain::And(
-                Box::new(Chain::Pipe(Box::new(cmd(&["a"])), Box::new(cmd(&["b"])))),
-                Box::new(cmd(&["c"])),
-            )
-        );
-    }
-
-    #[test]
-    fn parse_andor_binds_on_right_of_pipe() {
-        // `a && b | c` → And(a, Pipe(b, c))
-        let c = parse_chain("a && b | c").unwrap();
-        assert_eq!(
-            c,
-            Chain::And(
-                Box::new(cmd(&["a"])),
-                Box::new(Chain::Pipe(Box::new(cmd(&["b"])), Box::new(cmd(&["c"]))))
-            )
-        );
-    }
-
-    #[test]
-    fn parse_seq_binds_loosest() {
-        // `a ; b && c` → Seq(a, And(b, c))
-        let c = parse_chain("a ; b && c").unwrap();
-        assert_eq!(
-            c,
-            Chain::Seq(
-                Box::new(cmd(&["a"])),
-                Box::new(Chain::And(Box::new(cmd(&["b"])), Box::new(cmd(&["c"])))),
-            )
-        );
-    }
-
-    #[test]
-    fn parse_left_associative_andand() {
-        let c = parse_chain("a && b && c").unwrap();
-        assert_eq!(
-            c,
-            Chain::And(
-                Box::new(Chain::And(Box::new(cmd(&["a"])), Box::new(cmd(&["b"])))),
-                Box::new(cmd(&["c"])),
-            )
-        );
-    }
-
-    #[test]
-    fn parse_trailing_semicolon_accepted() {
-        let c = parse_chain("echo a;").unwrap();
-        assert_eq!(c, cmd(&["echo", "a"]));
-    }
-
-    #[test]
-    fn parse_empty_is_error() {
-        assert_eq!(parse_chain(""), Err(ParseError::Empty));
-        assert_eq!(parse_chain("   "), Err(ParseError::Empty));
-    }
-
-    #[test]
-    fn parse_trailing_operator_is_error() {
-        assert_eq!(parse_chain("a |"), Err(ParseError::TrailingOperator("|")));
-        assert_eq!(parse_chain("a &&"), Err(ParseError::TrailingOperator("&&")));
-        assert_eq!(parse_chain("a ||"), Err(ParseError::TrailingOperator("||")));
-    }
-
-    #[test]
-    fn parse_leading_operator_is_error() {
-        assert!(matches!(
-            parse_chain("| a"),
-            Err(ParseError::UnexpectedOperator(_))
-        ));
-    }
-
-    #[test]
-    fn parse_empty_inter_op_is_error() {
-        assert_eq!(parse_chain("a ;; b"), Err(ParseError::EmptyCommand));
-        assert_eq!(parse_chain("a | | b"), Err(ParseError::EmptyCommand));
-        assert_eq!(parse_chain("a && | b"), Err(ParseError::EmptyCommand));
-    }
-
-    // -- snapshot of acceptance-criteria AST shape --------------------------
-
-    #[test]
-    fn quoting_is_recorded_on_the_word() {
-        // The executor reads this flag to decide whether a word is a
-        // glob to expand or a literal (a regex, a path with a `*`).
-        let c = parse_chain("grep '.*ERROR' log.txt").unwrap();
-        assert_eq!(
-            c,
-            Chain::Command(vec![
-                Word::bare("grep"),
-                Word::quoted(".*ERROR"),
-                Word::bare("log.txt"),
-            ])
-        );
-    }
-
-    #[test]
-    fn partially_quoted_word_counts_as_quoted() {
-        // `--flag="a b"` glues an unquoted prefix onto a quoted tail;
-        // treating the whole word as quoted is the safe reading.
-        let c = parse_chain("echo pre\"fix\"").unwrap();
-        assert_eq!(
-            c,
-            Chain::Command(vec![Word::bare("echo"), Word::quoted("prefix")])
-        );
-    }
-
-    #[test]
-    fn snapshot_acceptance_strings() {
-        assert_eq!(
-            parse_chain("cat notes.md").unwrap(),
-            cmd(&["cat", "notes.md"])
-        );
-        let piped = format!(
-            "{:?}",
-            parse_chain("cat log.txt | grep ERROR | wc -l").unwrap()
-        );
-        assert!(piped.starts_with("Pipe(Pipe("), "got {piped}");
-        let or = format!(
-            "{:?}",
-            parse_chain("cat missing.txt || echo 'not found'").unwrap()
-        );
-        assert!(or.starts_with("Or("), "got {or}");
-        let and = format!("{:?}", parse_chain("ls /tmp && echo done").unwrap());
-        assert!(and.starts_with("And("), "got {and}");
-        let seq = format!("{:?}", parse_chain("echo hello ; echo world").unwrap());
-        assert!(seq.starts_with("Seq("), "got {seq}");
+    fn parse_rejects_malformed_chains() {
+        for (line, expected) in [
+            ("", ParseError::Empty),
+            ("   ", ParseError::Empty),
+            ("a |", ParseError::TrailingOperator("|")),
+            ("a &&", ParseError::TrailingOperator("&&")),
+            ("a ||", ParseError::TrailingOperator("||")),
+            ("| a", ParseError::UnexpectedOperator("|")),
+            ("a ;; b", ParseError::EmptyCommand),
+            ("a | | b", ParseError::EmptyCommand),
+            ("a && | b", ParseError::EmptyCommand),
+        ] {
+            assert_eq!(parse_chain(line), Err(expected), "{line:?}");
+        }
     }
 }

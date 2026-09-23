@@ -21,24 +21,23 @@ impl Command for Stub {
 #[test]
 fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
     let e = std::io::Error::from(std::io::ErrorKind::NotFound);
-    let line = io_error_nav("ls", "/tmp/*.db-shm", &e);
-    assert!(line.contains("no file matches /tmp/*.db-shm"), "{line}");
-    assert!(line.contains("Try: ls /tmp"), "{line}");
-
-    let plain = io_error_nav("ls", "/tmp/notes.txt", &e);
-    assert!(plain.contains("file not found: /tmp/notes.txt"), "{plain}");
-    assert!(plain.contains("Use: ls /tmp to see"), "{plain}");
+    assert_eq!(
+        io_error_nav("ls", "/tmp/*.db-shm", &e),
+        "[error] ls: no file matches /tmp/*.db-shm. Try: ls /tmp to see what is there\n"
+    );
+    assert_eq!(
+        io_error_nav("ls", "/tmp/notes.txt", &e),
+        "[error] ls: file not found: /tmp/notes.txt. Use: ls /tmp to see what is there\n"
+    );
 }
 
 #[test]
 fn path_through_a_file_points_at_the_offending_parent() {
     let e = std::io::Error::from(std::io::ErrorKind::NotADirectory);
-    let line = io_error_nav("cat", "notes.txt/sub", &e);
-    assert!(
-        line.contains("notes.txt/sub: a parent component is not a directory"),
-        "{line}"
+    assert_eq!(
+        io_error_nav("cat", "notes.txt/sub", &e),
+        "[error] cat: notes.txt/sub: a parent component is not a directory. Check: ls notes.txt\n"
     );
-    assert!(line.contains("Check: ls notes.txt\n"), "{line}");
 }
 
 #[test]
@@ -59,29 +58,19 @@ fn parent_dir_of_a_plain_path_ignores_trailing_slashes() {
 }
 
 #[test]
-fn sorted_names_is_alphabetical() {
+fn registry_resolves_by_name_and_lists_alphabetically() {
     let mut reg = CommandRegistry::new();
     reg.register(Stub("grep"));
     reg.register(Stub("cat"));
     reg.register(Stub("ls"));
-    assert_eq!(reg.sorted_names(), vec!["cat", "grep", "ls"]);
-}
-
-#[test]
-fn sorted_summaries_is_alphabetical_and_paired() {
-    let mut reg = CommandRegistry::new();
-    reg.register(Stub("grep"));
-    reg.register(Stub("cat"));
-    reg.register(Stub("ls"));
-    let pairs = reg.sorted_summaries();
-    assert_eq!(pairs.len(), 3);
-    assert_eq!(pairs[0].0, "cat");
-    assert_eq!(pairs[1].0, "grep");
-    assert_eq!(pairs[2].0, "ls");
-    // Every pair carries a non-empty summary.
-    for (name, summary) in &pairs {
-        assert!(!summary.is_empty(), "{name} has empty summary");
-    }
+    assert_eq!(reg.get("grep").map(|c| c.name()), Some("grep"));
+    assert!(reg.get("nope").is_none());
+    assert_eq!(reg.sorted_names(), ["cat", "grep", "ls"]);
+    let summary = "stub command for tests";
+    assert_eq!(
+        reg.sorted_summaries(),
+        [("cat", summary), ("grep", summary), ("ls", summary)]
+    );
 }
 
 /// Acceptance for the error-message-as-navigation convention: every
@@ -215,10 +204,6 @@ fn every_registered_command_emits_convention_compliant_error() {
         );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.contains("[error] "),
-            "{name}: stderr missing `[error] ` tag, got {stderr:?}"
-        );
-        assert!(
             stderr.contains(&format!("[error] {name}: ")),
             "{name}: stderr should say `[error] {name}: `, got {stderr:?}"
         );
@@ -244,30 +229,9 @@ fn every_registered_command_has_nonempty_help_and_summary() {
             summary.len()
         );
         let help = reg.get(name).expect("command registered").help();
-        assert!(!help.is_empty(), "{name} has empty help");
         assert!(
             help.contains("usage:"),
             "{name} help should contain `usage:` line, got {help:?}"
         );
     }
-}
-
-#[test]
-fn unknown_lookup_returns_none() {
-    let reg = CommandRegistry::new();
-    assert!(reg.get("nope").is_none());
-}
-
-#[tokio::test]
-async fn registered_command_is_runnable() {
-    let mut reg = CommandRegistry::new();
-    reg.register(Stub("ping"));
-    let cmd = reg.get("ping").unwrap();
-    let out = cmd
-        .run(CommandInput {
-            args: vec![],
-            stdin: None,
-        })
-        .await;
-    assert_eq!(out.exit_code, 0);
 }

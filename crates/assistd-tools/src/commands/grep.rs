@@ -365,27 +365,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quoted_alternation_matches_without_escapes() {
-        let out = run_grep(
-            &["Command|Tool"],
-            b"a Command here\nnothing\na Tool there\n",
-        )
-        .await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            "a Command here\na Tool there\n"
-        );
-        assert!(out.stderr.is_empty());
+    async fn filters_stdin_per_flags() {
+        let cases: [(&[&str], &[u8], i32, &str); 9] = [
+            (
+                &["ERROR"],
+                b"INFO ok\nERROR boom\nINFO also\n",
+                0,
+                "ERROR boom\n",
+            ),
+            (&["ZZZ"], b"nothing here\n", 1, ""),
+            (
+                &["Command|Tool"],
+                b"a Command here\nnothing\na Tool there\n",
+                0,
+                "a Command here\na Tool there\n",
+            ),
+            (
+                &["-n", "ERROR"],
+                b"ok\nERROR one\nok\nERROR two\n",
+                0,
+                "2:ERROR one\n4:ERROR two\n",
+            ),
+            (&["-i", "error"], b"ERROR boom\nnope\n", 0, "ERROR boom\n"),
+            (&["-v", "ERROR"], b"INFO ok\nERROR boom\n", 0, "INFO ok\n"),
+            (&["-c", "ERROR"], b"ERROR a\nINFO\nERROR b\n", 0, "2\n"),
+            (&["-c", "ZZZ"], b"a\nb\n", 1, "0\n"),
+            (&["-ivc", "error"], b"ERROR\ninfo\nError\nok\n", 0, "2\n"),
+        ];
+        for (args, stdin, exit_code, stdout) in cases {
+            let out = run_grep(args, stdin).await;
+            assert_eq!(out.exit_code, exit_code, "{args:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), stdout, "{args:?}");
+            assert!(out.stderr.is_empty(), "{args:?}: {out:?}");
+        }
     }
 
     #[tokio::test]
     async fn bre_escape_that_matches_nothing_explains_the_dialect() {
         let out = run_grep(&[r"Command\|Tool"], b"a Command here\na Tool there\n").await;
         assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains(r"`\|`"), "{stderr}");
-        assert!(stderr.contains("Use: "), "{stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] grep: no matches; `\\|` matches those characters literally here \
+             (PATTERN is Rust/ERE regex, not BRE). \
+             Use: unescaped ERE metachars in a quoted pattern, e.g. grep \"a|b\" FILE\n"
+        );
     }
 
     #[tokio::test]
@@ -393,6 +417,13 @@ mod tests {
         let out = run_grep(&[r"a\|b"], b"literal a|b line\n").await;
         assert_eq!(out.exit_code, 0);
         assert!(out.stderr.is_empty(), "{:?}", out.stderr);
+    }
+
+    #[tokio::test]
+    async fn missing_pattern_emits_usage() {
+        let out = run_grep(&[], b"").await;
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: grep"), "{out:?}");
     }
 
     #[tokio::test]
@@ -408,46 +439,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn n_flag_numbers_matching_lines() {
-        let out = run_grep(&["-n", "ERROR"], b"ok\nERROR one\nok\nERROR two\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"2:ERROR one\n4:ERROR two\n");
-    }
-
-    #[tokio::test]
     async fn single_file_is_not_path_prefixed() {
         let dir = tree();
         let path = dir.path().join("top.txt");
         let out = run_grep(&["ERROR", &path.to_string_lossy()], b"").await;
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"alpha ERROR\n");
-    }
-
-    #[tokio::test]
-    async fn r_flag_descends_and_prefixes_paths() {
-        let dir = tree();
-        let root = dir.path().to_string_lossy().into_owned();
-        let out = run_grep(&["-rn", "ERROR", &root], b"").await;
-        assert_eq!(out.exit_code, 0);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            stdout.contains(&format!("{root}/top.txt:1:alpha ERROR\n")),
-            "{stdout}"
-        );
-        assert!(
-            stdout.contains(&format!("{root}/sub/deep.txt:2:delta ERROR\n")),
-            "{stdout}"
-        );
-    }
-
-    #[tokio::test]
-    async fn r_flag_skips_binary_files() {
-        let dir = tree();
-        let out = run_grep(&["-r", "ERROR", &dir.path().to_string_lossy()], b"").await;
-        assert!(
-            !String::from_utf8_lossy(&out.stdout).contains("notes.bin"),
-            "{out:?}"
-        );
     }
 
     #[tokio::test]
@@ -461,46 +458,33 @@ mod tests {
             .into_owned();
         let out = run_grep(&["ERROR", &a, &b], b"").await;
         assert_eq!(out.exit_code, 0);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains(&format!("{a}:alpha ERROR\n")), "{stdout}");
-        assert!(stdout.contains(&format!("{b}:delta ERROR\n")), "{stdout}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{a}:alpha ERROR\n{b}:delta ERROR\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn r_flag_descends_in_order_and_skips_binary_files() {
+        let dir = tree();
+        let root = dir.path().to_string_lossy().into_owned();
+        let out = run_grep(&["-rn", "ERROR", &root], b"").await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{root}/top.txt:1:alpha ERROR\n{root}/sub/deep.txt:2:delta ERROR\n")
+        );
     }
 
     #[tokio::test]
     async fn rc_reports_a_count_per_file() {
         let dir = tree();
-        let out = run_grep(&["-rc", "ERROR", &dir.path().to_string_lossy()], b"").await;
-        assert_eq!(out.exit_code, 0);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains("top.txt:1\n"), "{stdout}");
-        assert!(stdout.contains("deep.txt:1\n"), "{stdout}");
-    }
-
-    #[tokio::test]
-    async fn directory_without_r_points_at_the_flag() {
-        let dir = tree();
         let root = dir.path().to_string_lossy().into_owned();
-        let out = run_grep(&["ERROR", &root], b"").await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains(&format!("[error] grep: {root} is a directory")),
-            "{stderr}"
-        );
-        assert!(
-            stderr.contains(&format!("Use: grep -r PATTERN {root}")),
-            "{stderr}"
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_file_reports_navigation_error() {
-        let out = run_grep(&["ERROR", "/definitely/not/here.txt"], b"").await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] grep: file not found: /definitely/not/here.txt"),
-            "{stderr}"
+        let out = run_grep(&["-rc", "ERROR", &root], b"").await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{root}/top.txt:1\n{root}/sub/deep.txt:1\n")
         );
     }
 
@@ -513,79 +497,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matches_from_stdin() {
-        let out = run_grep(&["ERROR"], b"INFO ok\nERROR boom\nINFO also\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"ERROR boom\n");
-    }
-
-    #[tokio::test]
-    async fn no_match_exits_1() {
-        let out = run_grep(&["ZZZ"], b"nothing here\n").await;
-        assert_eq!(out.exit_code, 1);
-        assert!(out.stdout.is_empty());
-    }
-
-    #[tokio::test]
-    async fn missing_pattern_errors() {
-        let out = run_grep(&[], b"").await;
+    async fn directory_without_r_points_at_the_flag() {
+        let dir = tree();
+        let root = dir.path().to_string_lossy().into_owned();
+        let out = run_grep(&["ERROR", &root], b"").await;
         assert_eq!(out.exit_code, 2);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("[error] grep: {root} is a directory. Use: grep -r PATTERN {root}\n")
+        );
     }
 
     #[tokio::test]
-    async fn i_flag_matches_case_insensitively() {
-        let out = run_grep(&["-i", "error"], b"ERROR boom\nnope\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"ERROR boom\n");
-    }
-
-    #[tokio::test]
-    async fn v_flag_inverts_match() {
-        let out = run_grep(&["-v", "ERROR"], b"INFO ok\nERROR boom\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"INFO ok\n");
-    }
-
-    #[tokio::test]
-    async fn c_flag_returns_count() {
-        let out = run_grep(&["-c", "ERROR"], b"ERROR a\nINFO\nERROR b\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"2\n");
-    }
-
-    #[tokio::test]
-    async fn ic_combined_case_insensitive_count() {
-        let out = run_grep(&["-ic", "error"], b"ERROR a\ninfo\nError b\nnothing\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"2\n");
-    }
-
-    #[tokio::test]
-    async fn ivc_all_three_flags_together() {
-        let out = run_grep(&["-ivc", "error"], b"ERROR\ninfo\nError\nok\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"2\n");
-    }
-
-    #[tokio::test]
-    async fn c_with_no_matches_exits_1_but_prints_zero() {
-        let out = run_grep(&["-c", "ZZZ"], b"a\nb\n").await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(out.stdout, b"0\n");
+    async fn missing_file_reports_navigation_error() {
+        let out = run_grep(&["ERROR", "/definitely/not/here.txt"], b"").await;
+        assert_eq!(out.exit_code, 2);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] grep: file not found: /definitely/not/here.txt. \
+             Use: ls /definitely/not to see what is there\n"
+        );
     }
 
     #[tokio::test]
     async fn unknown_flag_errors() {
         let out = run_grep(&["-x", "foo"], b"").await;
         assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] grep: unknown flag '-x'"),
-            "{stderr}"
-        );
-        assert!(
-            stderr.contains("Use: grep (no args) for supported flags"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] grep: unknown flag '-x'. Use: grep (no args) for supported flags\n"
         );
     }
 }

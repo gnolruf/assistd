@@ -135,107 +135,129 @@ mod tests {
     use super::*;
     use tokio::sync::watch;
 
-    async fn fresh() -> (SqliteMemoryStore, tokio::task::JoinHandle<()>) {
+    /// The guard keeps the database directory and the writer's shutdown
+    /// sender alive for the test's duration.
+    async fn fresh() -> (SqliteMemoryStore, (tempfile::TempDir, watch::Sender<bool>)) {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("memory.db");
-        std::mem::forget(temp);
-        let (_tx, rx) = watch::channel(false);
-        let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
-        (SqliteMemoryStore::new(Arc::new(handle)), writer)
+        let (tx, rx) = watch::channel(false);
+        let (handle, _writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
+            .await
+            .unwrap();
+        (SqliteMemoryStore::new(Arc::new(handle)), (temp, tx))
     }
 
     #[tokio::test]
-    async fn save_load_round_trip() {
-        let (store, _w) = fresh().await;
-        store.save("fact:user.name", "Ben".into()).await.unwrap();
+    async fn save_overwrites_in_place_and_load_sees_latest_value() {
+        let (store, _guard) = fresh().await;
+        let id = store.save("fact:user.name", "Ben".into()).await.unwrap();
         assert_eq!(
             store.load("fact:user.name").await.unwrap().as_deref(),
             Some("Ben")
         );
-    }
 
-    #[tokio::test]
-    async fn save_overwrites_existing_value() {
-        let (store, _w) = fresh().await;
-        store.save("k", "v1".into()).await.unwrap();
-        store.save("k", "v2".into()).await.unwrap();
-        assert_eq!(store.load("k").await.unwrap().as_deref(), Some("v2"));
+        let resaved = store
+            .save("fact:user.name", "Benjamin".into())
+            .await
+            .unwrap();
+        assert_eq!(resaved, id, "upsert must keep the row id");
+        assert_eq!(
+            store.load("fact:user.name").await.unwrap().as_deref(),
+            Some("Benjamin")
+        );
     }
 
     #[tokio::test]
     async fn load_missing_returns_none() {
-        let (store, _w) = fresh().await;
+        let (store, _guard) = fresh().await;
         assert_eq!(store.load("nope").await.unwrap(), None);
     }
 
     #[tokio::test]
-    async fn delete_is_silent_for_missing_key() {
-        let (store, _w) = fresh().await;
-        store.delete("missing").await.unwrap();
+    async fn delete_removes_key_and_is_silent_when_absent() {
+        let (store, _guard) = fresh().await;
+        store.save("k", "v".into()).await.unwrap();
+        store.delete("k").await.unwrap();
+        assert_eq!(store.load("k").await.unwrap(), None);
+        store.delete("k").await.unwrap();
     }
 
     #[tokio::test]
     async fn list_returns_keys_with_prefix_only() {
-        let (store, _w) = fresh().await;
+        let (store, _guard) = fresh().await;
         store.save("pref:a", "1".into()).await.unwrap();
         store.save("pref:b", "2".into()).await.unwrap();
         store.save("other:c", "3".into()).await.unwrap();
         let keys = store.list("pref:").await.unwrap();
-        assert_eq!(keys, vec!["pref:a", "pref:b"]);
+        assert_eq!(keys, ["pref:a", "pref:b"]);
     }
 
     #[tokio::test]
     async fn list_full_returns_id_key_value_in_lex_order() {
-        let (store, _w) = fresh().await;
-        store.save("pref:b", "two".into()).await.unwrap();
-        store.save("pref:a", "one".into()).await.unwrap();
+        let (store, _guard) = fresh().await;
+        let b = store.save("pref:b", "two".into()).await.unwrap();
+        let a = store.save("pref:a", "one".into()).await.unwrap();
         store.save("other:c", "three".into()).await.unwrap();
         let rows = store.list_full("pref:").await.unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].key, "pref:a");
-        assert_eq!(rows[0].value, "one");
-        assert_eq!(rows[1].key, "pref:b");
-        assert_eq!(rows[1].value, "two");
-        assert!(rows[0].id > 0 && rows[1].id > 0);
-        assert_ne!(rows[0].id, rows[1].id);
+        assert_eq!(
+            rows,
+            [
+                MemoryRecord {
+                    id: a,
+                    key: "pref:a".into(),
+                    value: "one".into(),
+                },
+                MemoryRecord {
+                    id: b,
+                    key: "pref:b".into(),
+                    value: "two".into(),
+                },
+            ]
+        );
     }
 
     #[tokio::test]
     async fn list_full_empty_prefix_returns_all_rows() {
-        let (store, _w) = fresh().await;
-        store.save("a", "1".into()).await.unwrap();
+        let (store, _guard) = fresh().await;
         store.save("b", "2".into()).await.unwrap();
-        let rows = store.list_full("").await.unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].key, "a");
-        assert_eq!(rows[1].key, "b");
+        store.save("a", "1".into()).await.unwrap();
+        let keys: Vec<String> = store
+            .list_full("")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        assert_eq!(keys, ["a", "b"]);
     }
 
     #[tokio::test]
-    async fn delete_by_id_returns_some_key_on_hit() {
-        let (store, _w) = fresh().await;
+    async fn delete_by_id_returns_key_on_hit_and_none_on_miss() {
+        let (store, _guard) = fresh().await;
         let id = store.save("fact:user.name", "Ben".into()).await.unwrap();
-        let removed = store.delete_by_id(id).await.unwrap();
-        assert_eq!(removed.as_deref(), Some("fact:user.name"));
+        assert_eq!(
+            store.delete_by_id(id).await.unwrap().as_deref(),
+            Some("fact:user.name")
+        );
         assert_eq!(store.load("fact:user.name").await.unwrap(), None);
+        assert_eq!(store.delete_by_id(id).await.unwrap(), None);
     }
 
     #[tokio::test]
-    async fn delete_by_id_returns_none_on_miss() {
-        let (store, _w) = fresh().await;
-        let removed = store.delete_by_id(99_999).await.unwrap();
-        assert!(removed.is_none());
-    }
-
-    #[tokio::test]
-    async fn list_escapes_like_metacharacters_in_prefix() {
-        let (store, _w) = fresh().await;
+    async fn prefix_like_metacharacters_match_literally() {
+        let (store, _guard) = fresh().await;
         store.save("pref:a", "1".into()).await.unwrap();
         store.save("prefXa", "X".into()).await.unwrap();
-        let keys = store.list("pref_").await.unwrap();
-        assert!(
-            keys.is_empty(),
-            "expected empty for literal `pref_`: {keys:?}"
-        );
+        store.save("100%:a", "p".into()).await.unwrap();
+        store.save("100x:a", "q".into()).await.unwrap();
+        assert_eq!(store.list("pref_").await.unwrap(), Vec::<String>::new());
+        assert_eq!(store.list("100%").await.unwrap(), ["100%:a"]);
+        let full: Vec<String> = store
+            .list_full("100%")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        assert_eq!(full, ["100%:a"]);
     }
 }

@@ -433,412 +433,290 @@ fn collapse_whitespace(s: &str) -> String {
 mod tests {
     use super::*;
 
-    fn push_all(buf: &mut SentenceBuffer, deltas: &[&str]) -> Vec<String> {
-        let mut out = Vec::new();
-        for d in deltas {
-            out.extend(buf.push(d));
+    fn run(mut b: SentenceBuffer, deltas: &[&str]) -> (Vec<String>, Option<String>) {
+        let emitted = deltas.iter().flat_map(|d| b.push(d)).collect();
+        (emitted, b.finish())
+    }
+
+    /// `(label, deltas, emitted sentences, finish tail)`, each run
+    /// through a fresh buffer from `make`.
+    type Case<'a> = (&'a str, &'a [&'a str], &'a [&'a str], Option<&'a str>);
+
+    fn check(make: impl Fn() -> SentenceBuffer, cases: &[Case<'_>]) {
+        for &(name, deltas, emitted, tail) in cases {
+            let (got, got_tail) = run(make(), deltas);
+            assert_eq!(got, emitted, "{name}: emitted");
+            assert_eq!(got_tail.as_deref(), tail, "{name}: tail");
         }
-        out
     }
 
     #[test]
-    fn flushes_on_period_then_capital() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("Hello world. Then more.");
-        assert_eq!(s, vec!["Hello world."]);
-        let tail = b.finish();
-        assert_eq!(tail.as_deref(), Some("Then more."));
-    }
-
-    #[test]
-    fn streamed_chunks_assemble_to_sentences() {
-        let mut b = SentenceBuffer::new(400);
-        let out = push_all(&mut b, &["Hel", "lo wo", "rld. ", "Then ", "more."]);
-        assert_eq!(out, vec!["Hello world."]);
-        assert_eq!(b.finish().as_deref(), Some("Then more."));
-    }
-
-    #[test]
-    fn does_not_split_on_abbreviation() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("Dr. Smith arrived. Then he left.");
-        assert_eq!(s, vec!["Dr. Smith arrived."]);
-        assert_eq!(b.finish().as_deref(), Some("Then he left."));
-    }
-
-    #[test]
-    fn does_not_split_on_eg() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("Use a tool, e.g. grep. It works.");
-        assert_eq!(s, vec!["Use a tool, e.g. grep."]);
-        assert_eq!(b.finish().as_deref(), Some("It works."));
-    }
-
-    #[test]
-    fn does_not_split_on_decimal() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("Pi is about 3.14159 here. End.");
-        assert_eq!(s, vec!["Pi is about 3.14159 here."]);
-        assert_eq!(b.finish().as_deref(), Some("End."));
-    }
-
-    #[test]
-    fn flushes_on_paragraph_break() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("First paragraph\n\nSecond starts");
-        assert_eq!(s, vec!["First paragraph"]);
-        assert_eq!(b.finish().as_deref(), Some("Second starts"));
-    }
-
-    #[test]
-    fn drops_fenced_code_block() {
-        let mut b = SentenceBuffer::new(400);
-        let s = push_all(
-            &mut b,
+    fn splits_at_sentence_boundaries() {
+        check(
+            || SentenceBuffer::new(400),
             &[
-                "Here is code: ",
-                "```rust\nfn main() { println!(\"hi\"); }\n```",
-                " That was a snippet.",
+                (
+                    "period then capital",
+                    &["Hello world. Then more."],
+                    &["Hello world."],
+                    Some("Then more."),
+                ),
+                (
+                    "streamed chunks",
+                    &["Hel", "lo wo", "rld. ", "Then ", "more."],
+                    &["Hello world."],
+                    Some("Then more."),
+                ),
+                (
+                    "several sentences in one delta",
+                    &["First. Second. Third. Fourth. Fifth. Sixth."],
+                    &["First.", "Second.", "Third.", "Fourth.", "Fifth."],
+                    Some("Sixth."),
+                ),
+                (
+                    "question mark",
+                    &["Are you sure? Yes I am."],
+                    &["Are you sure?"],
+                    Some("Yes I am."),
+                ),
+                (
+                    "exclamation mark",
+                    &["Wow! That works."],
+                    &["Wow!"],
+                    Some("That works."),
+                ),
+                (
+                    "abbreviation",
+                    &["Dr. Smith arrived. Then he left."],
+                    &["Dr. Smith arrived."],
+                    Some("Then he left."),
+                ),
+                (
+                    "dotted abbreviation",
+                    &["Use a tool, e.g. grep. It works."],
+                    &["Use a tool, e.g. grep."],
+                    Some("It works."),
+                ),
+                (
+                    "decimal",
+                    &["Pi is about 3.14159 here. End."],
+                    &["Pi is about 3.14159 here."],
+                    Some("End."),
+                ),
+                (
+                    "period inside a word",
+                    &["file.txt is here. Done."],
+                    &["file.txt is here."],
+                    Some("Done."),
+                ),
+                (
+                    "period then lowercase",
+                    &["End. then continue."],
+                    &[],
+                    Some("End. then continue."),
+                ),
+                (
+                    "period then newline",
+                    &["Item one.\nItem two."],
+                    &["Item one."],
+                    Some("Item two."),
+                ),
+                (
+                    "paragraph break",
+                    &["First paragraph\n\nSecond starts"],
+                    &["First paragraph"],
+                    Some("Second starts"),
+                ),
+                (
+                    "no terminator",
+                    &["Unfinished thought"],
+                    &[],
+                    Some("Unfinished thought"),
+                ),
             ],
         );
-        let joined = s.join(" | ");
-        assert!(
-            !joined.contains("println"),
-            "code leaked into TTS: {joined:?}"
+    }
+
+    #[test]
+    fn rewrites_markdown_for_speech() {
+        check(
+            || SentenceBuffer::new(400),
+            &[
+                (
+                    "link keeps its text",
+                    &["See [the docs](https://example.com/docs) please."],
+                    &[],
+                    Some("See the docs please."),
+                ),
+                (
+                    "bare url becomes link",
+                    &["Visit https://example.com for more. Bye."],
+                    &["Visit link for more."],
+                    Some("Bye."),
+                ),
+                (
+                    "multibyte text",
+                    &["That’s a famous line from Kennedy. "],
+                    &[],
+                    Some("That’s a famous line from Kennedy."),
+                ),
+                (
+                    "multibyte text with url",
+                    &["It’s at https://example.com, really. "],
+                    &[],
+                    Some("It’s at link really."),
+                ),
+                (
+                    "emphasis",
+                    &["This is *important* and **very urgent**."],
+                    &[],
+                    Some("This is important and very urgent."),
+                ),
+                (
+                    "heading marker",
+                    &["# A Heading\n\nContent here."],
+                    &["A Heading"],
+                    Some("Content here."),
+                ),
+                (
+                    "inner whitespace",
+                    &["a   b\t\tc. End."],
+                    &["a b c."],
+                    Some("End."),
+                ),
+            ],
         );
-        let tail = b.finish().unwrap_or_default();
-        assert!(!tail.contains("println"), "code leaked into tail: {tail:?}");
     }
 
     #[test]
-    fn strips_markdown_link_to_text() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("See [the docs](https://example.com/docs) please.");
-        let tail = b.finish().unwrap_or_default();
-        let joined = s.join(" ") + " " + &tail;
-        assert!(joined.contains("the docs"));
-        assert!(!joined.contains("example.com"));
-        assert!(!joined.contains('['));
-    }
-
-    #[test]
-    fn replaces_bare_url_with_link() {
-        let mut b = SentenceBuffer::new(400);
-        let _ = b.push("Visit https://example.com for more. Bye.");
-        let s = b.push("");
-        assert!(s.is_empty() || s.iter().any(|t| t.contains("link")));
-        let tail = b.finish().unwrap_or_default();
-        let joined = format!("{} {}", s.join(" "), tail);
-        assert!(!joined.contains("example.com"), "got {joined:?}");
-    }
-
-    #[test]
-    fn handles_multibyte_chars_around_no_url() {
-        let mut b = SentenceBuffer::new(400);
-        let mut all = b.push("That’s a famous line from John F. Kennedy. ");
-        if let Some(t) = b.finish() {
-            all.push(t);
-        }
-        let joined = all.join(" ");
-        assert!(joined.contains("That’s"), "got {joined:?}");
-        assert!(joined.contains("Kennedy"), "got {joined:?}");
-    }
-
-    #[test]
-    fn handles_multibyte_chars_with_url() {
-        let mut b = SentenceBuffer::new(400);
-        let mut all = b.push("It’s at https://example.com, really. ");
-        if let Some(t) = b.finish() {
-            all.push(t);
-        }
-        let joined = all.join(" ");
-        assert!(joined.contains("It’s"), "got {joined:?}");
-        assert!(!joined.contains("example.com"), "got {joined:?}");
-    }
-
-    #[test]
-    fn strips_emphasis_markers() {
-        let mut b = SentenceBuffer::new(400);
-        let _ = b.push("This is *important* and **very urgent**.");
-        let tail = b.finish().unwrap_or_default();
-        assert!(!tail.contains('*'));
-        assert!(tail.contains("important"));
-        assert!(tail.contains("very urgent"));
-    }
-
-    #[test]
-    fn strips_heading_markers_at_line_start() {
-        let mut b = SentenceBuffer::new(400);
-        let mut all = b.push("# A Heading\n\nContent here.");
-        if let Some(t) = b.finish() {
-            all.push(t);
-        }
-        let joined = all.join(" ");
-        assert!(!joined.contains('#'), "got {joined:?}");
-        assert!(joined.contains("A Heading"), "got {joined:?}");
-        assert!(joined.contains("Content here."), "got {joined:?}");
-    }
-
-    #[test]
-    fn length_cap_flushes_at_whitespace() {
-        let mut b = SentenceBuffer::new(50);
-        let s = b.push("aaaaaaaaa bbbbbbbbb ccccccccc ddddddddd eeeeeeeee fffffffff");
-        assert!(
-            !s.is_empty(),
-            "length cap should have produced at least one flush"
+    fn skip_mode_drops_code_blocks() {
+        check(
+            || SentenceBuffer::new(400),
+            &[
+                (
+                    "closed fence",
+                    &[
+                        "Here is code: ",
+                        "```rust\nfn main() { println!(\"hi\"); }\n```",
+                        " That was a snippet.",
+                    ],
+                    &["Here is code:"],
+                    Some("That was a snippet."),
+                ),
+                ("unterminated fence", &["```rust\nfn main() {"], &[], None),
+            ],
         );
-        assert!(
-            !s[0].ends_with(['a', 'b', 'c']),
-            "should not split mid-word: {:?}",
-            s[0]
+    }
+
+    #[test]
+    fn summarize_mode_replaces_code_blocks_with_a_phrase() {
+        check(
+            || SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize),
+            &[
+                (
+                    "with language",
+                    &["Prelude. ", "```rust\nfn main() {}\n```", " Tail end."],
+                    &["Prelude.", "Code block in rust."],
+                    Some("Tail end."),
+                ),
+                (
+                    "without language",
+                    &["```\nopaque content\n```", " After."],
+                    &["Code block."],
+                    Some("After."),
+                ),
+            ],
         );
-        let tail = b.finish().unwrap_or_default();
-        let total: usize = s.iter().map(|x| x.len()).sum::<usize>() + tail.len();
-        assert!(total > 0, "should have spoken something total");
     }
 
     #[test]
-    fn flushes_remaining_on_finish() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("Unfinished thought");
-        assert!(s.is_empty());
-        assert_eq!(b.finish().as_deref(), Some("Unfinished thought"));
+    fn summarize_mode_caps_the_language_tag() {
+        let fence = format!("```{}\nfoo\n```", "a".repeat(100));
+        let (emitted, tail) = run(
+            SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize),
+            &[&fence],
+        );
+        assert_eq!(
+            emitted,
+            [format!("Code block in {}.", "a".repeat(MAX_LANG_LEN))]
+        );
+        assert_eq!(tail, None);
     }
 
     #[test]
-    fn finish_returns_none_if_only_fence_left_open() {
-        let mut b = SentenceBuffer::new(400);
-        let _ = b.push("```rust\nfn main() {");
-        assert_eq!(b.finish(), None);
+    fn summarize_mode_emits_on_close() {
+        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
+        assert!(b.push("```python\nprint('hi')\n").is_empty());
+        assert_eq!(b.push("```"), ["Code block in python."]);
     }
 
     #[test]
-    fn handles_question_mark_terminator() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("Are you sure? Yes I am.");
-        assert_eq!(s, vec!["Are you sure?"]);
-        assert_eq!(b.finish().as_deref(), Some("Yes I am."));
+    fn length_safety_net_cuts_at_last_whitespace() {
+        let (emitted, tail) = run(
+            SentenceBuffer::new(50),
+            &["aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd eeeeeeeeee ffff"],
+        );
+        assert_eq!(emitted, ["aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd"]);
+        assert_eq!(tail.as_deref(), Some("eeeeeeeeee ffff"));
     }
 
     #[test]
-    fn handles_exclamation_terminator() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("Wow! That works.");
-        assert_eq!(s, vec!["Wow!"]);
-        assert_eq!(b.finish().as_deref(), Some("That works."));
+    fn length_safety_net_hard_cuts_on_a_char_boundary_without_whitespace() {
+        let (emitted, tail) = run(SentenceBuffer::new(50), &[&"a".repeat(600)]);
+        assert_eq!(emitted, vec!["a".repeat(50); 12]);
+        assert_eq!(tail, None);
+
+        let (emitted, tail) = run(SentenceBuffer::new(50), &[&"😀".repeat(13)]);
+        assert_eq!(emitted, ["😀".repeat(12)]);
+        assert_eq!(tail.as_deref(), Some("😀"));
     }
 
     #[test]
-    fn collapses_inner_whitespace() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("a   b\t\tc. End.");
-        assert_eq!(s, vec!["a b c.".to_string()]);
-        assert_eq!(b.finish().as_deref(), Some("End."));
+    fn length_safety_net_keeps_multibyte_words_whole() {
+        let (mut out, tail) = run(SentenceBuffer::new(50), &[&"😀😀 ".repeat(20)]);
+        assert!(!out.is_empty());
+        out.extend(tail);
+        for s in &out {
+            assert!(s.split(' ').all(|w| w == "😀😀"), "split mid-word: {s:?}");
+        }
+        assert_eq!(out.concat().matches('😀').count(), 40);
     }
 
     #[test]
-    fn does_not_split_mid_word_on_period_then_lowercase() {
-        let mut b = SentenceBuffer::new(400);
-        let _ = b.push("file.txt is here. Done.");
-        let tail = b.finish().unwrap_or_default();
-        assert!(tail == "Done." || tail.is_empty());
+    fn length_safety_net_cuts_after_multibyte_whitespace() {
+        for ws in ['\u{3000}', '\u{a0}'] {
+            let blob = format!("{}{ws}{}", "a".repeat(45), "b".repeat(10));
+            let (emitted, tail) = run(SentenceBuffer::new(50), &[&blob]);
+            assert_eq!(emitted, ["a".repeat(45)], "whitespace {ws:?}");
+            assert_eq!(tail.as_deref(), Some("bbbbbbbbbb"), "whitespace {ws:?}");
+        }
     }
-
-    #[test]
-    fn no_split_when_period_followed_by_lowercase() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("End. then continue.");
-        assert!(s.is_empty(), "should not split on lowercase succ: {s:?}");
-        let tail = b.finish().unwrap_or_default();
-        assert_eq!(tail, "End. then continue.");
-    }
-
-    #[test]
-    fn newline_after_period_counts_as_boundary() {
-        let mut b = SentenceBuffer::new(400);
-        let s = b.push("Item one.\nItem two.");
-        assert!(!s.is_empty());
-    }
-
-    // ---- flush_idle ----
 
     #[test]
     fn flush_idle_emits_at_last_whitespace() {
         let mut b = SentenceBuffer::new(400);
         let _ = b.push("I am writ");
-        let out = b.flush_idle();
-        assert_eq!(out.as_deref(), Some("I am"));
-        let s = b.push("ing now. Done.");
-        assert_eq!(s, vec!["writing now."]);
+        assert_eq!(b.flush_idle().as_deref(), Some("I am"));
+        assert_eq!(b.push("ing now. Done."), ["writing now."]);
         assert_eq!(b.finish().as_deref(), Some("Done."));
     }
 
     #[test]
-    fn flush_idle_returns_none_on_pure_whitespace() {
-        let mut b = SentenceBuffer::new(400);
-        let _ = b.push("   \t  ");
-        assert!(b.flush_idle().is_none());
-    }
-
-    #[test]
-    fn flush_idle_returns_none_in_code_fence() {
-        let mut b = SentenceBuffer::new(400);
-        let _ = b.push("```rust\nfn main");
-        assert!(b.flush_idle().is_none());
-    }
-
-    #[test]
-    fn flush_idle_returns_none_on_single_partial_word() {
-        let mut b = SentenceBuffer::new(400);
-        let _ = b.push("writ");
-        assert!(b.flush_idle().is_none());
+    fn flush_idle_returns_none_when_nothing_is_speakable() {
+        for input in ["   \t  ", "```rust\nfn main", "writ"] {
+            let mut b = SentenceBuffer::new(400);
+            let _ = b.push(input);
+            assert_eq!(b.flush_idle(), None, "{input:?}");
+        }
     }
 
     #[test]
     fn flush_idle_can_be_called_repeatedly_without_loss() {
         let mut b = SentenceBuffer::new(400);
         let _ = b.push("Hello world ");
-        let first = b.flush_idle();
-        assert_eq!(first.as_deref(), Some("Hello world"));
-        assert!(b.flush_idle().is_none());
-        let s = b.push("again. End.");
-        assert_eq!(s, vec!["again.".to_string()]);
+        assert_eq!(b.flush_idle().as_deref(), Some("Hello world"));
+        assert_eq!(b.flush_idle(), None);
+        assert_eq!(b.push("again. End."), ["again."]);
         assert_eq!(b.finish().as_deref(), Some("End."));
-    }
-
-    // ---- code-block mode ----
-
-    #[test]
-    fn code_block_skip_drops_content_default() {
-        let mut b = SentenceBuffer::new(400);
-        let s = push_all(
-            &mut b,
-            &["Prelude. ", "```rust\nfn main() {}\n```", " Tail end."],
-        );
-        let joined = s.join(" | ");
-        let tail = b.finish().unwrap_or_default();
-        let all = format!("{joined} {tail}");
-        assert!(!all.contains("fn main"), "code leaked: {all:?}");
-        assert!(!all.contains("Code block"), "summary leaked: {all:?}");
-    }
-
-    #[test]
-    fn code_block_summarize_emits_phrase_with_lang() {
-        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
-        let s = push_all(
-            &mut b,
-            &["Prelude. ", "```rust\nfn main() {}\n```", " Tail end."],
-        );
-        let joined = s.join(" | ");
-        let tail = b.finish().unwrap_or_default();
-        let all = format!("{joined} {tail}");
-        assert!(!all.contains("fn main"), "code leaked: {all:?}");
-        assert!(
-            all.contains("Code block in rust"),
-            "expected lang-tagged summary: {all:?}"
-        );
-        // Order: prelude before summary before tail.
-        let prelude_pos = all.find("Prelude").expect("prelude present");
-        let summary_pos = all.find("Code block").expect("summary present");
-        let tail_pos = all.find("Tail end").expect("tail present");
-        assert!(prelude_pos < summary_pos, "got: {all:?}");
-        assert!(summary_pos < tail_pos, "got: {all:?}");
-    }
-
-    #[test]
-    fn code_block_summarize_no_lang_tag() {
-        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
-        let s = push_all(&mut b, &["```\nopaque content\n```", " After."]);
-        assert!(
-            s.iter().any(|x| x == "Code block."),
-            "expected exactly \"Code block.\": {s:?}"
-        );
-        assert!(
-            !s.iter().any(|x| x.contains("Code block in")),
-            "should not have a lang suffix: {s:?}"
-        );
-    }
-
-    #[test]
-    fn code_block_summarize_lang_tag_capped_no_panic() {
-        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
-        let long_lang: String = "a".repeat(100);
-        let _ = b.push(&format!("```{long_lang}\nfoo\n```"));
-        let _ = b.finish();
-    }
-
-    #[test]
-    fn hard_cuts_input_with_no_boundary() {
-        let mut b = SentenceBuffer::new(50);
-        let blob: String = std::iter::repeat_n('a', 600).collect();
-        let out = b.push(&blob);
-        assert!(
-            !out.is_empty(),
-            "expected hard-cut sentence(s), got nothing"
-        );
-        let total_emitted: usize = out.iter().map(|s| s.len()).sum();
-        assert!(
-            total_emitted > 0,
-            "hard cut emitted only empty strings: {out:?}"
-        );
-    }
-
-    #[test]
-    fn natural_boundaries_split_normal_input() {
-        let mut b = SentenceBuffer::new(400);
-        let out = b.push("First. Second. Third. Fourth. Fifth. Sixth.");
-        let tail = b.finish().unwrap_or_default();
-        let combined = out.join(" ") + " " + &tail;
-        assert_eq!(
-            combined.matches('.').count(),
-            6,
-            "natural-boundary input was not split on terminators: {combined:?}"
-        );
-    }
-
-    #[test]
-    fn code_block_summarize_emits_only_after_close() {
-        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
-        let _ = b.push("```python\nprint('hi')\n");
-        let s = b.push("");
-        assert!(
-            s.iter().all(|x| !x.contains("Code block")),
-            "summary emitted prematurely: {s:?}"
-        );
-        let s2 = b.push("```");
-        assert!(
-            s2.iter().any(|x| x.contains("Code block in python")),
-            "expected summary on close: {s2:?}"
-        );
-    }
-
-    #[test]
-    fn length_safety_net_handles_multibyte_chars() {
-        let mut b = SentenceBuffer::new(50);
-        let blob: String = std::iter::repeat_n('\u{1F600}', 13).collect();
-        let out = b.push(&blob);
-        let combined = out.join("") + &b.finish().unwrap_or_default();
-        assert_eq!(combined.matches('\u{1F600}').count(), 13);
-    }
-
-    #[test]
-    fn length_safety_net_splits_multibyte_words_on_whitespace() {
-        let mut b = SentenceBuffer::new(50);
-        let blob: String = std::iter::repeat_n("\u{1F600}\u{1F600} ", 20).collect();
-        let out = b.push(&blob);
-        assert!(!out.is_empty());
-        let combined = out.join("") + &b.finish().unwrap_or_default();
-        assert_eq!(combined.matches('\u{1F600}').count(), 40);
-    }
-
-    #[test]
-    fn length_safety_net_cuts_after_multibyte_whitespace() {
-        for ws in ['\u{3000}', '\u{a0}'] {
-            let mut b = SentenceBuffer::new(50);
-            let blob = format!("{}{ws}{}", "a".repeat(45), "b".repeat(10));
-            let out = b.push(&blob);
-            assert_eq!(out, vec!["a".repeat(45)], "whitespace {ws:?}");
-            assert_eq!(b.finish().as_deref(), Some("bbbbbbbbbb"));
-        }
     }
 }

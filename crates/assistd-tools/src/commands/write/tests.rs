@@ -9,6 +9,15 @@ fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
     Arc::new(WritePolicyCfg::new(abs).expect("non-empty allowlist"))
 }
 
+async fn write_under(allowed: &Path, args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
+    WriteCommand::new(cfg_from(&[allowed]))
+        .run(CommandInput {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            stdin: stdin.map(<[u8]>::to_vec),
+        })
+        .await
+}
+
 #[test]
 fn empty_allowlist_yields_no_policy() {
     assert!(WritePolicyCfg::new(Vec::new()).is_none());
@@ -18,53 +27,41 @@ fn empty_allowlist_yields_no_policy() {
 async fn persists_stdin_to_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("out.txt");
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec![path.to_string_lossy().into_owned()],
-            stdin: Some(b"hi there\n".to_vec()),
-        })
-        .await;
+    let out = write_under(dir.path(), &[&path.to_string_lossy()], Some(b"hi there\n")).await;
     assert_eq!(out.exit_code, 0);
-    let content = tokio::fs::read(&path).await.unwrap();
-    assert_eq!(content, b"hi there\n");
+    assert_eq!(std::fs::read(&path).unwrap(), b"hi there\n");
 }
 
 #[tokio::test]
 async fn persists_args_content_to_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("out.txt");
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec![
-                path.to_string_lossy().into_owned(),
-                "hello".into(),
-                "world".into(),
-            ],
-            stdin: None,
-        })
-        .await;
+    let out = write_under(
+        dir.path(),
+        &[&path.to_string_lossy(), "hello", "world"],
+        None,
+    )
+    .await;
     assert_eq!(out.exit_code, 0);
-    let content = tokio::fs::read(&path).await.unwrap();
-    assert_eq!(content, b"hello world");
+    assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
 }
 
 #[tokio::test]
 async fn args_content_wins_over_stdin() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("out.txt");
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec![path.to_string_lossy().into_owned(), "args".into()],
-            stdin: Some(b"stdin".to_vec()),
-        })
-        .await;
+    let out = write_under(
+        dir.path(),
+        &[&path.to_string_lossy(), "args"],
+        Some(b"stdin"),
+    )
+    .await;
     assert_eq!(out.exit_code, 0);
-    let content = tokio::fs::read(&path).await.unwrap();
-    assert_eq!(content, b"args");
+    assert_eq!(std::fs::read(&path).unwrap(), b"args");
 }
 
 #[tokio::test]
-async fn no_args_errors() {
+async fn no_args_emits_usage() {
     let out = WriteCommand::permissive_for_tests()
         .run(CommandInput {
             args: Vec::new(),
@@ -72,85 +69,65 @@ async fn no_args_errors() {
         })
         .await;
     assert_eq!(out.exit_code, 2);
+    assert!(out.stdout.starts_with(b"usage: write"), "{out:?}");
 }
 
 #[tokio::test]
 async fn path_only_with_empty_stdin_creates_empty_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("out.txt");
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec![path.to_string_lossy().into_owned()],
-            stdin: None,
-        })
-        .await;
+    let out = write_under(dir.path(), &[&path.to_string_lossy()], None).await;
     assert_eq!(out.exit_code, 0);
-    let content = tokio::fs::read(&path).await.unwrap();
-    assert!(content.is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), b"");
 }
 
 #[tokio::test]
 async fn write_rejected_outside_allowlist() {
     let dir = tempdir().unwrap();
-    let cmd = WriteCommand::new(cfg_from(&[dir.path()]));
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["/etc/passwd".into(), "oops".into()],
-            stdin: None,
-        })
-        .await;
+    let outside = tempdir().unwrap();
+    let target = outside.path().join("target.txt");
+    let target_str = target.to_string_lossy().into_owned();
+    let out = write_under(dir.path(), &[&target_str, "oops"], None).await;
     assert_eq!(out.exit_code, 126);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("[error] write: /etc/passwd: path not in writable allowlist"),
-        "{stderr}"
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "[error] write: {target_str}: path not in writable allowlist. \
+             Check: [tools.write] writable_paths in config\n"
+        )
     );
-    assert!(
-        stderr.contains("Check: [tools.write] writable_paths in config"),
-        "{stderr}"
-    );
-}
-
-#[tokio::test]
-async fn write_allowlist_permits_tmp() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("permitted.txt");
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec![path.to_string_lossy().into_owned(), "ok".into()],
-            stdin: None,
-        })
-        .await;
-    assert_eq!(out.exit_code, 0);
+    assert!(!target.exists());
 }
 
 #[tokio::test]
 async fn write_allowlist_resolves_dotdot() {
-    let dir = tempdir().unwrap();
-    let tricky = format!("{}/../../../etc/passwd", dir.path().display());
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec![tricky, "oops".into()],
-            stdin: None,
-        })
-        .await;
+    let root = tempdir().unwrap();
+    let allowed = root.path().join("allowed");
+    std::fs::create_dir(&allowed).unwrap();
+    let escaped = root.path().join("escaped.txt");
+    let tricky = format!("{}/../escaped.txt", allowed.display());
+    let out = write_under(&allowed, &[&tricky, "oops"], None).await;
     assert_eq!(out.exit_code, 126);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("not in writable allowlist"), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "[error] write: {tricky}: path not in writable allowlist. \
+             Check: [tools.write] writable_paths in config\n"
+        )
+    );
+    assert!(!escaped.exists());
 }
 
 #[tokio::test]
 async fn write_allowlist_rejects_relative_path() {
     let dir = tempdir().unwrap();
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec!["relative.txt".into(), "hi".into()],
-            stdin: None,
-        })
-        .await;
+    let out = write_under(dir.path(), &["relative.txt", "hi"], None).await;
     assert_eq!(out.exit_code, 126);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("relative paths not permitted"), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "[error] write: relative.txt: relative paths not permitted. \
+         Try: an absolute path under an allowlisted directory\n"
+    );
 }
 
 #[test]
@@ -170,42 +147,19 @@ fn expand_tilde_without_home_errors() {
     assert!(matches!(err, PathResolveError::HomeNotSet));
 }
 
+/// A missing parent passes the allowlist (the anchor is its nearest
+/// existing ancestor) and fails only at the write, with exit 1.
 #[tokio::test]
-async fn write_allowlist_handles_nonexistent_parent() {
+async fn missing_parent_passes_policy_but_fails_the_write() {
     let dir = tempdir().unwrap();
-    // tokio::fs::write fails on a missing parent too, so we only assert
-    // the allowlist check passes; the underlying write may still fail,
-    // but with exit 1 (I/O error), not 126 (policy).
-    let target = dir.path().join("newsub").join("file.txt");
-    let cmd = WriteCommand::new(cfg_from(&[dir.path()]));
-    let out = cmd
-        .run(CommandInput {
-            args: vec![target.to_string_lossy().into_owned(), "hi".into()],
-            stdin: None,
-        })
-        .await;
-    // Policy must not reject (126); the I/O error path is exit 1.
-    assert_ne!(out.exit_code, 126, "{:?}", out.stderr);
-}
-
-#[tokio::test]
-async fn unwritable_path_exits_1() {
-    let dir = tempdir().unwrap();
-    // Keep the allowlist wide: the path is under the tempdir but its
-    // direct parent doesn't exist.
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec![
-                format!("{}/definitely/not/a/writable/path", dir.path().display()),
-                "hi".into(),
-            ],
-            stdin: None,
-        })
-        .await;
-    // Parent-missing is a policy success but an I/O failure; exit 1.
+    let parent = format!("{}/definitely/not/a/writable", dir.path().display());
+    let target = format!("{parent}/path");
+    let out = write_under(dir.path(), &[&target, "hi"], None).await;
     assert_eq!(out.exit_code, 1);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("[error] write: "), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!("[error] write: file not found: {target}. Use: ls {parent} to see what is there\n")
+    );
 }
 
 #[test]
@@ -218,7 +172,6 @@ fn lexical_clean_collapses_dotdot() {
         lexical_clean(Path::new("/tmp/./foo")),
         PathBuf::from("/tmp/foo")
     );
-    // `/..` stays at root.
     assert_eq!(lexical_clean(Path::new("/..")), PathBuf::from("/"));
 }
 
@@ -230,12 +183,7 @@ async fn dangling_symlink_escaping_allowlist_is_rejected() {
     let link = allowed.path().join("link");
     std::os::unix::fs::symlink(&escape_target, &link).unwrap();
 
-    let out = WriteCommand::new(cfg_from(&[allowed.path()]))
-        .run(CommandInput {
-            args: vec![link.to_string_lossy().into_owned(), "oops".into()],
-            stdin: None,
-        })
-        .await;
+    let out = write_under(allowed.path(), &[&link.to_string_lossy(), "oops"], None).await;
     assert_eq!(out.exit_code, 126, "{:?}", out.stderr);
     assert!(!escape_target.exists());
 }
@@ -244,19 +192,14 @@ async fn dangling_symlink_escaping_allowlist_is_rejected() {
 async fn dangling_symlink_directory_escaping_allowlist_is_rejected() {
     let allowed = tempdir().unwrap();
     let outside = tempdir().unwrap();
+    let missing = outside.path().join("missing");
     let link = allowed.path().join("dir");
-    std::os::unix::fs::symlink(outside.path().join("missing"), &link).unwrap();
+    std::os::unix::fs::symlink(&missing, &link).unwrap();
 
-    let out = WriteCommand::new(cfg_from(&[allowed.path()]))
-        .run(CommandInput {
-            args: vec![
-                link.join("file.txt").to_string_lossy().into_owned(),
-                "oops".into(),
-            ],
-            stdin: None,
-        })
-        .await;
+    let target = link.join("file.txt");
+    let out = write_under(allowed.path(), &[&target.to_string_lossy(), "oops"], None).await;
     assert_eq!(out.exit_code, 126, "{:?}", out.stderr);
+    assert!(!missing.exists());
 }
 
 #[tokio::test]
@@ -267,12 +210,7 @@ async fn symlink_to_allowlisted_file_writes_through() {
     let link = dir.path().join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
 
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec![link.to_string_lossy().into_owned(), "new".into()],
-            stdin: None,
-        })
-        .await;
+    let out = write_under(dir.path(), &[&link.to_string_lossy(), "new"], None).await;
     assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
     assert_eq!(std::fs::read(&real).unwrap(), b"new");
 }
@@ -290,18 +228,15 @@ async fn write_no_follow_refuses_final_symlink() {
     assert!(!target.exists());
 }
 
+/// The old content is longer than the new, so a missing truncate would
+/// leave its tail behind.
 #[tokio::test]
-async fn overwrites_existing_file() {
+async fn overwrites_and_truncates_existing_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("out.txt");
-    std::fs::write(&path, b"old").unwrap();
+    std::fs::write(&path, b"much longer old content").unwrap();
 
-    let out = WriteCommand::new(cfg_from(&[dir.path()]))
-        .run(CommandInput {
-            args: vec![path.to_string_lossy().into_owned(), "new".into()],
-            stdin: None,
-        })
-        .await;
+    let out = write_under(dir.path(), &[&path.to_string_lossy(), "new"], None).await;
     assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
     assert_eq!(std::fs::read(&path).unwrap(), b"new");
 }

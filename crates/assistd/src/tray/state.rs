@@ -189,8 +189,11 @@ mod tests {
     }
 
     #[test]
-    fn disconnected_takes_top_priority() {
-        let t = TrayTracker::default();
+    fn disconnected_outranks_daemon_activity() {
+        let mut t = TrayTracker::default();
+        assert_eq!(t.current(), TrayState::Disconnected);
+        assert!(!t.ingest(&listen(true)));
+        assert!(!t.ingest(&delta("a")));
         assert_eq!(t.current(), TrayState::Disconnected);
     }
 

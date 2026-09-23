@@ -81,20 +81,9 @@ impl ThroughputMeter {
 mod tests {
     use super::*;
 
-    fn base() -> Instant {
-        Instant::now()
-    }
-
-    #[test]
-    fn new_meter_reports_nothing() {
-        let m = ThroughputMeter::new();
-        assert!(m.snapshot(base()).rate.is_none());
-        assert!(m.first_delta_at.is_none());
-    }
-
     #[test]
     fn rate_is_chunks_over_elapsed_seconds() {
-        let t0 = base();
+        let t0 = Instant::now();
         let mut m = ThroughputMeter::new();
         m.on_delta(t0);
         m.on_delta(t0 + Duration::from_millis(500));
@@ -108,35 +97,36 @@ mod tests {
 
     #[test]
     fn rate_is_none_at_zero_elapsed() {
-        let t0 = base();
+        let t0 = Instant::now();
         let mut m = ThroughputMeter::new();
         m.on_delta(t0);
-        assert!(m.snapshot(t0).rate.is_none());
+        assert_eq!(m.snapshot(t0).rate, None);
     }
 
     #[test]
     fn done_freezes_final_rate_and_expires_after_hold() {
-        let t0 = base();
+        let t0 = Instant::now();
         let mut m = ThroughputMeter::new();
         m.on_delta(t0);
         m.on_delta(t0 + Duration::from_secs(1));
         m.on_done(t0 + Duration::from_secs(2));
 
         assert_eq!(m.snapshot(t0 + Duration::from_secs(3)).rate, Some(1.0));
-        assert!(m.snapshot(t0 + Duration::from_secs(10)).rate.is_none());
+        assert_eq!(m.snapshot(t0 + Duration::from_secs(10)).rate, None);
     }
 
     #[test]
-    fn reset_clears_state() {
-        let t0 = base();
+    fn reset_starts_a_fresh_measurement() {
+        let t0 = Instant::now();
         let mut m = ThroughputMeter::new();
         m.on_delta(t0);
         m.on_delta(t0 + Duration::from_millis(200));
         m.on_done(t0 + Duration::from_millis(500));
         m.reset();
-        assert!(m.snapshot(t0 + Duration::from_secs(1)).rate.is_none());
-        assert!(m.first_delta_at.is_none());
-        assert!(m.finished_at.is_none());
-        assert_eq!(m.chunk_count, 0);
+        assert_eq!(m.snapshot(t0 + Duration::from_secs(1)).rate, None);
+
+        let t1 = t0 + Duration::from_secs(1);
+        m.on_delta(t1);
+        assert_eq!(m.snapshot(t1 + Duration::from_secs(1)).rate, Some(1.0));
     }
 }

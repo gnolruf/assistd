@@ -109,16 +109,12 @@ impl SqliteHandle {
 mod tests {
     use super::*;
 
-    fn shutdown_pair() -> (watch::Sender<bool>, watch::Receiver<bool>) {
-        watch::channel(false)
-    }
-
     #[tokio::test]
     async fn open_creates_parent_dirs_and_runs_migrations() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("nested/dir/memory.db");
 
-        let (_tx, rx) = shutdown_pair();
+        let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
 
         let n: i64 = handle
@@ -135,24 +131,20 @@ mod tests {
         assert_eq!(n, 1);
 
         drop(handle);
-        // No graceful shutdown signal here; we just dropped the handle,
-        // so the writer's mpsc closes naturally and the worker exits.
         writer.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn shutdown_signal_drains_writer() {
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_signal_stops_writer_while_handle_is_alive() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        let (tx, rx) = shutdown_pair();
-        let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
+        let (tx, rx) = watch::channel(false);
+        let (_handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
 
-        // Send shutdown; the writer must observe it and exit promptly.
         tx.send(true).unwrap();
-        // Drop our handle so the channel closes too; writer should
-        // return either way.
-        drop(handle);
-        let res = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
-        res.expect("writer exited within 2s").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+            .await
+            .expect("writer exits once its idle drain window passes")
+            .unwrap();
     }
 }

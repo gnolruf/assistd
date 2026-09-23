@@ -197,9 +197,7 @@ fn registry_name(prefix: &str, server_native: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Trait-only fake server: returns a static tool list and echoes
-    /// arguments back as a Text result. Lets us exercise the adapter
-    /// without standing up real I/O.
+    /// Returns a static tool list and echoes arguments back as text.
     struct FakeMcpClient {
         schemas: Vec<ToolSchema>,
     }
@@ -215,9 +213,7 @@ mod tests {
         }
     }
 
-    /// Fake server that always fails its `invoke` with a caller-supplied
-    /// `McpError`, after an optional sleep. Used to exercise the
-    /// adapter's error-envelope path and duration tracking.
+    /// Fails its one `invoke` with a pre-armed error after `sleep`.
     struct ErrFakeClient {
         err: parking_lot::Mutex<Option<McpError>>,
         sleep: std::time::Duration,
@@ -249,149 +245,116 @@ mod tests {
         })
     }
 
-    fn err_client_with(err: McpError, sleep: std::time::Duration) -> Arc<dyn McpClient> {
-        Arc::new(ErrFakeClient {
+    async fn failing_tool(err: McpError, sleep: std::time::Duration) -> Box<dyn Tool> {
+        let client = Arc::new(ErrFakeClient {
             err: parking_lot::Mutex::new(Some(err)),
             sleep,
-        })
+        });
+        let mut tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
+        tools.pop().unwrap()
     }
 
     #[tokio::test]
-    async fn adapter_forwards_tool_metadata() {
-        let client = one_tool_client();
-        let tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name(), "mcp__web__search");
-        assert_eq!(tools[0].description(), "search the web");
+    async fn adapter_forwards_tool_metadata_under_registry_name() {
+        for (prefix, expected_name) in [("mcp__web", "mcp__web__search"), ("", "search")] {
+            let tools = adapt_client_as_tools(one_tool_client(), prefix)
+                .await
+                .unwrap();
+            let [tool] = tools.as_slice() else {
+                panic!("prefix {prefix:?}: expected one tool");
+            };
+            assert_eq!(tool.name(), expected_name, "prefix {prefix:?}");
+            assert_eq!(tool.description(), "search the web");
+            assert_eq!(
+                tool.parameters_schema(),
+                json!({"type": "object", "properties": {}})
+            );
+        }
     }
 
     #[tokio::test]
-    async fn adapter_strips_prefix_before_invoking() {
-        // Registry sees `mcp__web__search` but the upstream server
-        // expects bare `search`. The adapter must forward the
-        // server-native name.
-        let client = one_tool_client();
-        let tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
-        let tool = tools.into_iter().next().unwrap();
-        let out = tool.invoke(json!({"q": "rust"})).await.unwrap();
+    async fn adapter_invokes_the_server_native_name() {
+        let tools = adapt_client_as_tools(one_tool_client(), "mcp__web")
+            .await
+            .unwrap();
+        let out = tools[0].invoke(json!({"q": "rust"})).await.unwrap();
         assert_eq!(out["type"], "text");
-        let text = out["output"].as_str().unwrap();
-        assert!(text.starts_with("called search "), "{text}");
+        assert_eq!(out["output"], r#"called search with {"q":"rust"}"#);
     }
 
+    #[test]
+    fn tool_results_render_as_dispatch_envelopes() {
+        let cases = [
+            (
+                ToolResult::Text("hello".into()),
+                json!({
+                    "type": "text",
+                    "output": "hello",
+                    "exit_code": 0,
+                    "duration_ms": 42,
+                    "truncated": false,
+                }),
+            ),
+            (
+                ToolResult::Json(json!({"answer": 42})),
+                json!({
+                    "type": "json",
+                    "output": r#"{"answer":42}"#,
+                    "value": {"answer": 42},
+                    "exit_code": 0,
+                    "duration_ms": 42,
+                    "truncated": false,
+                }),
+            ),
+            (
+                ToolResult::Image {
+                    mime: "image/png".into(),
+                    bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                },
+                json!({
+                    "type": "image",
+                    "output": "(image: image/png, 4 bytes)",
+                    "exit_code": 0,
+                    "duration_ms": 42,
+                    "truncated": false,
+                    "attachments": [
+                        {"type": "image", "mime": "image/png", "data": "3q2+7w=="}
+                    ],
+                }),
+            ),
+        ];
+        for (result, expected) in cases {
+            assert_eq!(tool_result_to_json(result, 42), expected);
+        }
+    }
+
+    /// A failed call must come back as an `Ok` envelope, not a Rust
+    /// `Err`, so the model still sees the recovery hint.
     #[tokio::test]
-    async fn empty_prefix_leaves_name_unchanged() {
-        let client = one_tool_client();
-        let tools = adapt_client_as_tools(client, "").await.unwrap();
-        assert_eq!(tools[0].name(), "search");
-    }
-
-    #[test]
-    fn image_tool_result_lifts_into_attachments_array() {
-        let v = tool_result_to_json(
-            ToolResult::Image {
-                mime: "image/png".into(),
-                bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
-            },
-            0,
+    async fn adapter_turns_client_errors_into_error_envelopes() {
+        let err = || McpError::RpcError {
+            code: -32602,
+            message: "missing field 'query'".into(),
+            data: None,
+        };
+        let tool = failing_tool(err(), std::time::Duration::ZERO).await;
+        let mut out = tool.invoke(json!({})).await.unwrap();
+        assert!(out["duration_ms"].is_u64(), "{out}");
+        out.as_object_mut().unwrap().remove("duration_ms");
+        assert_eq!(
+            out,
+            json!({
+                "type": "error",
+                "output": mcp_error_line("mcp__web__search", &err()),
+                "exit_code": -1,
+                "truncated": false,
+            })
         );
-        assert_eq!(v["type"], "image");
-        assert_eq!(v["exit_code"], 0);
-        assert_eq!(v["truncated"], false);
-        let attachments = v["attachments"].as_array().expect("attachments array");
-        assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0]["type"], "image");
-        assert_eq!(attachments[0]["mime"], "image/png");
-        assert_eq!(attachments[0]["data"], "3q2+7w==");
-        let output = v["output"].as_str().unwrap();
-        assert!(output.contains("image/png"));
-        assert!(output.contains("4 bytes"));
     }
 
-    #[test]
-    fn text_tool_result_uses_dispatch_envelope() {
-        let v = tool_result_to_json(ToolResult::Text("hello".into()), 0);
-        assert_eq!(v["type"], "text");
-        assert_eq!(v["output"], "hello");
-        assert_eq!(v["exit_code"], 0);
-        assert_eq!(v["truncated"], false);
-    }
-
-    #[test]
-    fn json_tool_result_carries_value_and_string_output() {
-        let v = tool_result_to_json(ToolResult::Json(json!({"answer": 42})), 0);
-        assert_eq!(v["type"], "json");
-        assert_eq!(v["value"], json!({"answer": 42}));
-        assert!(v["output"].as_str().unwrap().contains("answer"));
-    }
-
-    #[test]
-    fn tool_result_carries_duration_ms_through_envelope() {
-        let v = tool_result_to_json(ToolResult::Text("hi".into()), 42);
-        assert_eq!(v["duration_ms"], 42);
-    }
-
-    /// Acceptance: when the upstream client fails with `RpcError`, the
-    /// adapter must surface the failure as a tool-result envelope (not
-    /// a Rust `Err`), with `exit_code: -1` and a convention-compliant
-    /// `[error] <tool>: …. Check: …` line. This is what lets the agent
-    /// loop's `dispatch_tool_call` thread the body straight into the
-    /// model's tool-role message without losing the recovery hint.
-    #[tokio::test]
-    async fn adapter_returns_error_envelope_on_rpc_error() {
-        let client = err_client_with(
-            McpError::RpcError {
-                code: -32602,
-                message: "missing field 'query'".into(),
-                data: None,
-            },
-            std::time::Duration::ZERO,
-        );
-        let tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
-        let tool = tools.into_iter().next().unwrap();
-        let out = tool.invoke(json!({})).await.unwrap();
-        assert_eq!(out["type"], "error");
-        assert_eq!(out["exit_code"], -1);
-        assert_eq!(out["truncated"], false);
-        let body = out["output"].as_str().unwrap();
-        assert!(
-            body.starts_with("[error] mcp__web__search: "),
-            "missing convention prefix: {body}"
-        );
-        assert!(body.contains("-32602"), "missing rpc code: {body}");
-        assert!(body.contains("missing field"), "missing message: {body}");
-        assert!(body.contains("Check:"), "missing recovery hint: {body}");
-    }
-
-    /// Acceptance: timeouts get a `Try:` recovery hint that suggests
-    /// retrying or shrinking the request, distinct from `RpcError`'s
-    /// `Check:` (which says "the input is wrong"). The model needs the
-    /// distinction to pick the right next step.
-    #[tokio::test]
-    async fn adapter_returns_error_envelope_on_timeout() {
-        let client = err_client_with(
-            McpError::RequestTimeout(std::time::Duration::from_secs(30)),
-            std::time::Duration::ZERO,
-        );
-        let tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
-        let tool = tools.into_iter().next().unwrap();
-        let out = tool.invoke(json!({})).await.unwrap();
-        assert_eq!(out["type"], "error");
-        assert_eq!(out["exit_code"], -1);
-        let body = out["output"].as_str().unwrap();
-        assert!(body.contains("timed out"), "{body}");
-        assert!(body.contains("30s"), "{body}");
-        assert!(body.contains("Try:"), "{body}");
-    }
-
-    /// Acceptance: `duration_ms` reflects the real RPC round-trip, not
-    /// a hardcoded 0. The TUI's `[exit:N | Xms]` footer surfaces this
-    /// to the user, so a stuck call should look stuck.
     #[tokio::test]
     async fn adapter_records_real_duration_ms() {
-        let client = err_client_with(McpError::ServerDown, std::time::Duration::from_millis(20));
-        let tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
-        let tool = tools.into_iter().next().unwrap();
+        let tool = failing_tool(McpError::ServerDown, std::time::Duration::from_millis(20)).await;
         let out = tool.invoke(json!({})).await.unwrap();
         let dur = out["duration_ms"].as_u64().expect("duration_ms u64");
         assert!(

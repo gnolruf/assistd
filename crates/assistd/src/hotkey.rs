@@ -363,252 +363,94 @@ fn is_wayland_only() -> bool {
 mod tests {
     use super::*;
 
-    fn empty_voice() -> VoiceConfig {
-        VoiceConfig::default()
-    }
+    const GARBAGE: &str = "### bogus ###";
 
-    #[test]
-    fn validate_empty_is_ok() {
-        validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &empty_voice(),
-        )
-        .expect("empty hotkeys valid");
-    }
+    type Edit = fn(&mut PresenceConfig, &mut VoiceConfig);
 
-    #[test]
-    fn validate_well_formed_is_ok() {
-        validate(
-            &PresenceConfig {
-                hotkey: "Super+Escape".into(),
-            },
-            &empty_voice(),
-        )
-        .expect("Super+Escape must parse");
-    }
-
-    #[test]
-    fn validate_garbage_errors() {
-        let err = validate(
-            &PresenceConfig {
-                hotkey: "not a real hotkey ###".into(),
-            },
-            &empty_voice(),
-        )
-        .expect_err("garbage must fail");
-        assert!(err.to_string().contains("presence.hotkey"));
-    }
-
-    #[test]
-    fn validate_voice_hotkey_when_enabled() {
-        let v = VoiceConfig {
-            enabled: true,
-            hotkey: "Super+Space".into(),
-            ..VoiceConfig::default()
+    /// Every hotkey feature enabled, every hotkey empty.
+    fn configs(edit: Edit) -> (PresenceConfig, VoiceConfig) {
+        let mut presence = PresenceConfig {
+            hotkey: String::new(),
         };
-        validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect("Super+Space must parse");
-    }
-
-    #[test]
-    fn validate_continuous_hotkey_when_enabled() {
-        use assistd_core::ContinuousListenConfig;
-        let v = VoiceConfig {
+        let mut voice = VoiceConfig {
             enabled: true,
             hotkey: String::new(),
-            continuous: ContinuousListenConfig {
-                enabled: true,
-                hotkey: "Super+Shift+L".into(),
-                ..ContinuousListenConfig::default()
-            },
             ..VoiceConfig::default()
         };
-        validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect("Super+Shift+L must parse");
+        voice.continuous.enabled = true;
+        voice.continuous.hotkey = String::new();
+        voice.synthesis.enabled = true;
+        voice.synthesis.toggle_hotkey = String::new();
+        voice.synthesis.skip_hotkey = String::new();
+        edit(&mut presence, &mut voice);
+        (presence, voice)
     }
 
     #[test]
-    fn validate_garbage_continuous_hotkey_errors() {
-        use assistd_core::ContinuousListenConfig;
-        let v = VoiceConfig {
-            enabled: true,
-            hotkey: String::new(),
-            continuous: ContinuousListenConfig {
-                enabled: true,
-                hotkey: "### bogus ###".into(),
-                ..ContinuousListenConfig::default()
-            },
-            ..VoiceConfig::default()
-        };
-        let err = validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect_err("garbage must fail");
-        assert!(err.to_string().contains("voice.continuous.hotkey"));
+    fn validate_accepts_empty_and_well_formed_hotkeys() {
+        let cases: [(&str, Edit); 2] = [
+            ("all empty", |_, _| {}),
+            ("all set", |p, v| {
+                p.hotkey = "Super+Escape".into();
+                v.hotkey = "Super+Space".into();
+                v.continuous.hotkey = "Super+Shift+L".into();
+                v.synthesis.toggle_hotkey = "Super+Shift+M".into();
+                v.synthesis.skip_hotkey = "Super+Shift+S".into();
+            }),
+        ];
+        for (label, edit) in cases {
+            let (p, v) = configs(edit);
+            validate(&p, &v).unwrap_or_else(|e| panic!("{label}: {e:#}"));
+        }
     }
 
     #[test]
-    fn validate_continuous_hotkey_ignored_when_disabled() {
-        use assistd_core::ContinuousListenConfig;
-        let v = VoiceConfig {
-            enabled: true,
-            hotkey: String::new(),
-            continuous: ContinuousListenConfig {
-                enabled: false,
-                hotkey: "### bogus ###".into(),
-                ..ContinuousListenConfig::default()
-            },
-            ..VoiceConfig::default()
-        };
-        validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect("garbage ignored when continuous is disabled");
+    fn validate_rejects_garbage_naming_the_config_key() {
+        let cases: [(&str, Edit); 5] = [
+            ("presence.hotkey", |p, _| p.hotkey = GARBAGE.into()),
+            ("voice.hotkey", |_, v| v.hotkey = GARBAGE.into()),
+            ("voice.continuous.hotkey", |_, v| {
+                v.continuous.hotkey = GARBAGE.into()
+            }),
+            ("voice.synthesis.toggle_hotkey", |_, v| {
+                v.synthesis.toggle_hotkey = GARBAGE.into()
+            }),
+            ("voice.synthesis.skip_hotkey", |_, v| {
+                v.synthesis.skip_hotkey = GARBAGE.into()
+            }),
+        ];
+        for (key, edit) in cases {
+            let (p, v) = configs(edit);
+            let err = validate(&p, &v).expect_err(key);
+            assert!(
+                err.to_string().starts_with(&format!("invalid {key} ")),
+                "{key}: {err}"
+            );
+        }
     }
 
     #[test]
-    fn validate_voice_hotkey_ignored_when_disabled() {
-        let v = VoiceConfig {
-            enabled: false,
-            hotkey: "bogus###".into(),
-            ..VoiceConfig::default()
-        };
-        validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect("garbage voice hotkey ignored when voice is disabled");
-    }
-
-    #[test]
-    fn validate_toggle_hotkey_when_synthesis_enabled() {
-        use assistd_core::SynthesisConfig;
-        let v = VoiceConfig {
-            enabled: true,
-            hotkey: String::new(),
-            synthesis: SynthesisConfig {
-                enabled: true,
-                toggle_hotkey: "Super+Shift+M".into(),
-                ..SynthesisConfig::default()
-            },
-            ..VoiceConfig::default()
-        };
-        validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect("Super+Shift+M must parse");
-    }
-
-    #[test]
-    fn validate_garbage_toggle_hotkey_errors() {
-        use assistd_core::SynthesisConfig;
-        let v = VoiceConfig {
-            enabled: true,
-            hotkey: String::new(),
-            synthesis: SynthesisConfig {
-                enabled: true,
-                toggle_hotkey: "### bogus ###".into(),
-                ..SynthesisConfig::default()
-            },
-            ..VoiceConfig::default()
-        };
-        let err = validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect_err("garbage must fail");
-        assert!(err.to_string().contains("voice.synthesis.toggle_hotkey"));
-    }
-
-    #[test]
-    fn validate_toggle_hotkey_ignored_when_synthesis_disabled() {
-        use assistd_core::SynthesisConfig;
-        let v = VoiceConfig {
-            enabled: true,
-            hotkey: String::new(),
-            synthesis: SynthesisConfig {
-                enabled: false,
-                toggle_hotkey: "### bogus ###".into(),
-                ..SynthesisConfig::default()
-            },
-            ..VoiceConfig::default()
-        };
-        validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect("garbage ignored when synthesis is disabled");
-    }
-
-    #[test]
-    fn validate_skip_hotkey_when_synthesis_enabled() {
-        use assistd_core::SynthesisConfig;
-        let v = VoiceConfig {
-            enabled: true,
-            hotkey: String::new(),
-            synthesis: SynthesisConfig {
-                enabled: true,
-                skip_hotkey: "Super+Shift+S".into(),
-                ..SynthesisConfig::default()
-            },
-            ..VoiceConfig::default()
-        };
-        validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect("Super+Shift+S must parse");
-    }
-
-    #[test]
-    fn validate_garbage_skip_hotkey_errors() {
-        use assistd_core::SynthesisConfig;
-        let v = VoiceConfig {
-            enabled: true,
-            hotkey: String::new(),
-            synthesis: SynthesisConfig {
-                enabled: true,
-                skip_hotkey: "### bogus ###".into(),
-                ..SynthesisConfig::default()
-            },
-            ..VoiceConfig::default()
-        };
-        let err = validate(
-            &PresenceConfig {
-                hotkey: String::new(),
-            },
-            &v,
-        )
-        .expect_err("garbage must fail");
-        assert!(err.to_string().contains("voice.synthesis.skip_hotkey"));
+    fn validate_ignores_hotkeys_of_disabled_features() {
+        let cases: [(&str, Edit); 3] = [
+            ("voice disabled", |_, v| {
+                v.enabled = false;
+                v.hotkey = GARBAGE.into();
+                v.continuous.hotkey = GARBAGE.into();
+                v.synthesis.toggle_hotkey = GARBAGE.into();
+            }),
+            ("continuous disabled", |_, v| {
+                v.continuous.enabled = false;
+                v.continuous.hotkey = GARBAGE.into();
+            }),
+            ("synthesis disabled", |_, v| {
+                v.synthesis.enabled = false;
+                v.synthesis.toggle_hotkey = GARBAGE.into();
+                v.synthesis.skip_hotkey = GARBAGE.into();
+            }),
+        ];
+        for (label, edit) in cases {
+            let (p, v) = configs(edit);
+            validate(&p, &v).unwrap_or_else(|e| panic!("{label}: {e:#}"));
+        }
     }
 }

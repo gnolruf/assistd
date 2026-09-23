@@ -31,19 +31,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_to_constructor_value() {
+    fn set_overrides_the_constructor_value() {
         let gate = VisionGate::new(true);
-        assert!(gate.supported());
-        let gate = VisionGate::new(false);
-        assert!(!gate.supported());
-    }
-
-    #[test]
-    fn set_flips_observed_value() {
-        let gate = VisionGate::new(false);
-        gate.set(true);
         assert!(gate.supported());
         gate.set(false);
         assert!(!gate.supported());
+        gate.set(true);
+        assert!(gate.supported());
     }
 }

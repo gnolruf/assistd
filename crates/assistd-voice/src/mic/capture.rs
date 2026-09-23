@@ -367,15 +367,12 @@ mod tests {
             ..VoiceConfig::default()
         };
         let err = validate(&cfg).expect_err("unknown device must not pass validation");
-        let msg = format!("{err}");
         assert!(
-            msg.contains("assistd-test-definitely-missing-device"),
-            "error should echo the configured name: {msg}"
+            matches!(&err, DeviceValidationError::NotFound { requested, .. }
+                if requested == "assistd-test-definitely-missing-device"),
+            "got {err:?}"
         );
-        assert!(
-            msg.contains("mic_device"),
-            "error should mention mic_device: {msg}"
-        );
+        let msg = err.to_string();
         assert!(
             msg.contains("Set voice.mic_device = null"),
             "error should hint at the null default: {msg}"

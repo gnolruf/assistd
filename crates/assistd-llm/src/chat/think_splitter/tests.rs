@@ -12,167 +12,96 @@ fn run(chunks: &[&str]) -> Vec<Segment> {
     out
 }
 
-#[test]
-fn passes_through_visible_only() {
-    assert_eq!(
-        run(&["hello world"]),
-        vec![Segment::Visible("hello world".into())]
-    );
+fn visible(text: &str) -> Segment {
+    Segment::Visible(text.into())
+}
+
+fn reasoning(text: &str) -> Segment {
+    Segment::Reasoning(text.into())
 }
 
 #[test]
-fn extracts_reasoning_block() {
-    assert_eq!(
-        run(&["<think>maybe</think>4"]),
-        vec![
-            Segment::Reasoning("maybe".into()),
-            Segment::Visible("4".into())
-        ]
-    );
-}
-
-#[test]
-fn handles_text_before_and_after_block() {
-    assert_eq!(
-        run(&["pre <think>cogitate</think> post"]),
-        vec![
-            Segment::Visible("pre ".into()),
-            Segment::Reasoning("cogitate".into()),
-            Segment::Visible(" post".into()),
-        ]
-    );
-}
-
-#[test]
-fn tolerates_open_tag_split_across_chunks() {
-    assert_eq!(
-        run(&["<thi", "nk>hello</think>done"]),
-        vec![
-            Segment::Reasoning("hello".into()),
-            Segment::Visible("done".into()),
-        ]
-    );
-}
-
-#[test]
-fn tolerates_close_tag_split_across_chunks() {
-    assert_eq!(
-        run(&["<think>foo</thi", "nk>bar"]),
-        vec![
-            Segment::Reasoning("foo".into()),
-            Segment::Visible("bar".into()),
-        ]
-    );
-}
-
-#[test]
-fn tolerates_tag_split_byte_by_byte() {
-    let chunks: Vec<&str> = vec![
-        "<", "t", "h", "i", "n", "k", ">", "x", "<", "/", "t", "h", "i", "n", "k", ">", "y",
+fn classifies_streamed_chunks() {
+    let cases: [(&str, &[&str], Vec<Segment>); 12] = [
+        (
+            "visible only",
+            &["hello world"],
+            vec![visible("hello world")],
+        ),
+        (
+            "reasoning block",
+            &["<think>maybe</think>4"],
+            vec![reasoning("maybe"), visible("4")],
+        ),
+        (
+            "text around a block",
+            &["pre <think>cogitate</think> post"],
+            vec![visible("pre "), reasoning("cogitate"), visible(" post")],
+        ),
+        (
+            "adjacent blocks",
+            &["a<think>b</think>c<think>d</think>e"],
+            vec![
+                visible("a"),
+                reasoning("b"),
+                visible("c"),
+                reasoning("d"),
+                visible("e"),
+            ],
+        ),
+        (
+            "open tag split across chunks",
+            &["<thi", "nk>hello</think>done"],
+            vec![reasoning("hello"), visible("done")],
+        ),
+        (
+            "close tag split across chunks",
+            &["<think>foo</thi", "nk>bar"],
+            vec![reasoning("foo"), visible("bar")],
+        ),
+        (
+            "tags split byte by byte",
+            &[
+                "<", "t", "h", "i", "n", "k", ">", "x", "<", "/", "t", "h", "i", "n", "k", ">", "y",
+            ],
+            vec![reasoning("x"), visible("y")],
+        ),
+        (
+            "plain text is emitted per feed, not held",
+            &["hello", " ", "world"],
+            vec![visible("hello"), visible(" "), visible("world")],
+        ),
+        (
+            "unrelated tag passes through",
+            &["<x>foo"],
+            vec![visible("<x>foo")],
+        ),
+        (
+            "dangling open-tag prefix is flushed as visible on finish",
+            &["trailing<thi"],
+            vec![visible("trailing"), visible("<thi")],
+        ),
+        (
+            "close tag outside a block is literal text",
+            &["a</think>b"],
+            vec![visible("a</think>b")],
+        ),
+        (
+            "multibyte body",
+            &["<think>héllo 🌍</think>!"],
+            vec![reasoning("héllo 🌍"), visible("!")],
+        ),
     ];
-    assert_eq!(
-        run(&chunks),
-        vec![Segment::Reasoning("x".into()), Segment::Visible("y".into())]
-    );
-}
-
-#[test]
-fn coalesces_adjacent_visible_chunks() {
-    // Visible content arriving across several chunks (no tags)
-    // should coalesce into one Visible segment per feed call.
-    let mut s = ThinkSplitter::default();
-    let mut out = Vec::new();
-    out.extend(s.feed("hello"));
-    out.extend(s.feed(" "));
-    out.extend(s.feed("world"));
-    // No coalescing across feed calls because each call returns
-    // fresh segments; callers concatenate by appending.
-    assert_eq!(
-        out,
-        vec![
-            Segment::Visible("hello".into()),
-            Segment::Visible(" ".into()),
-            Segment::Visible("world".into()),
-        ]
-    );
-}
-
-#[test]
-fn adjacent_blocks_are_classified_separately() {
-    assert_eq!(
-        run(&["a<think>b</think>c<think>d</think>e"]),
-        vec![
-            Segment::Visible("a".into()),
-            Segment::Reasoning("b".into()),
-            Segment::Visible("c".into()),
-            Segment::Reasoning("d".into()),
-            Segment::Visible("e".into()),
-        ]
-    );
-}
-
-#[test]
-fn unrelated_lt_fragment_passes_through_as_visible() {
-    // `<x>foo` is not a tag we recognise: the `<` initially holds
-    // back the rest until we can confirm it's not `<think>`.
-    // Verify the whole string ends up Visible.
-    assert_eq!(run(&["<x>foo"]), vec![Segment::Visible("<x>foo".into())]);
-}
-
-#[test]
-fn dangling_open_tag_is_held_then_flushed_as_visible() {
-    // Open-tag prefix that never completes ends up as Visible
-    // (current state at finish is OutsideThink, so we don't
-    // silently swallow content).
-    let mut s = ThinkSplitter::default();
-    let mut out = s.feed("trailing<thi");
-    out.extend(s.finish());
-    assert_eq!(
-        out,
-        vec![
-            Segment::Visible("trailing".into()),
-            Segment::Visible("<thi".into()),
-        ]
-    );
-}
-
-#[test]
-fn unmatched_close_tag_flips_to_visible_on_finish() {
-    // Defensive: if a `</think>` appears while OutsideThink,
-    // we treat the literal text as Visible since we never
-    // entered InsideThink.
-    let mut s = ThinkSplitter::default();
-    let mut out = s.feed("a</think>b");
-    out.extend(s.finish());
-    // The splitter sees no `<think>` to switch state, so
-    // `</think>` is not recognised as a tag in the OutsideThink
-    // state — emit the whole string as Visible.
-    let concatenated: String = out
-        .iter()
-        .map(|s| match s {
-            Segment::Visible(t) | Segment::Reasoning(t) => t.as_str(),
-        })
-        .collect();
-    assert_eq!(concatenated, "a</think>b");
-    assert!(out.iter().all(|s| matches!(s, Segment::Visible(_))));
-}
-
-#[test]
-fn handles_utf8_body_inside_block() {
-    assert_eq!(
-        run(&["<think>héllo 🌍</think>!"]),
-        vec![
-            Segment::Reasoning("héllo 🌍".into()),
-            Segment::Visible("!".into()),
-        ]
-    );
+    for (label, chunks, expected) in cases {
+        assert_eq!(run(chunks), expected, "{label}");
+    }
 }
 
 #[test]
 fn empty_feeds_are_no_ops() {
     let mut s = ThinkSplitter::default();
     assert!(s.feed("").is_empty());
-    assert_eq!(s.feed("hi"), vec![Segment::Visible("hi".into())]);
+    assert_eq!(s.feed("hi"), vec![visible("hi")]);
     assert!(s.feed("").is_empty());
-    assert!(s.finish().is_none());
+    assert_eq!(s.finish(), None);
 }

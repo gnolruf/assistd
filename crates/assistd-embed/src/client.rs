@@ -140,26 +140,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn l2_normalize_unit_vector() {
-        let v = l2_normalize(vec![3.0, 4.0]);
-        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(
-            (norm - 1.0).abs() < 1e-5,
-            "expected unit length, got {norm}"
-        );
-        assert!((v[0] - 0.6).abs() < 1e-5);
-        assert!((v[1] - 0.8).abs() < 1e-5);
-    }
-
-    #[test]
-    fn l2_normalize_zero_vector_is_identity() {
-        let v = l2_normalize(vec![0.0, 0.0, 0.0]);
-        assert_eq!(v, vec![0.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn l2_normalize_already_unit() {
-        let v = l2_normalize(vec![1.0, 0.0, 0.0]);
-        assert_eq!(v, vec![1.0, 0.0, 0.0]);
+    fn l2_normalize_scales_to_unit_length_and_passes_degenerate_input_through() {
+        let cases: [(&str, Vec<f32>, Vec<f32>); 5] = [
+            ("3-4-5", vec![3.0, 4.0], vec![0.6, 0.8]),
+            ("already unit", vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0]),
+            (
+                "f32::MAX components do not overflow",
+                vec![f32::MAX, f32::MAX],
+                vec![std::f32::consts::FRAC_1_SQRT_2; 2],
+            ),
+            ("zero vector", vec![0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0]),
+            (
+                "non-finite",
+                vec![f32::INFINITY, 1.0],
+                vec![f32::INFINITY, 1.0],
+            ),
+        ];
+        for (label, input, expected) in cases {
+            let got = l2_normalize(input);
+            assert_eq!(got.len(), expected.len(), "{label}");
+            for (g, e) in got.iter().zip(&expected) {
+                assert!(
+                    g == e || (g - e).abs() < 1e-6,
+                    "{label}: got {got:?}, expected {expected:?}"
+                );
+            }
+        }
     }
 }

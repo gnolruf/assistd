@@ -179,8 +179,8 @@ mod tests {
         let err = load_image(Path::new("/nonexistent/x.png"))
             .await
             .unwrap_err();
-        assert!(matches!(err, LoadImageError::Io { .. }));
-        assert!(err.user_message().starts_with("file not found:"));
+        assert!(matches!(err, LoadImageError::Io { .. }), "{err:?}");
+        assert_eq!(err.user_message(), "file not found: /nonexistent/x.png");
     }
 
     #[tokio::test]
@@ -189,8 +189,14 @@ mod tests {
         let path = dir.path().join("notes.txt");
         tokio::fs::write(&path, b"just some text").await.unwrap();
         let err = load_image(&path).await.unwrap_err();
-        assert!(matches!(err, LoadImageError::Unrecognized { .. }));
-        assert!(err.user_message().contains("not a recognized image"));
+        assert!(
+            matches!(err, LoadImageError::Unrecognized { .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.user_message(),
+            format!("not a recognized image file: {}", path.display())
+        );
     }
 
     #[tokio::test]

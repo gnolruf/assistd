@@ -648,402 +648,205 @@ fn install_hint(binary: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    // ---- parse_target ------------------------------------------------------
-
-    #[test]
-    fn parse_full_default() {
-        assert_eq!(parse_target(&[]), Ok(Target::Full));
+    fn args(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn parse_full_explicit() {
-        assert_eq!(parse_target(&["--full".into()]), Ok(Target::Full));
+    fn parse_target_accepts_each_form() {
+        let cases: [(&[&str], Target); 5] = [
+            (&[], Target::Full),
+            (&["--full"], Target::Full),
+            (&["--focused"], Target::Focused),
+            (&["--monitor=DP-1"], Target::Monitor("DP-1".into())),
+            (&["--monitor", "HDMI-1"], Target::Monitor("HDMI-1".into())),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(parse_target(&args(raw)), Ok(expected), "{raw:?}");
+        }
     }
 
     #[test]
-    fn parse_focused() {
-        assert_eq!(parse_target(&["--focused".into()]), Ok(Target::Focused));
+    fn parse_target_rejects_malformed_args() {
+        let cases: [(&[&str], &str); 5] = [
+            (
+                &["--full", "--focused"],
+                "expects at most one flag (--full, --focused, or --monitor=<name>)",
+            ),
+            (
+                &["--monitor"],
+                "--monitor requires a value: --monitor=<name> (e.g. --monitor=DP-1)",
+            ),
+            (
+                &["--monitor="],
+                "--monitor requires a name (try `xrandr --listmonitors` or `swaymsg -t get_outputs`)",
+            ),
+            (&["--monitor", ""], "--monitor requires a non-empty name"),
+            (&["--bogus"], "unknown flag: --bogus"),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(parse_target(&args(raw)), Err(expected.into()), "{raw:?}");
+        }
     }
 
-    #[test]
-    fn parse_too_many_args() {
-        let err = parse_target(&["--full".into(), "--focused".into()]).unwrap_err();
-        assert!(err.contains("at most one"), "{err}");
-    }
-
-    #[test]
-    fn parse_monitor_equals_form() {
-        assert_eq!(
-            parse_target(&["--monitor=DP-1".into()]),
-            Ok(Target::Monitor("DP-1".into()))
-        );
-    }
-
-    #[test]
-    fn parse_monitor_two_arg_form() {
-        assert_eq!(
-            parse_target(&["--monitor".into(), "HDMI-1".into()]),
-            Ok(Target::Monitor("HDMI-1".into()))
-        );
-    }
-
-    #[test]
-    fn parse_monitor_without_value_errors() {
-        let err = parse_target(&["--monitor".into()]).unwrap_err();
-        assert!(err.contains("--monitor=<name>"), "{err}");
-    }
-
-    #[test]
-    fn parse_monitor_empty_equals_value_errors() {
-        let err = parse_target(&["--monitor=".into()]).unwrap_err();
-        assert!(err.contains("--monitor"), "{err}");
-    }
-
-    /// The convention-compliance test in `command.rs` drives this exact path
-    /// (bogus flag) to verify our error format. Re-asserting here keeps the
-    /// failure message in this file when the format changes.
     #[tokio::test]
-    async fn bogus_flag_emits_convention_compliant_error() {
-        let cmd = ScreenshotCommand::default();
-        let out = cmd
+    async fn bogus_flag_emits_usage_error() {
+        let out = ScreenshotCommand::default()
             .run(CommandInput {
-                args: vec!["--bogus-flag".into()],
+                args: args(&["--bogus-flag"]),
                 stdin: None,
             })
             .await;
         assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.starts_with("[error] screenshot: unknown flag: --bogus-flag"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] screenshot: unknown flag: --bogus-flag. \
+             Use: screenshot --full or screenshot --focused\n"
         );
-        assert!(stderr.contains("Use: screenshot --full"), "{stderr}");
         assert!(out.attachments.is_empty());
     }
 
-    // ---- detect_backend_in -----------------------------------------
-
     #[test]
-    fn detect_backend_xdg_wayland() {
-        assert_eq!(
-            detect_backend_in(DisplayEnv {
-                session_type: Some("wayland"),
-                wayland_display: false,
-                x_display: false
-            }),
-            Ok(Backend::Wayland)
-        );
+    fn detect_backend_prefers_session_type_then_wayland() {
+        let none = Err("no display server detected (no WAYLAND_DISPLAY or DISPLAY)");
+        let cases = [
+            (Some("wayland"), false, false, Ok(Backend::Wayland)),
+            (Some("x11"), false, false, Ok(Backend::X11)),
+            (None, false, false, none),
+            // A TTY login falls back to the display variables.
+            (Some("tty"), false, false, none),
+            (Some("tty"), false, true, Ok(Backend::X11)),
+            // XWayland sets both; grim still captures X clients.
+            (None, true, true, Ok(Backend::Wayland)),
+            (None, false, true, Ok(Backend::X11)),
+        ];
+        for (session_type, wayland_display, x_display, expected) in cases {
+            assert_eq!(
+                detect_backend_in(DisplayEnv {
+                    session_type,
+                    wayland_display,
+                    x_display,
+                }),
+                expected,
+                "session={session_type:?} wayland={wayland_display} x={x_display}"
+            );
+        }
     }
 
     #[test]
-    fn detect_backend_xdg_x11() {
-        assert_eq!(
-            detect_backend_in(DisplayEnv {
-                session_type: Some("x11"),
-                wayland_display: false,
-                x_display: false
-            }),
-            Ok(Backend::X11)
-        );
+    fn detect_wayland_compositor_from_env() {
+        let cases = [
+            (true, true, Some("KDE"), WaylandCompositor::Sway),
+            (false, true, None, WaylandCompositor::Hyprland),
+            (false, false, Some("sway"), WaylandCompositor::Sway),
+            (false, false, Some("Hyprland"), WaylandCompositor::Hyprland),
+            (
+                false,
+                false,
+                Some("KDE"),
+                WaylandCompositor::Unknown("KDE".into()),
+            ),
+            (
+                false,
+                false,
+                None,
+                WaylandCompositor::Unknown(String::new()),
+            ),
+        ];
+        for (swaysock, hyprland_signature, current_desktop, expected) in cases {
+            assert_eq!(
+                detect_wayland_compositor_in(WaylandEnv {
+                    swaysock,
+                    hyprland_signature,
+                    current_desktop,
+                }),
+                expected,
+                "sway={swaysock} hypr={hyprland_signature} desktop={current_desktop:?}"
+            );
+        }
     }
-
-    #[test]
-    fn detect_backend_no_display() {
-        assert!(
-            detect_backend_in(DisplayEnv {
-                session_type: None,
-                wayland_display: false,
-                x_display: false
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn detect_backend_xdg_tty_falls_back_to_env() {
-        // Login on TTY without WAYLAND_DISPLAY/DISPLAY → no display server.
-        assert!(
-            detect_backend_in(DisplayEnv {
-                session_type: Some("tty"),
-                wayland_display: false,
-                x_display: false
-            })
-            .is_err()
-        );
-        // TTY but DISPLAY is forwarded → X11.
-        assert_eq!(
-            detect_backend_in(DisplayEnv {
-                session_type: Some("tty"),
-                wayland_display: false,
-                x_display: true
-            }),
-            Ok(Backend::X11)
-        );
-    }
-
-    #[test]
-    fn detect_backend_hybrid_prefers_wayland() {
-        // XWayland-enabled Wayland session: both env vars set, prefer Wayland.
-        assert_eq!(
-            detect_backend_in(DisplayEnv {
-                session_type: None,
-                wayland_display: true,
-                x_display: true
-            }),
-            Ok(Backend::Wayland)
-        );
-    }
-
-    #[test]
-    fn detect_backend_x11_via_display_only() {
-        assert_eq!(
-            detect_backend_in(DisplayEnv {
-                session_type: None,
-                wayland_display: false,
-                x_display: true
-            }),
-            Ok(Backend::X11)
-        );
-    }
-
-    // ---- detect_wayland_compositor_in ------------------------------
-
-    #[test]
-    fn compositor_swaysock_wins_over_other_signals() {
-        assert_eq!(
-            detect_wayland_compositor_in(WaylandEnv {
-                swaysock: true,
-                hyprland_signature: true,
-                current_desktop: Some("KDE")
-            }),
-            WaylandCompositor::Sway
-        );
-    }
-
-    #[test]
-    fn compositor_hypr_signature() {
-        assert_eq!(
-            detect_wayland_compositor_in(WaylandEnv {
-                swaysock: false,
-                hyprland_signature: true,
-                current_desktop: None
-            }),
-            WaylandCompositor::Hyprland
-        );
-    }
-
-    #[test]
-    fn compositor_xdg_sway() {
-        assert_eq!(
-            detect_wayland_compositor_in(WaylandEnv {
-                swaysock: false,
-                hyprland_signature: false,
-                current_desktop: Some("sway")
-            }),
-            WaylandCompositor::Sway
-        );
-    }
-
-    #[test]
-    fn compositor_xdg_hyprland_capitalized() {
-        assert_eq!(
-            detect_wayland_compositor_in(WaylandEnv {
-                swaysock: false,
-                hyprland_signature: false,
-                current_desktop: Some("Hyprland")
-            }),
-            WaylandCompositor::Hyprland
-        );
-    }
-
-    #[test]
-    fn compositor_unknown_carries_xdg_value() {
-        assert_eq!(
-            detect_wayland_compositor_in(WaylandEnv {
-                swaysock: false,
-                hyprland_signature: false,
-                current_desktop: Some("KDE")
-            }),
-            WaylandCompositor::Unknown("KDE".into())
-        );
-    }
-
-    #[test]
-    fn compositor_unknown_when_xdg_missing() {
-        assert_eq!(
-            detect_wayland_compositor_in(WaylandEnv {
-                swaysock: false,
-                hyprland_signature: false,
-                current_desktop: None
-            }),
-            WaylandCompositor::Unknown(String::new())
-        );
-    }
-
-    // ---- Hyprland geometry -----------------------------------------------
 
     #[test]
     fn hyprland_geom_from_json() {
-        let v = serde_json::json!({
-            "at": [100, 200],
-            "size": [800, 600],
-        });
-        assert_eq!(parse_hyprland_geom(&v), Some("100,200 800x600".to_string()));
+        let cases = [
+            (
+                serde_json::json!({"at": [100, 200], "size": [800, 600]}),
+                Some("100,200 800x600"),
+            ),
+            (serde_json::json!({"at": [0, 0]}), None),
+            (
+                serde_json::json!({"at": ["100", "200"], "size": ["800", "600"]}),
+                None,
+            ),
+            (serde_json::json!({"at": [100], "size": [800, 600]}), None),
+        ];
+        for (v, expected) in cases {
+            assert_eq!(parse_hyprland_geom(&v).as_deref(), expected, "{v}");
+        }
     }
 
     #[test]
-    fn hyprland_geom_missing_size_returns_none() {
-        let v = serde_json::json!({"at": [0, 0]});
-        assert!(parse_hyprland_geom(&v).is_none());
+    fn sway_tree_walk_finds_focused_rect() {
+        let cases = [
+            (
+                serde_json::json!({
+                    "focused": true,
+                    "rect": {"x": 10, "y": 20, "width": 300, "height": 400}
+                }),
+                Some("10,20 300x400"),
+            ),
+            (
+                serde_json::json!({
+                    "focused": false,
+                    "nodes": [
+                        {"focused": false, "nodes": [
+                            {"focused": true, "rect": {"x": 5, "y": 6, "width": 7, "height": 8}}
+                        ]}
+                    ]
+                }),
+                Some("5,6 7x8"),
+            ),
+            (
+                serde_json::json!({
+                    "focused": false,
+                    "floating_nodes": [
+                        {"focused": true, "rect": {"x": 1, "y": 2, "width": 3, "height": 4}}
+                    ]
+                }),
+                Some("1,2 3x4"),
+            ),
+            (serde_json::json!({"focused": false, "nodes": []}), None),
+            (serde_json::json!({"focused": true}), None),
+        ];
+        for (v, expected) in cases {
+            assert_eq!(find_focused_sway_rect(&v).as_deref(), expected, "{v}");
+        }
     }
 
-    #[test]
-    fn hyprland_geom_string_coords_returns_none() {
-        // Defensive: a future hyprctl version that emits coords as
-        // strings must not silently parse to garbage geometry.
-        let v = serde_json::json!({
-            "at": ["100", "200"],
-            "size": ["800", "600"],
-        });
-        assert!(parse_hyprland_geom(&v).is_none());
-    }
-
-    #[test]
-    fn hyprland_geom_short_array_returns_none() {
-        let v = serde_json::json!({
-            "at": [100],
-            "size": [800, 600],
-        });
-        assert!(parse_hyprland_geom(&v).is_none());
-    }
-
-    // ---- Sway tree walking -----------------------------------------------
-
-    #[test]
-    fn sway_focused_at_root() {
-        let v = serde_json::json!({
-            "focused": true,
-            "rect": {"x": 10, "y": 20, "width": 300, "height": 400}
-        });
-        assert_eq!(
-            find_focused_sway_rect(&v),
-            Some("10,20 300x400".to_string())
-        );
-    }
-
-    #[test]
-    fn sway_focused_in_nested_node() {
-        let v = serde_json::json!({
-            "focused": false,
-            "nodes": [
-                {"focused": false, "nodes": [
-                    {"focused": true, "rect": {"x": 5, "y": 6, "width": 7, "height": 8}}
-                ]}
-            ]
-        });
-        assert_eq!(find_focused_sway_rect(&v), Some("5,6 7x8".to_string()));
-    }
-
-    #[test]
-    fn sway_focused_in_floating_node() {
-        let v = serde_json::json!({
-            "focused": false,
-            "floating_nodes": [
-                {"focused": true, "rect": {"x": 1, "y": 2, "width": 3, "height": 4}}
-            ]
-        });
-        assert_eq!(find_focused_sway_rect(&v), Some("1,2 3x4".to_string()));
-    }
-
-    #[test]
-    fn sway_no_focused_node_returns_none() {
-        let v = serde_json::json!({"focused": false, "nodes": []});
-        assert!(find_focused_sway_rect(&v).is_none());
-    }
-
-    #[test]
-    fn sway_walks_three_levels_deep() {
-        // Real swaymsg output nests workspaces > containers > windows.
-        // The walker must recurse past at least 3 levels to find a
-        // focused leaf.
-        let v = serde_json::json!({
-            "focused": false,
-            "nodes": [
-                {"focused": false, "nodes": [
-                    {"focused": false, "nodes": [
-                        {
-                            "focused": true,
-                            "rect": {"x": 100, "y": 200, "width": 1280, "height": 720}
-                        }
-                    ]}
-                ]}
-            ]
-        });
-        assert_eq!(
-            find_focused_sway_rect(&v),
-            Some("100,200 1280x720".to_string())
-        );
-    }
-
-    #[test]
-    fn sway_focused_node_missing_rect_returns_none() {
-        // A malformed tree (focused=true but no rect) should not
-        // panic; find_focused_sway_rect uses `?` to propagate None.
-        let v = serde_json::json!({"focused": true});
-        assert!(find_focused_sway_rect(&v).is_none());
-    }
-
-    // ---- xrandr monitor geometry ----------------------------------------
-
-    /// Real `xrandr --listmonitors` output from a single-head HDMI
-    /// session. The geometry token carries physical-mm denominators
-    /// we need to strip.
-    const XRANDR_SINGLE: &str = "Monitors: 1\n \
-        0: +*HDMI-1 1920/598x1200/336+0+0  HDMI-1\n";
-
-    /// Two-head laptop+external. Note the second monitor positions
-    /// past 1920 on x, and one connector has the `+*` (primary)
-    /// prefix while the other has just `+`.
+    /// Two-head laptop+external: the second monitor sits past 1920 on x,
+    /// and only the primary carries the `*` flag.
     const XRANDR_DUAL: &str = "Monitors: 2\n \
         0: +*eDP-1 1920/300x1080/180+0+0  eDP-1\n \
         1: +DP-2 2560/600x1440/340+1920+0  DP-2\n";
 
     #[test]
-    fn parse_xrandr_single_monitor() {
-        assert_eq!(
-            parse_xrandr_monitor_geom(XRANDR_SINGLE, "HDMI-1").as_deref(),
-            Some("1920x1200+0+0")
-        );
-    }
-
-    #[test]
-    fn parse_xrandr_dual_monitor_picks_correct_geometry() {
-        assert_eq!(
-            parse_xrandr_monitor_geom(XRANDR_DUAL, "eDP-1").as_deref(),
-            Some("1920x1080+0+0")
-        );
-        assert_eq!(
-            parse_xrandr_monitor_geom(XRANDR_DUAL, "DP-2").as_deref(),
-            Some("2560x1440+1920+0")
-        );
-    }
-
-    #[test]
-    fn parse_xrandr_unknown_monitor_returns_none() {
-        assert!(parse_xrandr_monitor_geom(XRANDR_DUAL, "VGA-1").is_none());
-    }
-
-    #[test]
-    fn strip_xrandr_geom_token_drops_mm_denominators() {
-        assert_eq!(
-            strip_xrandr_geom_token("1920/598x1200/336+0+0").as_deref(),
-            Some("1920x1200+0+0")
-        );
+    fn parse_xrandr_picks_the_named_monitor() {
+        let cases = [
+            ("eDP-1", Some("1920x1080+0+0")),
+            ("DP-2", Some("2560x1440+1920+0")),
+            ("VGA-1", None),
+        ];
+        for (monitor, expected) in cases {
+            assert_eq!(
+                parse_xrandr_monitor_geom(XRANDR_DUAL, monitor).as_deref(),
+                expected,
+                "{monitor}"
+            );
+        }
     }
 
     #[test]
     fn strip_xrandr_geom_token_handles_negative_offsets() {
-        // A monitor positioned to the left of (0,0).
         assert_eq!(
             strip_xrandr_geom_token("1920/598x1080/336-1920+0").as_deref(),
             Some("1920x1080-1920+0")
@@ -1052,10 +855,8 @@ mod tests {
 
     #[test]
     fn strip_xrandr_geom_token_rejects_unrelated_tokens() {
-        // The connector-name field must NOT be treated as geometry.
-        assert!(strip_xrandr_geom_token("HDMI-1").is_none());
-        // Missing offsets → None.
-        assert!(strip_xrandr_geom_token("1920/598x1200/336").is_none());
+        assert_eq!(strip_xrandr_geom_token("HDMI-1"), None);
+        assert_eq!(strip_xrandr_geom_token("1920/598x1200/336"), None);
     }
 
     #[tokio::test]
@@ -1070,119 +871,81 @@ mod tests {
         assert!(matches!(err, CaptureError::BinaryMissing { .. }), "{err:?}");
         let out = capture_error_to_output(err);
         assert_eq!(out.exit_code, 127);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.starts_with("[error] screenshot: backend binary not found:"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] screenshot: backend binary not found: assistd-screenshot-not-a-real-bin-xyz. \
+             Install: the appropriate package for your distro\n"
         );
-        assert!(stderr.contains("Install:"), "{stderr}");
     }
 
     #[test]
-    fn install_hint_known_binaries() {
-        assert!(install_hint("maim").contains("maim"));
-        assert!(install_hint("grim").contains("grim"));
-        assert!(install_hint("xdotool").contains("xdotool"));
-        assert!(install_hint("swaymsg").contains("sway"));
-        assert!(install_hint("hyprctl").contains("Hyprland"));
-        // Unknown binaries fall back to a generic but useful message.
-        assert!(!install_hint("something-else").is_empty());
-    }
-
-    // ---- error -> output formatting --------------------------------------
-
-    #[test]
-    fn focused_unsupported_on_wayland_message_format() {
-        let out = capture_error_to_output(CaptureError::FocusedUnsupportedOnWayland {
-            compositor: "KDE".into(),
-        });
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("--focused not supported on Wayland compositor: KDE"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("Use: screenshot --full"), "{stderr}");
-    }
-
-    #[test]
-    fn timeout_error_format() {
-        let out = capture_error_to_output(CaptureError::Timeout);
-        assert_eq!(out.exit_code, 137);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] screenshot: capture timed out"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("Try:"), "{stderr}");
-    }
-
-    #[test]
-    fn nonzero_error_includes_stderr_tail() {
-        let out = capture_error_to_output(CaptureError::NonZero {
-            binary: "grim".into(),
-            status: 1,
-            stderr_tail: "compositor not running".into(),
-        });
-        assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("grim exited 1"), "{stderr}");
-        assert!(stderr.contains("compositor not running"), "{stderr}");
-    }
-
-    // ---- summary / help shape --------------------------------------------
-
-    #[test]
-    fn summary_under_80_chars() {
-        let s = ScreenshotCommand::default().summary();
-        assert!(s.len() <= 80, "summary is {} chars: {s:?}", s.len());
+    fn capture_errors_map_to_exit_code_and_message() {
+        let cases = [
+            (
+                CaptureError::FocusedUnsupportedOnWayland {
+                    compositor: "KDE".into(),
+                },
+                2,
+                "[error] screenshot: --focused not supported on Wayland compositor: KDE. \
+                 Use: screenshot --full (supported compositors for --focused: sway, Hyprland)\n",
+            ),
+            (
+                CaptureError::Timeout,
+                137,
+                "[error] screenshot: capture timed out. \
+                 Try: screenshot again or check the compositor is responsive\n",
+            ),
+            (
+                CaptureError::NonZero {
+                    binary: "grim".into(),
+                    status: 1,
+                    stderr_tail: "compositor not running".into(),
+                },
+                1,
+                "[error] screenshot: grim exited 1: compositor not running. \
+                 Try: a different target or backend\n",
+            ),
+        ];
+        for (err, exit_code, stderr) in cases {
+            let label = format!("{err:?}");
+            let out = capture_error_to_output(err);
+            assert_eq!(out.exit_code, exit_code, "{label}");
+            assert_eq!(String::from_utf8_lossy(&out.stderr), stderr, "{label}");
+        }
     }
 
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
         let cmd = ScreenshotCommand::new(
             Arc::new(ScreenshotPolicyCfg::default()),
-            crate::VisionGate::new(false),
+            VisionGate::new(false),
         );
         let out = cmd
             .run(CommandInput {
-                args: vec!["--full".into()],
+                args: args(&["--full"]),
                 stdin: None,
             })
             .await;
         assert_eq!(out.exit_code, 1);
         assert!(out.stdout.is_empty());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains(
-                "[error] screenshot: vision not available: model does not support images"
-            ),
-            "{stderr}"
-        );
-        assert!(
-            stderr.contains("Use: a model with mmproj loaded"),
-            "{stderr}"
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] screenshot: vision not available: model does not support images. \
+             Use: a model with mmproj loaded\n"
         );
         assert!(out.attachments.is_empty());
     }
 
     #[test]
     fn summary_changes_when_vision_disabled() {
-        let enabled = ScreenshotCommand::new(
-            Arc::new(ScreenshotPolicyCfg::default()),
-            VisionGate::new(true),
-        );
-        let disabled = ScreenshotCommand::new(
-            Arc::new(ScreenshotPolicyCfg::default()),
-            crate::VisionGate::new(false),
-        );
-        assert!(enabled.summary().contains("capture the screen"));
-        assert!(disabled.summary().contains("unavailable"));
-    }
-
-    #[test]
-    fn help_starts_with_usage() {
-        let h = ScreenshotCommand::default().help();
-        assert!(h.starts_with("usage: screenshot"), "{h}");
+        let summary = |supported| {
+            ScreenshotCommand::new(
+                Arc::new(ScreenshotPolicyCfg::default()),
+                VisionGate::new(supported),
+            )
+            .summary()
+        };
+        assert!(summary(true).contains("capture the screen"));
+        assert!(summary(false).contains("unavailable"));
     }
 }

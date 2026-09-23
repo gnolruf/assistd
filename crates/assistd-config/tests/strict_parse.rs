@@ -1,7 +1,7 @@
 //! Every section is optional, and anything not in the schema is a hard
 //! error.
 
-use assistd_config::Config;
+use assistd_config::{Config, fixtures};
 
 #[test]
 fn empty_toml_yields_the_code_defaults() {
@@ -98,4 +98,11 @@ fn defaults_validate() {
     Config::default()
         .validate()
         .expect("the code defaults must be a valid configuration");
+}
+
+#[test]
+fn minimal_fixture_parses_and_validates() {
+    fixtures::minimal()
+        .validate()
+        .expect("minimal fixture must validate");
 }
