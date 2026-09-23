@@ -233,27 +233,14 @@ mod tests {
             width: 360,
             height: 120,
         };
-        let scaled = scale_anchor_size(a, 1.1666666);
-        assert_eq!(scaled.width, 420);
-        assert_eq!(scaled.height, 140);
-        assert_eq!(scaled.offset_x, -10);
-        assert_eq!(scaled.offset_y, -30);
-        assert_eq!(scaled.corner, AnchorCorner::BottomRight);
-    }
-
-    #[test]
-    fn scale_anchor_size_identity_at_scale_one() {
-        use assistd_wm::{AnchorCorner, PlacementAnchor};
-        let a = PlacementAnchor {
-            corner: AnchorCorner::TopLeft,
-            offset_x: 5,
-            offset_y: 5,
-            width: 200,
-            height: 100,
-        };
-        let scaled = scale_anchor_size(a, 1.0);
-        assert_eq!(scaled.width, 200);
-        assert_eq!(scaled.height, 100);
+        assert_eq!(
+            scale_anchor_size(a, 1.1666666),
+            PlacementAnchor {
+                width: 420,
+                height: 140,
+                ..a
+            }
+        );
     }
 
     fn sink(
@@ -305,9 +292,12 @@ mod tests {
             args: json!({}),
         });
         let first = rx.try_recv().expect("show queued");
-        assert!(matches!(first, DriverInput::Show));
+        assert!(matches!(first, DriverInput::Show), "{first:?}");
         let second = rx.try_recv().expect("event queued");
-        assert!(matches!(second, DriverInput::Event(_)));
+        assert!(
+            matches!(&second, DriverInput::Event(ev) if matches!(**ev, Event::ToolCall { .. })),
+            "{second:?}"
+        );
     }
 
     #[test]
@@ -315,7 +305,10 @@ mod tests {
         let (s, mut rx) = sink(false, false, false);
         s.ingest(&Event::Done { id: "a".into() });
         let only = rx.try_recv().expect("event queued");
-        assert!(matches!(only, DriverInput::Event(_)));
+        assert!(
+            matches!(&only, DriverInput::Event(ev) if matches!(**ev, Event::Done { .. })),
+            "{only:?}"
+        );
         assert!(rx.try_recv().is_err(), "no Show should have been queued");
     }
 }

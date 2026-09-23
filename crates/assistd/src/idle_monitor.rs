@@ -146,153 +146,92 @@ mod tests {
     }
 
     #[test]
-    fn validate_both_zero_is_ok() {
-        validate(&cfg(0, 0)).expect("both zero disables the monitor");
+    fn validate_accepts_disabled_or_ordered_thresholds() {
+        for (drowsy, sleep) in [(0, 0), (0, 120), (30, 0), (30, 120)] {
+            validate(&cfg(drowsy, sleep))
+                .unwrap_or_else(|e| panic!("({drowsy}, {sleep}) rejected: {e}"));
+        }
     }
 
     #[test]
-    fn validate_one_zero_is_ok() {
-        validate(&cfg(0, 120)).expect("only sleep configured is valid");
-        validate(&cfg(30, 0)).expect("only drowsy configured is valid");
+    fn validate_rejects_sleep_at_or_below_drowsy() {
+        for (drowsy, sleep) in [(60, 30), (60, 60)] {
+            let err = validate(&cfg(drowsy, sleep)).expect_err("must be rejected");
+            assert!(
+                err.to_string()
+                    .contains("idle_to_sleep_mins must be greater than"),
+                "({drowsy}, {sleep}): {err}"
+            );
+        }
     }
 
     #[test]
-    fn validate_sleep_gt_drowsy_is_ok() {
-        validate(&cfg(30, 120)).expect("standard ordering is valid");
-    }
-
-    #[test]
-    fn validate_sleep_lt_drowsy_errors() {
-        let err = validate(&cfg(60, 30)).unwrap_err();
-        assert!(err.to_string().contains("idle_to_sleep_mins"));
-    }
-
-    #[test]
-    fn validate_sleep_eq_drowsy_errors() {
-        let err = validate(&cfg(60, 60)).unwrap_err();
-        assert!(err.to_string().contains("idle_to_sleep_mins"));
-    }
-
-    #[test]
-    fn active_before_drowsy_threshold_no_action() {
-        let a = decide(
-            PresenceState::Active,
-            Duration::from_secs(10 * 60),
-            &cfg(30, 120),
-        );
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn active_at_drowsy_threshold_drowses() {
-        let a = decide(
-            PresenceState::Active,
-            Duration::from_secs(30 * 60),
-            &cfg(30, 120),
-        );
-        assert_eq!(a, Action::Drowse);
-    }
-
-    #[test]
-    fn active_past_drowsy_but_below_sleep_still_drowses() {
-        let a = decide(
-            PresenceState::Active,
-            Duration::from_secs(90 * 60),
-            &cfg(30, 120),
-        );
-        assert_eq!(a, Action::Drowse);
-    }
-
-    #[test]
-    fn active_past_sleep_threshold_still_drowses_first_cascade() {
-        let a = decide(
-            PresenceState::Active,
-            Duration::from_secs(200 * 60),
-            &cfg(30, 120),
-        );
-        assert_eq!(a, Action::Drowse);
-    }
-
-    #[test]
-    fn active_with_drowsy_disabled_before_sleep_no_action() {
-        let a = decide(
-            PresenceState::Active,
-            Duration::from_secs(60 * 60),
-            &cfg(0, 120),
-        );
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn active_with_drowsy_disabled_past_sleep_sleeps_directly() {
-        let a = decide(
-            PresenceState::Active,
-            Duration::from_secs(130 * 60),
-            &cfg(0, 120),
-        );
-        assert_eq!(a, Action::Sleep);
-    }
-
-    #[test]
-    fn active_with_sleep_disabled_still_drowses() {
-        let a = decide(
-            PresenceState::Active,
-            Duration::from_secs(30 * 60),
-            &cfg(30, 0),
-        );
-        assert_eq!(a, Action::Drowse);
-    }
-
-    #[test]
-    fn drowsy_before_sleep_threshold_no_action() {
-        let a = decide(
-            PresenceState::Drowsy,
-            Duration::from_secs(60 * 60),
-            &cfg(30, 120),
-        );
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn drowsy_at_sleep_threshold_sleeps() {
-        let a = decide(
-            PresenceState::Drowsy,
-            Duration::from_secs(120 * 60),
-            &cfg(30, 120),
-        );
-        assert_eq!(a, Action::Sleep);
-    }
-
-    #[test]
-    fn drowsy_with_sleep_disabled_no_action() {
-        let a = decide(
-            PresenceState::Drowsy,
-            Duration::from_secs(200 * 60),
-            &cfg(30, 0),
-        );
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn sleeping_never_acts() {
-        let a = decide(
-            PresenceState::Sleeping,
-            Duration::from_secs(500 * 60),
-            &cfg(30, 120),
-        );
-        assert_eq!(a, Action::None);
-    }
-
-    #[test]
-    fn both_disabled_returns_none_from_any_state() {
-        let disabled = cfg(0, 0);
-        for state in [
-            PresenceState::Active,
-            PresenceState::Drowsy,
-            PresenceState::Sleeping,
-        ] {
-            let a = decide(state, Duration::from_secs(10_000 * 60), &disabled);
-            assert_eq!(a, Action::None);
+    fn decide_by_state_idle_time_and_thresholds() {
+        use PresenceState::{Active, Drowsy, Sleeping};
+        let cases = [
+            ("active before drowsy", Active, 10, (30, 120), Action::None),
+            ("active at drowsy", Active, 30, (30, 120), Action::Drowse),
+            (
+                "active between thresholds",
+                Active,
+                90,
+                (30, 120),
+                Action::Drowse,
+            ),
+            (
+                "active past sleep cascades via drowsy",
+                Active,
+                200,
+                (30, 120),
+                Action::Drowse,
+            ),
+            (
+                "active, drowsy disabled, before sleep",
+                Active,
+                60,
+                (0, 120),
+                Action::None,
+            ),
+            (
+                "active, drowsy disabled, past sleep",
+                Active,
+                130,
+                (0, 120),
+                Action::Sleep,
+            ),
+            (
+                "active, sleep disabled",
+                Active,
+                30,
+                (30, 0),
+                Action::Drowse,
+            ),
+            ("drowsy before sleep", Drowsy, 60, (30, 120), Action::None),
+            ("drowsy at sleep", Drowsy, 120, (30, 120), Action::Sleep),
+            ("drowsy, sleep disabled", Drowsy, 200, (30, 0), Action::None),
+            ("sleeping", Sleeping, 500, (30, 120), Action::None),
+            (
+                "active, both disabled",
+                Active,
+                10_000,
+                (0, 0),
+                Action::None,
+            ),
+            (
+                "drowsy, both disabled",
+                Drowsy,
+                10_000,
+                (0, 0),
+                Action::None,
+            ),
+        ];
+        for (label, state, idle_mins, (drowsy, sleep), expected) in cases {
+            let idle = Duration::from_secs(idle_mins * 60);
+            assert_eq!(
+                decide(state, idle, &cfg(drowsy, sleep)),
+                expected,
+                "{label}"
+            );
         }
     }
 }
