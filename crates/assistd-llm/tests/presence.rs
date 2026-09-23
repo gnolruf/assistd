@@ -676,7 +676,7 @@ async fn multiple_queries_during_wake_complete_in_order() {
     assert_eq!(m.state(), PresenceState::Sleeping);
 
     // Fire 5 concurrent queries with distinct ids. They race into
-    // acquire_request_guard → ensure_active → transition lock; one
+    // acquire_request_guard_with_progress → ensure_active → transition lock; one
     // wins the wake, the rest queue on the transition mutex.
     let mut handles = Vec::new();
     for i in 0..5 {
