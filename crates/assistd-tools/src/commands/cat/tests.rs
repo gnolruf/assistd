@@ -11,8 +11,7 @@ async fn cat_no_args_and_no_stdin_emits_usage() {
             args: Vec::new(),
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 2);
     assert!(out.stdout.starts_with(b"usage: cat"), "{out:?}");
 }
@@ -24,8 +23,7 @@ async fn cat_unknown_flag_errors() {
             args: vec!["-q".into(), "notes.md".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 2);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -45,8 +43,7 @@ async fn cat_reads_text_file() {
             args: vec![path.to_string_lossy().into_owned()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.stdout, b"hello world\n");
     assert_eq!(out.exit_code, 0);
 }
@@ -66,8 +63,7 @@ async fn cat_concatenates_multiple_text_files() {
             ],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.stdout, b"AB");
 }
 
@@ -78,8 +74,7 @@ async fn cat_missing_file_exits_1() {
             args: vec!["/nonexistent/path/xyz".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 1);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -108,8 +103,7 @@ async fn cat_n_numbers_lines_across_files() {
             ],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"1\tone\n2\ttwo\n3\tthree\n");
 }
@@ -121,8 +115,7 @@ async fn cat_n_numbers_stdin() {
             args: vec!["-n".into()],
             stdin: Some(b"alpha\nbeta\n".to_vec()),
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.stdout, b"1\talpha\n2\tbeta\n");
 }
 
@@ -133,8 +126,7 @@ async fn cat_no_args_echoes_stdin() {
             args: Vec::new(),
             stdin: Some(b"from stdin".to_vec()),
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.stdout, b"from stdin");
 }
 
@@ -148,8 +140,7 @@ async fn cat_rejects_binary_image_file() {
             args: vec![path.to_string_lossy().into_owned()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 1);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -172,8 +163,7 @@ async fn cat_rejects_binary_with_nul_bytes() {
             args: vec![path.to_string_lossy().into_owned()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 1);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -193,8 +183,7 @@ async fn cat_b_prints_metadata_for_binary() {
             args: vec!["-b".into(), path.to_string_lossy().into_owned()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("image/png"), "{stdout}");
@@ -214,8 +203,7 @@ async fn cat_b_works_on_text_file() {
             args: vec!["-b".into(), path.to_string_lossy().into_owned()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("text/plain"), "{stdout}");
@@ -237,8 +225,7 @@ async fn cat_refuses_a_device_file() {
             args: vec!["/dev/null".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 1);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("not a regular file"), "{stderr}");
@@ -264,8 +251,7 @@ async fn cat_refuses_a_file_over_the_read_limit() {
             args: vec![path.clone()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 1);
     assert!(out.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -281,8 +267,7 @@ async fn cat_b_reports_the_size_of_a_file_over_the_read_limit() {
             args: vec!["-b".into(), path],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let expected = format!("{} bytes", crate::commands::FILE_READ_MAX + 1);

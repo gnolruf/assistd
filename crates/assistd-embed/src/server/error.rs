@@ -1,4 +1,3 @@
-use std::process::ExitStatus;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -15,9 +14,6 @@ pub enum EmbedServerError {
         source: std::io::Error,
     },
 
-    #[error("embed-server exited before reaching ready: {status}")]
-    ExitedBeforeReady { status: ExitStatus },
-
     #[error("embed-server did not become ready within {timeout:?}")]
     HealthTimeout { timeout: Duration },
 
@@ -32,7 +28,4 @@ pub enum EmbedServerError {
 
     #[error("supervisor task panicked")]
     SupervisorPanic,
-
-    #[error("dim probe failed: server returned no embedding vectors")]
-    DimProbeEmpty,
 }

@@ -314,8 +314,8 @@ async fn handle_connection(
                 Ok(Request::ConfirmResponse {
                     confirm_id, allow, ..
                 }) => {
-                    if let Err(reason) = router.route_response(&confirm_id, allow) {
-                        warn!(confirm_id = %confirm_id, reason, "unmatched ConfirmResponse");
+                    if let Err(e) = router.route_response(&confirm_id, allow) {
+                        warn!(confirm_id = %confirm_id, reason = %e, "unmatched ConfirmResponse");
                     }
                 }
                 Ok(other) => {
@@ -359,7 +359,7 @@ async fn handle_connection(
         .await;
 
     if let Err(e) = dispatch_res {
-        error!("dispatch error: {e:#}");
+        error!("dispatch error: {e}");
     }
     let mut write_half = forward_res?;
     write_half.shutdown().await?;

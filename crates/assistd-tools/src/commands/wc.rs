@@ -1,4 +1,3 @@
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};
@@ -55,7 +54,7 @@ impl Command for WcCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         let mut selected = Selected::default();
         let mut files = Vec::new();
         for arg in &input.args {
@@ -69,15 +68,15 @@ impl Command for WcCommand {
                     'l' => selected.lines = true,
                     'w' => selected.words = true,
                     'c' => selected.bytes = true,
-                    other => return Ok(unsupported(&format!("-{other}"))),
+                    other => return unsupported(&format!("-{other}")),
                 }
             }
         }
 
         let stdin = match collect_input("wc", &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(CommandOutput::usage(self.help())),
-            Err(failure) => return Ok(failure),
+            Ok(None) => return CommandOutput::usage(self.help()),
+            Err(failure) => return failure,
         };
         let lines = stdin.iter().filter(|b| **b == b'\n').count();
         let words = stdin
@@ -97,9 +96,7 @@ impl Command for WcCommand {
             .filter(|(wanted, _)| *wanted)
             .map(|(_, n)| n.to_string())
             .collect();
-        Ok(CommandOutput::ok(
-            format!("{}\n", out.join(" ")).into_bytes(),
-        ))
+        CommandOutput::ok(format!("{}\n", out.join(" ")).into_bytes())
     }
 }
 
@@ -120,8 +117,7 @@ mod tests {
                 args: vec!["/dev/null".into()],
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 1);
         assert!(
             String::from_utf8_lossy(&out.stderr).contains("not a regular file"),
@@ -138,8 +134,7 @@ mod tests {
                 args: vec!["-l".into()],
                 stdin: Some(b"a\nb\nc\n".to_vec()),
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.stdout, b"3\n");
         assert_eq!(out.exit_code, 0);
     }
@@ -151,8 +146,7 @@ mod tests {
                 args: Vec::new(),
                 stdin: Some(b"hello world\nagain\n".to_vec()),
             })
-            .await
-            .unwrap();
+            .await;
         // 2 lines, 3 words, 18 bytes
         assert_eq!(out.stdout, b"2 3 18\n");
     }
@@ -164,7 +158,6 @@ mod tests {
                 stdin: Some(stdin.to_vec()),
             })
             .await
-            .expect("run returns Ok")
     }
 
     #[tokio::test]
@@ -184,8 +177,7 @@ mod tests {
                 args: Vec::new(),
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 2);
         assert!(out.stdout.starts_with(b"usage: wc"), "{out:?}");
     }

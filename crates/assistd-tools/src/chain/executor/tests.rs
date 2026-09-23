@@ -41,14 +41,14 @@ impl Command for Stub {
     fn help(&self) -> String {
         "stub help".to_string()
     }
-    async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, _input: CommandInput) -> CommandOutput {
         *self.invoked.lock() = true;
-        Ok(CommandOutput {
+        CommandOutput {
             stdout: self.stdout.clone(),
             stderr: Vec::new(),
             exit_code: self.exit_code,
             attachments: Vec::new(),
-        })
+        }
     }
 }
 
@@ -65,8 +65,8 @@ impl Command for Echo {
     fn help(&self) -> String {
         "usage: echo_stdin".to_string()
     }
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        Ok(CommandOutput::ok(input.stdin.unwrap_or_default()))
+    async fn run(&self, input: CommandInput) -> CommandOutput {
+        CommandOutput::ok(input.stdin.unwrap_or_default())
     }
 }
 
@@ -83,14 +83,14 @@ impl Command for LineCount {
     fn help(&self) -> String {
         "usage: lc".to_string()
     }
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         let n = input
             .stdin
             .unwrap_or_default()
             .iter()
             .filter(|b| **b == b'\n')
             .count();
-        Ok(CommandOutput::ok(format!("{n}\n").into_bytes()))
+        CommandOutput::ok(format!("{n}\n").into_bytes())
     }
 }
 
@@ -107,8 +107,8 @@ impl Command for Flood {
     fn help(&self) -> String {
         "usage: flood".to_string()
     }
-    async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
-        Ok(CommandOutput::ok(vec![b'x'; self.0]))
+    async fn run(&self, _input: CommandInput) -> CommandOutput {
+        CommandOutput::ok(vec![b'x'; self.0])
     }
 }
 
@@ -125,7 +125,7 @@ async fn pipe_threads_stdout_into_stdin() {
     r.register(Stub::new("emit", b"a\nb\nc\n".to_vec(), 0));
     r.register(LineCount);
     let chain = parse_chain("emit | lc").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert_eq!(out.stdout, b"3\n");
     assert_eq!(out.exit_code, 0);
 }
@@ -137,7 +137,7 @@ async fn pipe_three_stages() {
     r.register(Echo);
     r.register(LineCount);
     let chain = parse_chain("emit | echo_stdin | lc").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert_eq!(out.stdout, b"3\n");
 }
 
@@ -157,7 +157,7 @@ async fn and_runs_right_only_on_success() {
         f
     };
     let chain = parse_chain("ok && right").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert!(*ok_flag.lock());
     assert!(*right_flag.lock());
     assert_eq!(out.exit_code, 0);
@@ -175,7 +175,7 @@ async fn and_short_circuits_on_failure() {
         f
     };
     let chain = parse_chain("bad && right").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert!(!*right_flag.lock(), "right must not run");
     assert_eq!(out.exit_code, 1);
 }
@@ -186,7 +186,7 @@ async fn or_runs_right_only_on_failure() {
     r.register(Stub::new("bad", b"boom".to_vec(), 2));
     r.register(Stub::new("recover", b"ok".to_vec(), 0));
     let chain = parse_chain("bad || recover").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"boomok");
 }
@@ -202,7 +202,7 @@ async fn or_short_circuits_on_success() {
         f
     };
     let chain = parse_chain("good || right").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert!(!*right_flag.lock());
     assert_eq!(out.stdout, b"g");
 }
@@ -213,7 +213,7 @@ async fn seq_runs_both_regardless_of_exit() {
     r.register(Stub::new("first", b"a\n".to_vec(), 5));
     r.register(Stub::new("second", b"b\n".to_vec(), 0));
     let chain = parse_chain("first ; second").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"a\nb\n");
 }
@@ -222,7 +222,7 @@ async fn seq_runs_both_regardless_of_exit() {
 async fn unknown_command_returns_127_with_available_list() {
     let r = registry();
     let chain = parse_chain("nope").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert_eq!(out.exit_code, 127);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("[error] unknown command: nope"), "{stderr}");
@@ -235,7 +235,7 @@ async fn unknown_command_triggers_or_fallback() {
     let mut r = CommandRegistry::new();
     r.register(Stub::new("fallback", b"rescued\n".to_vec(), 0));
     let chain = parse_chain("nope || fallback").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert_eq!(out.exit_code, 0);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("rescued"), "{stdout}");
@@ -251,7 +251,7 @@ async fn unknown_then_and_shortcircuits() {
         f
     };
     let chain = parse_chain("nope && right").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert!(!*right_flag.lock(), "right must not run");
     assert_eq!(out.exit_code, 127);
 }
@@ -260,7 +260,7 @@ async fn unknown_then_and_shortcircuits() {
 async fn empty_stdin_through_lc_is_zero() {
     let r = registry();
     let chain = parse_chain("echo_stdin | lc").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert_eq!(out.stdout, b"0\n");
     assert_eq!(out.exit_code, 0);
 }
@@ -271,7 +271,7 @@ async fn pipe_buf_max_guards_against_flood() {
     r.register(Flood(PIPE_BUF_MAX + 1024));
     r.register(LineCount);
     let chain = parse_chain("flood | lc").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert_eq!(out.exit_code, 141);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("[error] pipe: "), "{stderr}");
@@ -298,7 +298,7 @@ async fn combined_precedence_and_short_circuit() {
         f
     };
     let chain = parse_chain("a && b | lc || d").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert!(!*d_flag.lock());
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"1\n");
@@ -318,14 +318,14 @@ async fn stderr_is_prefixed_with_command_name() {
         fn help(&self) -> String {
             "usage: boom".to_string()
         }
-        async fn run(&self, _: CommandInput) -> Result<CommandOutput> {
-            Ok(CommandOutput::failed(1, b"something went wrong\n".to_vec()))
+        async fn run(&self, _: CommandInput) -> CommandOutput {
+            CommandOutput::failed(1, b"something went wrong\n".to_vec())
         }
     }
     let mut r = CommandRegistry::new();
     r.register(Err1);
     let chain = parse_chain("boom").unwrap();
-    let out = execute(&chain, &r, None).await.unwrap();
+    let out = execute(&chain, &r, None).await;
     assert_eq!(out.exit_code, 1);
     assert_eq!(out.stderr, b"[boom]\tsomething went wrong\n");
 }

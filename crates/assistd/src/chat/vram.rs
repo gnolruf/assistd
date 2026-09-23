@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use tokio::process::Command;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tracing::warn;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -54,11 +55,15 @@ pub struct ResourceState {
     pub ram: RamState,
 }
 
-pub fn spawn_probe(mut shutdown: watch::Receiver<bool>) -> watch::Receiver<ResourceState> {
+/// Poll VRAM and RAM until `shutdown` flips, publishing each snapshot
+/// on the returned receiver.
+pub fn spawn_probe(
+    mut shutdown: watch::Receiver<bool>,
+) -> (watch::Receiver<ResourceState>, JoinHandle<()>) {
     let (tx, rx) = watch::channel(ResourceState::default());
     let mut vram_disabled = false;
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
             let vram = if vram_disabled {
                 VramState::Disabled
@@ -96,7 +101,7 @@ pub fn spawn_probe(mut shutdown: watch::Receiver<bool>) -> watch::Receiver<Resou
         }
     });
 
-    rx
+    (rx, handle)
 }
 
 enum ProbeError {

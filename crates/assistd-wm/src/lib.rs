@@ -1,31 +1,24 @@
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::print_stdout,
-        clippy::print_stderr
-    )
-)]
-
 //! Window manager integration: the [`WindowManager`] trait plus the i3
 //! and Sway backends that implement it over their IPC sockets.
 
 use async_trait::async_trait;
 
+#[cfg(any(feature = "i3", feature = "sway"))]
 pub(crate) mod backoff;
 pub mod criteria;
 pub mod error;
 #[cfg(feature = "i3")]
 pub mod i3;
+#[cfg(any(feature = "i3", feature = "sway"))]
 pub(crate) mod snapshot;
 #[cfg(feature = "sway")]
 pub mod sway;
 
 /// Per-call IPC timeout. A wedged compositor must not stall the
 /// caller's turn along with it.
+#[cfg(any(feature = "i3", feature = "sway"))]
 pub(crate) const WM_IPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-pub use error::{WmError, WmResult};
+pub use error::{TransportError, WmError, WmResult};
 #[cfg(feature = "i3")]
 pub use i3::{I3Backend, I3Handle};
 #[cfg(feature = "sway")]

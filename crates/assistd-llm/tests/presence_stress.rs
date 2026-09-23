@@ -1,11 +1,3 @@
-#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::print_stdout,
-    clippy::print_stderr
-)]
-
 //! Heavyweight stress tests for the presence state machine and the
 //! request-guard / chat-client interaction. Each test spawns a real
 //! `fake_llama_server` child process; they are gated behind `#[ignore]`
@@ -15,9 +7,10 @@
 
 #![cfg(feature = "test-support")]
 
+mod common;
+
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::{Duration, Instant};
@@ -30,16 +23,10 @@ use assistd_core::{
 };
 use assistd_ipc::{Event, Request};
 use assistd_llm::{LlamaChatClient, LlmBackend};
+use common::FakeLlama;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixStream};
-use tokio::sync::{Mutex, oneshot, watch};
-
-const FAKE_BIN: &str = env!("CARGO_BIN_EXE_fake_llama_server");
-
-// Test serialization guard: the fake binary reads FAKE_LLAMA_MODE from the
-// environment, so tests that set it must not run concurrently. Held for the
-// duration of each test.
-static MODE_LOCK: Mutex<()> = Mutex::const_new(());
+use tokio::sync::{oneshot, watch};
 
 fn init_tracing() {
     static ONCE: Once = Once::new();
@@ -54,11 +41,6 @@ fn init_tracing() {
     });
 }
 
-fn set_mode(mode: &str) {
-    // SAFETY: MODE_LOCK serializes access so this is single-threaded.
-    unsafe { std::env::set_var("FAKE_LLAMA_MODE", mode) };
-}
-
 async fn grab_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -66,9 +48,9 @@ async fn grab_port() -> u16 {
     port
 }
 
-fn server_spec(port: u16) -> LlamaServerConfig {
+fn server_spec(fake: &FakeLlama, port: u16) -> LlamaServerConfig {
     LlamaServerConfig {
-        binary_path: FAKE_BIN.into(),
+        binary_path: fake.binary_path(),
         host: Ipv4Addr::LOCALHOST.into(),
         port: NonZeroU16::new(port).expect("bound port is never 0"),
         gpu_layers: 0,
@@ -95,11 +77,13 @@ fn model_spec() -> ModelConfig {
     }
 }
 
-async fn new_active_manager(port: u16) -> (Arc<PresenceManager>, watch::Sender<bool>) {
-    set_mode("normal");
+async fn new_active_manager(
+    fake: &FakeLlama,
+    port: u16,
+) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     let (tx, rx) = watch::channel(false);
     let m = PresenceManager::new_active(
-        server_spec(port),
+        server_spec(fake, port),
         model_spec(),
         TimeoutsConfig::default(),
         rx,
@@ -148,10 +132,10 @@ async fn push_chat_script(port: u16, deltas: Vec<&str>, delay_ms_between: u64) {
 #[tokio::test]
 #[ignore = "spawns 10 real fake_llama_server cold-starts; ~10s; run with --ignored"]
 async fn ten_cold_start_cycles_no_deadlock() {
-    let _g = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(port).await;
+    let (m, _shutdown) = new_active_manager(&fake, port).await;
 
     let initial_pid = m.llama_pid().await.expect("active after cold start");
     let mut last_pid = initial_pid;
@@ -190,11 +174,11 @@ async fn ten_cold_start_cycles_no_deadlock() {
 #[tokio::test]
 #[ignore = "drives a real LlamaChatClient against fake_llama_server with a slow scripted stream; run with --ignored"]
 async fn sleep_defers_until_inflight_real_chat_stream_done() {
-    let _g = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("normal");
     init_tracing();
 
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(port).await;
+    let (m, _shutdown) = new_active_manager(&fake, port).await;
 
     // Push a slow 5-delta script: 200 ms between deltas → ~800 ms stream.
     push_chat_script(port, vec!["one ", "two ", "three ", "four ", "five"], 200).await;
@@ -203,10 +187,7 @@ async fn sleep_defers_until_inflight_real_chat_stream_done() {
         request_timeout_secs: nz64(10),
         ..ChatConfig::default()
     };
-    let mut server_cfg = server_spec(port);
-    // The chat client connects directly via reqwest; binary_path is
-    // unused here but keep it for any future probe code.
-    server_cfg.binary_path = PathBuf::from(FAKE_BIN);
+    let server_cfg = server_spec(&fake, port);
 
     let client = LlamaChatClient::new(
         &chat_cfg,

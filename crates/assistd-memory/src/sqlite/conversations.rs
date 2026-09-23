@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -11,6 +10,7 @@ use uuid::Uuid;
 
 use super::connection::SqliteHandle;
 use super::writer::{WriteOp, dispatch_write};
+use crate::{MemoryError, Result};
 
 /// Session identifier: a UUID string, stable across daemon restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -214,15 +214,6 @@ pub trait ConversationStore: Send + Sync + 'static {
         daemon_pid: u32,
     ) -> Result<(SessionId, BranchId)>;
 
-    /// Insert a branch row in `session`.
-    async fn create_branch(
-        &self,
-        session: &SessionId,
-        name: &str,
-        parent: Option<BranchId>,
-        fork_point_seq: Option<i64>,
-    ) -> Result<BranchId>;
-
     /// Update `sessions.current_branch_id` to point at `branch`.
     async fn set_current_branch(&self, session: &SessionId, branch: BranchId) -> Result<()>;
 
@@ -315,16 +306,6 @@ impl ConversationStore for NoConversationStore {
 
     async fn begin_session_with_main_branch(&self, _pid: u32) -> Result<(SessionId, BranchId)> {
         Ok((SessionId::new(), BranchId(0)))
-    }
-
-    async fn create_branch(
-        &self,
-        _s: &SessionId,
-        _name: &str,
-        _parent: Option<BranchId>,
-        _fp: Option<i64>,
-    ) -> Result<BranchId> {
-        Ok(BranchId(0))
     }
 
     async fn set_current_branch(&self, _s: &SessionId, _b: BranchId) -> Result<()> {
@@ -460,7 +441,7 @@ impl ConversationStore for SqliteConversationStore {
                 Ok(rows)
             })
             .await
-            .context("recent_turns")
+            .map_err(MemoryError::sqlite("recent_turns"))
     }
 
     async fn begin_session_with_main_branch(
@@ -478,25 +459,6 @@ impl ConversationStore for SqliteConversationStore {
         })
         .await?;
         Ok((id, branch))
-    }
-
-    async fn create_branch(
-        &self,
-        session: &SessionId,
-        name: &str,
-        parent: Option<BranchId>,
-        fork_point_seq: Option<i64>,
-    ) -> Result<BranchId> {
-        let session_id = session.0.clone();
-        let name = name.to_string();
-        dispatch_write(self.handle.writer(), |ack| WriteOp::CreateBranch {
-            session_id,
-            name,
-            parent_branch_id: parent,
-            fork_point_seq,
-            ack,
-        })
-        .await
     }
 
     async fn set_current_branch(&self, session: &SessionId, branch: BranchId) -> Result<()> {
@@ -524,7 +486,7 @@ impl ConversationStore for SqliteConversationStore {
                 .map(Option::flatten)
             })
             .await
-            .context("get_current_branch")?;
+            .map_err(MemoryError::sqlite("get_current_branch"))?;
         Ok(id.map(BranchId))
     }
 
@@ -590,7 +552,7 @@ impl ConversationStore for SqliteConversationStore {
                 Ok(rows)
             })
             .await
-            .context("list_branches")
+            .map_err(MemoryError::sqlite("list_branches"))
     }
 
     async fn resolve_branch(
@@ -641,7 +603,7 @@ impl ConversationStore for SqliteConversationStore {
                 .optional()
             })
             .await
-            .context("resolve_branch")?;
+            .map_err(MemoryError::sqlite("resolve_branch"))?;
         Ok(row.map(|(s, b)| (SessionId(s), BranchId(b))))
     }
 
@@ -701,7 +663,7 @@ impl ConversationStore for SqliteConversationStore {
                 Ok(rows)
             })
             .await
-            .context("load_branch_history")
+            .map_err(MemoryError::sqlite("load_branch_history"))
     }
 
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<String>> {
@@ -720,7 +682,7 @@ impl ConversationStore for SqliteConversationStore {
                 .optional()
             })
             .await
-            .context("latest_branch_activity")
+            .map_err(MemoryError::sqlite("latest_branch_activity"))
     }
 
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome> {
@@ -745,7 +707,7 @@ impl ConversationStore for SqliteConversationStore {
                 .map(Option::flatten)
             })
             .await
-            .context("get_session_title")
+            .map_err(MemoryError::sqlite("get_session_title"))
     }
 
     async fn set_session_title(&self, session: &SessionId, title: &str) -> Result<()> {
@@ -781,7 +743,7 @@ impl ConversationStore for SqliteConversationStore {
                 .optional()
             })
             .await
-            .context("find_resumable_session")
+            .map_err(MemoryError::sqlite("find_resumable_session"))
             .map(|row| {
                 row.map(|(id, branch, pid, started)| ResumeCandidate {
                     session_id: SessionId(id),

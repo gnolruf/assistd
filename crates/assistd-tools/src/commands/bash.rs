@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
@@ -71,9 +70,9 @@ impl Command for BashCommand {
         )
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         if input.args.is_empty() {
-            return Ok(CommandOutput::usage(self.help()));
+            return CommandOutput::usage(self.help());
         }
         let script = input.args.join(" ");
         let destructive = matches_destructive(&script, &self.policy.cfg.destructive_patterns);
@@ -82,7 +81,7 @@ impl Command for BashCommand {
             .authorize("bash", "command", &script, destructive)
             .await
         {
-            return Ok(denied);
+            return denied;
         }
 
         let cmd =
@@ -96,8 +95,8 @@ impl Command for BashCommand {
             self.policy.cfg.timeout,
         )
         .await
-        .or_else(|e| {
-            Ok(CommandOutput::failed(
+        .unwrap_or_else(|e| {
+            CommandOutput::failed(
                 SPAWN_FAILED_EXIT,
                 error_line(
                     "bash",
@@ -106,7 +105,7 @@ impl Command for BashCommand {
                     "bash and (if configured) bwrap are on PATH",
                 )
                 .into_bytes(),
-            ))
+            )
         })
     }
 }

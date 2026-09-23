@@ -1,11 +1,3 @@
-#![allow(unsafe_code)] // libc / env / fd primitives; each unsafe block is locally justified
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::print_stdout,
-    clippy::print_stderr
-)]
-
 //! Latency benchmarks for the auto-wake-on-query path. Each test
 //! measures `Instant`-to-first-Delta latency end-to-end through the
 //! full daemon stack: Unix socket → AppState → ensure_active() →
@@ -17,6 +9,8 @@
 //! Run with: `cargo test -p assistd-llm --features test-support --test wake_latency`
 
 #![cfg(feature = "test-support")]
+
+mod common;
 
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
@@ -32,13 +26,10 @@ use assistd_core::{
 };
 use assistd_ipc::{Event, Request};
 use assistd_llm::{LlamaChatClient, LlmBackend};
+use common::FakeLlama;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixStream};
-use tokio::sync::{Mutex, oneshot, watch};
-
-const FAKE_BIN: &str = env!("CARGO_BIN_EXE_fake_llama_server");
-
-static MODE_LOCK: Mutex<()> = Mutex::const_new(());
+use tokio::sync::{oneshot, watch};
 
 fn init_tracing() {
     static ONCE: Once = Once::new();
@@ -53,11 +44,6 @@ fn init_tracing() {
     });
 }
 
-fn set_mode(mode: &str) {
-    // SAFETY: MODE_LOCK serializes access so this is single-threaded.
-    unsafe { std::env::set_var("FAKE_LLAMA_MODE", mode) };
-}
-
 async fn grab_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -65,9 +51,9 @@ async fn grab_port() -> u16 {
     port
 }
 
-fn server_spec(port: u16) -> LlamaServerConfig {
+fn server_spec(fake: &FakeLlama, port: u16) -> LlamaServerConfig {
     LlamaServerConfig {
-        binary_path: FAKE_BIN.into(),
+        binary_path: fake.binary_path(),
         host: Ipv4Addr::LOCALHOST.into(),
         port: NonZeroU16::new(port).expect("bound port is never 0"),
         gpu_layers: 0,
@@ -94,11 +80,13 @@ fn model_spec() -> ModelConfig {
     }
 }
 
-async fn new_active_manager(port: u16) -> (Arc<PresenceManager>, watch::Sender<bool>) {
-    set_mode("normal");
+async fn new_active_manager(
+    fake: &FakeLlama,
+    port: u16,
+) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     let (tx, rx) = watch::channel(false);
     let m = PresenceManager::new_active(
-        server_spec(port),
+        server_spec(fake, port),
         model_spec(),
         TimeoutsConfig::default(),
         rx,
@@ -114,6 +102,7 @@ async fn new_active_manager(port: u16) -> (Arc<PresenceManager>, watch::Sender<b
 /// - the socket path
 /// - the stop sender + server task handle (so the test can clean up)
 async fn build_running_daemon(
+    fake: &FakeLlama,
     port: u16,
 ) -> (
     Arc<PresenceManager>,
@@ -122,12 +111,12 @@ async fn build_running_daemon(
     tokio::task::JoinHandle<()>,
     tempfile::TempDir,
 ) {
-    let (m, _shutdown) = new_active_manager(port).await;
+    let (m, _shutdown) = new_active_manager(fake, port).await;
     let chat_cfg = ChatConfig {
         request_timeout_secs: nz64(10),
         ..ChatConfig::default()
     };
-    let server_cfg = server_spec(port);
+    let server_cfg = server_spec(fake, port);
 
     let client = LlamaChatClient::new(
         &chat_cfg,
@@ -217,10 +206,10 @@ async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Durati
 
 #[tokio::test]
 async fn active_query_baseline_under_200ms() {
-    let _g = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(port).await;
+    let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
     assert_eq!(m.state(), PresenceState::Active);
 
     let (latency, _count, terminal) = measure_query_latency(&sock_path, "active-baseline").await;
@@ -241,10 +230,10 @@ async fn active_query_baseline_under_200ms() {
 
 #[tokio::test]
 async fn wake_from_drowsy_first_delta_under_1s() {
-    let _g = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(port).await;
+    let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
 
     m.drowse().await.expect("drowse");
     assert_eq!(m.state(), PresenceState::Drowsy);
@@ -269,10 +258,10 @@ async fn wake_from_drowsy_first_delta_under_1s() {
 
 #[tokio::test]
 async fn wake_from_sleeping_first_delta_under_5s() {
-    let _g = MODE_LOCK.lock().await;
+    let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(port).await;
+    let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
 
     m.sleep().await.expect("sleep");
     assert_eq!(m.state(), PresenceState::Sleeping);

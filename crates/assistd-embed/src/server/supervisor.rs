@@ -4,9 +4,7 @@ use super::health::HealthChecker;
 use super::process::ChildProcess;
 use super::service::ReadyState;
 use assistd_config::EmbeddingConfig;
-use parking_lot::Mutex;
 use std::process::ExitStatus;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -39,8 +37,6 @@ pub struct Supervisor {
     pub ready_timeout: Duration,
     pub shutdown_rx: watch::Receiver<bool>,
     pub ready_tx: watch::Sender<ReadyState>,
-    /// The child's PID while it runs.
-    pub pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl Supervisor {
@@ -124,7 +120,6 @@ impl Supervisor {
 
     async fn supervise_once(&mut self) -> Result<CycleResult, EmbedServerError> {
         let mut child = ChildProcess::spawn(&self.cfg)?;
-        *self.pid.lock() = child.pid();
         let ready_timeout = self.ready_timeout;
         let health = HealthChecker::new(
             &self.cfg.host.to_string(),
@@ -147,17 +142,14 @@ impl Supervisor {
         match startup {
             Startup::Ready => {}
             Startup::ChildExited(status) => {
-                *self.pid.lock() = None;
                 return Ok(CycleResult::FailedToStart { status });
             }
             Startup::ShuttingDown => {
                 child.shutdown(TERM_TIMEOUT).await?;
-                *self.pid.lock() = None;
                 return Ok(CycleResult::ShutdownRequested);
             }
             Startup::Failed(e) => {
                 child.shutdown(TERM_TIMEOUT).await?;
-                *self.pid.lock() = None;
                 return Err(e);
             }
         }
@@ -166,7 +158,7 @@ impl Supervisor {
         let _ = self.ready_tx.send(ReadyState::Ready);
         info!(target: "assistd::embed_server", "embed-server ready");
 
-        let result = tokio::select! {
+        tokio::select! {
             exit = child.wait() => match exit {
                 Ok(status) => Ok(CycleResult::CrashedAfterReady {
                     status,
@@ -178,8 +170,6 @@ impl Supervisor {
                 child.shutdown(TERM_TIMEOUT).await?;
                 Ok(CycleResult::ShutdownRequested)
             }
-        };
-        *self.pid.lock() = None;
-        result
+        }
     }
 }

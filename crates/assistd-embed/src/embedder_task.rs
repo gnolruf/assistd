@@ -128,7 +128,7 @@ async fn handle_job(embedder: &dyn Embedder, writer_tx: &mpsc::Sender<WriteOp>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
+    use crate::EmbedError;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -139,7 +139,7 @@ mod tests {
 
     #[async_trait]
     impl Embedder for MockEmbedder {
-        async fn embed(&self, _text: String) -> Result<Vec<f32>> {
+        async fn embed(&self, _text: String) -> Result<Vec<f32>, EmbedError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.vec.clone())
         }

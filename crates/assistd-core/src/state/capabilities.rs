@@ -1,7 +1,6 @@
 //! `GetCapabilities` handler.
 
 use super::AppState;
-use anyhow::Result;
 use assistd_ipc::{Component, Event, StatusKind, StatusSeverity};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -14,7 +13,7 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) {
         for failure in &self.subsystems.mcp_startup_failures {
             let _ = tx
                 .send(Event::Status {
@@ -65,6 +64,5 @@ impl AppState {
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
-        Ok(())
     }
 }

@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -16,7 +15,6 @@ reqwest = { workspace = true }
 rustix = { workspace = true }
 assistd-config = { workspace = true }
 assistd-memory = { workspace = true }
-parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

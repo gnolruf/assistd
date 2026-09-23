@@ -22,30 +22,6 @@ pub struct VisionState {
     pub vision_supported: bool,
 }
 
-/// Probe `/props` on `host:port` directly. Fails closed to the default
-/// (no model id, no vision).
-pub async fn probe_capabilities(host: &str, port: u16) -> VisionState {
-    let body = match fetch_props(host, port).await {
-        Some(v) => v,
-        None => return VisionState::default(),
-    };
-    let model_id = parse_model_id(&body);
-    let vision_supported = parse_vision_supported(&body);
-    debug!(
-        target: "assistd::llama_server",
-        "/props parsed; model_id = {model_id:?}, vision_supported = {vision_supported}"
-    );
-    VisionState {
-        model_id,
-        vision_supported,
-    }
-}
-
-/// Whether llama-server on `host:port` reports a loaded vision encoder.
-pub async fn detect_vision_support(host: &str, port: u16) -> bool {
-    probe_capabilities(host, port).await.vision_supported
-}
-
 /// Probe the loaded model's capabilities, following router indirection
 /// when `/props` on `host:port` reports `role: "router"`: the model then
 /// lives in a child server whose port comes from `control`, and the

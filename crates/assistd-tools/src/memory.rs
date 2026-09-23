@@ -4,10 +4,11 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use assistd_memory::{ConversationStore, MemoryStore, TurnSummary};
+use assistd_memory::{ConversationStore, MemoryError, MemoryStore};
 
 pub use assistd_memory::MemoryRecord;
+
+type Result<T> = std::result::Result<T, MemoryError>;
 
 /// Result cap applied when a caller passes `limit = 0`.
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -58,16 +59,6 @@ impl MemoryOps {
     pub async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
         self.store.list_full(prefix).await
     }
-
-    /// Return recent conversation turns, up to `limit` (or [`DEFAULT_SEARCH_LIMIT`] when `limit` is 0).
-    pub async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>> {
-        let limit = if limit == 0 {
-            DEFAULT_SEARCH_LIMIT
-        } else {
-            limit
-        };
-        self.conversations.recent_turns(limit).await
-    }
 }
 
 #[cfg(test)]
@@ -90,9 +81,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_backend_list_and_recent_turns_return_empty() {
+    async fn no_backend_list_returns_empty() {
         let ops = no_ops();
         assert!(ops.list("pref:").await.unwrap().is_empty());
-        assert!(ops.recent_turns(0).await.unwrap().is_empty());
     }
 }

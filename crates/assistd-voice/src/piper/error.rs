@@ -51,7 +51,4 @@ pub enum PiperError {
 
     #[error("rodio failed to open default audio output: {0}")]
     Audio(String),
-
-    #[error("piper service is degraded: {0}")]
-    Degraded(String),
 }

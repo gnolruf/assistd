@@ -1,7 +1,6 @@
 //! `Subscribe` handler: forwards bus events to a passive client.
 
 use super::AppState;
-use anyhow::Result;
 use assistd_ipc::{Event, SubscribeFilter};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
@@ -14,7 +13,7 @@ impl AppState {
         id: String,
         filter: SubscribeFilter,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) {
         let mut rx = self.runtime.subscribe_events();
         debug!(
             target: "assistd::subscribe",
@@ -30,7 +29,7 @@ impl AppState {
                         id = %id,
                         "subscriber detached (client closed)"
                     );
-                    return Ok(());
+                    return;
                 }
                 recv = rx.recv() => match recv {
                     Ok(event) => {
@@ -38,7 +37,7 @@ impl AppState {
                             && filter.matches(kind)
                             && tx.send(event).await.is_err()
                         {
-                            return Ok(());
+                            return;
                         }
                     }
                     Err(RecvError::Lagged(skipped)) => {
@@ -49,7 +48,7 @@ impl AppState {
                             "subscriber lagged; dropping events"
                         );
                     }
-                    Err(RecvError::Closed) => return Ok(()),
+                    Err(RecvError::Closed) => return,
                 },
             }
         }

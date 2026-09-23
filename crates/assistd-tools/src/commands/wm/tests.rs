@@ -56,13 +56,13 @@ impl StubWm {
     }
 }
 
-/// Wrap a `&Option<String>` as a `WmError::Ipc(anyhow!(msg))`. Tests
-/// that want to inject a backend failure write `focus_err: Some("…")`;
-/// without typed variants they used `anyhow::bail!`. The Ipc variant
-/// preserves the message body (which the tests assert on) and routes
-/// through the `Check: compositor connection` recovery hint.
+/// A transport failure whose message is `msg`, so tests can assert on
+/// the body.
 fn ipc_err(msg: &str) -> WmError {
-    WmError::Ipc(anyhow::anyhow!("{msg}"))
+    WmError::Ipc {
+        op: "stub",
+        source: std::io::Error::other(msg.to_string()).into(),
+    }
 }
 
 #[async_trait]
@@ -157,7 +157,6 @@ async fn run_wm(wm: Arc<dyn WindowManager>, args: &[&str]) -> CommandOutput {
             stdin: None,
         })
         .await
-        .unwrap()
 }
 
 #[tokio::test]
@@ -257,13 +256,6 @@ fn hint_for_disconnected() {
 }
 
 #[test]
-fn hint_for_not_found() {
-    let (label, hint) = hint_for(&WmError::NotFound(id(42)));
-    assert_eq!(label, Hint::Use);
-    assert!(hint.contains("wm list"), "{hint}");
-}
-
-#[test]
 fn hint_for_rejected() {
     let (label, _) = hint_for(&WmError::Rejected("focus: bad criteria".into()));
     assert_eq!(label, Hint::Try);
@@ -285,7 +277,7 @@ fn hint_for_unsupported() {
 
 #[test]
 fn hint_for_ipc() {
-    let (label, _) = hint_for(&WmError::Ipc(anyhow::anyhow!("socket dropped")));
+    let (label, _) = hint_for(&ipc_err("socket dropped"));
     assert_eq!(label, Hint::Check);
 }
 
@@ -359,7 +351,6 @@ async fn run_open(cmd: &WmCommand, args: &[&str]) -> CommandOutput {
         stdin: None,
     })
     .await
-    .unwrap()
 }
 
 #[tokio::test]
@@ -507,8 +498,7 @@ async fn non_open_subcommands_skip_the_gate() {
             args: vec!["focus".into(), "42".into()],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
 }
 

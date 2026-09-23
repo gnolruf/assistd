@@ -15,10 +15,6 @@ pub use assistd_config::CodeBlockMode;
 
 const MAX_LANG_LEN: usize = 32;
 
-/// Buffer size, as a multiple of `max_len`, past which the buffer is
-/// force-flushed even without a boundary.
-const HARD_CEILING_MULTIPLIER: usize = 4;
-
 const ABBREVIATIONS: &[&str] = &[
     "Mr", "Mrs", "Ms", "Dr", "St", "Sr", "Jr", "Inc", "Ltd", "Co", "etc", "vs", "e.g", "i.e",
     "U.S", "U.K", "approx", "Prof", "Gen", "Capt",
@@ -62,30 +58,7 @@ impl SentenceBuffer {
             self.feed_char(ch, &mut out);
         }
         self.scan_boundaries(&mut out);
-        if let Some(forced) = self.force_flush_if_oversize() {
-            out.push(forced);
-        }
         out
-    }
-
-    fn force_flush_if_oversize(&mut self) -> Option<String> {
-        let ceiling = self.max_len.saturating_mul(HARD_CEILING_MULTIPLIER);
-        if self.buf.len() < ceiling {
-            return None;
-        }
-        tracing::warn!(
-            target: "assistd::voice::sentence",
-            buf_bytes = self.buf.len(),
-            ceiling,
-            "sentence buffer exceeded hard ceiling without natural boundary; force-flushing"
-        );
-        let raw = std::mem::take(&mut self.buf);
-        let speech = postprocess_for_speech(&raw);
-        if speech.is_empty() {
-            None
-        } else {
-            Some(speech)
-        }
     }
 
     /// Flush the remaining tail as one sentence. An unterminated code
@@ -795,23 +768,23 @@ mod tests {
     }
 
     #[test]
-    fn force_flushes_pathological_no_boundary_input() {
+    fn hard_cuts_input_with_no_boundary() {
         let mut b = SentenceBuffer::new(50);
         let blob: String = std::iter::repeat_n('a', 600).collect();
         let out = b.push(&blob);
         assert!(
             !out.is_empty(),
-            "expected force-flushed sentence(s), got nothing"
+            "expected hard-cut sentence(s), got nothing"
         );
         let total_emitted: usize = out.iter().map(|s| s.len()).sum();
         assert!(
             total_emitted > 0,
-            "force flush emitted only empty strings: {out:?}"
+            "hard cut emitted only empty strings: {out:?}"
         );
     }
 
     #[test]
-    fn force_flush_does_not_fire_on_normal_input() {
+    fn natural_boundaries_split_normal_input() {
         let mut b = SentenceBuffer::new(400);
         let out = b.push("First. Second. Third. Fourth. Fifth. Sixth.");
         let tail = b.finish().unwrap_or_default();
@@ -819,7 +792,7 @@ mod tests {
         assert_eq!(
             combined.matches('.').count(),
             6,
-            "natural-boundary input took the force-flush path: {combined:?}"
+            "natural-boundary input was not split on terminators: {combined:?}"
         );
     }
 

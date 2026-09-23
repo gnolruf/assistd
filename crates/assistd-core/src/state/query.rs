@@ -2,19 +2,19 @@
 
 use super::context::combine_context_blocks;
 use super::wire::decode_wire_attachments;
-use super::{AppState, send_error};
+use super::{AppState, DispatchError, send_error};
 use crate::Agent;
 use crate::presence::{LlmStreamGuard, RequestGuard};
-use anyhow::Result;
+use crate::recovery::{Component, spawn_supervised};
 use assistd_ipc::{Event, StatusKind};
-use assistd_llm::{LlmEvent, ToolCall};
+use assistd_llm::{LlmError, LlmEvent, ToolCall};
 use assistd_memory::{PersistedMessage, SessionId, TurnId};
 use assistd_tools::{Attachment, inherit_confirm_router};
 use assistd_voice::{SentenceBuffer, SpeakDecision};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
@@ -54,17 +54,11 @@ impl AppState {
         text: String,
         wire_attachments: Vec<assistd_ipc::ImageAttachment>,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
-        let attachments = match self
+    ) -> Result<(), DispatchError> {
+        let attachments = self
             .prepare_attachments(&id, &wire_attachments, &tx)
-            .await?
-        {
-            Some(a) => a,
-            None => return Ok(()),
-        };
-        let Some(_session_guards) = self.acquire_query_guards(&id, &tx).await? else {
-            return Ok(());
-        };
+            .await?;
+        let _session_guards = self.acquire_query_guards(&id, &tx).await?;
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
 
         let (current_session, turn_id) = self.open_persistence_turn(&text).await;
@@ -109,24 +103,22 @@ impl AppState {
         id: &str,
         wire: &[assistd_ipc::ImageAttachment],
         tx: &mpsc::Sender<Event>,
-    ) -> Result<Option<Vec<Attachment>>> {
+    ) -> Result<Vec<Attachment>, DispatchError> {
         if let Some(rev) = self.subsystems.vision_revalidator.as_ref() {
             rev.revalidate().await;
         }
-        match decode_wire_attachments(wire) {
-            Ok(v) => Ok(Some(v)),
-            Err(e) => {
-                send_error(tx, id.to_string(), format!("invalid attachment: {e}")).await;
-                Err(anyhow::anyhow!("invalid attachment: {e}"))
-            }
+        let decoded = decode_wire_attachments(wire);
+        if let Err(e) = &decoded {
+            send_error(tx, id.to_string(), e.to_string()).await;
         }
+        decoded
     }
 
     async fn acquire_query_guards(
         &self,
         id: &str,
         tx: &mpsc::Sender<Event>,
-    ) -> Result<Option<QueryGuards>> {
+    ) -> Result<QueryGuards, DispatchError> {
         let request = match self
             .subsystems
             .presence
@@ -135,15 +127,15 @@ impl AppState {
         {
             Ok(g) => g,
             Err(e) => {
-                send_error(tx, id.to_string(), format!("wake failed: {e:#}")).await;
-                return Err(e);
+                send_error(tx, id.to_string(), format!("wake failed: {e}")).await;
+                return Err(e.into());
             }
         };
         let stream = self.subsystems.presence.acquire_stream_guard();
-        Ok(Some(QueryGuards {
+        Ok(QueryGuards {
             _request: request,
             _stream: stream,
-        }))
+        })
     }
 
     async fn open_persistence_turn(&self, text: &str) -> (Arc<SessionId>, Option<TurnId>) {
@@ -223,7 +215,7 @@ impl AppState {
         attachments: Vec<Attachment>,
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> AbortOnDropHandle<Result<()>> {
+    ) -> AbortOnDropHandle<Result<(), LlmError>> {
         let llm = self.subsystems.llm.clone();
         let tools = self.subsystems.tools.clone();
         let health: Option<Arc<dyn assistd_llm::LlmHealthProbe>> = Some(Arc::new(
@@ -251,7 +243,9 @@ impl AppState {
     ) -> JoinHandle<()> {
         let ctrl = self.subsystems.voice_output.clone();
         let events_bus = self.runtime.events_bus().clone();
-        tokio::spawn(
+        spawn_supervised(
+            "speech_worker",
+            Component::Voice,
             async move {
                 let mut emitted_start = false;
                 while let Some(sentence) = speech_rx.recv().await {
@@ -501,11 +495,11 @@ impl AppState {
         &self,
         id: String,
         turn_id: Option<TurnId>,
-        gen_result: std::result::Result<Result<()>, tokio::task::JoinError>,
+        gen_result: Result<Result<(), LlmError>, JoinError>,
         speech_handle: JoinHandle<()>,
         tx: &mpsc::Sender<Event>,
         done_emitted: bool,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         if let Some(t) = turn_id {
             let conv = self.memory.conversations.clone();
             self.runtime.persistence_tracker.spawn(async move {
@@ -531,11 +525,12 @@ impl AppState {
             }
             Ok(Err(e)) => {
                 send_error(tx, id, format!("llm backend error: {e}")).await;
-                Err(e)
+                Err(e.into())
             }
             Err(join_err) => {
-                send_error(tx, id, format!("llm backend panicked: {join_err}")).await;
-                Err(anyhow::anyhow!("llm backend panicked: {join_err}"))
+                let e = DispatchError::AgentPanicked(join_err);
+                send_error(tx, id, e.to_string()).await;
+                Err(e)
             }
         }
     }

@@ -63,13 +63,6 @@ async fn cycle_from_sleeping_goes_to_active_logically() {
     assert_eq!(start.next(), PresenceState::Active);
 }
 
-fn sleep_cfg(drowsy: u64, sleep: u64) -> crate::SleepConfig {
-    let mut cfg = crate::Config::default().sleep;
-    cfg.idle_to_drowsy_mins = drowsy;
-    cfg.idle_to_sleep_mins = sleep;
-    cfg
-}
-
 #[tokio::test]
 async fn ensure_active_resets_activity_timer() {
     let m = PresenceManager::stub(PresenceState::Active);
@@ -110,54 +103,16 @@ async fn wake_from_active_does_not_reset_activity_timer() {
     assert!(after >= before);
 }
 
-#[test]
-fn time_until_next_transition_active_counts_down_to_drowsy() {
-    let m = PresenceManager::stub(PresenceState::Active);
-    let cfg = sleep_cfg(30, 120);
-    let d = m.time_until_next_transition(&cfg).unwrap();
-    assert!(d <= Duration::from_secs(30 * 60));
-    assert!(d >= Duration::from_secs(30 * 60).saturating_sub(Duration::from_secs(5)));
-}
-
-#[test]
-fn time_until_next_transition_sleeping_returns_none() {
-    let m = PresenceManager::stub(PresenceState::Sleeping);
-    assert!(m.time_until_next_transition(&sleep_cfg(30, 120)).is_none());
-}
-
-#[test]
-fn time_until_next_transition_active_with_drowsy_disabled_uses_sleep() {
-    let m = PresenceManager::stub(PresenceState::Active);
-    let d = m.time_until_next_transition(&sleep_cfg(0, 120)).unwrap();
-    assert!(d <= Duration::from_secs(120 * 60));
-}
-
-#[test]
-fn time_until_next_transition_active_with_both_disabled_returns_none() {
-    let m = PresenceManager::stub(PresenceState::Active);
-    assert!(m.time_until_next_transition(&sleep_cfg(0, 0)).is_none());
-}
-
-#[test]
-fn time_until_next_transition_drowsy_with_sleep_disabled_returns_none() {
-    let m = PresenceManager::stub(PresenceState::Drowsy);
-    assert!(m.time_until_next_transition(&sleep_cfg(30, 0)).is_none());
-}
-
-#[test]
-fn time_until_next_transition_drowsy_counts_down_to_sleep() {
-    let m = PresenceManager::stub(PresenceState::Drowsy);
-    let d = m.time_until_next_transition(&sleep_cfg(30, 120)).unwrap();
-    assert!(d <= Duration::from_secs(120 * 60));
-}
-
 #[tokio::test]
 async fn acquire_request_guard_fast_path_when_active() {
     let m = PresenceManager::stub(PresenceState::Active);
-    let g = tokio::time::timeout(Duration::from_millis(100), m.acquire_request_guard())
-        .await
-        .expect("acquire did not complete in time")
-        .expect("acquire returned Err");
+    let g = tokio::time::timeout(
+        Duration::from_millis(100),
+        m.acquire_request_guard_inner(None),
+    )
+    .await
+    .expect("acquire did not complete in time")
+    .expect("acquire returned Err");
     drop(g);
     assert_eq!(m.state(), PresenceState::Active);
 }
@@ -165,7 +120,7 @@ async fn acquire_request_guard_fast_path_when_active() {
 #[tokio::test]
 async fn sleep_defers_for_inflight_request() {
     let m = PresenceManager::stub(PresenceState::Active);
-    let guard = m.acquire_request_guard().await.unwrap();
+    let guard = m.acquire_request_guard_inner(None).await.unwrap();
 
     let m2 = Arc::clone(&m);
     let sleep_task = tokio::spawn(async move { m2.sleep().await });
@@ -190,7 +145,7 @@ async fn sleep_defers_for_inflight_request() {
 #[tokio::test]
 async fn drowse_defers_for_inflight_request() {
     let m = PresenceManager::stub(PresenceState::Active);
-    let guard = m.acquire_request_guard().await.unwrap();
+    let guard = m.acquire_request_guard_inner(None).await.unwrap();
 
     let m2 = Arc::clone(&m);
     let drowse_task = tokio::spawn(async move { m2.drowse().await });
@@ -210,16 +165,15 @@ async fn drowse_defers_for_inflight_request() {
 #[tokio::test]
 async fn stream_guard_increments_and_decrements_count() {
     let m = PresenceManager::stub(PresenceState::Active);
-    let mut rx = m.subscribe_llm_streams();
-    assert_eq!(*rx.borrow_and_update(), 0);
+    assert_eq!(*m.stream_count_tx.borrow(), 0);
     let g1 = m.acquire_stream_guard();
-    assert_eq!(*m.subscribe_llm_streams().borrow(), 1);
+    assert_eq!(*m.stream_count_tx.borrow(), 1);
     let g2 = m.acquire_stream_guard();
-    assert_eq!(*m.subscribe_llm_streams().borrow(), 2);
+    assert_eq!(*m.stream_count_tx.borrow(), 2);
     drop(g1);
-    assert_eq!(*m.subscribe_llm_streams().borrow(), 1);
+    assert_eq!(*m.stream_count_tx.borrow(), 1);
     drop(g2);
-    assert_eq!(*m.subscribe_llm_streams().borrow(), 0);
+    assert_eq!(*m.stream_count_tx.borrow(), 0);
 }
 
 #[tokio::test]
@@ -292,7 +246,7 @@ async fn rapid_sleep_guard_loop_no_crash() {
         let m = Arc::clone(&m);
         readers.push(tokio::spawn(async move {
             for _ in 0..50 {
-                match m.acquire_request_guard().await {
+                match m.acquire_request_guard_inner(None).await {
                     Ok(g) => {
                         tokio::task::yield_now().await;
                         drop(g);

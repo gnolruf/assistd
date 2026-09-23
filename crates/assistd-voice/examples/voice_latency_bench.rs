@@ -10,8 +10,6 @@
 //! `tracing_subscriber::Layer` joins the events back to the iteration
 //! that produced them.
 
-#![cfg(feature = "test-support")]
-
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

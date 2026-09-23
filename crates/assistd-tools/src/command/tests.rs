@@ -13,8 +13,8 @@ impl Command for Stub {
     fn help(&self) -> String {
         "stub help".to_string()
     }
-    async fn run(&self, _input: CommandInput) -> Result<CommandOutput> {
-        Ok(CommandOutput::ok(Vec::new()))
+    async fn run(&self, _input: CommandInput) -> CommandOutput {
+        CommandOutput::ok(Vec::new())
     }
 }
 
@@ -109,9 +109,7 @@ fn every_registered_command_emits_convention_compliant_error() {
     }
 
     async fn run_cmd<C: Command>(cmd: C, args: Vec<String>) -> CommandOutput {
-        cmd.run(CommandInput { args, stdin: None })
-            .await
-            .expect("run returns Ok on handled failures")
+        cmd.run(CommandInput { args, stdin: None }).await
     }
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -270,7 +268,6 @@ async fn registered_command_is_runnable() {
             args: vec![],
             stdin: None,
         })
-        .await
-        .unwrap();
+        .await;
     assert_eq!(out.exit_code, 0);
 }

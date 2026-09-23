@@ -1,13 +1,3 @@
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::print_stdout,
-        clippy::print_stderr
-    )
-)]
-
 //! assistd configuration types. Every default lives once in
 //! [`defaults`]; every section is `#[serde(default, deny_unknown_fields)]`,
 //! so an omitted key falls back to its default and an unknown key is a

@@ -8,19 +8,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::error::McpError;
 use crate::jsonrpc::{Correlator, Response, notification_line};
-use crate::protocol::closed_err;
 use crate::{McpClient, ToolResult, ToolSchema, protocol};
 
 /// The reader drops the connection rather than buffer an event past
@@ -114,7 +112,7 @@ impl SseMcpClient {
             endpoint_ready_tx: Some(endpoint_ready_tx),
             done_tx,
         };
-        let stream_task = tokio::spawn(reader.run());
+        let stream_task = AbortOnDropHandle::new(tokio::spawn(reader.run()));
 
         let _ = tokio::time::timeout(Duration::from_secs(5), endpoint_ready_rx).await;
         if post_url.read().await.is_none() {
@@ -133,18 +131,16 @@ impl SseMcpClient {
                 error = %e,
                 "MCP SSE initialize failed; tearing down",
             );
-            let _ = cancel_tx.send(true);
-            stream_task.abort();
             return Err(e);
         }
 
-        let ping_task = tokio::spawn(ping_loop(
+        let ping_task = AbortOnDropHandle::new(tokio::spawn(ping_loop(
             client.clone(),
             cfg.ping_interval,
             cfg.label.clone(),
             cancel_rx,
             cancel_tx.clone(),
-        ));
+        )));
 
         info!(
             target: "assistd::mcp",
@@ -155,11 +151,10 @@ impl SseMcpClient {
         Ok((
             client,
             SseLifeline {
-                label: cfg.label,
                 cancel_tx,
-                stream_task: Some(stream_task),
-                ping_task: Some(ping_task),
-                done_rx: Some(done_rx),
+                stream_task,
+                ping_task,
+                done_rx,
             },
         ))
     }
@@ -187,10 +182,10 @@ impl SseMcpClient {
             .await
             .map_err(McpError::from)?;
         if !resp.status().is_success() {
-            return Err(McpError::Protocol(format!(
-                "POST notifications/initialized failed: HTTP {}",
-                resp.status()
-            )));
+            return Err(McpError::HttpStatus {
+                method: "notifications/initialized",
+                status: resp.status(),
+            });
         }
         Ok(())
     }
@@ -215,10 +210,10 @@ impl SseMcpClient {
             .await
             .map_err(McpError::from)?;
         if !resp.status().is_success() {
-            return Err(McpError::Protocol(format!(
-                "POST {method} failed: HTTP {}",
-                resp.status()
-            )));
+            return Err(McpError::HttpStatus {
+                method,
+                status: resp.status(),
+            });
         }
 
         protocol::await_reply(&mut pending.rx, self.request_timeout).await
@@ -227,44 +222,40 @@ impl SseMcpClient {
 
 #[async_trait]
 impl McpClient for SseMcpClient {
-    async fn list_tools(&self) -> AnyResult<Vec<ToolSchema>> {
+    async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError> {
         let result = self.call("tools/list", json!({})).await?;
-        Ok(protocol::parse_tools_list(&result)?)
+        protocol::parse_tools_list(&result)
     }
 
-    async fn invoke(&self, name: &str, arguments: Value) -> AnyResult<ToolResult> {
+    async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult, McpError> {
         let result = self
             .call("tools/call", protocol::tool_call_params(name, arguments))
             .await?;
-        Ok(protocol::parse_tool_call(result)?)
+        protocol::parse_tool_call(result)
     }
 }
 
-/// The reader and ping tasks of one SSE connection.
+/// The reader and ping tasks of one SSE connection. Dropping it
+/// aborts both, closing the event stream.
 pub struct SseLifeline {
-    pub label: String,
     cancel_tx: watch::Sender<bool>,
-    stream_task: Option<JoinHandle<()>>,
-    ping_task: Option<JoinHandle<()>>,
-    done_rx: Option<oneshot::Receiver<()>>,
+    stream_task: AbortOnDropHandle<()>,
+    ping_task: AbortOnDropHandle<()>,
+    done_rx: oneshot::Receiver<()>,
 }
 
 impl SseLifeline {
     /// Resolves when the read loop terminates.
     pub async fn wait_for_disconnect(&mut self) {
-        if let Some(rx) = self.done_rx.take() {
-            let _ = rx.await;
-        }
+        let _ = (&mut self.done_rx).await;
     }
 
-    /// Cancel both tasks and wait briefly for them to finish.
-    pub async fn shutdown(mut self) {
+    /// Cancel both tasks and wait briefly for each to finish; a task
+    /// still running after that is aborted.
+    pub async fn shutdown(self) {
         let _ = self.cancel_tx.send(true);
-        if let Some(t) = self.stream_task.take() {
-            let _ = tokio::time::timeout(Duration::from_millis(500), t).await;
-        }
-        if let Some(t) = self.ping_task.take() {
-            let _ = tokio::time::timeout(Duration::from_millis(500), t).await;
+        for task in [self.stream_task, self.ping_task] {
+            let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
         }
     }
 }
@@ -309,7 +300,7 @@ impl ReadLoop {
                     server = %label,
                     "SSE connect failed: {e}",
                 );
-                correlator.fail_all(closed_err);
+                correlator.fail_all();
                 let _ = done_tx.send(());
                 return;
             }
@@ -321,7 +312,7 @@ impl ReadLoop {
                 status = %resp.status(),
                 "SSE GET returned non-success status",
             );
-            correlator.fail_all(closed_err);
+            correlator.fail_all();
             let _ = done_tx.send(());
             return;
         }
@@ -385,7 +376,7 @@ impl ReadLoop {
             }
         }
 
-        correlator.fail_all(closed_err);
+        correlator.fail_all();
         let _ = done_tx.send(());
     }
 }

@@ -1,7 +1,7 @@
 //! Voice-input (PTT, listen) and voice-output (TTS) request handlers.
 
-use super::{AppState, send_error};
-use anyhow::Result;
+use super::{AppState, DispatchError, send_error};
+use crate::recovery::{Component, spawn_supervised};
 use assistd_ipc::{Event, VoiceCaptureState};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -12,7 +12,7 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         self.subsystems.voice_output.interrupt().await;
         if self.subsystems.listener.is_active() {
             send_error(
@@ -26,8 +26,20 @@ impl AppState {
         match self.subsystems.voice.start_recording().await {
             Ok(()) => {
                 let presence = self.subsystems.presence.clone();
-                let warm =
-                    tokio::spawn(async move { presence.ensure_active().await }.in_current_span());
+                let warm = spawn_supervised(
+                    "ptt_warmup",
+                    Component::Llm,
+                    async move {
+                        if let Err(e) = presence.ensure_active().await {
+                            tracing::warn!(
+                                target: "assistd::state",
+                                error = %e,
+                                "presence warmup failed; query path will retry"
+                            );
+                        }
+                    }
+                    .in_current_span(),
+                );
                 *self.runtime.warmup_handle.lock().await = Some(warm);
                 let _ = tx
                     .send(Event::VoiceState {
@@ -39,8 +51,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("ptt_start failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("ptt_start failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -49,7 +61,7 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         if self.subsystems.voice.state() != VoiceCaptureState::Idle {
             send_error(
                 &tx,
@@ -71,8 +83,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("listen_start failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("listen_start failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -81,7 +93,7 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         match self.subsystems.listener.stop().await {
             Ok(()) => {
                 let _ = tx
@@ -94,8 +106,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("listen_stop failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("listen_stop failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -104,7 +116,7 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         if self.subsystems.listener.is_active() {
             self.handle_listen_stop(id, tx).await
         } else {
@@ -116,7 +128,7 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) {
         let active = self.subsystems.listener.is_active();
         let _ = tx
             .send(Event::ListenState {
@@ -125,14 +137,9 @@ impl AppState {
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
-        Ok(())
     }
 
-    pub(super) async fn handle_voice_toggle(
-        self: Arc<Self>,
-        id: String,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    pub(super) async fn handle_voice_toggle(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         let new_state = !self.subsystems.voice_output.enabled();
         self.subsystems.voice_output.set_enabled(new_state).await;
         let _ = tx
@@ -142,14 +149,9 @@ impl AppState {
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
-        Ok(())
     }
 
-    pub(super) async fn handle_voice_skip(
-        self: Arc<Self>,
-        id: String,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    pub(super) async fn handle_voice_skip(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         self.subsystems.voice_output.skip().await;
         let _ = tx
             .send(Event::VoiceOutputState {
@@ -158,7 +160,6 @@ impl AppState {
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
-        Ok(())
     }
 
     /// Cancel the in-flight agent turn (if any) and drop queued TTS
@@ -167,20 +168,19 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) {
         if let Some(token) = self.runtime.current_cancel.lock().await.take() {
             token.cancel();
         }
         self.subsystems.voice_output.skip().await;
         let _ = tx.send(Event::Done { id }).await;
-        Ok(())
     }
 
     pub(super) async fn handle_get_voice_state(
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) {
         let _ = tx
             .send(Event::VoiceOutputState {
                 id: id.clone(),
@@ -188,7 +188,6 @@ impl AppState {
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
-        Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
@@ -196,7 +195,7 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "audio_capture_stop",
@@ -210,20 +209,11 @@ impl AppState {
             .await;
 
         let warmup = self.runtime.warmup_handle.lock().await.take();
-        let (text_res, warm_res) =
-            tokio::join!(self.subsystems.voice.stop_and_transcribe(), async {
-                match warmup {
-                    Some(h) => h.await.unwrap_or_else(|e| Err(anyhow::anyhow!(e))),
-                    None => Ok(()),
-                }
-            },);
-        if let Err(e) = &warm_res {
-            tracing::warn!(
-                target: "assistd::state",
-                error = %e,
-                "presence warmup failed; query path will retry"
-            );
-        }
+        let (text_res, ()) = tokio::join!(self.subsystems.voice.stop_and_transcribe(), async {
+            if let Some(h) = warmup {
+                let _ = h.await;
+            }
+        });
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "ensure_active_done",
@@ -238,8 +228,8 @@ impl AppState {
                         state: VoiceCaptureState::Idle,
                     })
                     .await;
-                send_error(&tx, id, format!("ptt_stop failed: {e:#}")).await;
-                return Err(e);
+                send_error(&tx, id, format!("ptt_stop failed: {e}")).await;
+                return Err(e.into());
             }
         };
 

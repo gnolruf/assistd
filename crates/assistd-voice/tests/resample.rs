@@ -5,11 +5,13 @@
 //! callback pushes into. Bypasses cpal entirely so the test is
 //! deterministic and runs on CI hosts without audio hardware.
 //!
-//! Stereo → mono downmix is a compile-time feature of the cpal
-//! callback (see `mic::capture::CallbackState::push_f32`). By the time
-//! a sample hits `drain_to_pcm`, it is already mono f32 at the device's
-//! native sample rate; the only remaining work is the rate conversion
-//! we verify here.
+//! Stereo → mono downmix happens at runtime in the cpal callback
+//! (`mic::capture::CallbackState::push`). By the time a sample hits
+//! `drain_to_pcm`, it is already mono f32 at the device's native
+//! sample rate; the only remaining work is the rate conversion we
+//! verify here.
+
+#![cfg(feature = "mic")]
 
 use std::f32::consts::PI;
 use std::sync::Arc;
@@ -17,8 +19,6 @@ use std::sync::atomic::AtomicBool;
 
 use assistd_voice::mic::consumer::drain_to_pcm;
 use ringbuf::HeapRb;
-#[allow(unused_imports)]
-use ringbuf::traits::Observer;
 use ringbuf::traits::{Producer, Split};
 
 /// Synthesise `seconds` of a single-channel 440 Hz sine at `rate_hz`,

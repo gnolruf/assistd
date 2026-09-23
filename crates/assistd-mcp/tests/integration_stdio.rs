@@ -4,8 +4,6 @@
 //! Cargo sets `CARGO_BIN_EXE_<name>` for binaries declared in the same
 //! crate, which we use to locate the fixture without hardcoding paths.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use std::time::Duration;
 
 use assistd_mcp::{
@@ -58,9 +56,9 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
 
 #[tokio::test]
 async fn external_shutdown_then_handle_shutdown_completes_quickly() {
-    // Mirrors daemon.rs:748-750: signal task flips the shared
-    // shutdown_tx, then daemon awaits per-handle shutdown(). Both
-    // should finish well inside the 15s shutdown() ceiling.
+    // Daemon-style shutdown: the shared shutdown watch flips, then each
+    // handle's shutdown() is awaited. Both should finish well inside
+    // the 15s shutdown() ceiling.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
         .await
@@ -81,8 +79,7 @@ async fn external_shutdown_then_handle_shutdown_completes_quickly() {
 
 #[tokio::test]
 async fn dropping_handle_without_shutdown_aborts_supervisor() {
-    // Validates the Drop impl: dropping a handle releases the
-    // supervisor task. Detect that by holding a watch_health
+    // Dropping a handle aborts the supervisor task. Detect that by holding a watch_health
     // receiver; once the supervisor is gone its health_tx is dropped
     // and `changed()` returns Err.
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -132,9 +129,9 @@ async fn server_crash_short_circuits_subsequent_calls() {
     assert_eq!(pre["output"], "echo:before");
 
     // Trigger the crash. The fake server `exit(0)`s before sending a
-    // response, so this call returns a transport-level error to the
-    // adapter (which `?`-bubbles via anyhow). We tolerate either
-    // outcome; we just need the supervisor to notice the death.
+    // response, so this call returns a transport-level error envelope.
+    // We tolerate either outcome; we just need the supervisor to
+    // notice the death.
     let _ = crasher.invoke(json!({})).await;
 
     // Wait for the supervisor's lifeline-watcher to see the EOF and

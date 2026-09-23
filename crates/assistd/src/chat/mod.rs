@@ -27,6 +27,8 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::info;
 use uuid::Uuid;
 
@@ -68,7 +70,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     info!("loaded config from {}", config_path.display());
 
     let (shutdown_tx, _) = watch::channel(false);
-    install_signal_handler(shutdown_tx.clone());
+    let _signal_handler = AbortOnDropHandle::new(install_signal_handler(shutdown_tx.clone()));
 
     let ipc = Arc::new(IpcClient::new());
     let mut startup_error: Option<String> = None;
@@ -114,7 +116,8 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         daemon_model_name
     };
 
-    let resource_rx = vram::spawn_probe(shutdown_tx.subscribe());
+    let (resource_rx, resource_probe) = vram::spawn_probe(shutdown_tx.subscribe());
+    let _resource_probe = AbortOnDropHandle::new(resource_probe);
 
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(64);
     let voice_pipeline = voice::spawn_pipeline(
@@ -125,10 +128,16 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     )
     .await;
 
-    let _polling_handle =
-        spawn_status_polling(ipc.clone(), chat_tx.clone(), shutdown_tx.subscribe());
-    let _title_handle =
-        spawn_title_subscription(ipc.clone(), chat_tx.clone(), shutdown_tx.subscribe());
+    let _polling_handle = AbortOnDropHandle::new(spawn_status_polling(
+        ipc.clone(),
+        chat_tx.clone(),
+        shutdown_tx.subscribe(),
+    ));
+    let _title_handle = AbortOnDropHandle::new(spawn_title_subscription(
+        ipc.clone(),
+        chat_tx.clone(),
+        shutdown_tx.subscribe(),
+    ));
 
     let run_result = run_tui(TuiContext {
         ipc: ipc.clone(),
@@ -332,7 +341,7 @@ fn spawn_status_polling(
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,
     mut shutdown: watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         loop {
@@ -355,7 +364,7 @@ fn spawn_title_subscription(
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,
     mut shutdown: watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
+) -> JoinHandle<()> {
     const RECONNECT_DELAY: Duration = Duration::from_secs(2);
     tokio::spawn(async move {
         loop {
@@ -422,7 +431,7 @@ async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Reque
     }
 }
 
-fn install_signal_handler(shutdown_tx: watch::Sender<bool>) {
+fn install_signal_handler(shutdown_tx: watch::Sender<bool>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut term = match signal(SignalKind::terminate()) {
             Ok(s) => s,
@@ -436,7 +445,7 @@ fn install_signal_handler(shutdown_tx: watch::Sender<bool>) {
             _ = term.recv() => info!("received SIGTERM"),
         }
         let _ = shutdown_tx.send(true);
-    });
+    })
 }
 
 fn log_dir() -> Result<PathBuf> {

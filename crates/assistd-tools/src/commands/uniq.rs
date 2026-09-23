@@ -1,4 +1,3 @@
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};
@@ -39,18 +38,18 @@ impl Command for UniqCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         let mut count_runs = false;
         let mut files = Vec::new();
         for arg in &input.args {
             match arg.as_str() {
                 "-c" => count_runs = true,
                 flag if flag.starts_with('-') && flag.len() > 1 => {
-                    return Ok(CommandOutput::usage_error(
+                    return CommandOutput::usage_error(
                         "uniq",
                         format_args!("unknown flag '{flag}'"),
                         "uniq or uniq -c",
-                    ));
+                    );
                 }
                 file => files.push(file.to_string()),
             }
@@ -58,8 +57,8 @@ impl Command for UniqCommand {
 
         let stdin = match collect_input("uniq", &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(CommandOutput::usage(self.help())),
-            Err(failure) => return Ok(failure),
+            Ok(None) => return CommandOutput::usage(self.help()),
+            Err(failure) => return failure,
         };
         let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
         if lines.last().is_some_and(|l| l.is_empty()) {
@@ -70,7 +69,7 @@ impl Command for UniqCommand {
         for run in lines.chunk_by(|a, b| a == b) {
             emit(&mut out, run[0], count_runs.then_some(run.len()));
         }
-        Ok(CommandOutput::ok(out))
+        CommandOutput::ok(out)
     }
 }
 
@@ -93,7 +92,6 @@ mod tests {
                 stdin: Some(stdin.to_vec()),
             })
             .await
-            .expect("run returns Ok")
     }
 
     #[tokio::test]
@@ -127,8 +125,7 @@ mod tests {
                 args: Vec::new(),
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 2);
         assert!(out.stdout.starts_with(b"usage: uniq"), "{out:?}");
     }

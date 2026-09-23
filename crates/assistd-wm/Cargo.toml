@@ -8,10 +8,8 @@ license.workspace = true
 default = ["i3", "sway"]
 i3 = ["dep:tokio-i3ipc"]
 sway = ["dep:swayipc-async"]
-hyprland = []
 
 [dependencies]
-anyhow = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }

@@ -1,4 +1,3 @@
-use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};
@@ -87,22 +86,22 @@ impl Command for SortCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
+    async fn run(&self, input: CommandInput) -> CommandOutput {
         let (flags, files) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => {
-                return Ok(CommandOutput::usage_error(
+                return CommandOutput::usage_error(
                     "sort",
                     msg,
                     "sort (no args) for supported flags",
-                ));
+                );
             }
         };
 
         let stdin = match collect_input("sort", &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(CommandOutput::usage(self.help())),
-            Err(failure) => return Ok(failure),
+            Ok(None) => return CommandOutput::usage(self.help()),
+            Err(failure) => return failure,
         };
         let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
         if lines.last().is_some_and(|l| l.is_empty()) {
@@ -124,7 +123,7 @@ impl Command for SortCommand {
             out.extend_from_slice(line);
             out.push(b'\n');
         }
-        Ok(CommandOutput::ok(out))
+        CommandOutput::ok(out)
     }
 }
 
@@ -139,7 +138,6 @@ mod tests {
                 stdin: Some(stdin.to_vec()),
             })
             .await
-            .expect("run returns Ok")
     }
 
     #[tokio::test]
@@ -199,8 +197,7 @@ mod tests {
                 args: Vec::new(),
                 stdin: None,
             })
-            .await
-            .unwrap();
+            .await;
         assert_eq!(out.exit_code, 2);
         assert!(out.stdout.starts_with(b"usage: sort"), "{out:?}");
     }

@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command as ProcCommand};
+use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::chain::PIPE_BUF_MAX;
@@ -240,6 +242,20 @@ pub(crate) async fn supervise(
     })
 }
 
+/// Owns the output readers of applications started by
+/// [`spawn_detached`]. A reader runs until its application closes both
+/// pipes; dropping the owner aborts any reader still running.
+#[derive(Default)]
+pub(crate) struct DetachedReaders(Mutex<JoinSet<()>>);
+
+impl DetachedReaders {
+    fn spawn(&self, reader: impl Future<Output = ()> + Send + 'static) {
+        let mut set = self.0.lock();
+        while set.try_join_next().is_some() {}
+        set.spawn(reader);
+    }
+}
+
 /// Spawn `cmd`, watch it for [`STARTUP_PROBE`], and leave it running if
 /// it survives that window.
 ///
@@ -248,13 +264,14 @@ pub(crate) async fn supervise(
 /// captured output — this is the failure path, and it is what makes a
 /// bad launch visible. A child still alive at the deadline is reported as
 /// exit 0 and detached: no timeout bounds it and nothing kills it when
-/// this future is dropped.
+/// this future is dropped. Its output readers are handed to `readers`.
 ///
 /// `Err` is returned only when the spawn itself fails, matching
 /// [`supervise`] so callers can attach their own recovery hint.
 pub(crate) async fn spawn_detached(
     tool: &str,
     mut cmd: ProcCommand,
+    readers: &DetachedReaders,
 ) -> std::io::Result<CommandOutput> {
     // No `kill_on_drop`: dropping the handle below must leave the
     // application running. `process_group(0)` still isolates it from the
@@ -269,21 +286,20 @@ pub(crate) async fn spawn_detached(
 
     // The readers outlive this call by design: a long-lived application
     // must never block on a full pipe, nor be SIGPIPE'd by us closing the
-    // read end. They end at EOF when it exits.
+    // read end. They end at EOF when it exits, dropping `drained`.
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
-    let stdout_task = tokio::spawn(drain_into(
-        stdout_pipe,
-        STARTUP_OUTPUT_MAX,
-        stdout_buf.clone(),
-    ));
-    let stderr_task = tokio::spawn(drain_into(
-        stderr_pipe,
-        STARTUP_OUTPUT_MAX,
-        stderr_buf.clone(),
-    ));
+    let (drained, drained_rx) = oneshot::channel::<()>();
+    let (stdout_sink, stderr_sink) = (stdout_buf.clone(), stderr_buf.clone());
+    readers.spawn(async move {
+        let _drained = drained;
+        tokio::join!(
+            drain_into(stdout_pipe, STARTUP_OUTPUT_MAX, stdout_sink),
+            drain_into(stderr_pipe, STARTUP_OUTPUT_MAX, stderr_sink),
+        );
+    });
 
     let Ok(waited) = timeout(STARTUP_PROBE, child.wait()).await else {
         // Neither kills nor orphans it: tokio's reaper collects the
@@ -293,13 +309,8 @@ pub(crate) async fn spawn_detached(
     };
 
     // Exited during the probe. If a grandchild holds the write end open
-    // the joins never finish, so the readers stay detached and we take
-    // whatever they captured.
-    let _ = timeout(POST_EXIT_DRAIN, async {
-        let _ = stdout_task.await;
-        let _ = stderr_task.await;
-    })
-    .await;
+    // the readers never finish, so we take whatever they captured.
+    let _ = timeout(POST_EXIT_DRAIN, drained_rx).await;
     let stdout = std::mem::take(&mut *stdout_buf.lock());
     let stderr = std::mem::take(&mut *stderr_buf.lock());
 

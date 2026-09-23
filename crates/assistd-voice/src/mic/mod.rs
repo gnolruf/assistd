@@ -4,35 +4,21 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{Result, anyhow};
 use assistd_config::VoiceConfig;
 use async_trait::async_trait;
-use thiserror::Error;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::VoiceCaptureState;
-use crate::VoiceInput;
-use crate::transcribe::{Transcriber, TranscriptionError};
+use crate::transcribe::Transcriber;
 use crate::whisper::WhisperTranscriberBuilder;
+use crate::{VoiceCaptureState, VoiceInput, VoiceInputError};
 
 pub mod capture;
 pub mod consumer;
 pub(crate) mod resample;
 
-pub use capture::AudioCaptureError;
-
-/// Errors surfaced by [`MicVoiceInput`].
-#[derive(Debug, Error)]
-pub enum VoiceInputError {
-    #[error("audio capture error: {0}")]
-    Capture(#[from] AudioCaptureError),
-    #[error("transcription error: {0}")]
-    Transcription(#[from] TranscriptionError),
-    #[error("capture task panicked: {0}")]
-    ConsumerPanic(String),
-}
+pub use capture::{AudioCaptureError, DeviceValidationError};
 
 /// Push-to-talk voice input backed by cpal and a [`Transcriber`]. The
 /// audio device is opened on [`start_recording`](VoiceInput::start_recording),
@@ -118,7 +104,7 @@ impl MicVoiceInput {
 
 #[async_trait]
 impl VoiceInput for MicVoiceInput {
-    async fn start_recording(&self) -> Result<()> {
+    async fn start_recording(&self) -> Result<(), VoiceInputError> {
         let mut inner = self.inner.lock().await;
         if inner.session.is_some() {
             return Ok(());
@@ -161,7 +147,7 @@ impl VoiceInput for MicVoiceInput {
         Ok(())
     }
 
-    async fn stop_and_transcribe(&self) -> Result<String> {
+    async fn stop_and_transcribe(&self) -> Result<String, VoiceInputError> {
         let (session, forwarder) = {
             let mut inner = self.inner.lock().await;
             match inner.session.take() {
@@ -177,13 +163,11 @@ impl VoiceInput for MicVoiceInput {
             Ok(Ok(pcm)) => pcm,
             Ok(Err(e)) => {
                 self.cleanup_forwarder_and_idle(forwarder).await;
-                return Err(anyhow!(VoiceInputError::from(e)));
+                return Err(e.into());
             }
             Err(join_err) => {
                 self.cleanup_forwarder_and_idle(forwarder).await;
-                return Err(anyhow!(VoiceInputError::ConsumerPanic(
-                    join_err.to_string()
-                )));
+                return Err(VoiceInputError::ConsumerPanic(join_err));
             }
         };
 
@@ -219,7 +203,7 @@ impl VoiceInput for MicVoiceInput {
         let result = self.transcriber.transcribe(&pcm).await;
         self.cleanup_forwarder_and_idle(forwarder).await;
 
-        let text = result.map_err(|e| anyhow!(VoiceInputError::from(e)))?;
+        let text = result?;
 
         info!(
             target: "assistd::voice::mic",
@@ -247,15 +231,5 @@ mod tests {
     #[test]
     fn voice_capture_state_pins_idle_default() {
         assert_eq!(VoiceCaptureState::Idle as u8, 0);
-    }
-
-    #[test]
-    fn error_conversions_compile() {
-        fn _from_capture(e: AudioCaptureError) -> VoiceInputError {
-            e.into()
-        }
-        fn _from_transcribe(e: TranscriptionError) -> VoiceInputError {
-            e.into()
-        }
     }
 }

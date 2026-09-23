@@ -36,6 +36,26 @@ pub enum AudioCaptureError {
     DeviceError(String),
 }
 
+/// Errors from [`validate`].
+#[derive(Debug, Error)]
+pub enum DeviceValidationError {
+    #[error(
+        "failed to enumerate cpal input devices while validating voice.mic_device \
+         = {requested:?}: {source}"
+    )]
+    Enumerate {
+        requested: String,
+        #[source]
+        source: CpalError,
+    },
+    /// `listing` is the comma-separated, quoted names cpal reported.
+    #[error(
+        "voice.mic_device = {requested:?} not found. Available input devices: [{listing}]. \
+         Set voice.mic_device = null to use the system default."
+    )]
+    NotFound { requested: String, listing: String },
+}
+
 /// Whisper's input rate; the consumer resamples the device rate to it.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
@@ -151,7 +171,7 @@ fn capture_ptt(
 /// system default is not an error, so a headless host still starts;
 /// only a named device that cannot be found is rejected. Always logs
 /// the available input devices.
-pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
+pub fn validate(cfg: &assistd_config::VoiceConfig) -> Result<(), DeviceValidationError> {
     if !cfg.enabled {
         return Ok(());
     }
@@ -162,11 +182,13 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
         Ok(devices) => devices
             .map(|d| device_name(&d).unwrap_or_else(|_| "<unknown>".to_string()))
             .collect(),
-        Err(e) => match requested {
-            Some(requested) => anyhow::bail!(
-                "failed to enumerate cpal input devices while validating voice.mic_device \
-                 = {requested:?}: {e}"
-            ),
+        Err(source) => match requested {
+            Some(requested) => {
+                return Err(DeviceValidationError::Enumerate {
+                    requested: requested.to_string(),
+                    source,
+                });
+            }
             None => return Ok(()),
         },
     };
@@ -197,10 +219,10 @@ pub fn validate(cfg: &assistd_config::VoiceConfig) -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    anyhow::bail!(
-        "voice.mic_device = {requested:?} not found. Available input devices: [{listing}]. \
-         Set voice.mic_device = null to use the system default."
-    );
+    Err(DeviceValidationError::NotFound {
+        requested: requested.to_string(),
+        listing,
+    })
 }
 
 fn device_name(device: &Device) -> Result<String, CpalError> {

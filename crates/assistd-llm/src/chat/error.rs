@@ -17,7 +17,4 @@ pub enum ChatClientError {
 
     #[error("summarization failed: {0}")]
     Summarize(String),
-
-    #[error("response body exceeded cap of {cap} bytes")]
-    BodyTooLarge { cap: usize },
 }

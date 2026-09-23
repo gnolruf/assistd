@@ -253,7 +253,6 @@ dependencies = [
 name = "assistd-core"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "assistd-config",
  "assistd-embed",
  "assistd-ipc",
@@ -283,11 +282,9 @@ dependencies = [
 name = "assistd-embed"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "assistd-config",
  "assistd-memory",
  "async-trait",
- "parking_lot",
  "reqwest",
  "rustix 1.1.4",
  "serde",
@@ -302,6 +299,7 @@ name = "assistd-ipc"
 version = "1.0.0"
 dependencies = [
  "base64 0.23.1",
+ "infer",
  "serde",
  "serde_json",
  "tempfile",
@@ -313,14 +311,12 @@ dependencies = [
 name = "assistd-llm"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "assistd-config",
  "assistd-core",
  "assistd-ipc",
  "assistd-tools",
  "async-trait",
  "base64 0.23.1",
- "libc",
  "parking_lot",
  "reqwest",
  "rustix 1.1.4",
@@ -337,7 +333,6 @@ dependencies = [
 name = "assistd-mcp"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "assistd-tools",
  "async-trait",
  "base64 0.23.1",
@@ -349,6 +344,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
 ]
@@ -357,7 +353,6 @@ dependencies = [
 name = "assistd-memory"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "rusqlite",
@@ -376,11 +371,11 @@ dependencies = [
 name = "assistd-tools"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "assistd-config",
  "assistd-embed",
  "assistd-ipc",
  "assistd-memory",
+ "assistd-tools",
  "assistd-wm",
  "async-trait",
  "base64 0.23.1",
@@ -436,7 +431,6 @@ dependencies = [
 name = "assistd-wm"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "futures-util",
  "swayipc-async",

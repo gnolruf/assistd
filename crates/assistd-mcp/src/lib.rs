@@ -1,13 +1,3 @@
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::print_stdout,
-        clippy::print_stderr
-    )
-)]
-
 //! MCP (Model Context Protocol) client. A server is reached over stdio
 //! or HTTP+SSE, supervised by [`McpServerHandle`], and each tool it
 //! exposes becomes a [`Tool`] via [`adapt_handle_as_tools`].
@@ -15,8 +5,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
-use assistd_tools::Tool;
+use assistd_tools::{Tool, ToolError};
 use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
@@ -58,10 +47,10 @@ pub enum ToolResult {
 #[async_trait]
 pub trait McpClient: Send + Sync + 'static {
     /// Every tool the server currently exposes. Safe to call concurrently.
-    async fn list_tools(&self) -> Result<Vec<ToolSchema>>;
+    async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError>;
 
     /// Invoke the server-native tool `name` with `arguments`.
-    async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult>;
+    async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult, McpError>;
 }
 
 /// Exposes one MCP tool as a [`Tool`] under `registry_name`; the
@@ -98,7 +87,7 @@ impl Tool for McpToolAdapter {
 
     /// Always `Ok`: a failed call is rendered into the envelope by
     /// [`error_envelope`] so the model keeps its recovery hint.
-    async fn invoke(&self, args: Value) -> Result<Value> {
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
         let outcome = self.client.invoke(&self.schema.name, args).await;
         let duration_ms = start.elapsed().as_millis();
@@ -114,17 +103,10 @@ impl Tool for McpToolAdapter {
 /// `exit_code: -1` and an `[error] <tool>: <what>. <Hint>: <recovery>`
 /// line as `output`, so the model handles every failure the same way.
 /// [`HealthRoutedTool`] emits the same shape without an RPC.
-fn error_envelope(tool_name: &str, e: &anyhow::Error, duration_ms: u128) -> Value {
-    let line = match e.downcast_ref::<McpError>() {
-        Some(mcp_err) => mcp_error_line(tool_name, mcp_err),
-        None => format!(
-            "[error] {tool_name}: tool invocation failed: {e}. \
-             Try: a different command\n"
-        ),
-    };
+fn error_envelope(tool_name: &str, e: &McpError, duration_ms: u128) -> Value {
     json!({
         "type": "error",
-        "output": line,
+        "output": mcp_error_line(tool_name, e),
         "exit_code": -1,
         "duration_ms": duration_ms,
         "truncated": false,
@@ -172,7 +154,7 @@ fn tool_result_to_json(r: ToolResult, duration_ms: u128) -> Value {
 pub async fn adapt_handle_as_tools(
     handle: &McpServerHandle,
     name_prefix: &str,
-) -> Result<Vec<Box<dyn Tool>>> {
+) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let client = handle.client();
     let schemas = client.list_tools().await?;
     let health_rx = handle.watch_health();
@@ -192,7 +174,7 @@ pub async fn adapt_handle_as_tools(
 async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
     name_prefix: &str,
-) -> Result<Vec<Box<dyn Tool>>> {
+) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let schemas = client.list_tools().await?;
     Ok(schemas
         .into_iter()
@@ -211,11 +193,6 @@ fn registry_name(prefix: &str, server_native: &str) -> String {
     }
 }
 
-/// Returns the crate version string from `Cargo.toml`.
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,11 +206,11 @@ mod tests {
 
     #[async_trait]
     impl McpClient for FakeMcpClient {
-        async fn list_tools(&self) -> Result<Vec<ToolSchema>> {
+        async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError> {
             Ok(self.schemas.clone())
         }
 
-        async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult> {
+        async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult, McpError> {
             Ok(ToolResult::Text(format!("called {name} with {arguments}")))
         }
     }
@@ -248,7 +225,7 @@ mod tests {
 
     #[async_trait]
     impl McpClient for ErrFakeClient {
-        async fn list_tools(&self) -> Result<Vec<ToolSchema>> {
+        async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError> {
             Ok(vec![ToolSchema {
                 name: "search".into(),
                 description: "search".into(),
@@ -256,10 +233,9 @@ mod tests {
             }])
         }
 
-        async fn invoke(&self, _name: &str, _arguments: Value) -> Result<ToolResult> {
+        async fn invoke(&self, _name: &str, _arguments: Value) -> Result<ToolResult, McpError> {
             tokio::time::sleep(self.sleep).await;
-            let e = self.err.lock().take().expect("err pre-armed");
-            Err(e.into())
+            Err(self.err.lock().take().expect("err pre-armed"))
         }
     }
 
@@ -353,11 +329,6 @@ mod tests {
     fn tool_result_carries_duration_ms_through_envelope() {
         let v = tool_result_to_json(ToolResult::Text("hi".into()), 42);
         assert_eq!(v["duration_ms"], 42);
-    }
-
-    #[test]
-    fn version_is_not_empty() {
-        assert!(!version().is_empty());
     }
 
     /// Acceptance: when the upstream client fails with `RpcError`, the

@@ -13,4 +13,4 @@ pub mod service;
 pub mod synth;
 
 pub use error::PiperError;
-pub use service::{PiperVoiceOutput, ReadyState};
+pub use service::PiperVoiceOutput;

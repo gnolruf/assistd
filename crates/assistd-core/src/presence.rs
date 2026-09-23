@@ -8,16 +8,78 @@ use std::sync::Arc;
 use parking_lot::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
 #[cfg(test)]
 use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::{Component, PresenceState, StatusKind, StatusSeverity};
-use assistd_llm::{HealthWaitError, LlamaServerControl, LlamaService, LlmHealthProbe, ReadyState};
+use assistd_llm::{
+    HealthWaitError, LlamaServerControl, LlamaServerError, LlamaService, LlmHealthProbe, ReadyState,
+};
 use async_trait::async_trait;
+use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, watch};
 use tokio::time::timeout;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
+
+/// Why a presence transition, or a request guard waiting on one, failed.
+#[derive(Debug, Error)]
+pub enum PresenceError {
+    #[error("failed to construct llama-server control client: {0}")]
+    Control(#[source] LlamaServerError),
+
+    #[error("initial cold-start wake failed: {0}")]
+    InitialWake(#[source] Box<PresenceError>),
+
+    #[error("cannot drowse from Sleeping: call wake() first")]
+    DrowseFromSleeping,
+
+    #[error("llama-server cold-start failed during wake: {0}")]
+    ColdStart(#[source] LlamaServerError),
+
+    #[error("llama-server /models/load failed for {model}: {source}")]
+    Load {
+        model: String,
+        #[source]
+        source: LlamaServerError,
+    },
+
+    #[error("llama-server did not finish loading {model} within the {secs}s backstop: {source}")]
+    LoadWait {
+        model: String,
+        secs: u64,
+        #[source]
+        source: LlamaServerError,
+    },
+
+    /// The supervisor restarted or gave up on the child mid-load.
+    #[error("llama-server left the ready state while loading {model}")]
+    LeftReady { model: String },
+
+    #[error("llama-server handle missing while loading model")]
+    ServiceMissing,
+
+    #[error("llama-server /models/unload failed for {model}: {source}")]
+    Unload {
+        model: String,
+        #[source]
+        source: LlamaServerError,
+    },
+
+    #[error("llama-server /models/unload timed out after {secs}s during drowse")]
+    UnloadTimeout { secs: u64 },
+
+    #[error("llama-server shutdown failed: {0}")]
+    Shutdown(#[source] LlamaServerError),
+
+    /// The child may outlive the daemon.
+    #[error("llama-server shutdown timed out after {secs}s")]
+    ShutdownTimeout { secs: u64 },
+
+    /// Sleep/wake churn kept the daemon out of `Active` on every retry.
+    #[error("failed to acquire active request guard after {attempts} retries")]
+    GuardRetriesExhausted { attempts: usize },
+}
 
 /// Owner of the llama-server handle and the daemon-wide presence state.
 ///
@@ -130,10 +192,10 @@ impl PresenceManager {
         model: ModelConfig,
         timeouts: TimeoutsConfig,
         daemon_shutdown: watch::Receiver<bool>,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Arc<Self>, PresenceError> {
         let control =
             LlamaServerControl::new(&llama_server.host.to_string(), llama_server.port.get())
-                .context("failed to construct llama-server control client")?;
+                .map_err(PresenceError::Control)?;
 
         let current_inner_shutdown: Arc<StdMutex<Option<watch::Sender<bool>>>> =
             Arc::new(StdMutex::new(None));
@@ -178,7 +240,7 @@ impl PresenceManager {
         manager
             .wake()
             .await
-            .context("initial cold-start wake failed")?;
+            .map_err(|e| PresenceError::InitialWake(Box::new(e)))?;
         Ok(manager)
     }
 
@@ -193,33 +255,6 @@ impl PresenceManager {
     /// Time since the last user-initiated interaction.
     pub fn idle_duration(&self) -> Duration {
         self.last_activity.lock().elapsed()
-    }
-
-    /// Time until the next idle-based transition given the current
-    /// state and config. Returns `None` when idle monitoring is
-    /// disabled for the relevant transition or when the daemon is
-    /// already `Sleeping`.
-    pub fn time_until_next_transition(&self, cfg: &crate::SleepConfig) -> Option<Duration> {
-        let idle = self.idle_duration();
-        let threshold_mins = match self.state() {
-            PresenceState::Active => {
-                if cfg.idle_to_drowsy_mins > 0 {
-                    cfg.idle_to_drowsy_mins
-                } else if cfg.idle_to_sleep_mins > 0 {
-                    cfg.idle_to_sleep_mins
-                } else {
-                    return None;
-                }
-            }
-            PresenceState::Drowsy => {
-                if cfg.idle_to_sleep_mins == 0 {
-                    return None;
-                }
-                cfg.idle_to_sleep_mins
-            }
-            PresenceState::Sleeping => return None,
-        };
-        Some(Duration::from_secs(threshold_mins * 60).saturating_sub(idle))
     }
 
     /// Subscribe to presence-state changes. The returned receiver starts at
@@ -294,7 +329,7 @@ impl PresenceManager {
     /// Wake unless already `Active`. Racing callers serialise on the
     /// transition lock, so only one wake runs.
     #[tracing::instrument(skip(self), fields(from = ?self.state()))]
-    pub async fn ensure_active(&self) -> Result<()> {
+    pub async fn ensure_active(&self) -> Result<(), PresenceError> {
         self.mark_activity();
         if self.state() == PresenceState::Active {
             return Ok(());
@@ -309,19 +344,16 @@ impl PresenceManager {
     /// under it holds for the guard's lifetime: a sleep must first take
     /// the write side of the same lock. A bounded retry covers sleep/wake
     /// churn between the wake and the re-check.
-    pub async fn acquire_request_guard(self: &Arc<Self>) -> Result<RequestGuard> {
-        self.acquire_request_guard_inner(None).await
-    }
-
-    /// [`Self::acquire_request_guard`] that also emits `Event::Status`
-    /// progress on `tx` every few seconds while a wake is in progress, so
-    /// a long model load is distinguishable from a hang. Wakes shorter
-    /// than one tick emit nothing.
+    ///
+    /// While a wake is in progress, also emits `Event::Status` progress
+    /// on `tx` every few seconds, so a long model load is
+    /// distinguishable from a hang. Wakes shorter than one tick emit
+    /// nothing.
     pub async fn acquire_request_guard_with_progress(
         self: &Arc<Self>,
         request_id: String,
         tx: tokio::sync::mpsc::Sender<assistd_ipc::Event>,
-    ) -> Result<RequestGuard> {
+    ) -> Result<RequestGuard, PresenceError> {
         self.acquire_request_guard_inner(Some((request_id, tx)))
             .await
     }
@@ -329,7 +361,7 @@ impl PresenceManager {
     async fn acquire_request_guard_inner(
         self: &Arc<Self>,
         progress: Option<(String, tokio::sync::mpsc::Sender<assistd_ipc::Event>)>,
-    ) -> Result<RequestGuard> {
+    ) -> Result<RequestGuard, PresenceError> {
         self.mark_activity();
         const MAX_RETRIES: usize = 3;
         for _ in 0..MAX_RETRIES {
@@ -348,11 +380,13 @@ impl PresenceManager {
             }
             result?;
         }
-        bail!("failed to acquire active request guard after {MAX_RETRIES} retries")
+        Err(PresenceError::GuardRetriesExhausted {
+            attempts: MAX_RETRIES,
+        })
     }
 
     /// `Some(started_at)` while a wake transition is running.
-    pub fn wake_in_progress(&self) -> Option<Instant> {
+    fn wake_in_progress(&self) -> Option<Instant> {
         *self.wake_started.lock()
     }
 
@@ -378,14 +412,9 @@ impl PresenceManager {
         .is_ok()
     }
 
-    /// Subscribe to changes in the in-flight LLM-stream count.
-    pub fn subscribe_llm_streams(&self) -> watch::Receiver<usize> {
-        self.stream_count_tx.subscribe()
-    }
-
     /// Drive the manager to `target`.
     #[tracing::instrument(skip(self), fields(from = ?self.state()))]
-    pub async fn set_presence(&self, target: PresenceState) -> Result<()> {
+    pub async fn set_presence(&self, target: PresenceState) -> Result<(), PresenceError> {
         self.mark_activity();
         match target {
             PresenceState::Active => self.wake().await,
@@ -399,7 +428,7 @@ impl PresenceManager {
     /// Two racing calls can both target the same state, in which case the
     /// loser is a no-op; the transition mutex still guarantees a step is
     /// never skipped or split.
-    pub async fn cycle(&self) -> Result<PresenceState> {
+    pub async fn cycle(&self) -> Result<PresenceState, PresenceError> {
         self.mark_activity();
         let target = self.state().next();
         self.set_presence(target).await?;
@@ -410,7 +439,7 @@ impl PresenceManager {
     ///
     /// Blocks until every outstanding [`RequestGuard`] has been dropped,
     /// so an in-flight generation is never killed mid-stream.
-    pub async fn sleep(&self) -> Result<()> {
+    pub async fn sleep(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
         let prior = self.state();
         if prior == PresenceState::Sleeping {
@@ -436,7 +465,7 @@ impl PresenceManager {
         outcome
     }
 
-    async fn teardown_llama(&self, service: Option<LlamaService>) -> Result<()> {
+    async fn teardown_llama(&self, service: Option<LlamaService>) -> Result<(), PresenceError> {
         let tx = self.current_inner_shutdown.lock().take();
         if let Some(tx) = tx {
             let _ = tx.send(true);
@@ -446,20 +475,16 @@ impl PresenceManager {
             return Ok(());
         };
 
-        let budget = Duration::from_secs(self.timeouts.presence_sleep_secs);
-        match timeout(budget, service.shutdown()).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(anyhow::Error::new(e)).context("llama-server shutdown failed"),
+        let secs = self.timeouts.presence_sleep_secs;
+        match timeout(Duration::from_secs(secs), service.shutdown()).await {
+            Ok(result) => result.map_err(PresenceError::Shutdown),
             Err(_) => {
                 warn!(
                     target: "assistd::presence",
-                    timeout_secs = self.timeouts.presence_sleep_secs,
+                    timeout_secs = secs,
                     "llama-server shutdown timed out; the child may outlive the daemon"
                 );
-                Err(anyhow!(
-                    "llama-server shutdown timed out after {}s",
-                    self.timeouts.presence_sleep_secs
-                ))
+                Err(PresenceError::ShutdownTimeout { secs })
             }
         }
     }
@@ -469,38 +494,35 @@ impl PresenceManager {
     /// Blocks until every outstanding [`RequestGuard`] has been dropped,
     /// so an in-flight generation completes before the model weights
     /// are unloaded.
-    pub async fn drowse(&self) -> Result<()> {
+    pub async fn drowse(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
         let prior = self.state();
         match prior {
             PresenceState::Drowsy => return Ok(()),
-            PresenceState::Sleeping => {
-                bail!("cannot drowse from Sleeping: call wake() first");
-            }
+            PresenceState::Sleeping => return Err(PresenceError::DrowseFromSleeping),
             PresenceState::Active => {}
         }
 
         let _inflight = self.inflight.write().await;
 
         let started = Instant::now();
-        let unload_budget = Duration::from_secs(self.timeouts.presence_drowse_secs);
-        match timeout(unload_budget, self.control.unload_model(&self.model.name)).await {
+        let secs = self.timeouts.presence_drowse_secs;
+        let unload = self.control.unload_model(&self.model.name);
+        match timeout(Duration::from_secs(secs), unload).await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                return Err(e).with_context(|| {
-                    format!("llama-server /models/unload failed for {}", self.model.name)
+            Ok(Err(source)) => {
+                return Err(PresenceError::Unload {
+                    model: self.model.name.clone(),
+                    source,
                 });
             }
             Err(_) => {
                 warn!(
                     target: "assistd::presence",
-                    timeout_secs = self.timeouts.presence_drowse_secs,
+                    timeout_secs = secs,
                     "llama-server /models/unload timed out during drowse; transition aborted"
                 );
-                return Err(anyhow!(
-                    "llama-server /models/unload timed out after {}s during drowse",
-                    self.timeouts.presence_drowse_secs
-                ));
+                return Err(PresenceError::UnloadTimeout { secs });
             }
         }
 
@@ -518,7 +540,7 @@ impl PresenceManager {
 
     /// `Sleeping|Drowsy → Active`. Idempotent from `Active`. While
     /// running, [`Self::wake_in_progress`] reports the start time.
-    pub async fn wake(&self) -> Result<()> {
+    pub async fn wake(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
         let prior = self.state();
         if prior == PresenceState::Active {
@@ -546,7 +568,7 @@ impl PresenceManager {
         Ok(())
     }
 
-    async fn cold_start(&self) -> Result<()> {
+    async fn cold_start(&self) -> Result<(), PresenceError> {
         let (inner_tx, inner_rx) = watch::channel(false);
         *self.current_inner_shutdown.lock() = Some(inner_tx);
 
@@ -561,7 +583,7 @@ impl PresenceManager {
             Err(e) => {
                 *self.current_inner_shutdown.lock() = None;
                 warn!(target: "assistd::presence", "wake cold-start failed: {e}");
-                return Err(anyhow!(e)).context("llama-server cold-start failed during wake");
+                return Err(PresenceError::ColdStart(e));
             }
         };
 
@@ -581,16 +603,19 @@ impl PresenceManager {
         loaded
     }
 
-    async fn load_model_and_wait(&self) -> Result<()> {
+    async fn load_model_and_wait(&self) -> Result<(), PresenceError> {
         self.control
             .load_model(&self.model.name)
             .await
-            .with_context(|| format!("llama-server /models/load failed for {}", self.model.name))?;
+            .map_err(|source| PresenceError::Load {
+                model: self.model.name.clone(),
+                source,
+            })?;
 
         self.await_model_loaded().await
     }
 
-    async fn await_model_loaded(&self) -> Result<()> {
+    async fn await_model_loaded(&self) -> Result<(), PresenceError> {
         const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
         let mut ready_rx = {
@@ -598,26 +623,25 @@ impl PresenceManager {
             guard
                 .as_ref()
                 .map(LlamaService::subscribe_ready)
-                .context("llama-server handle missing while loading model")?
+                .ok_or(PresenceError::ServiceMissing)?
         };
 
-        let backstop = Duration::from_secs(self.llama_server.ready_timeout_secs.get());
+        let secs = self.llama_server.ready_timeout_secs.get();
+        let backstop = Duration::from_secs(secs);
         tokio::select! {
             res = self
                 .control
                 .wait_for_loaded(&self.model.name, backstop, LOAD_POLL_INTERVAL) =>
             {
-                res.with_context(|| {
-                    format!(
-                        "llama-server did not finish loading {} within the {}s backstop",
-                        self.model.name, self.llama_server.ready_timeout_secs
-                    )
+                res.map_err(|source| PresenceError::LoadWait {
+                    model: self.model.name.clone(),
+                    secs,
+                    source,
                 })
             }
-            () = wait_until_not_ready(&mut ready_rx) => Err(anyhow!(
-                "llama-server left the ready state while loading {}",
-                self.model.name
-            )),
+            () = wait_until_not_ready(&mut ready_rx) => Err(PresenceError::LeftReady {
+                model: self.model.name.clone(),
+            }),
         }
     }
 }
@@ -632,8 +656,8 @@ fn spawn_load_progress_emitter(
     presence: Arc<PresenceManager>,
     request_id: String,
     tx: tokio::sync::mpsc::Sender<assistd_ipc::Event>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(tokio::spawn(async move {
         let mut interval = tokio::time::interval(LOAD_PROGRESS_INTERVAL);
         // Skip the first immediate tick so sub-interval wakes stay quiet.
         interval.tick().await;
@@ -657,7 +681,7 @@ fn spawn_load_progress_emitter(
                 return;
             }
         }
-    })
+    }))
 }
 
 impl PresenceManager {

@@ -30,7 +30,7 @@ assistd-mcp    = { version = "1.0", path = "crates/assistd-mcp" }
 assistd-memory = { version = "1.0", path = "crates/assistd-memory" }
 assistd-voice  = { version = "1.0", path = "crates/assistd-voice" }
 assistd-tools  = { version = "1.0", path = "crates/assistd-tools" }
-assistd-wm     = { version = "1.0", path = "crates/assistd-wm" }
+assistd-wm     = { version = "1.0", path = "crates/assistd-wm", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

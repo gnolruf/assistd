@@ -1,7 +1,6 @@
 //! Handlers for the `Memory*` variants of `Request`.
 
-use super::{AppState, send_error, wire_role};
-use anyhow::Result;
+use super::{AppState, DispatchError, send_error, wire_role};
 use assistd_ipc::{Event, ReindexKind};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -13,7 +12,7 @@ impl AppState {
         query: String,
         limit: u32,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         let model = self.memory.embedder.model().to_string();
         if model.is_empty() {
             let _ = tx.send(Event::Done { id }).await;
@@ -27,8 +26,8 @@ impl AppState {
         let vec = match self.memory.embedder.embed(query).await {
             Ok(v) => v,
             Err(e) => {
-                send_error(&tx, id, format!("embed failed: {e:#}")).await;
-                return Err(e);
+                send_error(&tx, id, format!("embed failed: {e}")).await;
+                return Err(e.into());
             }
         };
         match self
@@ -56,8 +55,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("semantic search failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("semantic search failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -68,15 +67,15 @@ impl AppState {
         key: String,
         value: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         match self.memory.memory_ops.save(&key, value).await {
             Ok(_id) => {
                 let _ = tx.send(Event::Done { id }).await;
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("memory save failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("memory save failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -86,7 +85,7 @@ impl AppState {
         id: String,
         key: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         match self.memory.memory_ops.load(&key).await {
             Ok(value) => {
                 let _ = tx
@@ -100,8 +99,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("memory load failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("memory load failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -111,7 +110,7 @@ impl AppState {
         id: String,
         prefix: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         match self.memory.memory_ops.list(&prefix).await {
             Ok(keys) => {
                 let _ = tx
@@ -124,8 +123,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("memory list failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("memory list failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -135,15 +134,15 @@ impl AppState {
         id: String,
         key: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         match self.memory.memory_ops.delete(&key).await {
             Ok(()) => {
                 let _ = tx.send(Event::Done { id }).await;
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("memory delete failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("memory delete failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -154,7 +153,7 @@ impl AppState {
         prefix: String,
         limit: u32,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         match self.memory.memory_ops.list_full(&prefix).await {
             Ok(rows) => {
                 let cap = if limit == 0 {
@@ -176,8 +175,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("memory list_all failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("memory list_all failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -187,7 +186,7 @@ impl AppState {
         id: String,
         memory_id: i64,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         match self.memory.memory_ops.forget(memory_id).await {
             Ok(removed) => {
                 let _ = tx
@@ -201,8 +200,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("memory forget failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("memory forget failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
@@ -215,7 +214,7 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         let model = self.memory.embedder.model().to_string();
         if model.is_empty() {
             send_error(
@@ -231,8 +230,8 @@ impl AppState {
         let chunks = match self.memory.semantic.chunks_missing_embedding(&model).await {
             Ok(v) => v,
             Err(e) => {
-                send_error(&tx, id, format!("reindex: list missing chunks: {e:#}")).await;
-                return Err(e);
+                send_error(&tx, id, format!("reindex: list missing chunks: {e}")).await;
+                return Err(e.into());
             }
         };
         let memories = match self
@@ -243,8 +242,8 @@ impl AppState {
         {
             Ok(v) => v,
             Err(e) => {
-                send_error(&tx, id, format!("reindex: list missing memories: {e:#}")).await;
-                return Err(e);
+                send_error(&tx, id, format!("reindex: list missing memories: {e}")).await;
+                return Err(e.into());
             }
         };
         let chunks_total = chunks.len() as u32;
@@ -294,7 +293,7 @@ impl AppState {
         store: F,
     ) where
         F: Fn(i64, Vec<u8>) -> Fut,
-        Fut: std::future::Future<Output = Result<()>>,
+        Fut: std::future::Future<Output = Result<(), assistd_memory::MemoryError>>,
     {
         let total = items.len() as u32;
         for (done, (item_id, text)) in (1u32..).zip(items) {

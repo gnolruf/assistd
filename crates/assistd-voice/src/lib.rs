@@ -1,18 +1,7 @@
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::print_stdout,
-        clippy::print_stderr
-    )
-)]
-
 //! Voice subsystem: the [`VoiceInput`] (speech-to-text) and
 //! [`VoiceOutput`] (text-to-speech) traits, with Whisper, cpal, and
 //! Piper implementations behind cargo features.
 
-use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::watch;
 
@@ -37,13 +26,17 @@ pub mod listen;
 pub mod piper;
 
 pub mod controller;
+pub mod error;
 pub mod sentence;
 
 pub use controller::{SpeakDecision, VoiceOutputController};
+pub use error::{VoiceInputError, VoiceOutputError};
 #[cfg(feature = "listen")]
-pub use listen::{ContinuousListener, MicContinuousListener, NoContinuousListener};
+pub use listen::{ContinuousListener, ListenError, MicContinuousListener, NoContinuousListener};
 #[cfg(feature = "mic")]
-pub use mic::{MicVoiceInput, VoiceInputError, capture::validate as mic_validate};
+pub use mic::{
+    AudioCaptureError, DeviceValidationError, MicVoiceInput, capture::validate as mic_validate,
+};
 #[cfg(feature = "tts")]
 pub use piper::{PiperError, PiperVoiceOutput};
 pub use sentence::SentenceBuffer;
@@ -66,11 +59,11 @@ pub trait VoiceInput: Send + Sync + 'static {
     /// Open the capture device and begin buffering. Recording runs
     /// until [`stop_and_transcribe`](Self::stop_and_transcribe) or the
     /// configured cap.
-    async fn start_recording(&self) -> Result<()>;
+    async fn start_recording(&self) -> Result<(), VoiceInputError>;
 
     /// Stop capture and transcribe. `Ok("")` means no speech was
     /// detected, not an error.
-    async fn stop_and_transcribe(&self) -> Result<String>;
+    async fn stop_and_transcribe(&self) -> Result<String, VoiceInputError>;
 
     /// Current capture state; cheap synchronous snapshot.
     fn state(&self) -> VoiceCaptureState;
@@ -86,10 +79,10 @@ pub trait VoiceInput: Send + Sync + 'static {
 pub trait VoiceOutput: Send + Sync + 'static {
     /// Synthesize `text` and enqueue the audio. Returns once enqueued,
     /// not once played; use [`wait_idle`](Self::wait_idle) for that.
-    async fn speak(&self, text: String) -> Result<()>;
+    async fn speak(&self, text: String) -> Result<(), VoiceOutputError>;
 
     /// Block until the playback queue drains.
-    async fn wait_idle(&self) -> Result<()> {
+    async fn wait_idle(&self) -> Result<(), VoiceOutputError> {
         Ok(())
     }
 
@@ -117,12 +110,12 @@ impl NoVoiceInput {
 
 #[async_trait]
 impl VoiceInput for NoVoiceInput {
-    async fn start_recording(&self) -> Result<()> {
-        anyhow::bail!("voice input is not enabled in this build")
+    async fn start_recording(&self) -> Result<(), VoiceInputError> {
+        Err(VoiceInputError::Disabled)
     }
 
-    async fn stop_and_transcribe(&self) -> Result<String> {
-        anyhow::bail!("voice input is not enabled in this build")
+    async fn stop_and_transcribe(&self) -> Result<String, VoiceInputError> {
+        Err(VoiceInputError::Disabled)
     }
 
     fn state(&self) -> VoiceCaptureState {
@@ -139,7 +132,7 @@ pub struct NoVoiceOutput;
 
 #[async_trait]
 impl VoiceOutput for NoVoiceOutput {
-    async fn speak(&self, _text: String) -> Result<()> {
+    async fn speak(&self, _text: String) -> Result<(), VoiceOutputError> {
         Ok(())
     }
 }

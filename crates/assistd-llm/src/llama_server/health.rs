@@ -32,11 +32,6 @@ impl HealthChecker {
         })
     }
 
-    /// Overall deadline used for readiness.
-    pub fn ready_timeout(&self) -> Duration {
-        self.ready_timeout
-    }
-
     /// Poll `/health` until it returns 200 OK, the deadline elapses, or
     /// shutdown is requested. Non-200 responses and transport errors
     /// keep polling.

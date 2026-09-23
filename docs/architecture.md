@@ -114,7 +114,7 @@ agent turn surfaces an `LlmError::ServerRestarting`. The agent
 retries once after the new child reports healthy; further failures
 propagate up to the client as an `Event::Error`.
 
-Vision support is detected dynamically: `probe_capabilities()` calls
+Vision support is detected dynamically: `probe_capabilities_routed()` calls
 `GET /props` on the running server to learn whether the model has a
 vision projector. The `VisionGate` flips on if so, allowing the `see`
 and `screenshot` commands to attach images to the next turn. A
