@@ -117,15 +117,10 @@ impl Correlator {
         let _ = tx.send(reply);
     }
 
-    /// Wake every pending caller with the error `err_factory` builds.
-    pub fn fail_all(&self, err_factory: impl Fn() -> RpcError) {
-        let drained: Vec<_> = {
-            let mut guard = self.pending.lock();
-            guard.drain().collect()
-        };
-        for (_, tx) in drained {
-            let _ = tx.send(Err(err_factory()));
-        }
+    /// Drop every pending reply sender, so each waiting receiver
+    /// observes a closed channel.
+    pub fn fail_all(&self) {
+        self.pending.lock().clear();
     }
 
     pub fn in_flight(&self) -> usize {
@@ -193,14 +188,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn closed_err() -> RpcError {
-        RpcError {
-            code: -1,
-            message: "transport closed".into(),
-            data: None,
-        }
-    }
-
     #[tokio::test]
     async fn round_trip_request_response() {
         let c = Correlator::new();
@@ -253,11 +240,11 @@ mod tests {
         let mut p2 = c.next_request("b", json!({})).unwrap();
         assert_eq!(c.in_flight(), 2);
 
-        c.fail_all(closed_err);
+        c.fail_all();
         assert_eq!(c.in_flight(), 0);
 
-        assert!((&mut p1.rx).await.unwrap().is_err());
-        assert!((&mut p2.rx).await.unwrap().is_err());
+        assert!((&mut p1.rx).await.is_err());
+        assert!((&mut p2.rx).await.is_err());
     }
 
     #[tokio::test]

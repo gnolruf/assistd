@@ -334,7 +334,6 @@ dependencies = [
 name = "assistd-mcp"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "assistd-tools",
  "async-trait",
  "base64 0.23.1",
@@ -346,6 +345,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
 ]

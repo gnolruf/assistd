@@ -64,7 +64,6 @@ impl Tool for HealthRoutedTool {
 mod tests {
     use super::*;
     use crate::{McpClient, ToolResult, ToolSchema};
-    use anyhow::Result as AnyResult;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -72,10 +71,10 @@ mod tests {
 
     #[async_trait]
     impl McpClient for FakeClient {
-        async fn list_tools(&self) -> AnyResult<Vec<ToolSchema>> {
+        async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError> {
             Ok(vec![])
         }
-        async fn invoke(&self, name: &str, _args: Value) -> AnyResult<ToolResult> {
+        async fn invoke(&self, name: &str, _args: Value) -> Result<ToolResult, McpError> {
             Ok(ToolResult::Text(format!("called {name}")))
         }
     }

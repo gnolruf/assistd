@@ -5,11 +5,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{RwLock, watch};
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, info, warn};
 
 use crate::backoff::{RESTART_WINDOW, RestartDecision, RestartPolicy, UNHEALTHY_RETRY_INTERVAL};
@@ -35,12 +34,17 @@ pub enum TransportConfig {
 
 /// Stable handle for a single MCP server. The `Arc<dyn McpClient>`
 /// returned by [`Self::client`] survives transport restarts.
+///
+/// Dropping the handle without [`Self::shutdown`] aborts the
+/// supervisor, which drops the live transport: a stdio child is
+/// SIGKILLed (`kill_on_drop`, direct child only) and an SSE
+/// connection's tasks are aborted.
 pub struct McpServerHandle {
     pub name: String,
     switch: Arc<SwitchingClient>,
     health_rx: watch::Receiver<HealthState>,
     supervisor_shutdown_tx: watch::Sender<bool>,
-    supervisor_task: Option<JoinHandle<()>>,
+    supervisor_task: AbortOnDropHandle<()>,
 }
 
 impl McpServerHandle {
@@ -67,14 +71,14 @@ impl McpServerHandle {
             supervisor_shutdown_rx,
             external_shutdown_rx,
         };
-        let supervisor_task = tokio::spawn(supervisor.run());
+        let supervisor_task = AbortOnDropHandle::new(tokio::spawn(supervisor.run()));
 
         Ok(Self {
             name,
             switch,
             health_rx,
             supervisor_shutdown_tx,
-            supervisor_task: Some(supervisor_task),
+            supervisor_task,
         })
     }
 
@@ -91,24 +95,11 @@ impl McpServerHandle {
         self.health_rx.clone()
     }
 
-    /// Stop the supervisor and wait up to 15 seconds for it to exit.
-    pub async fn shutdown(mut self) {
+    /// Stop the supervisor and wait up to 15 seconds for it to exit
+    /// gracefully; past that it is aborted.
+    pub async fn shutdown(self) {
         let _ = self.supervisor_shutdown_tx.send(true);
-        if let Some(task) = self.supervisor_task.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(15), task).await;
-        }
-    }
-}
-
-impl Drop for McpServerHandle {
-    fn drop(&mut self) {
-        // Aborting the supervisor drops the child, which is
-        // `kill_on_drop`, so a handle dropped without `shutdown()` still
-        // reaps its process.
-        let _ = self.supervisor_shutdown_tx.send(true);
-        if let Some(task) = self.supervisor_task.take() {
-            task.abort();
-        }
+        let _ = tokio::time::timeout(Duration::from_secs(15), self.supervisor_task).await;
     }
 }
 
@@ -132,13 +123,13 @@ impl SwitchingClient {
 
 #[async_trait]
 impl McpClient for SwitchingClient {
-    async fn list_tools(&self) -> AnyResult<Vec<ToolSchema>> {
+    async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError> {
         let live = self.inner.read().await.clone();
         let client = live.ok_or(McpError::ServerDown)?;
         client.list_tools().await
     }
 
-    async fn invoke(&self, name: &str, arguments: Value) -> AnyResult<ToolResult> {
+    async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult, McpError> {
         let live = self.inner.read().await.clone();
         let client = live.ok_or(McpError::ServerDown)?;
         client.invoke(name, arguments).await
@@ -343,14 +334,14 @@ mod tests {
 
     #[async_trait]
     impl McpClient for FakeClient {
-        async fn list_tools(&self) -> AnyResult<Vec<ToolSchema>> {
+        async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError> {
             Ok(vec![ToolSchema {
                 name: "ping".into(),
                 description: "ping".into(),
                 input_schema: json!({"type": "object"}),
             }])
         }
-        async fn invoke(&self, _name: &str, _args: Value) -> AnyResult<ToolResult> {
+        async fn invoke(&self, _name: &str, _args: Value) -> Result<ToolResult, McpError> {
             *self.invocations.lock() += 1;
             Ok(ToolResult::Text("pong".into()))
         }
@@ -360,8 +351,7 @@ mod tests {
     async fn switching_client_returns_server_down_when_empty() {
         let switch = Arc::new(SwitchingClient::new(None));
         let err = switch.list_tools().await.unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.to_lowercase().contains("unavailable") || msg.contains("server is currently"));
+        assert!(matches!(err, McpError::ServerDown), "{err}");
     }
 
     #[tokio::test]

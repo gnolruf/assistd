@@ -145,11 +145,3 @@ pub(crate) async fn await_reply(
         Err(_) => Err(McpError::RequestTimeout(timeout)),
     }
 }
-
-pub(crate) fn closed_err() -> RpcError {
-    RpcError {
-        code: -32603,
-        message: "MCP transport closed".into(),
-        data: None,
-    }
-}

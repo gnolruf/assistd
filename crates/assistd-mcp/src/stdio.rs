@@ -6,13 +6,12 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
 use crate::error::McpError;
@@ -81,10 +80,8 @@ impl StdioMcpClient {
         let stdin = child.stdin.take().expect("stdin piped");
         let stderr = child.stderr.take().expect("stderr piped");
 
-        let stderr_task = {
-            let label = cfg.label.clone();
-            tokio::spawn(forward_stderr(stderr, label))
-        };
+        let stderr_task =
+            AbortOnDropHandle::new(tokio::spawn(forward_stderr(stderr, cfg.label.clone())));
 
         let (client, transport_handles) =
             Self::from_streams(stdout, stdin, cfg.label.clone(), cfg.request_timeout).await?;
@@ -97,7 +94,7 @@ impl StdioMcpClient {
                 "MCP initialize failed; tearing down transport",
             );
             let _ = child.kill().await;
-            let _ = transport_handles.shutdown_and_join().await;
+            transport_handles.shutdown_and_join().await;
             let _ = stderr_task.await;
             return Err(e);
         }
@@ -110,10 +107,10 @@ impl StdioMcpClient {
         );
 
         let lifeline = ChildLifeline {
-            label: cfg.label.clone(),
-            child: Some(child),
-            transport: Some(transport_handles),
-            stderr_task: Some(stderr_task),
+            label: cfg.label,
+            child,
+            transport: transport_handles,
+            stderr_task,
         };
         Ok((client, lifeline))
     }
@@ -136,10 +133,16 @@ impl StdioMcpClient {
         let read_label = label.clone();
         let read_correlator = correlator.clone();
         let (read_done_tx, read_done_rx) = oneshot::channel::<()>();
-        let read_task = tokio::spawn(read_loop(read, read_correlator, read_label, read_done_tx));
+        let read_task = AbortOnDropHandle::new(tokio::spawn(read_loop(
+            read,
+            read_correlator,
+            read_label,
+            read_done_tx,
+        )));
 
         let write_label = label.clone();
-        let write_task = tokio::spawn(write_loop(write, write_rx, write_label));
+        let write_task =
+            AbortOnDropHandle::new(tokio::spawn(write_loop(write, write_rx, write_label)));
 
         let client = Arc::new(Self {
             label,
@@ -151,8 +154,8 @@ impl StdioMcpClient {
         Ok((
             client,
             TransportHandles {
-                read_task: Some(read_task),
-                write_task: Some(write_task),
+                read_task,
+                write_task,
                 read_done: read_done_rx,
             },
         ))
@@ -187,52 +190,40 @@ impl StdioMcpClient {
 
 #[async_trait]
 impl McpClient for StdioMcpClient {
-    async fn list_tools(&self) -> AnyResult<Vec<ToolSchema>> {
+    async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError> {
         let result = self.call("tools/list", json!({})).await?;
-        Ok(protocol::parse_tools_list(&result)?)
+        protocol::parse_tools_list(&result)
     }
 
-    async fn invoke(&self, name: &str, arguments: Value) -> AnyResult<ToolResult> {
+    async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult, McpError> {
         let result = self
             .call("tools/call", protocol::tool_call_params(name, arguments))
             .await?;
-        Ok(protocol::parse_tool_call(result)?)
+        protocol::parse_tool_call(result)
     }
 }
 
-/// The spawned child plus its I/O tasks.
+/// The spawned child plus its I/O tasks. Dropping it SIGKILLs the
+/// child and aborts the tasks.
 pub struct ChildLifeline {
-    pub label: String,
-    child: Option<tokio::process::Child>,
-    transport: Option<TransportHandles>,
-    stderr_task: Option<JoinHandle<()>>,
+    label: String,
+    child: tokio::process::Child,
+    transport: TransportHandles,
+    stderr_task: AbortOnDropHandle<()>,
 }
 
 impl ChildLifeline {
-    pub fn pid(&self) -> Option<u32> {
-        self.child.as_ref().and_then(|c| c.id())
-    }
-
     /// Resolves when the child exits or its stdout read loop ends. A
     /// live child whose read loop has ended can never answer again, so
     /// both count as death.
     pub async fn wait_for_death(&mut self) {
-        let child = self
-            .child
-            .as_mut()
-            .expect("wait_for_death called after shutdown");
-        let read_done = &mut self
-            .transport
-            .as_mut()
-            .expect("wait_for_death called after shutdown")
-            .read_done;
         tokio::select! {
-            status = child.wait() => debug!(
+            status = self.child.wait() => debug!(
                 target: "assistd::mcp",
                 server = %self.label,
                 "MCP child exited: {status:?}",
             ),
-            _ = read_done => debug!(
+            _ = &mut self.transport.read_done => debug!(
                 target: "assistd::mcp",
                 server = %self.label,
                 "MCP read loop ended while the child was still alive",
@@ -241,69 +232,64 @@ impl ChildLifeline {
     }
 
     /// SIGTERM the process group, wait `term_timeout`, then SIGKILL.
-    pub async fn shutdown(mut self, term_timeout: Duration) {
-        let label = self.label.clone();
-        if let Some(mut child) = self.child.take() {
-            #[cfg(unix)]
-            if let Some(pid) = child.id()
-                && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
-            {
-                let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+    pub async fn shutdown(self, term_timeout: Duration) {
+        let Self {
+            label,
+            mut child,
+            transport,
+            stderr_task,
+        } = self;
+        #[cfg(unix)]
+        if let Some(pid) = child.id()
+            && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
+        {
+            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+        }
+        match tokio::time::timeout(term_timeout, child.wait()).await {
+            Ok(Ok(status)) => {
+                info!(
+                    target: "assistd::mcp",
+                    server = %label,
+                    "MCP server exited after SIGTERM: {status}",
+                );
             }
-            match tokio::time::timeout(term_timeout, child.wait()).await {
-                Ok(Ok(status)) => {
-                    info!(
-                        target: "assistd::mcp",
-                        server = %label,
-                        "MCP server exited after SIGTERM: {status}",
-                    );
-                }
-                Ok(Err(e)) => {
-                    warn!(
-                        target: "assistd::mcp",
-                        server = %label,
-                        "MCP server wait error: {e}",
-                    );
-                }
-                Err(_) => {
-                    warn!(
-                        target: "assistd::mcp",
-                        server = %label,
-                        "MCP server did not exit within {term_timeout:?}; sending SIGKILL",
-                    );
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                }
+            Ok(Err(e)) => {
+                warn!(
+                    target: "assistd::mcp",
+                    server = %label,
+                    "MCP server wait error: {e}",
+                );
+            }
+            Err(_) => {
+                warn!(
+                    target: "assistd::mcp",
+                    server = %label,
+                    "MCP server did not exit within {term_timeout:?}; sending SIGKILL",
+                );
+                let _ = child.start_kill();
+                let _ = child.wait().await;
             }
         }
 
-        if let Some(handles) = self.transport.take() {
-            handles.shutdown_and_join().await;
-        }
-        if let Some(task) = self.stderr_task.take() {
-            let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
-        }
+        transport.shutdown_and_join().await;
+        let _ = tokio::time::timeout(Duration::from_millis(500), stderr_task).await;
     }
 }
 
-/// The read and write tasks of one transport.
+/// The read and write tasks of one transport. Dropping it aborts both.
 pub struct TransportHandles {
-    read_task: Option<JoinHandle<()>>,
-    write_task: Option<JoinHandle<()>>,
+    read_task: AbortOnDropHandle<()>,
+    write_task: AbortOnDropHandle<()>,
     /// Fires when the read loop terminates.
     pub read_done: oneshot::Receiver<()>,
 }
 
 impl TransportHandles {
     /// Abort both tasks and wait briefly for each to finish.
-    pub async fn shutdown_and_join(mut self) {
-        if let Some(t) = self.read_task.take() {
-            t.abort();
-            let _ = tokio::time::timeout(Duration::from_millis(500), t).await;
-        }
-        if let Some(t) = self.write_task.take() {
-            t.abort();
-            let _ = tokio::time::timeout(Duration::from_millis(500), t).await;
+    pub async fn shutdown_and_join(self) {
+        for task in [self.read_task, self.write_task] {
+            task.abort();
+            let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
         }
     }
 }
@@ -360,7 +346,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
         }
     }
-    correlator.fail_all(protocol::closed_err);
+    correlator.fail_all();
     let _ = done_tx.send(());
 }
 
@@ -408,6 +394,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex};
+    use tokio::task::JoinHandle;
 
     /// Pretend MCP server: reads requests from `client_to_server`, replies
     /// on `server_to_client`. Hands back the spawned task so callers can
@@ -679,11 +666,7 @@ mod tests {
         drop(server_write);
 
         let err = call.await.unwrap().unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.to_lowercase().contains("transport closed") || msg.contains("MCP transport"),
-            "{msg}"
-        );
+        assert!(matches!(err, McpError::TransportClosed), "{err}");
         handles.shutdown_and_join().await;
     }
 }

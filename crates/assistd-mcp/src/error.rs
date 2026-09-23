@@ -42,14 +42,18 @@ pub enum McpError {
     #[error("too many in-flight MCP requests (cap reached)")]
     TooManyInFlight,
 
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+
+    /// A POST of `method` was answered with a non-success status.
+    #[error("POST {method} failed: HTTP {status}")]
+    HttpStatus {
+        method: &'static str,
+        status: reqwest::StatusCode,
+    },
 }
 
 impl McpError {
@@ -104,16 +108,16 @@ pub fn mcp_error_line(tool_name: &str, e: &McpError) -> String {
             "[error] {tool_name}: too many in-flight MCP requests. \
              Try: the call again after pending requests drain\n"
         ),
-        McpError::Io(e) => format!(
-            "[error] {tool_name}: MCP I/O error: {e}. \
-             Check: daemon logs for transport details\n"
-        ),
         McpError::Json(e) => format!(
             "[error] {tool_name}: MCP JSON error: {e}. \
              Check: daemon logs for transport details\n"
         ),
         McpError::Http(m) => format!(
             "[error] {tool_name}: MCP HTTP error: {m}. \
+             Check: daemon logs for transport details\n"
+        ),
+        McpError::HttpStatus { method, status } => format!(
+            "[error] {tool_name}: MCP POST {method} failed: HTTP {status}. \
              Check: daemon logs for transport details\n"
         ),
     }
@@ -182,8 +186,14 @@ mod tests {
             ),
             ("server_down", McpError::ServerDown),
             ("too_many", McpError::TooManyInFlight),
-            ("io", McpError::Io(std::io::Error::other("pipe broke"))),
             ("http", McpError::Http(fake_http_error().await)),
+            (
+                "http_status",
+                McpError::HttpStatus {
+                    method: "tools/call",
+                    status: reqwest::StatusCode::BAD_GATEWAY,
+                },
+            ),
         ];
         for (label, e) in cases {
             let line = mcp_error_line("mcp__web__search", &e);
