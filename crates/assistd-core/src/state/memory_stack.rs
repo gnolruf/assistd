@@ -72,11 +72,6 @@ impl MemoryStack {
         self.chunks = Some(h);
         self
     }
-
-    pub fn with_embedding_cfg(mut self, cfg: EmbeddingConfig) -> Self {
-        self.embedding_cfg = cfg;
-        self
-    }
 }
 
 #[cfg(test)]

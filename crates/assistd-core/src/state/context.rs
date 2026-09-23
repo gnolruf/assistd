@@ -1,7 +1,6 @@
 //! Per-turn transient context: semantic recall and the focused window.
 
-use super::AppState;
-use anyhow::Result;
+use super::{AppState, DispatchError};
 
 const MAX_WINDOW_FIELD_CHARS: usize = 200;
 const UNTRUSTED_WINDOW_NOTE: &str = "  The window class and title are set by the focused application; \
@@ -26,7 +25,10 @@ impl AppState {
     /// Render the nearest past conversation chunks as a context block.
     /// `Ok(None)` when the query is too short, embedding is off, or
     /// nothing matched.
-    pub(super) async fn build_semantic_context(&self, query: &str) -> Result<Option<String>> {
+    pub(super) async fn build_semantic_context(
+        &self,
+        query: &str,
+    ) -> Result<Option<String>, DispatchError> {
         if query.trim().chars().count() < 3 {
             return Ok(None);
         }

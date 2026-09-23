@@ -17,7 +17,6 @@ assistd-memory = { workspace = true }
 assistd-tools = { workspace = true }
 assistd-voice = { workspace = true }
 assistd-wm    = { workspace = true }
-anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }

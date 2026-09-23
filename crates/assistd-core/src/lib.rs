@@ -1,13 +1,3 @@
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::print_stdout,
-        clippy::print_stderr
-    )
-)]
-
 //! Daemon orchestration: the agent loop, presence state machine, IPC
 //! socket server, and the `AppState` request dispatcher. Not a stable
 //! public API; the re-exports exist so the `assistd` binary can reach
@@ -44,17 +34,17 @@ pub use assistd_voice::{
 
 pub use assistd_wm::{NoWindowManager, WindowManager};
 
-pub use presence::{PresenceManager, RequestGuard};
+pub use presence::{PresenceError, PresenceManager, RequestGuard};
 pub use state::{
-    AppState, ConversationContext, McpStartupFailure, MemoryStack, RuntimeState, Subsystems,
-    history_entries,
+    AppState, ConversationContext, DispatchError, McpStartupFailure, MemoryStack, RuntimeState,
+    Subsystems, history_entries,
 };
 
-use anyhow::{Context, Result};
 use assistd_embed::{EmbedJob, Embedder};
 use assistd_memory::SemanticStore;
 use assistd_tools::{
-    ConfirmationGate, MemoryOps, RecallTool, RememberTool, ReminisceTool, RunTool, SandboxRequest,
+    ConfirmationGate, MemoryOps, RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError,
+    SandboxRequest,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
@@ -65,8 +55,36 @@ use assistd_tools::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tracing::warn;
+
+/// Why [`build_tools`] could not assemble the tool registry.
+#[derive(Debug, Error)]
+pub enum BuildToolsError {
+    #[error("failed to clear tools.output.overflow_dir {}: {source}", path.display())]
+    ClearOverflowDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to create tools.output.overflow_dir {}: {source}", path.display())]
+    CreateOverflowDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error(transparent)]
+    Sandbox(#[from] SandboxError),
+
+    #[error(
+        "tools.write.writable_paths contains no resolvable directories; \
+         fix ~/.config/assistd/config.toml"
+    )]
+    NoWritablePaths,
+}
 
 /// Subsystem handles [`build_tools`] wires into the tool registry.
 pub struct BuildToolsDeps<'a> {
@@ -89,7 +107,7 @@ pub struct BuildToolsDeps<'a> {
 /// Build the tool registry consumed by the daemon. Clears and recreates
 /// [`BuildToolsDeps::overflow_dir`] so per-process spill files land in a
 /// known-empty location at every startup.
-pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
+pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildToolsError> {
     let BuildToolsDeps {
         config,
         overflow_dir,
@@ -106,18 +124,18 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
     } = deps;
 
     if overflow_dir.exists() {
-        std::fs::remove_dir_all(&overflow_dir).with_context(|| {
-            format!(
-                "failed to clear tools.output.overflow_dir {}",
-                overflow_dir.display()
-            )
+        std::fs::remove_dir_all(&overflow_dir).map_err(|source| {
+            BuildToolsError::ClearOverflowDir {
+                path: overflow_dir.clone(),
+                source,
+            }
         })?;
     }
-    std::fs::create_dir_all(&overflow_dir).with_context(|| {
-        format!(
-            "failed to create tools.output.overflow_dir {}",
-            overflow_dir.display()
-        )
+    std::fs::create_dir_all(&overflow_dir).map_err(|source| {
+        BuildToolsError::CreateOverflowDir {
+            path: overflow_dir.clone(),
+            source,
+        }
     })?;
 
     let sandbox_request = match config.tools.bash.sandbox {
@@ -156,12 +174,8 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>> {
             }
         }
     }
-    let write_cfg = Arc::new(WritePolicyCfg::new(writable_paths).ok_or_else(|| {
-        anyhow::anyhow!(
-            "tools.write.writable_paths contains no resolvable directories; \
-             fix ~/.config/assistd/config.toml"
-        )
-    })?);
+    let write_cfg =
+        Arc::new(WritePolicyCfg::new(writable_paths).ok_or(BuildToolsError::NoWritablePaths)?);
 
     let screenshot_cfg = Arc::new(ScreenshotPolicyCfg {
         backend: match config.tools.screenshot.backend {
@@ -275,8 +289,7 @@ impl VisionRevalidator {
         self.apply_probe(probe).await;
     }
 
-    /// Apply a probe result to the cache and gate.
-    pub async fn apply_probe(&self, probe: assistd_llm::VisionState) {
+    async fn apply_probe(&self, probe: assistd_llm::VisionState) {
         if probe.model_id.is_none() {
             return;
         }
@@ -291,10 +304,6 @@ impl VisionRevalidator {
             *cache = probe.model_id;
             self.gate.set(probe.vision_supported);
         }
-    }
-
-    pub fn gate(&self) -> &Arc<assistd_tools::VisionGate> {
-        &self.gate
     }
 }
 
@@ -342,10 +351,7 @@ mod tests {
     async fn no_model_id_keeps_gate_unchanged() {
         let rev = make_revalidator(true, Some("model-A"));
         rev.apply_probe(VisionState::default()).await;
-        assert!(
-            rev.gate().supported(),
-            "gate must not flip on probe failure"
-        );
+        assert!(rev.gate.supported(), "gate must not flip on probe failure");
     }
 
     #[tokio::test]
@@ -356,7 +362,7 @@ mod tests {
             vision_supported: false,
         })
         .await;
-        assert!(rev.gate().supported());
+        assert!(rev.gate.supported());
     }
 
     #[tokio::test]
@@ -367,7 +373,7 @@ mod tests {
             vision_supported: false,
         })
         .await;
-        assert!(!rev.gate().supported(), "gate must flip when model changes");
+        assert!(!rev.gate.supported(), "gate must flip when model changes");
     }
 
     #[tokio::test]
@@ -378,7 +384,7 @@ mod tests {
             vision_supported: true,
         })
         .await;
-        assert!(rev.gate().supported());
+        assert!(rev.gate.supported());
     }
 
     #[tokio::test]
@@ -389,6 +395,6 @@ mod tests {
             vision_supported: true,
         })
         .await;
-        assert!(rev.gate().supported());
+        assert!(rev.gate.supported());
     }
 }
