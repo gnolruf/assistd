@@ -26,6 +26,7 @@ shlex = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
 rustix = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
