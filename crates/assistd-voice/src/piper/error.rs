@@ -52,9 +52,6 @@ pub enum PiperError {
     #[error("rodio failed to open default audio output: {0}")]
     Audio(String),
 
-    #[error("playback worker channel closed; rodio thread has exited")]
-    PlaybackClosed,
-
     #[error("piper service is degraded: {0}")]
     Degraded(String),
 }

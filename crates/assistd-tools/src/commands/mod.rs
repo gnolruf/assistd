@@ -31,7 +31,26 @@ pub use web::WebCommand;
 pub use wm::WmCommand;
 pub use write::{WriteCommand, WritePolicyCfg};
 
+use std::path::Path;
+
 use crate::command::{CommandOutput, Hint, error_line, io_error_nav};
+
+/// Read `path` only if it is a regular file. A device, FIFO or socket
+/// (including `/dev/stdin`, the daemon's own terminal) can block the
+/// read forever or never end, so anything that is neither a file nor a
+/// directory is refused before a read starts. Directories fall through
+/// to the read so the usual `EISDIR` message is preserved.
+pub(crate) async fn read_regular_file(path: impl AsRef<Path>) -> std::io::Result<Vec<u8>> {
+    let path = path.as_ref();
+    let meta = tokio::fs::metadata(path).await?;
+    if !meta.is_file() && !meta.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file (device, pipe, or socket)",
+        ));
+    }
+    tokio::fs::read(path).await
+}
 
 /// Gather what a stdin-or-files command should operate on. Files named
 /// on the command line win over stdin (as in coreutils), and several of
@@ -51,7 +70,7 @@ pub(crate) async fn collect_input(
     }
     let mut out = Vec::new();
     for path in files {
-        let bytes = match tokio::fs::read(path).await {
+        let bytes = match read_regular_file(path).await {
             Ok(b) => b,
             Err(e) => {
                 return Err(CommandOutput::failed(

@@ -79,6 +79,9 @@ impl AppState {
         let generator = self.spawn_agent_task(text, attachments, llm_tx, cancel.clone());
 
         let (speech, speech_rx) = self.speech_pipeline();
+        // A new message supersedes whatever the previous reply was
+        // still saying.
+        self.subsystems.voice_output.skip().await;
         let start_epoch = self.subsystems.voice_output.current_epoch();
         let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 

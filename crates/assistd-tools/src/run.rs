@@ -58,13 +58,19 @@ impl RunTool {
 fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
     let mut s = String::with_capacity(1024);
     s.push_str(
-        "Execute a shell-style command in the daemon's working directory. \
+        "Execute a shell-style command line in the daemon's working \
+         directory. The commands listed below exist only as the first word \
+         of this tool's `command` string, e.g. {\"command\": \"wm list\"}; \
+         they are not tools and cannot be called by name. Every other entry \
+         in the tool list is a separate tool with its own arguments. \
          Supports pipelines (|), and/or (&&, ||), sequencing (;), `~` and \
          globs (*, ?, []) on unquoted arguments; quote an argument to pass \
          it through literally, including a `|` that belongs to the \
-         argument rather than the pipeline (`grep \"a|b\" f.txt`). Redirections (>, <), env expansion ($VAR), \
-         and backgrounding (&) are NOT supported; use `bash \"…\"` for a \
-         real shell when needed. ",
+         argument rather than the pipeline (`grep \"a|b\" f.txt`). \
+         Redirections (>, <, 2>, 2>&1), here-docs, env expansion ($VAR), \
+         and backgrounding (&) are NOT supported: stderr is already \
+         captured in the result, and `bash \"…\"` gives a real shell when \
+         needed. ",
     );
     s.push_str(&format!(
         "Output is returned whole unless its stdout exceeds {max_lines} \
@@ -72,7 +78,7 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
          full text saved, with the truncation notice giving a \
          `Full output: {dir}/cmd-N.txt` path that subsequent `run` calls \
          can grep/cat. No such file exists for output under those \
-         limits.\n\nAvailable commands:\n",
+         limits.\n\nCommands (first word of `command`):\n",
         max_lines = spec.max_lines,
         max_size = human_size(spec.max_bytes),
         dir = spec.overflow_dir.display(),

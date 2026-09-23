@@ -29,6 +29,12 @@ impl ChildProcess {
             .arg(cfg.host.to_string())
             .arg("--port")
             .arg(cfg.port.to_string());
+        // With no layers offloaded, llama-server would still create a
+        // CUDA context on the card and fail to start when the chat model
+        // has filled VRAM; hiding the devices keeps it CPU-only.
+        if cfg.gpu_layers == 0 {
+            cmd.env("CUDA_VISIBLE_DEVICES", "");
+        }
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())

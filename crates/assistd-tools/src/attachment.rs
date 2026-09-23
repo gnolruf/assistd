@@ -77,6 +77,15 @@ pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), L
             path: path.display().to_string(),
             source: e,
         })?;
+    if !meta.is_file() {
+        return Err(LoadImageError::Io {
+            path: path.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a regular file (device, pipe, or socket)",
+            ),
+        });
+    }
     if meta.len() > MAX_IMAGE_BYTES {
         return Err(LoadImageError::TooLarge {
             path: path.display().to_string(),

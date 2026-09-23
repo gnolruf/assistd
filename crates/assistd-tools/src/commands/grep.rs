@@ -186,7 +186,7 @@ async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> Command
     let mut out = Vec::new();
     let mut total = 0usize;
     for path in targets {
-        let Ok(bytes) = tokio::fs::read(path).await else {
+        let Ok(bytes) = super::read_regular_file(path).await else {
             continue;
         };
         if sniff_binary(&bytes).is_some() {

@@ -110,6 +110,12 @@ pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
             Hint::Check,
             format_args!("ls -l {path}"),
         ),
+        ErrorKind::InvalidInput => error_line(
+            cmd,
+            format_args!("{path}: {e}"),
+            Hint::Check,
+            format_args!("ls -l {path}"),
+        ),
         _ => error_line(
             cmd,
             format_args!("{path}: {e}"),
