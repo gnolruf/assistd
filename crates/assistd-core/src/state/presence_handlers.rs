@@ -1,7 +1,6 @@
 //! Handlers for the presence state-machine variants of `Request`.
 
-use super::{AppState, send_error};
-use anyhow::Result;
+use super::{AppState, DispatchError, send_error};
 use assistd_ipc::{Event, PresenceState};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -12,7 +11,7 @@ impl AppState {
         id: String,
         target: PresenceState,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         match self.subsystems.presence.set_presence(target).await {
             Ok(()) => {
                 let _ = tx
@@ -25,17 +24,13 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("set_presence failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("set_presence failed: {e}")).await;
+                Err(e.into())
             }
         }
     }
 
-    pub(super) async fn handle_get_presence(
-        self: Arc<Self>,
-        id: String,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    pub(super) async fn handle_get_presence(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         let state = self.subsystems.presence.state();
         let _ = tx
             .send(Event::Presence {
@@ -44,14 +39,13 @@ impl AppState {
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
-        Ok(())
     }
 
     pub(super) async fn handle_cycle(
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
-    ) -> Result<()> {
+    ) -> Result<(), DispatchError> {
         match self.subsystems.presence.cycle().await {
             Ok(new_state) => {
                 let _ = tx
@@ -64,8 +58,8 @@ impl AppState {
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("cycle failed: {e:#}")).await;
-                Err(e)
+                send_error(&tx, id, format!("cycle failed: {e}")).await;
+                Err(e.into())
             }
         }
     }

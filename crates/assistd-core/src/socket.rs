@@ -359,7 +359,7 @@ async fn handle_connection(
         .await;
 
     if let Err(e) = dispatch_res {
-        error!("dispatch error: {e:#}");
+        error!("dispatch error: {e}");
     }
     let mut write_half = forward_res?;
     write_half.shutdown().await?;

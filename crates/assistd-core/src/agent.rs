@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use crate::recovery::{Component, StatusSeverity};
 use crate::recovery_event;
-use anyhow::Result;
 use assistd_ipc::StatusKind;
 use assistd_llm::{
     HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
@@ -74,6 +73,9 @@ impl Agent {
     /// step and each tool dispatch, so a slow tool is abandoned promptly.
     /// A never-cancelled token is fine for callers that only rely on the
     /// `tx` path.
+    ///
+    /// Errors when the backend fails; a restart the supervisor could not
+    /// complete surfaces as [`LlmError::ServerRestarting`].
     #[instrument(skip_all, name = "agent_turn")]
     pub async fn run_turn(
         &self,
@@ -81,11 +83,8 @@ impl Agent {
         user_attachments: Vec<Attachment>,
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
-    ) -> Result<()> {
-        self.backend
-            .push_user(user_text, user_attachments)
-            .await
-            .map_err(anyhow::Error::new)?;
+    ) -> Result<(), LlmError> {
+        self.backend.push_user(user_text, user_attachments).await?;
         let mut turn = Turn {
             tx,
             cancel,
@@ -126,19 +125,13 @@ impl Agent {
                         .iter()
                         .map(|call| cancelled_tool_result(call, "ended; tools are unavailable").0)
                         .collect();
-                    self.backend
-                        .push_tool_results(results)
-                        .await
-                        .map_err(anyhow::Error::new)?;
+                    self.backend.push_tool_results(results).await?;
                     let _ = turn.tx.send(LlmEvent::Done).await;
                     return Ok(());
                 }
                 StepOutcome::ToolCalls(calls) => {
                     let (results, stuck) = self.dispatch_tool_calls(&mut turn, calls).await;
-                    self.backend
-                        .push_tool_results(results)
-                        .await
-                        .map_err(anyhow::Error::new)?;
+                    self.backend.push_tool_results(results).await?;
                     turn.iteration += 1;
                     let exhausted = if stuck {
                         Some(ToolBudgetExhausted::Repeating)
@@ -159,9 +152,10 @@ impl Agent {
     /// waiting. A crash mid-step is retried once after the supervisor
     /// reports the server ready again; any other failure, or a second
     /// crash, ends the turn with an error after telling the client.
-    async fn step_with_replay(&self, turn: &Turn) -> Result<Option<StepOutcome>> {
+    async fn step_with_replay(&self, turn: &Turn) -> Result<Option<StepOutcome>, LlmError> {
         let mut restart_attempted = false;
         loop {
+            let replay_probe = self.health.as_ref().filter(|_| !restart_attempted);
             let step_result = tokio::select! {
                 biased;
                 () = turn.cancel.cancelled() => {
@@ -174,23 +168,20 @@ impl Agent {
                 }
                 r = self.backend.step(turn.schemas.clone(), turn.tx.clone()) => r,
             };
-            match step_result {
-                Ok(outcome) => return Ok(Some(outcome)),
-                Err(LlmError::ServerRestarting(reason))
-                    if !restart_attempted && self.health.is_some() =>
-                {
+            match (step_result, replay_probe) {
+                (Ok(outcome), _) => return Ok(Some(outcome)),
+                (Err(LlmError::ServerRestarting(reason)), Some(probe)) => {
                     restart_attempted = true;
-                    let probe = self.health.as_ref().expect("health Some by guard");
                     match await_restart(probe, turn, &reason).await {
                         Replay::Ready => continue,
                         Replay::Cancelled => return Ok(None),
                         Replay::Abandoned(final_msg) => {
                             fail_turn(&turn.tx, &final_msg).await;
-                            return Err(anyhow::Error::new(LlmError::ServerRestarting(final_msg)));
+                            return Err(LlmError::ServerRestarting(final_msg));
                         }
                     }
                 }
-                Err(e) => {
+                (Err(e), _) => {
                     let label = match &e {
                         LlmError::Chat(_) => "chat backend",
                         LlmError::ToolCallParse(_) => "tool-call parse",
@@ -198,7 +189,7 @@ impl Agent {
                         LlmError::ServerRestarting(_) => "llm restarting",
                     };
                     fail_turn(&turn.tx, &format!("{label}: {e}")).await;
-                    return Err(anyhow::Error::new(e));
+                    return Err(e);
                 }
             }
         }

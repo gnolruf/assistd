@@ -66,8 +66,7 @@ pub struct RuntimeState {
     /// Fire-and-forget persistence tasks, drained at daemon shutdown.
     pub(in crate::state) persistence_tracker: TaskTracker,
     /// Presence warmup spawned by PTT-start and joined by PTT-stop.
-    pub(in crate::state) warmup_handle:
-        Arc<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>>,
+    pub(in crate::state) warmup_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Cancellation token for the running agent turn.
     pub(in crate::state) current_cancel: Arc<Mutex<Option<CancellationToken>>>,
     /// Completion signal of the most recently queued persistence write.

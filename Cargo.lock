@@ -253,7 +253,6 @@ dependencies = [
 name = "assistd-core"
 version = "1.0.0"
 dependencies = [
- "anyhow",
  "assistd-config",
  "assistd-embed",
  "assistd-ipc",
