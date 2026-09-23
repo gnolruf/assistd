@@ -2,31 +2,24 @@ use super::*;
 use crate::chain::parse_chain;
 use crate::command::{Command, CommandInput, CommandOutput, CommandRegistry};
 use async_trait::async_trait;
-use parking_lot::Mutex;
-use std::sync::Arc;
 
-/// Fake command: returns a fixed exit code and stdout; records that
-/// it was invoked. `args[0]` (when present) overrides exit code,
-/// letting a single stub model "this run fails" vs "this run succeeds"
-/// in the same test.
+/// Fake command: emits fixed stdout (and optionally stderr) with a
+/// fixed exit code, ignoring its input.
 struct Stub {
     name: &'static str,
-    stdout: Vec<u8>,
+    stdout: &'static [u8],
+    stderr: &'static [u8],
     exit_code: i32,
-    invoked: Arc<Mutex<bool>>,
 }
 
 impl Stub {
-    fn new(name: &'static str, stdout: impl Into<Vec<u8>>, exit_code: i32) -> Self {
+    fn new(name: &'static str, stdout: &'static [u8], exit_code: i32) -> Self {
         Self {
             name,
-            stdout: stdout.into(),
+            stdout,
+            stderr: b"",
             exit_code,
-            invoked: Arc::new(Mutex::new(false)),
         }
-    }
-    fn invoked_flag(&self) -> Arc<Mutex<bool>> {
-        self.invoked.clone()
     }
 }
 
@@ -42,10 +35,9 @@ impl Command for Stub {
         "stub help".to_string()
     }
     async fn run(&self, _input: CommandInput) -> CommandOutput {
-        *self.invoked.lock() = true;
         CommandOutput {
-            stdout: self.stdout.clone(),
-            stderr: Vec::new(),
+            stdout: self.stdout.to_vec(),
+            stderr: self.stderr.to_vec(),
             exit_code: self.exit_code,
             attachments: Vec::new(),
         }
@@ -94,6 +86,29 @@ impl Command for LineCount {
     }
 }
 
+/// Reports whether it was handed a stdin at all.
+struct StdinKind;
+#[async_trait]
+impl Command for StdinKind {
+    fn name(&self) -> &str {
+        "stdin_kind"
+    }
+    fn summary(&self) -> &'static str {
+        "test: report stdin presence"
+    }
+    fn help(&self) -> String {
+        "usage: stdin_kind".to_string()
+    }
+    async fn run(&self, input: CommandInput) -> CommandOutput {
+        let kind = if input.stdin.is_some() {
+            "piped"
+        } else {
+            "none"
+        };
+        CommandOutput::ok(kind.as_bytes().to_vec())
+    }
+}
+
 /// Emits bytes of configurable length; exercises PIPE_BUF_MAX.
 struct Flood(usize);
 #[async_trait]
@@ -112,220 +127,142 @@ impl Command for Flood {
     }
 }
 
-fn registry() -> CommandRegistry {
+fn registry_of(stubs: impl IntoIterator<Item = Stub>) -> CommandRegistry {
     let mut r = CommandRegistry::new();
-    r.register(Echo);
-    r.register(LineCount);
+    for stub in stubs {
+        r.register(stub);
+    }
     r
 }
 
+async fn run_line(line: &str, registry: &CommandRegistry) -> CommandOutput {
+    let chain = parse_chain(line).unwrap();
+    execute(&chain, registry, None).await
+}
+
 #[tokio::test]
-async fn pipe_threads_stdout_into_stdin() {
-    let mut r = CommandRegistry::new();
-    r.register(Stub::new("emit", b"a\nb\nc\n".to_vec(), 0));
+async fn pipe_threads_stdout_through_every_stage() {
+    let mut r = registry_of([Stub::new("emit", b"a\nb\nc\n", 0)]);
+    r.register(Echo);
     r.register(LineCount);
-    let chain = parse_chain("emit | lc").unwrap();
-    let out = execute(&chain, &r, None).await;
+    let out = run_line("emit | echo_stdin | lc", &r).await;
     assert_eq!(out.stdout, b"3\n");
     assert_eq!(out.exit_code, 0);
 }
 
+/// Only a stage on the right of a pipe gets `Some` stdin, even when the
+/// upstream stage printed nothing; that is how a filter tells "nothing
+/// piped" from "empty input".
 #[tokio::test]
-async fn pipe_three_stages() {
-    let mut r = CommandRegistry::new();
-    r.register(Stub::new("emit", b"a\nb\nc\n".to_vec(), 0));
-    r.register(Echo);
-    r.register(LineCount);
-    let chain = parse_chain("emit | echo_stdin | lc").unwrap();
-    let out = execute(&chain, &r, None).await;
-    assert_eq!(out.stdout, b"3\n");
+async fn only_piped_stages_receive_stdin() {
+    let mut r = registry_of([Stub::new("silent", b"", 0)]);
+    r.register(StdinKind);
+    assert_eq!(run_line("stdin_kind", &r).await.stdout, b"none");
+    assert_eq!(run_line("silent | stdin_kind", &r).await.stdout, b"piped");
 }
 
 #[tokio::test]
-async fn and_runs_right_only_on_success() {
-    let mut r = CommandRegistry::new();
-    let ok_flag = {
-        let s = Stub::new("ok", b"first".to_vec(), 0);
-        let f = s.invoked_flag();
-        r.register(s);
-        f
-    };
-    let right_flag = {
-        let s = Stub::new("right", b"second".to_vec(), 0);
-        let f = s.invoked_flag();
-        r.register(s);
-        f
-    };
-    let chain = parse_chain("ok && right").unwrap();
-    let out = execute(&chain, &r, None).await;
-    assert!(*ok_flag.lock());
-    assert!(*right_flag.lock());
+async fn and_runs_right_on_success() {
+    let r = registry_of([
+        Stub::new("ok", b"first", 0),
+        Stub::new("right", b"second", 0),
+    ]);
+    let out = run_line("ok && right", &r).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"firstsecond");
 }
 
 #[tokio::test]
 async fn and_short_circuits_on_failure() {
-    let mut r = CommandRegistry::new();
-    r.register(Stub::new("bad", b"x".to_vec(), 1));
-    let right_flag = {
-        let s = Stub::new("right", b"never".to_vec(), 0);
-        let f = s.invoked_flag();
-        r.register(s);
-        f
-    };
-    let chain = parse_chain("bad && right").unwrap();
-    let out = execute(&chain, &r, None).await;
-    assert!(!*right_flag.lock(), "right must not run");
+    let r = registry_of([Stub::new("bad", b"x", 1), Stub::new("right", b"never", 0)]);
+    let out = run_line("bad && right", &r).await;
     assert_eq!(out.exit_code, 1);
+    assert_eq!(out.stdout, b"x");
 }
 
 #[tokio::test]
-async fn or_runs_right_only_on_failure() {
-    let mut r = CommandRegistry::new();
-    r.register(Stub::new("bad", b"boom".to_vec(), 2));
-    r.register(Stub::new("recover", b"ok".to_vec(), 0));
-    let chain = parse_chain("bad || recover").unwrap();
-    let out = execute(&chain, &r, None).await;
+async fn or_runs_right_on_failure() {
+    let r = registry_of([Stub::new("bad", b"boom", 2), Stub::new("recover", b"ok", 0)]);
+    let out = run_line("bad || recover", &r).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"boomok");
 }
 
 #[tokio::test]
 async fn or_short_circuits_on_success() {
-    let mut r = CommandRegistry::new();
-    r.register(Stub::new("good", b"g".to_vec(), 0));
-    let right_flag = {
-        let s = Stub::new("right", b"never".to_vec(), 0);
-        let f = s.invoked_flag();
-        r.register(s);
-        f
-    };
-    let chain = parse_chain("good || right").unwrap();
-    let out = execute(&chain, &r, None).await;
-    assert!(!*right_flag.lock());
+    let r = registry_of([Stub::new("good", b"g", 0), Stub::new("right", b"never", 0)]);
+    let out = run_line("good || right", &r).await;
+    assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"g");
 }
 
 #[tokio::test]
 async fn seq_runs_both_regardless_of_exit() {
-    let mut r = CommandRegistry::new();
-    r.register(Stub::new("first", b"a\n".to_vec(), 5));
-    r.register(Stub::new("second", b"b\n".to_vec(), 0));
-    let chain = parse_chain("first ; second").unwrap();
-    let out = execute(&chain, &r, None).await;
+    let r = registry_of([
+        Stub::new("first", b"a\n", 5),
+        Stub::new("second", b"b\n", 0),
+    ]);
+    let out = run_line("first ; second", &r).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"a\nb\n");
 }
 
+/// An unknown command is an ordinary failed stage, so `||` and `&&`
+/// treat it like any other non-zero exit.
 #[tokio::test]
 async fn unknown_command_returns_127_with_available_list() {
-    let r = registry();
-    let chain = parse_chain("nope").unwrap();
-    let out = execute(&chain, &r, None).await;
-    assert_eq!(out.exit_code, 127);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("[error] unknown command: nope"), "{stderr}");
-    assert!(stderr.contains("echo_stdin"), "{stderr}");
-    assert!(stderr.contains("lc"), "{stderr}");
-}
-
-#[tokio::test]
-async fn unknown_command_triggers_or_fallback() {
     let mut r = CommandRegistry::new();
-    r.register(Stub::new("fallback", b"rescued\n".to_vec(), 0));
-    let chain = parse_chain("nope || fallback").unwrap();
-    let out = execute(&chain, &r, None).await;
-    assert_eq!(out.exit_code, 0);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("rescued"), "{stdout}");
-}
-
-#[tokio::test]
-async fn unknown_then_and_shortcircuits() {
-    let mut r = CommandRegistry::new();
-    let right_flag = {
-        let s = Stub::new("right", b"never".to_vec(), 0);
-        let f = s.invoked_flag();
-        r.register(s);
-        f
-    };
-    let chain = parse_chain("nope && right").unwrap();
-    let out = execute(&chain, &r, None).await;
-    assert!(!*right_flag.lock(), "right must not run");
+    r.register(Echo);
+    r.register(LineCount);
+    let out = run_line("nope", &r).await;
     assert_eq!(out.exit_code, 127);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "[error] unknown command: nope. Available: echo_stdin, lc\n"
+    );
 }
 
 #[tokio::test]
-async fn empty_stdin_through_lc_is_zero() {
-    let r = registry();
-    let chain = parse_chain("echo_stdin | lc").unwrap();
-    let out = execute(&chain, &r, None).await;
-    assert_eq!(out.stdout, b"0\n");
-    assert_eq!(out.exit_code, 0);
-}
-
-#[tokio::test]
-async fn pipe_buf_max_guards_against_flood() {
+async fn pipe_buf_max_stops_a_flood_before_the_next_stage() {
     let mut r = CommandRegistry::new();
     r.register(Flood(PIPE_BUF_MAX + 1024));
     r.register(LineCount);
-    let chain = parse_chain("flood | lc").unwrap();
-    let out = execute(&chain, &r, None).await;
+    let out = run_line("flood | lc", &r).await;
     assert_eq!(out.exit_code, 141);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("[error] pipe: "), "{stderr}");
-    assert!(stderr.contains("exceeded"), "{stderr}");
-    assert!(stderr.contains("Try: "), "{stderr}");
+    assert!(out.stdout.is_empty(), "flooded bytes must not be forwarded");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "[error] pipe: stage output exceeded {PIPE_BUF_MAX} bytes. \
+             Try: pipe through wc -l or head first to shrink the stream\n"
+        )
+    );
 }
 
+/// `a && b | lc || d` parses as `(a && (b | lc)) || d`; the `||` sees
+/// the pipe's success and skips `d`.
 #[tokio::test]
 async fn combined_precedence_and_short_circuit() {
-    // `a && b | c || d`
-    //  → Or(And(a, Pipe(b, c)), d)  [given `&&` < `|` but `&&`/`||` same prec left-assoc]
-    //  Actually with our grammar: andor is left-assoc over && and ||,
-    //  so: ((a && (b | c)) || d)
-    //  Run `a` (ok 0), then `b | c`: `b` emits "hi\n" → `lc` → "1\n", exit 0.
-    //  Or short-circuits (exit 0), d doesn't run.
-    let mut r = CommandRegistry::new();
-    r.register(Stub::new("a", Vec::new(), 0));
-    r.register(Stub::new("b", b"hi\n".to_vec(), 0));
+    let mut r = registry_of([
+        Stub::new("a", b"", 0),
+        Stub::new("b", b"hi\n", 0),
+        Stub::new("d", b"never", 0),
+    ]);
     r.register(LineCount);
-    let d_flag = {
-        let s = Stub::new("d", b"never".to_vec(), 0);
-        let f = s.invoked_flag();
-        r.register(s);
-        f
-    };
-    let chain = parse_chain("a && b | lc || d").unwrap();
-    let out = execute(&chain, &r, None).await;
-    assert!(!*d_flag.lock());
+    let out = run_line("a && b | lc || d", &r).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"1\n");
 }
 
 #[tokio::test]
-async fn stderr_is_prefixed_with_command_name() {
-    struct Err1;
-    #[async_trait]
-    impl Command for Err1 {
-        fn name(&self) -> &str {
-            "boom"
-        }
-        fn summary(&self) -> &'static str {
-            "test: always fails"
-        }
-        fn help(&self) -> String {
-            "usage: boom".to_string()
-        }
-        async fn run(&self, _: CommandInput) -> CommandOutput {
-            CommandOutput::failed(1, b"something went wrong\n".to_vec())
-        }
-    }
-    let mut r = CommandRegistry::new();
-    r.register(Err1);
-    let chain = parse_chain("boom").unwrap();
-    let out = execute(&chain, &r, None).await;
+async fn stderr_lines_are_each_prefixed_with_the_command_name() {
+    let r = registry_of([Stub {
+        name: "boom",
+        stdout: b"",
+        stderr: b"first\nsecond",
+        exit_code: 1,
+    }]);
+    let out = run_line("boom", &r).await;
     assert_eq!(out.exit_code, 1);
-    assert_eq!(out.stderr, b"[boom]\tsomething went wrong\n");
+    assert_eq!(out.stderr, b"[boom]\tfirst\n[boom]\tsecond");
 }

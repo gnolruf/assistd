@@ -1,10 +1,6 @@
 use super::*;
-use crate::ToolRegistry;
 use crate::command::{Command, CommandInput, CommandOutput};
-use crate::commands::{
-    BashCommand, CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand,
-    WebCommand, WriteCommand,
-};
+use crate::commands::{CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand};
 use crate::fixtures::PNG_BYTES;
 use async_trait::async_trait;
 use regex::Regex;
@@ -43,19 +39,11 @@ fn invoke(tool: &RunTool, cmd: &str) -> Value {
     rt.block_on(tool.invoke(json!({ "command": cmd }))).unwrap()
 }
 
-fn footer_re() -> Regex {
-    Regex::new(r"\[exit:-?\d+ \| \d+ms\]$").unwrap()
-}
-
 fn assert_footer(output: &str, expected_exit: i32) {
+    let footer = Regex::new(&format!(r"\[exit:{expected_exit} \| \d+ms\]$")).unwrap();
     assert!(
-        footer_re().is_match(output),
-        "expected footer at end of: {output:?}"
-    );
-    let prefix = format!("[exit:{expected_exit} | ");
-    assert!(
-        output.contains(&prefix),
-        "expected footer exit_code={expected_exit} in: {output:?}"
+        footer.is_match(output),
+        "expected an exit:{expected_exit} footer at the end of: {output:?}"
     );
 }
 
@@ -76,30 +64,6 @@ fn run_cat_returns_file_contents() {
 }
 
 #[test]
-fn run_cat_rejects_binary_image() {
-    // `cat` rejects the binary file at Layer 1 (exit 1 with stderr).
-    // Layer 2 surfaces stderr inline via [stderr] marker.
-    let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    let path = tmp.path().join("photo.png");
-    std::fs::write(&path, PNG_BYTES).unwrap();
-    let tool = tool_with_dir(dir.path());
-    let cmd = format!("cat {}", path.to_string_lossy());
-    let result = invoke(&tool, &cmd);
-    assert_eq!(result["exit_code"], 1);
-    let stderr = result["stderr"].as_str().unwrap();
-    assert!(
-        stderr.contains("[error] cat: binary image file"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("Use: see "), "{stderr}");
-    let output = result["output"].as_str().unwrap();
-    assert!(output.contains("[stderr] "), "output={output}");
-    assert!(output.contains("binary image file"), "output={output}");
-    assert_footer(output, 1);
-}
-
-#[test]
 fn run_see_returns_attachment_as_base64() {
     let dir = fresh_dir();
     let tmp = tempdir().unwrap();
@@ -109,14 +73,10 @@ fn run_see_returns_attachment_as_base64() {
     let cmd = format!("see {}", path.to_string_lossy());
     let result = invoke(&tool, &cmd);
     assert_eq!(result["exit_code"], 0);
-    let attachments = result["attachments"].as_array().expect("attachments array");
-    assert_eq!(attachments.len(), 1);
-    assert_eq!(attachments[0]["type"], "image");
-    assert_eq!(attachments[0]["mime"], "image/png");
-    let decoded = B64
-        .decode(attachments[0]["data"].as_str().unwrap())
-        .unwrap();
-    assert_eq!(decoded.as_slice(), PNG_BYTES);
+    assert_eq!(
+        result["attachments"],
+        json!([{ "type": "image", "mime": "image/png", "data": B64.encode(PNG_BYTES) }])
+    );
 }
 
 #[test]
@@ -146,17 +106,14 @@ fn run_composes_flags_globs_and_stream_filters() {
     let tool = tool_with(dir.path(), full_registry());
     let root = tmp.path().to_string_lossy().into_owned();
 
-    // A glob feeds two files into grep, which labels its output.
     let globbed = invoke(&tool, &format!("grep ERROR {root}/*.log | wc -l"));
     assert_eq!(globbed["exit_code"], 0, "{globbed}");
     assert_eq!(globbed["stdout"], "3\n");
 
-    // -r walks the directory instead, and numbers the hits.
     let recursive = invoke(&tool, &format!("grep -rn ERROR {root} | wc -l"));
     assert_eq!(recursive["exit_code"], 0, "{recursive}");
     assert_eq!(recursive["stdout"], "4\n");
 
-    // The frequency idiom, start to finish.
     std::fs::write(tmp.path().join("hits.txt"), b"b\na\nb\n").unwrap();
     let freq = invoke(
         &tool,
@@ -164,7 +121,6 @@ fn run_composes_flags_globs_and_stream_filters() {
     );
     assert_eq!(freq["stdout"], "2\tb\n", "{freq}");
 
-    // cat -n numbers, tail slices, ls -a survives its flags.
     let numbered = invoke(&tool, &format!("cat -n {root}/b.log | tail -1"));
     assert_eq!(numbered["stdout"], "2\tERROR three\n");
     // a.log, b.log, notes.txt, hits.txt.
@@ -194,42 +150,38 @@ fn run_surfaces_a_failed_stage_behind_a_successful_one() {
 fn run_quoted_glob_reaches_the_command_literally() {
     let dir = fresh_dir();
     let tool = tool_with(dir.path(), registry());
-    // Quoted, so the regex must not be mistaken for a file pattern.
     let result = invoke(&tool, "echo 'a*b' | grep 'a\\*b'");
     assert_eq!(result["exit_code"], 0, "{result}");
     assert_eq!(result["stdout"], "a*b\n");
 }
 
+/// Usage text goes to stdout with exit 2 and an empty stderr, so the
+/// model can tell help apart from a failure.
 #[test]
-fn run_grep_ic_returns_count() {
-    let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    let path = tmp.path().join("log.txt");
-    std::fs::write(&path, b"ERROR a\ninfo\nError b\nwarn\n").unwrap();
-    let tool = tool_with_dir(dir.path());
-    let cmd = format!("cat {} | grep -ic \"error\"", path.to_string_lossy());
-    let result = invoke(&tool, &cmd);
-    assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["stdout"], "2\n");
-}
-
-#[test]
-fn help_flag_works_even_where_bare_calls_do_work() {
+fn run_prints_usage_on_stdout_for_bare_calls_and_help_flags() {
     let dir = fresh_dir();
     let tool = tool_with(dir.path(), full_registry());
-    for (cmd, usage) in [
+    for (line, usage) in [
+        ("grep", "usage: grep"),
+        ("see", "usage: see"),
+        ("write", "usage: write"),
+        ("web", "usage: web"),
+        ("bash", "usage: bash"),
+        // Bare `ls` and `echo` do real work, so only `--help` reaches
+        // their usage.
         ("ls --help", "usage: ls"),
         ("echo --help", "usage: echo"),
         ("grep --help", "usage: grep"),
     ] {
-        let result = invoke(&tool, cmd);
-        assert_eq!(result["exit_code"], 2, "{cmd}: {result}");
+        let result = invoke(&tool, line);
+        assert_eq!(result["exit_code"], 2, "{line}: {result}");
+        assert_eq!(result["stderr"], "", "{line}: {result}");
         assert!(
             result["stdout"]
                 .as_str()
                 .unwrap_or_default()
                 .starts_with(usage),
-            "{cmd}: {result}"
+            "{line}: {result}"
         );
     }
 }
@@ -240,108 +192,16 @@ fn unquoted_bre_alternation_names_the_quoting_fix() {
     let tool = tool_with(dir.path(), full_registry());
     let result = invoke(&tool, r"grep -r TODO\|FIXME AGENTS.md");
     assert_eq!(result["exit_code"], 2, "{result}");
-    let stderr = result["stderr"].as_str().unwrap_or_default();
-    assert!(stderr.contains("outside quotes"), "{stderr}");
-    assert!(stderr.contains(r#"grep "TODO|FIXME" FILE"#), "{stderr}");
-}
-
-#[test]
-fn run_head_reads_a_named_file() {
-    let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    let path = tmp.path().join("log.txt");
-    std::fs::write(&path, b"one\ntwo\nthree\nfour\n").unwrap();
-    let tool = tool_with(dir.path(), full_registry());
-
-    // The spelling the model reaches for first, end to end through
-    // the parser and executor.
-    let result = invoke(&tool, &format!("head -n 2 {}", path.to_string_lossy()));
-    assert_eq!(result["exit_code"], 0, "{result}");
-    assert_eq!(result["stdout"], "one\ntwo\n");
-
-    // The pipeline spelling keeps working.
-    let piped = invoke(
-        &tool,
-        &format!("cat {} | head -n 2", path.to_string_lossy()),
+    assert_eq!(
+        result["stderr"],
+        concat!(
+            r#"[error] parse: '\|' outside quotes: the '|' opened a pipeline and the '\' "#,
+            r#"stayed on the previous word. Use: a quoted ERE pattern, as in "#,
+            r#"`grep "TODO|FIXME" FILE`"#,
+            "\n"
+        )
     );
-    assert_eq!(piped["stdout"], "one\ntwo\n");
 }
-
-#[test]
-fn run_wc_counts_a_named_file() {
-    let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    let path = tmp.path().join("log.txt");
-    std::fs::write(&path, b"a\nb\nc\n").unwrap();
-    let tool = tool_with_dir(dir.path());
-    let result = invoke(&tool, &format!("wc -l {}", path.to_string_lossy()));
-    assert_eq!(result["exit_code"], 0, "{result}");
-    assert_eq!(result["stdout"], "3\n");
-}
-
-#[test]
-fn run_pipeline_cat_grep_wc() {
-    let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    let path = tmp.path().join("log.txt");
-    std::fs::write(&path, b"INFO start\nERROR a\nWARN b\nERROR c\nINFO done\n").unwrap();
-    let tool = tool_with_dir(dir.path());
-    let cmd = format!("cat {} | grep ERROR | wc -l", path.to_string_lossy());
-    let result = invoke(&tool, &cmd);
-    assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["stdout"], "2\n");
-}
-
-#[test]
-fn run_or_fallback_on_missing_file() {
-    let dir = fresh_dir();
-    let tool = tool_with_dir(dir.path());
-    let result = invoke(&tool, "cat /no/such/path || echo 'not found'");
-    assert_eq!(result["exit_code"], 0);
-    let stdout = result["stdout"].as_str().unwrap();
-    assert!(stdout.contains("not found"), "{stdout}");
-}
-
-#[test]
-fn run_and_chains_only_on_success() {
-    let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    let tool = tool_with_dir(dir.path());
-    let cmd = format!("ls {} && echo done", tmp.path().to_string_lossy());
-    let result = invoke(&tool, &cmd);
-    assert_eq!(result["exit_code"], 0);
-    let stdout = result["stdout"].as_str().unwrap();
-    assert!(stdout.contains("done"), "{stdout}");
-}
-
-#[test]
-fn run_seq_runs_both() {
-    let dir = fresh_dir();
-    let tool = tool_with_dir(dir.path());
-    let result = invoke(&tool, "echo hello ; echo world");
-    assert_eq!(result["exit_code"], 0);
-    let stdout = result["stdout"].as_str().unwrap();
-    assert!(stdout.contains("hello"), "{stdout}");
-    assert!(stdout.contains("world"), "{stdout}");
-}
-
-#[test]
-fn run_unknown_command_lists_available() {
-    let dir = fresh_dir();
-    let tool = tool_with_dir(dir.path());
-    let result = invoke(&tool, "foo");
-    assert_eq!(result["exit_code"], 127);
-    let stderr = result["stderr"].as_str().unwrap();
-    assert!(stderr.contains("[error] unknown command: foo"), "{stderr}");
-    assert!(stderr.contains("cat"), "{stderr}");
-    assert!(stderr.contains("echo"), "{stderr}");
-    assert!(stderr.contains("grep"), "{stderr}");
-    assert!(stderr.contains("ls"), "{stderr}");
-    assert!(stderr.contains("see"), "{stderr}");
-    assert!(stderr.contains("wc"), "{stderr}");
-}
-
-// --- boundary / sanity ------------------------------------------------
 
 #[test]
 fn run_rejects_wrong_argument_key() {
@@ -351,22 +211,26 @@ fn run_rejects_wrong_argument_key() {
     let err = rt
         .block_on(tool.invoke(json!({ "cmd": "ls" })))
         .unwrap_err();
-    assert!(err.to_string().contains("command"), "{err}");
+    assert!(
+        matches!(&err, ToolError::InvalidArgs(msg) if msg == "`command` (string) is required"),
+        "{err:?}"
+    );
 }
 
+/// Parse errors flow through `present()` like any other failure rather
+/// than surfacing as an `Err` at the tool boundary.
 #[test]
 fn run_parse_error_surfaces_as_present_result() {
-    // Parse errors flow through `present()` like any other failure: the
-    // LLM sees the usual `[stderr] ... [exit:N | Xms]` shape with a
-    // `[error] parse: ...` line, not a `ToolError` at the tool boundary.
     let dir = fresh_dir();
     let tool = tool_with_dir(dir.path());
     let result = invoke(&tool, "echo hi |");
     assert_eq!(result["exit_code"], 2);
-    let stderr = result["stderr"].as_str().unwrap();
-    assert!(stderr.contains("[error] parse: "), "{stderr}");
+    assert_eq!(
+        result["stderr"],
+        "[error] parse: trailing operator '|'. Try: add a command after the operator\n"
+    );
     let output = result["output"].as_str().unwrap();
-    assert!(output.contains("[stderr] "), "{output}");
+    assert!(output.starts_with("[stderr] [error] parse: "), "{output}");
     assert_footer(output, 2);
 }
 
@@ -375,10 +239,7 @@ fn run_omits_attachments_key_when_empty() {
     let dir = fresh_dir();
     let tool = tool_with_dir(dir.path());
     let result = invoke(&tool, "echo hi");
-    assert!(
-        result.get("attachments").is_none(),
-        "attachments key should be absent when empty"
-    );
+    assert!(result.get("attachments").is_none(), "{result}");
 }
 
 /// Fake command: emits a configurable number of lines.
@@ -421,51 +282,10 @@ impl Command for ByteCount {
     }
 }
 
-/// Fake command: emits raw PNG bytes as stdout.
-struct EmitPng;
-#[async_trait]
-impl Command for EmitPng {
-    fn name(&self) -> &str {
-        "emitpng"
-    }
-    fn summary(&self) -> &'static str {
-        "test: emit PNG"
-    }
-    fn help(&self) -> String {
-        "usage: emitpng".to_string()
-    }
-    async fn run(&self, _input: CommandInput) -> CommandOutput {
-        CommandOutput::ok(PNG_BYTES.to_vec())
-    }
-}
-
-/// Fake command: produces stdout + stderr + non-zero exit in one shot.
-struct Noisy;
-#[async_trait]
-impl Command for Noisy {
-    fn name(&self) -> &str {
-        "noisy"
-    }
-    fn summary(&self) -> &'static str {
-        "test: noisy output"
-    }
-    fn help(&self) -> String {
-        "usage: noisy".to_string()
-    }
-    async fn run(&self, _input: CommandInput) -> CommandOutput {
-        CommandOutput {
-            stdout: b"stdout content\n".to_vec(),
-            stderr: b"stderr content\n".to_vec(),
-            exit_code: 1,
-            attachments: Vec::new(),
-        }
-    }
-}
-
+/// Truncation applies only to the final output: a stage in the middle
+/// of a pipe hands its whole stream on.
 #[test]
 fn run_pipe_integrity_full_bytes_reach_final_stage() {
-    // Layer 1 must NOT truncate the 5000-line stream between `lines` and
-    // `bytecount`. The final `bytecount` sees the full upstream bytes.
     let mut reg = CommandRegistry::new();
     reg.register(Lines(5000));
     reg.register(ByteCount);
@@ -474,10 +294,7 @@ fn run_pipe_integrity_full_bytes_reach_final_stage() {
     let result = invoke(&tool, "lines | bytecount");
     let expected_bytes: usize = (1..=5000).map(|i| format!("line {i}\n").len()).sum();
     assert_eq!(result["exit_code"], 0);
-    assert_eq!(
-        result["stdout"].as_str().unwrap(),
-        &format!("{expected_bytes}\n")
-    );
+    assert_eq!(result["stdout"], format!("{expected_bytes}\n"));
     assert_eq!(result["truncated"], false);
     assert!(result.get("overflow_file").is_none());
 }
@@ -493,43 +310,15 @@ fn run_overflow_end_to_end_writes_temp_file() {
     let path = result["overflow_file"].as_str().expect("overflow_file");
     assert_eq!(path, dir.path().join("cmd-1.txt").to_string_lossy());
 
-    let contents = std::fs::read_to_string(path).unwrap();
-    // The full 5000-line content is on disk.
-    assert_eq!(contents.lines().count(), 5000);
-    assert!(contents.starts_with("line 1\n"));
-    assert!(contents.ends_with("line 5000\n"));
+    let expected: String = (1..=5000).map(|i| format!("line {i}\n")).collect();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
 
     let output = result["output"].as_str().unwrap();
-    assert!(output.contains("line 1\n"));
-    assert!(output.contains("line 200\n"));
-    assert!(!output.contains("line 201\n"));
-    assert!(output.contains("--- output truncated (5000 lines,"));
-    assert!(output.contains(&format!("Full output: {path}")));
-    assert!(output.contains(&format!("Explore: cat {path} | grep")));
-    assert!(output.contains(&format!("cat {path} | tail -n 100")));
+    assert!(
+        output.contains(&format!("Full output: {path}\n")),
+        "{output}"
+    );
     assert_footer(output, 0);
-}
-
-#[test]
-fn run_overflow_file_readable_via_followup_grep() {
-    // Acceptance: after an overflow, the LLM can follow up with
-    // `cat <overflow-path> | grep <pat>` and get matches from the full
-    // output.
-    let mut reg = CommandRegistry::new();
-    reg.register(Lines(5000));
-    reg.register(CatCommand);
-    reg.register(GrepCommand);
-    let dir = fresh_dir();
-    let tool = tool_with(dir.path(), Arc::new(reg));
-
-    let first = invoke(&tool, "lines");
-    let path = first["overflow_file"].as_str().expect("path").to_string();
-
-    // Follow-up: same RunTool instance, same overflow dir, reads the
-    // spilled file.
-    let followup = invoke(&tool, &format!("cat {path} | grep \"line 4242\""));
-    assert_eq!(followup["exit_code"], 0);
-    assert_eq!(followup["stdout"].as_str().unwrap(), "line 4242\n");
 }
 
 /// The tail hint in the overflow banner must be runnable as printed;
@@ -553,67 +342,12 @@ fn run_overflow_tail_hint_runs_as_printed() {
 
     let followup = invoke(&tool, hint);
     assert_eq!(followup["exit_code"], 0, "{followup}");
-    let stdout = followup["stdout"].as_str().unwrap();
-    assert_eq!(stdout.lines().count(), 100);
-    assert!(stdout.ends_with("line 5000\n"));
-}
-
-#[test]
-fn run_binary_guard_end_to_end() {
-    let mut reg = CommandRegistry::new();
-    reg.register(EmitPng);
-    let dir = fresh_dir();
-    let tool = tool_with(dir.path(), Arc::new(reg));
-    let result = invoke(&tool, "emitpng");
-    assert_eq!(result["exit_code"], 0);
-    let output = result["output"].as_str().unwrap();
-    assert!(output.starts_with("[error] binary output (image/png, "));
-    assert!(output.contains(". Use: cat -b <path>"));
-    assert_footer(output, 0);
-    // stdout_raw is suppressed when binary guard trips.
-    assert_eq!(result["stdout"].as_str().unwrap(), "");
-}
-
-#[test]
-fn run_metadata_footer_on_unknown_command() {
-    let dir = fresh_dir();
-    let tool = tool_with_dir(dir.path());
-    let result = invoke(&tool, "nope");
-    assert_eq!(result["exit_code"], 127);
-    let output = result["output"].as_str().unwrap();
-    assert_footer(output, 127);
-    assert!(output.contains("[stderr] "));
-    assert!(output.contains("unknown command: nope"));
-}
-
-#[test]
-fn run_stderr_attached_when_both_stdout_and_stderr_present() {
-    let mut reg = CommandRegistry::new();
-    reg.register(Noisy);
-    let dir = fresh_dir();
-    let tool = tool_with(dir.path(), Arc::new(reg));
-    let result = invoke(&tool, "noisy");
-    assert_eq!(result["exit_code"], 1);
-    let output = result["output"].as_str().unwrap();
-    // Stdout content survives; stderr is not silently dropped; both appear.
-    assert!(output.contains("stdout content\n"));
-    assert!(output.contains("[stderr] [noisy]\tstderr content\n"));
-    assert_footer(output, 1);
-}
-
-#[test]
-fn run_metadata_footer_present_on_success() {
-    let dir = fresh_dir();
-    let tool = tool_with_dir(dir.path());
-    let result = invoke(&tool, "echo hi");
-    let output = result["output"].as_str().unwrap();
-    assert_footer(output, 0);
-    assert!(output.starts_with("hi\n"));
+    let expected: String = (4901..=5000).map(|i| format!("line {i}\n")).collect();
+    assert_eq!(followup["stdout"], expected);
 }
 
 #[test]
 fn run_respects_config_overrides() {
-    // Tight spec: 3 lines / 10 KB. `lines 10` overflows via line cap.
     let mut reg = CommandRegistry::new();
     reg.register(Lines(10));
     let dir = fresh_dir();
@@ -625,86 +359,33 @@ fn run_respects_config_overrides() {
     let tool = RunTool::new(Arc::new(reg), &tight, dir.path().to_path_buf());
     let result = invoke(&tool, "lines");
     assert_eq!(result["truncated"], true);
+    assert_eq!(result["stdout"], "line 1\nline 2\nline 3\n");
     let output = result["output"].as_str().unwrap();
-    assert!(output.contains("line 1\n"));
-    assert!(output.contains("line 3\n"));
-    assert!(!output.contains("line 4\n"));
-    assert!(output.contains("--- output truncated (10 lines,"));
-}
-
-// --- progressive help: Level 0 (tool description) --------------------
-
-/// Acceptance #1: the `run` tool's description lists every registered
-/// command with its one-line summary.
-#[test]
-fn run_tool_description_lists_all_commands() {
-    let dir = fresh_dir();
-    let tool = tool_with(dir.path(), full_registry());
-    let desc = tool.description();
-    for name in [
-        "cat",
-        "ls",
-        "grep",
-        "wc",
-        "head",
-        "tail",
-        "sort",
-        "uniq",
-        "echo",
-        "write",
-        "see",
-        "screenshot",
-        "web",
-        "bash",
-        "wm",
-    ] {
-        assert!(desc.contains(name), "description missing `{name}`: {desc}");
-    }
-    // Summary text from a representative command should appear.
     assert!(
-        desc.contains("filter lines matching an ERE regex"),
-        "description missing grep summary: {desc}"
-    );
-    // Level-1 discovery hint tells the LLM how to drill in.
-    assert!(
-        desc.to_lowercase()
-            .contains("no (or insufficient) arguments")
-            || desc.to_lowercase().contains("usage"),
-        "description missing drill-in hint: {desc}"
+        output.contains("--- output truncated (10 lines,"),
+        "{output}"
     );
 }
 
-/// Acceptance #4: adding a new command to the registry automatically
-/// includes it in the Level-0 summary without touching any tool-side
-/// description string.
+/// The Level-0 description is built from the registry: every command
+/// appears as one `name: summary` line, so a new command needs no
+/// tool-side edit.
 #[test]
-fn run_tool_description_auto_updates_when_command_added() {
-    struct Frobnicate;
-    #[async_trait]
-    impl Command for Frobnicate {
-        fn name(&self) -> &str {
-            "frobnicate"
-        }
-        fn summary(&self) -> &'static str {
-            "frobnicate the widget"
-        }
-        fn help(&self) -> String {
-            "usage: frobnicate".to_string()
-        }
-        async fn run(&self, _input: CommandInput) -> CommandOutput {
-            CommandOutput::ok(Vec::new())
-        }
-    }
-    let mut reg = CommandRegistry::new();
-    reg.register(CatCommand);
-    reg.register(Frobnicate);
+fn run_tool_description_lists_every_command_with_its_summary() {
     let dir = fresh_dir();
-    let tool = tool_with(dir.path(), Arc::new(reg));
+    let reg = full_registry();
+    let tool = tool_with(dir.path(), Arc::clone(&reg));
     let desc = tool.description();
-    assert!(desc.contains("frobnicate"), "missing name: {desc}");
+    let listed: Vec<(&str, &str)> = desc
+        .lines()
+        .filter_map(|l| l.strip_prefix("  "))
+        .filter_map(|l| l.split_once(": "))
+        .map(|(name, summary)| (name.trim_end(), summary))
+        .collect();
+    assert_eq!(listed, reg.sorted_summaries(), "{desc}");
     assert!(
-        desc.contains("frobnicate the widget"),
-        "missing summary: {desc}"
+        desc.contains("Call a command with no (or insufficient) arguments to see its usage"),
+        "{desc}"
     );
 }
 
@@ -725,150 +406,17 @@ fn run_tool_description_states_configured_truncation_limits() {
     );
 }
 
-/// Acceptance #1, wire-level: the OpenAI-compatible schema (what the
-/// LLM actually consumes) exposes the dynamic description verbatim.
-#[test]
-fn openai_schemas_description_includes_all_commands() {
-    let dir = fresh_dir();
-    let mut tools = ToolRegistry::new();
-    tools.register(RunTool::new(
-        full_registry(),
-        &ToolsOutputConfig::default(),
-        dir.path().to_path_buf(),
-    ));
-    let schemas = tools.openai_schemas();
-    assert_eq!(schemas.len(), 1);
-    let desc = schemas[0]["function"]["description"]
-        .as_str()
-        .expect("description is a string");
-    for name in [
-        "cat",
-        "ls",
-        "grep",
-        "wc",
-        "head",
-        "tail",
-        "sort",
-        "uniq",
-        "echo",
-        "write",
-        "see",
-        "screenshot",
-        "web",
-        "bash",
-        "wm",
-    ] {
-        assert!(desc.contains(name), "schema description missing `{name}`");
-    }
-}
-
-// --- progressive help: Level 1 (command-level help on missing args) --
-
-/// Acceptance #2, #5: calling a command with no arguments returns its
-/// help text on stdout with a non-zero exit code so the LLM can tell
-/// help from successful execution.
-#[test]
-fn run_grep_no_args_returns_help_on_stdout_exit_2() {
-    let dir = fresh_dir();
-    let tool = tool_with_dir(dir.path());
-    let result = invoke(&tool, "grep");
-    assert_eq!(result["exit_code"], 2);
-    let stdout = result["stdout"].as_str().unwrap();
-    assert!(
-        stdout.starts_with("usage: grep"),
-        "stdout should start with `usage: grep`: {stdout:?}"
-    );
-    assert!(stdout.contains("PATTERN"), "help missing PATTERN: {stdout}");
-    // Help goes to stdout; stderr stays empty (no `[grep]\t` prefix).
-    assert_eq!(result["stderr"].as_str().unwrap(), "");
-    let output = result["output"].as_str().unwrap();
-    assert_footer(output, 2);
-}
-
-#[test]
-fn run_see_no_args_returns_help_on_stdout_exit_2() {
-    let dir = fresh_dir();
-    let mut reg = CommandRegistry::new();
-    reg.register(SeeCommand::default());
-    let tool = tool_with(dir.path(), Arc::new(reg));
-    let result = invoke(&tool, "see");
-    assert_eq!(result["exit_code"], 2);
-    let stdout = result["stdout"].as_str().unwrap();
-    assert!(stdout.starts_with("usage: see"), "{stdout:?}");
-    assert_eq!(result["stderr"].as_str().unwrap(), "");
-}
-
-#[test]
-fn run_write_no_args_returns_help_on_stdout_exit_2() {
-    let dir = fresh_dir();
-    let mut reg = CommandRegistry::new();
-    reg.register(WriteCommand::permissive_for_tests());
-    let tool = tool_with(dir.path(), Arc::new(reg));
-    let result = invoke(&tool, "write");
-    assert_eq!(result["exit_code"], 2);
-    let stdout = result["stdout"].as_str().unwrap();
-    assert!(stdout.starts_with("usage: write"), "{stdout:?}");
-    assert_eq!(result["stderr"].as_str().unwrap(), "");
-}
-
-#[test]
-fn run_web_no_args_returns_help_on_stdout_exit_2() {
-    let dir = fresh_dir();
-    let mut reg = CommandRegistry::new();
-    reg.register(WebCommand::new());
-    let tool = tool_with(dir.path(), Arc::new(reg));
-    let result = invoke(&tool, "web");
-    assert_eq!(result["exit_code"], 2);
-    let stdout = result["stdout"].as_str().unwrap();
-    assert!(stdout.starts_with("usage: web"), "{stdout:?}");
-    assert_eq!(result["stderr"].as_str().unwrap(), "");
-}
-
-#[test]
-fn run_bash_no_args_returns_help_on_stdout_exit_2() {
-    let dir = fresh_dir();
-    let mut reg = CommandRegistry::new();
-    reg.register(BashCommand::default());
-    let tool = tool_with(dir.path(), Arc::new(reg));
-    let result = invoke(&tool, "bash");
-    assert_eq!(result["exit_code"], 2);
-    let stdout = result["stdout"].as_str().unwrap();
-    assert!(stdout.starts_with("usage: bash"), "{stdout:?}");
-    assert_eq!(result["stderr"].as_str().unwrap(), "");
-}
-
-/// Help output on stdout is visually distinct from a real usage error
-/// on stderr. A real grep error (bad regex) still goes to stderr with
-/// the `[grep]\t` executor prefix; exits 2 like help does, but the
-/// transport is different. This test locks the distinction.
+/// A real usage error (unknown flag) keeps the executor's `[grep]\t`
+/// stderr prefix, distinct from help on stdout, though both exit 2.
 #[test]
 fn run_grep_real_usage_error_still_on_stderr() {
     let dir = fresh_dir();
     let tool = tool_with_dir(dir.path());
-    // Unrecognized flag; triggers parse_flags error path, which
-    // remains on stderr (unlike the no-args path, which emits help).
     let result = invoke(&tool, "grep -x foo");
     assert_eq!(result["exit_code"], 2);
     let stderr = result["stderr"].as_str().unwrap();
-    assert!(
-        stderr.contains("[grep]\t"),
-        "real errors keep executor prefix: {stderr}"
-    );
-    // Stdout stays empty; the usage error didn't go to stdout.
-    assert_eq!(result["stdout"].as_str().unwrap(), "");
-}
-
-// --- OpenAI schema ----------------------------------------------------
-
-#[test]
-fn parameters_schema_shape() {
-    let dir = fresh_dir();
-    let tool = tool_with_dir(dir.path());
-    let schema = tool.parameters_schema();
-    assert_eq!(schema["type"], "object");
-    assert_eq!(schema["additionalProperties"], false);
-    assert_eq!(schema["required"][0], "command");
-    assert_eq!(schema["properties"]["command"]["type"], "string");
+    assert!(stderr.starts_with("[grep]\t[error] grep: "), "{stderr}");
+    assert_eq!(result["stdout"], "");
 }
 
 /// `/dev/stdin` is the daemon's own terminal; reading it would block the

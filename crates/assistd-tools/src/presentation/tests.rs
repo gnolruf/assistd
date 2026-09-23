@@ -3,8 +3,6 @@ use crate::command::CommandOutput;
 use crate::fixtures::PNG_BYTES;
 use tempfile::tempdir;
 
-// Minimal valid 1x1 PNG; contains NUL bytes in IHDR.
-
 fn spec_in(dir: &Path) -> PresentSpec {
     PresentSpec {
         max_lines: 200,
@@ -13,143 +11,93 @@ fn spec_in(dir: &Path) -> PresentSpec {
     }
 }
 
-fn tiny_spec_in(dir: &Path, max_lines: usize, max_bytes: usize) -> PresentSpec {
-    PresentSpec {
-        max_lines,
-        max_bytes,
-        overflow_dir: dir.to_path_buf(),
+fn output(stdout: &[u8], stderr: &[u8], exit_code: i32) -> CommandOutput {
+    CommandOutput {
+        stdout: stdout.to_vec(),
+        stderr: stderr.to_vec(),
+        exit_code,
+        attachments: Vec::new(),
     }
 }
 
-// --- binary_guard ------------------------------------------------------
-
-#[test]
-fn binary_guard_rejects_nul_byte_with_mime_label() {
-    let label = binary_label(PNG_BYTES).expect("png should be flagged");
-    assert_eq!(label, "image/png");
+fn present_ms(out: CommandOutput, spec: &PresentSpec, ms: u64) -> PresentResult {
+    present(out, spec, &AtomicU64::new(0), Duration::from_millis(ms))
 }
 
 #[test]
-fn binary_guard_rejects_nul_without_magic_match() {
-    let mut bytes = b"plain text".to_vec();
-    bytes.push(0);
-    let label = binary_label(&bytes).expect("NUL should be flagged");
-    assert_eq!(label, "application/octet-stream");
+fn binary_label_flags_bytes_the_model_should_not_see() {
+    let mut nul_text = b"plain text".to_vec();
+    nul_text.push(0);
+    let cases: [(&str, &[u8], Option<&str>); 8] = [
+        ("png magic", PNG_BYTES, Some("image/png")),
+        (
+            "NUL without magic",
+            &nul_text[..],
+            Some("application/octet-stream"),
+        ),
+        (
+            "invalid utf-8",
+            &[0xC3, 0x28, b' ', b'h', b'i'][..],
+            Some("invalid-utf8"),
+        ),
+        // 3 of 20 characters are controls: over the 10% threshold.
+        (
+            "15% controls",
+            b"abcdef\x01\x02\x03ghijklmnopq",
+            Some("control-chars"),
+        ),
+        // Exactly 10% is still text; the rule is strictly greater.
+        ("10% controls", b"abcdefgh\x01\x02ijklmnopqr", None),
+        ("tabs and newlines", b"a\tb\nc\td\ne\tf\n", None),
+        ("empty", b"", None),
+        ("multibyte utf-8", "héllo wörld ñ 日本語\n".as_bytes(), None),
+    ];
+    for (case, bytes, expected) in cases {
+        assert_eq!(binary_label(bytes).as_deref(), expected, "{case}");
+    }
 }
 
 #[test]
-fn binary_guard_rejects_invalid_utf8() {
-    let bytes: &[u8] = &[0xC3, 0x28, b' ', b'h', b'i']; // 0xC3 0x28 is invalid
-    let label = binary_label(bytes).expect("invalid utf-8 should be flagged");
-    assert_eq!(label, "invalid-utf8");
+fn count_lines_counts_an_unterminated_last_line() {
+    for (s, expected) in [
+        ("", 0),
+        ("one", 1),
+        ("one\ntwo", 2),
+        ("one\n", 1),
+        ("one\ntwo\n", 2),
+    ] {
+        assert_eq!(count_lines(s), expected, "{s:?}");
+    }
 }
 
 #[test]
-fn binary_guard_rejects_high_control_ratio() {
-    // 20 chars: 2 non-whitespace control chars (\x01, \x02) = 10%. Must
-    // exceed 10% to reject, so add one more (15%).
-    let bytes = b"abcdef\x01\x02\x03ghijklmnopq".to_vec();
-    let label = binary_label(&bytes).expect("control ratio should trip");
-    assert_eq!(label, "control-chars");
+fn truncate_lines_bytes_applies_both_caps() {
+    for (s, max_lines, max_bytes, expected) in [
+        ("a\nb\nc\nd\ne\n", 3, 1024, "a\nb\nc\n"),
+        ("abcdefghij\n", 100, 5, "abcde"),
+        // A byte cap inside a multi-byte character backs off to the
+        // previous boundary.
+        ("日本", 100, 4, "日"),
+        ("a\nb\nc\n", 100, 1024, "a\nb\nc\n"),
+    ] {
+        assert_eq!(
+            truncate_lines_bytes(s, max_lines, max_bytes),
+            expected,
+            "{s:?} lines={max_lines} bytes={max_bytes}"
+        );
+    }
 }
-
-#[test]
-fn binary_guard_accepts_tabs_and_newlines() {
-    // 50% whitespace-controls; none are "suspicious".
-    let bytes = b"a\tb\nc\td\ne\tf\n".to_vec();
-    assert!(binary_label(&bytes).is_none());
-}
-
-#[test]
-fn binary_guard_accepts_empty_input() {
-    assert!(binary_label(&[]).is_none());
-}
-
-#[test]
-fn binary_guard_accepts_normal_text() {
-    let bytes = b"hello world\nthis is fine\n".to_vec();
-    assert!(binary_label(&bytes).is_none());
-}
-
-#[test]
-fn binary_guard_accepts_utf8_multibyte() {
-    let bytes = "héllo wörld ñ 日本語\n".as_bytes().to_vec();
-    assert!(binary_label(&bytes).is_none());
-}
-
-#[test]
-fn binary_guard_accepts_exactly_10_percent_controls() {
-    // 20 chars, exactly 2 controls (10%). Rule is strict >10% → accept.
-    let bytes = b"abcdefgh\x01\x02ijklmnopqr".to_vec();
-    assert_eq!(bytes.len(), 20);
-    assert!(binary_label(&bytes).is_none());
-}
-
-// --- count_lines -------------------------------------------------------
-
-#[test]
-fn count_lines_empty_is_zero() {
-    assert_eq!(count_lines(""), 0);
-}
-
-#[test]
-fn count_lines_no_trailing_newline_counts_partial() {
-    assert_eq!(count_lines("one"), 1);
-    assert_eq!(count_lines("one\ntwo"), 2);
-}
-
-#[test]
-fn count_lines_trailing_newline_exact() {
-    assert_eq!(count_lines("one\n"), 1);
-    assert_eq!(count_lines("one\ntwo\n"), 2);
-}
-
-// --- truncate_lines_bytes ---------------------------------------------
-
-#[test]
-fn truncate_lines_bytes_line_cap_first() {
-    let s = "a\nb\nc\nd\ne\n";
-    let t = truncate_lines_bytes(s, 3, 1024);
-    assert_eq!(t, "a\nb\nc\n");
-}
-
-#[test]
-fn truncate_lines_bytes_byte_cap_clamps_head() {
-    let s = "abcdefghij\n"; // 11 bytes, 1 line
-    let t = truncate_lines_bytes(s, 100, 5);
-    assert_eq!(t, "abcde");
-}
-
-#[test]
-fn truncate_lines_bytes_utf8_boundary_safe() {
-    // "日" is 3 bytes: 0xE6 0x97 0xA5.
-    let s = "日本"; // 6 bytes total
-    let t = truncate_lines_bytes(s, 100, 4); // clamp inside 2nd rune
-    assert_eq!(t, "日"); // 3 bytes; must not return partial rune
-}
-
-#[test]
-fn truncate_lines_bytes_returns_full_when_under_caps() {
-    let s = "a\nb\nc\n";
-    let t = truncate_lines_bytes(s, 100, 1024);
-    assert_eq!(t, s);
-}
-
-// --- present: footer on every path ------------------------------------
 
 #[test]
 fn present_appends_footer_on_success() {
     let dir = tempdir().unwrap();
-    let out = CommandOutput::ok(b"hello\n".to_vec());
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
+    let r = present_ms(
+        CommandOutput::ok(b"hello\n".to_vec()),
         &spec_in(dir.path()),
-        &counter,
-        Duration::from_millis(7),
+        7,
     );
-    assert!(r.output.ends_with("[exit:0 | 7ms]"));
-    assert!(r.output.starts_with("hello\n"));
+    assert_eq!(r.output, "hello\n[exit:0 | 7ms]");
+    assert_eq!(r.stdout_raw, "hello\n");
     assert_eq!(r.exit_code, 0);
     assert_eq!(r.duration_ms, 7);
     assert!(!r.truncated);
@@ -159,88 +107,40 @@ fn present_appends_footer_on_success() {
 #[test]
 fn present_footer_on_zero_stdout_zero_exit() {
     let dir = tempdir().unwrap();
-    let out = CommandOutput::ok(Vec::new());
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
-        &spec_in(dir.path()),
-        &counter,
-        Duration::from_millis(2),
-    );
+    let r = present_ms(CommandOutput::ok(Vec::new()), &spec_in(dir.path()), 2);
     assert_eq!(r.output, "[exit:0 | 2ms]");
 }
 
-// --- present: stderr attachment ---------------------------------------
-
 #[test]
-fn present_appends_stderr_marker_when_nonzero_and_nonempty() {
+fn present_appends_stderr_after_stdout() {
     let dir = tempdir().unwrap();
-    let out = CommandOutput {
-        stdout: b"ok\n".to_vec(),
-        stderr: b"[cat]\tboom\n".to_vec(),
-        exit_code: 1,
-        attachments: Vec::new(),
-    };
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
+    let r = present_ms(
+        output(b"ok\n", b"[cat]\tboom\n", 1),
         &spec_in(dir.path()),
-        &counter,
-        Duration::from_millis(5),
+        5,
     );
-    // Body preserves the executor's per-stage prefix inside the marker.
-    assert!(
-        r.output
-            .contains("ok\n[stderr] [cat]\tboom\n[exit:1 | 5ms]")
-    );
+    assert_eq!(r.output, "ok\n[stderr] [cat]\tboom\n[exit:1 | 5ms]");
 }
 
+/// A pipeline reports its last stage's exit code, so an earlier stage's
+/// failure is only visible through stderr.
 #[test]
 fn present_shows_stderr_on_zero_exit() {
     let dir = tempdir().unwrap();
-    let out = CommandOutput {
-        stdout: Vec::new(),
-        stderr: b"[error] unknown command: find. Available: cat, ls\n".to_vec(),
-        exit_code: 0,
-        attachments: Vec::new(),
-    };
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
+    let r = present_ms(
+        output(
+            b"",
+            b"[error] unknown command: find. Available: cat, ls\n",
+            0,
+        ),
         &spec_in(dir.path()),
-        &counter,
-        Duration::from_millis(1),
+        1,
     );
-    assert!(
-        r.output.contains("[stderr] [error] unknown command: find"),
-        "{}",
-        r.output
+    assert_eq!(
+        r.output,
+        "[stderr] [error] unknown command: find. Available: cat, ls\n[exit:0 | 1ms]"
     );
-    assert!(r.output.ends_with("[exit:0 | 1ms]"), "{}", r.output);
 }
-
-#[test]
-fn present_stderr_survives_with_nonempty_stdout() {
-    let dir = tempdir().unwrap();
-    let out = CommandOutput {
-        stdout: b"stdout content\n".to_vec(),
-        stderr: b"stderr content\n".to_vec(),
-        exit_code: 127,
-        attachments: Vec::new(),
-    };
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
-        &spec_in(dir.path()),
-        &counter,
-        Duration::from_millis(3),
-    );
-    assert!(r.output.contains("stdout content"));
-    assert!(r.output.contains("[stderr] stderr content"));
-    assert!(r.output.ends_with("[exit:127 | 3ms]"));
-}
-
-// --- present: overflow -----------------------------------------------
 
 #[test]
 fn present_overflow_writes_temp_file_and_exposes_path() {
@@ -248,78 +148,58 @@ fn present_overflow_writes_temp_file_and_exposes_path() {
     let big: Vec<u8> = (1..=5000)
         .flat_map(|i| format!("line {i}\n").into_bytes())
         .collect();
-    let expected = big.clone();
-    let out = CommandOutput::ok(big);
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
-        &spec_in(dir.path()),
-        &counter,
-        Duration::from_millis(9),
-    );
+    let r = present_ms(CommandOutput::ok(big.clone()), &spec_in(dir.path()), 9);
 
     assert!(r.truncated);
-    let overflow_path = r.overflow_file.as_ref().expect("overflow path");
-    assert_eq!(overflow_path, &dir.path().join("cmd-1.txt"));
-    assert_eq!(std::fs::read(overflow_path).unwrap(), expected);
+    let path = r.overflow_file.as_ref().expect("overflow path");
+    assert_eq!(path, &dir.path().join("cmd-1.txt"));
+    assert_eq!(std::fs::read(path).unwrap(), big);
 
-    // Body: first 200 lines, banner, full path, explore hints, footer.
-    assert!(r.output.contains("line 1\n"));
-    assert!(r.output.contains("line 200\n"));
-    assert!(!r.output.contains("line 201\n"));
-    assert!(r.output.contains("--- output truncated (5000 lines,"));
-    assert!(
-        r.output
-            .contains(&format!("Full output: {}", overflow_path.display()))
+    let head: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+    let p = path.display();
+    assert_eq!(
+        r.output,
+        format!(
+            "{head}--- output truncated (5000 lines, {}) ---\n\
+             Full output: {p}\n\
+             Explore: cat {p} | grep\n\
+             cat {p} | tail -n 100\n\
+             [exit:0 | 9ms]",
+            human_size(big.len()),
+        )
     );
-    assert!(r.output.contains("Explore: cat "));
-    assert!(r.output.contains("| tail -n 100"));
-    assert!(r.output.ends_with("[exit:0 | 9ms]"));
+    assert_eq!(r.stdout_raw, head);
 }
 
 #[test]
 fn present_overflow_byte_threshold_trips_independently_of_lines() {
     let dir = tempdir().unwrap();
-    // One long line: no newline, so count_lines = 1 but bytes > max_bytes.
-    let big = vec![b'x'; 10_000];
-    let out = CommandOutput::ok(big);
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
-        &tiny_spec_in(dir.path(), 200, 1024),
-        &counter,
-        Duration::from_millis(1),
-    );
+    let spec = PresentSpec {
+        max_bytes: 1024,
+        ..spec_in(dir.path())
+    };
+    let r = present_ms(CommandOutput::ok(vec![b'x'; 10_000]), &spec, 1);
     assert!(r.truncated);
-    assert!(r.overflow_file.is_some());
+    assert_eq!(r.stdout_raw, "x".repeat(1024));
+    assert_eq!(r.overflow_file, Some(dir.path().join("cmd-1.txt")));
 }
 
+/// An unwritable overflow dir still yields the head and banner, just
+/// without pointing at a file that does not exist.
 #[test]
 fn present_overflow_write_failure_degrades() {
-    // overflow_dir points at a path that doesn't exist (write fails);
-    // presentation still produces a body with the head + banner, but
-    // NOT the "Full output:" / "Explore:" lines.
-    let bad_dir = PathBuf::from("/nonexistent-assistd-test-dir/nope");
     let spec = PresentSpec {
         max_lines: 2,
         max_bytes: 1024,
-        overflow_dir: bad_dir,
+        overflow_dir: PathBuf::from("/nonexistent-assistd-test-dir/nope"),
     };
-    let out = CommandOutput::ok(b"a\nb\nc\nd\n".to_vec());
-    let counter = AtomicU64::new(0);
-    let r = present(out, &spec, &counter, Duration::from_millis(1));
+    let r = present_ms(CommandOutput::ok(b"a\nb\nc\nd\n".to_vec()), &spec, 1);
     assert!(r.truncated);
-    assert!(r.overflow_file.is_none(), "write should have failed");
-    assert!(r.output.contains("--- output truncated (4 lines,"));
-    assert!(
-        !r.output.contains("Full output:"),
-        "degraded path must omit Full output line"
+    assert!(r.overflow_file.is_none());
+    assert_eq!(
+        r.output,
+        "a\nb\n--- output truncated (4 lines, 8B) ---\n[exit:0 | 1ms]"
     );
-    assert!(
-        !r.output.contains("Explore:"),
-        "degraded path must omit Explore hints"
-    );
-    assert!(r.output.ends_with("[exit:0 | 1ms]"));
 }
 
 #[test]
@@ -334,38 +214,33 @@ fn present_counter_increments_across_calls() {
                 .collect(),
         )
     };
-    let r1 = present(mk(), &spec, &counter, Duration::from_millis(1));
-    let r2 = present(mk(), &spec, &counter, Duration::from_millis(1));
-    let r3 = present(mk(), &spec, &counter, Duration::from_millis(1));
-    assert_eq!(r1.overflow_file.unwrap(), dir.path().join("cmd-1.txt"));
-    assert_eq!(r2.overflow_file.unwrap(), dir.path().join("cmd-2.txt"));
-    assert_eq!(r3.overflow_file.unwrap(), dir.path().join("cmd-3.txt"));
+    for n in 1..=3 {
+        let r = present(mk(), &spec, &counter, Duration::from_millis(1));
+        assert_eq!(
+            r.overflow_file,
+            Some(dir.path().join(format!("cmd-{n}.txt")))
+        );
+    }
 }
-
-// --- present: binary guard end-to-end ---------------------------------
 
 #[test]
 fn present_binary_guard_suppresses_stdout_preserves_attachments() {
     let dir = tempdir().unwrap();
     let out = CommandOutput {
-        stdout: PNG_BYTES.to_vec(),
-        stderr: Vec::new(),
-        exit_code: 0,
         attachments: vec![Attachment::Image {
             mime: "image/png".into(),
             bytes: PNG_BYTES.to_vec(),
         }],
+        ..output(PNG_BYTES, b"", 0)
     };
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
-        &spec_in(dir.path()),
-        &counter,
-        Duration::from_millis(2),
+    let r = present_ms(out, &spec_in(dir.path()), 2);
+    assert_eq!(
+        r.output,
+        format!(
+            "[error] binary output (image/png, {}). Use: cat -b <path>\n[exit:0 | 2ms]",
+            human_size(PNG_BYTES.len())
+        )
     );
-    assert!(r.output.starts_with("[error] binary output (image/png, "));
-    assert!(r.output.contains(". Use: cat -b <path>"));
-    assert!(r.output.ends_with("[exit:0 | 2ms]"));
     assert_eq!(r.stdout_raw, "");
     assert!(!r.truncated);
     assert!(r.overflow_file.is_none());
@@ -373,43 +248,19 @@ fn present_binary_guard_suppresses_stdout_preserves_attachments() {
 }
 
 #[test]
-fn present_binary_guard_with_stderr_on_failure() {
+fn present_binary_guard_keeps_stderr() {
     let dir = tempdir().unwrap();
-    let out = CommandOutput {
-        stdout: PNG_BYTES.to_vec(),
-        stderr: b"something went wrong\n".to_vec(),
-        exit_code: 1,
-        attachments: Vec::new(),
-    };
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
+    let r = present_ms(
+        output(PNG_BYTES, b"something went wrong\n", 1),
         &spec_in(dir.path()),
-        &counter,
-        Duration::from_millis(4),
+        4,
     );
-    assert!(r.output.starts_with("[error] binary output (image/png"));
-    assert!(r.output.contains("\n[stderr] something went wrong\n"));
-    assert!(r.output.ends_with("[exit:1 | 4ms]"));
-}
-
-// --- pipe integrity ---------------------------------------------------
-//
-// Layer 1 integrity (pipes never truncate mid-chain) is covered by the
-// chain::executor tests. Here we confirm that when a final stage emits
-// tiny output after a huge upstream stage, Layer 2 does NOT truncate.
-#[test]
-fn present_does_not_truncate_small_final_output() {
-    let dir = tempdir().unwrap();
-    let out = CommandOutput::ok(b"5000\n".to_vec()); // final count after big pipe
-    let counter = AtomicU64::new(0);
-    let r = present(
-        out,
-        &spec_in(dir.path()),
-        &counter,
-        Duration::from_millis(1),
+    assert_eq!(
+        r.output,
+        format!(
+            "[error] binary output (image/png, {}). Use: cat -b <path>\n\
+             [stderr] something went wrong\n[exit:1 | 4ms]",
+            human_size(PNG_BYTES.len())
+        )
     );
-    assert!(!r.truncated);
-    assert!(r.overflow_file.is_none());
-    assert_eq!(r.output, "5000\n[exit:0 | 1ms]");
 }

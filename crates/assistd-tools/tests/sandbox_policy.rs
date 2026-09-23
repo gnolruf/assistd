@@ -1,15 +1,10 @@
-//! Integration tests for the bash command's policy and sandbox layers.
+//! Integration tests for the bash command's policy and sandbox layers,
+//! in the order they fire: the denylist (gate skipped, exit 126), the
+//! destructive-pattern gate, and the bwrap sandbox. The matchers
+//! themselves are unit-tested alongside the policy module.
 //!
-//! Covers all four layers in the order they fire (per
-//! `crates/assistd-tools/src/commands/bash.rs`):
-//!   1. Denylist: literal substring match, gates skipped, exit 126.
-//!   2. Destructive patterns: shlex-tokenized prefix match, gate consulted.
-//!   3. Bwrap sandbox: process group + filesystem mount restrictions.
-//!   4. Timeout: covered in-crate; not duplicated here.
-//!
-//! Bwrap-dependent tests skip when `bwrap` is not on PATH (mirrors the
-//! `piper_missing_binary.rs` skip pattern); they pass silently rather
-//! than fail so CI runners without bubblewrap installed still pass.
+//! Bwrap-dependent tests return early when `bwrap` is not on PATH so
+//! hosts without bubblewrap still pass.
 
 use std::sync::Arc;
 
@@ -20,6 +15,7 @@ use assistd_tools::{
     SandboxInfo, SandboxRequest,
 };
 use async_trait::async_trait;
+use parking_lot::Mutex;
 
 const POLICY_DENIED_EXIT: i32 = 126;
 
@@ -51,21 +47,34 @@ fn input(script: &str) -> CommandInput {
     }
 }
 
-/// Returns `Some(SandboxInfo)` when bwrap is available on PATH, `None`
-/// otherwise. Bwrap-dependent tests early-return on `None` so they pass
-/// silently rather than fail on hosts without bubblewrap installed.
 fn bwrap_or_none() -> Option<Arc<SandboxInfo>> {
     let info = probe_sandbox(SandboxRequest::Bwrap, Vec::new()).ok()?;
-    if matches!(info.mode, ResolvedSandboxMode::Bwrap { .. }) {
-        Some(info)
-    } else {
-        None
+    matches!(info.mode, ResolvedSandboxMode::Bwrap { .. }).then_some(info)
+}
+
+/// Fails the test if the policy ever consults it.
+struct PanicGate;
+
+#[async_trait]
+impl ConfirmationGate for PanicGate {
+    async fn confirm(&self, req: ConfirmationRequest) -> bool {
+        panic!("gate must not be consulted for {:?}", req.script);
     }
 }
 
-// ---------------------------------------------------------------------
-// Layer 1: denylist (literal substring, case-insensitive, bypass gate)
-// ---------------------------------------------------------------------
+/// Approves every request and records what it was asked.
+#[derive(Default)]
+struct RecordingGate {
+    asked: Mutex<Vec<ConfirmationRequest>>,
+}
+
+#[async_trait]
+impl ConfirmationGate for RecordingGate {
+    async fn confirm(&self, req: ConfirmationRequest) -> bool {
+        self.asked.lock().push(req);
+        true
+    }
+}
 
 #[tokio::test]
 async fn denylist_blocks_rm_rf_root() {
@@ -85,47 +94,7 @@ async fn denylist_blocks_rm_rf_root() {
 }
 
 #[tokio::test]
-async fn denylist_matches_inside_chained_script() {
-    let cmd = bash_with(
-        vec!["mkfs"],
-        vec![],
-        Arc::new(AlwaysAllowGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("cd /tmp && mkfs.ext4 /dev/null")).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-}
-
-#[tokio::test]
-async fn denylist_is_case_insensitive_for_literal_match() {
-    let cmd = bash_with(
-        vec!["mkfs"],
-        vec![],
-        Arc::new(AlwaysAllowGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("MKFS.EXT4 /dev/null")).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-}
-
-#[tokio::test]
-async fn denylist_blocks_dd_to_block_device() {
-    let cmd = bash_with(vec!["dd"], vec![], Arc::new(AlwaysAllowGate), no_sandbox());
-    let out = cmd.run(input("dd if=/dev/zero of=/dev/sda")).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-}
-
-#[tokio::test]
 async fn denylist_bypasses_confirmation_gate() {
-    // PanicGate would be invoked if the destructive-pattern path were
-    // reached. For denylist matches, the gate must be bypassed entirely.
-    struct PanicGate;
-    #[async_trait]
-    impl ConfirmationGate for PanicGate {
-        async fn confirm(&self, _r: ConfirmationRequest) -> bool {
-            panic!("denylist must bypass the gate");
-        }
-    }
     let cmd = bash_with(
         vec!["rm -rf"],
         vec![vec!["rm", "-rf"]],
@@ -136,12 +105,8 @@ async fn denylist_bypasses_confirmation_gate() {
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
 }
 
-// ---------------------------------------------------------------------
-// Layer 2: destructive patterns (shlex word-prefix, gate-consulted)
-// ---------------------------------------------------------------------
-
 #[tokio::test]
-async fn destructive_pattern_after_double_amp_is_blocked_when_gate_denies() {
+async fn destructive_pattern_is_blocked_when_gate_denies() {
     let cmd = bash_with(
         vec![],
         vec![vec!["rm", "-rf"]],
@@ -158,106 +123,23 @@ async fn destructive_pattern_after_double_amp_is_blocked_when_gate_denies() {
 }
 
 #[tokio::test]
-async fn destructive_pattern_after_semicolon_is_blocked() {
-    // Note: shlex tokenizes `hi;` as one word, so the separator must
-    // be space-padded for the matcher to anchor. The glued form
-    // (`hi;rm`) is a documented limitation of the syntactic backstop;
-    // see `command_substitution_evades_destructive_pattern` for the
-    // analogous `$()` case.
-    let cmd = bash_with(
-        vec![],
-        vec![vec!["rm", "-rf"]],
-        Arc::new(DenyAllGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("echo hi ; rm -rf /tmp/whatever")).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-}
-
-#[tokio::test]
-async fn glued_semicolon_evades_destructive_pattern() {
-    // Documented limitation: when the separator has no surrounding
-    // whitespace (`hi;rm`), shlex glues it to the adjacent word and the
-    // matcher loses the anchor. The denylist (Layer 1) is the real
-    // defense for cases like this; this test pins the behavior so a
-    // future tightening (e.g. pre-tokenizing on shell metacharacters)
-    // is a deliberate change.
-    let scratch =
-        std::env::temp_dir().join(format!("sandbox-policy-glued-semi-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&scratch);
-    let target = scratch.join("file");
-    std::fs::write(&target, b"x").unwrap();
-
-    let cmd = bash_with(
-        vec![],
-        vec![vec!["rm", "-rf"]],
-        Arc::new(DenyAllGate),
-        no_sandbox(),
-    );
-    let script = format!("echo hi;rm -rf {}", target.display());
-    let out = cmd.run(input(&script)).await;
-
-    let cleaned = !target.exists();
-    let denied = out.exit_code == POLICY_DENIED_EXIT;
-    assert!(
-        cleaned || denied,
-        "expected target removed (matcher missed) or exit 126 (matcher caught); got exit={} cleaned={cleaned}",
-        out.exit_code
-    );
-    let _ = std::fs::remove_dir_all(&scratch);
-}
-
-#[tokio::test]
-async fn destructive_pattern_after_double_pipe_is_blocked() {
-    let cmd = bash_with(
-        vec![],
-        vec![vec!["rm", "-rf"]],
-        Arc::new(DenyAllGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("false || rm -rf /tmp/whatever")).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-}
-
-#[tokio::test]
-async fn destructive_pattern_after_pipe_is_blocked() {
-    let cmd = bash_with(
-        vec![],
-        vec![vec!["rm"]],
-        Arc::new(DenyAllGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("ls /tmp | rm /tmp/x")).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-}
-
-#[tokio::test]
-async fn destructive_pattern_runs_when_gate_approves() {
-    // Use `true` as the destructive-marker so the test doesn't actually
-    // delete anything. AlwaysAllow lets it through; exit 0 means the
-    // gate was consulted and approved, then the script ran.
-    let cmd = bash_with(
-        vec![],
-        vec![vec!["true"]],
-        Arc::new(AlwaysAllowGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("true")).await;
+async fn destructive_pattern_asks_the_gate_and_runs_when_approved() {
+    let gate = Arc::new(RecordingGate::default());
+    let cmd = bash_with(vec![], vec![vec!["true"]], gate.clone(), no_sandbox());
+    let out = cmd.run(input("true && echo ran")).await;
     assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout, b"ran\n");
+    let asked = gate.asked.lock();
+    let [req] = asked.as_slice() else {
+        panic!("expected exactly one confirmation, got {asked:?}");
+    };
+    assert_eq!(req.tool, "bash");
+    assert_eq!(req.script, "true && echo ran");
+    assert_eq!(req.matched_pattern, "true");
 }
 
 #[tokio::test]
 async fn quoted_literal_does_not_trigger_destructive_pattern() {
-    // `echo "rm -rf /"` tokenizes to ["echo", "rm -rf /"]; the second
-    // token is a single quoted string, so the prefix ["rm", "-rf"]
-    // shouldn't anchor and the gate must not be invoked.
-    struct PanicGate;
-    #[async_trait]
-    impl ConfirmationGate for PanicGate {
-        async fn confirm(&self, _r: ConfirmationRequest) -> bool {
-            panic!("gate must not fire on quoted literal");
-        }
-    }
     let cmd = bash_with(
         vec![],
         vec![vec!["rm", "-rf"]],
@@ -269,58 +151,39 @@ async fn quoted_literal_does_not_trigger_destructive_pattern() {
     assert_eq!(out.stdout, b"rm -rf /\n");
 }
 
+/// Documented limitation: the destructive matcher is syntactic, so a
+/// separator glued to a word (`hi;rm`) or a command substitution
+/// (`$(echo rm)`) hides the command from it. The denylist and the
+/// sandbox are the real defense. Pinned so a tightening of the matcher
+/// is a deliberate change.
 #[tokio::test]
-async fn command_substitution_evades_destructive_pattern() {
-    // Documented limitation per the policy.rs comment: $(echo rm) -rf
-    // tokenizes to ["$(echo", "rm)", "-rf", ...] which doesn't match
-    // ["rm", "-rf"]. The bwrap sandbox is the real defense; this test
-    // pins the syntactic backstop's behavior so a future tightening
-    // (e.g. expanding shell substitutions before matching) is a
-    // deliberate choice rather than an accidental relaxation. We use a
-    // /tmp target so that even when the sandbox is off and the script
-    // runs, no real data is at risk.
-    use std::path::PathBuf;
-    let scratch = std::env::temp_dir().join(format!(
-        "sandbox-policy-substitution-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::create_dir_all(&scratch);
-    let target: PathBuf = scratch.join("file");
-    std::fs::write(&target, b"x").unwrap();
+async fn syntactic_evasions_slip_past_the_destructive_gate() {
+    for template in ["echo hi;rm -rf {}", "$(echo rm) -rf {}"] {
+        let scratch = tempfile::tempdir().unwrap();
+        let target = scratch.path().join("file");
+        std::fs::write(&target, b"x").unwrap();
+        let script = template.replace("{}", &target.to_string_lossy());
 
-    let cmd = bash_with(
-        vec![],
-        vec![vec!["rm", "-rf"]],
-        Arc::new(DenyAllGate),
-        no_sandbox(),
-    );
-    let script = format!("$(echo rm) -rf {}", target.display());
-    let out = cmd.run(input(&script)).await;
-
-    // Either: (a) the syntactic check missed it and bash ran it →
-    // exit 0 and the file is gone, OR (b) the matcher tightened in a
-    // future change → exit 126. Either is acceptable; we just want
-    // the test to flag the next time behavior shifts.
-    let cleaned = !target.exists();
-    let denied = out.exit_code == POLICY_DENIED_EXIT;
-    assert!(
-        cleaned || denied,
-        "expected file removed (matcher missed substitution) OR exit 126 (matcher caught it); \
-         got exit_code={} cleaned={cleaned}",
-        out.exit_code
-    );
-
-    let _ = std::fs::remove_dir_all(&scratch);
+        let cmd = bash_with(
+            vec![],
+            vec![vec!["rm", "-rf"]],
+            Arc::new(PanicGate),
+            no_sandbox(),
+        );
+        let out = cmd.run(input(&script)).await;
+        assert_eq!(
+            out.exit_code,
+            0,
+            "{script}: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!target.exists(), "{script}: the script should have run");
+    }
 }
-
-// ---------------------------------------------------------------------
-// Layer 3: bwrap sandbox (filesystem mount restrictions)
-// ---------------------------------------------------------------------
 
 #[tokio::test]
 async fn bwrap_allows_writes_to_tmp() {
     let Some(sandbox) = bwrap_or_none() else {
-        eprintln!("skipping bwrap test: bwrap not on PATH");
         return;
     };
     let unique = format!("/tmp/assistd-sandbox-test-{}", std::process::id());
@@ -339,7 +202,6 @@ async fn bwrap_allows_writes_to_tmp() {
 #[tokio::test]
 async fn bwrap_blocks_writes_to_read_only_root() {
     let Some(sandbox) = bwrap_or_none() else {
-        eprintln!("skipping bwrap test: bwrap not on PATH");
         return;
     };
     // /usr is part of the `--ro-bind / /` mount, so any write under it
@@ -347,18 +209,12 @@ async fn bwrap_blocks_writes_to_read_only_root() {
     let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
     let unique = format!("/usr/assistd-sandbox-test-{}", std::process::id());
     let out = cmd.run(input(&format!("touch {unique}"))).await;
-    assert_ne!(
-        out.exit_code,
-        0,
-        "expected non-zero exit for write under /usr; stdout={} stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+    assert_ne!(out.exit_code, 0, "write under /usr succeeded: {combined}");
     let lower = combined.to_ascii_lowercase();
     assert!(
         lower.contains("read-only")
@@ -371,13 +227,10 @@ async fn bwrap_blocks_writes_to_read_only_root() {
 #[tokio::test]
 async fn bwrap_unshares_pid_namespace() {
     let Some(sandbox) = bwrap_or_none() else {
-        eprintln!("skipping bwrap test: bwrap not on PATH");
         return;
     };
-    // --unshare-pid creates a new PID namespace where bwrap itself runs
-    // as PID 1; bash (its child) is PID 2. The actual value depends on
-    // the bwrap version but the host PID would be in the thousands+,
-    // so any single-digit value demonstrates the namespace was created.
+    // Inside a fresh PID namespace bwrap is PID 1 and bash a small
+    // number after it; host PIDs are far larger.
     let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd.run(input("echo $$")).await;
     assert_eq!(out.exit_code, 0);
@@ -385,25 +238,14 @@ async fn bwrap_unshares_pid_namespace() {
     let pid: u32 = pid_str
         .parse()
         .unwrap_or_else(|_| panic!("expected numeric PID, got {pid_str:?}"));
-    assert!(
-        pid < 100,
-        "expected low PID inside the sandbox (host PIDs are typically much larger), got {pid}"
-    );
+    assert!(pid < 100, "expected low PID inside the sandbox, got {pid}");
 }
 
-// ---------------------------------------------------------------------
-// Sandbox probing: Auto falls back to None when bwrap is missing
-// ---------------------------------------------------------------------
-
-#[tokio::test]
-async fn probe_sandbox_auto_with_bwrap_present_resolves_to_bwrap() {
+#[test]
+fn probe_sandbox_auto_with_bwrap_present_resolves_to_bwrap() {
     if bwrap_or_none().is_none() {
-        eprintln!("skipping bwrap probe positive test: bwrap not on PATH");
         return;
     }
     let info = probe_sandbox(SandboxRequest::Auto, Vec::new()).expect("auto probe");
-    assert!(
-        matches!(info.mode, ResolvedSandboxMode::Bwrap { .. }),
-        "Auto with bwrap on PATH must resolve to Bwrap"
-    );
+    assert!(matches!(info.mode, ResolvedSandboxMode::Bwrap { .. }));
 }

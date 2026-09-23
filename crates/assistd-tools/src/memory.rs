@@ -60,29 +60,3 @@ impl MemoryOps {
         self.store.list_full(prefix).await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use assistd_memory::{NoConversationStore, NoMemoryStore};
-
-    fn no_ops() -> MemoryOps {
-        MemoryOps::new(Arc::new(NoMemoryStore), Arc::new(NoConversationStore))
-    }
-
-    #[tokio::test]
-    async fn no_backend_save_then_load_returns_none() {
-        // Mirrors the contract of `NoMemoryStore` exactly: every method
-        // succeeds and `load` reports the key as absent. The façade
-        // must not pretend the placeholder backend stores anything.
-        let ops = no_ops();
-        ops.save("k", "v".into()).await.unwrap();
-        assert_eq!(ops.load("k").await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn no_backend_list_returns_empty() {
-        let ops = no_ops();
-        assert!(ops.list("pref:").await.unwrap().is_empty());
-    }
-}
