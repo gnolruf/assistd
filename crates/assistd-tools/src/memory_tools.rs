@@ -417,7 +417,6 @@ impl Tool for ReminisceTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolRegistry;
     use assistd_embed::NoEmbedder;
     use assistd_memory::{
         NoConversationStore, NoMemoryStore, NoSemanticStore, SqliteConversationStore, SqliteHandle,
@@ -561,23 +560,24 @@ mod tests {
         assert_eq!(spy.excluded.lock().as_deref(), Some(second.0.as_str()));
     }
 
-    /// Stand up a SQLite-backed `MemoryOps` in a tempdir. The writer
-    /// task is leaked at end of test (the `_w` JoinHandle is dropped);
-    /// that mirrors the existing memory-crate test pattern.
-    async fn fresh_ops() -> (Arc<MemoryOps>, tokio::task::JoinHandle<()>) {
+    /// A SQLite-backed `MemoryOps` in a fresh tempdir. The writer handle
+    /// and the tempdir must be held for the test's duration.
+    async fn fresh_ops() -> (
+        Arc<MemoryOps>,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("memory.db");
-        // Leak the tempdir for the duration of the test; `path` must
-        // outlive the handle. Cleanup happens on test process exit.
-        std::mem::forget(temp);
         let (_tx, rx) = watch::channel(false);
-        let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
+        let (handle, writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
+            .await
+            .unwrap();
         let handle = Arc::new(handle);
         let mem: Arc<dyn assistd_memory::MemoryStore> =
             Arc::new(SqliteMemoryStore::new(handle.clone()));
         let conv: Arc<dyn assistd_memory::ConversationStore> =
             Arc::new(SqliteConversationStore::new(handle));
-        (Arc::new(MemoryOps::new(mem, conv)), writer)
+        (Arc::new(MemoryOps::new(mem, conv)), writer, temp)
     }
 
     fn no_ops() -> Arc<MemoryOps> {
@@ -587,11 +587,18 @@ mod tests {
         ))
     }
 
+    fn invalid_args(err: ToolError) -> String {
+        match err {
+            ToolError::InvalidArgs(msg) => msg,
+            other => panic!("expected InvalidArgs, got {other:?}"),
+        }
+    }
+
     // --- Remember --------------------------------------------------------
 
     #[tokio::test]
     async fn remember_saves_key_value() {
-        let (ops, _w) = fresh_ops().await;
+        let (ops, _w, _dir) = fresh_ops().await;
         let tool = RememberTool::new(ops.clone(), closed_embed_tx());
         let result = tool
             .invoke(json!({"key": "editor_preference", "value": "vim"}))
@@ -607,7 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn remember_dedups_by_key() {
-        let (ops, _w) = fresh_ops().await;
+        let (ops, _w, _dir) = fresh_ops().await;
         let tool = RememberTool::new(ops.clone(), closed_embed_tx());
         tool.invoke(json!({"key": "editor_preference", "value": "vim"}))
             .await
@@ -625,24 +632,23 @@ mod tests {
 
     #[tokio::test]
     async fn remember_rejects_invalid_key() {
-        let (ops, _w) = fresh_ops().await;
-        let tool = RememberTool::new(ops, closed_embed_tx());
+        let tool = RememberTool::new(no_ops(), closed_embed_tx());
         for bad in ["has spaces", "Editor_Pref", "trailing!", "slash/ed", ""] {
             let err = tool
                 .invoke(json!({"key": bad, "value": "x"}))
                 .await
                 .unwrap_err();
-            let msg = err.to_string();
+            let msg = invalid_args(err);
             assert!(
-                msg.contains("key") || msg.contains("required"),
-                "expected a key/required error for {bad:?}, got: {msg}"
+                msg.starts_with(&format!("`key` must match {KEY_PATTERN} ")),
+                "{bad:?}: {msg}"
             );
         }
     }
 
     #[tokio::test]
     async fn remember_accepts_hyphenated_and_dotted_keys() {
-        let (ops, _w) = fresh_ops().await;
+        let (ops, _w, _dir) = fresh_ops().await;
         let tool = RememberTool::new(ops.clone(), closed_embed_tx());
         for key in ["standup.2026-09-11", "project.assistd-tools.dir"] {
             tool.invoke(json!({"key": key, "value": "noted"}))
@@ -654,27 +660,37 @@ mod tests {
 
     #[tokio::test]
     async fn remember_rejects_missing_args() {
-        let (ops, _w) = fresh_ops().await;
-        let tool = RememberTool::new(ops, closed_embed_tx());
+        let tool = RememberTool::new(no_ops(), closed_embed_tx());
         let err = tool.invoke(json!({})).await.unwrap_err();
-        assert!(
-            err.to_string().contains("key"),
-            "missing-key error should mention `key`: {err}"
-        );
+        assert_eq!(invalid_args(err), "`key` (string) is required");
         let err = tool.invoke(json!({"key": "user.name"})).await.unwrap_err();
-        assert!(
-            err.to_string().contains("value"),
-            "missing-value error should mention `value`: {err}"
-        );
+        assert_eq!(invalid_args(err), "`value` (string) is required");
+    }
+
+    #[tokio::test]
+    async fn remember_enqueues_embed_job_with_value_text() {
+        let (ops, _w, _dir) = fresh_ops().await;
+        let (etx, mut erx) = live_embed_tx();
+        let tool = RememberTool::new(ops.clone(), etx);
+        tool.invoke(json!({"key": "editor_preference", "value": "vim is the way"}))
+            .await
+            .unwrap();
+        match erx
+            .try_recv()
+            .expect("embed job queued before invoke returns")
+        {
+            EmbedJob::Memory { memory_id, text } => {
+                assert!(memory_id > 0, "expected real rowid, got {memory_id}");
+                assert_eq!(text, "vim is the way");
+            }
+            EmbedJob::Chunk { .. } => panic!("expected Memory job, got Chunk"),
+        }
     }
 
     // --- Recall ----------------------------------------------------------
 
     #[tokio::test]
     async fn recall_with_disabled_embedder_returns_no_memories() {
-        // NoEmbedder + empty model name → invoke short-circuits to the
-        // no-memories sentinel. Matches the behavior the LLM sees when
-        // embedding is turned off in config.
         let tool = RecallTool::new(no_embedder(), no_semantic(), String::new());
         let result = tool
             .invoke(json!({"query": "what editor do I prefer"}))
@@ -685,121 +701,62 @@ mod tests {
         assert_eq!(result["truncated"], false);
     }
 
+    /// With embedding configured, a failed embed and an empty result
+    /// both read as no memories rather than an error.
     #[tokio::test]
-    async fn recall_with_no_semantic_hits_returns_marker() {
-        // Embedder is wired (model name non-empty) but the semantic
-        // store has no memories indexed → still the no-memories sentinel.
-        // NoSemanticStore returns empty for nearest_memories regardless
-        // of the model name, so we just need a non-empty model string to
-        // get past the disabled short-circuit.
-        let tool = RecallTool::new(no_embedder(), no_semantic(), "some-model".into());
-        let result = tool.invoke(json!({"query": "anything"})).await.unwrap();
-        assert_eq!(result["output"], "(no memories)");
-    }
-
-    #[tokio::test]
-    async fn recall_rejects_missing_query() {
-        // strict-mode schema requires `query`; a missing arg is a
-        // protocol error from the model and surfaces as Err.
-        let tool = RecallTool::new(no_embedder(), no_semantic(), String::new());
-        let err = tool.invoke(json!({})).await.unwrap_err();
-        assert!(
-            err.to_string().contains("query"),
-            "expected error to mention `query`: {err}"
-        );
-    }
-
-    // --- Schema sanity ---------------------------------------------------
-
-    #[test]
-    fn registered_in_openai_schemas_correctly() {
-        // Build a registry holding all three tools and inspect the wire
-        // shape `step` will send to llama-server. Pins the strict-mode
-        // contract that every property is required.
-        let mut reg = ToolRegistry::new();
-        reg.register(RememberTool::new(no_ops(), closed_embed_tx()));
-        reg.register(RecallTool::new(no_embedder(), no_semantic(), String::new()));
-        reg.register(ReminisceTool::new(
-            no_embedder(),
-            no_semantic(),
-            String::new(),
-            watch::channel(Arc::new(SessionId::new())).1,
-        ));
-        let schemas = reg.openai_schemas();
-        assert_eq!(schemas.len(), 3);
-
-        let remember = &schemas[0]["function"];
-        assert_eq!(remember["name"], "remember");
-        assert_eq!(remember["strict"], true);
-        let req = remember["parameters"]["required"].as_array().unwrap();
-        let names: Vec<&str> = req.iter().filter_map(|v| v.as_str()).collect();
-        assert!(names.contains(&"key"));
-        assert!(names.contains(&"value"));
-
-        let recall = &schemas[1]["function"];
-        assert_eq!(recall["name"], "recall");
-        assert_eq!(recall["strict"], true);
-        let req = recall["parameters"]["required"].as_array().unwrap();
-        let names: Vec<&str> = req.iter().filter_map(|v| v.as_str()).collect();
-        assert_eq!(names, vec!["query"]);
-
-        let reminisce = &schemas[2]["function"];
-        assert_eq!(reminisce["name"], "reminisce");
-        assert_eq!(reminisce["strict"], true);
-        let req = reminisce["parameters"]["required"].as_array().unwrap();
-        let names: Vec<&str> = req.iter().filter_map(|v| v.as_str()).collect();
-        assert!(names.contains(&"query"));
-        assert!(names.contains(&"limit"));
-    }
-
-    #[tokio::test]
-    async fn remember_enqueues_embed_job_with_value_text() {
-        // RememberTool should fire an EmbedJob::Memory through the
-        // channel after a successful save, so the saved value can be
-        // semantically searched later.
-        let (ops, _w) = fresh_ops().await;
-        let (etx, mut erx) = live_embed_tx();
-        let tool = RememberTool::new(ops.clone(), etx);
-        tool.invoke(json!({"key": "editor_preference", "value": "vim is the way"}))
-            .await
-            .unwrap();
-        // Drain the queue. The job's memory_id should be non-zero (the
-        // SQLite-backed save returns the actual rowid).
-        let job = tokio::time::timeout(std::time::Duration::from_secs(1), erx.recv())
-            .await
-            .expect("embed job arrived")
-            .expect("channel still open");
-        match job {
-            EmbedJob::Memory { memory_id, text } => {
-                assert!(memory_id > 0, "expected real rowid, got {memory_id}");
-                assert_eq!(text, "vim is the way");
-            }
-            EmbedJob::Chunk { .. } => panic!("expected Memory job, got Chunk"),
+    async fn recall_without_hits_returns_no_memories() {
+        for (case, embedder) in [
+            ("embed fails", no_embedder()),
+            ("no hits", Arc::new(FixedEmbedder) as Arc<dyn Embedder>),
+        ] {
+            let tool = RecallTool::new(embedder, no_semantic(), "m".into());
+            let result = tool.invoke(json!({"query": "anything"})).await.unwrap();
+            assert_eq!(result["output"], "(no memories)", "{case}");
         }
     }
 
     #[tokio::test]
-    async fn remember_then_recall_round_trip_no_embedder() {
-        // Belt-and-suspenders: drive both tools end-to-end. With the
-        // embedding subsystem disabled, recall reports the no-memories
-        // sentinel even though the save did land in SQLite; this proves
-        // the wire-up is sane in the disabled-embedder configuration.
-        // Semantic-on round-trip lives in the embedder integration test.
-        let (ops, _w) = fresh_ops().await;
-        let remember = RememberTool::new(ops.clone(), closed_embed_tx());
-        let recall = RecallTool::new(no_embedder(), no_semantic(), String::new());
-        remember
-            .invoke(json!({"key": "editor_preference", "value": "vim"}))
-            .await
-            .unwrap();
-        // The save must hit the underlying store regardless of the
-        // embedder state; verify directly rather than through recall,
-        // which would short-circuit on the empty model name.
-        assert_eq!(
-            ops.load("editor_preference").await.unwrap().as_deref(),
-            Some("vim")
-        );
-        let result = recall.invoke(json!({"query": "vim"})).await.unwrap();
-        assert_eq!(result["output"], "(no memories)");
+    async fn recall_rejects_missing_query() {
+        let tool = RecallTool::new(no_embedder(), no_semantic(), String::new());
+        let err = tool.invoke(json!({})).await.unwrap_err();
+        assert_eq!(invalid_args(err), "`query` (string) is required");
+    }
+
+    // --- Schema sanity ---------------------------------------------------
+
+    /// Strict mode requires every declared property to be listed as
+    /// required and no others to be accepted.
+    #[test]
+    fn schemas_satisfy_strict_mode() {
+        let tools: [Box<dyn Tool>; 3] = [
+            Box::new(RememberTool::new(no_ops(), closed_embed_tx())),
+            Box::new(RecallTool::new(no_embedder(), no_semantic(), String::new())),
+            Box::new(ReminisceTool::new(
+                no_embedder(),
+                no_semantic(),
+                String::new(),
+                watch::channel(Arc::new(SessionId::new())).1,
+            )),
+        ];
+        for tool in tools {
+            let schema = tool.parameters_schema();
+            let name = tool.name();
+            assert_eq!(schema["additionalProperties"], false, "{name}");
+            let mut properties: Vec<&str> = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name}: properties object"))
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let mut required: Vec<&str> = schema["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}: required array"))
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            properties.sort_unstable();
+            required.sort_unstable();
+            assert_eq!(required, properties, "{name}");
+        }
     }
 }

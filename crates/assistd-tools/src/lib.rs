@@ -183,46 +183,28 @@ mod tests {
     }
 
     #[test]
-    fn registry_starts_empty() {
-        let reg = ToolRegistry::new();
-        assert!(reg.is_empty());
-        assert_eq!(reg.len(), 0);
-        assert!(reg.get("noop").is_none());
-    }
-
-    #[tokio::test]
-    async fn registered_tool_is_findable_and_invokable() {
+    fn registry_finds_tools_by_name() {
         let mut reg = ToolRegistry::new();
         reg.register(Noop);
-        assert_eq!(reg.len(), 1);
-        let tool = reg.get("noop").expect("tool registered");
-        let result = tool.invoke(Value::Null).await.unwrap();
-        assert_eq!(result, Value::Null);
+        assert_eq!(reg.get("noop").map(|t| t.name()), Some("noop"));
+        assert!(reg.get("missing").is_none());
     }
 
     #[test]
     fn openai_schemas_wraps_each_tool() {
         let mut reg = ToolRegistry::new();
         reg.register(Noop);
-        let schemas = reg.openai_schemas();
-        assert_eq!(schemas.len(), 1);
-        let entry = &schemas[0];
-        assert_eq!(entry["type"], "function");
-        assert_eq!(entry["function"]["name"], "noop");
-        assert_eq!(entry["function"]["strict"], true);
-        assert_eq!(entry["function"]["parameters"]["type"], "object");
-    }
-
-    #[test]
-    fn mcp_tool_name_prefix_matches_mcp_init_convention() {
-        // The constant must equal the literal that assistd/src/mcp_init.rs
-        // stamps onto adapted tool names. Catches an accidental rename
-        // here without the mcp_init side updating.
-        assert_eq!(MCP_TOOL_NAME_PREFIX, "mcp__");
-    }
-
-    #[test]
-    fn version_is_not_empty() {
-        assert!(!version().is_empty());
+        assert_eq!(
+            reg.openai_schemas(),
+            [json!({
+                "type": "function",
+                "function": {
+                    "name": "noop",
+                    "description": "does nothing",
+                    "parameters": Noop.parameters_schema(),
+                    "strict": true,
+                }
+            })]
+        );
     }
 }

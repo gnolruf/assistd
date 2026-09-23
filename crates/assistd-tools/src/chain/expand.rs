@@ -62,7 +62,6 @@ fn expand_glob(pattern: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::{TempDir, tempdir};
 
     fn fixture() -> TempDir {
@@ -78,90 +77,52 @@ mod tests {
     }
 
     #[test]
-    fn plain_word_passes_through() {
-        assert_eq!(expand_args(&[Word::bare("cat")]), vec!["cat".to_string()]);
-    }
-
-    #[test]
-    fn glob_expands_to_sorted_matches() {
+    fn glob_expands_to_sorted_visible_matches() {
         let dir = fixture();
-        let out = expand_args(&[Word::bare(joined(&dir, "*.toml"))]);
         assert_eq!(
-            out,
-            vec![joined(&dir, "alpha.toml"), joined(&dir, "beta.toml")]
+            expand_args(&[Word::bare(joined(&dir, "*.toml"))]),
+            [joined(&dir, "alpha.toml"), joined(&dir, "beta.toml")]
         );
-    }
-
-    #[test]
-    fn glob_skips_hidden_entries() {
-        let dir = fixture();
-        let out = expand_args(&[Word::bare(joined(&dir, "*"))]);
-        assert!(
-            !out.iter().any(|p| p.ends_with(".hidden.toml")),
-            "hidden file leaked into {out:?}"
-        );
-    }
-
-    #[test]
-    fn quoted_glob_is_literal() {
-        let dir = fixture();
-        let pattern = joined(&dir, "*.toml");
-        assert_eq!(expand_args(&[Word::quoted(&pattern)]), vec![pattern]);
-    }
-
-    #[test]
-    fn unmatched_glob_stays_literal() {
-        let dir = fixture();
-        let pattern = joined(&dir, "*.rs");
-        assert_eq!(expand_args(&[Word::bare(&pattern)]), vec![pattern]);
-    }
-
-    #[test]
-    fn regex_metachars_survive_when_nothing_matches() {
-        // A grep pattern is a bare word too; it must reach the command
-        // untouched whenever it doesn't happen to name files.
         assert_eq!(
-            expand_args(&[Word::bare(".*ERROR")]),
-            vec![".*ERROR".to_string()]
+            expand_args(&[Word::bare(joined(&dir, "*"))]),
+            [
+                joined(&dir, "alpha.toml"),
+                joined(&dir, "beta.toml"),
+                joined(&dir, "gamma.txt")
+            ]
         );
+    }
+
+    #[test]
+    fn words_that_do_not_expand_pass_through_verbatim() {
+        let dir = fixture();
+        for (case, word) in [
+            ("plain word", Word::bare("cat")),
+            ("quoted glob", Word::quoted(joined(&dir, "*.toml"))),
+            ("unmatched glob", Word::bare(joined(&dir, "*.rs"))),
+            // A grep pattern is a bare word too; it must reach the
+            // command untouched whenever it doesn't happen to name files.
+            ("regex matching no file", Word::bare(".*ERROR")),
+            ("quoted tilde", Word::quoted("~/notes.md")),
+            // `~alice` needs a passwd lookup we don't do; leaving it
+            // literal surfaces "file not found: ~alice/x" instead of a
+            // path silently pointing at the wrong home.
+            ("named-user tilde", Word::bare("~alice/x")),
+        ] {
+            assert_eq!(
+                expand_args(std::slice::from_ref(&word)),
+                [word.text.as_str()],
+                "{case}"
+            );
+        }
     }
 
     #[test]
     fn tilde_expands_against_home() {
         let home = std::env::var("HOME").expect("HOME set in test env");
         assert_eq!(
-            expand_args(&[Word::bare("~/notes.md")]),
-            vec![
-                PathBuf::from(home)
-                    .join("notes.md")
-                    .to_string_lossy()
-                    .into_owned()
-            ]
-        );
-    }
-
-    #[test]
-    fn bare_tilde_is_home() {
-        let home = std::env::var("HOME").expect("HOME set in test env");
-        assert_eq!(expand_args(&[Word::bare("~")]), vec![home]);
-    }
-
-    #[test]
-    fn quoted_tilde_is_literal() {
-        assert_eq!(
-            expand_args(&[Word::quoted("~/notes.md")]),
-            vec!["~/notes.md".to_string()]
-        );
-    }
-
-    #[test]
-    fn named_user_tilde_is_left_alone() {
-        // `~alice` needs a passwd lookup we don't do; leaving it literal
-        // surfaces a clear "file not found: ~alice/x" instead of a path
-        // silently pointing at the wrong home.
-        assert_eq!(
-            expand_args(&[Word::bare("~alice/x")]),
-            vec!["~alice/x".to_string()]
+            expand_args(&[Word::bare("~/notes.md"), Word::bare("~")]),
+            [format!("{home}/notes.md"), home]
         );
     }
 }
