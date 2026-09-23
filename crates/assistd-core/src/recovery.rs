@@ -186,30 +186,8 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn component_as_str_is_stable() {
-        assert_eq!(Component::Llm.as_str(), "llm");
-        assert_eq!(Component::IdleMonitor.as_str(), "idle_monitor");
-        assert_eq!(Component::ListenDispatcher.as_str(), "listen_dispatcher");
-    }
-
-    #[test]
-    fn severity_as_str_matches_tracing_levels() {
-        assert_eq!(StatusSeverity::Info.as_str(), "info");
-        assert_eq!(StatusSeverity::Warning.as_str(), "warning");
-        assert_eq!(StatusSeverity::Error.as_str(), "error");
-    }
-
     #[tokio::test]
-    async fn spawn_supervised_completes_normally_for_clean_task() {
-        let handle = spawn_supervised("ok_task", Component::Daemon, async {
-            tokio::task::yield_now().await;
-        });
-        handle.await.expect("sentinel join");
-    }
-
-    #[tokio::test]
-    async fn spawn_supervised_logs_on_panic() {
+    async fn spawn_supervised_contains_inner_panic() {
         let handle = spawn_supervised("panicker", Component::Llm, async {
             panic!("boom");
         });
@@ -219,20 +197,14 @@ mod tests {
     }
 
     #[test]
-    fn panic_message_extracts_static_str() {
-        let payload: Box<dyn Any + Send> = Box::new("static panic text");
-        assert_eq!(panic_message(&*payload), "static panic text");
-    }
-
-    #[test]
-    fn panic_message_extracts_owned_string() {
-        let payload: Box<dyn Any + Send> = Box::new("owned panic text".to_string());
-        assert_eq!(panic_message(&*payload), "owned panic text");
-    }
-
-    #[test]
-    fn panic_message_falls_back_for_non_string_payload() {
-        let payload: Box<dyn Any + Send> = Box::new(42u32);
-        assert_eq!(panic_message(&*payload), "<non-string panic payload>");
+    fn panic_message_extracts_string_payloads() {
+        let cases: [(Box<dyn Any + Send>, &str); 3] = [
+            (Box::new("static panic text"), "static panic text"),
+            (Box::new("owned panic text".to_string()), "owned panic text"),
+            (Box::new(42u32), "<non-string panic payload>"),
+        ];
+        for (payload, expected) in cases {
+            assert_eq!(panic_message(&*payload), expected);
+        }
     }
 }

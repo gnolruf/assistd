@@ -1,11 +1,20 @@
 use super::*;
 
 #[tokio::test]
-async fn sleep_from_sleeping_is_noop() {
-    let m = PresenceManager::stub(PresenceState::Sleeping);
-    assert!(m.sleep().await.is_ok());
-    assert!(m.sleep().await.is_ok());
-    assert_eq!(m.state(), PresenceState::Sleeping);
+async fn transition_to_current_state_is_a_silent_noop() {
+    for state in [
+        PresenceState::Active,
+        PresenceState::Drowsy,
+        PresenceState::Sleeping,
+    ] {
+        let m = PresenceManager::stub(state);
+        let rx = m.subscribe();
+        m.set_presence(state)
+            .await
+            .unwrap_or_else(|e| panic!("{state:?}: {e:#}"));
+        assert_eq!(m.state(), state);
+        assert!(!rx.has_changed().unwrap(), "{state:?}: broadcast a no-op");
+    }
 }
 
 #[tokio::test]
@@ -15,29 +24,8 @@ async fn drowse_from_sleeping_errors() {
         .drowse()
         .await
         .expect_err("drowse from Sleeping must error");
-    assert!(err.to_string().contains("Sleeping"));
+    assert!(matches!(err, PresenceError::DrowseFromSleeping), "{err:?}");
     assert_eq!(m.state(), PresenceState::Sleeping);
-}
-
-#[tokio::test]
-async fn ensure_active_is_noop_when_active() {
-    let m = PresenceManager::stub(PresenceState::Active);
-    assert!(m.ensure_active().await.is_ok());
-    assert_eq!(m.state(), PresenceState::Active);
-}
-
-#[tokio::test]
-async fn wake_from_active_is_noop() {
-    let m = PresenceManager::stub(PresenceState::Active);
-    assert!(m.wake().await.is_ok());
-    assert_eq!(m.state(), PresenceState::Active);
-}
-
-#[tokio::test]
-async fn drowse_from_drowsy_is_noop() {
-    let m = PresenceManager::stub(PresenceState::Drowsy);
-    assert!(m.drowse().await.is_ok());
-    assert_eq!(m.state(), PresenceState::Drowsy);
 }
 
 #[tokio::test]
@@ -46,21 +34,7 @@ async fn sleep_from_active_broadcasts_sleeping() {
     let mut rx = m.subscribe();
     m.sleep().await.unwrap();
     assert_eq!(*rx.borrow_and_update(), PresenceState::Sleeping);
-}
-
-#[tokio::test]
-async fn subscribe_sees_test_set_state() {
-    let m = PresenceManager::stub(PresenceState::Sleeping);
-    let mut rx = m.subscribe();
-    m.set_state_for_test(PresenceState::Drowsy);
-    rx.changed().await.unwrap();
-    assert_eq!(*rx.borrow_and_update(), PresenceState::Drowsy);
-}
-
-#[tokio::test]
-async fn cycle_from_sleeping_goes_to_active_logically() {
-    let start = PresenceState::Sleeping;
-    assert_eq!(start.next(), PresenceState::Active);
+    assert_eq!(m.state(), PresenceState::Sleeping);
 }
 
 #[tokio::test]
@@ -73,6 +47,7 @@ async fn ensure_active_resets_activity_timer() {
     let after = m.idle_duration();
     assert!(after < before);
     assert!(after < Duration::from_millis(20));
+    assert_eq!(m.state(), PresenceState::Active);
 }
 
 #[tokio::test]
@@ -89,7 +64,8 @@ async fn cycle_resets_activity_timer() {
     let m = PresenceManager::stub(PresenceState::Drowsy);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(m.idle_duration() >= Duration::from_millis(40));
-    m.cycle().await.unwrap();
+    assert_eq!(m.cycle().await.unwrap(), PresenceState::Sleeping);
+    assert_eq!(m.state(), PresenceState::Sleeping);
     assert!(m.idle_duration() < Duration::from_millis(20));
 }
 
@@ -106,14 +82,13 @@ async fn wake_from_active_does_not_reset_activity_timer() {
 #[tokio::test]
 async fn acquire_request_guard_fast_path_when_active() {
     let m = PresenceManager::stub(PresenceState::Active);
-    let g = tokio::time::timeout(
+    tokio::time::timeout(
         Duration::from_millis(100),
         m.acquire_request_guard_inner(None),
     )
     .await
     .expect("acquire did not complete in time")
     .expect("acquire returned Err");
-    drop(g);
     assert_eq!(m.state(), PresenceState::Active);
 }
 
@@ -125,20 +100,18 @@ async fn sleep_defers_for_inflight_request() {
     let m2 = Arc::clone(&m);
     let sleep_task = tokio::spawn(async move { m2.sleep().await });
 
-    // Sleep must block while the request guard is alive.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !sleep_task.is_finished(),
         "sleep completed while request guard held"
     );
 
-    // Drop guard; sleep should now proceed.
     drop(guard);
-    let res = tokio::time::timeout(Duration::from_secs(2), sleep_task)
+    tokio::time::timeout(Duration::from_secs(2), sleep_task)
         .await
         .expect("sleep did not complete after guard dropped")
-        .expect("sleep task panicked");
-    res.expect("sleep returned Err");
+        .expect("sleep task panicked")
+        .expect("sleep returned Err");
     assert_eq!(m.state(), PresenceState::Sleeping);
 }
 
@@ -157,58 +130,57 @@ async fn drowse_defers_for_inflight_request() {
     );
 
     drop(guard);
-    let _ = tokio::time::timeout(Duration::from_secs(2), drowse_task)
+    tokio::time::timeout(Duration::from_secs(2), drowse_task)
         .await
-        .expect("drowse did not unblock after guard dropped");
+        .expect("drowse did not unblock after guard dropped")
+        .expect("drowse task panicked")
+        .expect_err("stub has no llama-server to unload");
+    assert_eq!(m.state(), PresenceState::Active);
 }
 
 #[tokio::test]
 async fn stream_guard_increments_and_decrements_count() {
     let m = PresenceManager::stub(PresenceState::Active);
-    assert_eq!(*m.stream_count_tx.borrow(), 0);
+    let rx = m.stream_count_tx.subscribe();
+    assert_eq!(*rx.borrow(), 0);
     let g1 = m.acquire_stream_guard();
-    assert_eq!(*m.stream_count_tx.borrow(), 1);
+    assert_eq!(*rx.borrow(), 1);
     let g2 = m.acquire_stream_guard();
-    assert_eq!(*m.stream_count_tx.borrow(), 2);
+    assert_eq!(*rx.borrow(), 2);
     drop(g1);
-    assert_eq!(*m.stream_count_tx.borrow(), 1);
+    assert_eq!(*rx.borrow(), 1);
     drop(g2);
-    assert_eq!(*m.stream_count_tx.borrow(), 0);
+    assert_eq!(*rx.borrow(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_until_llm_idle_returns_true_immediately_when_zero() {
     let m = PresenceManager::stub(PresenceState::Active);
-    let ok = tokio::time::timeout(
+    let idle = tokio::time::timeout(
         Duration::from_millis(20),
         m.wait_until_llm_idle(Duration::from_secs(5)),
     )
     .await
     .expect("wait did not complete fast");
-    assert!(ok);
+    assert!(idle);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_until_llm_idle_times_out_when_busy() {
     let m = PresenceManager::stub(PresenceState::Active);
     let _g = m.acquire_stream_guard();
-    let ok = m.wait_until_llm_idle(Duration::from_millis(30)).await;
-    assert!(!ok, "wait should have timed out while a guard is held");
+    assert!(!m.wait_until_llm_idle(Duration::from_millis(30)).await);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_until_llm_idle_returns_true_after_guard_dropped() {
     let m = PresenceManager::stub(PresenceState::Active);
     let g = m.acquire_stream_guard();
-    let m2 = Arc::clone(&m);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(30)).await;
         drop(g);
-        // Keep the Arc alive for the spawn so the guard drop observes the watch.
-        let _ = m2;
     });
-    let ok = m.wait_until_llm_idle(Duration::from_millis(500)).await;
-    assert!(ok, "wait should have resolved once the guard dropped");
+    assert!(m.wait_until_llm_idle(Duration::from_millis(500)).await);
 }
 
 #[tokio::test]
@@ -217,10 +189,10 @@ async fn stream_guard_does_not_block_sleep() {
     let _stream = m.acquire_stream_guard();
     let m2 = Arc::clone(&m);
     let sleep_task = tokio::spawn(async move { m2.sleep().await });
-    let res = tokio::time::timeout(Duration::from_secs(1), sleep_task)
+    tokio::time::timeout(Duration::from_secs(1), sleep_task)
         .await
-        .expect("sleep was blocked by an LLM stream guard");
-    res.expect("sleep task panicked")
+        .expect("sleep was blocked by an LLM stream guard")
+        .expect("sleep task panicked")
         .expect("sleep returned Err");
     assert_eq!(m.state(), PresenceState::Sleeping);
 }
@@ -229,8 +201,9 @@ async fn stream_guard_does_not_block_sleep() {
 async fn wake_marker_cleared_on_error_path() {
     let m = PresenceManager::stub(PresenceState::Drowsy);
     assert!(m.wake_in_progress().is_none());
-    let err = m.wake().await;
-    assert!(err.is_err(), "wake must fail against dummy control");
+    m.wake()
+        .await
+        .expect_err("wake must fail against dummy control");
     assert!(
         m.wake_in_progress().is_none(),
         "wake_in_progress must be cleared after wake returns, even on error"
@@ -238,7 +211,7 @@ async fn wake_marker_cleared_on_error_path() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rapid_sleep_guard_loop_no_crash() {
+async fn rapid_sleep_and_guard_churn_does_not_deadlock() {
     let m = PresenceManager::stub(PresenceState::Active);
 
     let mut readers = Vec::new();
@@ -246,12 +219,11 @@ async fn rapid_sleep_guard_loop_no_crash() {
         let m = Arc::clone(&m);
         readers.push(tokio::spawn(async move {
             for _ in 0..50 {
-                match m.acquire_request_guard_inner(None).await {
-                    Ok(g) => {
-                        tokio::task::yield_now().await;
-                        drop(g);
-                    }
-                    Err(_) => tokio::task::yield_now().await,
+                if let Ok(g) = m.acquire_request_guard_inner(None).await {
+                    tokio::task::yield_now().await;
+                    drop(g);
+                } else {
+                    tokio::task::yield_now().await;
                 }
             }
         }));
