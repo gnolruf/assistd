@@ -575,19 +575,27 @@ impl SandboxInfo {
 }
 
 /// Default bubblewrap flags applied before any user `bwrap_extra_args`.
-/// Read-only root, writable `$HOME` + `/tmp`, standard `/dev` and `/proc`,
+/// Read-only root, writable `/tmp` and (when it is a usable non-root
+/// directory) `$HOME`, standard `/dev` and `/proc`,
 /// isolated pid/ipc/uts namespaces, dies with the daemon. Crucially *not*
 /// `--unshare-net`: the assistant legitimately needs curl/pip/etc., so
 /// network isolation is opt-in via `bwrap_extra_args`.
 fn default_bwrap_flags() -> Vec<String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    vec![
-        "--ro-bind".into(),
-        "/".into(),
-        "/".into(),
-        "--bind".into(),
-        home.clone(),
-        home.clone(),
+    default_bwrap_flags_for(std::env::var("HOME").ok())
+}
+
+fn default_bwrap_flags_for(home: Option<String>) -> Vec<String> {
+    let mut flags: Vec<String> = vec!["--ro-bind".into(), "/".into(), "/".into()];
+    let home = home.filter(|h| is_bindable_home(h));
+    match &home {
+        Some(home) => flags.extend(["--bind".into(), home.clone(), home.clone()]),
+        None => warn!(
+            target: "assistd::policy",
+            "HOME is unset or not a non-root absolute directory; sandboxed commands \
+             will have no writable home"
+        ),
+    }
+    flags.extend([
         "--bind".into(),
         "/tmp".into(),
         "/tmp".into(),
@@ -602,13 +610,22 @@ fn default_bwrap_flags() -> Vec<String> {
         "--unshare-uts".into(),
         "--new-session".into(),
         "--die-with-parent".into(),
-        "--setenv".into(),
-        "HOME".into(),
-        home,
+    ]);
+    if let Some(home) = home {
+        flags.extend(["--setenv".into(), "HOME".into(), home]);
+    }
+    flags.extend([
         "--setenv".into(),
         "PATH".into(),
         "/usr/local/bin:/usr/bin:/bin".into(),
-    ]
+    ]);
+    flags
+}
+
+fn is_bindable_home(home: &str) -> bool {
+    let path = std::path::Path::new(home);
+    path.is_absolute()
+        && std::fs::canonicalize(path).is_ok_and(|real| real.is_dir() && real.parent().is_some())
 }
 
 /// Bind flags for [`SandboxAccess::Session`], re-exposing the compositor
@@ -1070,6 +1087,52 @@ mod tests {
             "a stale XDG_RUNTIME_DIR must not be passed to bwrap, which aborts on a \
              missing bind source"
         );
+    }
+
+    fn writable_binds(flags: &[String]) -> Vec<&str> {
+        flags
+            .windows(2)
+            .filter(|w| w[0] == "--bind")
+            .map(|w| w[1].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn home_is_bound_writable_when_usable() {
+        let dir = std::env::temp_dir();
+        let dir_str = dir.to_string_lossy().into_owned();
+        let flags = default_bwrap_flags_for(Some(dir_str.clone()));
+        assert!(writable_binds(&flags).contains(&dir_str.as_str()));
+        let setenv = flags
+            .windows(3)
+            .find(|w| w[0] == "--setenv" && w[1] == "HOME")
+            .expect("HOME is exported into the sandbox");
+        assert_eq!(setenv[2], dir_str);
+    }
+
+    #[test]
+    fn unusable_home_never_binds_the_root_writable() {
+        for home in [
+            None,
+            Some(""),
+            Some("/"),
+            Some("//"),
+            Some("/tmp/.."),
+            Some("relative"),
+        ] {
+            let flags = default_bwrap_flags_for(home.map(str::to_string));
+            assert_eq!(
+                writable_binds(&flags),
+                ["/tmp"],
+                "HOME={home:?} must only leave /tmp writable: {flags:?}"
+            );
+            assert!(
+                !flags
+                    .windows(2)
+                    .any(|w| w[0] == "--setenv" && w[1] == "HOME"),
+                "HOME={home:?} must not be exported: {flags:?}"
+            );
+        }
     }
 
     #[test]
