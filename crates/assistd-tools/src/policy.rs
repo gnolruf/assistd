@@ -375,42 +375,118 @@ pub fn matches_denylist<'a>(script: &str, patterns: &'a [String]) -> Option<&'a 
     })
 }
 
-/// Whether any command segment of the shlex-tokenized script starts with
-/// a configured destructive prefix. Returns the matched prefix.
+const COMMAND_SEPARATORS: &[&str] = &["|", "||", ";", "&&", "&"];
+
+/// Commands that run their arguments as another command. Every token
+/// after one is a potential command word, since its own options (`sudo
+/// -u root`, `nice -n 10`) cannot be told apart from the command without
+/// knowing each wrapper's flags.
+const PASS_THROUGH_WRAPPERS: &[&str] = &[
+    "sudo", "doas", "env", "exec", "xargs", "nohup", "nice", "time", "timeout", "command",
+    "setsid", "stdbuf",
+];
+
+/// Whether any command in the script starts with a configured
+/// destructive prefix, compared case-insensitively. Returns the matched
+/// prefix.
 ///
-/// Quoted arguments (`echo "rm -rf"`) stay single tokens and so do not
-/// match `["rm", "-rf"]`. Unparseable scripts count as no match; bash
-/// will surface the syntax error itself.
+/// The script is split into lines at unquoted newlines, and each line
+/// into commands at `|`, `||`, `;`, `&&` and `&`. A command's words are
+/// checked after any leading `NAME=value` assignments, and every word
+/// after a pass-through wrapper (`sudo`, `env`, `xargs`, …) is checked
+/// too. Quoted arguments (`echo "rm -rf"`) stay single tokens and so do
+/// not match `["rm", "-rf"]`. A line shlex cannot parse counts as no
+/// match; bash will surface the syntax error itself.
 pub fn matches_destructive<'a>(script: &str, prefixes: &'a [Vec<String>]) -> Option<&'a [String]> {
-    let tokens = shlex::split(script)?;
-    if tokens.is_empty() {
-        return None;
-    }
-    let lower: Vec<String> = tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
+    script_lines(script)
+        .into_iter()
+        .filter_map(shlex::split)
+        .find_map(|tokens| {
+            let anchors = command_anchors(&tokens);
+            prefixes
+                .iter()
+                .filter(|prefix| !prefix.is_empty())
+                .find(|prefix| {
+                    anchors.iter().any(|&at| {
+                        tokens.get(at..at + prefix.len()).is_some_and(|words| {
+                            words
+                                .iter()
+                                .zip(prefix.iter())
+                                .all(|(word, pat)| word.eq_ignore_ascii_case(pat))
+                        })
+                    })
+                })
+                .map(Vec::as_slice)
+        })
+}
 
-    let separators: &[&str] = &["|", "||", ";", "&&", "&"];
-    let mut anchors: Vec<usize> = vec![0];
-    for (i, tok) in lower.iter().enumerate() {
-        if separators.iter().any(|s| *s == tok) && i + 1 < lower.len() {
-            anchors.push(i + 1);
+fn script_lines(script: &str) -> Vec<&str> {
+    #[derive(Clone, Copy)]
+    enum State {
+        Plain,
+        Single,
+        Double,
+        Comment,
+    }
+
+    let bytes = script.as_bytes();
+    let mut lines = Vec::new();
+    let mut state = State::Plain;
+    let mut start = 0;
+    let mut end = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        match (state, bytes[i]) {
+            (State::Plain | State::Double, b'\\') => i += 1,
+            (State::Plain, b'\'') => state = State::Single,
+            (State::Plain, b'"') => state = State::Double,
+            (State::Single, b'\'') | (State::Double, b'"') => state = State::Plain,
+            (State::Plain, b'#') if i == 0 || b" \t\n;&|()".contains(&bytes[i - 1]) => {
+                state = State::Comment;
+                end = Some(i);
+            }
+            (State::Plain | State::Comment, b'\n') => {
+                lines.push(&script[start..end.unwrap_or(i)]);
+                state = State::Plain;
+                start = i + 1;
+                end = None;
+            }
+            _ => {}
         }
+        i += 1;
     }
+    lines.push(&script[start..end.unwrap_or(bytes.len())]);
+    lines
+}
 
-    for prefix in prefixes {
-        if prefix.is_empty() {
+fn command_anchors(tokens: &[String]) -> Vec<usize> {
+    let mut anchors = Vec::new();
+    let mut at_command = true;
+    let mut wrapped = false;
+    for (i, tok) in tokens.iter().enumerate() {
+        if COMMAND_SEPARATORS.contains(&tok.as_str()) {
+            at_command = true;
+            wrapped = false;
             continue;
         }
-        let lower_prefix: Vec<String> = prefix.iter().map(|t| t.to_ascii_lowercase()).collect();
-        for &anchor in &anchors {
-            if anchor + lower_prefix.len() > lower.len() {
-                continue;
-            }
-            if lower[anchor..anchor + lower_prefix.len()] == lower_prefix[..] {
-                return Some(prefix.as_slice());
-            }
+        if at_command || wrapped {
+            anchors.push(i);
+        }
+        if at_command {
+            wrapped |= PASS_THROUGH_WRAPPERS
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case(tok));
+            at_command = is_assignment(tok);
         }
     }
-    None
+    anchors
+}
+
+fn is_assignment(tok: &str) -> bool {
+    tok.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 /// How sandboxing was requested for subprocess-spawning commands.
@@ -864,6 +940,58 @@ mod tests {
         assert!(matches_destructive("shutdown -h now", &prefixes).is_some());
         // "shutdown" inside a quoted arg doesn't anchor at a command slot.
         assert!(matches_destructive("echo 'shutdown'", &prefixes).is_none());
+    }
+
+    fn rm_rf() -> Vec<Vec<String>> {
+        vec![vec!["rm".into(), "-rf".into()]]
+    }
+
+    #[test]
+    fn destructive_matches_command_on_a_later_line() {
+        assert!(matches_destructive("true\nrm -rf ~", &rm_rf()).is_some());
+        assert!(matches_destructive("cd /tmp\n\n  rm -rf ~\n", &rm_rf()).is_some());
+    }
+
+    #[test]
+    fn destructive_ignores_newlines_inside_quotes_and_continuations() {
+        assert!(matches_destructive("echo \"a\nrm -rf ~\"", &rm_rf()).is_none());
+        assert!(matches_destructive("echo 'a\nrm -rf ~'", &rm_rf()).is_none());
+        assert!(matches_destructive("echo \\\nrm -rf ~", &rm_rf()).is_none());
+    }
+
+    #[test]
+    fn destructive_quote_in_comment_does_not_hide_later_lines() {
+        assert!(matches_destructive("true # it's fine\nrm -rf ~", &rm_rf()).is_some());
+        assert!(matches_destructive("rm -rf ~;# it's fine", &rm_rf()).is_some());
+    }
+
+    #[test]
+    fn destructive_unparseable_line_does_not_hide_earlier_lines() {
+        assert!(matches_destructive("rm -rf ~\necho \"oops", &rm_rf()).is_some());
+    }
+
+    #[test]
+    fn destructive_matches_through_pass_through_wrappers() {
+        for script in [
+            "sudo rm -rf ~",
+            "sudo -u root rm -rf ~",
+            "exec rm -rf ~",
+            "env FOO=1 rm -rf ~",
+            "find . -print0 | xargs -0 rm -rf",
+            "nice -n 10 sudo rm -rf ~",
+            "FOO=1 BAR=2 rm -rf ~",
+        ] {
+            assert!(
+                matches_destructive(script, &rm_rf()).is_some(),
+                "{script:?} must match"
+            );
+        }
+    }
+
+    #[test]
+    fn destructive_arguments_of_ordinary_commands_do_not_anchor() {
+        assert!(matches_destructive("echo rm -rf ~", &rm_rf()).is_none());
+        assert!(matches_destructive("sudo true ; echo rm -rf ~", &rm_rf()).is_none());
     }
 
     fn bwrap_sandbox(extra_args: Vec<String>) -> SandboxInfo {
