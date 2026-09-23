@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, anyhow};
 use assistd_config::{ContinuousListenConfig, VoiceConfig};
 use async_trait::async_trait;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::transcribe::Transcriber;
 
@@ -23,6 +24,11 @@ const UTTERANCE_CHANNEL_DEPTH: usize = 16;
 
 /// ~2.5 s of 20 ms frames, enough to ride out scheduling hiccups.
 const FRAME_CHANNEL_DEPTH: usize = 128;
+
+/// Utterances awaiting transcription. Each one holds its PCM until the
+/// single transcription worker reaches it; beyond this, new utterances
+/// are dropped rather than letting a slow transcriber accumulate audio.
+const PENDING_UTTERANCE_DEPTH: usize = 4;
 
 /// cpal + webrtc-vad implementation of [`ContinuousListener`].
 pub struct MicContinuousListener {
@@ -43,6 +49,7 @@ struct ListenSession {
     capture_stop: Arc<AtomicBool>,
     capture_handle: CaptureJoin,
     vad_handle: JoinHandle<()>,
+    transcribe_handle: JoinHandle<()>,
 }
 
 impl MicContinuousListener {
@@ -97,18 +104,20 @@ impl ContinuousListener for MicContinuousListener {
             handle: capture_handle,
         } = capture::start(self.mic_device.as_deref(), frame_tx);
 
-        let rt_handle = tokio::runtime::Handle::current();
+        let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(PENDING_UTTERANCE_DEPTH);
+        let transcribe_handle = tokio::spawn(transcribe_loop(
+            self.transcriber.clone(),
+            self.utterances.clone(),
+            pcm_rx,
+        ));
         let tuning = self.tuning;
-        let transcriber = self.transcriber.clone();
-        let utterances = self.utterances.clone();
-        let vad_handle = tokio::task::spawn_blocking(move || {
-            vad_loop(tuning, transcriber, utterances, frame_rx, rt_handle);
-        });
+        let vad_handle = tokio::task::spawn_blocking(move || vad_loop(tuning, frame_rx, pcm_tx));
 
         inner.session = Some(ListenSession {
             capture_stop,
             capture_handle,
             vad_handle,
+            transcribe_handle,
         });
         let _ = self.state_tx.send(true);
         info!(target: "assistd::voice::listen", "continuous listening started");
@@ -131,7 +140,12 @@ impl ContinuousListener for MicContinuousListener {
             Ok(Err(e)) => warn!(target: "assistd::voice::listen", "capture worker error: {e}"),
             Err(e) => warn!(target: "assistd::voice::listen", "capture worker panicked: {e}"),
         }
-        let _ = session.vad_handle.await;
+        if let Err(e) = session.vad_handle.await {
+            warn!(target: "assistd::voice::listen", "VAD worker panicked: {e}");
+        }
+        if let Err(e) = session.transcribe_handle.await {
+            warn!(target: "assistd::voice::listen", "transcription worker panicked: {e}");
+        }
 
         self.active.store(false, Ordering::SeqCst);
         let _ = self.state_tx.send(false);
@@ -152,13 +166,13 @@ impl ContinuousListener for MicContinuousListener {
     }
 }
 
-/// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer.
+/// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer. Never
+/// waits on `pcm_tx`: stalling here would back up the frame channel and
+/// silently truncate live audio, so a full queue drops the utterance.
 fn vad_loop(
     tuning: VadTuning,
-    transcriber: Arc<dyn Transcriber>,
-    utterances: broadcast::Sender<String>,
     mut frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
-    rt: tokio::runtime::Handle,
+    pcm_tx: mpsc::Sender<Vec<i16>>,
 ) {
     let mut vad = UtteranceVad::new(tuning);
     while let Some(frame) = frame_rx.blocking_recv() {
@@ -168,26 +182,42 @@ fn vad_loop(
         let pcm = match event {
             VadEvent::UtteranceComplete(p) | VadEvent::Truncated(p) => p,
         };
-        let transcriber = transcriber.clone();
-        let utterances = utterances.clone();
-        rt.spawn(async move {
-            match transcriber.transcribe(&pcm).await {
-                Ok(text) => {
-                    let trimmed = text.trim();
-                    if trimmed.is_empty() {
-                        return;
-                    }
-                    if utterances.send(trimmed.to_string()).is_err() {
-                        tracing::debug!(
-                            target: "assistd::voice::listen",
-                            "no utterance subscribers; dropping transcript"
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(target: "assistd::voice::listen", "transcription failed: {e:#}");
-                }
-            }
-        });
+        match pcm_tx.try_send(pcm) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => warn!(
+                target: "assistd::voice::listen",
+                "transcription backlog full; dropping utterance"
+            ),
+            Err(TrySendError::Closed(_)) => return,
+        }
     }
 }
+
+async fn transcribe_loop(
+    transcriber: Arc<dyn Transcriber>,
+    utterances: broadcast::Sender<String>,
+    mut pcm_rx: mpsc::Receiver<Vec<i16>>,
+) {
+    while let Some(pcm) = pcm_rx.recv().await {
+        match transcriber.transcribe(&pcm).await {
+            Ok(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if utterances.send(trimmed.to_string()).is_err() {
+                    debug!(
+                        target: "assistd::voice::listen",
+                        "no utterance subscribers; dropping transcript"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(target: "assistd::voice::listen", "transcription failed: {e:#}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
