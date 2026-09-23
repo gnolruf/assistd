@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::time::Duration;
 
 #[cfg(feature = "chat")]
 mod chat;
@@ -144,9 +145,19 @@ enum Commands {
     Memory(memory_cli::MemoryArgs),
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// How long exit waits on `spawn_blocking` work (e.g. a Whisper model
+/// load abandoned by a shutdown during startup) before leaving it behind.
+const BLOCKING_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+fn main() -> Result<()> {
     let cli = Cli::parse();
+    let runtime = tokio::runtime::Runtime::new()?;
+    let result = runtime.block_on(dispatch(cli));
+    runtime.shutdown_timeout(BLOCKING_SHUTDOWN_GRACE);
+    result
+}
+
+async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         #[cfg(feature = "daemon")]
         Commands::Daemon(args) => daemon::run(args).await,
