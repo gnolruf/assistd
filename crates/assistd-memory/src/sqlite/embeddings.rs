@@ -495,7 +495,7 @@ fn scan_top_k(
     top_k: usize,
 ) -> rusqlite::Result<Vec<(i64, f32)>> {
     let mut stmt = c.prepare(sql)?;
-    let mut heap = BinaryHeap::with_capacity(top_k + 1);
+    let mut heap = BinaryHeap::new();
     let mut rows = stmt.query(params)?;
     while let Some(row) = rows.next()? {
         let rowid: i64 = row.get(0)?;
