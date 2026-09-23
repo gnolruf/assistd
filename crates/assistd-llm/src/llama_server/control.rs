@@ -196,67 +196,61 @@ impl ModelEntry {
 mod tests {
     use super::*;
 
-    #[test]
-    fn models_response_empty_is_not_loaded() {
-        let body = r#"{"data":[]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert!(!parsed.contains_loaded("anything"));
+    fn parse(body: &str) -> ModelsResponse {
+        serde_json::from_str(body).unwrap()
     }
 
     #[test]
-    fn models_response_recognises_structured_status_loaded() {
-        let body = r#"{"data":[
-            {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--host","127.0.0.1","--port","48881"]}},
-            {"id":"baz/qux:Q4","status":{"value":"unloaded","args":["--host","127.0.0.1","--port","0"]}}
-        ]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
+    fn contains_loaded_requires_matching_id_and_loaded_status() {
+        let parsed = parse(
+            r#"{"data":[
+                {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--host","127.0.0.1","--port","48881"]}},
+                {"id":"baz/qux:Q4","status":{"value":"unloaded","args":["--host","127.0.0.1","--port","0"]}}
+            ]}"#,
+        );
         assert!(parsed.contains_loaded("foo/bar:Q4"));
         assert!(!parsed.contains_loaded("baz/qux:Q4"));
         assert!(!parsed.contains_loaded("c"));
+        assert!(!parse(r#"{"data":[]}"#).contains_loaded("anything"));
     }
 
     #[test]
-    fn find_loaded_child_port_extracts_port_from_spawn_args() {
-        let body = r#"{"data":[
-            {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--host","127.0.0.1","--port","48881","--alias","foo/bar:Q4"]}}
-        ]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed.find_loaded_child_port("foo/bar:Q4"), Some(48881));
-    }
-
-    #[test]
-    fn find_loaded_child_port_returns_none_for_unloaded_model() {
-        let body = r#"{"data":[
-            {"id":"foo/bar:Q4","status":{"value":"unloaded","args":["--port","48881"]}}
-        ]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed.find_loaded_child_port("foo/bar:Q4"), None);
-    }
-
-    #[test]
-    fn find_loaded_child_port_returns_none_for_unknown_model() {
-        let body = r#"{"data":[
-            {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--port","48881"]}}
-        ]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed.find_loaded_child_port("other/model:Q4"), None);
-    }
-
-    #[test]
-    fn find_loaded_child_port_ignores_non_numeric_port() {
-        let body = r#"{"data":[
-            {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--port","auto"]}}
-        ]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed.find_loaded_child_port("foo/bar:Q4"), None);
-    }
-
-    #[test]
-    fn find_loaded_child_port_handles_port_zero_as_unbound() {
-        let body = r#"{"data":[
-            {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--port","0"]}}
-        ]}"#;
-        let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed.find_loaded_child_port("foo/bar:Q4"), Some(0));
+    fn find_loaded_child_port_reads_the_port_spawn_arg() {
+        let cases = [
+            (
+                "loaded, port among other args",
+                r#"{"id":"foo/bar:Q4","status":{"value":"loaded","args":["--host","127.0.0.1","--port","48881","--alias","foo/bar:Q4"]}}"#,
+                "foo/bar:Q4",
+                Some(48881),
+            ),
+            (
+                "port 0 is reported as-is",
+                r#"{"id":"foo/bar:Q4","status":{"value":"loaded","args":["--port","0"]}}"#,
+                "foo/bar:Q4",
+                Some(0),
+            ),
+            (
+                "unloaded model",
+                r#"{"id":"foo/bar:Q4","status":{"value":"unloaded","args":["--port","48881"]}}"#,
+                "foo/bar:Q4",
+                None,
+            ),
+            (
+                "unknown model",
+                r#"{"id":"foo/bar:Q4","status":{"value":"loaded","args":["--port","48881"]}}"#,
+                "other/model:Q4",
+                None,
+            ),
+            (
+                "non-numeric port",
+                r#"{"id":"foo/bar:Q4","status":{"value":"loaded","args":["--port","auto"]}}"#,
+                "foo/bar:Q4",
+                None,
+            ),
+        ];
+        for (label, entry, model, expected) in cases {
+            let parsed = parse(&format!(r#"{{"data":[{entry}]}}"#));
+            assert_eq!(parsed.find_loaded_child_port(model), expected, "{label}");
+        }
     }
 }

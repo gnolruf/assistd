@@ -72,6 +72,28 @@ fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) 
     (chat, model)
 }
 
+fn message(role: Role, content: &str) -> Message {
+    Message {
+        role,
+        content: content.into(),
+        attachments: Vec::new(),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        reasoning: String::new(),
+        context: None,
+    }
+}
+
+fn contents(c: &Conversation) -> Vec<&str> {
+    c.messages.iter().map(|m| m.content.as_str()).collect()
+}
+
+fn with_context(ctx: &str, text: &str) -> String {
+    format!(
+        "[Context: added automatically, not written by the user]\n{ctx}\n[End of context]\n\n{text}"
+    )
+}
+
 fn user_text(message: &wire::ChatMessage<'_>) -> String {
     assert_eq!(message.role, "user");
     match &message.content {
@@ -131,15 +153,10 @@ fn transient_context_neutralises_forged_delimiters() {
 #[test]
 fn wire_carries_a_single_leading_system_message() {
     let mut c = Conversation::new("sys".into());
-    c.replace_messages(vec![Message {
-        role: Role::System,
-        content: format!("{SUMMARY_PREFIX}earlier talk"),
-        attachments: Vec::new(),
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        reasoning: String::new(),
-        context: None,
-    }]);
+    c.replace_messages(vec![message(
+        Role::System,
+        &format!("{SUMMARY_PREFIX}earlier talk"),
+    )]);
     c.push_user("one".into());
     c.push_assistant("two".into());
     c.set_transient_context("ctx".into());
@@ -169,20 +186,8 @@ fn transient_context_attaches_to_image_turns_too() {
     let wire = c.as_wire_messages();
     assert_eq!(wire.len(), 2);
     assert!(matches!(wire[1].content, Some(wire::ContentBody::Parts(_))));
-    let text = user_text(&wire[1]);
-    assert!(text.contains("ctx") && text.ends_with("what is this?"));
+    assert_eq!(user_text(&wire[1]), with_context("ctx", "what is this?"));
     assert!(c.pending_context().is_none());
-}
-
-#[test]
-fn transient_context_omitted_when_unset() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("hi".into());
-    let wire = c.as_wire_messages();
-    // Only the static system prompt + the user message.
-    assert_eq!(wire.len(), 2);
-    assert_eq!(wire[0].role, "system");
-    assert_eq!(wire[1].role, "user");
 }
 
 #[test]
@@ -218,7 +223,10 @@ fn rollback_last_user_returns_its_context_to_the_pending_slot() {
     c.rollback_last_user();
     assert_eq!(c.pending_context(), Some("ctx"));
     c.push_user("hi again".into());
-    assert!(user_text(&c.as_wire_messages()[1]).contains("ctx"));
+    assert_eq!(
+        user_text(&c.as_wire_messages()[1]),
+        with_context("ctx", "hi again")
+    );
 }
 
 #[test]
@@ -236,7 +244,7 @@ fn image_tool_results_do_not_close_the_turn() {
         }],
     );
     let wire = c.as_wire_messages();
-    assert!(user_text(&wire[1]).contains("ctx"));
+    assert_eq!(user_text(&wire[1]), with_context("ctx", "look"));
     assert_eq!(
         wire.iter().find_map(|m| m.reasoning_content),
         Some("thinking")
@@ -271,8 +279,12 @@ fn reasoning_is_sent_with_its_tool_call_and_dropped_by_the_next_user_turn() {
     c.push_assistant("done".into());
     c.push_user("thanks".into());
     assert_eq!(reasoning_on_wire(&c), None);
-    assert!(
-        c.approx_total_tokens() < in_loop + approx_tokens("donethanks") + 8,
+    assert_eq!(
+        c.approx_total_tokens(),
+        in_loop - approx_tokens("list first")
+            + 2 * TOKENS_PER_MESSAGE_OVERHEAD
+            + approx_tokens("done")
+            + approx_tokens("thanks"),
         "cleared reasoning must stop counting toward the budget"
     );
 }
@@ -281,15 +293,7 @@ fn reasoning_is_sent_with_its_tool_call_and_dropped_by_the_next_user_turn() {
 fn transient_note_renders_as_final_user_message_for_one_request() {
     let mut c = Conversation::new("sys".into());
     c.push_user("hello".into());
-    c.push_assistant_with_tool_calls(
-        None,
-        String::new(),
-        vec![ToolCallRecord {
-            id: "c-1".into(),
-            name: "run".into(),
-            arguments: "{}".into(),
-        }],
-    );
+    c.push_assistant_with_tool_calls(None, String::new(), vec![mk_call("c-1", "{}")]);
     c.push_tool_result("c-1".into(), "out".into());
     c.set_transient_note("stop calling tools".into());
 
@@ -316,7 +320,10 @@ fn transient_note_counts_toward_budget_and_is_cleared_with_history() {
     c.push_user("hello".into());
     let baseline = c.approx_total_tokens();
     c.set_transient_note("a".repeat(100));
-    assert!(c.approx_total_tokens() > baseline);
+    assert_eq!(
+        c.approx_total_tokens(),
+        baseline + TOKENS_PER_MESSAGE_OVERHEAD + 25
+    );
 
     c.replace_messages(Vec::new());
     assert_eq!(c.consume_transient_note(), None);
@@ -328,10 +335,7 @@ fn approx_total_tokens_includes_transient_context() {
     let baseline = c.approx_total_tokens();
     c.set_transient_context("a".repeat(100));
     let pending = c.approx_total_tokens();
-    assert!(
-        pending > baseline,
-        "pending context must contribute to budget math: {baseline} → {pending}"
-    );
+    assert_eq!(pending, baseline + TOKENS_PER_MESSAGE_OVERHEAD + 25);
     c.push_user("q".into());
     let attached = c.approx_total_tokens();
     assert!(
@@ -346,34 +350,13 @@ fn replace_messages_swaps_history_and_clears_transient() {
     c.push_user("first".into());
     c.set_transient_context("ctx".into());
     c.replace_messages(vec![
-        Message {
-            role: Role::User,
-            content: "loaded user".into(),
-            attachments: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            reasoning: String::new(),
-            context: None,
-        },
-        Message {
-            role: Role::Assistant,
-            content: "loaded assistant".into(),
-            attachments: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            reasoning: String::new(),
-            context: None,
-        },
+        message(Role::User, "loaded user"),
+        message(Role::Assistant, "loaded assistant"),
     ]);
     let wire = c.as_wire_messages();
-    // [system=sys, user=loaded user, assistant=loaded assistant]; context gone.
-    assert_eq!(wire.len(), 3);
-    assert_eq!(wire[0].role, "system");
-    assert_eq!(wire[1].role, "user");
-    match &wire[1].content {
-        Some(wire::ContentBody::Text(t)) => assert_eq!(*t, "loaded user"),
-        _ => panic!("expected text body"),
-    }
+    let roles: Vec<_> = wire.iter().map(|m| m.role).collect();
+    assert_eq!(roles, ["system", "user", "assistant"]);
+    assert_eq!(user_text(&wire[1]), "loaded user");
     assert!(c.pending_context().is_none());
 }
 
@@ -384,39 +367,35 @@ fn truncate_to_last_real_user_drops_through_assistant_chain() {
     c.push_assistant("a1".into());
     c.push_user("second".into());
     c.push_assistant("a2".into());
-    let removed = c.truncate_to_last_real_user();
-    assert_eq!(removed, 2, "drops 'second' user + 'a2' assistant");
-    assert_eq!(c.messages.len(), 2);
-    assert_eq!(c.messages[0].content, "first");
-    assert_eq!(c.messages[1].content, "a1");
+    assert_eq!(c.truncate_to_last_real_user(), 2);
+    assert_eq!(contents(&c), ["first", "a1"]);
 }
 
 #[test]
-fn truncate_to_last_real_user_skips_tool_results_to_real_user() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("real q".into());
-    // Tool-call pair, ending with a tool-result user message.
-    c.push_assistant_with_tool_calls(
-        None,
-        String::new(),
-        vec![ToolCallRecord {
-            id: "c-1".into(),
-            name: "run".into(),
-            arguments: "{}".into(),
-        }],
-    );
-    c.push_user("[tool:run]\noutput".into());
-    c.push_assistant("final".into());
-    let removed = c.truncate_to_last_real_user();
-    assert_eq!(removed, 4);
-    assert!(c.messages.is_empty());
+fn truncate_to_last_real_user_skips_both_tool_result_shapes() {
+    for image_result in [false, true] {
+        let mut c = Conversation::new("sys".into());
+        c.push_user("real q".into());
+        c.push_assistant_with_tool_calls(None, String::new(), vec![mk_call("c-1", "{}")]);
+        if image_result {
+            c.push_tool_result_with_attachments("run", "output".into(), Vec::new());
+        } else {
+            c.push_tool_result("c-1".into(), "output".into());
+        }
+        c.push_assistant("final".into());
+        assert_eq!(
+            c.truncate_to_last_real_user(),
+            4,
+            "image_result = {image_result}"
+        );
+        assert!(c.messages.is_empty(), "image_result = {image_result}");
+    }
 }
 
 #[test]
 fn truncate_to_last_real_user_returns_zero_when_no_user_present() {
     let mut c = Conversation::new("sys".into());
-    let removed = c.truncate_to_last_real_user();
-    assert_eq!(removed, 0);
+    assert_eq!(c.truncate_to_last_real_user(), 0);
 }
 
 #[test]
@@ -426,15 +405,14 @@ fn push_and_rollback_user_message() {
     c.push_assistant("hello".into());
     c.rollback_last_user();
     assert_eq!(
-        c.messages.len(),
-        2,
+        contents(&c),
+        ["hi", "hello"],
         "rollback is a no-op when last is assistant"
     );
 
     c.push_user("again".into());
     c.rollback_last_user();
-    assert_eq!(c.messages.len(), 2);
-    assert!(matches!(c.messages.last().unwrap().role, Role::Assistant));
+    assert_eq!(contents(&c), ["hi", "hello"]);
 }
 
 #[test]
@@ -446,6 +424,7 @@ fn as_wire_messages_injects_system_first() {
     assert_eq!(wire[0].role, "system");
     assert_eq!(wire[0].content, Some(wire::ContentBody::Text("sys".into())));
     assert_eq!(wire[1].role, "user");
+    assert_eq!(wire[1].content, Some(wire::ContentBody::Text("hi".into())));
 }
 
 #[test]
@@ -455,6 +434,7 @@ fn as_wire_messages_drops_empty_system_prompt() {
     let wire = c.as_wire_messages();
     assert_eq!(wire.len(), 1);
     assert_eq!(wire[0].role, "user");
+    assert_eq!(wire[0].content, Some(wire::ContentBody::Text("hi".into())));
 }
 
 #[test]
@@ -478,31 +458,18 @@ fn push_user_with_attachments_renders_multimodal_wire() {
     let wire = c.as_wire_messages();
     assert_eq!(wire.len(), 1);
     assert_eq!(wire[0].role, "user");
-    let parts = match &wire[0].content {
-        Some(wire::ContentBody::Parts(p)) => p,
-        other => panic!("expected Some(Parts), got {other:?}"),
-    };
-    assert_eq!(parts.len(), 2);
-    match &parts[0] {
-        wire::ContentPart::Text { text } => assert_eq!(*text, "what is this?"),
-        other => panic!("first part must be text, got {other:?}"),
-    }
-    match &parts[1] {
-        wire::ContentPart::ImageUrl { image_url } => {
-            assert_eq!(image_url.url, "data:image/png;base64,q80=");
-        }
-        other => panic!("second part must be image_url, got {other:?}"),
-    }
-}
-
-#[test]
-fn plain_text_user_still_renders_as_string_content() {
-    let mut c = Conversation::new(String::new());
-    c.push_user("hello".into());
-    let wire = c.as_wire_messages();
     assert_eq!(
         wire[0].content,
-        Some(wire::ContentBody::Text("hello".into()))
+        Some(wire::ContentBody::Parts(vec![
+            wire::ContentPart::Text {
+                text: "what is this?".into()
+            },
+            wire::ContentPart::ImageUrl {
+                image_url: wire::ImageUrl {
+                    url: "data:image/png;base64,q80=".into()
+                }
+            },
+        ]))
     );
 }
 
@@ -522,27 +489,6 @@ fn attachments_contribute_to_token_budget() {
     );
     let with_image = c.approx_total_tokens();
     assert_eq!(with_image, baseline + TOKENS_PER_IMAGE);
-}
-
-#[test]
-fn multimodal_wire_serializes_to_openai_shape() {
-    let mut c = Conversation::new(String::new());
-    c.push_user_with_attachments(
-        "describe".into(),
-        vec![Attachment::Image {
-            mime: "image/jpeg".into(),
-            bytes: vec![0x12, 0x34, 0x56],
-        }],
-    );
-    let msgs = c.as_wire_messages();
-    let json = serde_json::to_value(&msgs).unwrap();
-    assert_eq!(json[0]["content"][0]["type"], "text");
-    assert_eq!(json[0]["content"][0]["text"], "describe");
-    assert_eq!(json[0]["content"][1]["type"], "image_url");
-    assert_eq!(
-        json[0]["content"][1]["image_url"]["url"],
-        "data:image/jpeg;base64,EjRW"
-    );
 }
 
 #[tokio::test]
@@ -565,18 +511,19 @@ async fn ensure_budget_summarizes_when_over() {
         ));
     }
     c.push_user("latest question".into());
-    let before_total = c.approx_total_tokens();
 
     let fake = FakeSummarizer::new("the conversation covered topics 0 through 9");
     let (chat, model) = spec(60, 2, 10_000);
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
     assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
-    assert!(c.approx_total_tokens() <= 60 || c.approx_total_tokens() < before_total);
-
+    assert!(c.approx_total_tokens() <= 60, "{}", c.approx_total_tokens());
     let first = &c.messages[0];
     assert_eq!(first.role, Role::System);
-    assert!(first.content.starts_with(SUMMARY_PREFIX));
+    assert_eq!(
+        first.content,
+        "[Conversation summary] the conversation covered topics 0 through 9"
+    );
 
     let last = c.messages.last().unwrap();
     assert_eq!(last.role, Role::User);
@@ -584,26 +531,33 @@ async fn ensure_budget_summarizes_when_over() {
 }
 
 #[tokio::test]
-async fn ensure_budget_preserves_recent_turns_around_summary() {
+async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
+    let user = |i: usize| format!("user {i} message with enough length to count");
+    let assistant = |i: usize| format!("assistant {i} message with enough length to count");
     let mut c = Conversation::new("sys".into());
     for i in 0..6 {
-        c.push_user(format!("user {i} message with enough length to count"));
-        c.push_assistant(format!("assistant {i} message with enough length to count"));
+        c.push_user(user(i));
+        c.push_assistant(assistant(i));
     }
     c.push_user("current question with enough length to count".into());
 
-    let fake = FakeSummarizer::new("early chat covered topics 0 and 1");
+    let fake = FakeSummarizer::new("early chat covered topics 0 to 4");
     let (chat, model) = spec(120, 2, 10_000);
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
-    let tail_contents: Vec<_> = c
-        .messages
-        .iter()
-        .rev()
-        .take(5)
-        .map(|m| m.content.clone())
+    let summarized: String = (0..5)
+        .map(|i| format!("user: {}\nassistant: {}\n", user(i), assistant(i)))
         .collect();
-    assert!(tail_contents.iter().any(|c| c.contains("current question")));
+    assert_eq!(*fake.captured.lock().await, [summarized]);
+    assert_eq!(
+        contents(&c),
+        [
+            "[Conversation summary] early chat covered topics 0 to 4",
+            user(5).as_str(),
+            assistant(5).as_str(),
+            "current question with enough length to count",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -625,11 +579,16 @@ fn truncate_drops_oldest_first() {
         c.push_user(format!("user message {i} with padding"));
         c.push_assistant(format!("assistant reply {i} with padding"));
     }
-    let before = c.messages.len();
+    let before: Vec<String> = c.messages.iter().map(|m| m.content.clone()).collect();
     let (chat, model) = spec(40, 2, 10_000);
     c.truncate_to_budget(&chat, &model);
-    assert!(c.messages.len() < before);
-    assert_eq!(c.messages.last().unwrap().role, Role::Assistant);
+    let after: Vec<String> = contents(&c).into_iter().map(String::from).collect();
+    assert!(after.len() < before.len());
+    assert!(
+        before.ends_with(&after),
+        "{after:?} is not a suffix of {before:?}"
+    );
+    assert!(c.approx_total_tokens() <= 40);
 }
 
 #[test]
@@ -640,20 +599,17 @@ fn truncate_preserves_last_user_message() {
         c.push_assistant(format!("a{i} with filler"));
     }
     c.push_user("keepme with filler".into());
-    let (chat, model) = spec(20, 1, 10_000);
+    // The latest user turn alone exceeds this budget; truncation must
+    // stop at it rather than drop it.
+    let (chat, model) = spec(10, 1, 10_000);
     c.truncate_to_budget(&chat, &model);
-    assert_eq!(c.messages.last().unwrap().content, "keepme with filler");
+    assert_eq!(contents(&c), ["keepme with filler"]);
 }
 
 #[test]
 fn truncate_utf8_clamps_on_codepoint_boundary() {
-    let s = "世界世界世界";
-    let truncated = truncate_utf8(s, 4);
-    assert!(truncated.ends_with('…'));
-    assert!(truncated.chars().filter(|c| *c != '…').all(|c| c == '世'));
+    assert_eq!(truncate_utf8("世界世界世界", 4), "世…");
 }
-
-// --- tool-call conversation support ----------------------------------
 
 fn mk_call(id: &str, args: &str) -> ToolCallRecord {
     ToolCallRecord {
@@ -661,24 +617,6 @@ fn mk_call(id: &str, args: &str) -> ToolCallRecord {
         name: "run".into(),
         arguments: args.into(),
     }
-}
-
-#[test]
-fn push_assistant_with_tool_calls_records_calls() {
-    let mut c = Conversation::new(String::new());
-    c.push_user("do it".into());
-    c.push_assistant_with_tool_calls(
-        None,
-        String::new(),
-        vec![mk_call("call-1", r#"{"command":"ls"}"#)],
-    );
-    let last = c.messages.last().unwrap();
-    assert_eq!(last.role, Role::Assistant);
-    assert_eq!(last.content, "");
-    assert_eq!(last.tool_calls.len(), 1);
-    assert_eq!(last.tool_calls[0].id, "call-1");
-    assert_eq!(last.tool_calls[0].name, "run");
-    assert_eq!(last.tool_calls[0].arguments, r#"{"command":"ls"}"#);
 }
 
 #[test]
@@ -692,23 +630,17 @@ fn as_wire_messages_renders_tool_calls_with_content_absent() {
     );
     let wire = c.as_wire_messages();
     assert_eq!(wire.len(), 2);
-    assert_eq!(wire[1].role, "assistant");
-    assert!(wire[1].content.is_none(), "content must be absent");
-    let calls = wire[1].tool_calls.as_ref().expect("tool_calls present");
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, "call-1");
-    assert_eq!(calls[0].kind, "function");
-    assert_eq!(calls[0].function.name, "run");
-    assert_eq!(calls[0].function.arguments, r#"{"command":"ls"}"#);
-
-    // Serialized JSON must omit `content` (null is not equivalent for
-    // strict Jinja templates).
-    let json = serde_json::to_value(&wire[1]).unwrap();
-    assert!(
-        json.get("content").is_none(),
-        "content key must be omitted: {json}"
+    assert_eq!(
+        serde_json::to_value(&wire[1]).unwrap(),
+        serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "run", "arguments": r#"{"command":"ls"}"#},
+            }],
+        })
     );
-    assert_eq!(json["tool_calls"][0]["function"]["name"], "run");
 }
 
 #[test]
@@ -721,9 +653,18 @@ fn as_wire_messages_keeps_narration_alongside_tool_calls() {
         vec![mk_call("call-1", r#"{"command":"ls"}"#)],
     );
     let wire = c.as_wire_messages();
-    let json = serde_json::to_value(&wire[1]).unwrap();
-    assert_eq!(json["content"], "Got it, listing the directory.");
-    assert_eq!(json["tool_calls"][0]["function"]["name"], "run");
+    assert_eq!(
+        serde_json::to_value(&wire[1]).unwrap(),
+        serde_json::json!({
+            "role": "assistant",
+            "content": "Got it, listing the directory.",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "run", "arguments": r#"{"command":"ls"}"#},
+            }],
+        })
+    );
 }
 
 #[test]
@@ -737,11 +678,14 @@ fn tool_results_render_on_the_tool_role_with_their_call_id() {
     );
     c.push_tool_result("call-1".into(), "a\nb\n[exit:0 | 1ms]".into());
     let wire = c.as_wire_messages();
-    let json = serde_json::to_value(&wire[2]).unwrap();
-    assert_eq!(json["role"], "tool");
-    assert_eq!(json["tool_call_id"], "call-1");
-    assert_eq!(json["content"], "a\nb\n[exit:0 | 1ms]");
-    assert!(json.get("tool_calls").is_none());
+    assert_eq!(
+        serde_json::to_value(&wire[2]).unwrap(),
+        serde_json::json!({
+            "role": "tool",
+            "content": "a\nb\n[exit:0 | 1ms]",
+            "tool_call_id": "call-1",
+        })
+    );
 }
 
 #[test]
@@ -758,20 +702,11 @@ fn dropping_a_tool_call_message_drops_all_of_its_results() {
     c.push_assistant("answer".into());
     c.push_user("second question".into());
 
-    let (chat, model) = spec(20, 1, 10_000);
+    // Sized so that dropping the call with only its first result would
+    // already fit, leaving "two" orphaned.
+    let (chat, model) = spec(24, 1, 10_000);
     c.truncate_to_budget(&chat, &model);
-
-    for (i, m) in c.messages.iter().enumerate() {
-        if m.role == Role::Tool {
-            assert!(
-                c.messages[..i]
-                    .iter()
-                    .any(|p| p.role == Role::Assistant && !p.tool_calls.is_empty()),
-                "tool result at {i} lost its call"
-            );
-        }
-    }
-    assert_eq!(c.messages.last().unwrap().content, "second question");
+    assert_eq!(contents(&c), ["answer", "second question"]);
 }
 
 #[test]
@@ -803,26 +738,11 @@ fn tool_results_do_not_count_as_preserved_turns() {
 }
 
 #[test]
-fn truncate_to_last_real_user_skips_tool_role_results() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("real q".into());
-    c.push_assistant_with_tool_calls(None, String::new(), vec![mk_call("c-1", "{}")]);
-    c.push_tool_result("c-1".into(), "output".into());
-    c.push_assistant("final".into());
-    let removed = c.truncate_to_last_real_user();
-    assert_eq!(removed, 4);
-    assert!(c.messages.is_empty());
-}
-
-#[test]
 fn tool_calls_contribute_to_token_budget() {
     let mut c = Conversation::new(String::new());
     c.push_user("q".into());
     let baseline = c.approx_total_tokens();
-
-    let mut c2 = Conversation::new(String::new());
-    c2.push_user("q".into());
-    c2.push_assistant_with_tool_calls(
+    c.push_assistant_with_tool_calls(
         None,
         String::new(),
         vec![mk_call(
@@ -830,17 +750,16 @@ fn tool_calls_contribute_to_token_budget() {
             r#"{"command":"a very long command string here to make the call nontrivial"}"#,
         )],
     );
-    let with_call = c2.approx_total_tokens();
+    let call_cost = c.approx_total_tokens() - baseline;
     assert!(
-        with_call > baseline,
-        "tool_calls should add to token count: {with_call} vs {baseline}"
+        call_cost > TOKENS_PER_MESSAGE_OVERHEAD,
+        "an empty-content message costs only the overhead; got {call_cost}"
     );
 }
 
 #[test]
-fn truncate_drops_tool_call_pair_atomically() {
+fn truncate_drops_image_tool_result_with_its_call() {
     let mut c = Conversation::new(String::new());
-    // Old messages we'll summarize/truncate:
     c.push_user("old q".into());
     c.push_assistant_with_tool_calls(
         None,
@@ -849,49 +768,24 @@ fn truncate_drops_tool_call_pair_atomically() {
     );
     c.push_tool_result_with_attachments("run", "some output\n".into(), Vec::new());
     c.push_assistant("old reply".into());
-    // The latest turn (kept by preserve):
     c.push_user("latest".into());
 
-    let (chat, model) = spec(10, 1, 10_000);
+    // Sized so that dropping only the call would already fit, leaving
+    // its result orphaned at the head.
+    let (chat, model) = spec(30, 1, 10_000);
     c.truncate_to_budget(&chat, &model);
-
-    // The remaining history must not carry a dangling tool_calls
-    // without a matching result (or vice versa).
-    for (i, m) in c.messages.iter().enumerate() {
-        if m.role == Role::Assistant && !m.tool_calls.is_empty() {
-            let next = c.messages.get(i + 1);
-            assert!(
-                matches!(next, Some(n) if n.role == Role::User
-                         && n.content.starts_with(TOOL_RESULT_PREFIX)),
-                "assistant tool_calls at index {i} has no matching result; \
-                 history: {:?}",
-                c.messages
-            );
-        }
-        if m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX) {
-            let prev = i.checked_sub(1).and_then(|p| c.messages.get(p));
-            assert!(
-                matches!(prev, Some(p) if p.role == Role::Assistant
-                         && !p.tool_calls.is_empty()),
-                "tool result at index {i} has no matching assistant; \
-                 history: {:?}",
-                c.messages
-            );
-        }
-    }
+    assert_eq!(contents(&c), ["old reply", "latest"]);
 }
 
 #[tokio::test]
 async fn summarize_preserves_tool_call_pair_boundary() {
     let mut c = Conversation::new("sys".into());
-    // Stuff enough history to force summarization.
     for i in 0..5 {
         c.push_user(format!("turn {i} question with some filler text here"));
         c.push_assistant(format!(
             "turn {i} answer with some filler text here to blow budget"
         ));
     }
-    // A tool-call pair in the recent tail.
     c.push_assistant_with_tool_calls(
         None,
         String::new(),
@@ -904,16 +798,19 @@ async fn summarize_preserves_tool_call_pair_boundary() {
     let (chat, model) = spec(60, 2, 10_000);
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
-    // Post-summarize, the preserved tail must not have a dangling
-    // tool_calls or tool-result.
-    for (i, m) in c.messages.iter().enumerate() {
-        if m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX) {
-            let prev = i.checked_sub(1).and_then(|p| c.messages.get(p));
-            assert!(
-                matches!(prev, Some(p) if p.role == Role::Assistant
-                         && !p.tool_calls.is_empty()),
-                "orphaned tool result at {i}"
-            );
-        }
-    }
+    // The preserve boundary lands on the tool result and must widen to
+    // keep the call it answers.
+    assert_eq!(
+        contents(&c),
+        [
+            "[Conversation summary] summary",
+            "",
+            "[tool:run]\nfoo\nbar\n",
+            "latest",
+        ]
+    );
+    assert_eq!(
+        c.messages[1].tool_calls,
+        [mk_call("c-99", r#"{"command":"ls"}"#)]
+    );
 }

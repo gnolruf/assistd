@@ -162,11 +162,10 @@ async fn ten_cold_start_cycles_no_deadlock() {
         last_pid = pid;
     }
 
-    // Final teardown: each cycle calls /models/load on the new child, so
-    // the most recent load_count is exactly 1 (a fresh child = fresh
-    // counter). Just sanity-check it's >= 1.
+    // Counters live in the child, so the final fresh child has seen
+    // exactly the one load its cold-start wake made.
     let (load_count, _, _, _) = get_counters(port).await;
-    assert!(load_count >= 1, "expected at least one load on final child");
+    assert_eq!(load_count, 1);
 
     m.sleep().await.unwrap();
 }
@@ -301,7 +300,6 @@ async fn sleep_defers_until_inflight_real_chat_stream_done() {
     // accept >= 600ms to give a bit of slack for scheduler jitter.
     sleep_task.await.unwrap().expect("sleep returned Err");
     let elapsed = sleep_started.elapsed();
-    eprintln!("sleep_started.elapsed() = {elapsed:?}");
     assert!(
         elapsed >= Duration::from_millis(600),
         "sleep finished in {elapsed:?}; expected >=600ms (RequestGuard should block on the in-flight stream)"

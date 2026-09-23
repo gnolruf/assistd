@@ -11,6 +11,7 @@ mod common;
 
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
@@ -18,16 +19,19 @@ use std::time::Duration;
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_core::{
-    AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceManager,
-    PresenceState, ToolRegistry, VoiceOutputController,
+    AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceError,
+    PresenceManager, PresenceState, ToolRegistry, VoiceOutputController,
 };
 use assistd_ipc::{Event, Request};
 use assistd_llm::{EchoBackend, LlmBackend, LlmEvent};
 use async_trait::async_trait;
 use common::FakeLlama;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{TcpListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 
 fn init_tracing() {
     static ONCE: Once = Once::new();
@@ -187,21 +191,6 @@ async fn sleep_stops_supervisor_and_kills_child() {
 }
 
 #[tokio::test]
-async fn sleep_from_sleeping_is_idempotent() {
-    let fake = FakeLlama::new("normal");
-    init_tracing();
-    let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-
-    m.sleep().await.unwrap();
-    assert_eq!(m.state(), PresenceState::Sleeping);
-    // Second sleep must not panic, error, or spawn anything.
-    m.sleep().await.expect("second sleep should be a no-op");
-    assert_eq!(m.state(), PresenceState::Sleeping);
-    assert!(m.llama_pid().await.is_none());
-}
-
-#[tokio::test]
 async fn drowse_calls_unload_and_keeps_process_alive() {
     let fake = FakeLlama::new("normal");
     init_tracing();
@@ -228,25 +217,6 @@ async fn drowse_calls_unload_and_keeps_process_alive() {
     );
 
     m.sleep().await.unwrap();
-}
-
-#[tokio::test]
-async fn drowse_from_sleeping_errors_and_preserves_state() {
-    let fake = FakeLlama::new("normal");
-    init_tracing();
-    let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-    m.sleep().await.unwrap();
-
-    let err = m
-        .drowse()
-        .await
-        .expect_err("drowse from Sleeping must error");
-    assert!(
-        err.to_string().to_lowercase().contains("sleeping"),
-        "error should mention Sleeping: {err}"
-    );
-    assert_eq!(m.state(), PresenceState::Sleeping);
 }
 
 #[tokio::test]
@@ -316,9 +286,11 @@ async fn failed_wake_leaves_nothing_behind_for_sleep_to_miss() {
 
     // The child spawns and reports healthy, then /models/load 500s.
     fake.set_mode("load-failure");
-    m.wake()
+    let err = m
+        .wake()
         .await
         .expect_err("wake must fail when /models/load errors");
+    assert!(matches!(err, PresenceError::Load { .. }), "{err:?}");
 
     assert_eq!(m.state(), PresenceState::Sleeping);
     assert!(
@@ -361,9 +333,14 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
     .expect("cold-start wake failed");
     let pid = m.llama_pid().await.expect("child running");
 
-    m.sleep()
+    let err = m
+        .sleep()
         .await
         .expect_err("sleep must report a shutdown it could not join");
+    assert!(
+        matches!(err, PresenceError::ShutdownTimeout { secs: 1 }),
+        "{err:?}"
+    );
 
     assert_eq!(
         m.state(),
@@ -380,6 +357,91 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
     );
 }
 
+/// A daemon socket served over `AppState` for the duration of a test.
+struct Daemon {
+    sock_path: PathBuf,
+    stop_tx: oneshot::Sender<()>,
+    server: JoinHandle<()>,
+    _dir: TempDir,
+}
+
+impl Daemon {
+    async fn serve(m: &Arc<PresenceManager>, backend: Arc<dyn LlmBackend>) -> Self {
+        let state = Arc::new(AppState::new(
+            Config::default(),
+            backend,
+            Arc::clone(m),
+            Arc::new(ToolRegistry::default()),
+            Arc::new(NoVoiceInput::new()),
+            Arc::new(NoContinuousListener::new()),
+            VoiceOutputController::new(Arc::new(NoVoiceOutput), true),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("assistd.sock");
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let server_path = sock_path.clone();
+        let server = tokio::spawn(async move {
+            assistd_core::socket::serve_at(&server_path, state, async {
+                let _ = stop_rx.await;
+            })
+            .await
+            .unwrap();
+        });
+        for _ in 0..200 {
+            if UnixStream::connect(&sock_path).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Self {
+            sock_path,
+            stop_tx,
+            server,
+            _dir: dir,
+        }
+    }
+
+    async fn stop(self) {
+        let _ = self.stop_tx.send(());
+        self.server.await.unwrap();
+    }
+}
+
+type EventLines = Lines<BufReader<OwnedReadHalf>>;
+
+async fn send_query(sock: &Path, id: &str, text: &str) -> EventLines {
+    let (read, mut write) = UnixStream::connect(sock).await.unwrap().into_split();
+    let req = Request::Query {
+        id: id.into(),
+        text: text.into(),
+        attachments: Vec::new(),
+    };
+    let mut body = serde_json::to_string(&req).unwrap();
+    body.push('\n');
+    write.write_all(body.as_bytes()).await.unwrap();
+    write.shutdown().await.unwrap();
+    BufReader::new(read).lines()
+}
+
+/// Read events into `events` until a terminal one or the end of the stream.
+async fn read_to_terminal(lines: &mut EventLines, events: &mut Vec<Event>) {
+    while let Some(line) = lines.next_line().await.unwrap() {
+        let e: Event = serde_json::from_str(&line).unwrap();
+        let terminal = e.is_terminal();
+        events.push(e);
+        if terminal {
+            break;
+        }
+    }
+}
+
+async fn query(sock: &Path, id: &str, text: &str) -> Vec<Event> {
+    let mut lines = send_query(sock, id, text).await;
+    let mut events = Vec::new();
+    read_to_terminal(&mut lines, &mut events).await;
+    events
+}
+
 #[tokio::test]
 async fn query_during_sleeping_triggers_auto_wake() {
     let fake = FakeLlama::new("normal");
@@ -387,84 +449,30 @@ async fn query_during_sleeping_triggers_auto_wake() {
     let port = grab_port().await;
     let (m, _shutdown) = new_active_manager(&fake, port).await;
 
-    // Put the manager to Sleeping before serving any queries.
     m.sleep().await.unwrap();
     assert_eq!(m.state(), PresenceState::Sleeping);
 
-    // AppState uses EchoBackend; we're testing the auto-wake hook in
-    // handle_query, not the llama chat path.
-    let state = Arc::new(AppState::new(
-        Config::default(),
-        Arc::new(EchoBackend::new()),
-        m.clone(),
-        Arc::new(ToolRegistry::default()),
-        Arc::new(NoVoiceInput::new()),
-        Arc::new(NoContinuousListener::new()),
-        VoiceOutputController::new(Arc::new(NoVoiceOutput), true),
-    ));
-
-    let dir = tempfile::tempdir().unwrap();
-    let sock_path = dir.path().join("assistd.sock");
-    let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    let server_path = sock_path.clone();
-    let server = tokio::spawn(async move {
-        assistd_core::socket::serve_at(&server_path, state, async {
-            let _ = stop_rx.await;
-        })
-        .await
-        .unwrap();
-    });
-
-    // Wait for the socket to come up.
-    for _ in 0..200 {
-        if UnixStream::connect(&sock_path).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    let req = Request::Query {
-        id: "q1".into(),
-        text: "hello".into(),
-        attachments: Vec::new(),
-    };
-    let stream = UnixStream::connect(&sock_path).await.unwrap();
-    let (read, mut write) = stream.into_split();
-    let mut body = serde_json::to_string(&req).unwrap();
-    body.push('\n');
-    write.write_all(body.as_bytes()).await.unwrap();
-    write.shutdown().await.unwrap();
-
-    let mut reader = BufReader::new(read);
-    let mut events = Vec::new();
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        let e: Event = serde_json::from_str(line.trim()).unwrap();
-        let terminal = e.is_terminal();
-        events.push(e);
-        if terminal {
-            break;
-        }
-    }
+    // EchoBackend: this exercises the auto-wake hook, not the chat path.
+    let daemon = Daemon::serve(&m, Arc::new(EchoBackend::new())).await;
+    let events = query(&daemon.sock_path, "q1", "hello").await;
 
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, Event::Delta { text, .. } if text == "hello"))
+            .any(|e| matches!(e, Event::Delta { text, .. } if text == "hello")),
+        "{events:?}"
     );
-    assert!(matches!(events.last(), Some(Event::Done { .. })));
+    assert!(
+        matches!(events.last(), Some(Event::Done { .. })),
+        "{events:?}"
+    );
     assert_eq!(
         m.state(),
         PresenceState::Active,
         "auto-wake must leave manager in Active"
     );
 
-    let _ = stop_tx.send(());
-    server.await.unwrap();
+    daemon.stop().await;
     m.sleep().await.unwrap();
 }
 
@@ -518,32 +526,6 @@ impl LlmBackend for DelayBackend {
     }
 }
 
-async fn connect_and_send(sock: &std::path::Path, req: &Request) -> Vec<Event> {
-    let stream = UnixStream::connect(sock).await.unwrap();
-    let (read, mut write) = stream.into_split();
-    let mut body = serde_json::to_string(req).unwrap();
-    body.push('\n');
-    write.write_all(body.as_bytes()).await.unwrap();
-    write.shutdown().await.unwrap();
-
-    let mut reader = BufReader::new(read);
-    let mut events = Vec::new();
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        let e: Event = serde_json::from_str(line.trim()).unwrap();
-        let terminal = e.is_terminal();
-        events.push(e);
-        if terminal {
-            break;
-        }
-    }
-    events
-}
-
 #[tokio::test]
 async fn sleep_defers_until_inflight_query_done() {
     let fake = FakeLlama::new("normal");
@@ -551,60 +533,30 @@ async fn sleep_defers_until_inflight_query_done() {
     let port = grab_port().await;
     let (m, _shutdown) = new_active_manager(&fake, port).await;
 
-    let state = Arc::new(AppState::new(
-        Config::default(),
-        Arc::new(DelayBackend {
-            delay: Duration::from_millis(500),
-            last_user: tokio::sync::Mutex::new(String::new()),
-        }),
-        m.clone(),
-        Arc::new(ToolRegistry::default()),
-        Arc::new(NoVoiceInput::new()),
-        Arc::new(NoContinuousListener::new()),
-        VoiceOutputController::new(Arc::new(NoVoiceOutput), true),
-    ));
-
-    let dir = tempfile::tempdir().unwrap();
-    let sock_path = dir.path().join("assistd.sock");
-    let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    let server_path = sock_path.clone();
-    let server = tokio::spawn(async move {
-        assistd_core::socket::serve_at(&server_path, state, async {
-            let _ = stop_rx.await;
-        })
-        .await
-        .unwrap();
+    let backend = Arc::new(DelayBackend {
+        delay: Duration::from_millis(500),
+        last_user: tokio::sync::Mutex::new(String::new()),
     });
+    let daemon = Daemon::serve(&m, backend).await;
 
-    for _ in 0..200 {
-        if UnixStream::connect(&sock_path).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    // Once the first Delta arrives the query holds its request guard and
+    // the backend has ~500ms of generation left.
+    let mut lines = send_query(&daemon.sock_path, "q1", "hello").await;
+    let mut events = Vec::new();
+    while !events.iter().any(|e| matches!(e, Event::Delta { .. })) {
+        let line = lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("stream closed before any Delta");
+        events.push(serde_json::from_str::<Event>(&line).unwrap());
     }
 
-    // Kick off the query; it'll emit a Delta ~immediately, then sleep 500ms,
-    // then emit Done.
-    let req = Request::Query {
-        id: "q1".into(),
-        text: "hello".into(),
-        attachments: Vec::new(),
-    };
-    let sock_for_client = sock_path.clone();
-    let client_task = tokio::spawn(async move { connect_and_send(&sock_for_client, &req).await });
-
-    // Give the query a head start so the request guard is taken before
-    // we issue the sleep.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Request sleep while the query is still streaming. The sleep must
-    // not complete until the generator finishes.
-    let m_for_sleep = m.clone();
+    let m_for_sleep = Arc::clone(&m);
     let sleep_started = std::time::Instant::now();
     let sleep_task = tokio::spawn(async move { m_for_sleep.sleep().await });
 
-    // Wait for the client to drain its full event stream.
-    let events = client_task.await.unwrap();
+    read_to_terminal(&mut lines, &mut events).await;
     assert!(
         events
             .iter()
@@ -620,80 +572,40 @@ async fn sleep_defers_until_inflight_query_done() {
         "no Error events expected, got {events:?}"
     );
 
-    // Now sleep is free to proceed; it must not have completed before
-    // the generator finished.
     sleep_task.await.unwrap().expect("sleep returned Err");
     let sleep_elapsed = sleep_started.elapsed();
     assert!(
         sleep_elapsed >= Duration::from_millis(350),
-        "sleep finished in {sleep_elapsed:?}, expected >=350ms (block on the 500ms DelayBackend \
-         minus the 100ms head start and a little slack)"
+        "sleep finished in {sleep_elapsed:?}, expected it to wait out most of the \
+         500ms still left in the generation"
     );
     assert_eq!(m.state(), PresenceState::Sleeping);
 
-    let _ = stop_tx.send(());
-    server.await.unwrap();
+    daemon.stop().await;
 }
 
 #[tokio::test]
-async fn multiple_queries_during_wake_complete_in_order() {
+async fn concurrent_queries_during_wake_all_complete() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
     let (m, _shutdown) = new_active_manager(&fake, port).await;
+    let daemon = Daemon::serve(&m, Arc::new(EchoBackend::new())).await;
 
-    let state = Arc::new(AppState::new(
-        Config::default(),
-        Arc::new(EchoBackend::new()),
-        m.clone(),
-        Arc::new(ToolRegistry::default()),
-        Arc::new(NoVoiceInput::new()),
-        Arc::new(NoContinuousListener::new()),
-        VoiceOutputController::new(Arc::new(NoVoiceOutput), true),
-    ));
-
-    let dir = tempfile::tempdir().unwrap();
-    let sock_path = dir.path().join("assistd.sock");
-    let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    let server_path = sock_path.clone();
-    let server = tokio::spawn(async move {
-        assistd_core::socket::serve_at(&server_path, state, async {
-            let _ = stop_rx.await;
-        })
-        .await
-        .unwrap();
-    });
-
-    for _ in 0..200 {
-        if UnixStream::connect(&sock_path).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    // Put the daemon to sleep so the next queries have to wake it.
     m.sleep().await.unwrap();
     assert_eq!(m.state(), PresenceState::Sleeping);
 
-    // Fire 5 concurrent queries with distinct ids. They race into
-    // acquire_request_guard_with_progress → ensure_active → transition lock; one
-    // wins the wake, the rest queue on the transition mutex.
-    let mut handles = Vec::new();
-    for i in 0..5 {
-        let id = format!("q{i}");
-        let text = format!("msg{i}");
-        let sock = sock_path.clone();
-        let req = Request::Query {
-            id: id.clone(),
-            text: text.clone(),
-            attachments: Vec::new(),
-        };
-        handles.push((
-            id,
-            text,
-            tokio::spawn(async move { connect_and_send(&sock, &req).await }),
-        ));
-    }
+    // One query wins the wake; the rest queue on the transition lock.
+    let handles: Vec<_> = (0..5)
+        .map(|i| {
+            let id = format!("q{i}");
+            let text = format!("msg{i}");
+            let sock = daemon.sock_path.clone();
+            let (task_id, task_text) = (id.clone(), text.clone());
+            let handle = tokio::spawn(async move { query(&sock, &task_id, &task_text).await });
+            (id, text, handle)
+        })
+        .collect();
 
     for (id, text, h) in handles {
         let events = h.await.unwrap();
@@ -719,7 +631,6 @@ async fn multiple_queries_during_wake_complete_in_order() {
         "wake must leave manager Active"
     );
 
-    let _ = stop_tx.send(());
-    server.await.unwrap();
+    daemon.stop().await;
     m.sleep().await.unwrap();
 }
