@@ -8,132 +8,102 @@ fn snap() -> Arc<RwLock<Snapshot>> {
     Arc::new(RwLock::new(Snapshot::default()))
 }
 
-#[tokio::test]
-async fn focus_event_overwrites_all_fields() {
-    let s = snap();
+async fn event(
+    s: &Arc<RwLock<Snapshot>>,
+    kind: WindowChangeKind,
+    raw: u64,
+    class: &str,
+    title: &str,
+) {
     apply_window_event(
-        &s,
-        WindowChangeKind::Focus,
-        Some(id(42)),
-        Some("Firefox".into()),
-        Some("GitHub".into()),
+        s,
+        kind,
+        Some(id(raw)),
+        Some(class.into()),
+        Some(title.into()),
     )
     .await;
-    let r = s.read().await;
-    assert_eq!(r.focused_id, Some(id(42)));
-    assert_eq!(r.focused_class.as_deref(), Some("Firefox"));
-    assert_eq!(r.focused_title.as_deref(), Some("GitHub"));
+}
+
+fn focused(raw: u64, class: &str, title: &str) -> Option<FocusedWindowContext> {
+    Some(FocusedWindowContext {
+        id: Some(id(raw)),
+        class: Some(class.into()),
+        title: Some(title.into()),
+        workspace: None,
+    })
 }
 
 #[tokio::test]
-async fn title_event_for_focused_id_updates_title() {
+async fn focus_event_overwrites_all_fields() {
     let s = snap();
-    apply_window_event(
-        &s,
-        WindowChangeKind::Focus,
-        Some(id(42)),
-        Some("Firefox".into()),
-        Some("Old".into()),
-    )
-    .await;
-    apply_window_event(
-        &s,
-        WindowChangeKind::Title,
-        Some(id(42)),
-        Some("Firefox".into()),
-        Some("New".into()),
-    )
-    .await;
-    assert_eq!(s.read().await.focused_title.as_deref(), Some("New"));
+    event(&s, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
+    event(&s, WindowChangeKind::Focus, 7, "kitty", "shell").await;
+    assert_eq!(read_focused_context(&s).await, focused(7, "kitty", "shell"));
+}
+
+#[tokio::test]
+async fn title_event_for_focused_id_updates_title_and_class() {
+    let s = snap();
+    event(&s, WindowChangeKind::Focus, 42, "Firefox", "Old").await;
+    event(&s, WindowChangeKind::Title, 42, "firefox", "New").await;
+    assert_eq!(
+        read_focused_context(&s).await,
+        focused(42, "firefox", "New")
+    );
 }
 
 #[tokio::test]
 async fn title_event_for_other_id_is_ignored() {
     let s = snap();
-    apply_window_event(
-        &s,
-        WindowChangeKind::Focus,
-        Some(id(42)),
-        Some("Firefox".into()),
-        Some("foreground".into()),
-    )
-    .await;
-    apply_window_event(
+    event(&s, WindowChangeKind::Focus, 42, "Firefox", "foreground").await;
+    event(
         &s,
         WindowChangeKind::Title,
-        Some(id(99)),
-        Some("Firefox".into()),
-        Some("background drift".into()),
+        99,
+        "Firefox",
+        "background drift",
     )
     .await;
-    assert_eq!(s.read().await.focused_title.as_deref(), Some("foreground"));
+    assert_eq!(
+        read_focused_context(&s).await,
+        focused(42, "Firefox", "foreground")
+    );
 }
 
 #[tokio::test]
 async fn close_event_for_focused_id_clears_focus() {
     let s = snap();
-    apply_window_event(
-        &s,
-        WindowChangeKind::Focus,
-        Some(id(42)),
-        Some("Firefox".into()),
-        Some("GitHub".into()),
-    )
-    .await;
-    apply_window_event(
-        &s,
-        WindowChangeKind::Close,
-        Some(id(42)),
-        Some("Firefox".into()),
-        Some("GitHub".into()),
-    )
-    .await;
-    let r = s.read().await;
-    assert!(r.focused_id.is_none());
-    assert!(r.focused_class.is_none());
-    assert!(r.focused_title.is_none());
+    event(&s, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
+    event(&s, WindowChangeKind::Close, 42, "Firefox", "GitHub").await;
+    assert_eq!(read_focused_context(&s).await, None);
 }
 
 #[tokio::test]
 async fn close_event_for_other_id_is_ignored() {
     let s = snap();
-    apply_window_event(
-        &s,
-        WindowChangeKind::Focus,
-        Some(id(42)),
-        Some("Firefox".into()),
-        Some("GitHub".into()),
-    )
-    .await;
-    apply_window_event(
-        &s,
-        WindowChangeKind::Close,
-        Some(id(99)),
-        Some("Other".into()),
-        Some("Other".into()),
-    )
-    .await;
-    assert_eq!(s.read().await.focused_id, Some(id(42)));
-}
-
-#[tokio::test]
-async fn workspace_focus_updates_active_workspace() {
-    let s = snap();
-    apply_workspace_focus(&s, Some("3".into())).await;
-    assert_eq!(s.read().await.active_workspace.as_deref(), Some("3"));
+    event(&s, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
+    event(&s, WindowChangeKind::Close, 99, "Other", "Other").await;
+    assert_eq!(
+        read_focused_context(&s).await,
+        focused(42, "Firefox", "GitHub")
+    );
 }
 
 #[tokio::test]
 async fn read_focused_context_returns_none_for_empty() {
-    let s = snap();
-    assert!(read_focused_context(&s).await.is_none());
+    assert_eq!(read_focused_context(&snap()).await, None);
 }
 
 #[tokio::test]
-async fn read_focused_context_returns_some_for_partial() {
+async fn workspace_focus_alone_yields_a_partial_context() {
     let s = snap();
     apply_workspace_focus(&s, Some("3".into())).await;
-    let ctx = read_focused_context(&s).await.unwrap();
-    assert!(ctx.id.is_none());
-    assert_eq!(ctx.workspace.as_deref(), Some("3"));
+    assert_eq!(
+        read_focused_context(&s).await,
+        Some(FocusedWindowContext {
+            workspace: Some("3".into()),
+            ..FocusedWindowContext::default()
+        })
+    );
 }

@@ -12,20 +12,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_spec_sequence() {
-        let expected = [1, 2, 4, 8, 16, 32, 60, 60, 60, 60];
-        for (i, want) in expected.iter().enumerate() {
+    fn doubles_from_one_second_and_caps_at_sixty() {
+        for (attempt, secs) in [
+            (0, 1),
+            (1, 2),
+            (2, 4),
+            (3, 8),
+            (4, 16),
+            (5, 32),
+            (6, 60),
+            (9, 60),
+            (63, 60),
+            (64, 60),
+            (u32::MAX, 60),
+        ] {
             assert_eq!(
-                backoff_delay(i as u32),
-                Duration::from_secs(*want),
-                "attempt {i}"
+                backoff_delay(attempt),
+                Duration::from_secs(secs),
+                "attempt {attempt}"
             );
         }
-    }
-
-    #[test]
-    fn caps_at_sixty_seconds_for_large_attempts() {
-        assert_eq!(backoff_delay(64), Duration::from_secs(60));
-        assert_eq!(backoff_delay(u32::MAX), Duration::from_secs(60));
     }
 }

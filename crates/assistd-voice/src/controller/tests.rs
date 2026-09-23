@@ -36,11 +36,13 @@ async fn new_starts_with_given_enabled_flag_and_zero_epoch() {
 }
 
 #[tokio::test]
-async fn set_enabled_false_cancels_inner() {
+async fn set_enabled_false_cancels_inner_once() {
     let inner = Arc::new(RecordingOutput::default());
     let ctrl = VoiceOutputController::new(inner.clone(), true);
     ctrl.set_enabled(false).await;
     assert!(!ctrl.enabled());
+    assert_eq!(inner.cancels.load(Ordering::SeqCst), 1);
+    ctrl.set_enabled(false).await;
     assert_eq!(inner.cancels.load(Ordering::SeqCst), 1);
 }
 
@@ -52,14 +54,6 @@ async fn set_enabled_true_does_not_cancel_or_bump_epoch() {
     assert!(ctrl.enabled());
     assert_eq!(inner.cancels.load(Ordering::SeqCst), 0);
     assert_eq!(ctrl.current_epoch(), 0);
-}
-
-#[tokio::test]
-async fn set_enabled_idempotent_off_does_not_double_cancel() {
-    let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::new(inner.clone(), false);
-    ctrl.set_enabled(false).await;
-    assert_eq!(inner.cancels.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -82,41 +76,28 @@ async fn interrupt_is_alias_of_skip() {
 }
 
 #[tokio::test]
-async fn should_speak_returns_speak_when_enabled_and_epoch_matches() {
-    let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), true);
-    let start = ctrl.current_epoch();
-    assert_eq!(ctrl.should_speak(start), SpeakDecision::Speak);
-}
-
-#[tokio::test]
-async fn should_speak_returns_drop_for_skip_after_epoch_advance() {
-    let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), true);
-    let start = ctrl.current_epoch();
-    ctrl.skip().await;
-    assert_eq!(ctrl.should_speak(start), SpeakDecision::DropForSkip);
-}
-
-#[tokio::test]
-async fn should_speak_returns_drop_silent_when_disabled_same_epoch() {
-    let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), false);
-    let start = ctrl.current_epoch();
-    assert_eq!(ctrl.should_speak(start), SpeakDecision::DropSilent);
-}
-
-#[tokio::test]
-async fn drop_for_skip_takes_priority_over_drop_silent() {
-    let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), false);
-    let start = ctrl.current_epoch();
-    ctrl.skip().await;
-    assert_eq!(ctrl.should_speak(start), SpeakDecision::DropForSkip);
-}
-
-#[tokio::test]
-async fn future_query_after_skip_speaks_normally() {
-    let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), true);
-    ctrl.skip().await;
-    let start = ctrl.current_epoch();
-    assert_eq!(ctrl.should_speak(start), SpeakDecision::Speak);
+async fn should_speak_decision() {
+    for (enabled, skip_before_start, skip_after_start, expected) in [
+        (true, false, false, SpeakDecision::Speak),
+        (true, true, false, SpeakDecision::Speak),
+        (true, false, true, SpeakDecision::DropForSkip),
+        (false, false, false, SpeakDecision::DropSilent),
+        (false, false, true, SpeakDecision::DropForSkip),
+    ] {
+        let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), enabled);
+        if skip_before_start {
+            ctrl.skip().await;
+        }
+        let start = ctrl.current_epoch();
+        if skip_after_start {
+            ctrl.skip().await;
+        }
+        assert_eq!(
+            ctrl.should_speak(start),
+            expected,
+            "enabled={enabled} skip_before_start={skip_before_start} skip_after_start={skip_after_start}"
+        );
+    }
 }
 
 #[tokio::test]

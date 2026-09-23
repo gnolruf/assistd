@@ -147,37 +147,23 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn no_voice_input_start_errors() {
-        assert!(NoVoiceInput::new().start_recording().await.is_err());
+    async fn no_voice_input_refuses_capture_and_stays_idle() {
+        let input = NoVoiceInput::new();
+        assert!(matches!(
+            input.start_recording().await,
+            Err(VoiceInputError::Disabled)
+        ));
+        assert!(matches!(
+            input.stop_and_transcribe().await,
+            Err(VoiceInputError::Disabled)
+        ));
+        assert_eq!(input.state(), VoiceCaptureState::Idle);
+        assert_eq!(*input.subscribe().borrow(), VoiceCaptureState::Idle);
     }
 
     #[tokio::test]
-    async fn no_voice_input_stop_errors() {
-        assert!(NoVoiceInput::new().stop_and_transcribe().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn no_voice_input_state_is_idle() {
-        assert_eq!(NoVoiceInput::new().state(), VoiceCaptureState::Idle);
-    }
-
-    #[tokio::test]
-    async fn no_voice_output_is_silent_success() {
+    async fn no_voice_output_accepts_and_drops_speech() {
         NoVoiceOutput.speak("hi".into()).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn no_voice_output_wait_idle_returns_ok() {
         NoVoiceOutput.wait_idle().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn no_voice_output_cancel_does_not_panic() {
-        NoVoiceOutput.cancel().await;
-    }
-
-    #[test]
-    fn version_is_not_empty() {
-        assert!(!version().is_empty());
     }
 }

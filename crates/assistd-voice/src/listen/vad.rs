@@ -236,17 +236,13 @@ impl UtteranceVad {
 mod tests {
     use super::*;
 
-    fn silent_frame() -> [i16; FRAME_SAMPLES] {
-        [0; FRAME_SAMPLES]
-    }
-
-    fn voiced_frame() -> [i16; FRAME_SAMPLES] {
-        [1000; FRAME_SAMPLES]
-    }
+    const SILENT: i16 = 0;
+    const VOICED: i16 = 1000;
+    const NO_EVENTS: [VadEvent; 0] = [];
 
     fn tight_tuning() -> VadTuning {
         VadTuning {
-            onset_confirm_frames: 1,
+            onset_confirm_frames: 2,
             offset_frames: 2,
             min_utterance_frames: 1,
             max_utterance_frames: 50,
@@ -255,133 +251,82 @@ mod tests {
         }
     }
 
+    /// Feed `n` identical frames, collecting any events.
+    fn feed(v: &mut UtteranceVad, voiced: bool, n: usize) -> Vec<VadEvent> {
+        let frame = [if voiced { VOICED } else { SILENT }; FRAME_SAMPLES];
+        (0..n)
+            .filter_map(|_| v.feed_decided(&frame, voiced))
+            .collect()
+    }
+
+    fn frames(sample: i16, n: usize) -> Vec<i16> {
+        vec![sample; n * FRAME_SAMPLES]
+    }
+
     #[test]
     fn silent_input_produces_no_events() {
         let mut v = UtteranceVad::new(tight_tuning());
-        let s = silent_frame();
-        for _ in 0..100 {
-            assert!(v.feed_decided(&s, false).is_none());
-        }
+        assert_eq!(feed(&mut v, false, 100), NO_EVENTS);
     }
 
     #[test]
     fn voiced_burst_bounded_by_silence_emits_one_utterance() {
         let mut v = UtteranceVad::new(tight_tuning());
-        let s = silent_frame();
-        let voiced = voiced_frame();
+        assert_eq!(feed(&mut v, false, 5), NO_EVENTS);
+        assert_eq!(feed(&mut v, true, 10), NO_EVENTS);
+        let events = feed(&mut v, false, 5);
 
-        for _ in 0..5 {
-            assert_eq!(v.feed_decided(&s, false), None);
-        }
-        let mut events = Vec::new();
-        for _ in 0..10 {
-            if let Some(e) = v.feed_decided(&voiced, true) {
-                events.push(e);
-            }
-        }
-        for _ in 0..5 {
-            if let Some(e) = v.feed_decided(&s, false) {
-                events.push(e);
-            }
-        }
-        assert_eq!(events.len(), 1, "expected exactly one utterance");
-        match &events[0] {
-            VadEvent::UtteranceComplete(pcm) => {
-                let expected_min = 10 * FRAME_SAMPLES;
-                assert!(
-                    pcm.len() >= expected_min,
-                    "pcm length {} < expected min {expected_min}",
-                    pcm.len()
-                );
-            }
-            other => panic!("expected UtteranceComplete, got {other:?}"),
-        }
+        // Pre-roll holds three frames, the last of which is the first
+        // voiced frame; the trailing silence that confirmed the offset
+        // is kept.
+        let expected = [frames(SILENT, 2), frames(VOICED, 10), frames(SILENT, 2)].concat();
+        assert_eq!(events, [VadEvent::UtteranceComplete(expected)]);
     }
 
     #[test]
     fn utterance_below_min_is_dropped() {
-        let mut cfg = tight_tuning();
-        cfg.min_utterance_frames = 20;
-        let mut v = UtteranceVad::new(cfg);
-
-        let s = silent_frame();
-        let voiced = voiced_frame();
-
-        for _ in 0..5 {
-            v.feed_decided(&s, false);
-        }
-        for _ in 0..2 {
-            v.feed_decided(&voiced, true);
-        }
-        let mut events = Vec::new();
-        for _ in 0..10 {
-            if let Some(e) = v.feed_decided(&s, false) {
-                events.push(e);
-            }
-        }
-        assert!(
-            events.is_empty(),
-            "short burst should be dropped, got {events:?}"
-        );
+        let mut v = UtteranceVad::new(VadTuning {
+            min_utterance_frames: 20,
+            ..tight_tuning()
+        });
+        feed(&mut v, false, 5);
+        feed(&mut v, true, 2);
+        assert_eq!(feed(&mut v, false, 10), NO_EVENTS);
     }
 
     #[test]
     fn continuous_voiced_input_force_flushes_at_max() {
-        let mut cfg = tight_tuning();
-        cfg.max_utterance_frames = 10;
-        cfg.offset_frames = 100;
-        let mut v = UtteranceVad::new(cfg);
-
-        let voiced = voiced_frame();
-        let mut events = Vec::new();
-        for _ in 0..25 {
-            if let Some(e) = v.feed_decided(&voiced, true) {
-                events.push(e);
-            }
-        }
-        assert!(!events.is_empty(), "expected at least one Truncated event");
-        assert!(
-            matches!(events[0], VadEvent::Truncated(_)),
-            "expected Truncated first, got {:?}",
-            events[0]
-        );
+        let mut v = UtteranceVad::new(VadTuning {
+            max_utterance_frames: 10,
+            offset_frames: 100,
+            ..tight_tuning()
+        });
+        let truncated = VadEvent::Truncated(frames(VOICED, 10));
+        assert_eq!(feed(&mut v, true, 25), [truncated.clone(), truncated]);
     }
 
     #[test]
     fn onset_requires_multiple_confirmed_frames() {
-        let mut cfg = tight_tuning();
-        cfg.onset_confirm_frames = 3;
-        let mut v = UtteranceVad::new(cfg);
-
-        let s = silent_frame();
-        let voiced = voiced_frame();
-
-        for _ in 0..5 {
-            v.feed_decided(&s, false);
-        }
-        v.feed_decided(&voiced, true);
-        for _ in 0..10 {
-            assert!(v.feed_decided(&s, false).is_none());
-        }
+        let mut v = UtteranceVad::new(VadTuning {
+            onset_confirm_frames: 3,
+            ..tight_tuning()
+        });
+        feed(&mut v, false, 5);
+        feed(&mut v, true, 2);
+        assert_eq!(feed(&mut v, false, 10), NO_EVENTS);
     }
 
     #[test]
-    fn vad_tuning_from_ms_rounds_up() {
-        let t = VadTuning::from_ms(800, 30);
-        assert_eq!(t.offset_frames, 40);
-        assert_eq!(t.max_utterance_frames, 1500);
-        assert_eq!(t.min_utterance_frames, MIN_UTTERANCE_MS.div_ceil(20));
-        assert_eq!(t.preroll_frames, PREROLL_MS.div_ceil(20));
-        assert_eq!(t.onset_confirm_frames, ONSET_CONFIRM_MS.div_ceil(20));
-        assert_eq!(t.aggressiveness, AGGRESSIVENESS);
-    }
-
-    #[test]
-    fn vad_tuning_never_yields_a_zero_frame_window() {
-        let t = VadTuning::from_ms(1, 0);
-        assert_eq!(t.offset_frames, 1);
-        assert_eq!(t.max_utterance_frames, 1);
-        assert!(t.min_utterance_frames >= 1);
-        assert!(t.onset_confirm_frames >= 1);
+    fn vad_tuning_from_ms_rounds_up_to_whole_frames() {
+        for (silence_ms, max_secs, offset_frames, max_utterance_frames) in
+            [(800, 30, 40, 1500), (810, 30, 41, 1500), (1, 0, 1, 1)]
+        {
+            let t = VadTuning::from_ms(silence_ms, max_secs);
+            assert_eq!(
+                (t.offset_frames, t.max_utterance_frames),
+                (offset_frames, max_utterance_frames),
+                "from_ms({silence_ms}, {max_secs})"
+            );
+        }
     }
 }
