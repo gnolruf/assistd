@@ -327,7 +327,6 @@ mod tests {
     use parking_lot::Mutex;
     use serde_json::json;
 
-    /// Trivial McpClient that returns a fixed tool list and echoes args.
     struct FakeClient {
         invocations: Arc<Mutex<u32>>,
     }
@@ -348,37 +347,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_client_returns_server_down_when_empty() {
-        let switch = Arc::new(SwitchingClient::new(None));
+    async fn switching_client_follows_swaps() {
+        let switch = SwitchingClient::new(None);
         let err = switch.list_tools().await.unwrap_err();
         assert!(matches!(err, McpError::ServerDown), "{err}");
-    }
 
-    #[tokio::test]
-    async fn switching_client_forwards_when_swapped_in() {
         let invocations = Arc::new(Mutex::new(0));
         let fake: Arc<dyn McpClient> = Arc::new(FakeClient {
             invocations: invocations.clone(),
         });
-        let switch = Arc::new(SwitchingClient::new(Some(fake)));
-        let _ = switch.invoke("ping", json!({})).await.unwrap();
+        switch.swap(Some(fake)).await;
+        assert_eq!(switch.list_tools().await.unwrap().len(), 1);
+        switch.invoke("ping", json!({})).await.unwrap();
         assert_eq!(*invocations.lock(), 1);
 
-        // Swap to None; subsequent calls fail.
         switch.swap(None).await;
-        assert!(switch.invoke("ping", json!({})).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn switching_client_can_be_swapped_back_in() {
-        let switch = Arc::new(SwitchingClient::new(None));
-        assert!(switch.list_tools().await.is_err());
-
-        let fake: Arc<dyn McpClient> = Arc::new(FakeClient {
-            invocations: Arc::new(Mutex::new(0)),
-        });
-        switch.swap(Some(fake)).await;
-        let tools = switch.list_tools().await.unwrap();
-        assert_eq!(tools.len(), 1);
+        let err = switch.invoke("ping", json!({})).await.unwrap_err();
+        assert!(matches!(err, McpError::ServerDown), "{err}");
+        assert_eq!(*invocations.lock(), 1);
     }
 }
