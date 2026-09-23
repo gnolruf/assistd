@@ -41,11 +41,14 @@ const MAX_TOOL_STEPS: u32 = 200;
 ///
 /// With a `health` probe the loop recovers from one llama-server crash
 /// per step: it waits for the supervisor to report ready and replays the
-/// step. Without one, a crash ends the turn.
+/// step. Without one, a crash ends the turn. A tool invocation still
+/// running after `tool_deadline` is dropped and reported to the model as
+/// a failed call.
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
     health: Option<Arc<dyn LlmHealthProbe>>,
+    tool_deadline: Duration,
 }
 
 impl Agent {
@@ -53,11 +56,13 @@ impl Agent {
         backend: Arc<dyn LlmBackend>,
         tools: Arc<ToolRegistry>,
         health: Option<Arc<dyn LlmHealthProbe>>,
+        tool_deadline: Duration,
     ) -> Self {
         Self {
             backend,
             tools,
             health,
+            tool_deadline,
         }
     }
 
@@ -243,7 +248,7 @@ impl Agent {
             let dispatched = tokio::select! {
                 biased;
                 () = turn.cancel.cancelled() => None,
-                r = dispatch_tool_call(&self.tools, &call, turn.iteration) => Some(r),
+                r = dispatch_tool_call(&self.tools, &call, turn.iteration, self.tool_deadline) => Some(r),
             };
             let (payload, raw_result) = dispatched.unwrap_or_else(|| {
                 warn!(
@@ -527,6 +532,7 @@ async fn dispatch_tool_call(
     tools: &ToolRegistry,
     call: &ToolCall,
     iteration: u32,
+    deadline: Duration,
 ) -> (ToolResultPayload, Value) {
     let start = Instant::now();
 
@@ -550,7 +556,26 @@ async fn dispatch_tool_call(
         );
     };
 
-    let result = tool.invoke(call.arguments.clone()).await;
+    let Ok(result) = tokio::time::timeout(deadline, tool.invoke(call.arguments.clone())).await
+    else {
+        let duration_ms = start.elapsed().as_millis();
+        warn!(
+            target: "assistd::agent",
+            iteration,
+            tool = %call.name,
+            duration_ms = duration_ms,
+            "tool call exceeded its deadline; abandoning it"
+        );
+        return error_tool_result(
+            call,
+            format!(
+                "[error] {}: no result after {}s; call abandoned. Try: a faster or narrower command.",
+                call.name,
+                deadline.as_secs()
+            ),
+            duration_ms,
+        );
+    };
     let duration_ms = start.elapsed().as_millis();
 
     let raw = match result {

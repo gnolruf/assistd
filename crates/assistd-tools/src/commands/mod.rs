@@ -33,15 +33,60 @@ pub use write::{WriteCommand, WritePolicyCfg};
 
 use std::path::Path;
 
+use tokio::io::AsyncReadExt;
+
+use crate::chain::PIPE_BUF_MAX;
 use crate::command::{CommandOutput, Hint, error_line, io_error_nav};
 
-/// Read `path` only if it is a regular file. A device, FIFO or socket
-/// (including `/dev/stdin`, the daemon's own terminal) can block the
-/// read forever or never end, so anything that is neither a file nor a
-/// directory is refused before a read starts. Directories fall through
-/// to the read so the usual `EISDIR` message is preserved.
+/// Largest file a command reads into memory. A bigger one would
+/// overflow a pipeline stage anyway.
+pub(crate) const FILE_READ_MAX: u64 = PIPE_BUF_MAX as u64;
+
+/// Read `path` whole, refusing anything that is not a regular file or
+/// is larger than [`FILE_READ_MAX`]. A file that grows past the cap
+/// while being read is refused too.
 pub(crate) async fn read_regular_file(path: impl AsRef<Path>) -> std::io::Result<Vec<u8>> {
-    let path = path.as_ref();
+    let too_large = || {
+        std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!(
+                "file exceeds the {} read limit",
+                cat::human_size(PIPE_BUF_MAX)
+            ),
+        )
+    };
+    let (file, size) = open_regular(path.as_ref()).await?;
+    if size > FILE_READ_MAX {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    file.take(FILE_READ_MAX + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > FILE_READ_MAX {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
+/// Read at most `limit` bytes from the start of `path`, with the same
+/// file-type check as [`read_regular_file`] but no size cap. Returns
+/// those bytes and the file's size.
+pub(crate) async fn read_regular_head(
+    path: impl AsRef<Path>,
+    limit: u64,
+) -> std::io::Result<(Vec<u8>, u64)> {
+    let (file, size) = open_regular(path.as_ref()).await?;
+    let mut head = Vec::new();
+    file.take(limit).read_to_end(&mut head).await?;
+    Ok((head, size))
+}
+
+/// Open `path` only if it is a regular file, returning it with its
+/// size. A device, FIFO or socket (including `/dev/stdin`, the daemon's
+/// own terminal) can block the open or read forever or never end, so
+/// anything that is neither a file nor a directory is refused before it
+/// is opened. Directories fall through so the read fails with the usual
+/// `EISDIR` message.
+async fn open_regular(path: &Path) -> std::io::Result<(tokio::fs::File, u64)> {
     let meta = tokio::fs::metadata(path).await?;
     if !meta.is_file() && !meta.is_dir() {
         return Err(std::io::Error::new(
@@ -49,7 +94,7 @@ pub(crate) async fn read_regular_file(path: impl AsRef<Path>) -> std::io::Result
             "not a regular file (device, pipe, or socket)",
         ));
     }
-    tokio::fs::read(path).await
+    Ok((tokio::fs::File::open(path).await?, meta.len()))
 }
 
 /// Gather what a stdin-or-files command should operate on. Files named

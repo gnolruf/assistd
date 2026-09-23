@@ -229,7 +229,12 @@ impl AppState {
         let health: Option<Arc<dyn assistd_llm::LlmHealthProbe>> = Some(Arc::new(
             crate::presence::PresenceLlmHealthProbe::new(self.subsystems.presence.clone()),
         ));
-        let agent = Agent::new(llm, tools, health);
+        let agent = Agent::new(
+            llm,
+            tools,
+            health,
+            Duration::from_secs(self.config.timeouts.tool_call_secs),
+        );
         AbortOnDropHandle::new(tokio::spawn(
             inherit_confirm_router(async move {
                 agent.run_turn(text, attachments, llm_tx, cancel).await

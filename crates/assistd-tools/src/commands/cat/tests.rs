@@ -244,3 +244,47 @@ async fn cat_refuses_a_device_file() {
     assert!(stderr.contains("not a regular file"), "{stderr}");
     assert!(stderr.contains("ls -l /dev/null"), "{stderr}");
 }
+
+fn oversized_file() -> (tempfile::TempDir, String) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("huge.log");
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(crate::commands::FILE_READ_MAX + 1)
+        .unwrap();
+    let path = path.to_string_lossy().into_owned();
+    (dir, path)
+}
+
+#[tokio::test]
+async fn cat_refuses_a_file_over_the_read_limit() {
+    let (_dir, path) = oversized_file();
+    let out = CatCommand
+        .run(CommandInput {
+            args: vec![path.clone()],
+            stdin: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 1);
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("read limit"), "{stderr}");
+    assert!(stderr.contains(&format!("tail -n 200 {path}")), "{stderr}");
+}
+
+#[tokio::test]
+async fn cat_b_reports_the_size_of_a_file_over_the_read_limit() {
+    let (_dir, path) = oversized_file();
+    let out = CatCommand
+        .run(CommandInput {
+            args: vec!["-b".into(), path],
+            stdin: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = format!("{} bytes", crate::commands::FILE_READ_MAX + 1);
+    assert!(stdout.contains(&expected), "{stdout}");
+}
