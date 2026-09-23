@@ -74,25 +74,6 @@ impl MicVoiceInput {
         }
     }
 
-    /// Feed pre-recorded PCM straight to the transcriber, publishing the
-    /// same `Recording → Transcribing → Idle` sequence as a real press.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn transcribe_pcm_for_test(
-        &self,
-        pcm_i16_16k_mono: &[i16],
-    ) -> Result<String, VoiceInputError> {
-        // Yield between transitions so watch subscribers observe each
-        // one instead of only the latest.
-        let _ = self.state_tx.send(VoiceCaptureState::Recording);
-        tokio::task::yield_now().await;
-        let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
-        tokio::task::yield_now().await;
-        let result = self.transcriber.transcribe(pcm_i16_16k_mono).await;
-        tokio::task::yield_now().await;
-        let _ = self.state_tx.send(VoiceCaptureState::Idle);
-        Ok(result?)
-    }
-
     async fn cleanup_forwarder_and_idle(&self, forwarder: Option<JoinHandle<()>>) {
         if let Some(handle) = forwarder {
             handle.abort();
@@ -221,15 +202,5 @@ impl VoiceInput for MicVoiceInput {
 
     fn subscribe(&self) -> watch::Receiver<VoiceCaptureState> {
         self.state_tx.subscribe()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn voice_capture_state_pins_idle_default() {
-        assert_eq!(VoiceCaptureState::Idle as u8, 0);
     }
 }

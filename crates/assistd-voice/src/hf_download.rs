@@ -195,10 +195,20 @@ mod tests {
 
     #[test]
     fn rejects_malformed_ids() {
-        assert!(parse_hf_id("ggerganov/whisper.cpp").is_err());
-        assert!(parse_hf_id("whisper:file.bin").is_err());
-        assert!(parse_hf_id("owner/repo:").is_err());
-        assert!(parse_hf_id("/repo:file.bin").is_err());
+        for id in [
+            "ggerganov/whisper.cpp",
+            "whisper:file.bin",
+            "owner/repo:",
+            "owner/repo:a:b",
+            "/repo:file.bin",
+            "owner/:file.bin",
+        ] {
+            let err = parse_hf_id(id).expect_err(id);
+            assert!(
+                matches!(&err, DownloadError::InvalidId { id: got, .. } if got == id),
+                "{id}: {err:?}"
+            );
+        }
     }
 
     #[test]

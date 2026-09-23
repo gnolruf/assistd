@@ -709,104 +709,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn translate_criteria_rewrites_app_id_to_title() {
-        let out = translate_criteria_for_i3(&PlacementCriteria::AppId("dev.assistd.popup".into()));
-        assert_eq!(out, PlacementCriteria::Title("dev.assistd.popup".into()));
+    fn translate_criteria_rewrites_only_app_id_to_title() {
+        let con = PlacementCriteria::ConId(WindowId::new(42).unwrap());
+        for (input, expected) in [
+            (
+                PlacementCriteria::AppId("dev.assistd.popup".into()),
+                PlacementCriteria::Title("dev.assistd.popup".into()),
+            ),
+            (
+                PlacementCriteria::Class("Firefox".into()),
+                PlacementCriteria::Class("Firefox".into()),
+            ),
+            (
+                PlacementCriteria::Title("Inbox".into()),
+                PlacementCriteria::Title("Inbox".into()),
+            ),
+            (con.clone(), con),
+        ] {
+            assert_eq!(translate_criteria_for_i3(&input), expected, "{input:?}");
+        }
     }
 
     #[test]
-    fn translate_criteria_preserves_class_title_and_con_id() {
-        assert_eq!(
-            translate_criteria_for_i3(&PlacementCriteria::Class("Firefox".into())),
-            PlacementCriteria::Class("Firefox".into())
-        );
-        assert_eq!(
-            translate_criteria_for_i3(&PlacementCriteria::Title("Inbox".into())),
-            PlacementCriteria::Title("Inbox".into())
-        );
-        let con = WindowId::new(42).unwrap();
-        assert_eq!(
-            translate_criteria_for_i3(&PlacementCriteria::ConId(con)),
-            PlacementCriteria::ConId(con)
-        );
+    fn xft_dpi_scale_from_xrdb_output() {
+        for (xrdb, expected) in [
+            (
+                "*color0:\t#000000\nXft.dpi:\t144\nXft.antialias:\t1\n",
+                Some(1.5),
+            ),
+            ("Xft.dpi:\t72\n", Some(1.0)),
+            ("", None),
+            ("Xft.antialias:\t1\n", None),
+            ("Xft.dpi:\tnope\n", None),
+            ("Xft.dpi:\t-50\n", None),
+            ("Xft.dpi:\t0\n", None),
+        ] {
+            assert_eq!(parse_xft_dpi_scale(xrdb), expected, "{xrdb:?}");
+        }
     }
 
     #[test]
-    fn xft_dpi_parses_standard_xrdb_line() {
-        let xrdb = "*color0:\t#000000\nXft.dpi:\t144\nXft.antialias:\t1\n";
-        assert_eq!(parse_xft_dpi_scale(xrdb), Some(1.5));
-    }
-
-    #[test]
-    fn xft_dpi_returns_none_when_missing() {
-        assert_eq!(parse_xft_dpi_scale(""), None);
-        assert_eq!(parse_xft_dpi_scale("Xft.antialias:\t1\n"), None);
-    }
-
-    #[test]
-    fn xft_dpi_clamps_below_96() {
-        let xrdb = "Xft.dpi:\t72\n";
-        assert_eq!(parse_xft_dpi_scale(xrdb), Some(1.0));
-    }
-
-    #[test]
-    fn xft_dpi_rejects_garbage() {
-        assert_eq!(parse_xft_dpi_scale("Xft.dpi:\tnope\n"), None);
-        assert_eq!(parse_xft_dpi_scale("Xft.dpi:\t-50\n"), None);
-        assert_eq!(parse_xft_dpi_scale("Xft.dpi:\t0\n"), None);
-    }
-
-    #[test]
-    fn xrandr_parses_connected_output_geometry_and_mm() {
-        let xrandr = "\
+    fn xrandr_output_size_for_connected_outputs_only() {
+        let full = "\
 Screen 0: minimum 8 x 8, current 2560 x 1440, maximum 32767 x 32767
 HDMI-0 disconnected primary (normal left inverted right x axis y axis)
 DP-0 connected 2560x1440+0+0 (normal left inverted right x axis y axis) 587mm x 330mm
    2560x1440     59.95*+ 280.00   120.00
 ";
-        assert_eq!(
-            parse_xrandr_output_size(xrandr, "DP-0"),
-            Some(((2560, 1440), (587, 330)))
-        );
-    }
-
-    #[test]
-    fn xrandr_returns_none_for_disconnected_output() {
-        let xrandr = "HDMI-0 disconnected primary\nDP-0 connected 2560x1440+0+0 587mm x 330mm\n";
-        assert_eq!(parse_xrandr_output_size(xrandr, "HDMI-0"), None);
-    }
-
-    #[test]
-    fn xrandr_returns_none_for_missing_output() {
-        let xrandr = "DP-0 connected 2560x1440+0+0 587mm x 330mm\n";
-        assert_eq!(parse_xrandr_output_size(xrandr, "DP-1"), None);
-    }
-
-    #[test]
-    fn xrandr_returns_none_when_no_mm_dimensions() {
-        let xrandr = "DP-0 connected 2560x1440+0+0 (normal left inverted right)\n";
-        assert_eq!(parse_xrandr_output_size(xrandr, "DP-0"), None);
+        for (xrandr, output, expected) in [
+            (full, "DP-0", Some(((2560, 1440), (587, 330)))),
+            (full, "HDMI-0", None),
+            (full, "DP-1", None),
+            (
+                "DP-0 connected 2560x1440+0+0 (normal left inverted right)\n",
+                "DP-0",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                parse_xrandr_output_size(xrandr, output),
+                expected,
+                "{output} in {xrandr:?}"
+            );
+        }
     }
 
     #[test]
     fn randr_scale_matches_winit_quantization() {
-        // 2560x1440 on 587x330mm reproduces winit's calc_dpi_factor:
-        // ppmm = sqrt((2560*1440)/(587*330)) ≈ 4.32
-        // factor = round(ppmm * 12*25.4/96) / 12 ≈ 1.1667
-        let s = calc_randr_scale((2560, 1440), (587, 330));
-        assert!((s - 1.1667).abs() < 0.001, "got {s}");
-    }
-
-    #[test]
-    fn randr_scale_clamps_zero_mm_to_one() {
-        assert_eq!(calc_randr_scale((1920, 1080), (0, 0)), 1.0);
-        assert_eq!(calc_randr_scale((1920, 1080), (500, 0)), 1.0);
-    }
-
-    #[test]
-    fn randr_scale_floor_is_one() {
-        let s = calc_randr_scale((1024, 768), (400, 300));
-        assert_eq!(s, 1.0);
+        for (pixels, mm, expected) in [
+            // ppmm ≈ 4.32; round(4.32 * 12 * 25.4 / 96) / 12 = 14 / 12.
+            ((2560, 1440), (587, 330), 14.0 / 12.0),
+            ((1024, 768), (400, 300), 1.0),
+            ((1920, 1080), (0, 0), 1.0),
+            ((1920, 1080), (500, 0), 1.0),
+        ] {
+            assert_eq!(
+                calc_randr_scale(pixels, mm),
+                expected,
+                "{pixels:?} on {mm:?}mm"
+            );
+        }
     }
 
     #[test]

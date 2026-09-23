@@ -616,9 +616,9 @@ mod tests {
 
     #[test]
     fn sway_id_rejects_non_positive() {
-        assert!(sway_id(0).is_none());
-        assert!(sway_id(-1).is_none());
-        assert!(sway_id(-12345).is_none());
+        for raw in [0, -1, -12345] {
+            assert_eq!(sway_id(raw), None, "{raw}");
+        }
         assert_eq!(sway_id(42), WindowId::new(42));
     }
 }
