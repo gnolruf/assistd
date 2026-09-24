@@ -156,6 +156,10 @@ impl WindowManager for SwayBackend {
             .filter(|s| s.is_finite() && *s > 0.0)
             .unwrap_or(1.0))
     }
+
+    fn is_connected(&self) -> bool {
+        self.ipc.is_connected()
+    }
 }
 
 struct SwayIpc;

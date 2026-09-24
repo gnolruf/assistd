@@ -149,6 +149,10 @@ impl WindowManager for I3Backend {
             .place_floating(&translate_criteria_for_i3(criteria), anchor)
             .await
     }
+
+    fn is_connected(&self) -> bool {
+        self.ipc.is_connected()
+    }
 }
 
 struct I3Ipc;

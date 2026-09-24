@@ -6,6 +6,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
@@ -113,6 +114,8 @@ pub(crate) trait IpcProtocol: Send + Sync + Sized + 'static {
 pub(crate) struct IpcBackend<P: IpcProtocol> {
     protocol: P,
     cmd: Mutex<Option<P::Cmd>>,
+    /// Mirrors whether `cmd` holds a connection, readable without the lock.
+    connected: AtomicBool,
     snapshot: RwLock<Snapshot>,
     reconnect: Notify,
     window_events: broadcast::Sender<WindowEvent>,
@@ -138,12 +141,23 @@ impl<P: IpcProtocol> IpcBackend<P> {
         let backend = Arc::new(Self {
             protocol,
             cmd: Mutex::new(Some(cmd)),
+            connected: AtomicBool::new(true),
             snapshot: RwLock::new(initial),
             reconnect: Notify::new(),
             window_events,
         });
         let supervisor_task = tokio::spawn(supervise(backend.clone(), events, shutdown));
         Ok((backend, supervisor_task))
+    }
+
+    /// Whether the command socket is connected. Never blocks.
+    pub(crate) fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    fn set_conn(&self, slot: &mut Option<P::Cmd>, conn: Option<P::Cmd>) {
+        self.connected.store(conn.is_some(), Ordering::Relaxed);
+        *slot = conn;
     }
 
     /// Run one IPC call on the command socket under [`WM_IPC_TIMEOUT`].
@@ -162,7 +176,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
             Ok(Err(e)) => WmError::ipc(ctx, e),
             Err(_) => WmError::Timeout(WM_IPC_TIMEOUT),
         };
-        *guard = None;
+        self.set_conn(&mut guard, None);
         self.reconnect.notify_one();
         Err(err)
     }
@@ -355,7 +369,7 @@ async fn supervise<P: IpcProtocol>(
 
     let mut attempt: u32 = 0;
     loop {
-        *backend.cmd.lock().await = None;
+        backend.set_conn(&mut *backend.cmd.lock().await, None);
         tracing::warn!(
             "{name} disconnected; reconnecting (attempt {})",
             attempt + 1
@@ -377,7 +391,7 @@ async fn supervise<P: IpcProtocol>(
                 if let Ok(s) = seed_snapshot::<P>(&mut cmd).await {
                     *backend.snapshot.write().await = s;
                 }
-                *backend.cmd.lock().await = Some(cmd);
+                backend.set_conn(&mut *backend.cmd.lock().await, Some(cmd));
                 attempt = 0;
                 tracing::info!("{name} backend reconnected");
                 if !backend.drive_events(events, &mut shutdown).await {
@@ -424,3 +438,6 @@ fn find_map_node<P: IpcProtocol, T>(
 ) -> Option<T> {
     f(node).or_else(|| P::children(node).find_map(|child| find_map_node::<P, T>(child, f)))
 }
+
+#[cfg(test)]
+mod tests;
