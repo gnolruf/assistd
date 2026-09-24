@@ -69,12 +69,40 @@ pub struct ToolCallRecord {
     pub arguments: String,
 }
 
+/// An image held as the `data:` URI it goes out as. Encoding happens
+/// once, when the image enters the conversation, rather than on every
+/// request that replays it; the raw bytes are dropped at that point.
+#[derive(Debug, Clone)]
+pub struct ImageDataUri(String);
+
+impl ImageDataUri {
+    fn encode(attachment: Attachment) -> Self {
+        match attachment {
+            Attachment::Image { mime, bytes } => {
+                let mut uri = String::with_capacity(
+                    "data:;base64,".len() + mime.len() + bytes.len().div_ceil(3) * 4,
+                );
+                uri.push_str("data:");
+                uri.push_str(&mime);
+                uri.push_str(";base64,");
+                B64.encode_string(bytes, &mut uri);
+                Self(uri)
+            }
+        }
+    }
+
+    /// The URI text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// One turn in the in-memory conversation, owned by [`Conversation`].
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
     pub content: String,
-    pub attachments: Vec<Attachment>,
+    pub attachments: Vec<ImageDataUri>,
     /// Non-empty only on assistant messages that requested tool calls.
     pub tool_calls: Vec<ToolCallRecord>,
     /// Set only on [`Role::Tool`] messages: the id of the assistant tool
@@ -179,7 +207,7 @@ impl Conversation {
         self.messages.push(Message {
             role: Role::User,
             content,
-            attachments,
+            attachments: encode_all(attachments),
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: String::new(),
@@ -199,7 +227,7 @@ impl Conversation {
         self.messages.push(Message {
             role: Role::User,
             content: format!("{TOOL_RESULT_PREFIX}{name}]\n{content}"),
-            attachments,
+            attachments: encode_all(attachments),
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: String::new(),
@@ -396,16 +424,21 @@ impl Conversation {
                 continue;
             }
             let text = wire_text(message);
-            let content = if message.attachments.is_empty() {
-                wire::ContentBody::Text(text)
-            } else {
-                let mut parts = Vec::with_capacity(message.attachments.len() + 1);
-                parts.push(wire::ContentPart::Text { text });
-                for attachment in &message.attachments {
-                    parts.push(attachment_to_part(attachment));
-                }
-                wire::ContentBody::Parts(parts)
-            };
+            let content =
+                if message.attachments.is_empty() {
+                    wire::ContentBody::Text(text)
+                } else {
+                    let mut parts = Vec::with_capacity(message.attachments.len() + 1);
+                    parts.push(wire::ContentPart::Text { text });
+                    parts.extend(message.attachments.iter().map(|image| {
+                        wire::ContentPart::ImageUrl {
+                            image_url: wire::ImageUrl {
+                                url: image.as_str(),
+                            },
+                        }
+                    }));
+                    wire::ContentBody::Parts(parts)
+                };
             out.push(wire::ChatMessage {
                 role: message.role.as_wire(),
                 content: Some(content),
@@ -684,14 +717,8 @@ fn neutralise_context_markers(ctx: &str) -> Cow<'_, str> {
     )
 }
 
-fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
-    match att {
-        Attachment::Image { mime, bytes } => wire::ContentPart::ImageUrl {
-            image_url: wire::ImageUrl {
-                url: format!("data:{};base64,{}", mime, B64.encode(bytes)),
-            },
-        },
-    }
+fn encode_all(attachments: Vec<Attachment>) -> Vec<ImageDataUri> {
+    attachments.into_iter().map(ImageDataUri::encode).collect()
 }
 
 fn effective_budget(chat: &ChatConfig, model: &ModelConfig) -> u32 {

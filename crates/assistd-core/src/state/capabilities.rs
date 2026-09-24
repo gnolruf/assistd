@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 
 impl AppState {
     /// Report MCP startup failures, then probe llama-server for vision
-    /// support and the model name. Probes per request because a model
-    /// swap can flip vision between calls.
+    /// support and the model name. Probes live rather than reading the
+    /// vision gate, so the answer describes the server as it is now.
     pub(super) async fn handle_get_capabilities(
         self: Arc<Self>,
         id: String,
@@ -29,25 +29,9 @@ impl AppState {
                 .await;
         }
 
-        let host = self.config.llama_server.host.to_string();
-        let port = self.config.llama_server.port.get();
-        let probe = match assistd_llm::LlamaServerControl::new(&host, port) {
-            Ok(control) => {
-                assistd_llm::probe_capabilities_routed(
-                    &host,
-                    port,
-                    &self.config.model.name,
-                    &control,
-                )
-                .await
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "assistd::vision",
-                    "GetCapabilities: failed to build control client: {e}"
-                );
-                assistd_llm::VisionState::default()
-            }
+        let probe = match &self.subsystems.vision_revalidator {
+            Some(rev) => rev.probe().await,
+            None => assistd_llm::VisionState::default(),
         };
         let model_name = self
             .config

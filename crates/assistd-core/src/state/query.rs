@@ -2,11 +2,11 @@
 
 use super::context::combine_context_blocks;
 use super::wire::decode_wire_attachments;
-use super::{AppState, DispatchError, send_error};
+use super::{AppState, DispatchError, RuntimeState, send_error};
 use crate::Agent;
 use crate::presence::{LlmStreamGuard, RequestGuard};
 use crate::recovery::{Component, spawn_supervised};
-use assistd_ipc::{Event, StatusKind};
+use assistd_ipc::{Event, EventKind, StatusKind};
 use assistd_llm::{LlmError, LlmEvent, ToolCall};
 use assistd_memory::{PersistedMessage, SessionId, TurnId};
 use assistd_tools::{Attachment, inherit_confirm_router};
@@ -31,6 +31,17 @@ fn tool_calls_message(narration: String, calls: &[ToolCall]) -> PersistedMessage
         .map(|c| serde_json::json!({"id": c.id, "name": c.name, "arguments": c.arguments}))
         .collect();
     PersistedMessage::assistant_tool_calls(content, calls_json)
+}
+
+/// `LastDelta` carries the whole reply so far, so building one costs a
+/// copy of it; skip that when no subscriber would receive it.
+fn publish_last_delta(runtime: &RuntimeState, id: &str, text: &str) {
+    if runtime.bus_wants(EventKind::LastDelta) {
+        let _ = runtime.events_bus().send(Event::LastDelta {
+            id: id.to_string(),
+            text: text.to_string(),
+        });
+    }
 }
 
 struct QueryGuards {
@@ -60,6 +71,9 @@ impl AppState {
             .await?;
         let _session_guards = self.acquire_query_guards(&id, &tx).await?;
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        if let Some(rev) = &self.subsystems.vision_revalidator {
+            rev.revalidate_if_stale(&self.subsystems.presence).await;
+        }
 
         let (current_session, turn_id) = self.open_persistence_turn(&text).await;
         self.assemble_transient_context(&text).await;
@@ -104,9 +118,6 @@ impl AppState {
         wire: &[assistd_ipc::ImageAttachment],
         tx: &mpsc::Sender<Event>,
     ) -> Result<Vec<Attachment>, DispatchError> {
-        if let Some(rev) = self.subsystems.vision_revalidator.as_ref() {
-            rev.revalidate().await;
-        }
         let decoded = decode_wire_attachments(wire);
         if let Err(e) = &decoded {
             send_error(tx, id.to_string(), e.to_string()).await;
@@ -316,7 +327,6 @@ impl AppState {
         let mut first_sentence_emitted = false;
         let mut done_emitted = false;
 
-        let events_bus = self.runtime.events_bus().clone();
         // Backdate so the first Delta emits without waiting a window.
         let mut last_emit_at = Instant::now()
             .checked_sub(LAST_DELTA_DEBOUNCE)
@@ -350,10 +360,7 @@ impl AppState {
                     let sentences = sentence_buf.push(&text);
                     assistant_accum.push_str(&text);
                     if last_emit_at.elapsed() >= LAST_DELTA_DEBOUNCE {
-                        let _ = events_bus.send(Event::LastDelta {
-                            id: id.clone(),
-                            text: assistant_accum.clone(),
-                        });
+                        publish_last_delta(&self.runtime, &id, &assistant_accum);
                         last_emit_at = Instant::now();
                     }
                     (
@@ -374,10 +381,7 @@ impl AppState {
                 LlmEvent::ToolCallsRequested { calls } => {
                     let narration = std::mem::take(&mut assistant_accum);
                     if !narration.is_empty() {
-                        let _ = events_bus.send(Event::LastDelta {
-                            id: id.clone(),
-                            text: narration.clone(),
-                        });
+                        publish_last_delta(&self.runtime, &id, &narration);
                     }
                     self.persist_message_fire_and_forget(
                         turn_id,
@@ -448,10 +452,7 @@ impl AppState {
                     let sentences = tail.into_iter().collect();
                     if !assistant_accum.is_empty() {
                         let final_text = std::mem::take(&mut assistant_accum);
-                        let _ = events_bus.send(Event::LastDelta {
-                            id: id.clone(),
-                            text: final_text.clone(),
-                        });
+                        publish_last_delta(&self.runtime, &id, &final_text);
                         self.persist_message_fire_and_forget(
                             turn_id,
                             PersistedMessage::assistant_text(final_text),

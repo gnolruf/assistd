@@ -14,13 +14,13 @@ impl AppState {
         filter: SubscribeFilter,
         tx: mpsc::Sender<Event>,
     ) {
-        let mut rx = self.runtime.subscribe_events();
         debug!(
             target: "assistd::subscribe",
             id = %id,
             kinds = ?filter.kinds,
             "subscriber attached"
         );
+        let mut rx = self.runtime.subscribe_events(filter);
         loop {
             tokio::select! {
                 _ = tx.closed() => {
@@ -33,10 +33,7 @@ impl AppState {
                 }
                 recv = rx.recv() => match recv {
                     Ok(event) => {
-                        if let Some(kind) = event.kind()
-                            && filter.matches(kind)
-                            && tx.send(event).await.is_err()
-                        {
+                        if tx.send(event).await.is_err() {
                             return;
                         }
                     }

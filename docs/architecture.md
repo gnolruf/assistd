@@ -122,9 +122,11 @@ Vision support is detected dynamically: `probe_capabilities_routed()` calls
 `GET /props` on the running server to learn whether the model has a
 vision projector. The `VisionGate` flips on if so, allowing the `see`
 and `screenshot` commands to attach images to the next turn. A
-`VisionRevalidator` re-probes at the top of every query so a model
-swap (e.g., switching presets via the config and reloading) is
-picked up without a daemon restart.
+`VisionRevalidator` re-probes at the start of the first query after
+the weights may have been reloaded (any presence transition, or a
+supervisor restart of the child), and again after any failed probe,
+so the gate tracks what is actually loaded without probing on every
+query.
 
 ### Agent loop (`assistd-core::Agent`)
 

@@ -398,7 +398,9 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
         ..StateParts::default()
     }
     .build();
-    let mut bus = state.runtime.subscribe_events();
+    let mut bus = state
+        .runtime
+        .subscribe_events(assistd_ipc::SubscribeFilter::default());
 
     let (res, _) = dispatch(&state, query("req-title", "tell me about cats")).await;
     res.unwrap();
