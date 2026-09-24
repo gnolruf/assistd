@@ -1,4 +1,4 @@
-//! Test fixtures, exported so downstream crates' tests can share them.
+//! Shared test fixtures.
 
 use crate::top::Config;
 

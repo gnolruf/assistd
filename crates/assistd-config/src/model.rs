@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
-    /// Model identifier passed to llama-server's `--hf` flag.
-    /// Format: `owner/repo:quant` (e.g. `"unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"`).
+    /// HuggingFace model llama-server loads, as `owner/repo:quant`
+    /// (e.g. `"unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"`).
     pub name: String,
     /// Context window length in tokens.
     pub context_length: NonZeroU32,

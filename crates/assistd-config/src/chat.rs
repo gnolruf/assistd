@@ -44,8 +44,7 @@ pub struct ChatConfig {
     pub top_k: Option<NonZeroU32>,
     /// Min-p sampling cutoff in `0.0..=1.0`. `None` omits the field.
     pub min_p: Option<f32>,
-    /// Presence penalty in `-2.0..=2.0`. `None` omits the field. Qwen3 reasoning
-    /// variants recommend a small positive value (e.g. 1.5) to reduce repetition.
+    /// Presence penalty in `-2.0..=2.0`. `None` omits the field.
     pub presence_penalty: Option<f32>,
 }
 

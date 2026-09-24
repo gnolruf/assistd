@@ -9,25 +9,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrayConfig {
-    /// Floating activity popup spawned alongside the tray icon (feature
-    /// `tray-popup`). Configuration is parsed regardless of the build
-    /// feature so a config file authored once works on every build.
+    /// Floating activity popup shown alongside the tray icon on
+    /// `tray-popup` builds. Parsed on every build, so one config file
+    /// works regardless of features.
     pub popup: TrayPopupConfig,
 }
 
-/// Geometry and wake-up policy for the floating activity popup.
-///
-/// The popup is a borderless ~360×120 window anchored near the
-/// system-tray icon. It surfaces the daemon's most-recent assistant
-/// reply text plus the last tool call so the user can glance at
-/// activity without alt-tabbing to the chat TUI. Placement is delegated
-/// to the compositor through `assistd-wm`; see
-/// [`PopupAnchor`] for the supported corners.
+/// Geometry and wake-up policy for the floating activity popup, which
+/// shows the latest assistant reply and tool call. Geometry is in
+/// logical pixels.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrayPopupConfig {
-    /// Globally enable or disable the popup. When `false`, the popup
-    /// task is not spawned even on a build with `--features tray-popup`.
+    /// Enable the popup. When `false`, no popup is shown even on a
+    /// `tray-popup` build.
     pub enabled: bool,
 
     /// Screen corner the popup anchors to. Offsets are measured from
@@ -35,9 +30,8 @@ pub struct TrayPopupConfig {
     pub anchor: PopupAnchor,
 
     /// Horizontal offset from the anchor, in pixels. Positive moves
-    /// right; negative moves left. For a right-anchored popup, the
-    /// default `-10` nudges the popup inward by 10 px so it doesn't
-    /// kiss the screen edge.
+    /// right; negative moves left, so a negative value moves a
+    /// right-anchored popup inward.
     pub offset_x: i32,
 
     /// Vertical offset from the anchor, in pixels. Positive moves down;
@@ -62,9 +56,9 @@ pub struct TrayPopupConfig {
 }
 
 impl TrayPopupConfig {
-    /// Idle timeout while the daemon's continuous listener is active. The
-    /// user can reply verbally without touching a key, so the popup has to
-    /// outlast the time it takes to hear it and start speaking.
+    /// Idle timeout while continuous listening is active: three times
+    /// `auto_hide_ms`, since the user may reply verbally and the popup
+    /// must outlast the time it takes to hear it and start speaking.
     pub fn listen_auto_hide_ms(&self) -> u64 {
         self.auto_hide_ms.saturating_mul(3)
     }
@@ -91,17 +85,14 @@ impl Default for TrayPopupConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrayPopupWakeConfig {
-    /// Open on `Event::ToolCall` — catches every MCP / bash / web
-    /// invocation. Default: `true`.
+    /// Open on every tool call. Default: `true`.
     pub tool_call: bool,
 
-    /// Open on the first `Event::LastDelta` of a turn — i.e. as soon as
-    /// the model starts replying. Default: `true`. Flip to `false` if
-    /// you live in the chat TUI and don't want a popup on every reply.
+    /// Open as soon as the model starts replying in a turn. Default:
+    /// `true`.
     pub delta: bool,
 
-    /// Open on `Event::Error`. Useful for noticing failures that would
-    /// otherwise only land in the tracing log. Default: `true`.
+    /// Open when a turn fails. Default: `true`.
     pub error: bool,
 }
 
@@ -115,17 +106,15 @@ impl Default for TrayPopupWakeConfig {
     }
 }
 
-/// Screen corner the popup anchors to. The compositor (i3 / sway) is
-/// responsible for the actual placement; the tray sends a `floating
-/// enable, resize set W H, move position …` IPC sequence templated
-/// from this variant plus the configured offsets.
+/// Screen position the popup anchors to; the configured offsets are
+/// applied from it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PopupAnchor {
     /// Top-left of the focused output.
     TopLeft,
-    /// Top-right of the focused output. Default — matches the most
-    /// common tray location on Waybar / xfce-panel / KDE.
+    /// Top-right of the focused output. The default, as the most common
+    /// tray location.
     #[default]
     TopRight,
     /// Bottom-left of the focused output.
