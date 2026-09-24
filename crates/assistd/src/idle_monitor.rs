@@ -1,8 +1,4 @@
 //! Drowses and sleeps the daemon after configured idle periods.
-//!
-//! Calls `drowse()` / `sleep()` directly rather than `set_presence`, so
-//! automatic transitions do not reset the idle timer and the monitor can
-//! progress Active → Drowsy → Sleeping.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +32,7 @@ pub fn validate(cfg: &SleepConfig) -> Result<()> {
     Ok(())
 }
 
-/// `None` when both thresholds are 0.
+/// Spawn the idle monitor. `None` when both thresholds are 0.
 pub fn spawn_monitor(
     cfg: &SleepConfig,
     presence: Arc<PresenceManager>,
@@ -91,6 +87,9 @@ async fn run_monitor(
     }
 }
 
+/// Calls `drowse()` / `sleep()` directly rather than `set_presence`, so
+/// an automatic transition does not reset the idle timer and the monitor
+/// can progress Active → Drowsy → Sleeping.
 async fn apply(action: Action, presence: &PresenceManager) {
     match action {
         Action::None => {}

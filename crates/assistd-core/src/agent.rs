@@ -1,8 +1,5 @@
 //! Per-turn agent loop: step the LLM, dispatch the tool calls it
 //! requests, feed the results back, repeat until it answers.
-//!
-//! Invariant: the caller serialises turns. Two concurrent `run_turn`
-//! calls would interleave in the backend's conversation state.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,11 +17,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-/// Wall-clock budget for waiting on an LLM restart before falling
-/// through to a terminal error. The supervisor's worst-case backoff
-/// sum is 1+2+4+8+16+32 = 63s; 75s gives headroom for spawn + health
-/// probe latency. Longer than this and we treat the restart as
-/// hopeless and surface to the user.
+/// Wall-clock budget for waiting on an LLM restart before the turn
+/// fails. Covers the supervisor's worst-case backoff sum (63s) plus
+/// headroom for spawn and health-probe latency.
 const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 
 /// Consecutive identical tool calls after which the model is treated
@@ -51,6 +46,8 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Build an agent over `backend` and `tools`; see [`Agent`] for how
+    /// `health` and `tool_deadline` shape a turn.
     pub fn new(
         backend: Arc<dyn LlmBackend>,
         tools: Arc<ToolRegistry>,
@@ -71,8 +68,9 @@ impl Agent {
     /// The turn stops without error when `tx` closes or `cancel` fires;
     /// both are checked between iterations and raced against the LLM
     /// step and each tool dispatch, so a slow tool is abandoned promptly.
-    /// A never-cancelled token is fine for callers that only rely on the
-    /// `tx` path.
+    ///
+    /// Turns must not run concurrently: two overlapping calls would
+    /// interleave in the backend's conversation state.
     ///
     /// Errors when the backend fails; a restart the supervisor could not
     /// complete surfaces as [`LlmError::ServerRestarting`].
@@ -301,7 +299,6 @@ impl Agent {
     }
 }
 
-/// Per-turn state threaded through the loop.
 struct Turn {
     tx: mpsc::Sender<LlmEvent>,
     cancel: CancellationToken,
@@ -407,7 +404,6 @@ async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &st
     }
 }
 
-/// Surface a fatal error in the stream and close it with `Done`.
 async fn fail_turn(tx: &mpsc::Sender<LlmEvent>, message: &str) {
     let _ = tx
         .send(LlmEvent::Delta {

@@ -1,4 +1,4 @@
-//! Window-manager backend construction shared by the daemon and the tray.
+//! Window-manager backend construction from config.
 
 use std::sync::Arc;
 

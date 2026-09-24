@@ -22,7 +22,7 @@ use wm_bridge::{
     WmBackendBundle, anchor_from_config, build_wm_backend, place_worker, popup_criteria,
 };
 
-/// Hook the tray's subscribe loop calls into for each daemon event.
+/// Cloneable handle that feeds daemon events to the popup driver.
 #[derive(Clone)]
 pub struct PopupSink {
     driver_tx: UnboundedSender<DriverInput>,

@@ -8,14 +8,14 @@ use assistd_voice::{ContinuousListener, VoiceInput, VoiceOutputController};
 use assistd_wm::{NoWindowManager, WindowManager};
 use std::sync::Arc;
 
-/// One MCP server that failed to start during daemon boot, surfaced
-/// to clients via `Event::Status`.
+/// One MCP server that failed to start during daemon boot.
 #[derive(Debug, Clone)]
 pub struct McpStartupFailure {
     pub server_name: String,
     pub reason: String,
 }
 
+/// Handles to the long-lived daemon subsystems.
 pub struct Subsystems {
     pub llm: Arc<dyn LlmBackend>,
     pub presence: Arc<PresenceManager>,
@@ -29,6 +29,8 @@ pub struct Subsystems {
 }
 
 impl Subsystems {
+    /// Bundle the required subsystems, with no window manager, no vision
+    /// revalidator, and no MCP startup failures.
     pub fn new(
         llm: Arc<dyn LlmBackend>,
         presence: Arc<PresenceManager>,
@@ -50,16 +52,19 @@ impl Subsystems {
         }
     }
 
+    /// Replace the window manager.
     pub fn with_window_manager(mut self, wm: Arc<dyn WindowManager>) -> Self {
         self.window_manager = wm;
         self
     }
 
+    /// Attach a vision revalidator.
     pub fn with_vision_revalidator(mut self, r: Arc<crate::VisionRevalidator>) -> Self {
         self.vision_revalidator = Some(r);
         self
     }
 
+    /// Record the MCP servers that failed to start.
     pub fn with_mcp_startup_failures(mut self, failures: Vec<McpStartupFailure>) -> Self {
         self.mcp_startup_failures = failures;
         self

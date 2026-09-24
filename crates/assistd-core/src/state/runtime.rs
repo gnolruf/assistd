@@ -12,7 +12,7 @@ use tokio_util::task::TaskTracker;
 
 const EVENTS_BUS_CAPACITY: usize = 256;
 
-/// Active (session, branch) pointer shared by every persistence write site.
+/// The active (session, branch) pair, always read and replaced together.
 pub struct ConversationContext {
     inner: tokio::sync::RwLock<ConversationContextInner>,
     /// Lets holders that cannot await the lock read the session
@@ -27,10 +27,12 @@ struct ConversationContextInner {
 }
 
 impl ConversationContext {
+    /// Point at `branch_id` of `session_id`.
     pub fn new(session_id: SessionId, branch_id: BranchId) -> Self {
         Self::from_arc(Arc::new(session_id), branch_id)
     }
 
+    /// [`Self::new`] for an already shared session id.
     pub fn from_arc(session_id: Arc<SessionId>, branch_id: BranchId) -> Self {
         let (session, _) = watch::channel(session_id.clone());
         Self {
@@ -47,11 +49,14 @@ impl ConversationContext {
         self.session.subscribe()
     }
 
+    /// The active session and branch.
     pub async fn current(&self) -> (Arc<SessionId>, BranchId) {
         let g = self.inner.read().await;
         (g.session_id.clone(), g.branch_id)
     }
 
+    /// Make `branch_id` of `session_id` active and notify
+    /// [`Self::session_updates`] watchers.
     pub async fn replace(&self, session_id: Arc<SessionId>, branch_id: BranchId) {
         let mut g = self.inner.write().await;
         g.session_id = session_id.clone();
@@ -60,7 +65,9 @@ impl ConversationContext {
     }
 }
 
-/// Runtime bookkeeping owned by `AppState`.
+/// Per-process request bookkeeping: the active conversation, turn
+/// serialisation and cancellation, persistence ordering, and the events
+/// bus.
 pub struct RuntimeState {
     pub conversation_ctx: Arc<ConversationContext>,
     /// Serialises whole agent turns.
@@ -81,6 +88,7 @@ pub struct RuntimeState {
 }
 
 impl RuntimeState {
+    /// Fresh state pointing at branch 0 of a new session.
     pub fn new() -> Self {
         let (events_bus, _) = broadcast::channel(EVENTS_BUS_CAPACITY);
         Self {
@@ -95,15 +103,18 @@ impl RuntimeState {
         }
     }
 
+    /// Replace the active-conversation pointer.
     pub fn with_conversation_ctx(mut self, ctx: Arc<ConversationContext>) -> Self {
         self.conversation_ctx = ctx;
         self
     }
 
+    /// A handle to the tracker of fire-and-forget persistence tasks.
     pub fn persistence_tracker_handle(&self) -> TaskTracker {
         self.persistence_tracker.clone()
     }
 
+    /// The broadcast bus [`Self::publish`] sends on.
     pub fn events_bus(&self) -> &broadcast::Sender<Event> {
         &self.events_bus
     }

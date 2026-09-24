@@ -828,7 +828,6 @@ mod tests {
         // rows: [(0,6), (6,11)]
         assert_eq!(locate_cursor(&rows, 0), (0, 0));
         assert_eq!(locate_cursor(&rows, 5), (0, 5));
-        // Cursor at the wrap boundary → next row col 0.
         assert_eq!(locate_cursor(&rows, 6), (1, 0));
         assert_eq!(locate_cursor(&rows, 11), (1, 5));
     }

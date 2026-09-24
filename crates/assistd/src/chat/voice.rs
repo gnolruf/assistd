@@ -16,7 +16,7 @@ use crate::ipc_voice_proxy::IpcVoiceProxy;
 
 const EVENT_BRIDGE_CAPACITY: usize = 12;
 
-/// Tasks the caller holds for the TUI session's lifetime.
+/// The hotkey-grab and event-bridge tasks behind chat push-to-talk.
 pub struct VoicePipeline {
     hotkey_handle: Option<JoinHandle<()>>,
     bridge_handle: Option<JoinHandle<()>>,

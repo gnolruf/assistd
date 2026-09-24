@@ -16,10 +16,9 @@ pub struct InputLine {
     history_cap: usize,
 }
 
-/// Action returned by [`InputLine::on_key`] to the event loop.
+/// Action returned by [`InputLine::on_key`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum InputAction {
-    /// No action required.
     None,
     /// The user pressed Enter with non-empty input; contains the submitted text.
     Submit(String),

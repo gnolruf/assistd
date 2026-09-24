@@ -1,5 +1,4 @@
-//! Fire-and-forget message persistence and the drain that branch
-//! handlers run before mutating branches.
+//! Fire-and-forget message persistence and its bounded drain.
 
 use super::AppState;
 use assistd_embed::EmbedJob;
@@ -60,13 +59,13 @@ impl AppState {
                     return;
                 }
             };
-            // NoConversationStore returns 0: nothing to chunk.
             let Some(content) = content_for_chunks else {
                 return;
             };
             let Some(chunks_handle) = chunks_handle else {
                 return;
             };
+            // NoConversationStore returns 0: nothing to chunk.
             if row_id == 0 {
                 return;
             }
@@ -105,8 +104,9 @@ impl AppState {
         });
     }
 
-    /// Wait, briefly, for every queued persistence task to land. Callers
-    /// hold `agent_turn_lock` so no new tasks spawn during the wait.
+    /// Wait, up to 500ms, for every queued persistence task to land.
+    /// Hold `agent_turn_lock` across the call so no new tasks spawn
+    /// during the wait.
     pub(super) async fn drain_persistence_inflight(&self) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while !self.runtime.persistence_tracker.is_empty() && std::time::Instant::now() < deadline {
