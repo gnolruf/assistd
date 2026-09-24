@@ -262,7 +262,7 @@ async fn handle_connection(
     let router = ConfirmRouter::new(req.id().to_string(), tx.clone(), CONFIRM_TIMEOUT);
 
     let is_subscribe = matches!(req, Request::Subscribe { .. });
-    let events_bus = state.runtime.events_bus().clone();
+    let bus_state = state.clone();
 
     let router_for_dispatch = router.clone();
     let dispatch_fut = async move {
@@ -274,8 +274,8 @@ async fn handle_connection(
         while let Some(event) = rx.recv().await {
             // Subscribe forwarders read from the bus; teeing back
             // onto it would loop.
-            if !is_subscribe && event.kind().is_some() {
-                let _ = events_bus.send(event.clone());
+            if !is_subscribe {
+                bus_state.runtime.publish(&event);
             }
             write_event(&mut write_half, &event).await?;
         }

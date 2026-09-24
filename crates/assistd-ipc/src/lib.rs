@@ -295,7 +295,9 @@ pub enum Request {
     /// Forwards every broadcast-eligible event that matches
     /// `filter` until the client disconnects. No terminal `Done`
     /// is emitted for the subscription itself; events carry the
-    /// originating turn's `id`, not `Subscribe.id`.
+    /// originating turn's `id`, not `Subscribe.id`. A forwarded
+    /// [`Event::ToolResult`] omits the result's `attachments`; only the
+    /// connection that made the request receives the images.
     Subscribe {
         id: String,
         #[serde(default)]
