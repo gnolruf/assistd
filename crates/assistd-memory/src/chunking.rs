@@ -31,6 +31,9 @@ impl Default for ChunkingConfig {
 ///   advancing by `chunk_chars - overlap_chars` each step. The last
 ///   window is included even when shorter than the limit.
 /// - Pure-whitespace chunks are dropped.
+///
+/// A config with `chunk_chars == 0` or `overlap_chars >= chunk_chars`
+/// returns the input as a single chunk.
 pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
     if content.trim().is_empty() {
         return Vec::new();

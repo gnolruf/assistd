@@ -1,22 +1,6 @@
-//! Tiny in-tree MCP server fixture used by the integration test.
-//!
-//! Reads JSON-RPC requests one-per-line from stdin, replies on stdout
-//! with the corresponding response (also one line of JSON).
-//!
-//! Implements just enough of the protocol to exercise the daemon's
-//! discovery + invocation path:
-//!   * `initialize` → returns capabilities + protocol version.
-//!   * `notifications/initialized` → ignored (no response).
-//!   * `tools/list` → returns `echo`, `crash_me` and `flood_stdout`.
-//!   * `tools/call` for `echo` → returns the input under `text`.
-//!   * `tools/call` for `crash_me` → exits the process (used to
-//!     simulate a server crash mid-session).
-//!   * `tools/call` for `flood_stdout` → emits one line past the
-//!     transport's line cap and keeps running (used to simulate a dead
-//!     read loop under a live child).
-//!
-//! Built as a regular `[[bin]]` so the integration test can locate it
-//! through `CARGO_BIN_EXE_fake_mcp_server`.
+//! Minimal MCP server fixture: newline-delimited JSON-RPC on
+//! stdin/stdout, answering `initialize`, `ping`, `tools/list` and
+//! `tools/call` for the `echo`, `crash_me` and `flood_stdout` tools.
 
 use std::io::{BufRead, BufReader, Write};
 
@@ -116,13 +100,14 @@ fn main() {
                             }
                         })
                     }
+                    // Exits without replying, simulating a crash mid-session.
                     "crash_me" => {
-                        // Goodbye, cruel daemon.
                         std::process::exit(0);
                     }
-                    // Overshoot the client's 1 MiB line cap by less than a
-                    // pipe buffer, so the write completes and this process
-                    // stays alive and readable after the client gives up.
+                    // Kills the client's read loop while this process stays
+                    // alive. Overshoots the 1 MiB line cap by less than a
+                    // pipe buffer, so the write completes and stdin stays
+                    // readable after the client gives up.
                     "flood_stdout" => {
                         let mut junk = vec![b'x'; 1024 * 1024 + 1024];
                         junk.push(b'\n');

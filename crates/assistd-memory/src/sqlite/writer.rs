@@ -77,7 +77,6 @@ pub enum WriteOp {
         daemon_pid: u32,
         ack: oneshot::Sender<Result<BranchId>>,
     },
-    /// Update `sessions.current_branch_id`.
     SetCurrentBranch {
         session_id: String,
         branch_id: BranchId,
@@ -99,12 +98,10 @@ pub enum WriteOp {
         new_name: String,
         ack: oneshot::Sender<Result<BranchId>>,
     },
-    /// Drop the most recent turn from `branch`.
     UndoLastTurn {
         branch_id: BranchId,
         ack: oneshot::Sender<Result<UndoOutcome>>,
     },
-    /// Set `sessions.title`.
     SetSessionTitle {
         session_id: String,
         title: String,
@@ -112,8 +109,9 @@ pub enum WriteOp {
     },
 }
 
-/// Spawn the writer task. The caller awaits the returned handle on
-/// shutdown, after flipping `shutdown`.
+/// Spawn the writer task. It exits once every sender is dropped, or once
+/// `shutdown` flips to `true` and the queue then stays idle for two
+/// seconds.
 pub fn spawn_writer(
     conn: Connection,
     mut rx: mpsc::Receiver<WriteOp>,
@@ -476,8 +474,8 @@ async fn begin_session_with_main_branch(
     let created = started.clone();
     let branch_rowid = conn
         .call(move |c| -> rusqlite::Result<_> {
-            // One transaction: startup treats a session without a main
-            // branch as corrupt.
+            // One transaction so no session is ever persisted without
+            // its `main` branch.
             let tx = c.transaction()?;
             tx.execute(
                 "INSERT INTO sessions (id, started_at, daemon_pid) VALUES (?1, ?2, ?3)",

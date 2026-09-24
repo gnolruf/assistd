@@ -17,6 +17,8 @@ pub struct HealthRoutedTool {
 }
 
 impl HealthRoutedTool {
+    /// Gate `inner` on `health_rx`; `server_name` tags the envelope
+    /// returned while the server is down.
     pub fn new(
         inner: McpToolAdapter,
         server_name: String,

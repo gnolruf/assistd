@@ -23,8 +23,8 @@ use async_trait::async_trait;
 /// Generates embedding vectors for text.
 #[async_trait]
 pub trait Embedder: Send + Sync + 'static {
-    /// An L2-normalised embedding of `text`; callers compute cosine as
-    /// a dot product.
+    /// An L2-normalised embedding of `text`, so cosine similarity is a
+    /// plain dot product.
     async fn embed(&self, text: String) -> Result<Vec<f32>, EmbedError>;
 
     /// L2-normalised embeddings of `texts`, one per input and in input

@@ -62,6 +62,7 @@ pub struct Correlator {
 }
 
 impl Correlator {
+    /// An empty correlator; ids start at 1.
     pub fn new() -> Self {
         Self {
             next_id: AtomicU64::new(1),
@@ -95,8 +96,9 @@ impl Correlator {
         })
     }
 
-    /// Wake the caller waiting on `response.id`. Unknown ids are logged
-    /// and dropped; they occur when a reply lands after a reconnect.
+    /// Wake the request waiting on `response.id`. Frames without an id
+    /// are ignored; replies to unknown ids, such as a request that
+    /// already timed out, are logged and dropped.
     pub fn deliver(&self, response: Response) {
         let Some(id) = response.id else {
             return;
@@ -123,6 +125,7 @@ impl Correlator {
         self.pending.lock().clear();
     }
 
+    /// Number of requests currently awaiting a reply.
     pub fn in_flight(&self) -> usize {
         self.pending.lock().len()
     }
@@ -160,6 +163,7 @@ impl Pending<'_> {
         Ok(bytes)
     }
 
+    /// The request serialised as a JSON-RPC 2.0 frame.
     pub fn frame_json(&self) -> Result<Vec<u8>, McpError> {
         let req = Request {
             jsonrpc: "2.0",

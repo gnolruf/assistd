@@ -37,6 +37,8 @@ pub struct SseConfig {
 }
 
 impl SseConfig {
+    /// Config for `url` with no extra headers, 30s request and read
+    /// timeouts, and a 15s ping interval.
     pub fn new(label: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
@@ -510,10 +512,13 @@ struct PartialEvent {
 }
 
 impl EventParser {
+    /// A parser with nothing buffered.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Buffer a body chunk; complete events are drained with
+    /// [`Self::next_event`].
     pub fn push(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
     }

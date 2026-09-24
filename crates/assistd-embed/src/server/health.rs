@@ -16,6 +16,8 @@ pub struct HealthChecker {
 }
 
 impl HealthChecker {
+    /// Checker for `http://{host}:{port}/health`; `ready_timeout` bounds
+    /// each [`Self::wait_ready`].
     pub fn new(host: &str, port: u16, ready_timeout: Duration) -> Result<Self, EmbedServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()

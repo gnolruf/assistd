@@ -1,10 +1,5 @@
 //! Vector retrieval over `embeddings` (chunk-keyed) and
 //! `memory_embeddings` (memory-keyed).
-//!
-//! Vectors are little-endian `f32` BLOBs, L2-normalised at write time,
-//! so cosine similarity is a plain dot product. Retrieval is a linear
-//! scan into a bounded min-heap, then one batched JOIN to hydrate the
-//! winners; that is ample for a single user's history.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
@@ -44,8 +39,7 @@ pub struct MemoryHit {
 pub trait SemanticStore: Send + Sync + 'static {
     /// Top-K conversation chunks by cosine. `query_vector` must already
     /// be L2-normalised. `exclude_session` drops one session's chunks
-    /// before ranking so the caller still gets `top_k` hits from other
-    /// conversations.
+    /// before ranking, so they never count toward `top_k`.
     async fn nearest_chunks(
         &self,
         query_vector: Vec<f32>,
@@ -96,7 +90,7 @@ pub trait SemanticStore: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-/// No-op fallback used when the embedding subsystem is disabled.
+/// No-op store: writes are discarded and searches find nothing.
 pub struct NoSemanticStore;
 
 #[async_trait]
@@ -150,13 +144,16 @@ impl SemanticStore for NoSemanticStore {
     }
 }
 
-/// SQLite-backed [`SemanticStore`].
+/// SQLite-backed [`SemanticStore`]. Retrieval is a linear scan into a
+/// bounded min-heap followed by one batched lookup of the winners,
+/// which is ample for a single user's history.
 #[derive(Clone)]
 pub struct SqliteSemanticStore {
     handle: Arc<SqliteHandle>,
 }
 
 impl SqliteSemanticStore {
+    /// Store over the shared database handle.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
@@ -181,8 +178,6 @@ impl SemanticStore for SqliteSemanticStore {
             .handle
             .conn()
             .call(move |c| {
-                // Filter before ranking so the excluded session doesn't
-                // eat into `top_k`.
                 scan_top_k(
                     c,
                     "SELECT e.conversation_chunk_id, e.vector
@@ -551,7 +546,8 @@ fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
 }
 
 /// Encode an `f32` slice as the little-endian BLOB the embedding tables
-/// store.
+/// store. Stored vectors must be L2-normalised, since similarity is
+/// scored as a plain dot product.
 pub fn vector_to_blob(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
     for x in v {

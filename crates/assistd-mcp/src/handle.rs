@@ -21,7 +21,10 @@ use crate::{McpClient, ToolResult, ToolSchema};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthState {
     Healthy,
+    /// The transport died and a restart is pending.
     Restarting,
+    /// A restart cap was hit; restarts continue at the slow
+    /// [`UNHEALTHY_RETRY_INTERVAL`] cadence.
     Unhealthy,
 }
 
@@ -87,10 +90,13 @@ impl McpServerHandle {
         self.switch.clone()
     }
 
+    /// The most recently published health.
     pub fn health(&self) -> HealthState {
         *self.health_rx.borrow()
     }
 
+    /// A receiver that observes every health change. Its sender closes
+    /// when the supervisor exits.
     pub fn watch_health(&self) -> watch::Receiver<HealthState> {
         self.health_rx.clone()
     }

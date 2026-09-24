@@ -17,6 +17,7 @@ pub struct SqliteMemoryStore {
 }
 
 impl SqliteMemoryStore {
+    /// Store over the shared database handle.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }

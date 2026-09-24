@@ -62,6 +62,7 @@ pub struct McpToolAdapter {
 }
 
 impl McpToolAdapter {
+    /// Adapter that invokes `schema.name` on `client`.
     pub fn new(client: Arc<dyn McpClient>, schema: ToolSchema, registry_name: String) -> Self {
         Self {
             client,
@@ -85,8 +86,9 @@ impl Tool for McpToolAdapter {
         self.schema.input_schema.clone()
     }
 
-    /// Always `Ok`: a failed call is rendered into the envelope by
-    /// [`error_envelope`] so the model keeps its recovery hint.
+    /// Always `Ok`: a failed call comes back as an error envelope
+    /// (`exit_code: -1`, with a [`mcp_error_line`] as `output`) so the
+    /// model keeps its recovery hint.
     async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
         let outcome = self.client.invoke(&self.schema.name, args).await;
@@ -328,8 +330,6 @@ mod tests {
         }
     }
 
-    /// A failed call must come back as an `Ok` envelope, not a Rust
-    /// `Err`, so the model still sees the recovery hint.
     #[tokio::test]
     async fn adapter_turns_client_errors_into_error_envelopes() {
         let err = || McpError::RpcError {

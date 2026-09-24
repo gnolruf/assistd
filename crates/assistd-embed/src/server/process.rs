@@ -16,6 +16,8 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
+    /// Spawn `llama-server --embedding` for `cfg` in its own process
+    /// group. With `gpu_layers == 0` the child sees no CUDA devices.
     pub fn spawn(cfg: &EmbeddingConfig) -> Result<Self, EmbedServerError> {
         let mut cmd = Command::new("llama-server");
         cmd.arg("--embedding")
@@ -71,6 +73,7 @@ impl ChildProcess {
         })
     }
 
+    /// Wait for the child to exit.
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait().await
     }

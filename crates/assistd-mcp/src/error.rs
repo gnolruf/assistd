@@ -57,6 +57,7 @@ pub enum McpError {
 }
 
 impl McpError {
+    /// A [`McpError::Config`] wrapping `source` with `context`.
     pub fn config(
         context: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,

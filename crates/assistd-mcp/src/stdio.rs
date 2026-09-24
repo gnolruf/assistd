@@ -34,6 +34,8 @@ pub struct StdioConfig {
 }
 
 impl StdioConfig {
+    /// Config that runs `command` with no args or extra env and a 30s
+    /// request timeout.
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
@@ -54,8 +56,10 @@ pub struct StdioMcpClient {
 }
 
 impl StdioMcpClient {
-    /// Spawn the server process, run the initialize handshake, and
-    /// return the client plus the lifeline the supervisor watches.
+    /// Spawn the server in its own process group, run the initialize
+    /// handshake, and return the client plus the child's
+    /// [`ChildLifeline`]. Errors if the spawn or the handshake fails;
+    /// on a failed handshake the child is killed.
     pub async fn spawn(cfg: StdioConfig) -> Result<(Arc<Self>, ChildLifeline), McpError> {
         let mut cmd = Command::new(&cfg.command);
         cmd.args(&cfg.args)

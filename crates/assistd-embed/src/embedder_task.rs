@@ -33,9 +33,10 @@ impl EmbedJob {
 }
 
 /// Spawn the worker. Jobs already queued together are embedded in one
-/// request of up to [`BATCH_SIZE`] inputs. The caller awaits the
-/// returned handle on shutdown so in-flight embeddings land before the
-/// memory writer drains.
+/// request of up to [`BATCH_SIZE`] inputs. The task exits when the job
+/// channel closes, or once `shutdown` flips to `true` and the jobs
+/// already queued are stored. Vectors reach the database only through
+/// `writer_tx`, so the memory writer must outlive the task.
 pub fn spawn_embedder_task(
     embedder: Arc<dyn Embedder>,
     writer_tx: Arc<mpsc::Sender<WriteOp>>,
