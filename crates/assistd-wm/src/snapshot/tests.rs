@@ -4,17 +4,11 @@ fn id(n: u64) -> WindowId {
     WindowId::new(n).expect("test ids are non-zero")
 }
 
-fn snap() -> Arc<RwLock<Snapshot>> {
-    Arc::new(RwLock::new(Snapshot::default()))
+fn snap() -> RwLock<Snapshot> {
+    RwLock::new(Snapshot::default())
 }
 
-async fn event(
-    s: &Arc<RwLock<Snapshot>>,
-    kind: WindowChangeKind,
-    raw: u64,
-    class: &str,
-    title: &str,
-) {
+async fn event(s: &RwLock<Snapshot>, kind: WindowChangeKind, raw: u64, class: &str, title: &str) {
     apply_window_event(
         s,
         kind,
