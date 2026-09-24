@@ -16,8 +16,8 @@ pub(crate) mod snapshot;
 #[cfg(feature = "sway")]
 pub mod sway;
 
-/// Per-call IPC timeout. A wedged compositor must not stall the
-/// caller's turn along with it.
+/// Per-call IPC timeout, so a wedged compositor cannot block a request
+/// indefinitely.
 #[cfg(any(feature = "i3", feature = "sway"))]
 pub(crate) const WM_IPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub use error::{TransportError, WmError, WmResult};
@@ -73,7 +73,7 @@ impl std::fmt::Display for WindowId {
     }
 }
 
-/// Returned by [`WindowId::from_str`] when the input is not a positive
+/// Error parsing a [`WindowId`] from a string that is not a positive
 /// decimal integer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseWindowIdError;
@@ -108,6 +108,7 @@ pub enum WorkspaceId {
 }
 
 impl WorkspaceId {
+    /// A numeric workspace.
     pub fn num(n: u32) -> Self {
         WorkspaceId::Num(n)
     }
@@ -245,8 +246,8 @@ impl std::str::FromStr for ResizeDir {
     }
 }
 
-/// Returned by [`ResizeDir::from_str`] when the input is neither
-/// `"grow"` nor `"shrink"`.
+/// Error parsing a [`ResizeDir`] from a string other than `"grow"` or
+/// `"shrink"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseResizeDirError;
 
@@ -294,8 +295,8 @@ impl std::str::FromStr for Layout {
     }
 }
 
-/// Returned by [`Layout::from_str`] when the input is not a known
-/// layout name.
+/// Error parsing a [`Layout`] from a string that is not a known layout
+/// name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseLayoutError;
 
@@ -354,8 +355,8 @@ pub enum PlacementCriteria {
     AppId(String),
     /// X11 `WM_CLASS`.
     Class(String),
-    /// Exact `_NET_WM_NAME` / `WM_NAME` match. The escape hatch when a
-    /// toolkit leaves `WM_CLASS` empty on X11 (egui-winit 0.34 does).
+    /// Exact `_NET_WM_NAME` / `WM_NAME` match, for toolkits that leave
+    /// `WM_CLASS` empty on X11.
     Title(String),
     /// Match a specific compositor container id (`[con_id="…"]`).
     ConId(WindowId),
@@ -438,7 +439,7 @@ pub struct PlacementAnchor {
 }
 
 /// Async interface to a window manager. Each method is one IPC
-/// operation bounded by [`WM_IPC_TIMEOUT`]; a call that exceeds it
+/// operation bounded by a five-second timeout; a call that exceeds it
 /// returns [`WmError::Timeout`] and triggers reconnection.
 #[async_trait]
 pub trait WindowManager: Send + Sync + 'static {
@@ -511,7 +512,7 @@ pub trait WindowManager: Send + Sync + 'static {
         Err(WmError::Unsupported("floating placement"))
     }
 
-    /// Whether the backend is connected to a compositor. Lets callers
+    /// Whether the backend is connected to a compositor, so callers can
     /// short-circuit instead of collecting a [`WmError::Disconnected`]
     /// per operation.
     fn is_connected(&self) -> bool {

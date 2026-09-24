@@ -1,21 +1,11 @@
-//! Shared, read-only assertions exercised by both `i3_live.rs` and
-//! `sway_live.rs`. These are the "i3 test suite" that the Sway backend
-//! must also pass: every assertion reads cached or freshly-fetched
-//! state and never issues a focus / move command, so they're safe to
-//! run against the developer's live session.
-//!
-//! Both backends store this module via `mod common;` at the top of
-//! their integration test file. Cargo treats `tests/common/mod.rs` as
-//! a non-test helper module; only files directly under `tests/` are
-//! compiled as test binaries.
+//! Read-only assertions shared by the live i3 and Sway tests. None
+//! issues a focus or move command, so they are safe to run against a
+//! live session.
 
 use std::sync::Arc;
 
 use assistd_wm::WindowManager;
 
-/// `focused_window()` should return Some(class) for a session with at
-/// least one mapped, focused window, which is the common case on a
-/// developer machine running the test.
 pub async fn assert_focused_window_present(wm: &Arc<dyn WindowManager>) {
     let focused = wm
         .focused_window()
@@ -27,9 +17,7 @@ pub async fn assert_focused_window_present(wm: &Arc<dyn WindowManager>) {
     );
 }
 
-/// `focused_context().class` should agree with `focused_window()`.
-/// This is the contract the daemon relies on when folding passive
-/// desktop context into each user turn.
+/// Asserts that `focused_context().id` matches `focused_window()`.
 pub async fn assert_focused_context_agrees(wm: &Arc<dyn WindowManager>) {
     let focused = wm
         .focused_window()
@@ -46,11 +34,8 @@ pub async fn assert_focused_context_agrees(wm: &Arc<dyn WindowManager>) {
     );
 }
 
-/// At least one workspace must be marked focused on a session that's
-/// actually displaying windows. (Multi-monitor setups have one focused
-/// workspace per output; we don't assert *exactly* one because all
-/// outputs report `focused == true` for their respective active
-/// workspaces.)
+/// Multi-monitor setups report one focused workspace per output, so
+/// this asserts at least one rather than exactly one.
 pub async fn assert_at_least_one_workspace_focused(wm: &Arc<dyn WindowManager>) {
     let workspaces = wm
         .list_workspaces()
@@ -66,9 +51,8 @@ pub async fn assert_at_least_one_workspace_focused(wm: &Arc<dyn WindowManager>) 
     );
 }
 
-/// Sanity check: the focused window's class appears in the
-/// `list_windows()` enumeration. Catches drift between the cached
-/// snapshot and the freshly-walked tree.
+/// Catches drift between the cached focus snapshot and a freshly
+/// walked tree.
 pub async fn assert_focused_window_in_list_windows(wm: &Arc<dyn WindowManager>) {
     let focused = match wm
         .focused_window()
@@ -76,7 +60,7 @@ pub async fn assert_focused_window_in_list_windows(wm: &Arc<dyn WindowManager>) 
         .expect("focused_window query failed")
     {
         Some(c) => c,
-        None => return, // No focused window → nothing to check.
+        None => return,
     };
     let windows = wm.list_windows().await.expect("list_windows query failed");
     assert!(
@@ -85,8 +69,6 @@ pub async fn assert_focused_window_in_list_windows(wm: &Arc<dyn WindowManager>) 
     );
 }
 
-/// Backend reports itself as connected. Both real backends override
-/// `is_connected()` to true; only `NoWindowManager` returns false.
 pub async fn assert_is_connected(wm: &Arc<dyn WindowManager>) {
     assert!(
         wm.is_connected(),

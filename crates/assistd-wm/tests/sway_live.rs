@@ -1,14 +1,7 @@
-//! Live Sway integration test. `#[ignore]` so it never runs in CI or
-//! `cargo test`; opt in with:
-//!
-//! ```text
-//! cargo test -p assistd-wm --test sway_live -- --ignored --nocapture
-//! ```
-//!
-//! Read-only: connects, exercises the same shared assertions as
-//! `i3_live`, plus a Sway-specific `list_outputs()` smoke check, and
-//! shuts down. Does NOT issue `focus` or `move_to_workspace` against
-//! the live session.
+//! Live Sway integration test, ignored by default; run it with
+//! `cargo test -p assistd-wm --test sway_live -- --ignored --nocapture`.
+//! Read-only: it never issues `focus` or `move_to_workspace`, which
+//! would mutate the user's window state.
 
 #![cfg(feature = "sway")]
 
@@ -37,8 +30,7 @@ async fn connects_and_passes_shared_assertions() {
     common::assert_at_least_one_workspace_focused(&wm).await;
     common::assert_focused_window_in_list_windows(&wm).await;
 
-    // Sway-specific: list_outputs() must succeed (unlike the i3
-    // backend which inherits the trait default that returns Err).
+    // Only the Sway backend implements `list_outputs`.
     let outputs = wm
         .list_outputs()
         .await

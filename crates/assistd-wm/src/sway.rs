@@ -1,9 +1,8 @@
-//! Sway backend for [`crate::WindowManager`], over `swayipc-async`.
-//! Same shape as the i3 backend: one command socket, one event socket.
-//! `swayipc-async` runs on `async-io`, which costs one extra reactor
-//! thread alongside tokio. Views carry either `app_id` (Wayland-native)
-//! or `window_properties.class` (XWayland); whichever is present is
-//! surfaced as the window's app.
+//! Sway backend for [`crate::WindowManager`], over `swayipc-async`,
+//! with one command socket and one event socket. `swayipc-async` runs
+//! on `async-io`, which costs one extra reactor thread alongside tokio.
+//! A view's app is its `app_id` (Wayland-native) or, failing that, its
+//! `window_properties.class` (XWayland).
 
 use std::sync::Arc;
 

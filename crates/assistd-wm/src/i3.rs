@@ -416,8 +416,7 @@ fn parse_geometry_size(token: &str) -> Option<(u32, u32)> {
     Some((w.parse().ok()?, h.parse().ok()?))
 }
 
-/// Winit's RandR DPI formula (`x11/util/randr.rs::calc_dpi_factor`),
-/// quantised to 1/12 steps so monitors with minor EDID rounding agree.
+/// Winit's X11 RandR DPI formula, quantised to 1/12 steps so monitors with minor EDID rounding agree.
 /// `1.0` for zero-sized inputs or absurd results.
 fn calc_randr_scale(pixels: (u32, u32), mm: (u64, u64)) -> f64 {
     let (px_w, px_h) = (pixels.0 as f64, pixels.1 as f64);

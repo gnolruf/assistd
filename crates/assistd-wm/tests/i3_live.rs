@@ -1,14 +1,7 @@
-//! Live i3 integration test. `#[ignore]` so it never runs in CI or
-//! `cargo test`; opt in with:
-//!
-//! ```text
-//! cargo test -p assistd-wm --test i3_live -- --ignored --nocapture
-//! ```
-//!
-//! Read-only: connects, exercises the shared assertions in `common`,
-//! and shuts down. Does NOT issue `focus` or `move_to_workspace`
-//! against the live session; those would mutate the user's window
-//! state.
+//! Live i3 integration test, ignored by default; run it with
+//! `cargo test -p assistd-wm --test i3_live -- --ignored --nocapture`.
+//! Read-only: it never issues `focus` or `move_to_workspace`, which
+//! would mutate the user's window state.
 
 #![cfg(feature = "i3")]
 
@@ -37,8 +30,7 @@ async fn connects_and_passes_shared_assertions() {
     common::assert_at_least_one_workspace_focused(&wm).await;
     common::assert_focused_window_in_list_windows(&wm).await;
 
-    // Give the event task a brief window to confirm it's running and
-    // subscribed (no assertion, just exercising the loop).
+    // Exercises the event loop briefly; nothing is asserted.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let _ = shutdown_tx.send(true);
