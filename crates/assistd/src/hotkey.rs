@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::{
-    ContinuousListener, PresenceConfig, PresenceManager, VoiceConfig, VoiceInput,
-    VoiceOutputController,
+    Component, ContinuousListener, PresenceConfig, PresenceManager, VoiceConfig, VoiceInput,
+    VoiceOutputController, spawn_supervised,
 };
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use tokio::sync::watch;
@@ -157,9 +157,11 @@ pub fn spawn_listener(
         return None;
     }
 
-    Some(tokio::spawn(run_listener(
-        manager, registered, subsystems, shutdown,
-    )))
+    Some(spawn_supervised(
+        "hotkey_listener",
+        Component::Hotkey,
+        run_listener(manager, registered, subsystems, shutdown),
+    ))
 }
 
 fn register(manager: &GlobalHotKeyManager, binding: Binding, spec: &str) -> Option<HotKey> {

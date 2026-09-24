@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use assistd_core::{PresenceManager, PresenceState, SleepConfig};
+use assistd_core::{Component, PresenceManager, PresenceState, SleepConfig, spawn_supervised};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -57,9 +57,11 @@ pub fn spawn_monitor(
         "idle monitor enabled"
     );
     let cfg = cfg.clone();
-    Some(tokio::spawn(async move {
-        run_monitor(cfg, presence, shutdown).await
-    }))
+    Some(spawn_supervised(
+        "idle_monitor",
+        Component::IdleMonitor,
+        run_monitor(cfg, presence, shutdown),
+    ))
 }
 
 async fn run_monitor(

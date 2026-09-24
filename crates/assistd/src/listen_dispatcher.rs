@@ -5,7 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::{AppState, ContinuousListener, PresenceManager, PresenceState};
+use assistd_core::{
+    AppState, Component, ContinuousListener, PresenceManager, PresenceState, spawn_supervised,
+};
 use assistd_ipc::Event;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -23,17 +25,16 @@ pub fn spawn_dispatcher(
     start_on_launch: bool,
     shutdown: watch::Receiver<bool>,
 ) -> ListenDispatcherHandles {
-    let forwarder = tokio::spawn(run_utterance_forwarder(
-        state,
-        listener.clone(),
-        shutdown.clone(),
-    ));
-    let presence_gate = tokio::spawn(run_presence_gate(
-        listener,
-        presence,
-        start_on_launch,
-        shutdown,
-    ));
+    let forwarder = spawn_supervised(
+        "listen_forwarder",
+        Component::ListenDispatcher,
+        run_utterance_forwarder(state, listener.clone(), shutdown.clone()),
+    );
+    let presence_gate = spawn_supervised(
+        "listen_presence_gate",
+        Component::ListenDispatcher,
+        run_presence_gate(listener, presence, start_on_launch, shutdown),
+    );
     ListenDispatcherHandles {
         forwarder,
         presence_gate,
