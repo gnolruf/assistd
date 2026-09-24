@@ -1,25 +1,5 @@
-//! Wire-level IPC types shared between the assistd daemon and its clients.
-//!
-//! Kept in its own crate so a client-only build can depend on just these
-//! types without pulling in the daemon's subsystem crates.
-//!
-//! # Protocol
-//!
-//! The daemon listens on a Unix domain socket and speaks a line-delimited
-//! JSON protocol. A client sends exactly one [`Request`] line and shuts
-//! down its write half, then reads zero or more [`Event`] lines until the
-//! daemon sends [`Event::Done`] (success) or [`Event::Error`] (failure) and
-//! closes the connection.
-//!
-//! Every event carries the originating request's `id`.
-//!
-//! ## Passive subscription
-//!
-//! [`Request::Subscribe`] is a long-lived attachment to the daemon-
-//! wide events bus. The connection stays open until either side
-//! closes it; no terminal `Done` is emitted. Events arrive with the
-//! originating turn's `id` (not `Subscribe.id`), filtered by the
-//! requested [`SubscribeFilter`].
+//! Wire types for the daemon's Unix-socket protocol: line-delimited JSON,
+//! with [`Request`] lines from the client and [`Event`] lines back.
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -43,6 +23,7 @@ pub struct ImageAttachment {
 }
 
 impl ImageAttachment {
+    /// Encode raw image `bytes` as standard padded base64.
     pub fn from_bytes(mime: impl Into<String>, bytes: &[u8]) -> Self {
         Self {
             mime: mime.into(),
@@ -50,13 +31,13 @@ impl ImageAttachment {
         }
     }
 
+    /// Decode `data_base64`; errors when it is not valid standard base64.
     pub fn decode_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
         base64::engine::general_purpose::STANDARD.decode(&self.data_base64)
     }
 }
 
-/// Coarse daemon lifecycle state exposed on the wire so clients and the
-/// daemon can agree on resource usage. `Sleeping` means llama-server is
+/// Coarse daemon lifecycle state. `Sleeping` means llama-server is
 /// fully stopped; `Drowsy` keeps the process alive but its model weights
 /// unloaded; `Active` is fully ready to answer queries.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -128,7 +109,9 @@ impl SubscribeFilter {
 
 /// Request sent by a client to the daemon, as one JSON line with a
 /// `"type"` discriminant. Every variant carries an `id` that is echoed
-/// on every [`Event`] emitted in response.
+/// on every [`Event`] emitted in response. A client sends one request
+/// and shuts down its write half, except on a connection that must
+/// answer an [`Event::ConfirmRequest`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -149,7 +132,7 @@ pub enum Request {
     /// `Active → Drowsy → Sleeping → Active`.
     Cycle { id: String },
     /// Begin a push-to-talk recording. Returns immediately with `Done`
-    /// once cpal has opened the device; audio is buffered in the daemon
+    /// once the input device is open; audio is buffered in the daemon
     /// until a matching `PttStop` arrives.
     PttStart { id: String },
     /// End the push-to-talk recording and transcribe what was captured.
@@ -221,16 +204,14 @@ pub enum Request {
     MemoryDelete { id: String, key: String },
     /// Remove the memory whose row id is `memory_id`. Emits a single
     /// [`Event::MemoryForgetResult`] (with `deleted: false` when the
-    /// id didn't match any row), then a terminal `Done`. Distinct from
-    /// `MemoryDelete` so the CLI can take an integer id and the daemon
-    /// can echo back the deleted key.
+    /// id didn't match any row), then a terminal `Done`. Unlike
+    /// `MemoryDelete`, addresses the row by id and reports the deleted
+    /// key.
     MemoryForget { id: String, memory_id: i64 },
     /// Semantic search over persisted conversation chunks. Embeds the
     /// query and ranks past messages by cosine similarity. Emits zero
     /// or more `SemanticHit` events ordered best-first, then `Done`.
-    /// `limit = 0` is treated as the daemon's default cap. Backs the
-    /// `assistd memory reminisce` CLI subcommand and the LLM-callable
-    /// `reminisce` tool.
+    /// `limit = 0` is treated as the daemon's default cap.
     MemorySemanticSearch {
         id: String,
         query: String,
@@ -238,12 +219,11 @@ pub enum Request {
         limit: u32,
     },
     /// Re-embed every memory and conversation-chunk row that has no
-    /// embedding under the daemon's currently-configured embedding
-    /// model. Used to recover after a model swap or after a run where
-    /// the embedding subsystem was unavailable. Emits one
-    /// [`Event::ReindexProgress`] per kind/transition plus per item
-    /// processed, then a terminal `Done` (or `Error` on a fatal
-    /// embedder failure). Backs `assistd memory reindex`.
+    /// embedding under the currently configured embedding model, such
+    /// as rows written before a model swap or while the embedder was
+    /// unavailable. Emits one [`Event::ReindexProgress`] per
+    /// kind/transition plus per item processed, then a terminal `Done`
+    /// (or `Error` on a fatal embedder failure).
     MemoryReindex { id: String },
     /// Reply to a daemon-issued [`Event::ConfirmRequest`], sent on the
     /// same connection as the originating request and routed by
@@ -276,20 +256,18 @@ pub enum Request {
     /// from the current branch. Emits a single [`Event::UndoApplied`]
     /// reporting how many messages were removed, then `Done`.
     Undo { id: String },
-    /// TUI startup: decide whether to resume the current branch or
-    /// start a fresh conversation. If the latest message on the
-    /// current branch was written within `recency_secs`, the daemon
-    /// keeps that branch and streams its history back (one
-    /// [`Event::HistoryEntry`] per message). Otherwise it creates a
-    /// new session with an empty `main` branch, sets it as current,
-    /// and emits [`Event::BranchSwitched`]. Either path terminates
-    /// with `Done`.
+    /// Resume the current branch or start a fresh conversation. If the
+    /// latest message on the current branch was written within
+    /// `recency_secs`, the daemon keeps that branch and streams its
+    /// history back (one [`Event::HistoryEntry`] per message).
+    /// Otherwise it creates a new session with an empty `main` branch,
+    /// sets it as current, and emits [`Event::BranchSwitched`]. Either
+    /// path terminates with `Done`.
     ResumeOrNew { id: String, recency_secs: u64 },
-    /// `/new`: unconditionally start a fresh conversation. Creates a
-    /// new session with an empty `main` branch, sets it as current,
-    /// emits [`Event::BranchSwitched`], then `Done`. Distinct from
-    /// [`Request::ResumeOrNew`] which may decide to keep an existing
-    /// branch when it's recent or empty.
+    /// Unconditionally start a fresh conversation. Creates a new
+    /// session with an empty `main` branch, sets it as current, emits
+    /// [`Event::BranchSwitched`], then `Done`. Unlike
+    /// [`Request::ResumeOrNew`], never keeps the existing branch.
     NewSession { id: String },
     /// Attach a passive subscriber to the daemon-wide events bus.
     /// Forwards every broadcast-eligible event that matches
@@ -328,6 +306,7 @@ impl Request {
         }
     }
 
+    /// The correlation id echoed on every [`Event`] sent in response.
     pub fn id(&self) -> &str {
         match self {
             Request::Query { id, .. }
@@ -364,8 +343,8 @@ impl Request {
         }
     }
 
-    /// Short, stable name for the variant, used as a span field so
-    /// concurrent requests can be filtered by kind in trace output.
+    /// Stable snake_case name of the variant, identical to its wire
+    /// `"type"` tag.
     pub fn kind(&self) -> &'static str {
         match self {
             Request::Query { .. } => "query",
@@ -544,14 +523,17 @@ impl std::fmt::Display for ReindexKind {
 }
 
 /// Events streamed from the daemon to a client, as JSON lines with a
-/// `"type"` discriminant.
+/// `"type"` discriminant. A response stream ends with exactly one
+/// terminal [`Event::Done`] or [`Event::Error`], after which the daemon
+/// closes the connection; a [`Request::Subscribe`] stream has no
+/// terminal event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     /// A streamed chunk of response text.
     Delta { id: String, text: String },
-    /// A streamed chunk of the model's reasoning content, kept separate
-    /// from `Delta` so clients can render it as a collapsible block.
+    /// A streamed chunk of the model's reasoning content, distinct from
+    /// the reply text carried by `Delta`.
     ReasoningDelta { id: String, text: String },
     /// The model asked to invoke a tool.
     ToolCall {
@@ -623,8 +605,8 @@ pub enum Event {
     MemoryKeys { id: String, keys: Vec<String> },
     /// One `(id, key, value)` row emitted by `MemoryListAll`. The
     /// daemon streams these in lexicographic key order, then a
-    /// terminal `Done`. `memory_id` is the SQLite row id; the CLI
-    /// uses it as the argument to `assistd memory forget <id>`.
+    /// terminal `Done`. `memory_id` is the row id accepted by
+    /// [`Request::MemoryForget`].
     MemoryRow {
         id: String,
         memory_id: i64,
@@ -660,7 +642,7 @@ pub enum Event {
     },
     /// Response to [`Request::GetCapabilities`]. `vision` is true when
     /// the loaded model accepts images; `model_name` is the basename of
-    /// `model.name`.
+    /// the configured `model.name`.
     Capabilities {
         id: String,
         vision: bool,
@@ -694,7 +676,7 @@ pub enum Event {
         is_active_session: bool,
     },
     /// Emitted by [`Request::Fork`] and [`Request::Switch`] to confirm
-    /// the active branch changed. For `/switch` cross-session moves,
+    /// the active branch changed. After a cross-session switch,
     /// `session_id` is the session the daemon is now active in.
     BranchSwitched {
         id: String,
@@ -716,7 +698,7 @@ pub enum Event {
     /// Emitted by [`Request::Undo`]. `removed_messages` is the count of
     /// rows dropped from the current branch; 0 means "nothing to undo"
     /// (the branch had no real user turn). `last_user_text` echoes the
-    /// undone prompt for the TUI to surface (e.g. "undone: hello world").
+    /// undone prompt.
     UndoApplied {
         id: String,
         removed_messages: u32,
@@ -726,8 +708,8 @@ pub enum Event {
     Error { id: String, message: String },
     /// Terminal success event; the stream is over.
     Done { id: String },
-    /// The running reply so far, emitted only on the broadcast bus for
-    /// [`Request::Subscribe`] consumers.
+    /// The running reply so far, sent only to [`Request::Subscribe`]
+    /// connections.
     LastDelta { id: String, text: String },
 }
 
@@ -737,6 +719,7 @@ impl Event {
         matches!(self, Event::Done { .. } | Event::Error { .. })
     }
 
+    /// The id of the request this event responds to.
     pub fn id(&self) -> &str {
         match self {
             Event::Delta { id, .. }

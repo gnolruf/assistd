@@ -40,7 +40,7 @@ pub enum LoadImageError {
         path: String,
         detected: String,
     },
-    /// An image, but not one of [`SUPPORTED_MIMES`].
+    /// An image, but not PNG, JPEG or WebP.
     UnsupportedFormat {
         path: String,
         mime: String,
@@ -48,7 +48,8 @@ pub enum LoadImageError {
 }
 
 impl LoadImageError {
-    /// One-line message without any `[error] <cmd>:` prefix.
+    /// One-line, human-readable description of the failure, with no
+    /// prefix.
     pub fn user_message(&self) -> String {
         match self {
             LoadImageError::Io { path, source } => match source.kind() {
@@ -166,8 +167,8 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    // Minimal GIF89a header → infer reports image/gif → must be rejected
-    // by the supported-format allowlist.
+    // A minimal GIF89a image: `infer::is_image` accepts it, but it is
+    // outside the supported-format allowlist.
     const GIF_BYTES: &[u8] = &[
         0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xFF, 0xFF,
         0xFF, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,
@@ -213,10 +214,8 @@ mod tests {
 
     #[tokio::test]
     async fn oversize_file_is_rejected_before_read() {
-        // Use a sparse file so the test doesn't actually allocate
-        // MAX_IMAGE_BYTES + 1 of disk. set_len + drop is enough; metadata()
-        // reports the logical size and load_image rejects on that, never
-        // reaching the read path.
+        // A sparse file reports the oversize logical length without
+        // allocating disk, so rejection must come from metadata alone.
         let dir = tempdir().unwrap();
         let path = dir.path().join("huge.png");
         let f = tokio::fs::File::create(&path).await.unwrap();

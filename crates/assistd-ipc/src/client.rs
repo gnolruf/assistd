@@ -40,19 +40,21 @@ pub struct IpcClient {
 }
 
 impl IpcClient {
-    /// Bind to [`socket_path`].
+    /// Client for the per-user default [`socket_path`].
     pub fn new() -> Self {
         Self {
             socket_path: socket_path(),
         }
     }
 
+    /// Client for the socket at `p`.
     pub fn with_path(p: impl Into<PathBuf>) -> Self {
         Self {
             socket_path: p.into(),
         }
     }
 
+    /// The socket path this client connects to.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
@@ -162,6 +164,8 @@ impl DialogConnection {
         self.events.next_event().await
     }
 
+    /// Send a further request, such as a [`Request::ConfirmResponse`],
+    /// on this connection.
     pub async fn send(&mut self, req: Request) -> Result<()> {
         write_frame(&mut self.write, &req).await
     }
