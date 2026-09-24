@@ -10,6 +10,8 @@ pub mod error;
 #[cfg(feature = "i3")]
 pub mod i3;
 #[cfg(any(feature = "i3", feature = "sway"))]
+mod ipc_backend;
+#[cfg(any(feature = "i3", feature = "sway"))]
 pub(crate) mod snapshot;
 #[cfg(feature = "sway")]
 pub mod sway;

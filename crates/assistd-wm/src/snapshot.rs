@@ -2,8 +2,6 @@
 //! their native window events onto `(kind, id, class, title)` and hand
 //! them to [`apply_window_event`]; the update rules live here.
 
-use std::sync::Arc;
-
 use tokio::sync::RwLock;
 
 use crate::{FocusedWindowContext, WindowId};
@@ -29,7 +27,7 @@ pub(crate) enum WindowChangeKind {
 /// not class, so two windows of the same app never alias: `Title` and
 /// `Close` only take effect when their id is the focused one.
 pub(crate) async fn apply_window_event(
-    snap: &Arc<RwLock<Snapshot>>,
+    snap: &RwLock<Snapshot>,
     kind: WindowChangeKind,
     id: Option<WindowId>,
     class: Option<String>,
@@ -60,19 +58,17 @@ pub(crate) async fn apply_window_event(
     }
 }
 
-pub(crate) async fn apply_workspace_focus(snap: &Arc<RwLock<Snapshot>>, workspace: Option<String>) {
+pub(crate) async fn apply_workspace_focus(snap: &RwLock<Snapshot>, workspace: Option<String>) {
     snap.write().await.active_workspace = workspace;
 }
 
-pub(crate) async fn read_focused_id(snap: &Arc<RwLock<Snapshot>>) -> Option<WindowId> {
+pub(crate) async fn read_focused_id(snap: &RwLock<Snapshot>) -> Option<WindowId> {
     snap.read().await.focused_id
 }
 
 /// `None` only when every field is empty; a partial snapshot still
 /// yields a context.
-pub(crate) async fn read_focused_context(
-    snap: &Arc<RwLock<Snapshot>>,
-) -> Option<FocusedWindowContext> {
+pub(crate) async fn read_focused_context(snap: &RwLock<Snapshot>) -> Option<FocusedWindowContext> {
     let s = snap.read().await;
     if s.focused_id.is_none()
         && s.focused_class.is_none()
