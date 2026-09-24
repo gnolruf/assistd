@@ -928,10 +928,10 @@ impl App {
                     id: id.to_string(),
                     writer: None,
                 });
-                if let Some(queued) = self.queued_transcription.take() {
-                    if queued.id == id {
-                        self.begin_voice_turn(&queued.text);
-                    }
+                if let Some(queued) = self.queued_transcription.take()
+                    && queued.id == id
+                {
+                    self.begin_voice_turn(&queued.text);
                 }
                 true
             }
@@ -1001,10 +1001,10 @@ impl App {
             }
         }
         self.spinner = self.spinner.wrapping_add(1);
-        if let Some((_, at)) = &self.notice {
-            if at.elapsed() > NOTICE_HOLD {
-                self.notice = None;
-            }
+        if let Some((_, at)) = &self.notice
+            && at.elapsed() > NOTICE_HOLD
+        {
+            self.notice = None;
         }
         let live_secs = self.output.live_thinking_seconds();
         if live_secs != self.last_thinking_seconds {
@@ -1439,15 +1439,15 @@ impl SlashCommand {
 }
 
 fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = p.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
-    if p == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home);
-        }
+    if p == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home);
     }
     PathBuf::from(p)
 }
