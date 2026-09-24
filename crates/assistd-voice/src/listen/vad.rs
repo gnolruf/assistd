@@ -1,14 +1,4 @@
 //! VAD-driven utterance segmentation over 20 ms frames.
-//!
-//! ```text
-//!   Silent ---> PreVoice ---> Voiced ---> Trailing ---> Silent
-//! ```
-//!
-//! Onset needs `onset_confirm_frames` consecutive voiced frames so a
-//! keystroke click doesn't start an utterance; offset needs
-//! `offset_frames` consecutive silent frames so a mid-word pause
-//! doesn't end one. A pre-roll ring is prepended to each utterance
-//! so the first syllable isn't clipped.
 
 use std::collections::VecDeque;
 
@@ -80,7 +70,12 @@ enum State {
 }
 
 /// Classifies 20 ms frames via webrtc-vad and emits utterances bounded
-/// by confirmed silence.
+/// by confirmed silence, moving Silent → PreVoice → Voiced → Trailing →
+/// Silent. Onset needs `onset_confirm_frames` consecutive voiced frames
+/// so a keystroke click does not start an utterance; offset needs
+/// `offset_frames` consecutive silent frames so a mid-word pause does
+/// not end one. A pre-roll ring is prepended to each utterance so the
+/// first syllable is not clipped.
 pub struct UtteranceVad {
     vad: Vad,
     tuning: VadTuning,
@@ -91,6 +86,8 @@ pub struct UtteranceVad {
 }
 
 impl UtteranceVad {
+    /// A segmenter in the silent state. An `aggressiveness` above 3 is
+    /// treated as 3.
     pub fn new(tuning: VadTuning) -> Self {
         let mode = match tuning.aggressiveness {
             0 => VadMode::Quality,

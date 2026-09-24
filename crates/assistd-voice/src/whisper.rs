@@ -72,6 +72,7 @@ pub struct WhisperTranscriber {
 }
 
 impl WhisperTranscriber {
+    /// A builder with nothing set; a model is required before `build`.
     pub fn builder() -> WhisperTranscriberBuilder {
         WhisperTranscriberBuilder::default()
     }

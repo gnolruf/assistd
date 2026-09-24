@@ -124,7 +124,8 @@ pub struct QueuedTranscriber {
 }
 
 impl QueuedTranscriber {
-    /// A CPU-backed `primary` disables the queue-and-fallback path.
+    /// Wraps `primary`. `cpu_factory` is invoked on the first fallback
+    /// and a successfully built transcriber is reused.
     pub fn new(
         primary: Arc<dyn Transcriber>,
         cpu_factory: CpuFallbackFactory,
@@ -225,6 +226,7 @@ pub struct StubTranscriber {
 
 #[cfg(any(test, feature = "test-support"))]
 impl StubTranscriber {
+    /// A CPU-backed stub returning `text`.
     pub fn with_text(text: impl Into<String>) -> Arc<Self> {
         Self::build(text, false)
     }
@@ -242,6 +244,7 @@ impl StubTranscriber {
         })
     }
 
+    /// Number of `transcribe` calls so far.
     pub fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }

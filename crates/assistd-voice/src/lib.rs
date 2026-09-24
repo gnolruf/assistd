@@ -102,6 +102,7 @@ impl Default for NoVoiceInput {
 }
 
 impl NoVoiceInput {
+    /// A placeholder whose state stays `Idle`.
     pub fn new() -> Self {
         let (state_tx, _) = watch::channel(VoiceCaptureState::Idle);
         Self { state_tx }

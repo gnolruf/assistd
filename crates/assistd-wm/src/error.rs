@@ -14,7 +14,8 @@ pub enum WmError {
     #[error("compositor rejected command: {0}")]
     Rejected(String),
 
-    /// Retry once, then assume `Disconnected`.
+    /// The IPC call exceeded its timeout. Retry once, then treat the
+    /// backend as `Disconnected`.
     #[error("IPC timed out after {0:?}")]
     Timeout(Duration),
 

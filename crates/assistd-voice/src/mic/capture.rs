@@ -1,8 +1,4 @@
 //! cpal stream construction and the audio-thread callback.
-//!
-//! `cpal::Stream` is `!Send` on ALSA, so every stream in this crate is
-//! opened, held, and dropped on one `spawn_blocking` worker; only
-//! atomics and join handles cross threads.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -66,8 +62,10 @@ pub struct CaptureSession {
     pub handle: JoinHandle<Result<Vec<i16>, AudioCaptureError>>,
 }
 
-/// A running input stream and the ring consumer it feeds. The caller
-/// drops `stream` last, on the thread that built it.
+/// A running input stream and the ring consumer it feeds.
+/// `cpal::Stream` is `!Send` on ALSA, so `stream` must be dropped last,
+/// on the thread that built it; only atomics and join handles cross
+/// threads.
 pub struct ProducerStream {
     pub consumer: ringbuf::HeapCons<f32>,
     pub native_rate: u32,

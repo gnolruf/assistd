@@ -1,6 +1,5 @@
-//! A missing Piper binary fails `PiperVoiceOutput::start` before any
-//! download or subprocess, so the daemon can run with voice output
-//! disabled.
+//! A missing Piper binary fails `PiperVoiceOutput::start` with
+//! `BinaryMissing` before any download or subprocess.
 
 #![cfg(feature = "tts")]
 
