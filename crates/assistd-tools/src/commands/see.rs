@@ -16,6 +16,8 @@ pub struct SeeCommand {
 }
 
 impl SeeCommand {
+    /// A `see` command that refuses to run while `gate` reports no
+    /// vision support.
     pub fn new(gate: Arc<VisionGate>) -> Self {
         Self { gate }
     }
@@ -231,8 +233,6 @@ mod tests {
         assert!(out.attachments.is_empty());
     }
 
-    /// A gate shared with the daemon's revalidation path flips a
-    /// long-lived command between available and unavailable.
     #[test]
     fn gate_flip_changes_summary_dynamically() {
         let gate = VisionGate::new(true);

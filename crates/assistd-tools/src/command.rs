@@ -1,30 +1,7 @@
 //! Internal command abstraction: Rust handlers the chain executor
 //! dispatches to, operating on raw bytes with a Unix-style exit code so
-//! `&&`/`||` composition works as users expect. The LLM never sees a
-//! `Command` directly; it sees one [`crate::Tool`] (`run`) that walks
-//! the chain.
-//!
-//! # Error-message-as-navigation convention
-//!
-//! Every stderr line a command emits must carry both *what went wrong* and
-//! *what to do instead*, so the LLM recovers in one step instead of blind
-//! retries. The format is:
-//!
-//! ```text
-//! [error] <cmd>: <what-went-wrong>. <Hint>: <recovery>\n
-//! ```
-//!
-//! - `<cmd>`: the command name (`cat`, `see`, `bash`, …) or a pseudo-tag
-//!   for pre-dispatch failures (`parse`, `pipe`, `unknown command`).
-//! - `<Hint>`: a [`Hint`] label.
-//! - `<recovery>`: either a concrete `run`-executable command the LLM can
-//!   issue verbatim (e.g. `see photo.png`, `ls /dir`, `cat -b file.bin`)
-//!   or a short check instruction (`ls -l <path>`).
-//!
-//! Use [`error_line`] to build a line, or [`io_error_nav`] to classify a
-//! `std::io::Error` against the path that produced it. Never return a bare
-//! non-zero `exit_code` without context; if a subprocess or downstream
-//! library emitted stderr, forward it so the LLM can see *why*.
+//! `&&`/`||` composition works. The model never sees a [`Command`]
+//! directly, only the [`crate::RunTool`] that walks the chain.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -64,8 +41,17 @@ impl fmt::Display for Hint {
     }
 }
 
-/// Format a single stderr line conforming to the error-navigation
-/// convention: `[error] <cmd>: <what>. <hint>: <recovery>\n`.
+/// Format a stderr line in the error-navigation convention every
+/// command follows: `[error] <cmd>: <what>. <hint>: <recovery>\n`.
+///
+/// Each line says both what went wrong and what to do instead, so the
+/// model recovers in one step rather than retrying blindly. `cmd` is the
+/// command name, or a pseudo-tag (`parse`, `pipe`, `unknown command`) for
+/// failures before dispatch. `recovery` is either a command the model can
+/// run verbatim (`see photo.png`, `ls /dir`) or a short check instruction
+/// (`ls -l <path>`). A command should not return a bare non-zero exit
+/// code: it emits such a line, or forwards the subprocess stderr that
+/// explains the failure.
 pub fn error_line(
     cmd: &str,
     what: impl fmt::Display,
@@ -76,14 +62,13 @@ pub fn error_line(
 }
 
 /// Classify a `std::io::Error` against the `path` that produced it and
-/// emit a convention-compliant stderr line. Used by every file-touching
-/// command so NotFound and PermissionDenied get uniform navigation hints.
+/// build an [`error_line`] whose hint suits the error kind.
 pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
     use std::io::ErrorKind;
     match e.kind() {
         // A path still carrying glob metacharacters got here because the
         // expander found nothing to match and passed the pattern through
-        // (POSIX behaviour). Saying "file not found" sends the caller
+        // (POSIX behaviour). Saying "file not found" sends the model
         // looking for a file it never asked for.
         ErrorKind::NotFound if has_glob_meta(path) => error_line(
             cmd,
@@ -135,8 +120,8 @@ fn has_glob_meta(path: &str) -> bool {
 }
 
 /// Directory containing `path`, cut before the first glob metacharacter
-/// when there is one, so the hint points at a directory the caller can
-/// actually list.
+/// when there is one, so the hint points at a directory that can
+/// actually be listed.
 fn parent_dir(path: &str) -> &str {
     let head = path
         .find(['*', '?', '['])
@@ -150,8 +135,8 @@ fn parent_dir(path: &str) -> &str {
 
 /// Input to a single chain stage.
 pub struct CommandInput {
-    /// Positional arguments **after** argv[0]. The command's own name
-    /// is not included here; the registry has already resolved it.
+    /// Positional arguments after `argv[0]`; the command's own name is
+    /// not included.
     pub args: Vec<String>,
     /// Bytes piped in from the previous chain stage. `None` when the
     /// command is not on the right of a pipe, so a filter can tell
@@ -171,10 +156,8 @@ pub enum Attachment {
 /// Output of a single chain stage.
 ///
 /// Every failure is reported here, as a non-zero `exit_code` with a
-/// stderr line, which is what lets `|| echo 'not found'` catch a
-/// missing file: the `cat` handler reports `exit_code = 1` with a
-/// friendly stderr, and the executor treats that as a triggerable
-/// failure for `||`.
+/// stderr line, so `&&` and `||` can react to it: `cat missing || echo
+/// 'not found'` runs the `echo`.
 #[derive(Debug, Default, Clone)]
 pub struct CommandOutput {
     pub stdout: Vec<u8>,
@@ -234,25 +217,22 @@ impl CommandOutput {
 
 /// A single internal command (`cat`, `grep`, `bash`, …).
 ///
-/// The `summary` / `help` split backs the progressive `--help` discovery
-/// system: `summary` is a ≤80-char one-liner that [`CommandRegistry`]
-/// aggregates for the `run` tool's Level-0 description (the list the LLM
-/// sees in its tool schema); `help` is the full usage block a command
-/// emits when invoked with insufficient arguments (Level-1). Commands
-/// with subcommands can return subcommand-specific help from within their
-/// own `run` body (Level-2).
+/// Help is progressive: [`Command::summary`] is the one-liner listed in
+/// the `run` tool's description, [`Command::help`] is the full usage
+/// block returned when the command is called with insufficient
+/// arguments, and commands with subcommands return subcommand help from
+/// their own [`Command::run`].
 #[async_trait]
 pub trait Command: Send + Sync + 'static {
-    /// Machine-readable name used to dispatch the command (e.g. `"cat"`, `"grep"`).
+    /// Name the command is dispatched by (e.g. `"cat"`).
     fn name(&self) -> &str;
-    /// One-line advertisement (≤80 chars, no trailing newline). Used to
-    /// build the `run` tool's Level-0 description. Convention: terse verb
-    /// phrase, e.g. `"filter lines matching a pattern (supports -i, -v, -c)"`.
+    /// One line of at most 80 chars with no trailing newline, phrased as
+    /// a terse verb phrase such as
+    /// `"filter lines matching a pattern (supports -i, -v, -c)"`.
     fn summary(&self) -> &'static str;
-    /// Full usage block. Emitted verbatim on stdout when the command is
-    /// called with insufficient arguments. Convention: first line begins
-    /// with `usage: <name> …` so the LLM can visually disambiguate help
-    /// output from a real `[<name>]\terror: …` failure.
+    /// Full usage block, written verbatim to stdout. The first line
+    /// begins with `usage: <name> …` so help reads distinctly from an
+    /// `[error] <name>: …` failure.
     fn help(&self) -> String;
     /// Execute the command with the given input and return its output.
     /// Failures are reported through the output's exit code and stderr.

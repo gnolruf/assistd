@@ -367,9 +367,6 @@ fn run_respects_config_overrides() {
     );
 }
 
-/// The Level-0 description is built from the registry: every command
-/// appears as one `name: summary` line, so a new command needs no
-/// tool-side edit.
 #[test]
 fn run_tool_description_lists_every_command_with_its_summary() {
     let dir = fresh_dir();

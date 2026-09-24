@@ -21,6 +21,8 @@ pub struct BashCommand {
 }
 
 impl BashCommand {
+    /// A `bash` command that runs scripts under `cfg`, inside `sandbox`,
+    /// asking `gate` before any destructive match.
     pub fn new(
         cfg: Arc<BashPolicyCfg>,
         sandbox: Arc<SandboxInfo>,

@@ -1,15 +1,5 @@
-//! Command-line tokenizer and recursive-descent parser. Produces a
-//! [`super::Chain`] AST from a user-supplied string.
-//!
-//! Grammar (lowest precedence first; all operators left-associative,
-//! matching bash semantics):
-//!
-//! ```text
-//! seq     := andor ( ';'            andor? )*     (trailing ';' allowed)
-//! andor   := pipe  ( ('&&' | '||')  pipe   )*
-//! pipe    := cmd   ( '|'            cmd    )*
-//! cmd     := WORD+
-//! ```
+//! Command-line tokenizer and recursive-descent parser that produces a
+//! [`super::Chain`] AST.
 
 use std::iter::Peekable;
 use std::vec::IntoIter;
@@ -44,7 +34,7 @@ pub enum ParseError {
 /// Which redirection the line asked for. Kept apart from
 /// [`ParseError::Unsupported`] because the way out differs per shape:
 /// output goes through `write`, input through a pipe, and stderr is
-/// already in the result the caller gets back.
+/// already part of every result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Redirection {
     Output,
@@ -93,6 +83,16 @@ impl Op {
 }
 
 /// Parse a shell-style command line into a [`Chain`] AST.
+///
+/// Grammar, lowest precedence first; all operators are left-associative,
+/// as in bash:
+///
+/// ```text
+/// seq     := andor ( ';'            andor? )*     (trailing ';' allowed)
+/// andor   := pipe  ( ('&&' | '||')  pipe   )*
+/// pipe    := cmd   ( '|'            cmd    )*
+/// cmd     := WORD+
+/// ```
 pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
@@ -460,8 +460,6 @@ mod tests {
         );
     }
 
-    /// Precedence, lowest first: `;` < `&&`/`||` < `|`, all
-    /// left-associative.
     #[test]
     fn parse_builds_the_precedence_tree() {
         for (line, expected) in [

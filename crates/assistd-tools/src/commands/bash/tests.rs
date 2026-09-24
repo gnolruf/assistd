@@ -271,7 +271,7 @@ async fn timeout_kills_backgrounded_grandchild() {
 }
 
 /// Same requirement on the overflow path: the flood (`yes`) dies of
-/// SIGPIPE once we drop the read end, but a quiet background child
+/// SIGPIPE once the read end is dropped, but a quiet background child
 /// only dies if the group is signalled.
 #[cfg(unix)]
 #[tokio::test]

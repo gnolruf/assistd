@@ -1,12 +1,7 @@
-//! Tool-use subsystem: the trait every invokable tool implements, plus
-//! the registry the LLM looks up tool calls in.
-//!
-//! The daemon exposes a single LLM-facing tool (`run`) whose argument is
-//! a Unix-shell-style command line. `run` parses the line into a
-//! [`chain::Chain`] AST and dispatches each stage through a
-//! [`CommandRegistry`] of internal Rust handlers. Two-tier split: `Tool`
-//! is what the LLM sees (JSON-in/JSON-out); `Command` is what executes
-//! bytes-in/bytes-out with a Unix exit code.
+//! Tool-use subsystem. A [`Tool`] is what the model calls (JSON in, JSON
+//! out); the built-in one, [`RunTool`], parses a shell-style command line
+//! into a [`chain::Chain`] and dispatches each stage to a [`Command`]
+//! (bytes in, bytes out, Unix exit code) from a [`CommandRegistry`].
 
 pub mod attachment;
 pub mod chain;
@@ -59,15 +54,14 @@ pub enum ToolError {
 /// A single tool the LLM can invoke.
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
-    /// Machine-readable identifier used by the LLM to call this tool.
+    /// Identifier the model calls this tool by.
     fn name(&self) -> &str;
 
     /// Human-readable description the LLM sees when deciding whether to
     /// call the tool.
     fn description(&self) -> &str;
 
-    /// JSON Schema describing the `arguments` object the LLM must pass to
-    /// [`Tool::invoke`]. Used to build the OpenAI-compatible `tools` array.
+    /// JSON Schema for the `arguments` object [`Tool::invoke`] accepts.
     fn parameters_schema(&self) -> Value;
 
     /// Execute the tool with JSON-shaped arguments and return a
@@ -75,7 +69,7 @@ pub trait Tool: Send + Sync + 'static {
     async fn invoke(&self, args: Value) -> Result<Value, ToolError>;
 }
 
-/// Lookup table for tools registered with the daemon.
+/// Lookup table of registered tools.
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,

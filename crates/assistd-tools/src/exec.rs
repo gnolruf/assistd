@@ -1,18 +1,7 @@
-//! Shared subprocess spawning for the commands that run real processes,
-//! in the two shapes those commands need:
-//!
-//! - [`supervise`] runs a child to completion under a timeout and returns
-//!   its output. Used by [`crate::commands::BashCommand`], whose contract
-//!   is "run this and give me the result".
-//! - [`spawn_detached`] watches a child only long enough to catch a
-//!   failed startup, then leaves it running. Used by `wm open`, whose
-//!   contract is "launch this and leave the window open".
-//!
-//! [`supervise`] puts the child in its own process group and kills the
-//! whole group once the child ends, however it ends, so a forked
-//! grandchild can't leak or hold the output pipes open.
-//! [`spawn_detached`] cannot do that and stay useful; bubblewrap's
-//! `--die-with-parent` bounds a launched application instead.
+//! Subprocess spawning for the commands that run real processes:
+//! [`supervise`] runs a child to completion under a timeout and returns
+//! its output, while [`spawn_detached`] watches a child only long enough
+//! to catch a failed startup, then leaves it running.
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -32,7 +21,7 @@ use crate::chain::PIPE_BUF_MAX;
 use crate::command::{CommandOutput, Hint, error_line};
 
 /// Exit code for policy denial. POSIX "command found but not executable" is
-/// the closest semantic match to "we recognize the command but refuse it".
+/// the closest match to a command that is recognized but refused.
 pub(crate) const POLICY_DENIED_EXIT: i32 = 126;
 
 /// Exit code for a spawn that never got off the ground (binary missing,
@@ -181,9 +170,9 @@ async fn wait_feeding(
 }
 
 /// Run `cmd` to completion with [`capture`] and render the result as a
-/// command output. `tool` names the caller in the timeout and overflow
-/// error lines. `Err` is returned only when the spawn itself fails, so
-/// each caller can attach its own recovery hint.
+/// command output. `tool` is the command name written on the timeout
+/// and overflow error lines. `Err` is returned only when the spawn
+/// itself fails, leaving the recovery hint to the command.
 pub(crate) async fn supervise(
     tool: &str,
     cmd: ProcCommand,
@@ -265,9 +254,11 @@ impl DetachedReaders {
 /// bad launch visible. A child still alive at the deadline is reported as
 /// exit 0 and detached: no timeout bounds it and nothing kills it when
 /// this future is dropped. Its output readers are handed to `readers`.
+/// Killing the process group would defeat the purpose, so bubblewrap's
+/// `--die-with-parent` bounds a launched application instead.
 ///
-/// `Err` is returned only when the spawn itself fails, matching
-/// [`supervise`] so callers can attach their own recovery hint.
+/// `Err` is returned only when the spawn itself fails, as with
+/// [`supervise`].
 pub(crate) async fn spawn_detached(
     tool: &str,
     mut cmd: ProcCommand,
@@ -285,8 +276,8 @@ pub(crate) async fn spawn_detached(
     let mut child = cmd.spawn()?;
 
     // The readers outlive this call by design: a long-lived application
-    // must never block on a full pipe, nor be SIGPIPE'd by us closing the
-    // read end. They end at EOF when it exits, dropping `drained`.
+    // must never block on a full pipe, nor be SIGPIPE'd by the read end
+    // closing. They end at EOF when it exits, dropping `drained`.
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
@@ -309,7 +300,7 @@ pub(crate) async fn spawn_detached(
     };
 
     // Exited during the probe. If a grandchild holds the write end open
-    // the readers never finish, so we take whatever they captured.
+    // the readers never finish, so take whatever they captured.
     let _ = timeout(POST_EXIT_DRAIN, drained_rx).await;
     let stdout = std::mem::take(&mut *stdout_buf.lock());
     let stderr = std::mem::take(&mut *stderr_buf.lock());

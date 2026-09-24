@@ -64,6 +64,8 @@ pub struct ScreenshotCommand {
 }
 
 impl ScreenshotCommand {
+    /// A `screenshot` command configured by `cfg` that refuses to run
+    /// while `gate` reports no vision support.
     pub fn new(cfg: Arc<ScreenshotPolicyCfg>, gate: Arc<VisionGate>) -> Self {
         Self { cfg, gate }
     }
@@ -397,7 +399,6 @@ async fn capture_x11_monitor(monitor: &str, deadline: Duration) -> Result<Vec<u8
     run_capture("maim", &["-g", &geom], deadline).await
 }
 
-/// Run `binary` to completion and return its stdout.
 async fn run_capture(
     binary: &str,
     args: &[&str],
