@@ -298,7 +298,11 @@ fn mouse_wheel_scrolls_by_a_fixed_step() {
         (MouseEventKind::ScrollDown, MOUSE_WHEEL_STEP),
     ] {
         app.on_mouse(wheel(kind));
-        assert_eq!(app.output.scroll_offset(), expected, "after {kind:?}");
+        assert_eq!(
+            app.output.scroll_offset(),
+            usize::from(expected),
+            "after {kind:?}"
+        );
     }
 }
 

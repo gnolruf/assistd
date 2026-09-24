@@ -1010,7 +1010,7 @@ impl App {
         if live_secs != self.last_thinking_seconds {
             self.last_thinking_seconds = live_secs;
             if live_secs.is_some() {
-                self.output.mark_dirty();
+                self.output.refresh_live_thinking();
             }
         }
     }
