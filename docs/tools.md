@@ -42,25 +42,25 @@ run "cat README.md | grep -i 'license' | uppercase"
 We'll touch four files:
 
 1. New: `crates/assistd-tools/src/commands/uppercase.rs`.
-2. Edit: `crates/assistd-tools/src/commands/mod.rs` (re-export).
+2. Edit: `crates/assistd-tools/src/commands/mod.rs` (re-export, plus
+   the test-only `test_registry()`).
 3. Edit: `crates/assistd-core/src/lib.rs` (registration in `build_tools`).
-4. Edit: `crates/assistd-tools/src/command.rs` tests (extend the
-   convention-compliance and help/summary acceptance tests so the
-   new command is covered).
+4. Edit: `crates/assistd-tools/src/command/tests.rs` (extend the
+   convention-compliance acceptance test so the new command is
+   covered).
 
 ### Step 1 — Implement the command
 
 Create `crates/assistd-tools/src/commands/uppercase.rs`:
 
 ```rust
-use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, error_line};
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 
 /// `uppercase`: read bytes from stdin, ASCII-uppercase letters, write to
 /// stdout. Non-ASCII bytes pass through untouched (no UTF-8 case
-/// folding in v1; users who need that should call `bash 'tr a-z A-Z'`).
+/// folding).
 pub struct UppercaseCommand;
 
 #[async_trait]
@@ -85,24 +85,23 @@ impl Command for UppercaseCommand {
             .to_string()
     }
 
-    async fn run(&self, input: CommandInput) -> Result<CommandOutput> {
-        if !input.args.is_empty() {
-            return Ok(CommandOutput::failed(
+    async fn run(&self, input: CommandInput) -> CommandOutput {
+        if let Some(arg) = input.args.first() {
+            return CommandOutput::failed(
                 2,
                 error_line(
                     "uppercase",
-                    format_args!("unexpected argument: {}", input.args[0]),
-                    "Use",
-                    "uppercase (no args; pipe input via stdin)",
-                )
-                .into_bytes(),
-            ));
+                    format_args!("unexpected argument: {arg}"),
+                    Hint::Use,
+                    format_args!("cat {arg} | uppercase"),
+                ),
+            );
         }
         let Some(mut out) = input.stdin else {
-            return Ok(CommandOutput::usage(self.help()));
+            return CommandOutput::usage(self.help());
         };
         out.make_ascii_uppercase();
-        Ok(CommandOutput::ok(out))
+        CommandOutput::ok(out)
     }
 }
 
@@ -110,42 +109,38 @@ impl Command for UppercaseCommand {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn uppercases_ascii_stdin() {
-        let out = UppercaseCommand
+    async fn run_uppercase(args: Vec<String>, stdin: Option<&[u8]>) -> CommandOutput {
+        UppercaseCommand
             .run(CommandInput {
-                args: Vec::new(),
-                stdin: Some(b"Hello, World!".to_vec()),
+                args,
+                stdin: stdin.map(<[u8]>::to_vec),
             })
             .await
-            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn uppercases_ascii_stdin() {
+        let out = run_uppercase(Vec::new(), Some(b"Hello, World!".as_slice())).await;
         assert_eq!(out.stdout, b"HELLO, WORLD!");
         assert_eq!(out.exit_code, 0);
     }
 
     #[tokio::test]
     async fn passes_through_non_ascii_bytes() {
-        let out = UppercaseCommand
-            .run(CommandInput {
-                args: Vec::new(),
-                stdin: Some("café".as_bytes().to_vec()),
-            })
-            .await
-            .unwrap();
-        // 'c' -> 'C', 'a' -> 'A', 'f' -> 'F'; the é (0xC3 0xA9) is
-        // non-ASCII and passes through.
+        let out = run_uppercase(Vec::new(), Some("café".as_bytes())).await;
         assert_eq!(out.stdout, "CAFé".as_bytes());
     }
 
     #[tokio::test]
+    async fn no_stdin_replies_with_usage() {
+        let out = run_uppercase(Vec::new(), None).await;
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stdout.starts_with(b"usage: uppercase"), "{out:?}");
+    }
+
+    #[tokio::test]
     async fn arguments_rejected_with_convention_error() {
-        let out = UppercaseCommand
-            .run(CommandInput {
-                args: vec!["FILE".into()],
-                stdin: None,
-            })
-            .await
-            .unwrap();
+        let out = run_uppercase(vec!["FILE".into()], None).await;
         assert_eq!(out.exit_code, 2);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("[error] uppercase: "), "{stderr}");
@@ -154,21 +149,27 @@ mod tests {
 }
 ```
 
-Three things to notice:
+Four things to notice:
 
 - **`summary()` is ≤80 chars and a verb phrase.** That string lands
   verbatim in the `run` tool's description, which is the only thing
   the LLM sees when choosing whether to call you. Treat it as a
   one-line ad to a model that's read every shell man page.
-- **`help()` starts with `usage: <name>`.** The convention-compliance
-  test enforces this. The same string is what the executor returns
-  on stdout (with `exit_code = 2`) when the command is invoked with
-  insufficient args, so the model gets self-service docs in-band.
+- **`help()` starts with `usage: <name>`.** The help/summary
+  acceptance test checks for a `usage:` line. Return it via
+  `CommandOutput::usage` (stdout, `exit_code = 2`) when the command is
+  invoked with insufficient input, so the model gets self-service docs
+  in-band; the executor also answers `<cmd> --help` with it.
+- **`run` is infallible.** It returns a `CommandOutput`, never a
+  `Result`: every failure is a non-zero `exit_code` plus a stderr
+  line, which is what lets `||` and `&&` react to it.
 - **Failure paths use `error_line`.** Every stderr line carries
-  `[error] <cmd>: <what>. <Hint>: <recovery>`. That convention is
-  what lets the LLM recover in one step rather than guessing again.
-  Read [`io_error_nav`](../crates/assistd-tools/src/command.rs) for
-  the standard `NotFound` / `PermissionDenied` formatters.
+  `[error] <cmd>: <what>. <Hint>: <recovery>`, where `<Hint>` is a
+  `Hint` variant. That convention is what lets the LLM recover in one
+  step rather than guessing again. `CommandOutput::usage_error` is a
+  shorthand for the exit-2, `Hint::Use` case above; read
+  [`io_error_nav`](../crates/assistd-tools/src/command.rs) for the
+  standard `NotFound` / `PermissionDenied` formatters.
 
 ### Step 2 — Re-export from the commands module
 
@@ -180,27 +181,42 @@ pub mod bash;
 pub mod cat;
 pub mod echo;
 pub mod grep;
+pub mod head_tail;
 pub mod ls;
 pub mod screenshot;
 pub mod see;
+pub mod sort;
+pub mod uniq;
 pub mod uppercase;   // <-- new
 pub mod wc;
 pub mod web;
 pub mod wm;
 pub mod write;
 
-pub use bash::{BashCommand, BashPolicyCfg};
+pub use crate::policy::BashPolicyCfg;
+pub use bash::BashCommand;
 pub use cat::CatCommand;
 pub use echo::EchoCommand;
 pub use grep::GrepCommand;
+pub use head_tail::{HeadCommand, TailCommand};
 pub use ls::LsCommand;
 pub use screenshot::{Backend as ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg};
 pub use see::SeeCommand;
+pub use sort::SortCommand;
+pub use uniq::UniqCommand;
 pub use uppercase::UppercaseCommand;   // <-- new
 pub use wc::WcCommand;
 pub use web::WebCommand;
 pub use wm::WmCommand;
 pub use write::{WriteCommand, WritePolicyCfg};
+```
+
+The same file holds the test-only `test_registry()` the help/summary
+acceptance test iterates over; register `UppercaseCommand` there too:
+
+```rust
+r.register(EchoCommand);
+r.register(UppercaseCommand);   // <-- new
 ```
 
 ### Step 3 — Register in `build_tools`
@@ -215,28 +231,31 @@ commands.register(CatCommand);
 commands.register(LsCommand);
 commands.register(GrepCommand);
 commands.register(WcCommand);
+commands.register(HeadCommand);
+commands.register(TailCommand);
+commands.register(SortCommand);
+commands.register(UniqCommand);
 commands.register(EchoCommand);
 commands.register(UppercaseCommand);   // <-- new
 commands.register(WriteCommand::new(write_cfg));
 commands.register(SeeCommand::new(vision_gate.clone()));
 commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
 commands.register(WebCommand::new());
-commands.register(BashCommand::new(bash_cfg, sandbox, confirmation_gate));
-commands.register(WmCommand::new(window_manager, bash_cfg, sandbox, confirmation_gate));
+commands.register(BashCommand::new(
+    bash_cfg.clone(),
+    sandbox.clone(),
+    confirmation_gate.clone(),
+));
+commands.register(WmCommand::new(
+    window_manager,
+    bash_cfg,
+    sandbox,
+    confirmation_gate,
+));
 ```
 
-You'll also need the import at the top of the file. The simple
-commands (no constructor args, no policy) are grouped together; add
-`UppercaseCommand` there:
-
-```rust
-use assistd_tools::commands::{
-    BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, LsCommand,
-    ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, UppercaseCommand,
-    WcCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
-    Backend as ScreenshotBackendKind,
-};
-```
+You'll also need to add `UppercaseCommand` to the
+`assistd_tools::commands::{…}` import at the top of the file.
 
 That's the entire integration. The command is now visible to the LLM:
 its summary appears in the dynamic catalog the `run` tool advertises,
@@ -245,13 +264,15 @@ it. No tool schema work, no IPC changes, no client-side updates.
 
 ### Step 4 — Extend the acceptance tests
 
-Two tests in [crates/assistd-tools/src/command.rs](../crates/assistd-tools/src/command.rs)
-exhaustively assert that every registered command (a) emits
-convention-compliant errors, and (b) has a non-empty `help()` and a
-`usage:`-prefixed help block. They run inside the workspace so adding
-a command without updating them will fail CI.
+Two tests in [crates/assistd-tools/src/command/tests.rs](../crates/assistd-tools/src/command/tests.rs)
+assert that every production command (a) emits convention-compliant
+errors, and (b) has a non-empty, ≤80-char `summary()` and a `help()`
+containing `usage:`. Neither discovers commands on its own, so a new
+command is covered only once you add it.
 
-Add a row to `every_registered_command_emits_convention_compliant_error`:
+Add `UppercaseCommand` to the `use crate::commands::{…}` list in
+`every_registered_command_emits_convention_compliant_error`, and a row
+to its `cases`:
 
 ```rust
 (
@@ -263,9 +284,9 @@ Add a row to `every_registered_command_emits_convention_compliant_error`:
 ),
 ```
 
-And register `UppercaseCommand` in the body of
-`every_registered_command_has_nonempty_help_and_summary`, bumping the
-expected `reg.len()` assertion from 11 to 12.
+`every_registered_command_has_nonempty_help_and_summary` iterates over
+`test_registry()`, which you extended in step 2; bump its expected
+`reg.len()` assertion from 15 to 16.
 
 ### Step 5 — Run it
 
@@ -299,19 +320,22 @@ pub trait Tool: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> Value;
-    async fn invoke(&self, args: Value) -> Result<Value>;
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError>;
 }
 ```
+
+`ToolError` has two variants: `InvalidArgs(String)` for arguments that
+violate the schema or its constraints, and `Store` for a failed
+memory-store call.
 
 A minimal sketch — a `wait` tool that sleeps for a configurable
 duration and returns the elapsed time:
 
 ```rust
-use anyhow::{Context, Result};
+use assistd_tools::{Tool, ToolError};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::time::Duration;
-use assistd_tools::Tool;
+use std::time::{Duration, Instant};
 
 pub struct WaitTool;
 
@@ -340,11 +364,13 @@ impl Tool for WaitTool {
         })
     }
 
-    async fn invoke(&self, args: Value) -> Result<Value> {
-        let ms = args.get("ms")
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
+        let ms = args
+            .get("ms")
             .and_then(Value::as_u64)
-            .context("`ms` is required and must be a non-negative integer")?;
-        let started = std::time::Instant::now();
+            .filter(|ms| *ms <= 60_000)
+            .ok_or_else(|| ToolError::InvalidArgs("`ms` must be an integer in 0..=60000".into()))?;
+        let started = Instant::now();
         tokio::time::sleep(Duration::from_millis(ms)).await;
         Ok(json!({ "elapsed_ms": started.elapsed().as_millis() as u64 }))
     }
@@ -357,12 +383,13 @@ Three notes:
   `required` are non-negotiable: the daemon emits OpenAI-strict
   schemas, and llama-server enforces them via grammar-constrained
   decoding. Loose schemas hurt accuracy.
-- **Error handling.** Return `Err` for catastrophic failures the
-  model can't recover from. For predictable failures (bad input,
-  remote service down), return `Ok(json!({ "error": "...", "hint":
-  "..." }))` so the model sees the structured failure and can
-  retry. The same navigation philosophy as `Command`'s stderr
-  convention applies.
+- **Error handling.** Return `Err(ToolError::InvalidArgs(..))` for
+  arguments that violate the schema; the agent loop reports it to the
+  model as a failed call. For a failure the model can recover from by
+  doing something else (remote service down, nothing found), return
+  `Ok(json!({ "error": "...", "hint": "..." }))` so the model sees the
+  structured failure and can retry. The same navigation philosophy
+  as `Command`'s stderr convention applies.
 - **Registration.** Tools register directly into the
   `ToolRegistry` after the `RunTool`. In `build_tools`:
 
@@ -380,9 +407,11 @@ links to the canonical implementation.
 - **Error format.** `[error] <cmd>: <what>. <Hint>: <recovery>` —
   use [`error_line`](../crates/assistd-tools/src/command.rs) and
   [`io_error_nav`](../crates/assistd-tools/src/command.rs).
-- **Hint vocabulary.** `Use:` / `Try:` for actionable alternatives;
-  `Check:` / `Available:` for diagnostics. The
-  acceptance test scans for these four exact prefixes.
+- **Hint vocabulary.** The `Hint` enum: `Use:` / `Try:` for
+  actionable alternatives; `Check:` / `Available:` for diagnostics;
+  `Install:` names a package; `Note:` explains a condition. The
+  convention acceptance test accepts only the first four, so a
+  command's failure path should use one of them.
 - **`summary()` budget.** ≤80 characters, no trailing newline,
   starts with a verb. Test enforced.
 - **`help()` shape.** First line must contain `usage:`. Test

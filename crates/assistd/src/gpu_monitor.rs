@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use assistd_core::{PresenceManager, PresenceState, SleepConfig};
+use assistd_core::{Component, PresenceManager, PresenceState, SleepConfig, spawn_supervised};
 use nvml_wrapper::{Nvml, enums::device::UsedGpuMemory};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -86,9 +86,11 @@ pub fn spawn_monitor(
     );
 
     let cfg = cfg.clone();
-    Some(tokio::spawn(async move {
-        run_monitor(nvml, cfg, presence, shutdown).await
-    }))
+    Some(spawn_supervised(
+        "gpu_monitor",
+        Component::GpuMonitor,
+        run_monitor(nvml, cfg, presence, shutdown),
+    ))
 }
 
 async fn run_monitor(

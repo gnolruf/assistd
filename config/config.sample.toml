@@ -94,9 +94,9 @@ max_response_tokens = 1024
 # Deadline for the first streamed byte of a /v1/chat/completions call,
 # which is prompt prefill rather than a stall — raise it if a large model
 # on CPU-offloaded experts needs longer to reach its first token. Once
-# tokens are flowing only [timeouts] stream_inactivity_secs applies, so
-# long generations are never cut off. Also caps the whole (non-streaming)
-# summarization call.
+# tokens are flowing only an internal 30s gap-between-chunks deadline
+# applies (not configurable), so long generations are never cut off.
+# Also caps the whole (non-streaming) summarization call.
 request_timeout_secs = 120
 # Sampling temperature for the non-streaming summarization call. Lower
 # than `temperature` by default because summaries should be deterministic.
