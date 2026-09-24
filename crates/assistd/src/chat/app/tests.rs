@@ -106,7 +106,7 @@ fn status(event: Event) -> ChatEvent {
 /// Accept one dialog connection, read its request line, then stream
 /// `events` back. The delay before the first write gives the query
 /// driver time to observe its closed writer channel while nothing is
-/// readable, which is the state the pre-fix driver parked in forever.
+/// readable, so a driver that parks in that state hangs the test.
 async fn mock_daemon(
     socket: std::path::PathBuf,
     events: Vec<Event>,

@@ -1,7 +1,6 @@
 //! [`assistd_voice::VoiceInput`] over IPC: press and release become
-//! `Request::PttStart` and `Request::PttStop`. Both the chat TUI and the
-//! daemon's own hotkey listener use it, so every push-to-talk turn takes
-//! the daemon's one PTT path.
+//! `Request::PttStart` and `Request::PttStop`, so every push-to-talk turn
+//! takes the daemon's one PTT path.
 
 use std::sync::Arc;
 

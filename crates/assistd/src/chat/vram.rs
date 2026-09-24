@@ -32,7 +32,6 @@ pub enum VramState {
     Unknown,
     /// `nvidia-smi` not found; VRAM monitoring unavailable.
     Disabled,
-    /// Successfully polled.
     Ok(VramInfo),
     /// `nvidia-smi` returned an error.
     Err(String),
@@ -44,11 +43,10 @@ pub enum RamState {
     /// Not yet probed.
     #[default]
     Unknown,
-    /// Successfully read from `/proc/meminfo`.
     Ok(RamInfo),
 }
 
-/// Combined VRAM + RAM snapshot used by the status-bar renderer.
+/// Combined VRAM and RAM snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceState {
     pub vram: VramState,

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use assistd_ipc::Event;
 use serde_json::Value;
 
-/// Snapshot pushed through the `watch` channel to the GUI thread.
+/// Everything the popup window renders, as one snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PopupState {
     pub body: String,

@@ -304,7 +304,8 @@ impl App {
         }
     }
 
-    /// A second prompt arriving while one is open is denied immediately.
+    /// Show a destructive-command prompt. A second prompt arriving while
+    /// one is open is denied immediately.
     pub fn open_confirmation_modal(
         &mut self,
         confirm_id: String,
@@ -840,8 +841,8 @@ impl App {
         }
     }
 
-    /// Always reports the now-active session, so it is also how the
-    /// status bar learns that a switch changed or cleared the title.
+    /// `BranchSwitched` always carries the now-active session's title, so
+    /// a missing one clears it.
     fn on_branch_switched(
         &mut self,
         name: String,
