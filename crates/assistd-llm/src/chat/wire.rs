@@ -96,14 +96,13 @@ pub enum ContentBody<'a> {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart<'a> {
     Text { text: Cow<'a, str> },
-    ImageUrl { image_url: ImageUrl },
+    ImageUrl { image_url: ImageUrl<'a> },
 }
 
-/// `{"url": "data:image/png;base64,..."}`. Owned because we build the
-/// data URI on the fly when rendering wire messages.
+/// `{"url": "data:image/png;base64,..."}`, borrowed from the history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ImageUrl {
-    pub url: String,
+pub struct ImageUrl<'a> {
+    pub url: &'a str,
 }
 
 /// One entry in an outgoing `tool_calls` array on an assistant message.
