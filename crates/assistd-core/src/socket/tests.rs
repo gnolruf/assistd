@@ -310,7 +310,7 @@ async fn removes_stale_socket_file_on_bind() {
 }
 
 /// Backend that emits N deltas with a fixed pause between each, then
-/// Done. Used to exercise graceful shutdown of in-flight streams.
+/// Done.
 struct SlowBackend {
     deltas: usize,
     pause: std::time::Duration,
@@ -368,7 +368,7 @@ impl assistd_llm::LlmBackend for SlowBackend {
 }
 
 /// Backend that emits a single delta then blocks indefinitely on an
-/// un-awoken channel. Used to exercise the shutdown grace timeout.
+/// un-awoken channel.
 struct StuckBackend;
 
 #[async_trait::async_trait]
@@ -645,7 +645,6 @@ async fn client_sees_eof_promptly_after_terminal_event() {
 
 #[tokio::test]
 async fn shutdown_closes_idle_subscriber_without_waiting_out_grace() {
-    // The default 5s grace must not be spent waiting on an idle subscriber.
     let state = test_state();
     let server = TestServer::start(state.clone()).await;
     let (_write, mut reader) = open_connection(
@@ -823,8 +822,7 @@ async fn one_shot_client_eof_denies_prompt_without_waiting() {
     .await;
 }
 
-/// Backend that streams 1 KiB deltas until its channel closes. Used to
-/// exercise clients that disconnect or stop reading mid-turn.
+/// Backend that streams 1 KiB deltas until its channel closes.
 struct FloodBackend;
 
 impl FloodBackend {

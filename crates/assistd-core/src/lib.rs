@@ -1,7 +1,7 @@
 //! Daemon orchestration: the agent loop, presence state machine, IPC
 //! socket server, and the `AppState` request dispatcher. Not a stable
-//! public API; the re-exports exist so the `assistd` binary can reach
-//! every subsystem through one crate.
+//! public API; it re-exports the subsystem crates so dependents need
+//! only this one.
 
 pub mod agent;
 pub mod presence;
@@ -104,7 +104,8 @@ pub struct BuildToolsDeps<'a> {
     pub mcp_tools: Vec<Box<dyn assistd_tools::Tool>>,
 }
 
-/// Build the tool registry consumed by the daemon. Clears and recreates
+/// Assemble the tool registry: the built-in commands behind `run`, the
+/// memory tools, and `mcp_tools`. Clears and recreates
 /// [`BuildToolsDeps::overflow_dir`] so per-process spill files land in a
 /// known-empty location at every startup.
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildToolsError> {
@@ -355,6 +356,7 @@ fn expand_config_tilde(raw: &str) -> PathBuf {
     }
 }
 
+/// This crate's version string.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

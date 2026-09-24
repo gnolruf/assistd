@@ -1,6 +1,5 @@
-//! Supervised
-//! task spawning, and the daemon panic hook. Recovery events log under
-//! `target = "assistd::recovery"`.
+//! Supervised task spawning and the daemon panic hook. Recovery events
+//! log under `target = "assistd::recovery"`.
 
 use std::any::Any;
 use std::future::Future;

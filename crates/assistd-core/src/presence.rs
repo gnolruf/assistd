@@ -133,6 +133,7 @@ pub struct PresenceLlmHealthProbe {
 }
 
 impl PresenceLlmHealthProbe {
+    /// Wrap `presence` as a health probe.
     pub fn new(presence: Arc<PresenceManager>) -> Self {
         Self { presence }
     }
@@ -244,6 +245,7 @@ impl PresenceManager {
         Ok(manager)
     }
 
+    /// The current presence state.
     pub fn state(&self) -> PresenceState {
         *self.state.lock()
     }
@@ -270,7 +272,7 @@ impl PresenceManager {
     }
 
     /// Non-blocking [`Self::llama_pid`]. Also `None` while a transition
-    /// holds the llama slot, so periodic callers must tolerate misses.
+    /// holds the llama slot, so a `None` may be spurious.
     pub fn llama_pid_blocking(&self) -> Option<u32> {
         self.llama
             .try_lock()
@@ -385,7 +387,6 @@ impl PresenceManager {
         })
     }
 
-    /// `Some(started_at)` while a wake transition is running.
     fn wake_in_progress(&self) -> Option<Instant> {
         *self.wake_started.lock()
     }
@@ -538,8 +539,7 @@ impl PresenceManager {
         Ok(())
     }
 
-    /// `Sleeping|Drowsy → Active`. Idempotent from `Active`. While
-    /// running, [`Self::wake_in_progress`] reports the start time.
+    /// `Sleeping|Drowsy → Active`. Idempotent from `Active`.
     pub async fn wake(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
         let prior = self.state();
