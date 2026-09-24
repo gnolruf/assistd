@@ -126,10 +126,18 @@ impl EventStream {
     /// The next event, or `Ok(None)` when the daemon closed the stream
     /// without a terminal event.
     pub async fn next_event(&mut self) -> Result<Option<Event>> {
-        match self.inner.next_line().await? {
-            None => Ok(None),
-            Some(line) => Ok(Some(serde_json::from_str(&line)?)),
+        while let Some(line) = self.inner.next_line().await? {
+            match serde_json::from_str(&line) {
+                Ok(event) => return Ok(Some(event)),
+                Err(e) if e.is_data() => tracing::warn!(
+                    target: "assistd::ipc",
+                    error = %e,
+                    "skipping event this client cannot decode"
+                ),
+                Err(e) => return Err(e.into()),
+            }
         }
+        Ok(None)
     }
 
     /// Collect events up to and including the terminal one. A stream
@@ -190,6 +198,18 @@ mod tests {
     fn mock_server(
         responses: Vec<Event>,
     ) -> (tempfile::TempDir, PathBuf, tokio::task::JoinHandle<()>) {
+        mock_server_raw(
+            responses
+                .iter()
+                .map(|ev| serde_json::to_string(ev).unwrap())
+                .collect(),
+        )
+    }
+
+    /// [`mock_server`] that writes each of `lines` verbatim.
+    fn mock_server_raw(
+        lines: Vec<String>,
+    ) -> (tempfile::TempDir, PathBuf, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mock.sock");
         let listener = UnixListener::bind(&path).unwrap();
@@ -200,8 +220,7 @@ mod tests {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             let _: Request = serde_json::from_str(line.trim()).unwrap();
-            for ev in responses {
-                let mut out = serde_json::to_string(&ev).unwrap();
+            for mut out in lines {
                 out.push('\n');
                 write.write_all(out.as_bytes()).await.unwrap();
             }
@@ -228,6 +247,39 @@ mod tests {
             .await
             .expect("one_shot");
         assert_eq!(stream.collect().await.expect("collect"), events);
+        h.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn skips_unknown_events_from_daemon() {
+        let (_dir, path, h) = mock_server_raw(vec![
+            r#"{"type":"future_event","id":"r","payload":1}"#.into(),
+            r#"{"type":"status","id":"r","severity":"info","component":"future_subsystem","event":"restarting","message":"m"}"#.into(),
+            r#"{"type":"delta","id":"r","text":"hello"}"#.into(),
+            r#"{"type":"done","id":"r"}"#.into(),
+        ]);
+        let client = IpcClient::with_path(path);
+        let stream = client.one_shot(Request::query("r", "x")).await.unwrap();
+        assert_eq!(
+            stream.collect().await.expect("collect"),
+            vec![
+                Event::Delta {
+                    id: "r".into(),
+                    text: "hello".into(),
+                },
+                Event::Done { id: "r".into() },
+            ]
+        );
+        h.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_json_is_an_error() {
+        let (_dir, path, h) = mock_server_raw(vec![r#"{"type":"delta","id":"r""#.into()]);
+        let client = IpcClient::with_path(path);
+        let mut stream = client.one_shot(Request::query("r", "x")).await.unwrap();
+        let err = stream.next_event().await.expect_err("expected Json");
+        assert!(matches!(err, IpcClientError::Json(_)), "{err:?}");
         h.await.unwrap();
     }
 
