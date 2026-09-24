@@ -301,12 +301,11 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
 
     let slots = app.output.thumbnail_layout(area.width);
-    let (lines, start) = app.output.render_view(area.width, area.height);
-    let text = Text::from(lines.to_vec());
-    let para = Paragraph::new(text).scroll((start, 0));
-    frame.render_widget(para, area);
+    let (lines, viewport_top) = app.output.render_view(area.width, area.height);
+    for (line, row) in lines.iter().zip(area.rows()) {
+        frame.render_widget(line, row);
+    }
 
-    let viewport_top = start as usize;
     let viewport_bottom = viewport_top.saturating_add(area.height as usize);
     const CAPTION_ROWS: u16 = 1;
     let image_height = THUMBNAIL_ROWS.saturating_sub(CAPTION_ROWS);
@@ -661,6 +660,56 @@ mod tests {
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn test_app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        App::new(
+            std::sync::Arc::new(assistd_ipc::IpcClient::with_path(
+                "/tmp/assistd-test-nonexistent.sock",
+            )),
+            tx,
+            "test-model".into(),
+            assistd_core::Config::default().sleep,
+            false,
+            None,
+        )
+    }
+
+    fn output_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("test terminal");
+        terminal
+            .draw(|frame| render_output(frame, frame.area(), app))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                row.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn output_pane_draws_the_scrolled_window() {
+        let mut app = test_app();
+        for i in 0..30 {
+            app.output.push_info(&format!("line {i}"));
+        }
+        assert_eq!(
+            output_rows(&mut app, 20, 3),
+            ["line 27", "line 28", "line 29"]
+        );
+        app.output.scroll_lines_up(10);
+        assert_eq!(
+            output_rows(&mut app, 20, 3),
+            ["line 17", "line 18", "line 19"]
+        );
+        app.output.clear();
+        app.output.push_info("only");
+        assert_eq!(output_rows(&mut app, 20, 3), ["only", "", ""]);
     }
 
     #[test]

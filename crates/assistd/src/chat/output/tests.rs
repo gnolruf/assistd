@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use ratatui_image::picker::Picker;
+
 use super::*;
 
 fn line_text(line: &Line<'static>) -> String {
@@ -429,7 +431,7 @@ fn render_view_clamps_scroll_offset() {
     }
     p.scroll_offset = 99;
     let (lines, start) = p.render_view(80, 10);
-    assert_eq!(lines.len(), 16);
+    assert_eq!(lines.len(), 10);
     assert_eq!(start, 0);
     assert_eq!(p.scroll_offset, 6);
 }
@@ -439,4 +441,136 @@ fn render_view_zero_width_falls_back_to_raw_lines() {
     let mut p = OutputPane::new();
     p.push_user("hi");
     assert_eq!(rendered_lines(&mut p, 0, 5), ["> hi", ""]);
+}
+
+fn thumbnail_protocol() -> StatefulProtocol {
+    Picker::halfblocks().new_resize_protocol(image::DynamicImage::new_rgb8(4, 4))
+}
+
+fn assert_matches_full_rewrap(p: &mut OutputPane, width: u16) {
+    p.sync_wrap(width);
+    let mut full = WrapCache::default();
+    full.sync(&p.items, width, p.verbose);
+    let incremental: Vec<String> = p.wrap.lines.iter().map(line_text).collect();
+    let expected: Vec<String> = full.lines.iter().map(line_text).collect();
+    assert_eq!(incremental, expected, "width {width}");
+    assert_eq!(p.wrap.lines, full.lines, "width {width}");
+    assert_eq!(p.wrap.starts, full.starts, "width {width}");
+    assert_eq!(p.wrap.thumbnails, full.thumbnails, "width {width}");
+}
+
+/// A viewport width and the pane mutation applied before checking it.
+type Step = (u16, fn(&mut OutputPane));
+
+#[test]
+fn incremental_rewrap_matches_full_rewrap() {
+    let mut p = OutputPane::new();
+    let steps: &[Step] = &[
+        (40, |p| p.push_user("what is in /tmp and why")),
+        (40, |p| p.begin_assistant()),
+        (40, |p| p.append_thinking("let me look ")),
+        (40, |p| {
+            p.append_thinking("at the directory\n\nwith ls");
+            last_thinking(p).started_at -= Duration::from_millis(5500);
+        }),
+        (40, |p| p.refresh_live_thinking()),
+        (40, |p| assert!(p.toggle_last_expandable())),
+        (40, |p| p.append_thinking(" and some more reasoning")),
+        (40, |p| p.finish_thinking()),
+        (40, push_seq_30),
+        (40, |p| p.append_assistant("The directory holds ")),
+        (40, |p| {
+            p.append_assistant("thirty files that are all quite long")
+        }),
+        (13, |p| p.append_assistant("\nsecond line")),
+        (13, |p| p.append_assistant("\n")),
+        (13, |p| assert!(p.toggle_last_expandable())),
+        (80, |p| p.append_assistant("third line")),
+        (80, |p| {
+            p.push_thumbnail("cat.png".into(), thumbnail_protocol())
+        }),
+        (80, |p| p.append_assistant("after the image")),
+        (80, |p| p.set_verbose(true)),
+        (9, |p| p.append_assistant(" still streaming")),
+        (9, |p| p.set_verbose(false)),
+        (9, |p| p.finish_assistant()),
+        (0, |p| p.push_user("follow-up")),
+        (25, |p| p.append_assistant("a reply to be undone")),
+        (25, |p| assert_eq!(p.pop_last_user_exchange(), 3)),
+        (25, |p| p.append_assistant("fresh reply")),
+        (25, |p| p.clear()),
+        (25, |p| p.push_info("empty again")),
+    ];
+    for &(width, step) in steps {
+        step(&mut p);
+        assert_matches_full_rewrap(&mut p, width);
+    }
+}
+
+#[test]
+fn streaming_delta_rewraps_only_the_open_line() {
+    let mut p = OutputPane::new();
+    push_seq_30(&mut p);
+    p.append_assistant("hello");
+    p.sync_wrap(40);
+    let before_tail = p.wrap.starts[1];
+    p.append_assistant(" world");
+    assert_eq!(p.wrap.stale, [1]);
+    p.sync_wrap(40);
+    assert_eq!(p.wrap.starts, [0, before_tail]);
+    assert_eq!(line_text(&p.wrap.lines[before_tail]), "hello world");
+}
+
+#[test]
+fn scrolling_addresses_lines_past_u16_max() {
+    let mut p = OutputPane::new();
+    let total = 70_000;
+    for i in 0..total {
+        p.push_info(&format!("line {i}"));
+    }
+    let first_visible = |p: &mut OutputPane| {
+        let (lines, start) = p.render_view(80, 10);
+        (start, line_text(&lines[0]), lines.len())
+    };
+    assert_eq!(
+        first_visible(&mut p),
+        (total - 10, format!("line {}", total - 10), 10)
+    );
+    p.scroll_lines_up(2);
+    assert_eq!(
+        first_visible(&mut p),
+        (total - 12, format!("line {}", total - 12), 10)
+    );
+    p.scroll_offset = total - 10 - 66_000;
+    assert_eq!(first_visible(&mut p), (66_000, "line 66000".into(), 10));
+    p.scroll_offset = usize::MAX;
+    assert_eq!(first_visible(&mut p), (0, "line 0".into(), 10));
+    assert_eq!(p.scroll_offset(), total - 10);
+}
+
+#[test]
+fn thumbnail_slots_line_up_with_rendered_rows_at_narrow_widths() {
+    let mut p = OutputPane::new();
+    push_seq_30(&mut p);
+    p.append_thinking("reasoning");
+    p.finish_thinking();
+    p.push_thumbnail("cat.png".into(), thumbnail_protocol());
+    p.push_info("below");
+    p.push_thumbnail("dog.png".into(), thumbnail_protocol());
+    for width in [12, 20, 80] {
+        let slots = p.thumbnail_layout(width);
+        let (lines, top) = p.render_view(width, u16::MAX);
+        assert_eq!(top, 0);
+        let rendered: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(slots.len(), 2, "width {width}");
+        for (slot, name) in slots.iter().zip(["cat.png", "dog.png"]) {
+            assert_eq!(slot.height, usize::from(THUMBNAIL_ROWS), "width {width}");
+            assert_eq!(
+                rendered[slot.start_row],
+                format!("📎 {name}"),
+                "width {width}"
+            );
+        }
+        assert_eq!(rendered[slots[0].start_row + slots[0].height], "below");
+    }
 }
