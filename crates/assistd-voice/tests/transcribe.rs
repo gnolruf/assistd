@@ -1,12 +1,7 @@
-//! End-to-end transcription test. Downloads a small Whisper model and a
-//! known speech clip from public URLs, then asserts:
-//!   - the 5+ second clip of clear English is transcribed accurately;
-//!   - silence padding is trimmed by whisper.cpp's built-in VAD so the
-//!     padded clip's transcript matches the unpadded one;
-//!   - the run completes within a generous latency ceiling.
-//!
-//! Gated behind the `test-support` feature so a plain
-//! `cargo test -p assistd-voice` stays offline.
+//! End-to-end transcription against a small Whisper model and a known
+//! speech clip, both downloaded: checks accuracy, that whisper.cpp's VAD
+//! trims silence padding, and a generous latency ceiling. Gated behind
+//! `test-support` so a plain `cargo test -p assistd-voice` stays offline.
 
 #![cfg(feature = "test-support")]
 

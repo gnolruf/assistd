@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::hf_download::{self, cached_path, ensure_file, parse_hf_id};
 use crate::piper::error::PiperError;
 
+/// The `piper` subdirectory of the shared model cache.
 pub fn default_cache_dir() -> PathBuf {
     hf_download::default_cache_dir("piper")
 }

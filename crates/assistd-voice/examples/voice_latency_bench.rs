@@ -1,14 +1,9 @@
-//! `voice_latency_bench`: in-process driver for the
-//! end-of-speech → first-audio-frame voice loop, built so the project
-//! has a reproducible number to track against the <500 ms budget.
-//!
-//! Loads a 16 kHz mono i16 WAV, runs the full pipeline N times against a
-//! running llama-server, and reports per-stage and end-to-end timings
-//! captured from the `assistd::voice::latency` debug events emitted at
-//! every stage of the daemon's hot path. Each iteration opens its own
-//! `voice_turn` span with a fresh `correlation_id`; a custom
-//! `tracing_subscriber::Layer` joins the events back to the iteration
-//! that produced them.
+//! End-of-speech to first-audio latency benchmark. Runs a 16 kHz mono
+//! WAV through Whisper, a running llama-server, and Piper N times, and
+//! reports per-stage and end-to-end timings from the
+//! `assistd::voice::latency` debug events. Each iteration runs in a
+//! `voice_turn` span with a fresh `correlation_id`, which a custom
+//! `tracing_subscriber::Layer` uses to attribute events to it.
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -57,57 +52,40 @@ struct Args {
     /// llama-server port.
     #[arg(long, default_value = "8080")]
     llama_port: std::num::NonZeroU16,
-    /// Model identifier sent in the `model` field of `/v1/chat/completions`.
-    /// Should match what llama-server has loaded; many servers don't
-    /// validate this and a placeholder works fine.
+    /// Model name sent to `/v1/chat/completions`. llama-server usually
+    /// does not validate it, so a placeholder works.
     #[arg(long, default_value = "default")]
     model: String,
-    /// Whisper GGML model HuggingFace identifier (matches the daemon's
-    /// `voice.transcription.model` config). Tiny / base / small all work.
+    /// HuggingFace identifier of the Whisper GGML model, as in
+    /// `voice.transcription.model`. Tiny, base, and small all work.
     #[arg(long, default_value = "ggerganov/whisper.cpp:ggml-tiny.en.bin")]
     whisper_model: String,
-    /// Force CPU inference for Whisper. Default uses GPU when CUDA is
-    /// available (matches the daemon's prefer_gpu default).
+    /// Force CPU inference for Whisper. Otherwise the GPU is used when
+    /// CUDA is available.
     #[arg(long, default_value_t = false)]
     whisper_cpu_only: bool,
-    /// Cap LLM response length so each iteration completes promptly.
-    /// Note: reasoning models (Qwen3, DeepSeek-R1, etc.) spend tokens
-    /// in a `<think>` block before emitting visible content. With a
-    /// budget below the thinking length, the iteration finishes with
-    /// zero content deltas; `llm_first_token` and everything
-    /// downstream of it won't fire. 1024 is a safe default for most
-    /// reasoning models and short prompts.
+    /// Cap on LLM response tokens so each iteration completes promptly.
+    /// Reasoning models spend tokens in a `<think>` block first; a
+    /// budget below the thinking length yields no visible content, so
+    /// `llm_first_token` and every later stage never fire.
     #[arg(long, default_value = "1024")]
     max_response_tokens: std::num::NonZeroU32,
-    /// Skip Piper TTS startup and substitute the silent `NoVoiceOutput`.
-    /// Use when piper isn't on PATH or you only want Whisper + LLM
-    /// timings. The bench will still report every stage that fired
-    /// (audio_capture_stop through first_sentence_emitted) but
-    /// piper_spawn / piper_first_byte / piper_synth_done /
-    /// playback_enqueued won't appear and end-to-end won't be reported.
+    /// Substitute the silent `NoVoiceOutput` for Piper, for Whisper and
+    /// LLM timings only. Piper stages and end-to-end timing are omitted.
     #[arg(long)]
     no_piper: bool,
-    /// Override the piper binary name. Defaults to `piper`; pass
-    /// `piper-tts` if your distro's package ships it under that name
-    /// (e.g. the Arch AUR `piper-tts-bin` package).
+    /// Piper binary name or path, e.g. `piper-tts` where the distro
+    /// package ships it under that name.
     #[arg(long, default_value = "piper")]
     piper_binary: String,
-    /// Pass `--cuda` to piper to route ONNX inference through the
-    /// CUDA execution provider. Requires a piper binary built against
-    /// `onnxruntime-gpu`. Most distro-packaged binaries (including
-    /// the Arch `piper-tts-bin`) ship CPU-only onnxruntime; you'll
-    /// see "CUDA execution provider not available" in piper's stderr
-    /// and the synth will fail. Build piper from source against
-    /// onnxruntime-gpu, or grab a GPU release from
-    /// `https://github.com/rhasspy/piper/releases` (look for
-    /// `piper_linux_x86_64_gpu.tar.gz`-style assets).
+    /// Pass `--cuda` to piper. Requires a piper built against
+    /// `onnxruntime-gpu`; most distro packages are CPU-only and fail
+    /// with "CUDA execution provider not available".
     #[arg(long)]
     piper_cuda: bool,
-    /// Prepend `/no_think ` to the transcribed prompt. Qwen3-family
-    /// models (and other reasoning models that honor this token) will
-    /// skip the `<think>` block and start emitting visible content
-    /// immediately. Drops `llm_first_token` from multi-second
-    /// reasoning latency to ~prefill+1-token decode.
+    /// Prepend `/no_think ` to the transcribed prompt so Qwen3-style
+    /// reasoning models skip the `<think>` block, cutting
+    /// `llm_first_token` to roughly prefill plus one decoded token.
     #[arg(long)]
     no_think: bool,
     /// Emit results as JSON instead of a human-readable table.
@@ -190,9 +168,7 @@ async fn main() -> Result<()> {
         match PiperVoiceOutput::start(synth_cfg).await {
             Ok(p) => Arc::new(p),
             Err(e) => {
-                // Mirror the daemon's try-warn-fallback pattern. The
-                // bench is still useful without piper; Whisper + LLM
-                // timings remain comparable across runs.
+                // Whisper and LLM timings stay comparable without piper.
                 eprintln!(
                     "Piper unavailable ({e:#}); falling back to NoVoiceOutput. \
                      End-to-end timing will be omitted. Install piper or pass \
@@ -205,8 +181,8 @@ async fn main() -> Result<()> {
 
     let mut runs: Vec<RunMetrics> = Vec::with_capacity(args.iterations);
     for i in 0..args.iterations {
-        // Fresh LlamaChatClient per iter so accumulated history doesn't
-        // skew results across runs. New reqwest::Client costs <1 ms.
+        // A fresh client per iteration keeps accumulated history from
+        // skewing later runs; building one costs under 1 ms.
         let llm: Arc<dyn LlmBackend> = Arc::new(
             LlamaChatClient::new(&chat_cfg, &server_cfg, &model_cfg, &timeouts, None)
                 .context("building LLM client")?,
@@ -251,9 +227,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Drive the streaming pipeline for one iteration. Mirrors the
-/// daemon's `handle_query` dispatch loop but stripped to the voice path:
-/// no agent loop, no tools, no persistence.
+/// One pass of the streaming voice path: transcribe, generate, segment,
+/// and speak. No agent loop, tools, or persistence.
 async fn run_one(
     whisper: Arc<dyn Transcriber>,
     llm: Arc<dyn LlmBackend>,
@@ -274,19 +249,16 @@ async fn run_one(
     if transcript.trim().is_empty() {
         bail!("whisper returned empty transcript");
     }
-    // Qwen3 honors `/no_think` as the first token of the user message
-    // by suppressing the `<think>` block. Other reasoning models that
-    // recognize the same convention (DeepSeek-R1 distills, etc.)
-    // benefit too; non-reasoning models ignore the prefix harmlessly.
+    // Reasoning models that honor a leading `/no_think` skip the
+    // `<think>` block; other models ignore it.
     let text = if no_think {
         format!("/no_think {transcript}")
     } else {
         transcript
     };
 
-    // Skip the warmup join: the bench's LLM client is fresh each iter,
-    // there's no PresenceManager, and ensure_active() is therefore a
-    // no-op. Emit the marker for parity with the daemon's event stream.
+    // There is no presence manager to wait on; the marker keeps the
+    // stage timeline complete.
     tracing::debug!(
         target: "assistd::voice::latency",
         stage = "ensure_active_done",
@@ -300,9 +272,8 @@ async fn run_one(
     let prompt = text.clone();
     let llm_task = tokio::spawn(
         async move {
-            // Surface generate errors via tracing; the bench's stage
-            // table only shows what fired, so a silent failure looks
-            // like "the LLM never replied" with no hint why.
+            // The stage table only shows what fired, so an unlogged
+            // failure would look like the LLM never replied.
             if let Err(e) = llm_clone.generate(prompt, llm_tx).await {
                 tracing::error!(
                     target: "voice_latency_bench",
@@ -320,25 +291,13 @@ async fn run_one(
             while let Some(s) = speech_rx.recv().await {
                 let _ = piper_clone.speak(s).await;
             }
-            // We deliberately don't call `wait_idle()` (which blocks on
-            // rodio's `Player::sleep_until_end`). Two reasons:
-            //   1. The bench records `playback_enqueued` per sentence,
-            //      not "audio finished playing"; we already have the
-            //      measurement we care about.
-            //   2. `drain()` spawns a `std::thread` that runs the
-            //      blocking `sleep_until_end`. If we time out the
-            //      future, the thread leaks and keeps holding rodio
-            //      state; empirically this then blocks the *next*
-            //      iteration's `player.append` and the bench wedges.
-            // Audio that's already queued continues to play (or not,
-            // if the device is silent) in the background until the
-            // bench process exits.
+            // No `wait_idle`: the bench measures `playback_enqueued`,
+            // not playback completion. Queued audio keeps playing in
+            // the background.
         }
         .in_current_span(),
     );
 
-    // SentenceBuffer max-len tracks the daemon's piper default
-    // (max_sentence_chars = 220). Code-block mode defaults to Skip.
     let mut sb = SentenceBuffer::new(220);
     let mut first_emitted = false;
     while let Some(ev) = llm_rx.recv().await {
@@ -364,19 +323,13 @@ async fn run_one(
                             stage = "first_sentence_emitted",
                             "voice latency stage"
                         );
-                        // first_emitted set is unused; we break next.
                     }
                     let _ = speech_tx.send(tail).await;
                 }
                 break;
             }
-            // The bench's prompt is a single user message and the LLM
-            // is invoked via generate() (not the agent loop), so tool
-            // events never appear. Status events likewise only fire on
-            // a managed-server crash, which the bench's stub backend
-            // can't trigger. ReasoningDelta is silently dropped: this
-            // bench measures TTS latency for the visible reply, and
-            // chain-of-thought tokens are never read aloud.
+            // `generate` runs no agent loop, so tool events never
+            // arrive, and reasoning is never spoken.
             LlmEvent::ToolCallsRequested { .. }
             | LlmEvent::ToolCall { .. }
             | LlmEvent::ToolResult { .. }
@@ -390,9 +343,8 @@ async fn run_one(
     Ok(())
 }
 
-/// Read a WAV from disk and return its samples as 16-bit signed mono PCM
-/// at 16 kHz. Errors out on any other shape so the caller surfaces a
-/// clear "wrong WAV format" message instead of a confusing whisper failure.
+/// Samples of a 16 kHz 16-bit signed mono WAV. Any other format is a
+/// clear error here rather than a confusing whisper failure later.
 fn load_wav_16k_mono(path: &Path) -> Result<Vec<i16>> {
     let mut reader =
         hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -468,9 +420,8 @@ impl Visit for CorrIdVisitor {
     }
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if field.name() == "correlation_id" {
-            // `%id` formatting routes through Display, which `record_debug`
-            // captures as `"abc"`-quoted Debug repr. Strip the quotes so
-            // downstream lookups are exact-string matches.
+            // `%`-formatted fields arrive via `record_debug`; strip any
+            // surrounding quotes so lookups match exactly.
             let raw = format!("{value:?}");
             self.corr = Some(raw.trim_matches('"').to_string());
         }
@@ -550,8 +501,7 @@ impl RunMetrics {
     fn from_stages(t0: Instant, stages: StageLog) -> Self {
         let mut per_stage = HashMap::new();
         for (name, when) in &stages {
-            // First write wins: duplicate stage names keep the earliest
-            // timestamp, which is the behaviour we want for first_byte etc.
+            // Duplicate stage names keep the earliest timestamp.
             per_stage
                 .entry(name.clone())
                 .or_insert_with(|| when.duration_since(t0).as_millis() as u64);
@@ -622,7 +572,7 @@ fn summarize(requested: usize, runs: &[RunMetrics]) -> Summary {
             by_stage.entry(name.clone()).or_default().push(*ms);
         }
     }
-    // Order stages by the canonical timeline; unknown extras append.
+    // Known stages in timeline order, then any others by name.
     let mut stages: Vec<(String, StageStats)> = STAGE_ORDER
         .iter()
         .filter_map(|name| {
@@ -689,9 +639,8 @@ fn print_human(summary: &Summary) {
     }
 }
 
-// `serde_json::to_string_pretty` on `Summary` requires Serialize. Build
-// the JSON value by hand so we don't drag in `serde` derive (and so the
-// schema is explicit and stable).
+// Hand-written rather than derived so the JSON schema is explicit and
+// the `serde` derive feature is not needed.
 impl serde::Serialize for Summary {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         let stages: serde_json::Map<String, serde_json::Value> = self

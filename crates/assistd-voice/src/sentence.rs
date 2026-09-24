@@ -1,13 +1,6 @@
 //! Streaming sentence segmenter between the LLM token stream and TTS.
 //! Strips markdown, handles fenced code blocks per [`CodeBlockMode`],
 //! and emits whole sentences at prosody boundaries.
-//!
-//! Boundary priority, highest first: paragraph break `\n\n`; bullet
-//! marker `\n- ` or `\n* `; strong terminator `[.!?]` followed by
-//! whitespace and an uppercase letter, digit, or newline, with
-//! abbreviation and decimal guards; the `max_len` safety net. A
-//! terminator at the end of the buffer is never a boundary, because
-//! it may be an abbreviation awaiting context; `finish` flushes it.
 
 use std::collections::VecDeque;
 
@@ -23,6 +16,13 @@ const ABBREVIATIONS: &[&str] = &[
 /// Streaming sentence segmenter. Feed deltas with [`push`](Self::push),
 /// call [`finish`](Self::finish) when the stream ends, and
 /// [`flush_idle`](Self::flush_idle) when it pauses.
+///
+/// Boundary priority, highest first: paragraph break `\n\n`; bullet
+/// marker `\n- ` or `\n* `; strong terminator `[.!?]` followed by
+/// whitespace and an uppercase letter, digit, or newline, with
+/// abbreviation and decimal guards; the `max_len` safety net. A
+/// terminator at the end of the buffer is never a boundary, because it
+/// may be an abbreviation awaiting context; `finish` flushes it.
 pub struct SentenceBuffer {
     buf: String,
     in_code_fence: bool,
@@ -39,6 +39,8 @@ impl SentenceBuffer {
         Self::new_with_mode(max_len, CodeBlockMode::Skip)
     }
 
+    /// A segmenter that handles fenced code blocks per `mode`. `max_len`
+    /// is raised to at least 50 bytes.
     pub fn new_with_mode(max_len: usize, mode: CodeBlockMode) -> Self {
         Self {
             buf: String::new(),
@@ -215,8 +217,7 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
 }
 
 /// Offset just past the whitespace following a `.`, `!`, or `?` that
-/// ends a sentence. A terminator at the very end of the buffer never
-/// qualifies: it may be an abbreviation awaiting its next word.
+/// ends a sentence.
 fn find_terminator(buf: &str) -> Option<usize> {
     let bytes = buf.as_bytes();
     for (i, &c) in bytes.iter().enumerate() {
@@ -358,7 +359,7 @@ fn strip_links(s: &str) -> String {
     out
 }
 
-/// Drop runs of one to three `*` or `_`.
+/// Drops every `*` and `_`.
 fn strip_emphasis(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut buf = VecDeque::<char>::new();
