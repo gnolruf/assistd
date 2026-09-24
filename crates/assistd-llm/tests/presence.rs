@@ -1,9 +1,5 @@
-//! End-to-end tests for the presence state machine.
-//!
-//! These exercise `PresenceManager` against a real `fake_llama_server` child
-//! process. Gated behind the `test-support` feature because they need the
-//! fake binary. Run with:
-//!     cargo test -p assistd-llm --features test-support --test presence
+//! End-to-end tests for the presence state machine, driving
+//! `PresenceManager` against a real `fake_llama_server` child process.
 
 #![cfg(feature = "test-support")]
 
@@ -99,8 +95,8 @@ async fn new_active_manager(
 }
 
 fn pid_alive(pid: u32) -> bool {
-    // `test_kill_process` does `kill(pid, 0)`: existence probe with no
-    // signal sent. EPERM means the process exists but we can't signal it.
+    // `test_kill_process` is `kill(pid, 0)`: an existence probe that sends
+    // no signal. EPERM means the process exists but cannot be signaled.
     let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
         return false;
     };
@@ -159,7 +155,6 @@ async fn cold_start_puts_manager_in_active_and_loads_model() {
     let pid = m.llama_pid().await.expect("child running after wake");
     assert!(pid_alive(pid));
 
-    // Cold start loads the model via POST /models/load.
     let (load_count, unload_count, loaded) = get_counters(port).await;
     assert_eq!(load_count, 1, "cold start should call /models/load once");
     assert_eq!(unload_count, 0);
@@ -202,13 +197,10 @@ async fn drowse_calls_unload_and_keeps_process_alive() {
     m.drowse().await.expect("drowse should succeed");
     assert_eq!(m.state(), PresenceState::Drowsy);
 
-    // Same PID, still alive.
     let pid_after = m.llama_pid().await.expect("child still running");
     assert_eq!(pid_before, pid_after, "drowse must not respawn the process");
     assert!(pid_alive(pid_after));
 
-    // /models/unload was called exactly once more, and server reports no
-    // loaded model.
     let (_, unload_after, loaded) = get_counters(port).await;
     assert_eq!(unload_after, unload_before + 1);
     assert!(
@@ -234,15 +226,12 @@ async fn wake_from_drowsy_reuses_process_and_only_loads_model() {
     m.wake().await.expect("wake from Drowsy should succeed");
     assert_eq!(m.state(), PresenceState::Active);
 
-    // Same PID, no respawn.
     let pid_after = m.llama_pid().await.expect("child still running");
     assert_eq!(
         pid_initial, pid_after,
         "wake from Drowsy must not respawn the process"
     );
 
-    // /models/load was called once more (no extra spawn means the supervisor
-    // wasn't restarted, so the ready-then-load sequence ran only a second time).
     let (load_after, _, loaded) = get_counters(port).await;
     assert_eq!(load_after, load_initial + 1);
     assert_eq!(loaded.as_deref(), Some(model_spec().name.as_str()));
@@ -476,10 +465,9 @@ async fn query_during_sleeping_triggers_auto_wake() {
     m.sleep().await.unwrap();
 }
 
-/// Backend that emits one Delta, sleeps for a configurable duration,
-/// then emits Done. Used to put a predictable gap between the first
-/// visible token and the terminal Done event so we can assert that
-/// `sleep()` blocks through the gap rather than killing the generator.
+/// Backend that emits one Delta, sleeps for `delay`, then emits Done,
+/// leaving a predictable gap between the first visible token and the
+/// terminal event.
 struct DelayBackend {
     delay: Duration,
     last_user: tokio::sync::Mutex<String>,

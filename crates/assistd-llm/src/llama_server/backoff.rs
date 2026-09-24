@@ -5,11 +5,11 @@ use std::time::Duration;
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 /// Rolling-window cap on *any* restart (startup or crash-after-ready). Without
-/// this, a child that stays up for at least [`super::supervisor::MIN_HEALTHY_SECONDS`]
-/// before each crash would reset the consecutive-failure counter and restart
-/// forever — paying the multi-second weight-load cost every cycle. Hitting
-/// this cap forces [`crate::llama_server::ReadyState::Degraded`] regardless
-/// of how long any individual child lived.
+/// it, a child that stays healthy for `MIN_HEALTHY_SECONDS` before each crash
+/// would reset the consecutive-failure counter and restart forever, paying the
+/// multi-second weight-load cost every cycle. Hitting this cap forces
+/// [`crate::llama_server::ReadyState::Degraded`] regardless of how long any
+/// individual child lived.
 pub const MAX_RESTARTS_PER_WINDOW: usize = 10;
 
 /// Width of the rolling window used by [`MAX_RESTARTS_PER_WINDOW`].

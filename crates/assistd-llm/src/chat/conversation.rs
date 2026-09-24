@@ -189,6 +189,7 @@ impl Conversation {
         self.transient_note.take()
     }
 
+    /// The context block waiting for the next user turn, if any.
     #[cfg(test)]
     pub fn pending_context(&self) -> Option<&str> {
         self.pending_context.as_deref()
@@ -387,9 +388,6 @@ impl Conversation {
         }
         for message in &self.messages[turns_start..] {
             if !message.tool_calls.is_empty() {
-                // Narration-free tool calls omit `content` entirely: the
-                // OpenAI spec allows null/absent and some chat templates
-                // require absent rather than empty.
                 let specs: Vec<wire::ToolCallSpec<'_>> = message
                     .tool_calls
                     .iter()
@@ -460,8 +458,9 @@ impl Conversation {
     }
 
     /// Keep the approximate token total under budget, summarizing the
-    /// oldest turns if needed. On summarizer failure the caller falls
-    /// back to [`Self::truncate_to_budget`].
+    /// oldest turns if needed. Returns an error, with history unchanged,
+    /// if the summarizer fails or returns empty text;
+    /// [`Self::truncate_to_budget`] is the infallible fallback.
     pub async fn ensure_budget(
         &mut self,
         summarizer: &dyn Summarizer,
@@ -537,12 +536,10 @@ impl Conversation {
         Ok(())
     }
 
-    /// Infallible fallback: drop the oldest non-system, non-summary messages
-    /// repeatedly until we fit in budget (or we've reduced history to just
-    /// the latest user message). Tool-call/result pairs are dropped
-    /// atomically so the wire payload never carries an assistant
-    /// `tool_calls` without a matching result (or vice versa); most
-    /// server-side chat templates reject that.
+    /// Drop the oldest messages after any summary until the conversation
+    /// fits the budget or only the latest user turn remains. Tool-call and
+    /// result pairs are dropped together, because most chat templates
+    /// reject `tool_calls` without matching results (or vice versa).
     pub fn truncate_to_budget(&mut self, chat: &ChatConfig, model: &ModelConfig) {
         let budget = effective_budget(chat, model);
         while self.approx_total_tokens() > budget {
@@ -558,8 +555,7 @@ impl Conversation {
     }
 
     /// Remove `idx` and, when it is an assistant message with tool
-    /// calls, the tool results that follow it, so the wire payload never
-    /// carries `tool_calls` without their results. `first_droppable_index`
+    /// calls, the tool results that follow it. `first_droppable_index`
     /// always yields the assistant half first, so the reverse direction
     /// never needs handling.
     fn drop_with_pair(&mut self, idx: usize) {
@@ -630,10 +626,9 @@ impl Conversation {
                 }
             }
         }
-        // If the boundary landed on a tool-result user message, its
-        // preceding assistant-with-tool_calls would be orphaned on
-        // summarize. Walk back to include any matching assistant half,
-        // keeping the pair intact.
+        // A boundary on a tool result would orphan its assistant
+        // `tool_calls` half on summarize, so walk back to keep the pair
+        // intact.
         while idx > start
             && self
                 .messages

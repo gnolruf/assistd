@@ -2,8 +2,6 @@
 //! request-guard / chat-client interaction. Each test spawns a real
 //! `fake_llama_server` child process; they are gated behind `#[ignore]`
 //! so the default `cargo test` run stays fast.
-//!
-//! Run with: `cargo test -p assistd-llm --features test-support --test presence_stress -- --ignored`
 
 #![cfg(feature = "test-support")]
 
@@ -226,7 +224,6 @@ async fn sleep_defers_until_inflight_real_chat_stream_done() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // Open the query connection and stream events.
     let stream = UnixStream::connect(&sock_path).await.unwrap();
     let (read, mut write) = stream.into_split();
     let req = Request::Query {
@@ -263,7 +260,6 @@ async fn sleep_defers_until_inflight_real_chat_stream_done() {
     let sleep_started = Instant::now();
     let sleep_task = tokio::spawn(async move { m_for_sleep.sleep().await });
 
-    // Drain the rest of the stream until Done.
     loop {
         let mut line = String::new();
         let n = reader.read_line(&mut line).await.unwrap();
