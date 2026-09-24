@@ -36,6 +36,7 @@ pub struct LlamaEmbedder {
 impl LlamaEmbedder {
     /// Probe the server once to learn the vector dimension.
     /// `request_timeout` applies to the probe and every embed request.
+    /// Errors if the probe fails or returns an empty vector.
     pub async fn new(
         host: &str,
         port: u16,

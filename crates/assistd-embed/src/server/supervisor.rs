@@ -40,8 +40,8 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    /// Run until shutdown or until the child enters
-    /// [`ReadyState::Degraded`].
+    /// Run until shutdown. Once in [`ReadyState::Degraded`] it stops
+    /// restarting the child and only waits for shutdown.
     pub async fn run(mut self) {
         let mut consecutive_failures: u32 = 0;
 
