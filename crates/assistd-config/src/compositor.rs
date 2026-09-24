@@ -14,7 +14,6 @@ pub enum CompositorType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CompositorConfig {
-    /// Which compositor to integrate with.
     #[serde(rename = "type")]
     pub compositor_type: CompositorType,
 }

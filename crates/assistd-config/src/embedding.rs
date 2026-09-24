@@ -18,7 +18,10 @@ pub struct EmbeddingConfig {
     /// Master switch. When `false` semantic recall is unavailable.
     pub enabled: bool,
     /// HuggingFace model id passed verbatim to llama-server's
-    /// `--hf-repo` flag. Format: `<owner>/<repo>:<file>`.
+    /// `--hf-repo` flag, as `<owner>/<repo>:<quant>`. The suffix must be a
+    /// quant tag, not a `.gguf` filename: llama-server resolves it against
+    /// its preset manifest, and a filename fails with a misleading "no GGUF
+    /// files found".
     pub model: String,
     /// Bind host for the embedding llama-server. Should be loopback.
     pub host: IpAddr,

@@ -46,7 +46,7 @@ impl Default for ToolsOutputConfig {
 }
 
 impl ToolsOutputConfig {
-    /// `max_kb` expressed in bytes, ready to pass to the presentation layer.
+    /// `max_kb` expressed in bytes.
     pub fn max_bytes(&self) -> usize {
         (self.max_kb.get() as usize) * 1024
     }
@@ -80,10 +80,9 @@ pub struct ToolsBashConfig {
     /// cause immediate rejection before spawn. Use for patterns that should
     /// never be executed under any circumstances.
     pub denylist: Vec<String>,
-    /// Shell-tokenized word prefixes that trigger interactive confirmation
-    /// before executing (when a confirmation gate is wired up) or reject by
-    /// default over IPC. Example: `"rm -rf"` matches `rm -rf foo` but not
-    /// `echo "rm -rf"`.
+    /// Shell-tokenized word prefixes that require confirmation before
+    /// executing, and are rejected when no one can confirm. Example:
+    /// `"rm -rf"` matches `rm -rf foo` but not `echo "rm -rf"`.
     pub destructive_patterns: Vec<String>,
     /// Sandbox mode. See [`BashSandboxMode`].
     pub sandbox: BashSandboxMode,
@@ -140,11 +139,9 @@ pub enum ScreenshotBackend {
     Wayland,
 }
 
-/// Screenshot-command policy. Bytes are kept in memory and never written
-/// to disk by this command.
+/// Screenshot-command settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsScreenshotConfig {
-    /// Which capture backend to use.
     pub backend: ScreenshotBackend,
 }
