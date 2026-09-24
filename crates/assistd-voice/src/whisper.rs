@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use whisper_rs::{
-    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadParams,
-    convert_integer_to_float_audio,
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+    WhisperVadParams, convert_integer_to_float_audio,
 };
 
 use crate::gpu;
@@ -27,14 +28,51 @@ struct SileroVadParams {
     silence_secs: f32,
 }
 
+/// Idle inference states kept for reuse. A whisper state owns the KV
+/// cache and compute buffers (VRAM under CUDA), so allocating one per
+/// utterance is expensive. Each call checks out its own state, so
+/// concurrent calls never share one and the lock is held only to pop
+/// or push. A state is returned only after a successful run; one whose
+/// run failed is dropped, and the next call allocates a fresh one.
+struct StatePool<S> {
+    idle: Mutex<Vec<S>>,
+}
+
+impl<S> Default for StatePool<S> {
+    fn default() -> Self {
+        Self {
+            idle: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl<S> StatePool<S> {
+    fn with_state<R, E>(
+        &self,
+        create: impl FnOnce() -> Result<S, E>,
+        run: impl FnOnce(&mut S) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let idle = self.idle.lock().pop();
+        let mut state = match idle {
+            Some(state) => state,
+            None => create()?,
+        };
+        let out = run(&mut state)?;
+        self.idle.lock().push(state);
+        Ok(out)
+    }
+}
+
 /// Concrete [`Transcriber`] backed by whisper.cpp via whisper-rs.
 pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
+    states: Arc<StatePool<WhisperState>>,
     cfg: InferenceConfig,
     is_gpu: bool,
 }
 
 impl WhisperTranscriber {
+    /// A builder with nothing set; a model is required before `build`.
     pub fn builder() -> WhisperTranscriberBuilder {
         WhisperTranscriberBuilder::default()
     }
@@ -59,9 +97,18 @@ impl Transcriber for WhisperTranscriber {
         convert_integer_to_float_audio(pcm_i16_16k_mono, &mut audio_f32)
             .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
         let ctx = self.ctx.clone();
+        let states = self.states.clone();
         let cfg = self.cfg.clone();
-        let result =
-            tokio::task::spawn_blocking(move || run_inference(ctx, cfg, audio_f32)).await?;
+        let result = tokio::task::spawn_blocking(move || {
+            states.with_state(
+                || {
+                    ctx.create_state()
+                        .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))
+                },
+                |state| run_inference(state, &cfg, &audio_f32),
+            )
+        })
+        .await?;
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "whisper_done",
@@ -72,14 +119,10 @@ impl Transcriber for WhisperTranscriber {
 }
 
 fn run_inference(
-    ctx: Arc<WhisperContext>,
-    cfg: InferenceConfig,
-    audio: Vec<f32>,
+    state: &mut WhisperState,
+    cfg: &InferenceConfig,
+    audio: &[f32],
 ) -> Result<String, TranscriptionError> {
-    let mut state = ctx
-        .create_state()
-        .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
-
     let strategy = if cfg.beams <= 1 {
         SamplingStrategy::Greedy { best_of: 1 }
     } else {
@@ -112,7 +155,7 @@ fn run_inference(
     }
 
     state
-        .full(params, &audio)
+        .full(params, audio)
         .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
 
     let segment_count = state.full_n_segments();
@@ -256,6 +299,7 @@ impl WhisperTranscriberBuilder {
 
         Ok(WhisperTranscriber {
             ctx: Arc::new(ctx),
+            states: Arc::default(),
             cfg: InferenceConfig {
                 threads: self.threads,
                 beams: self.beams.max(1),
@@ -307,5 +351,70 @@ fn should_use_gpu(prefer: bool) -> bool {
             "No CUDA GPU available, falling back to CPU transcription"
         );
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StatePool;
+    use std::cell::Cell;
+
+    fn counting_create(created: &Cell<u32>) -> impl FnOnce() -> Result<u32, &'static str> + '_ {
+        move || {
+            created.set(created.get() + 1);
+            Ok(created.get())
+        }
+    }
+
+    #[test]
+    fn successful_runs_reuse_one_state() {
+        let pool = StatePool::default();
+        let created = Cell::new(0);
+        for _ in 0..3 {
+            let id = pool
+                .with_state(counting_create(&created), |s| Ok::<_, &str>(*s))
+                .unwrap();
+            assert_eq!(id, 1);
+        }
+        assert_eq!(created.get(), 1);
+    }
+
+    #[test]
+    fn failed_run_discards_its_state() {
+        let pool = StatePool::default();
+        let created = Cell::new(0);
+        let err = pool
+            .with_state(counting_create(&created), |_| Err::<(), _>("boom"))
+            .unwrap_err();
+        assert_eq!(err, "boom");
+        let id = pool
+            .with_state(counting_create(&created), |s| Ok::<_, &str>(*s))
+            .unwrap();
+        assert_eq!(id, 2, "a fresh state replaces the failed one");
+    }
+
+    #[test]
+    fn overlapping_runs_get_distinct_states() {
+        let pool = StatePool::default();
+        let created = Cell::new(0);
+        let (outer, inner) = pool
+            .with_state(counting_create(&created), |outer| {
+                let inner = pool.with_state(counting_create(&created), |s| Ok::<_, &str>(*s))?;
+                Ok((*outer, inner))
+            })
+            .unwrap();
+        assert_ne!(outer, inner);
+        for _ in 0..2 {
+            pool.with_state(counting_create(&created), |_| Ok::<_, &str>(()))
+                .unwrap();
+        }
+        assert_eq!(created.get(), 2, "both states are pooled for reuse");
+    }
+
+    #[test]
+    fn create_failure_propagates() {
+        let pool: StatePool<u32> = StatePool::default();
+        let err = pool.with_state(|| Err("no state"), |_| Ok(())).unwrap_err();
+        assert_eq!(err, "no state");
     }
 }

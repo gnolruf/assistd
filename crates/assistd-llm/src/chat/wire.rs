@@ -1,17 +1,5 @@
-//! Serde types for the OpenAI-shaped `/v1/chat/completions` endpoint as
-//! served by llama.cpp. We only model the subset the client actually uses.
-//!
-//! `ChatMessage.content` is modeled as an untagged enum so text-only turns
-//! render as a plain string (matching classic OpenAI payloads) while
-//! multimodal turns render as an array of content parts. llama.cpp
-//! accepts both shapes; a vision-capable model + mmproj is required for
-//! the `image_url` parts to actually reach the projector.
-//!
-//! Tool-calling shape: an assistant message carrying `tool_calls` keeps
-//! whatever narration the model streamed before the call as `content`, and
-//! omits the field entirely when there was none. Some llama.cpp Jinja
-//! templates reject `"content": null` but accept an omitted key;
-//! `skip_serializing_if` takes care of that.
+//! Serde types for the subset of llama.cpp's OpenAI-shaped
+//! `/v1/chat/completions` endpoint that the chat client uses.
 
 use std::borrow::Cow;
 
@@ -59,9 +47,9 @@ pub struct ChatTemplateKwargs {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage<'a> {
     pub role: &'a str,
-    /// Message text. `None` for assistant messages that carry only
-    /// `tool_calls`; the OpenAI spec allows (and many servers require)
-    /// the field to be omitted entirely in that case.
+    /// Message text. `None` for an assistant message whose `tool_calls`
+    /// had no narration before them; the key is then omitted rather than
+    /// sent as `null`, which some llama.cpp Jinja templates reject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentBody<'a>>,
     /// Tool calls the assistant is requesting. Set on assistant turns
@@ -79,11 +67,10 @@ pub struct ChatMessage<'a> {
     pub reasoning_content: Option<&'a str>,
 }
 
-/// Wire shape of a message's `content` field.
-///
-/// Untagged serde keeps the two shapes indistinguishable on the outgoing
-/// wire: `Text(s)` serializes as the bare string `"..."`, `Parts(v)`
-/// serializes as a JSON array `[{"type": "text", "text": "..."}, ...]`.
+/// Wire shape of a message's `content` field. Untagged, so `Text`
+/// serializes as a bare string (the classic OpenAI shape) and `Parts` as
+/// an array of content parts; llama.cpp accepts both. Image parts reach
+/// the model only when it is served with a vision projector (mmproj).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum ContentBody<'a> {
@@ -96,14 +83,13 @@ pub enum ContentBody<'a> {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart<'a> {
     Text { text: Cow<'a, str> },
-    ImageUrl { image_url: ImageUrl },
+    ImageUrl { image_url: ImageUrl<'a> },
 }
 
-/// `{"url": "data:image/png;base64,..."}`. Owned because we build the
-/// data URI on the fly when rendering wire messages.
+/// `{"url": "data:image/png;base64,..."}`, borrowed from the history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ImageUrl {
-    pub url: String,
+pub struct ImageUrl<'a> {
+    pub url: &'a str,
 }
 
 /// One entry in an outgoing `tool_calls` array on an assistant message.
@@ -115,6 +101,7 @@ pub struct ToolCallSpec<'a> {
     pub function: FunctionCallSpec<'a>,
 }
 
+/// The `function` object of a [`ToolCallSpec`].
 #[derive(Debug, Clone, Serialize)]
 pub struct FunctionCallSpec<'a> {
     pub name: &'a str,
@@ -123,7 +110,7 @@ pub struct FunctionCallSpec<'a> {
     pub arguments: &'a str,
 }
 
-/// Non-streaming response body, used only for the summarization call.
+/// Non-streaming response body.
 #[derive(Debug, Deserialize)]
 pub struct ChatResponse {
     pub choices: Vec<ChatChoice>,

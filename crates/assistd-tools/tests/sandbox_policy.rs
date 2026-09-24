@@ -1,10 +1,7 @@
 //! Integration tests for the bash command's policy and sandbox layers,
-//! in the order they fire: the denylist (gate skipped, exit 126), the
-//! destructive-pattern gate, and the bwrap sandbox. The matchers
-//! themselves are unit-tested alongside the policy module.
-//!
-//! Bwrap-dependent tests return early when `bwrap` is not on PATH so
-//! hosts without bubblewrap still pass.
+//! in the order they fire: the denylist, the destructive-pattern gate,
+//! and the bwrap sandbox. Bwrap-dependent tests return early when
+//! `bwrap` is not on PATH.
 
 use std::sync::Arc;
 
@@ -151,11 +148,10 @@ async fn quoted_literal_does_not_trigger_destructive_pattern() {
     assert_eq!(out.stdout, b"rm -rf /\n");
 }
 
-/// Documented limitation: the destructive matcher is syntactic, so a
-/// separator glued to a word (`hi;rm`) or a command substitution
-/// (`$(echo rm)`) hides the command from it. The denylist and the
-/// sandbox are the real defense. Pinned so a tightening of the matcher
-/// is a deliberate change.
+/// The destructive matcher is syntactic, so a separator glued to a word
+/// (`hi;rm`) or a command substitution (`$(echo rm)`) hides the command
+/// from it. The denylist and the sandbox are the real defense. Pinned so
+/// a tightening of the matcher is a deliberate change.
 #[tokio::test]
 async fn syntactic_evasions_slip_past_the_destructive_gate() {
     for template in ["echo hi;rm -rf {}", "$(echo rm) -rf {}"] {

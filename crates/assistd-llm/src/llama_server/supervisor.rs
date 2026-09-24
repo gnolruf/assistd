@@ -45,9 +45,10 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    /// Runs the supervisor loop until shutdown is requested, [`MAX_CONSECUTIVE_FAILURES`]
-    /// is reached, or [`MAX_RESTARTS_PER_WINDOW`] is exceeded inside
-    /// [`RESTART_WINDOW`]. Intended to be spawned as a Tokio task.
+    /// Runs the supervisor loop until shutdown is requested. Once
+    /// [`MAX_CONSECUTIVE_FAILURES`] is reached, or [`MAX_RESTARTS_PER_WINDOW`]
+    /// restarts land inside [`RESTART_WINDOW`], it broadcasts
+    /// [`ReadyState::Degraded`] and stops restarting until shutdown.
     pub async fn run(mut self) {
         let mut consecutive_failures: u32 = 0;
 
@@ -181,7 +182,7 @@ impl Supervisor {
         };
 
         match phase1 {
-            Phase1::Ready => { /* fall through */ }
+            Phase1::Ready => {}
             Phase1::ChildExited(status) => {
                 *self.pid.lock() = None;
                 return Ok(CycleResult::FailedToStart { status });

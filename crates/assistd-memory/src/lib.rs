@@ -52,7 +52,7 @@ pub trait MemoryStore: Send + Sync + 'static {
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>>;
 }
 
-/// No-op fallback used when no persistent backend is configured.
+/// No-op store: writes are discarded and reads find nothing.
 pub struct NoMemoryStore;
 
 #[async_trait]

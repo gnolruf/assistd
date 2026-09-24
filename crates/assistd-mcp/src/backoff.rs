@@ -18,7 +18,7 @@ pub const MAX_RESTARTS_PER_WINDOW: usize = 10;
 /// Width of the rolling window used by [`MAX_RESTARTS_PER_WINDOW`].
 pub const RESTART_WINDOW: Duration = Duration::from_secs(600);
 
-/// Cap on the SSE reconnection delay (also reused for stdio restarts).
+/// Upper bound on [`backoff_delay`], in seconds.
 pub const RECONNECT_MAX_SECS: u64 = 60;
 
 /// Spawn cadence once either cap is hit: slow enough not to thrash,

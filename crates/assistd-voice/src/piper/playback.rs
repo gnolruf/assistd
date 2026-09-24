@@ -1,9 +1,4 @@
-//! Audio playback via rodio. The device sink is `!Send` on ALSA and
-//! must outlive every utterance, so it lives on a dedicated
-//! `std::thread` rather than the `spawn_blocking` pool, which may
-//! retire idle threads. The `Player` is `Send + Sync`, but its
-//! `append` and `clear` can block on rodio's internal queue mutex,
-//! so they run on the blocking pool rather than a runtime worker.
+//! Audio playback via rodio.
 
 use std::num::NonZero;
 use std::sync::Arc;
@@ -21,7 +16,12 @@ use crate::piper::synth::SynthOutput;
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Owns the rodio playback path: a device thread and the player
-/// queued onto it.
+/// queued onto it. The device sink is `!Send` on ALSA and must outlive
+/// every utterance, so it lives on a dedicated `std::thread` rather
+/// than the `spawn_blocking` pool, which may retire idle threads. The
+/// `Player` is `Send + Sync`, but its `append` and `clear` can block on
+/// rodio's internal queue mutex, so they run on the blocking pool
+/// rather than a runtime worker.
 pub struct RodioPlaybackWorker {
     player: Arc<Player>,
     shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
@@ -207,7 +207,7 @@ fn spawn_device_thread(
 }
 
 /// How long `Drop` waits for the device thread before abandoning the
-/// join so a wedged audio device cannot hang daemon shutdown.
+/// join so a wedged audio device cannot hang shutdown.
 const DROP_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Drop for RodioPlaybackWorker {

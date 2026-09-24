@@ -20,10 +20,12 @@ pub fn format_workspace_target(ws: &WorkspaceId) -> String {
     }
 }
 
+/// Focuses `window`.
 pub fn format_focus(window: &WindowId) -> String {
     format!(r#"[con_id="{}"] focus"#, window.get())
 }
 
+/// Moves `window`'s container to `workspace`.
 pub fn format_move_to_workspace(window: &WindowId, workspace: &WorkspaceId) -> String {
     format!(
         r#"[con_id="{}"] move container to {}"#,
@@ -32,6 +34,7 @@ pub fn format_move_to_workspace(window: &WindowId, workspace: &WorkspaceId) -> S
     )
 }
 
+/// Grows or shrinks `window`'s width by `pixels`.
 pub fn format_resize_width(window: &WindowId, direction: ResizeDir, pixels: u32) -> String {
     format!(
         r#"[con_id="{}"] resize {} width {} px or 0 ppt"#,

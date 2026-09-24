@@ -26,7 +26,8 @@ pub struct SqliteHandle {
 impl SqliteHandle {
     /// Open `path` (creating parent directories), apply pragmas, run
     /// migrations, and spawn the writer task. Returns the handle and
-    /// the writer's `JoinHandle`, which the caller awaits on shutdown.
+    /// the writer task's `JoinHandle`; see [`spawn_writer`] for when
+    /// the task exits.
     pub async fn open(
         path: &Path,
         shutdown: watch::Receiver<bool>,

@@ -51,8 +51,8 @@ pub struct PresentResult {
     pub attachments: Vec<Attachment>,
 }
 
-/// Render a completed chain's output. `duration` is whatever the caller
-/// measured around execution.
+/// Render a completed chain's output. `counter` numbers the spill files;
+/// `duration` is the elapsed time shown in the footer.
 pub fn present(
     out: CommandOutput,
     spec: &PresentSpec,

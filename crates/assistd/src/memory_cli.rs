@@ -20,8 +20,7 @@ pub enum MemoryAction {
     /// Semantic search over persisted conversation content. Embeds the
     /// query and ranks past messages by cosine similarity, so
     /// paraphrased phrasings still hit. Requires the embedding
-    /// subsystem; with embeddings disabled the daemon emits zero hits
-    /// and a clean Done.
+    /// subsystem; with embeddings disabled it returns no hits.
     Reminisce {
         /// Natural-language query. The daemon embeds this and finds
         /// the top-`limit` most semantically similar past messages.

@@ -1,6 +1,7 @@
 //! Scrollable output pane: prose lines, tool blocks, thinking blocks and
 //! thumbnails, wrapped to the viewport width on render.
 
+use std::ops::Range;
 use std::time::Instant;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -47,9 +48,8 @@ enum OutputItem {
 pub struct OutputPane {
     items: Vec<OutputItem>,
     open_assistant: Option<usize>,
-    scroll_offset: u16,
-    wrap_cache: Option<(u16, Vec<Line<'static>>)>,
-    dirty: bool,
+    scroll_offset: usize,
+    wrap: WrapCache,
     /// Renders every thinking and tool block expanded, leaving their
     /// per-item flags untouched.
     verbose: bool,
@@ -67,17 +67,13 @@ impl OutputPane {
             items: Vec::new(),
             open_assistant: None,
             scroll_offset: 0,
-            wrap_cache: None,
-            dirty: true,
+            wrap: WrapCache::default(),
             verbose: false,
         }
     }
 
     pub fn set_verbose(&mut self, verbose: bool) {
-        if self.verbose != verbose {
-            self.verbose = verbose;
-            self.dirty = true;
-        }
+        self.verbose = verbose;
     }
 
     /// Append a `> `-prefixed prompt line and a blank separator.
@@ -88,7 +84,6 @@ impl OutputPane {
             user_style(),
         )));
         self.items.push(OutputItem::Text(Line::from("")));
-        self.dirty = true;
     }
 
     /// [`Self::push_user`] with a trailing 📎 tag naming the attachments.
@@ -104,7 +99,6 @@ impl OutputPane {
             user_style(),
         )));
         self.items.push(OutputItem::Text(Line::from("")));
-        self.dirty = true;
     }
 
     pub fn push_info(&mut self, text: &str) {
@@ -113,7 +107,6 @@ impl OutputPane {
             text.to_string(),
             info_style(),
         )));
-        self.dirty = true;
     }
 
     /// Open a streaming assistant block for [`Self::append_assistant`].
@@ -124,7 +117,6 @@ impl OutputPane {
             assistant_style(),
         )));
         self.open_assistant = Some(self.items.len() - 1);
-        self.dirty = true;
     }
 
     pub fn append_assistant(&mut self, delta: &str) {
@@ -136,10 +128,12 @@ impl OutputPane {
             }
         };
         let mut fragments = delta.split('\n');
-        if let Some(first) = fragments.next() {
-            if let Some(line) = self.text_at_mut(idx) {
-                append_to_line(line, first);
-            }
+        if let Some(first) = fragments.next()
+            && !first.is_empty()
+            && let Some(line) = self.text_at_mut(idx)
+        {
+            append_to_line(line, first);
+            self.wrap.invalidate(idx);
         }
         for frag in fragments {
             self.items.push(OutputItem::Text(single_span_line(
@@ -149,7 +143,6 @@ impl OutputPane {
             idx = self.items.len() - 1;
         }
         self.open_assistant = Some(idx);
-        self.dirty = true;
     }
 
     pub fn finish_assistant(&mut self) {
@@ -158,7 +151,6 @@ impl OutputPane {
         }
         self.open_assistant = None;
         self.items.push(OutputItem::Text(Line::from("")));
-        self.dirty = true;
     }
 
     pub fn push_error(&mut self, msg: &str) {
@@ -167,7 +159,6 @@ impl OutputPane {
             format!("!! {msg}"),
             error_style(),
         )));
-        self.dirty = true;
     }
 
     /// Blocks whose body exceeds [`COLLAPSE_THRESHOLD`] lines start
@@ -188,25 +179,19 @@ impl OutputPane {
             duration_ms,
             expanded,
         }));
-        self.dirty = true;
     }
 
     /// Toggle the most recent tool or thinking block.
     pub fn toggle_last_expandable(&mut self) -> bool {
-        for item in self.items.iter_mut().rev() {
-            match item {
-                OutputItem::Tool(b) => {
-                    b.expanded = !b.expanded;
-                    self.dirty = true;
-                    return true;
-                }
-                OutputItem::Thinking(t) => {
-                    t.expanded = !t.expanded;
-                    self.dirty = true;
-                    return true;
-                }
-                _ => {}
-            }
+        for (idx, item) in self.items.iter_mut().enumerate().rev() {
+            let expanded = match item {
+                OutputItem::Tool(b) => &mut b.expanded,
+                OutputItem::Thinking(t) => &mut t.expanded,
+                OutputItem::Text(_) | OutputItem::Thumbnail(_) => continue,
+            };
+            *expanded = !*expanded;
+            self.wrap.invalidate(idx);
+            return true;
         }
         false
     }
@@ -220,7 +205,6 @@ impl OutputPane {
             ended_at: None,
             expanded: false,
         }));
-        self.dirty = true;
     }
 
     /// Append to the live thinking block, opening one if the trailing
@@ -235,19 +219,19 @@ impl OutputPane {
         }
         if let Some(OutputItem::Thinking(t)) = self.items.last_mut() {
             t.text.push_str(delta);
+            self.wrap.invalidate(self.items.len() - 1);
         }
-        self.dirty = true;
     }
 
     /// Stamp and collapse the live thinking block. No-op when none is
     /// live.
     pub fn finish_thinking(&mut self) {
-        for item in self.items.iter_mut().rev() {
+        for (idx, item) in self.items.iter_mut().enumerate().rev() {
             if let OutputItem::Thinking(t) = item {
                 if t.ended_at.is_none() {
                     t.ended_at = Some(Instant::now());
                     t.expanded = false;
-                    self.dirty = true;
+                    self.wrap.invalidate(idx);
                 }
                 return;
             }
@@ -256,67 +240,71 @@ impl OutputPane {
 
     /// Whole seconds the live thinking block has run, if any.
     pub fn live_thinking_seconds(&self) -> Option<u64> {
-        for item in self.items.iter().rev() {
-            if let OutputItem::Thinking(t) = item {
-                if t.ended_at.is_none() {
-                    return Some(t.started_at.elapsed().as_secs());
-                }
-            }
-        }
-        None
+        self.live_thinking()
+            .map(|(_, t)| t.started_at.elapsed().as_secs())
     }
 
-    /// Force a rewrap on the next render.
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+    /// Rewrap the live thinking block on the next render so its
+    /// elapsed-time header advances. No-op when none is live.
+    pub fn refresh_live_thinking(&mut self) {
+        if let Some((idx, _)) = self.live_thinking() {
+            self.wrap.invalidate(idx);
+        }
+    }
+
+    fn live_thinking(&self) -> Option<(usize, &ThinkingBlock)> {
+        self.items
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, item)| match item {
+                OutputItem::Thinking(t) if t.ended_at.is_none() => Some((idx, t)),
+                _ => None,
+            })
     }
 
     pub fn clear(&mut self) {
         self.items.clear();
+        self.wrap.truncate(0);
         self.open_assistant = None;
         self.scroll_offset = 0;
-        self.dirty = true;
     }
 
     /// Drop everything from the most recent user prompt onward. Returns
     /// the number of items removed.
     pub fn pop_last_user_exchange(&mut self) -> usize {
-        let mut idx = self.items.len();
-        while idx > 0 {
-            idx -= 1;
-            if let OutputItem::Text(line) = &self.items[idx]
-                && line
-                    .spans
-                    .first()
-                    .map(|s| s.content.starts_with("> "))
-                    .unwrap_or(false)
-            {
-                let removed = self.items.len() - idx;
-                self.items.truncate(idx);
-                self.open_assistant = None;
-                self.dirty = true;
-                return removed;
-            }
-        }
-        0
+        let Some(idx) = self.items.iter().rposition(|item| {
+            matches!(
+                item,
+                OutputItem::Text(line)
+                    if line.spans.first().is_some_and(|s| s.content.starts_with("> "))
+            )
+        }) else {
+            return 0;
+        };
+        let removed = self.items.len() - idx;
+        self.items.truncate(idx);
+        self.wrap.truncate(idx);
+        self.open_assistant = None;
+        removed
     }
 
     pub fn scroll_page_up(&mut self, viewport_height: u16) {
-        let step = (viewport_height / 2).max(1);
+        let step = usize::from((viewport_height / 2).max(1));
         self.scroll_offset = self.scroll_offset.saturating_add(step);
     }
 
     pub fn scroll_page_down(&mut self, viewport_height: u16) {
-        let step = (viewport_height / 2).max(1);
+        let step = usize::from((viewport_height / 2).max(1));
         self.scroll_offset = self.scroll_offset.saturating_sub(step);
     }
 
     pub fn scroll_lines_up(&mut self, lines: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_add(lines.max(1));
+        self.scroll_offset = self.scroll_offset.saturating_add(usize::from(lines.max(1)));
     }
 
     pub fn scroll_lines_down(&mut self, lines: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines.max(1));
+        self.scroll_offset = self.scroll_offset.saturating_sub(usize::from(lines.max(1)));
     }
 
     pub fn reset_scroll(&mut self) {
@@ -324,77 +312,26 @@ impl OutputPane {
     }
 
     /// Offset in wrapped lines; 0 is pinned to the bottom.
-    pub fn scroll_offset(&self) -> u16 {
+    pub fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
 
-    /// The wrapped lines and the index of the first one in the viewport.
-    /// Clamps the scroll offset to the wrapped total.
-    pub fn render_view(&mut self, width: u16, height: u16) -> (&[Line<'static>], u16) {
-        let wrapped_len = self.wrapped(width).len();
-        let max_offset = wrapped_len.saturating_sub(height as usize) as u16;
-        if self.scroll_offset > max_offset {
-            self.scroll_offset = max_offset;
-        }
-        let start = wrapped_len
-            .saturating_sub(height as usize)
-            .saturating_sub(self.scroll_offset as usize) as u16;
-        let lines = &self
-            .wrap_cache
-            .as_ref()
-            .expect("wrap_cache populated by self.wrapped() above")
-            .1;
-        (lines, start)
+    /// The wrapped lines inside a `height`-row viewport and the index of
+    /// the first of them in the whole wrapped transcript. Clamps the
+    /// scroll offset to the wrapped total.
+    pub fn render_view(&mut self, width: u16, height: u16) -> (&[Line<'static>], usize) {
+        self.sync_wrap(width);
+        let lines = &self.wrap.lines;
+        let height = usize::from(height);
+        let max_offset = lines.len().saturating_sub(height);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+        let start = max_offset - self.scroll_offset;
+        let end = lines.len().min(start + height);
+        (&lines[start..end], start)
     }
 
-    fn wrapped(&mut self, width: u16) -> &[Line<'static>] {
-        let needs_rewrap = self.dirty
-            || self
-                .wrap_cache
-                .as_ref()
-                .map(|(w, _)| *w != width)
-                .unwrap_or(true);
-        if needs_rewrap {
-            let wrapped = self.rewrap(width);
-            self.wrap_cache = Some((width, wrapped));
-            self.dirty = false;
-        }
-        &self
-            .wrap_cache
-            .as_ref()
-            .expect("wrap_cache populated by branch above")
-            .1
-    }
-
-    fn rewrap(&self, width: u16) -> Vec<Line<'static>> {
-        if width == 0 {
-            return self
-                .items
-                .iter()
-                .map(|it| match it {
-                    OutputItem::Text(l) => l.clone(),
-                    OutputItem::Tool(b) => {
-                        single_span_line(format!("$ {}", b.command), tool_call_style())
-                    }
-                    OutputItem::Thumbnail(t) => {
-                        single_span_line(format!("📎 {}", t.name), info_style())
-                    }
-                    OutputItem::Thinking(t) => {
-                        single_span_line(thinking_header_text(t), thinking_header_style())
-                    }
-                })
-                .collect();
-        }
-        let mut out = Vec::with_capacity(self.items.len() * 2);
-        for item in &self.items {
-            match item {
-                OutputItem::Text(line) => wrap_line_into(&mut out, line, width),
-                OutputItem::Tool(b) => render_tool_block(&mut out, b, width, self.verbose),
-                OutputItem::Thumbnail(t) => render_thumbnail_placeholder(&mut out, t),
-                OutputItem::Thinking(t) => render_thinking_block(&mut out, t, width, self.verbose),
-            }
-        }
-        out
+    fn sync_wrap(&mut self, width: u16) {
+        self.wrap.sync(&self.items, width, self.verbose);
     }
 
     fn close_open_assistant(&mut self) {
@@ -405,10 +342,10 @@ impl OutputPane {
             );
             if empty && idx + 1 == self.items.len() {
                 self.items.pop();
+                self.wrap.truncate(idx);
             } else {
                 self.items.push(OutputItem::Text(Line::from("")));
             }
-            self.dirty = true;
         }
     }
 
@@ -427,31 +364,24 @@ impl OutputPane {
                 name,
                 protocol,
             })));
-        self.dirty = true;
     }
 
-    /// Where each thumbnail sits in the wrapped output.
+    /// Where each thumbnail's reserved rows sit in the wrapped output that
+    /// [`Self::render_view`] returns for the same `width`.
     pub fn thumbnail_layout(&mut self, width: u16) -> Vec<ThumbnailSlot> {
-        let _ = self.wrapped(width);
-        let mut slots = Vec::new();
-        let mut row: usize = 0;
-        for (idx, item) in self.items.iter().enumerate() {
-            let height = match item {
-                OutputItem::Text(line) => wrapped_text_rows(line, width),
-                OutputItem::Tool(b) => wrapped_tool_rows(b, width, self.verbose),
-                OutputItem::Thumbnail(_) => THUMBNAIL_ROWS as usize,
-                OutputItem::Thinking(t) => wrapped_thinking_rows(t, width, self.verbose),
-            };
-            if matches!(item, OutputItem::Thumbnail(_)) {
-                slots.push(ThumbnailSlot {
-                    item_idx: idx,
-                    start_row: row,
-                    height,
-                });
-            }
-            row += height;
-        }
-        slots
+        self.sync_wrap(width);
+        self.wrap
+            .thumbnails
+            .iter()
+            .map(|&item_idx| {
+                let rows = self.wrap.rows(item_idx);
+                ThumbnailSlot {
+                    item_idx,
+                    start_row: rows.start,
+                    height: rows.len(),
+                }
+            })
+            .collect()
     }
 
     /// `None` when the item at `idx` is not a thumbnail.
@@ -471,64 +401,102 @@ pub struct ThumbnailSlot {
     pub height: usize,
 }
 
+/// Wrapped rows of the leading `starts.len()` items, valid for one
+/// `(width, verbose)` key. Every item mutated in place must be passed to
+/// [`Self::invalidate`] and every removal to [`Self::truncate`]; items
+/// appended past the cached prefix are picked up by [`Self::sync`].
+#[derive(Default)]
+struct WrapCache {
+    key: Option<(u16, bool)>,
+    lines: Vec<Line<'static>>,
+    /// First row of each cached item; an item ends where the next starts.
+    starts: Vec<usize>,
+    /// Indices of cached thumbnail items, ascending.
+    thumbnails: Vec<usize>,
+    /// Cached items whose rows must be re-rendered.
+    stale: Vec<usize>,
+}
+
+impl WrapCache {
+    fn invalidate(&mut self, idx: usize) {
+        if idx < self.starts.len() {
+            self.stale.push(idx);
+        }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        if let Some(&start) = self.starts.get(len) {
+            self.lines.truncate(start);
+            self.starts.truncate(len);
+            self.thumbnails.retain(|&i| i < len);
+            self.stale.retain(|&i| i < len);
+        }
+    }
+
+    fn rows(&self, idx: usize) -> Range<usize> {
+        let end = self
+            .starts
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(self.lines.len());
+        self.starts[idx]..end
+    }
+
+    fn sync(&mut self, items: &[OutputItem], width: u16, verbose: bool) {
+        if self.key != Some((width, verbose)) {
+            self.key = Some((width, verbose));
+            self.truncate(0);
+        }
+        self.stale.sort_unstable();
+        self.stale.dedup();
+        let mut fresh = Vec::new();
+        for idx in std::mem::take(&mut self.stale) {
+            render_item(&mut fresh, &items[idx], width, verbose);
+            let rows = self.rows(idx);
+            let (old_len, new_len) = (rows.len(), fresh.len());
+            self.lines.splice(rows, fresh.drain(..));
+            if new_len != old_len {
+                for start in &mut self.starts[idx + 1..] {
+                    *start = *start - old_len + new_len;
+                }
+            }
+        }
+        for (idx, item) in items.iter().enumerate().skip(self.starts.len()) {
+            self.starts.push(self.lines.len());
+            if matches!(item, OutputItem::Thumbnail(_)) {
+                self.thumbnails.push(idx);
+            }
+            render_item(&mut self.lines, item, width, verbose);
+        }
+    }
+}
+
+/// A zero width renders one unwrapped line per item.
+fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verbose: bool) {
+    if width == 0 {
+        out.push(match item {
+            OutputItem::Text(l) => l.clone(),
+            OutputItem::Tool(b) => single_span_line(format!("$ {}", b.command), tool_call_style()),
+            OutputItem::Thumbnail(t) => single_span_line(format!("📎 {}", t.name), info_style()),
+            OutputItem::Thinking(t) => {
+                single_span_line(thinking_header_text(t), thinking_header_style())
+            }
+        });
+        return;
+    }
+    match item {
+        OutputItem::Text(line) => wrap_line_into(out, line, width),
+        OutputItem::Tool(b) => render_tool_block(out, b, width, verbose),
+        OutputItem::Thumbnail(t) => render_thumbnail_placeholder(out, t),
+        OutputItem::Thinking(t) => render_thinking_block(out, t, width, verbose),
+    }
+}
+
 fn render_thumbnail_placeholder(out: &mut Vec<Line<'static>>, t: &ThumbnailItem) {
     out.push(single_span_line(format!("📎 {}", t.name), info_style()));
     for _ in 1..THUMBNAIL_ROWS {
         out.push(Line::from(""));
     }
-}
-
-fn wrapped_text_rows(line: &Line<'static>, width: u16) -> usize {
-    if width == 0 {
-        return 1;
-    }
-    let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    if content.is_empty() {
-        return 1;
-    }
-    let n = textwrap::wrap(&content, width as usize).len();
-    n.max(1)
-}
-
-fn wrapped_thinking_rows(t: &ThinkingBlock, width: u16, verbose: bool) -> usize {
-    if width == 0 {
-        return 1;
-    }
-    let inner_w = width.saturating_sub(2).max(1) as usize;
-    let header = 1;
-    let separator = 1;
-    let show_body = (t.expanded || verbose) && !t.text.is_empty();
-    let body: usize = if show_body {
-        t.text
-            .lines()
-            .map(|line| textwrap::wrap(line, inner_w).len().max(1))
-            .sum()
-    } else {
-        0
-    };
-    header + body + separator
-}
-
-fn wrapped_tool_rows(b: &ToolBlock, width: u16, verbose: bool) -> usize {
-    if width == 0 {
-        return 1;
-    }
-    let inner_w = width.saturating_sub(2).max(1) as usize;
-    let mut rows: usize = 0;
-    rows += textwrap::wrap(&format!("$ {}", b.command), inner_w)
-        .len()
-        .max(1);
-    let body_lines = split_body(&b.output);
-    let collapsed = !verbose && !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
-    let visible_idxs = visible_body_indices(&body_lines, collapsed);
-    for i in &visible_idxs {
-        let n = textwrap::wrap(&body_lines[*i], inner_w).len().max(1);
-        rows += n;
-    }
-    if collapsed && body_lines.len() > visible_idxs.len() {
-        rows += 1;
-    }
-    rows + 2
 }
 
 fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16) {

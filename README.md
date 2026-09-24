@@ -42,9 +42,9 @@ guides after this.
 
 ### Prerequisites
 
-- Rust toolchain. The version is pinned via `rust-toolchain.toml`
-  (currently `≥ 1.85`); rustup installs it automatically on first
-  build.
+- Rust toolchain, stable channel (selected by `rust-toolchain.toml`;
+  rustup installs it automatically on first build). The minimum
+  supported version is 1.92, declared as `rust-version` in `Cargo.toml`.
 - `llama-server` from `llama.cpp` on your `$PATH`. Verify with
   `which llama-server`. If it isn't installed, follow the upstream
   build instructions; the daemon will spawn it as a child process.

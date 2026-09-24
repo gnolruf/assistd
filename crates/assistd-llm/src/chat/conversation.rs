@@ -69,12 +69,40 @@ pub struct ToolCallRecord {
     pub arguments: String,
 }
 
+/// An image held as the `data:` URI it goes out as. Encoding happens
+/// once, when the image enters the conversation, rather than on every
+/// request that replays it; the raw bytes are dropped at that point.
+#[derive(Debug, Clone)]
+pub struct ImageDataUri(String);
+
+impl ImageDataUri {
+    fn encode(attachment: Attachment) -> Self {
+        match attachment {
+            Attachment::Image { mime, bytes } => {
+                let mut uri = String::with_capacity(
+                    "data:;base64,".len() + mime.len() + bytes.len().div_ceil(3) * 4,
+                );
+                uri.push_str("data:");
+                uri.push_str(&mime);
+                uri.push_str(";base64,");
+                B64.encode_string(bytes, &mut uri);
+                Self(uri)
+            }
+        }
+    }
+
+    /// The URI text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// One turn in the in-memory conversation, owned by [`Conversation`].
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
     pub content: String,
-    pub attachments: Vec<Attachment>,
+    pub attachments: Vec<ImageDataUri>,
     /// Non-empty only on assistant messages that requested tool calls.
     pub tool_calls: Vec<ToolCallRecord>,
     /// Set only on [`Role::Tool`] messages: the id of the assistant tool
@@ -161,6 +189,7 @@ impl Conversation {
         self.transient_note.take()
     }
 
+    /// The context block waiting for the next user turn, if any.
     #[cfg(test)]
     pub fn pending_context(&self) -> Option<&str> {
         self.pending_context.as_deref()
@@ -179,7 +208,7 @@ impl Conversation {
         self.messages.push(Message {
             role: Role::User,
             content,
-            attachments,
+            attachments: encode_all(attachments),
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: String::new(),
@@ -199,7 +228,7 @@ impl Conversation {
         self.messages.push(Message {
             role: Role::User,
             content: format!("{TOOL_RESULT_PREFIX}{name}]\n{content}"),
-            attachments,
+            attachments: encode_all(attachments),
             tool_calls: Vec::new(),
             tool_call_id: None,
             reasoning: String::new(),
@@ -359,9 +388,6 @@ impl Conversation {
         }
         for message in &self.messages[turns_start..] {
             if !message.tool_calls.is_empty() {
-                // Narration-free tool calls omit `content` entirely: the
-                // OpenAI spec allows null/absent and some chat templates
-                // require absent rather than empty.
                 let specs: Vec<wire::ToolCallSpec<'_>> = message
                     .tool_calls
                     .iter()
@@ -396,16 +422,21 @@ impl Conversation {
                 continue;
             }
             let text = wire_text(message);
-            let content = if message.attachments.is_empty() {
-                wire::ContentBody::Text(text)
-            } else {
-                let mut parts = Vec::with_capacity(message.attachments.len() + 1);
-                parts.push(wire::ContentPart::Text { text });
-                for attachment in &message.attachments {
-                    parts.push(attachment_to_part(attachment));
-                }
-                wire::ContentBody::Parts(parts)
-            };
+            let content =
+                if message.attachments.is_empty() {
+                    wire::ContentBody::Text(text)
+                } else {
+                    let mut parts = Vec::with_capacity(message.attachments.len() + 1);
+                    parts.push(wire::ContentPart::Text { text });
+                    parts.extend(message.attachments.iter().map(|image| {
+                        wire::ContentPart::ImageUrl {
+                            image_url: wire::ImageUrl {
+                                url: image.as_str(),
+                            },
+                        }
+                    }));
+                    wire::ContentBody::Parts(parts)
+                };
             out.push(wire::ChatMessage {
                 role: message.role.as_wire(),
                 content: Some(content),
@@ -427,8 +458,9 @@ impl Conversation {
     }
 
     /// Keep the approximate token total under budget, summarizing the
-    /// oldest turns if needed. On summarizer failure the caller falls
-    /// back to [`Self::truncate_to_budget`].
+    /// oldest turns if needed. Returns an error, with history unchanged,
+    /// if the summarizer fails or returns empty text;
+    /// [`Self::truncate_to_budget`] is the infallible fallback.
     pub async fn ensure_budget(
         &mut self,
         summarizer: &dyn Summarizer,
@@ -504,12 +536,10 @@ impl Conversation {
         Ok(())
     }
 
-    /// Infallible fallback: drop the oldest non-system, non-summary messages
-    /// repeatedly until we fit in budget (or we've reduced history to just
-    /// the latest user message). Tool-call/result pairs are dropped
-    /// atomically so the wire payload never carries an assistant
-    /// `tool_calls` without a matching result (or vice versa); most
-    /// server-side chat templates reject that.
+    /// Drop the oldest messages after any summary until the conversation
+    /// fits the budget or only the latest user turn remains. Tool-call and
+    /// result pairs are dropped together, because most chat templates
+    /// reject `tool_calls` without matching results (or vice versa).
     pub fn truncate_to_budget(&mut self, chat: &ChatConfig, model: &ModelConfig) {
         let budget = effective_budget(chat, model);
         while self.approx_total_tokens() > budget {
@@ -525,8 +555,7 @@ impl Conversation {
     }
 
     /// Remove `idx` and, when it is an assistant message with tool
-    /// calls, the tool results that follow it, so the wire payload never
-    /// carries `tool_calls` without their results. `first_droppable_index`
+    /// calls, the tool results that follow it. `first_droppable_index`
     /// always yields the assistant half first, so the reverse direction
     /// never needs handling.
     fn drop_with_pair(&mut self, idx: usize) {
@@ -597,10 +626,9 @@ impl Conversation {
                 }
             }
         }
-        // If the boundary landed on a tool-result user message, its
-        // preceding assistant-with-tool_calls would be orphaned on
-        // summarize. Walk back to include any matching assistant half,
-        // keeping the pair intact.
+        // A boundary on a tool result would orphan its assistant
+        // `tool_calls` half on summarize, so walk back to keep the pair
+        // intact.
         while idx > start
             && self
                 .messages
@@ -684,14 +712,8 @@ fn neutralise_context_markers(ctx: &str) -> Cow<'_, str> {
     )
 }
 
-fn attachment_to_part(att: &Attachment) -> wire::ContentPart<'_> {
-    match att {
-        Attachment::Image { mime, bytes } => wire::ContentPart::ImageUrl {
-            image_url: wire::ImageUrl {
-                url: format!("data:{};base64,{}", mime, B64.encode(bytes)),
-            },
-        },
-    }
+fn encode_all(attachments: Vec<Attachment>) -> Vec<ImageDataUri> {
+    attachments.into_iter().map(ImageDataUri::encode).collect()
 }
 
 fn effective_budget(chat: &ChatConfig, model: &ModelConfig) -> u32 {

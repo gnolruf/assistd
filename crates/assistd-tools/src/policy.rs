@@ -1,11 +1,5 @@
 //! Command-execution policy: confirmation gates, pattern matchers, and
 //! sandbox probing.
-//!
-//! The denylist and destructive-pattern checks are syntactic backstops
-//! for obvious dangerous invocations (`rm -rf /`, `mkfs`, …). A
-//! sufficiently clever script defeats them through variable expansion,
-//! here-docs, or command substitution, so they are not the real
-//! defense; the bwrap sandbox is.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -28,6 +22,11 @@ use crate::exec::POLICY_DENIED_EXIT;
 
 /// Policy for the commands that spawn subprocesses. Destructive
 /// patterns are pre-tokenized so no invocation re-parses them.
+///
+/// The denylist and destructive patterns are syntactic backstops for
+/// obviously dangerous invocations (`rm -rf /`, `mkfs`, …). Variable
+/// expansion, here-docs or command substitution defeat them, so they
+/// are not the real defense; the bwrap sandbox is.
 #[derive(Debug, Clone)]
 pub struct BashPolicyCfg {
     pub timeout: Duration,
@@ -56,9 +55,10 @@ pub(crate) struct SubprocessPolicy {
 
 impl SubprocessPolicy {
     /// Refuse `script` when it hits the denylist or when the gate
-    /// declines a destructive match. `tool` and `op` name the caller in
-    /// the error line; `destructive` is the caller's own match result,
-    /// since `bash` matches its script and `wm open` matches argv.
+    /// declines a destructive match. `tool` and `op` name the command and
+    /// operation in the error line. `destructive` is the destructive
+    /// pattern match, computed by the command because what it matches (a
+    /// script, an argv) differs per command.
     pub(crate) async fn authorize(
         &self,
         tool: &str,
@@ -134,7 +134,7 @@ pub trait ConfirmationGate: Send + Sync + 'static {
     /// Ask for confirmation. `true` = proceed, `false` = cancel.
     ///
     /// Implementations must convert *every* failure mode (channel drop, UI
-    /// shutdown, timeout) into `false` so the agent loop never hangs.
+    /// shutdown, timeout) into `false` so a turn never hangs.
     async fn confirm(&self, req: ConfirmationRequest) -> bool;
 }
 
@@ -304,8 +304,8 @@ impl ConfirmRouter {
         Ok(())
     }
 
-    /// Deny every prompt in flight and every later ask. Called once the
-    /// client's write side is closed, since no answer can follow.
+    /// Deny every prompt in flight and every later ask, for when the
+    /// client can no longer answer.
     pub fn close(&self) {
         let drained = {
             let mut pending = self.pending.lock();
@@ -331,8 +331,8 @@ tokio::task_local! {
 
 /// Wrap `fut` so it runs under the caller's [`CONFIRM_ROUTER`], if one
 /// is in scope. Task-locals do not survive `tokio::spawn`; call this at
-/// the spawn site so the spawned agent turn can still reach the
-/// connection that asked for it.
+/// the spawn site so the spawned task can still reach the connection
+/// that asked for it.
 pub fn inherit_confirm_router<F: Future>(fut: F) -> impl Future<Output = F::Output> {
     let router = CONFIRM_ROUTER.try_with(Arc::clone).ok();
     async move {
@@ -366,12 +366,9 @@ impl ConfirmationGate for IpcConfirmationGate {
     }
 }
 
-/// Case-insensitive literal-substring search over a bash script. Returns
-/// the *first* matching pattern so the caller can surface it to the user
-/// verbatim (per the denylist error-message contract).
-///
-/// Patterns are compared as lowercase; empty patterns are ignored (they
-/// would match every script).
+/// Case-insensitive literal-substring search over a bash script,
+/// returning the first matching pattern. Empty patterns are ignored
+/// (they would match every script).
 pub fn matches_denylist<'a>(script: &str, patterns: &'a [String]) -> Option<&'a str> {
     let haystack = script.to_ascii_lowercase();
     patterns.iter().find_map(|p| {
@@ -512,8 +509,7 @@ pub enum SandboxRequest {
     None,
 }
 
-/// Resolved sandbox state, cached in an `Arc<SandboxInfo>` and shared across
-/// every bash invocation so we pay the probe cost once.
+/// How subprocesses are wrapped, as resolved once by [`probe_sandbox`].
 #[derive(Debug, Clone)]
 pub enum ResolvedSandboxMode {
     /// No wrapping; bash is spawned directly.
@@ -536,11 +532,11 @@ pub struct SandboxInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxAccess {
     /// The default profile. `/run` is a fresh tmpfs, so the compositor
-    /// and D-Bus session sockets are unreachable. Used by `bash`.
+    /// and D-Bus session sockets are unreachable.
     Default,
     /// Additionally bind `$XDG_RUNTIME_DIR` back over the `/run` tmpfs.
-    /// Used by `wm open`, which launches GUI applications: without the
-    /// Wayland and D-Bus sockets they fail to start at all.
+    /// GUI applications need this: without the Wayland and D-Bus sockets
+    /// they fail to start at all.
     Session,
 }
 
@@ -736,7 +732,6 @@ fn probe_sandbox_with_path(
     Ok(Arc::new(SandboxInfo { mode, extra_args }))
 }
 
-/// Minimal `which` over an explicit PATH value.
 fn find_executable(name: &str, path_env: &std::ffi::OsStr) -> Option<PathBuf> {
     for dir in std::env::split_paths(path_env) {
         if dir.as_os_str().is_empty() {

@@ -1,22 +1,26 @@
 //! HTTP control plane for llama.cpp's router-mode server: `POST
 //! /models/load` and `POST /models/unload` attach and detach model
-//! weights without restarting the process. The server is assumed to be
-//! listening already; [`super::LlamaService`] supervises the process.
+//! weights without restarting the process, and `GET /props` reports
+//! what is loaded. The server is assumed to be listening already;
+//! [`super::LlamaService`] supervises the process.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tracing::debug;
 
 use super::error::LlamaServerError;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+const PROPS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// HTTP client for the model-management endpoints on llama-server.
 /// Stateless apart from the connection pool, so it survives restarts of
 /// the server behind its fixed base URL.
 pub struct LlamaServerControl {
     client: reqwest::Client,
+    host: String,
     base_url: String,
 }
 
@@ -29,8 +33,22 @@ impl LlamaServerControl {
             .build()?;
         Ok(Self {
             client,
+            host: host.to_string(),
             base_url: format!("http://{host}:{port}"),
         })
+    }
+
+    /// `GET /props` on the server, bounded by a short timeout because
+    /// it is a capability probe rather than a model operation.
+    pub async fn props(&self) -> Result<Value, LlamaServerError> {
+        self.fetch_props(&self.base_url).await
+    }
+
+    /// `GET /props` on the router child listening on `port` of the same
+    /// host, under the same timeout as [`Self::props`].
+    pub async fn child_props(&self, port: u16) -> Result<Value, LlamaServerError> {
+        self.fetch_props(&format!("http://{}:{port}", self.host))
+            .await
     }
 
     /// Ask the server to load `model`. Returns once the request is
@@ -90,6 +108,20 @@ impl LlamaServerControl {
         let status = resp.status();
         if !status.is_success() {
             return Err(control_http_error("GET", "/models", status));
+        }
+        Ok(resp.json().await?)
+    }
+
+    async fn fetch_props(&self, base_url: &str) -> Result<Value, LlamaServerError> {
+        let resp = self
+            .client
+            .get(format!("{base_url}/props"))
+            .timeout(PROPS_TIMEOUT)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(control_http_error("GET", "/props", status));
         }
         Ok(resp.json().await?)
     }

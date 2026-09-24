@@ -3,6 +3,7 @@ name = "assistd-wm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [features]
 default = ["i3", "sway"]
@@ -19,7 +20,7 @@ swayipc-async = { workspace = true, optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 
 [lints]
 workspace = true

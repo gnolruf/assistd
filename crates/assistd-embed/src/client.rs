@@ -10,7 +10,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
-    input: &'a str,
+    input: &'a [&'a str],
     model: &'a str,
 }
 
@@ -21,6 +21,7 @@ struct EmbedResponse {
 
 #[derive(Deserialize)]
 struct EmbedDatum {
+    index: usize,
     embedding: Vec<f32>,
 }
 
@@ -34,7 +35,8 @@ pub struct LlamaEmbedder {
 
 impl LlamaEmbedder {
     /// Probe the server once to learn the vector dimension.
-    /// `request_timeout` applies to the probe and every `embed` call.
+    /// `request_timeout` applies to the probe and every embed request.
+    /// Errors if the probe fails or returns an empty vector.
     pub async fn new(
         host: &str,
         port: u16,
@@ -49,8 +51,10 @@ impl LlamaEmbedder {
             .map_err(EmbedError::Client)?;
         let base_url = format!("http://{host}:{port}");
 
-        let probe = embed_raw(&client, &base_url, &model, "x").await?;
-        let dim = probe.len();
+        let dim = embed_raw(&client, &base_url, &model, &["x"])
+            .await?
+            .first()
+            .map_or(0, Vec::len);
         if dim == 0 {
             return Err(EmbedError::DimProbeEmpty);
         }
@@ -73,14 +77,33 @@ impl LlamaEmbedder {
 #[async_trait]
 impl Embedder for LlamaEmbedder {
     async fn embed(&self, text: String) -> Result<Vec<f32>, EmbedError> {
-        let raw = embed_raw(&self.client, &self.base_url, &self.model, &text).await?;
-        if raw.len() != self.dim {
-            return Err(EmbedError::DimMismatch {
-                got: raw.len(),
-                expected: self.dim,
-            });
+        self.embed_batch(&[text.as_str()])
+            .await?
+            .pop()
+            .ok_or(EmbedError::CountMismatch {
+                got: 0,
+                expected: 1,
+            })
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(l2_normalize(raw))
+        embed_raw(&self.client, &self.base_url, &self.model, texts)
+            .await?
+            .into_iter()
+            .map(|raw| {
+                if raw.len() == self.dim {
+                    Ok(l2_normalize(raw))
+                } else {
+                    Err(EmbedError::DimMismatch {
+                        got: raw.len(),
+                        expected: self.dim,
+                    })
+                }
+            })
+            .collect()
     }
 
     fn model(&self) -> &str {
@@ -96,10 +119,10 @@ async fn embed_raw(
     client: &reqwest::Client,
     base_url: &str,
     model: &str,
-    text: &str,
-) -> Result<Vec<f32>, EmbedError> {
+    input: &[&str],
+) -> Result<Vec<Vec<f32>>, EmbedError> {
     let url = format!("{base_url}/v1/embeddings");
-    let body = EmbedRequest { input: text, model };
+    let body = EmbedRequest { input, model };
     let resp = client
         .post(&url)
         .json(&body)
@@ -115,8 +138,26 @@ async fn embed_raw(
         });
     }
     let parsed: EmbedResponse = resp.json().await.map_err(EmbedError::Decode)?;
-    let first = parsed.data.into_iter().next().ok_or(EmbedError::NoData)?;
-    Ok(first.embedding)
+    order_by_index(parsed.data, input.len())
+}
+
+/// Place each entry at its `index`; the server is free to return
+/// entries in any order.
+fn order_by_index(data: Vec<EmbedDatum>, expected: usize) -> Result<Vec<Vec<f32>>, EmbedError> {
+    if data.len() != expected {
+        return Err(EmbedError::CountMismatch {
+            got: data.len(),
+            expected,
+        });
+    }
+    let mut slots: Vec<Option<Vec<f32>>> = vec![None; expected];
+    for EmbedDatum { index, embedding } in data {
+        match slots.get_mut(index) {
+            Some(slot) if slot.is_none() => *slot = Some(embedding),
+            _ => return Err(EmbedError::BadIndex { index, expected }),
+        }
+    }
+    Ok(slots.into_iter().flatten().collect())
 }
 
 fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
@@ -136,35 +177,4 @@ fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn l2_normalize_scales_to_unit_length_and_passes_degenerate_input_through() {
-        let cases: [(&str, Vec<f32>, Vec<f32>); 5] = [
-            ("3-4-5", vec![3.0, 4.0], vec![0.6, 0.8]),
-            ("already unit", vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0]),
-            (
-                "f32::MAX components do not overflow",
-                vec![f32::MAX, f32::MAX],
-                vec![std::f32::consts::FRAC_1_SQRT_2; 2],
-            ),
-            ("zero vector", vec![0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0]),
-            (
-                "non-finite",
-                vec![f32::INFINITY, 1.0],
-                vec![f32::INFINITY, 1.0],
-            ),
-        ];
-        for (label, input, expected) in cases {
-            let got = l2_normalize(input);
-            assert_eq!(got.len(), expected.len(), "{label}");
-            for (g, e) in got.iter().zip(&expected) {
-                assert!(
-                    g == e || (g - e).abs() < 1e-6,
-                    "{label}: got {got:?}, expected {expected:?}"
-                );
-            }
-        }
-    }
-}
+mod tests;

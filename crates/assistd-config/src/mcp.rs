@@ -45,7 +45,6 @@ pub enum McpServerConfig {
         name: String,
         /// Command to spawn. A bare name is resolved via `$PATH`.
         command: PathBuf,
-        /// Arguments passed to the command.
         #[serde(default)]
         args: Vec<String>,
         /// Environment variables injected into the child process.

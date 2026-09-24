@@ -1,28 +1,12 @@
 //! Stateful classifier that separates `<think>...</think>` reasoning
 //! from visible content as `delta.content` chunks stream in.
-//!
-//! Some llama.cpp builds and some reasoning models (Qwen3, DeepSeek-R1)
-//! emit reasoning inline as raw `<think>...</think>` tags inside the
-//! `content` field rather than via the separated `reasoning_content`
-//! channel. We can't depend on operators flipping `--reasoning-format`
-//! on the server, so the SSE handler runs every `content` chunk through
-//! this splitter and forwards the resulting segments to the correct
-//! `LlmEvent` variant.
-//!
-//! The splitter tolerates tag splits across SSE chunks: an incoming
-//! `"<thi"` parks in `pending`, and the next chunk's `"nk>hello"`
-//! completes the tag and emits `Reasoning("hello")`.
-//!
-//! The recognised tags are ASCII-only (`<`, `/`, `t`, `h`, `i`, `n`,
-//! `k`, `>`), so byte-slice arithmetic on `pending` never lands inside
-//! a multibyte UTF-8 character.
 
 /// One classified slice emitted by [`ThinkSplitter::feed`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Segment {
-    /// Content that should reach the user as part of the reply.
+    /// Text outside any `<think>` block.
     Visible(String),
-    /// Content that should reach the user as part of a Thinking block.
+    /// Text inside a `<think>` block.
     Reasoning(String),
 }
 
@@ -39,8 +23,15 @@ const OPEN_TAG: &str = "<think>";
 const CLOSE_TAG: &str = "</think>";
 
 /// Stateful `<think>` / `</think>` tag tracker for streamed `content`
-/// chunks. Holds at most `CLOSE_TAG.len() - 1 == 7` bytes of partial
-/// trailing-tag prefix between calls.
+/// chunks. Some llama.cpp builds and reasoning models (Qwen3,
+/// DeepSeek-R1) emit reasoning inline in `content` rather than on the
+/// separate `reasoning_content` channel unless the server runs with
+/// `--reasoning-format`, which cannot be relied on.
+///
+/// A tag split across chunks (`"<thi"` then `"nk>hello"`) is held back
+/// until it completes; at most `CLOSE_TAG.len() - 1 == 7` bytes carry
+/// over between calls. The tags are ASCII, so byte offsets into the
+/// carried-over text never land inside a multibyte UTF-8 character.
 #[derive(Debug, Default)]
 pub struct ThinkSplitter {
     state: State,

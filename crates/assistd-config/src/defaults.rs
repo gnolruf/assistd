@@ -52,8 +52,6 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local deskto
      prefer calling a tool over guessing. Answer precisely and in a conversational tone.";
 
 pub const DEFAULT_VOICE_HOTKEY: &str = "Super+Space";
-/// Push-to-talk recording cap in seconds; a longer hold keeps the first
-/// N seconds.
 pub const DEFAULT_VOICE_MAX_RECORDING_SECS: NonZeroU32 = nz32(60);
 
 pub const DEFAULT_WHISPER_MODEL: &str = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin";
@@ -69,8 +67,6 @@ pub const DEFAULT_PIPER_VOICE: &str =
 pub const DEFAULT_PIPER_LENGTH_SCALE: f32 = 1.0;
 pub const DEFAULT_PIPER_DEADLINE_SECS: NonZeroU32 = nz32(30);
 pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: NonZeroU32 = nz32(400);
-/// Idle gap (ms) between LLM deltas after which the sentence buffer is
-/// spoken without a terminator. `0` disables the timeout flush.
 pub const DEFAULT_PIPER_PARTIAL_FLUSH_MS: u32 = 750;
 pub const DEFAULT_PIPER_TOGGLE_HOTKEY: &str = "";
 pub const DEFAULT_PIPER_SKIP_HOTKEY: &str = "";
@@ -105,9 +101,6 @@ pub const DEFAULT_BASH_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 pub const DEFAULT_MEMORY_ENABLED: bool = true;
 
 pub const DEFAULT_EMBEDDING_ENABLED: bool = true;
-/// The `:` suffix must be a quant tag, not a `.gguf` filename:
-/// llama-server resolves it against its preset manifest and a filename
-/// fails with a misleading "no GGUF files found".
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M";
 pub const DEFAULT_EMBEDDING_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_EMBEDDING_PORT: NonZeroU16 = nz16(8386);
@@ -119,9 +112,6 @@ pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 pub const DEFAULT_MCP_ENABLED: bool = false;
 pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 
-/// Popup geometry is in logical pixels; offsets are measured from the
-/// anchored corner, so a negative `offset_x` on a right-anchored popup
-/// moves it inward.
 pub const DEFAULT_TRAY_POPUP_ENABLED: bool = true;
 pub const DEFAULT_TRAY_POPUP_WIDTH: u32 = 360;
 pub const DEFAULT_TRAY_POPUP_HEIGHT: u32 = 120;

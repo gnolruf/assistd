@@ -29,9 +29,10 @@ pub struct ChatConfig {
     /// Maximum tokens the model may emit in a single streamed response.
     pub max_response_tokens: NonZeroU32,
     /// Deadline, in seconds, for a streamed chat call's first byte, which
-    /// covers prompt prefill. Once streaming starts, only
-    /// `timeouts.stream_inactivity_secs` applies, so generation length is
-    /// unbounded. Also caps the whole non-streaming summarization call.
+    /// covers prompt prefill. Once streaming starts, only the internal
+    /// (non-configurable) deadline between chunks applies, so generation
+    /// length is unbounded. Also caps the whole non-streaming
+    /// summarization call.
     pub request_timeout_secs: NonZeroU64,
     /// Sampling temperature for the (non-streaming) summarization call.
     /// Lower than `temperature` by default because summaries should be
@@ -44,8 +45,7 @@ pub struct ChatConfig {
     pub top_k: Option<NonZeroU32>,
     /// Min-p sampling cutoff in `0.0..=1.0`. `None` omits the field.
     pub min_p: Option<f32>,
-    /// Presence penalty in `-2.0..=2.0`. `None` omits the field. Qwen3 reasoning
-    /// variants recommend a small positive value (e.g. 1.5) to reduce repetition.
+    /// Presence penalty in `-2.0..=2.0`. `None` omits the field.
     pub presence_penalty: Option<f32>,
 }
 

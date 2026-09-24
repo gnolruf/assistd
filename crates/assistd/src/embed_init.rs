@@ -39,10 +39,10 @@ impl EmbeddingSubsystem {
         if let Some(h) = self.task_handle {
             let _ = h.await;
         }
-        if let Some(svc) = self.service_handle {
-            if let Err(e) = svc.shutdown().await {
-                tracing::warn!("embed-server shutdown error: {e:#}");
-            }
+        if let Some(svc) = self.service_handle
+            && let Err(e) = svc.shutdown().await
+        {
+            tracing::warn!("embed-server shutdown error: {e:#}");
         }
     }
 }

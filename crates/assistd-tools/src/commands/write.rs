@@ -57,7 +57,7 @@ impl WritePolicyCfg {
 ///   already has the content inline).
 ///
 /// If both args and stdin are provided, args win and stdin is silently
-/// discarded; callers who want stdin should avoid passing extra argv.
+/// discarded.
 ///
 /// # Policy
 ///
@@ -70,10 +70,12 @@ pub struct WriteCommand {
 }
 
 impl WriteCommand {
+    /// A `write` command confined to `cfg`'s allowlist.
     pub fn new(cfg: Arc<WritePolicyCfg>) -> Self {
         Self { cfg }
     }
 
+    /// A command whose allowlist is `/`, permitting any absolute path.
     #[cfg(test)]
     pub fn permissive_for_tests() -> Self {
         Self {

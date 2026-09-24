@@ -26,8 +26,13 @@ pub enum EmbedError {
     #[error("parse /v1/embeddings response body: {0}")]
     Decode(#[source] reqwest::Error),
 
-    #[error("embed response had no data entries")]
-    NoData,
+    /// The response did not hold exactly one `data` entry per input.
+    #[error("embed response had {got} data entries for {expected} inputs")]
+    CountMismatch { got: usize, expected: usize },
+
+    /// A response entry's `index` was out of range or repeated.
+    #[error("embed response entry index {index} is out of range or repeated for {expected} inputs")]
+    BadIndex { index: usize, expected: usize },
 
     #[error("embed server returned an empty vector during dim probe")]
     DimProbeEmpty,

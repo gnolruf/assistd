@@ -34,6 +34,8 @@ use uuid::Uuid;
 
 use self::app::{App, ChatEvent, WireStream};
 
+const CHAT_CHANNEL_CAPACITY: usize = 64;
+
 #[derive(Args)]
 pub struct ChatArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
@@ -119,7 +121,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let (resource_rx, resource_probe) = vram::spawn_probe(shutdown_tx.subscribe());
     let _resource_probe = AbortOnDropHandle::new(resource_probe);
 
-    let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(64);
+    let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(CHAT_CHANNEL_CAPACITY);
     let voice_pipeline = voice::spawn_pipeline(
         &config,
         ipc.clone(),
@@ -267,11 +269,33 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
                 break;
             }
         }
+        drain_queued(&mut app, &mut chat_rx, &mut resource_rx);
         terminal.draw(|f| ui::render(f, &mut app))?;
     }
 
     drop(terminal);
     Ok(())
+}
+
+/// Apply channel events that are already queued so a burst of deltas
+/// costs one frame. Bounded by the channel capacity so a producer that
+/// keeps pace cannot starve redraws. Terminal events are left to the
+/// select loop: polling `EventStream` outside it would drop its waker.
+fn drain_queued(
+    app: &mut App,
+    chat_rx: &mut mpsc::Receiver<ChatEvent>,
+    resource_rx: &mut watch::Receiver<vram::ResourceState>,
+) {
+    for _ in 0..CHAT_CHANNEL_CAPACITY {
+        let Ok(ev) = chat_rx.try_recv() else {
+            break;
+        };
+        app.on_chat_event(ev);
+    }
+    if resource_rx.has_changed().unwrap_or(false) {
+        let v = resource_rx.borrow_and_update().clone();
+        app.on_resources(v);
+    }
 }
 
 fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {

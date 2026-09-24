@@ -1,8 +1,5 @@
-//! [`PiperVoiceOutput`]: synthesis plus playback behind a circuit
-//! breaker. After `FAILURE_THRESHOLD` failures within `FAILURE_WINDOW`
-//! the service goes `Degraded` and drops utterances; once the window
-//! has elapsed since the last failure one utterance is let through
-//! and either re-arms the service or re-opens the breaker.
+//! [`PiperVoiceOutput`]: Piper synthesis plus rodio playback behind a
+//! circuit breaker.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -37,7 +34,10 @@ struct CircuitState {
 }
 
 /// [`VoiceOutput`] backed by per-utterance piper subprocesses and
-/// rodio playback.
+/// rodio playback. After three failures within a minute the service is
+/// degraded and `speak` drops utterances without error; once a minute
+/// has passed since the last failure, one utterance is let through and
+/// either re-arms the service or re-opens the breaker.
 pub struct PiperVoiceOutput {
     synth: Arc<OneShotSynth>,
     playback: Arc<RodioPlaybackWorker>,

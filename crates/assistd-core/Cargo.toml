@@ -3,6 +3,7 @@ name = "assistd-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [features]
 i3 = ["assistd-wm/i3"]
@@ -26,7 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 shlex = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "net", "signal"] }
 tokio-util = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }

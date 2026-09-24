@@ -17,10 +17,12 @@ use crate::{MemoryError, Result};
 pub struct SessionId(pub String);
 
 impl SessionId {
+    /// A fresh random (v4 UUID) session id.
     pub fn new() -> Self {
         Self(Uuid::new_v4().to_string())
     }
 
+    /// The id as a UUID string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -94,6 +96,7 @@ pub struct PersistedMessage {
 }
 
 impl PersistedMessage {
+    /// A user prompt.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: PersistedRole::User,
@@ -104,6 +107,7 @@ impl PersistedMessage {
         }
     }
 
+    /// An assistant reply with no tool calls.
     pub fn assistant_text(content: impl Into<String>) -> Self {
         Self {
             role: PersistedRole::Assistant,
@@ -126,6 +130,7 @@ impl PersistedMessage {
         }
     }
 
+    /// The output of tool call `call_id`, which invoked tool `name`.
     pub fn tool_result(
         content: impl Into<String>,
         call_id: impl Into<String>,
@@ -234,22 +239,23 @@ pub trait ConversationStore: Send + Sync + 'static {
     /// (newest first) then branch id.
     async fn list_branches(&self) -> Result<Vec<BranchInfo>>;
 
-    /// Look up a branch by name, optionally qualified by an 8-char
-    /// session id prefix. Returns the matching `(SessionId, BranchId)`
-    /// pair or `None` when no match exists. Ambiguous matches
-    /// (multiple branches with the same name across sessions) return
-    /// the first hit ordered by session.started_at DESC; callers can
-    /// detect ambiguity by passing the qualified form.
+    /// Look up a branch by `target`, either `name` or
+    /// `<session-id-prefix>/name`. A qualified target only matches
+    /// sessions whose id starts with the prefix. An unqualified target
+    /// prefers a branch in `prefer_session`. Remaining ambiguity
+    /// resolves to the most recently started session. `None` when
+    /// nothing matches.
     async fn resolve_branch(
         &self,
         target: &str,
         prefer_session: Option<&SessionId>,
     ) -> Result<Option<(SessionId, BranchId)>>;
 
-    /// Snapshot a branch by copying every `branch_messages` row from
-    /// `src` into a freshly-created branch named `new_name` with
-    /// `parent = src` and `fork_point_seq = max seq on src`. Returns
-    /// the new BranchId. Atomic in a single transaction.
+    /// Snapshot `src` into a new branch `new_name` in one transaction:
+    /// the new branch has `src` as parent, `fork_point_seq` set to the
+    /// highest seq on `src`, and references every message on `src`.
+    /// Errors if `src` doesn't exist or its session already has a
+    /// branch named `new_name`.
     async fn fork_branch(&self, src: BranchId, new_name: &str) -> Result<BranchId>;
 
     /// Every message on `branch`, ordered by branch-local seq.
@@ -265,8 +271,8 @@ pub trait ConversationStore: Send + Sync + 'static {
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome>;
 
     /// The most recent session with `ended_at IS NULL` and a current
-    /// branch, or `None`. The caller checks whether `daemon_pid` is
-    /// still alive before claiming it.
+    /// branch, or `None`. Whether its `daemon_pid` is still alive is
+    /// not checked.
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>>;
 
     /// Current `sessions.title`, or `None` when none has been set.
@@ -286,7 +292,7 @@ pub struct ResumeCandidate {
     pub started_at: String,
 }
 
-/// No-op fallback used when memory is disabled.
+/// No-op store: writes are discarded and reads find nothing.
 pub struct NoConversationStore;
 
 #[async_trait]
@@ -374,6 +380,7 @@ pub struct SqliteConversationStore {
 }
 
 impl SqliteConversationStore {
+    /// Store over the shared database handle.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }

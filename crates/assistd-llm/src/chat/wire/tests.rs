@@ -59,7 +59,7 @@ fn serializes_multimodal_content_as_parts_array() {
             },
             ContentPart::ImageUrl {
                 image_url: ImageUrl {
-                    url: "data:image/png;base64,AAAA".into(),
+                    url: "data:image/png;base64,AAAA",
                 },
             },
         ])),

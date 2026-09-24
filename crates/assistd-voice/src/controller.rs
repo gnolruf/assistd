@@ -27,6 +27,7 @@ pub enum SpeakDecision {
 }
 
 impl VoiceOutputController {
+    /// Wraps `inner`, muted unless `initially_enabled`, at epoch zero.
     pub fn new(inner: Arc<dyn VoiceOutput>, initially_enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             inner,
@@ -35,10 +36,13 @@ impl VoiceOutputController {
         })
     }
 
+    /// Whether speech is currently unmuted.
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
     }
 
+    /// The skip epoch a worker captures when it starts and later passes
+    /// to [`should_speak`](Self::should_speak).
     pub fn current_epoch(&self) -> u64 {
         self.skip_epoch.load(Ordering::SeqCst)
     }
@@ -76,6 +80,7 @@ impl VoiceOutputController {
         }
     }
 
+    /// The wrapped output.
     pub fn inner(&self) -> &Arc<dyn VoiceOutput> {
         &self.inner
     }

@@ -1,8 +1,5 @@
 //! End-to-end stdio-transport tests against the in-tree
 //! `fake_mcp_server` binary.
-//!
-//! Cargo sets `CARGO_BIN_EXE_<name>` for binaries declared in the same
-//! crate, which we use to locate the fixture without hardcoding paths.
 
 use std::time::Duration;
 
@@ -99,11 +96,6 @@ async fn dropping_handle_without_shutdown_aborts_supervisor() {
 
 #[tokio::test]
 async fn server_crash_short_circuits_subsequent_calls() {
-    // Spin up the fake server, take a successful `echo`, then call
-    // `crash_me` to simulate a transport death. After a brief grace
-    // period the supervisor should flip health off `Healthy`, and the
-    // health-routed wrapper around the echo tool should return the
-    // dispatch-shape error JSON instead of hanging on a dead transport.
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
         .await
@@ -161,11 +153,8 @@ async fn server_crash_short_circuits_subsequent_calls() {
 
 #[tokio::test]
 async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
-    // A stdio server can lose its read loop (over-long line, read
-    // error) while the process itself keeps running. The supervisor
-    // must treat that as death rather than leaving the server
-    // `Healthy` and every later call to time out against a socket
-    // nobody reads from.
+    // A lost read loop under a live child must count as death, or the
+    // server stays `Healthy` while every call times out.
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
         .await

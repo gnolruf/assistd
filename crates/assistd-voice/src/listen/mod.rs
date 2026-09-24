@@ -32,6 +32,7 @@ pub trait ContinuousListener: Send + Sync + 'static {
     /// Close the mic and drain any in-flight utterance. Idempotent.
     async fn stop(&self) -> Result<(), ListenError>;
 
+    /// Whether the listener is currently capturing.
     fn is_active(&self) -> bool;
 
     /// Completed transcripts. Slow consumers may miss older utterances.
@@ -55,6 +56,7 @@ impl Default for NoContinuousListener {
 }
 
 impl NoContinuousListener {
+    /// A placeholder that stays inactive.
     pub fn new() -> Self {
         let (state_tx, _) = watch::channel(false);
         let (utterances, _) = broadcast::channel(16);

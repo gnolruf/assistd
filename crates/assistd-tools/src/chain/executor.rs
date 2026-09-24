@@ -1,10 +1,6 @@
 //! Walks a [`super::Chain`] AST, dispatching each stage through a
 //! [`crate::CommandRegistry`] and gluing the results together according to
 //! Unix pipeline semantics.
-//!
-//! Pipelining is sequential: the left stage runs to completion and its
-//! stdout becomes the right stage's stdin. [`PIPE_BUF_MAX`] caps that
-//! buffer so a runaway stage can't exhaust daemon memory.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -13,17 +9,19 @@ use super::expand::expand_args;
 use super::{Chain, Word};
 use crate::command::{CommandInput, CommandOutput, CommandRegistry, Hint, error_line};
 
-/// Maximum bytes buffered between pipe stages. Overflow exits 141, the
-/// SIGPIPE code, so `||` fallbacks still fire.
+/// Maximum bytes buffered between pipe stages, so a runaway stage can't
+/// exhaust daemon memory. Overflow exits 141, the SIGPIPE code, so `||`
+/// fallbacks still fire.
 pub const PIPE_BUF_MAX: usize = 10 * 1024 * 1024;
 
 /// Execute a parsed command chain.
 ///
-/// The returned `CommandOutput`'s `stderr` is the concatenation of every
-/// stage's stderr, with each command's output prefixed `"[name]\t"` so
-/// the caller can tell which stage spoke. Short-circuited branches
-/// (right side of `&&` on failure, right side of `||` on success) emit
-/// nothing.
+/// Pipelining is sequential: the left stage runs to completion and its
+/// stdout, capped at [`PIPE_BUF_MAX`], becomes the right stage's stdin.
+/// The returned `stderr` is the concatenation of every stage's stderr,
+/// each line prefixed `"[name]\t"` with the stage that wrote it.
+/// Short-circuited branches (right side of `&&` on failure, right side
+/// of `||` on success) emit nothing.
 pub fn execute<'a>(
     chain: &'a Chain,
     registry: &'a CommandRegistry,

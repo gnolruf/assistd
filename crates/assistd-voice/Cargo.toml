@@ -3,6 +3,7 @@ name = "assistd-voice"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [features]
 default = ["whisper", "mic", "listen", "tts"]
@@ -42,16 +43,16 @@ assistd-ipc = { workspace = true, features = ["client"] }
 assistd-config = { workspace = true }
 parking_lot = { workspace = true }
 
-whisper-rs = { version = "0.16", optional = true, default-features = false, features = ["tracing_backend"] }
+whisper-rs = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["stream"] }
 nvml-wrapper = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
-cpal = { version = "0.18.1", optional = true }
-ringbuf = { version = "0.5", optional = true }
-rubato = { version = "5.0", optional = true }
+cpal = { workspace = true, optional = true }
+ringbuf = { workspace = true, optional = true }
+rubato = { workspace = true, optional = true }
 
-webrtc-vad = { version = "0.4", optional = true }
+webrtc-vad = { workspace = true, optional = true }
 
 rodio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
@@ -65,7 +66,7 @@ clap = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
-hound = "3.5"
+hound = { workspace = true }
 
 [lints]
 workspace = true

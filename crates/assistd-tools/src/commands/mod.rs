@@ -103,8 +103,7 @@ async fn open_regular(path: &Path) -> std::io::Result<(tokio::fs::File, u64)> {
 /// are refused here for the reason `cat` refuses them: their bytes would
 /// land in the model's context window.
 ///
-/// `Ok(None)` means neither a file nor stdin was supplied, which every
-/// caller answers with its own usage text.
+/// `Ok(None)` means neither a file nor stdin was supplied.
 pub(crate) async fn collect_input(
     cmd: &str,
     files: &[String],

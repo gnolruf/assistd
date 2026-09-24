@@ -1,7 +1,7 @@
 # Architecture
 
-`assistd` is a Rust workspace split into eleven crates plus a thin
-binary. This page maps the crates, the external processes the daemon
+`assistd` is a Rust workspace split into ten library crates plus a
+thin binary. This page maps the crates, the external processes the daemon
 supervises, and the path a user query takes from keypress to spoken
 reply. Read it once before contributing; the rest of `docs/` assumes
 the vocabulary established here.
@@ -22,21 +22,22 @@ the vocabulary established here.
 ┌─────────────────────────────────────────────────────────────────────┐
 │  assistd  (binary; `daemon` subcommand)                             │
 │  CLI parsing, subsystem init, lifecycle                             │
-└────────────────┬────────────────────────────────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  assistd-core                                                       │
-│  AppState  ·  Agent (per-turn loop)  ·  socket server  ·  presence  │
-└──┬───────────┬─────────────┬──────────────┬─────────────┬───────────┘
-   │           │             │              │             │
-   ▼           ▼             ▼              ▼             ▼
-┌──────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐
-│ llm  │  │  tools   │  │  voice   │  │   mcp    │  │   wm    │
-│      │  │          │  │          │  │          │  │         │
-│chat  │  │ run +    │  │ Whisper  │  │ stdio    │  │ i3 IPC  │
-│loop  │  │ commands │  │ + Piper  │  │ + SSE    │  │ + Sway  │
-└──┬───┘  └─┬────┬───┘  └────┬─────┘  └────┬─────┘  └────┬────┘
+└────────────────┬─────────────────────────────────────────┬──────────┘
+                 │                                         │
+                 ▼                                         │
+┌───────────────────────────────────────────────────┐      │
+│  assistd-core                                     │      │
+│  AppState · Agent (per-turn loop) · socket server │      │
+│  · presence                                       │      │
+└──┬───────────┬─────────────┬──────────────┬───────┘      │
+   │           │             │              │              │
+   ▼           ▼             ▼              ▼              ▼
+┌──────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│ llm  │  │  tools   │  │  voice   │  │    wm    │  │   mcp    │
+│      │  │          │  │          │  │          │  │          │
+│chat  │  │ run +    │  │ Whisper  │  │ i3 IPC   │  │ stdio    │
+│loop  │  │ commands │  │ + Piper  │  │ + Sway   │  │ + SSE    │
+└──┬───┘  └─┬────┬───┘  └────┬─────┘  └────┬─────┘  └────┬─────┘
    │        │    │           │             │             │
    │        │    └────► ipc (wire types, shared by clients + daemon)
    │        │
@@ -46,7 +47,7 @@ the vocabulary established here.
    │   │ SQLite  │    │ HTTP cli │
    │   └─────────┘    └─────┬────┘
    │                        │
-   │   config (TOML schema, consumed by every crate above)
+   │   config (TOML schema, consumed by most crates above)
    │                        │
    ▼                        ▼
 ┌──────────────┐   ┌────────────────┐    External processes
@@ -68,20 +69,20 @@ the vocabulary established here.
 
 | Crate            | Purpose                                                                                              | Depends on                                                                       |
 |------------------|------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
-| `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring.                                                | every `assistd-*` crate (daemon feature)                                         |
+| `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | `ipc` always; every other `assistd-*` crate via the `daemon` feature             |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable.                    | none                                                                             |
-| `assistd-core`   | Daemon glue. `AppState`, agent loop, presence machine, socket server, `build_tools()` factory.       | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `mcp`, `voice`, `wm`         |
+| `assistd-core`   | Daemon glue. `AppState`, agent loop, presence machine, socket server, `build_tools()` factory.       | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `voice`, `wm`                |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store.                                        | `config`, `memory`                                                               |
 | `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | none (intentionally minimal so client-only builds stay small)                    |
-| `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + child-process supervisor.        | `config`, `tools`                                                                |
+| `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + child-process supervisor.        | `config`, `ipc`, `tools`                                                         |
 | `assistd-mcp`    | MCP client (stdio + SSE) and adapter that exposes discovered MCP tools through the `Tool` trait.     | `tools`                                                                          |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `ConversationStore`, `SemanticStore`.                | none                                                                             |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`                                         |
-| `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + adaptive `SpeakDecision`. | `config`, `ipc`                                                                  |
+| `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`                                                                  |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | none                                                                             |
 
-`config` and `ipc` sit at the bottom because everything depends on
-them. `core` sits at the top because it's where every subsystem is
+`config` and `ipc` sit at the bottom: they have no internal
+dependencies, and most other crates build on them. `core` sits at the top because it's where every subsystem is
 wired into a working daemon. The binary itself is intentionally thin:
 parse argv, load config, build `AppState`, hand off.
 
@@ -94,9 +95,12 @@ client (via the [`ksni`](https://crates.io/crates/ksni) crate): it
 holds a passive `Request::Subscribe` connection, translates the
 broadcast events into icon state (config error → disconnected →
 generating → listening → presence), and provides a Sleep / Wake menu that issues
-`Request::SetPresence` on isolated one-shot connections. Like every
-other client it depends only on `assistd-ipc` + `assistd-config`, so
-client-only builds stay daemon-free.
+`Request::SetPresence` on isolated one-shot connections. The `tray`
+feature itself pulls in only `assistd-ipc` + `assistd-config`; the
+optional `tray-popup` feature adds `assistd-wm`, `eframe` and `winit`
+for the floating reply popup. The `chat` feature, by contrast, enables
+the whole `daemon` feature on purpose: when no daemon is listening, the
+TUI starts one by re-executing its own binary as `assistd daemon`.
 
 ## Subsystem walk-throughs
 
@@ -118,9 +122,11 @@ Vision support is detected dynamically: `probe_capabilities_routed()` calls
 `GET /props` on the running server to learn whether the model has a
 vision projector. The `VisionGate` flips on if so, allowing the `see`
 and `screenshot` commands to attach images to the next turn. A
-`VisionRevalidator` re-probes at the top of every query so a model
-swap (e.g., switching presets via the config and reloading) is
-picked up without a daemon restart.
+`VisionRevalidator` re-probes at the start of the first query after
+the weights may have been reloaded (any presence transition, or a
+supervisor restart of the child), and again after any failed probe,
+so the gate tracks what is actually loaded without probing on every
+query.
 
 ### Agent loop (`assistd-core::Agent`)
 
@@ -178,8 +184,8 @@ spawns model-chosen argv and so shares that same `[tools.bash]` policy,
 widened only by a bind of `$XDG_RUNTIME_DIR` so a launched GUI
 application can reach the compositor, and left running once it survives
 a startup probe; `write` restricts targets to a
-configured allowlist; `see` and `screenshot` no-op when the loaded
-model has no vision projector.
+configured allowlist; `see` and `screenshot` refuse with an error
+when the loaded model has no vision projector.
 
 ### Memory (`assistd-memory` + `assistd-embed`)
 
@@ -188,14 +194,15 @@ holds three schemas: a key/value `MemoryStore` for durable facts, a
 `ConversationStore` for full per-session transcripts (with branching
 + undo), and a `SemanticStore` for embedding-indexed chunks.
 
-The `remember` tool writes to all three: it inserts the K/V row,
-records the turn, and queues an embedding job on a `tokio::sync::mpsc`
-channel. A background task drains the queue, sends batches to the
-embedding server (a second, smaller llama-server child process
-configured under `[embedding]`), and inserts the resulting vectors
-into the semantic store. The `recall` tool runs a cosine-similarity
-query against that store; the `reminisce` tool summarizes a
-transcript range and saves the summary back as a high-level memory.
+The `remember` tool inserts the K/V row and queues an embedding job
+for its value on a `tokio::sync::mpsc` channel; each persisted
+conversation turn queues its chunks on the same channel. A background
+task drains the queue, sends batches to the embedding server (a
+second, smaller llama-server child process configured under
+`[embedding]`), and inserts the resulting vectors into the semantic
+store. The `recall` tool embeds its query and ranks saved memories by
+cosine similarity; the `reminisce` tool runs the same kind of search
+over conversation chunks from earlier sessions.
 
 ### Voice (`assistd-voice`)
 
@@ -214,10 +221,11 @@ when the LLM is mid-stream.
 
 TTS: model output flows through a `SentenceBuffer` that segments the
 stream into speakable units, each handed to `PiperVoiceOutput`,
-which writes audio chunks to the spawned `piper` binary's HTTP
-endpoint and plays the returned PCM via rodio. `SpeakDecision`
-adapts: short replies are read in full, long replies are summarized
-first (configurable in `[voice.synthesis]`).
+which spawns the `piper` binary per utterance with `--output-raw`,
+writes the sentence to its stdin, reads raw PCM from its stdout, and
+plays it via rodio. Before each sentence, `VoiceOutputController`
+returns a `SpeakDecision`: speak it, or drop it because TTS is toggled
+off or the reply was skipped. Tunables live in `[voice.synthesis]`.
 
 ### Window manager (`assistd-wm`)
 
@@ -250,27 +258,27 @@ Discovered tools are wrapped by `McpToolAdapter`, which implements
 The supervisor restarts crashed stdio servers with exponential
 backoff and re-runs discovery on each restart. SSE servers
 auto-reconnect on transport drop. The daemon never blocks on a
-slow MCP server: each call has a per-tool timeout that surfaces as
-a structured error to the model.
+slow MCP server: each call is bounded by that server's
+`request_timeout_secs`, and a timeout surfaces as a structured error
+to the model.
 
 ## Data flow: end-to-end query
 
 A walk through `assistd query "what files changed this week?"`:
 
 1. **Client.** `assistd query` constructs `Request::Query { id,
-   text, attachments: [], version: Some(1) }`, dials
+   text, attachments: [] }`, dials
    `$XDG_RUNTIME_DIR/assistd.sock`, writes the JSON line, half-closes
    the write side, and reads `Event` lines until `Done`.
 
 2. **Socket server** ([`crates/assistd-core/src/socket.rs`](../crates/assistd-core/src/socket.rs)).
-   Parses the request, looks up the handler for the variant,
-   dispatches under a per-turn `Mutex` so concurrent queries
-   serialize.
+   Parses the request and hands it to `AppState::dispatch`, which
+   routes a `Query` to `handle_query`; that takes the per-turn agent
+   lock, so concurrent queries serialize.
 
 3. **Agent** ([`crates/assistd-core/src/agent.rs`](../crates/assistd-core/src/agent.rs)).
    The handler builds `Agent::new(...)` from the cached `AppState`
-   and calls `run_turn()`. The agent emits `Event::Status { text:
-   "Thinking..." }` so the TUI shows immediate feedback.
+   and calls `run_turn()`.
 
 4. **LLM step** ([`crates/assistd-llm/src/chat/client.rs`](../crates/assistd-llm/src/chat/client.rs)).
    `LlamaChatClient` POSTs `messages + tools` to llama-server with
@@ -285,12 +293,14 @@ A walk through `assistd query "what files changed this week?"`:
    read-only).
 
 6. **Sandbox.** `BashCommand` invokes the configured sandbox
-   (bubblewrap by default), with the user's writable paths bound
-   read-only and `/proc`, `/sys` restricted. The sandboxed `git`
-   runs, returns stdout. `RunTool::invoke` truncates if needed
-   (per `[tools.output]`), spills overflow to `~/.cache/assistd/
-   tools-overflow/` if larger than the inline cap, base64-encodes
-   any image attachments, and returns the JSON result.
+   (bubblewrap by default): a read-only root with writable `$HOME`
+   and `/tmp`, fresh `/dev` and `/proc`, a tmpfs `/run`, and
+   unshared pid/ipc/uts namespaces. The sandboxed `git` runs, returns
+   stdout. If stdout exceeds the `[tools.output]` line or byte cap,
+   `RunTool::invoke` cuts it to that head and spills the full text to
+   `tools.output.overflow_dir` (default `/tmp/assistd-output`,
+   emptied at every daemon start); it then base64-encodes any image
+   attachments and returns the JSON result.
 
 7. **Loop back.** Result emitted as `Event::ToolResult`, pushed back
    into the conversation, agent calls `step` again. The model now
@@ -305,9 +315,11 @@ For voice queries the only difference is step 1: the request
 originates from `assistd ptt-stop` after the daemon ran the
 recorded audio through Whisper. Steps 2–7 are identical.
 
-For `assistd chat`, the TUI is the long-lived client: it dials the
-socket once at startup, holds it open, and submits one `Request`
-per turn over the same connection.
+For `assistd chat`, the TUI is a long-lived client but not a single
+connection: each turn opens its own connection, kept writable so the
+TUI can answer confirmation prompts with `Request::ConfirmResponse`,
+while separate long-lived `Request::Subscribe` connections carry
+broadcast events such as session titles.
 
 ## Where to look next
 

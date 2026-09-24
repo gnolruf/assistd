@@ -1,9 +1,4 @@
 //! HTTP streaming chat client for the locally-managed llama-server.
-//!
-//! The conversation mutex is held only across the cheap state-mutation
-//! phases before and after a request; the HTTP stream itself runs
-//! lock-free, so a hung server never blocks a concurrent `push_user` or
-//! `set_transient_context`.
 
 use std::collections::BTreeMap;
 use std::mem::take;
@@ -36,6 +31,10 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce 
     assistant conclusions. Write in past tense. Do not add commentary.";
 
 /// HTTP streaming chat client backed by a locally-managed llama-server.
+///
+/// The conversation lock is held only while state is mutated before and
+/// after a request; the HTTP stream runs without it, so a hung server
+/// never blocks a concurrent `push_user` or `set_transient_context`.
 pub struct LlamaChatClient {
     client: reqwest::Client,
     base_url: String,
@@ -45,7 +44,7 @@ pub struct LlamaChatClient {
     conv: Mutex<Conversation>,
     /// Without a probe every HTTP failure is a transport fault; with
     /// one, a failure that coincides with a supervisor restart becomes
-    /// [`LlmError::ServerRestarting`] so the caller can replay.
+    /// [`LlmError::ServerRestarting`] so the request can be replayed.
     health: Option<Arc<dyn LlmHealthProbe>>,
 }
 
@@ -77,7 +76,7 @@ impl LlamaChatClient {
     }
 
     /// A request carrying the configured sampling parameters and no
-    /// tools; callers set what differs.
+    /// tools.
     fn base_request<'a>(&'a self, messages: Vec<wire::ChatMessage<'a>>) -> wire::ChatRequest<'a> {
         wire::ChatRequest {
             model: self.model.name.as_str(),
@@ -190,7 +189,7 @@ impl LlamaChatClient {
     }
 
     /// POST the request and return the response once it is known to be
-    /// a success from a server that has not restarted underneath us.
+    /// a success from a server that has not restarted since it was sent.
     /// Errors if the response headers have not arrived by `first_byte_by`.
     async fn send_request(
         &self,
@@ -466,8 +465,6 @@ impl LlmBackend for LlamaChatClient {
             if r.attachments.is_empty() {
                 conv.push_tool_result(r.call_id, r.content);
             } else {
-                // Image parts only render on a user turn, so a result
-                // carrying one keeps the tagged user-message shape.
                 conv.push_tool_result_with_attachments(&r.name, r.content, r.attachments);
             }
         }
@@ -566,7 +563,7 @@ impl LlmBackend for LlamaChatClient {
                         context: None,
                     });
                 }
-                // A row with no call id was written by the vision path;
+                // A tool row without a call id is an image-carrying result;
                 // replaying it as a tool message would leave the template
                 // without the id it needs, so it keeps the tagged user shape.
                 HistoryRole::Tool => match entry.tool_call_id {
@@ -848,7 +845,7 @@ struct ToolCallBuilder {
 enum StreamOutcome {
     /// Stream completed cleanly with a `[DONE]` marker (or EOF after deltas).
     Ok(Box<StreamAccum>),
-    /// Stream errored after we'd already forwarded deltas; return what we have.
+    /// Stream errored after deltas were forwarded; keep what arrived.
     PartialAfterEmit(Box<StreamAccum>),
     /// The consumer dropped the receiver mid-stream; stop quietly.
     ClientDisconnected(Box<StreamAccum>),

@@ -14,24 +14,22 @@ use crate::defaults::{
 /// real one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeoutsConfig {
-    /// Cap on `PresenceManager::sleep`'s `service.shutdown()` call.
-    /// Covers the SIGTERM grace plus slack for the supervisor to
-    /// observe the watch flip and exit. Default: 30s.
+    /// Cap on stopping llama-server when entering `Sleeping`. Covers the
+    /// SIGTERM grace plus slack for the supervisor to exit. Default: 30s.
     pub presence_sleep_secs: u64,
-    /// Cap on `PresenceManager::drowse`'s `control.unload_model()`
-    /// HTTP call. Default: 10s.
+    /// Cap on the model-unload HTTP call when entering `Drowsy`.
+    /// Default: 10s.
     pub presence_drowse_secs: u64,
-    /// Outer envelope on `AppState::dispatch`. Strictly a safety valve
-    /// so a stuck connection cannot wedge a daemon-side connection
-    /// task forever. Stream-level inactivity timeouts catch the
-    /// granular case. Default: 600s (10 min).
+    /// Outer envelope on handling one IPC request, so a stuck connection
+    /// cannot wedge its daemon-side task forever. Stream-level inactivity
+    /// timeouts catch the granular case. Default: 600s.
     pub dispatch_envelope_secs: u64,
-    /// Inactivity deadline between SSE chunks in
-    /// `LlamaChatClient::stream_openai`, applied once the stream has
-    /// produced its first byte. If the model then goes quiet for this
-    /// long, the call errors out instead of hanging. The wait for the
-    /// first byte is prompt prefill rather than a stall and is bounded
-    /// by `chat.request_timeout_secs`. Default: 30s.
+    /// Inactivity deadline between SSE chunks of a streamed chat
+    /// completion, applied once the stream has produced its first byte.
+    /// If the model then goes quiet for this long, the call errors out
+    /// instead of hanging. The wait for the first byte is prompt prefill
+    /// rather than a stall and is bounded by `chat.request_timeout_secs`.
+    /// Default: 30s.
     pub stream_inactivity_secs: u64,
     /// Cap on a single tool invocation within an agent turn. A call
     /// that trips it becomes an error result and the turn continues.

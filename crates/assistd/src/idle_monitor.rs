@@ -1,14 +1,10 @@
 //! Drowses and sleeps the daemon after configured idle periods.
-//!
-//! Calls `drowse()` / `sleep()` directly rather than `set_presence`, so
-//! automatic transitions do not reset the idle timer and the monitor can
-//! progress Active → Drowsy → Sleeping.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use assistd_core::{PresenceManager, PresenceState, SleepConfig};
+use assistd_core::{Component, PresenceManager, PresenceState, SleepConfig, spawn_supervised};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -36,7 +32,7 @@ pub fn validate(cfg: &SleepConfig) -> Result<()> {
     Ok(())
 }
 
-/// `None` when both thresholds are 0.
+/// Spawn the idle monitor. `None` when both thresholds are 0.
 pub fn spawn_monitor(
     cfg: &SleepConfig,
     presence: Arc<PresenceManager>,
@@ -57,9 +53,11 @@ pub fn spawn_monitor(
         "idle monitor enabled"
     );
     let cfg = cfg.clone();
-    Some(tokio::spawn(async move {
-        run_monitor(cfg, presence, shutdown).await
-    }))
+    Some(spawn_supervised(
+        "idle_monitor",
+        Component::IdleMonitor,
+        run_monitor(cfg, presence, shutdown),
+    ))
 }
 
 async fn run_monitor(
@@ -89,6 +87,9 @@ async fn run_monitor(
     }
 }
 
+/// Calls `drowse()` / `sleep()` directly rather than `set_presence`, so
+/// an automatic transition does not reset the idle timer and the monitor
+/// can progress Active → Drowsy → Sleeping.
 async fn apply(action: Action, presence: &PresenceManager) {
     match action {
         Action::None => {}

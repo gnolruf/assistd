@@ -1,7 +1,7 @@
 //! Daemon orchestration: the agent loop, presence state machine, IPC
 //! socket server, and the `AppState` request dispatcher. Not a stable
-//! public API; the re-exports exist so the `assistd` binary can reach
-//! every subsystem through one crate.
+//! public API; it re-exports the subsystem crates so dependents need
+//! only this one.
 
 pub mod agent;
 pub mod presence;
@@ -104,7 +104,8 @@ pub struct BuildToolsDeps<'a> {
     pub mcp_tools: Vec<Box<dyn assistd_tools::Tool>>,
 }
 
-/// Build the tool registry consumed by the daemon. Clears and recreates
+/// Assemble the tool registry: the built-in commands behind `run`, the
+/// memory tools, and `mcp_tools`. Clears and recreates
 /// [`BuildToolsDeps::overflow_dir`] so per-process spill files land in a
 /// known-empty location at every startup.
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildToolsError> {
@@ -237,74 +238,106 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
     Ok(Arc::new(tools))
 }
 
-/// Caches the running llama-server's model id alongside the
-/// [`assistd_tools::VisionGate`] so a re-probe can detect a model swap
-/// and flip vision availability without rebuilding the tool registry.
-/// The gate only changes when the cached model id changes.
+/// Keeps an [`assistd_tools::VisionGate`] in step with the model
+/// llama-server has loaded, without rebuilding the tool registry.
+///
+/// Vision support can only change when weights are loaded, and the
+/// daemon always loads the one configured model, so the gate is
+/// re-probed only when a load may have happened since the last
+/// successful probe: after any presence transition (every return to
+/// `Active` reloads the weights) or a supervisor restart of the
+/// llama-server child (the router then reloads the model on demand).
+/// A failed probe leaves the gate as it was and is retried on the next
+/// [`Self::revalidate_if_stale`], so a transient HTTP blip never flips
+/// vision off mid-session.
 pub struct VisionRevalidator {
     gate: Arc<assistd_tools::VisionGate>,
-    cached_model: tokio::sync::Mutex<Option<String>>,
-    host: String,
-    port: u16,
+    control: assistd_llm::LlamaServerControl,
     model_name: String,
+    seen: tokio::sync::Mutex<SeenLoad>,
+}
+
+/// The load the gate was last probed against.
+struct SeenLoad {
+    presence: watch::Receiver<PresenceState>,
+    llama_pid: Option<u32>,
+    probed: bool,
+}
+
+impl SeenLoad {
+    /// Whether a probe is due: the last one failed, or the presence
+    /// state or llama-server child changed since it ran. Marks both as
+    /// seen either way.
+    fn take_stale(&mut self, llama_pid: Option<u32>) -> bool {
+        let reloaded = self.presence.has_changed().unwrap_or(false) || self.llama_pid != llama_pid;
+        self.presence.mark_unchanged();
+        self.llama_pid = llama_pid;
+        reloaded || !self.probed
+    }
 }
 
 impl VisionRevalidator {
-    /// `initial_model_id` is the model id known at startup; `None` accepts
-    /// the first probe result unconditionally as the baseline.
-    pub fn new(
-        gate: Arc<assistd_tools::VisionGate>,
-        initial_model_id: Option<String>,
-        host: String,
-        port: u16,
+    /// Probe `model_name` through `control` to seed the gate, then track
+    /// `presence` for later loads.
+    pub async fn new(
+        control: assistd_llm::LlamaServerControl,
         model_name: String,
+        presence: &PresenceManager,
     ) -> Arc<Self> {
+        let mut seen = SeenLoad {
+            presence: presence.subscribe(),
+            llama_pid: presence.llama_pid().await,
+            probed: false,
+        };
+        let initial = assistd_llm::probe_capabilities_routed(&control, &model_name).await;
+        let gate = assistd_tools::VisionGate::new(initial.vision_supported);
+        seen.probed = initial.model_id.is_some();
         Arc::new(Self {
             gate,
-            cached_model: tokio::sync::Mutex::new(initial_model_id),
-            host,
-            port,
+            control,
             model_name,
+            seen: tokio::sync::Mutex::new(seen),
         })
     }
 
-    /// Re-probe `/props` and, if the model id changed, update the
-    /// gate. Tolerates probe failures silently; a transient HTTP
-    /// blip should not flip vision off mid-session.
-    pub async fn revalidate(&self) {
-        let Ok(control) = assistd_llm::LlamaServerControl::new(&self.host, self.port) else {
-            tracing::warn!(
-                target: "assistd::vision",
-                "VisionRevalidator could not build control client; skipping probe"
-            );
-            return;
-        };
-        let probe = assistd_llm::probe_capabilities_routed(
-            &self.host,
-            self.port,
-            &self.model_name,
-            &control,
-        )
-        .await;
-        self.apply_probe(probe).await;
+    /// The gate this revalidator keeps current.
+    pub fn gate(&self) -> Arc<assistd_tools::VisionGate> {
+        Arc::clone(&self.gate)
     }
 
-    async fn apply_probe(&self, probe: assistd_llm::VisionState) {
-        if probe.model_id.is_none() {
-            return;
-        }
-        let mut cache = self.cached_model.lock().await;
-        if *cache != probe.model_id {
-            tracing::info!(
-                old = ?*cache,
-                new = ?probe.model_id,
-                vision_supported = probe.vision_supported,
-                "llama-server model changed; updating vision gate"
-            );
-            *cache = probe.model_id;
-            self.gate.set(probe.vision_supported);
+    /// Probe llama-server now, without touching the gate.
+    pub async fn probe(&self) -> assistd_llm::VisionState {
+        assistd_llm::probe_capabilities_routed(&self.control, &self.model_name).await
+    }
+
+    /// Re-probe and update the gate if a load may have happened since
+    /// the last successful probe; otherwise return without any I/O.
+    /// Call while holding `presence` `Active`, so the probe sees the
+    /// model that will serve the turn.
+    pub async fn revalidate_if_stale(&self, presence: &PresenceManager) {
+        let mut seen = self.seen.lock().await;
+        if seen.take_stale(presence.llama_pid().await) {
+            seen.probed = apply_probe(&self.gate, self.probe().await);
         }
     }
+}
+
+/// Set `gate` from a probe that reached the model, returning whether it
+/// did.
+fn apply_probe(gate: &assistd_tools::VisionGate, probe: assistd_llm::VisionState) -> bool {
+    if probe.model_id.is_none() {
+        return false;
+    }
+    if gate.supported() != probe.vision_supported {
+        tracing::info!(
+            target: "assistd::vision",
+            model = ?probe.model_id,
+            vision_supported = probe.vision_supported,
+            "loaded model's vision support changed; updating vision gate"
+        );
+    }
+    gate.set(probe.vision_supported);
+    true
 }
 
 fn expand_config_tilde(raw: &str) -> PathBuf {
@@ -323,6 +356,7 @@ fn expand_config_tilde(raw: &str) -> PathBuf {
     }
 }
 
+/// This crate's version string.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -332,59 +366,56 @@ mod tests {
     use super::*;
     use assistd_llm::VisionState;
 
-    #[tokio::test]
-    async fn apply_probe_flips_gate_only_when_model_id_changes() {
+    #[test]
+    fn apply_probe_trusts_every_probe_that_reached_the_model() {
         let probe = |id: Option<&str>, vision| VisionState {
             model_id: id.map(str::to_string),
             vision_supported: vision,
         };
         let cases = [
+            ("failed probe", true, probe(None, false), true, false),
             (
-                "failed probe",
+                "reload lost vision",
                 true,
-                Some("model-A"),
-                probe(None, false),
-                true,
-            ),
-            (
-                "same model",
-                true,
-                Some("model-A"),
-                probe(Some("model-A"), false),
-                true,
-            ),
-            (
-                "swap to text-only",
-                true,
-                Some("vision"),
-                probe(Some("text"), false),
+                probe(Some("m"), false),
                 false,
-            ),
-            (
-                "swap to vision",
-                false,
-                Some("text"),
-                probe(Some("vision"), true),
                 true,
             ),
             (
-                "first probe",
+                "reload gained vision",
                 false,
-                None,
-                probe(Some("vision"), true),
+                probe(Some("m"), true),
+                true,
                 true,
             ),
+            ("unchanged", true, probe(Some("m"), true), true, true),
         ];
-        for (label, gate_initial, cached, probe, expected) in cases {
-            let rev = VisionRevalidator::new(
-                assistd_tools::VisionGate::new(gate_initial),
-                cached.map(str::to_string),
-                "127.0.0.1".to_string(),
-                0,
-                "test/model:Q4".to_string(),
-            );
-            rev.apply_probe(probe).await;
-            assert_eq!(rev.gate.supported(), expected, "{label}");
+        for (label, gate_initial, probe, expected_gate, expected_reached) in cases {
+            let gate = assistd_tools::VisionGate::new(gate_initial);
+            assert_eq!(apply_probe(&gate, probe), expected_reached, "{label}");
+            assert_eq!(gate.supported(), expected_gate, "{label}");
         }
+    }
+
+    #[test]
+    fn a_probe_is_due_only_after_a_failure_or_a_possible_reload() {
+        let (presence_tx, presence) = watch::channel(PresenceState::Active);
+        let mut seen = SeenLoad {
+            presence,
+            llama_pid: Some(1),
+            probed: true,
+        };
+        assert!(!seen.take_stale(Some(1)), "nothing changed");
+
+        presence_tx.send(PresenceState::Sleeping).unwrap();
+        presence_tx.send(PresenceState::Active).unwrap();
+        assert!(seen.take_stale(Some(1)), "presence round trip");
+        assert!(!seen.take_stale(Some(1)), "round trip already seen");
+
+        assert!(seen.take_stale(Some(2)), "child restarted");
+        assert!(!seen.take_stale(Some(2)), "restart already seen");
+
+        seen.probed = false;
+        assert!(seen.take_stale(Some(2)), "last probe failed");
     }
 }

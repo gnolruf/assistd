@@ -1,7 +1,5 @@
 //! LLM-callable memory tools. `remember` and `recall` work on saved
-//! key/value facts; `reminisce` searches past dialogue. Re-saving a key
-//! overwrites its value, so the key validator rejects whitespace and
-//! uppercase to keep one concept on one spelling.
+//! key/value facts; `reminisce` searches past dialogue.
 
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -18,7 +16,9 @@ use crate::{Tool, ToolError};
 
 const RECALL_LIMIT: usize = 50;
 
-/// Hyphens are allowed so ISO dates (`standup.2026-09-11`) can be keys.
+/// Re-saving a key overwrites its value, so keys reject whitespace and
+/// uppercase to keep one concept on one spelling. Hyphens are allowed so
+/// ISO dates (`standup.2026-09-11`) can be keys.
 const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
@@ -33,6 +33,7 @@ pub struct RememberTool {
 }
 
 impl RememberTool {
+    /// A tool saving through `ops` and queueing each value on `embed_tx`.
     pub fn new(ops: Arc<MemoryOps>, embed_tx: mpsc::Sender<EmbedJob>) -> Self {
         Self { ops, embed_tx }
     }
@@ -146,6 +147,9 @@ pub struct RecallTool {
 }
 
 impl RecallTool {
+    /// A tool ranking memories in `semantic` against query vectors from
+    /// `embedder`. An empty `embedding_model` means embedding is
+    /// disabled.
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
@@ -275,6 +279,10 @@ pub struct ReminisceTool {
 }
 
 impl ReminisceTool {
+    /// A tool ranking past messages in `semantic` against query vectors
+    /// from `embedder`, leaving out the session `current_session` names
+    /// at call time. An empty `embedding_model` means embedding is
+    /// disabled.
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
@@ -424,18 +432,13 @@ mod tests {
     };
     use tokio::sync::watch;
 
-    /// Tests that don't exercise the embed channel use a 1-capacity
-    /// channel with the receiver dropped, so `try_send` always fails;
-    /// the embed path is exercised but doesn't actually do anything.
+    /// A sender whose receiver is dropped, so every `try_send` fails.
     fn closed_embed_tx() -> mpsc::Sender<EmbedJob> {
         let (tx, rx) = mpsc::channel::<EmbedJob>(1);
         drop(rx);
         tx
     }
 
-    /// Open embed channel for tests that want to assert RememberTool
-    /// actually queues an embed job. Returns the sender to give to the
-    /// tool plus the receiver to drain in the test body.
     fn live_embed_tx() -> (mpsc::Sender<EmbedJob>, mpsc::Receiver<EmbedJob>) {
         mpsc::channel::<EmbedJob>(8)
     }
@@ -594,8 +597,6 @@ mod tests {
         }
     }
 
-    // --- Remember --------------------------------------------------------
-
     #[tokio::test]
     async fn remember_saves_key_value() {
         let (ops, _w, _dir) = fresh_ops().await;
@@ -687,8 +688,6 @@ mod tests {
         }
     }
 
-    // --- Recall ----------------------------------------------------------
-
     #[tokio::test]
     async fn recall_with_disabled_embedder_returns_no_memories() {
         let tool = RecallTool::new(no_embedder(), no_semantic(), String::new());
@@ -721,8 +720,6 @@ mod tests {
         let err = tool.invoke(json!({})).await.unwrap_err();
         assert_eq!(invalid_args(err), "`query` (string) is required");
     }
-
-    // --- Schema sanity ---------------------------------------------------
 
     /// Strict mode requires every declared property to be listed as
     /// required and no others to be accepted.

@@ -23,12 +23,16 @@ pub struct SynthOutput {
     pub sample_rate: u32,
 }
 
-/// Stateless synthesizer: one piper subprocess per call.
+/// Stateless synthesizer: one piper subprocess per call. Piper's raw
+/// output has no in-band frame delimiter, so per-utterance EOF on stdout
+/// is the only reliable end marker; the 50-250 ms model-load cost
+/// overlaps with generation of the next sentence.
 pub struct OneShotSynth {
     cfg: Arc<PiperRuntimeConfig>,
 }
 
 impl OneShotSynth {
+    /// A synthesizer that spawns piper as `cfg` describes.
     pub fn new(cfg: Arc<PiperRuntimeConfig>) -> Self {
         Self { cfg }
     }

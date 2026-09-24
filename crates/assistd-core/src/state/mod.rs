@@ -29,7 +29,7 @@ pub(crate) mod wire;
 
 pub use self::branches::history_entries;
 pub use self::memory_stack::MemoryStack;
-pub use self::runtime::{ConversationContext, RuntimeState};
+pub use self::runtime::{BusSubscription, ConversationContext, RuntimeState};
 pub use self::subsystems::{McpStartupFailure, Subsystems};
 
 /// Why a request handler failed.

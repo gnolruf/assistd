@@ -466,7 +466,7 @@ fn push_user_with_attachments_renders_multimodal_wire() {
             },
             wire::ContentPart::ImageUrl {
                 image_url: wire::ImageUrl {
-                    url: "data:image/png;base64,q80=".into()
+                    url: "data:image/png;base64,q80="
                 }
             },
         ]))
