@@ -14,7 +14,6 @@ async fn turn_persists_across_store_reopen() {
 
     let branch: BranchId;
 
-    // ─── Session 1 ────────────────────────────────────────────────
     {
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
@@ -64,7 +63,6 @@ async fn turn_persists_across_store_reopen() {
         writer.await.unwrap();
     }
 
-    // ─── Session 2 (simulates a daemon restart) ──────────────────
     {
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();

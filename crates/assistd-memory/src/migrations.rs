@@ -5,12 +5,12 @@
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
-/// V1: full MVP schema:
-/// - `schema_migrations` - version log for future upgrades.
+/// V1 schema:
+/// - `schema_migrations` - reserved version log; applied migrations
+///   are tracked in `PRAGMA user_version`.
 /// - `sessions` - one row per daemon process (uuid PK), carries a
-///   nullable `title` (filled asynchronously by an LLM-summarisation
-///   task after the first agent response) and a `current_branch_id`
-///   pointer into `branches`.
+///   nullable `title` (set some time after the session starts) and a
+///   `current_branch_id` pointer into `branches`.
 /// - `turns` - logical user-prompt-to-final-assistant grouping inside
 ///   a session.
 /// - `conversations` - one row per `Message`. Tool results are
@@ -18,10 +18,10 @@ use rusqlite_migration::{M, Migrations};
 /// - `conversations_fts` - FTS5 mirror, kept in sync via triggers.
 /// - `memories` - flat KV with provenance (source_conversation_id).
 /// - `memory_embeddings` - sibling to `embeddings`, indexes the KV
-///   rows for semantic recall. `UNIQUE(memory_id)` powers the
-///   `INSERT ... ON CONFLICT(memory_id) DO UPDATE` upsert path so
-///   re-saving an existing key overwrites the embedding in place and
-///   no stale vector survives a value change.
+///   rows for semantic recall. `UNIQUE(memory_id)` keeps at most one
+///   vector per memory and backs the
+///   `INSERT ... ON CONFLICT(memory_id) DO UPDATE` upsert, so
+///   re-embedding a memory overwrites its vector in place.
 /// - `branches` + `branch_messages` - named branches per session plus
 ///   a join table mapping `(branch_id, branch-local seq)` to
 ///   `conversation_id`. Forks share `conversations` rows across
