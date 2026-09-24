@@ -1,12 +1,7 @@
-//! Latency benchmarks for the auto-wake-on-query path. Each test
-//! measures `Instant`-to-first-Delta latency end-to-end through the
-//! full daemon stack: Unix socket → AppState → ensure_active() →
-//! LlamaChatClient → fake_llama_server. Thresholds are deliberately
-//! generous so transient CI jitter doesn't cause flakes; the goal is
-//! to fail loudly on a 10× regression. Actual durations are logged at
-//! `info` (set `RUST_LOG`) so drift can be tracked over time.
-//!
-//! Run with: `cargo test -p assistd-llm --features test-support --test wake_latency`
+//! Latency benchmarks for the auto-wake-on-query path, measured to the
+//! first Delta through the full daemon stack against `fake_llama_server`.
+//! Thresholds are generous so they catch a 10× regression rather than CI
+//! jitter; actual durations are logged at `info`.
 
 #![cfg(feature = "test-support")]
 
@@ -96,11 +91,9 @@ async fn new_active_manager(
     (m, tx)
 }
 
-/// Set up an AppState backed by a real LlamaChatClient against the
-/// fake server, expose it on a temp Unix socket, and return:
-/// - the manager (so the test can drive sleep/drowse)
-/// - the socket path
-/// - the stop sender + server task handle (so the test can clean up)
+/// Serve an `AppState` backed by a real `LlamaChatClient` against the fake
+/// server on a temp Unix socket. Returns the manager, the socket path, the
+/// server's stop sender and task, and the backing tempdir.
 async fn build_running_daemon(
     fake: &FakeLlama,
     port: u16,
@@ -127,8 +120,8 @@ async fn build_running_daemon(
     )
     .expect("build chat client");
     let mut config = Config::default();
-    // Default grace is 5s; that adds 5s × 3 tests to the suite for no
-    // gain in CI. Cap at 1s so test wall time tracks the actual work.
+    // The default 5s grace would add 5s per test for no gain; 1s keeps
+    // wall time tracking the actual work.
     config.daemon.shutdown_grace_secs = 1;
     let state = Arc::new(AppState::new(
         config,
@@ -240,7 +233,6 @@ async fn wake_from_drowsy_first_delta_under_1s() {
         latency < Duration::from_secs(1),
         "wake-from-Drowsy regressed: first Delta took {latency:?}, expected <1s"
     );
-    // Auto-wake must have left the daemon Active.
     assert_eq!(m.state(), PresenceState::Active);
 
     let _ = stop_tx.send(());

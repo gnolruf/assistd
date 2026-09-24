@@ -1,8 +1,5 @@
-//! Integration tests for the streaming chat client.
-//!
-//! These tests live behind the `test-support` feature because they rely on a
-//! hand-rolled in-process HTTP/1.1 server that speaks chunked SSE. Run with:
-//!     cargo test -p assistd-llm --features test-support
+//! Integration tests for the streaming chat client against a hand-rolled
+//! in-process HTTP/1.1 server that speaks chunked SSE.
 
 #![cfg(feature = "test-support")]
 
@@ -29,7 +26,7 @@ use tokio::task::JoinHandle;
 #[derive(Clone)]
 struct Script {
     /// Responses returned to streaming (`stream: true`) requests, in order.
-    /// Each call pops the front of the queue; if empty the last entry is reused.
+    /// Each request pops the front entry, except the last, which is reused.
     stream_responses: Arc<Mutex<VecDeque<StreamResponse>>>,
     /// Responses returned to non-streaming (summarize, `stream: false`) calls.
     summary_responses: Arc<Mutex<VecDeque<SummaryResponse>>>,
@@ -48,16 +45,14 @@ struct CapturedRequest {
 enum StreamResponse {
     /// Serve a 200 OK chunked SSE stream of these deltas, then `[DONE]`.
     Deltas(Vec<String>),
-    /// Serve a 200 OK chunked stream of raw SSE frames (caller supplies the
-    /// exact `data: ...\n\n` lines). Used to inject role-only first chunks.
+    /// Serve a 200 OK chunked stream of these exact `data: ...\n\n` frames.
     RawFrames(Vec<String>),
     /// Serve a 200 OK chunked stream of the deltas, then drop the connection
     /// before emitting `[DONE]`.
     DropAfterDeltas(Vec<String>),
     /// Serve a 200 OK chunked stream of the deltas, then go quiet: hold
     /// the socket open without writing further bytes until the test drops
-    /// the server. Used to exercise the per-chunk inactivity timeout in
-    /// `LlamaChatClient::stream_openai`.
+    /// the server.
     StallAfterDeltas(Vec<String>),
     /// Serve a 200 OK chunked SSE stream of the deltas, sleeping for the
     /// given gap before each one, then `[DONE]`.
@@ -248,10 +243,8 @@ async fn handle_stream_response(
                 );
                 write_chunk(sock, frame.as_bytes()).await?;
             }
-            // Hold the socket open without writing further bytes. The
-            // client-side per-chunk inactivity timeout should fire and
-            // surface a streaming error. We sleep for far longer than
-            // any test-side timeout so the client wins the race.
+            // Stay silent far longer than any client-side timeout, so the
+            // per-chunk inactivity timeout fires first.
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
         StreamResponse::PacedDeltas(deltas, gap) => {
@@ -801,10 +794,6 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Agent-loop step API
-// ---------------------------------------------------------------------------
-
 fn tool_call_frames(call_id: &str, name: &str, arg_chunks: &[&str]) -> Vec<String> {
     tool_call_frames_finishing(call_id, name, arg_chunks, "tool_calls")
 }
@@ -997,7 +986,7 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
             &[r#"{"command":"echo hi"}"#],
         )))
         .await;
-    // Turn 2 (after we push_tool_results): plain text answer.
+    // Turn 2, after push_tool_results: plain text answer.
     script
         .push_stream(StreamResponse::Deltas(vec!["done".into()]))
         .await;
@@ -1123,7 +1112,6 @@ async fn request_timeout_surfaces_as_error() {
     tokio::spawn(async move {
         loop {
             if let Ok((sock, _)) = listener.accept().await {
-                // Hold the socket open without writing anything.
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 drop(sock);
             }

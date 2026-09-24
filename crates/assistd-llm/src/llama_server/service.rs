@@ -17,13 +17,14 @@ pub enum ReadyState {
     /// The last spawn attempt failed; a restart is scheduled after `attempt`
     /// consecutive failures.
     BackingOff { attempt: u32 },
-    /// `MAX_CONSECUTIVE_FAILURES` hit; the supervisor stopped restarting.
+    /// A restart limit was hit ([`MAX_CONSECUTIVE_FAILURES`] or the
+    /// rolling-window cap); the supervisor stopped restarting.
     Degraded,
 }
 
-/// Handle to the managed llama-server. Construct via [`LlamaService::start`];
-/// drop order: call [`LlamaService::shutdown`] after the daemon's shutdown
-/// watch has been flipped (the supervisor is already winding down by then).
+/// Handle to the managed llama-server, constructed via
+/// [`LlamaService::start`]. Dropping it aborts the supervisor task;
+/// [`LlamaService::shutdown`] joins it instead.
 pub struct LlamaService {
     task: Option<JoinHandle<()>>,
     ready_rx: watch::Receiver<ReadyState>,
@@ -31,13 +32,12 @@ pub struct LlamaService {
 }
 
 impl LlamaService {
-    /// Spawns the supervisor and blocks until the child reports Ready or the
-    /// supervisor gives up and enters Degraded.
+    /// Spawns the supervisor and waits until the child reports Ready.
     ///
-    /// `shutdown_rx` is a subscriber on the daemon's shutdown watch. Flipping
-    /// that watch externally causes the supervisor to tear down the child and
-    /// exit; a call to `start` that sees shutdown before Ready returns
-    /// `ShutdownDuringHealth`.
+    /// Flipping `shutdown_rx` makes the supervisor tear down the child and
+    /// exit. Returns [`LlamaServerError::ShutdownDuringHealth`] if that
+    /// happens before Ready, and [`LlamaServerError::StartupFailed`] if the
+    /// supervisor gives up and enters Degraded.
     #[tracing::instrument(skip(cfg, model, shutdown_rx), fields(host = %cfg.host, port = cfg.port))]
     pub async fn start(
         cfg: LlamaServerConfig,
@@ -59,8 +59,8 @@ impl LlamaService {
         loop {
             match ready_rx.changed().await {
                 Err(_) => {
-                    // Supervisor task dropped its sender; most likely the
-                    // daemon signaled shutdown before the child reached Ready.
+                    // The supervisor exited and dropped its sender, which
+                    // before Ready normally means shutdown was signaled.
                     let _ = task.await;
                     return Err(LlamaServerError::ShutdownDuringHealth);
                 }
@@ -97,9 +97,9 @@ impl LlamaService {
         *self.ready_rx.borrow()
     }
 
-    /// Subscribe to the supervisor's readiness watch. Used by callers
-    /// that need to await a transition (e.g. crash → restart → Ready)
-    /// rather than just snapshot the current state.
+    /// Subscribe to the supervisor's readiness watch, to await a
+    /// transition (e.g. crash → restart → Ready) rather than snapshot the
+    /// current state.
     pub fn subscribe_ready(&self) -> watch::Receiver<ReadyState> {
         self.ready_rx.clone()
     }
@@ -110,8 +110,9 @@ impl LlamaService {
         *self.pid.lock()
     }
 
-    /// Awaits the supervisor task. The caller is expected to have already
-    /// flipped the shared shutdown watch; this just joins.
+    /// Joins the supervisor task. The shutdown watch passed to
+    /// [`Self::start`] must already be flipped; this does not signal it.
+    /// Errors with [`LlamaServerError::SupervisorPanic`] if the task panicked.
     pub async fn shutdown(mut self) -> Result<(), LlamaServerError> {
         if let Some(task) = self.task.take() {
             task.await.map_err(|_| LlamaServerError::SupervisorPanic)?;

@@ -1,8 +1,7 @@
 //! Vision-capability probe. llama.cpp loads a multimodal projector
 //! automatically when the HF repo bundles one, so the only way to know
 //! whether the model accepts images is to ask `/props` for its
-//! `modalities` object. The probe fails closed: any HTTP error, parse
-//! failure, or absent field reads as no vision.
+//! `modalities` object.
 
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -22,8 +21,9 @@ pub struct VisionState {
 /// Probe the loaded model's capabilities through `control`, following
 /// router indirection when its `/props` reports `role: "router"`: the
 /// model then lives in a child server whose port the router's `/models`
-/// reports, and the child's `/props` is the answer. Fails closed to the
-/// default.
+/// reports, and the child's `/props` is the answer. Fails closed: any
+/// HTTP error, parse failure or absent field yields the default (no
+/// vision).
 pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str) -> VisionState {
     let Some(body) = props_or_warn(control.props().await) else {
         return VisionState::default();

@@ -1,8 +1,5 @@
-//! Integration tests for the llama-server supervisor.
-//!
-//! These tests are gated behind the `test-support` feature because they need
-//! the `fake_llama_server` helper binary. Run with:
-//!     cargo test -p assistd-llm --features test-support
+//! Integration tests for the llama-server supervisor against the
+//! `fake_llama_server` helper binary.
 
 #![cfg(feature = "test-support")]
 

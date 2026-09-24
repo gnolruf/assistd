@@ -36,7 +36,7 @@ pub enum HealthWaitError {
     NoService,
 }
 
-/// Health/restart probe the chat client consults to classify an HTTP
+/// Readiness view of a managed llama-server, used to classify an HTTP
 /// failure as crash-induced (worth replaying) or transport-level
 /// (propagated as an error).
 #[async_trait]
@@ -51,9 +51,8 @@ pub trait LlmHealthProbe: Send + Sync {
     fn state(&self) -> Option<ReadyState>;
 
     /// Block until the supervisor reports `ReadyState::Ready` or
-    /// `timeout` elapses. Maps `Degraded` to `HealthWaitError::Degraded`
-    /// immediately so the caller can give up rather than wait the full
-    /// budget on a hopeless restart.
+    /// `timeout` elapses. Returns [`HealthWaitError::Degraded`] as soon
+    /// as the supervisor gives up, rather than waiting out `timeout`.
     async fn wait_for_ready(&self, timeout: Duration) -> Result<(), HealthWaitError>;
 }
 
@@ -82,16 +81,16 @@ pub enum LlmError {
 pub type LlmResult<T> = std::result::Result<T, LlmError>;
 
 /// Whether a request lets a reasoning model produce its `<think>`
-/// block. Reasoning is discarded by one-shot callers, so a model that
-/// spends the whole token budget thinking returns nothing at all;
-/// [`Thinking::Disabled`] asks the chat template to skip it.
+/// block. [`Thinking::Disabled`] asks the chat template to skip it, so
+/// a request whose reasoning is discarded cannot spend its whole token
+/// budget thinking and return nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Thinking {
     Enabled,
     Disabled,
 }
 
-/// Events streamed from a backend to the caller during generation.
+/// Events a backend streams during generation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LlmEvent {
     /// A streamed chunk of model output.
@@ -180,6 +179,9 @@ pub struct HistoryEntry {
     pub tool_name: Option<String>,
 }
 
+/// A language model holding one in-memory conversation. Optional
+/// capabilities have default implementations that do nothing, or that
+/// fail with [`LlmError::Unavailable`] where a result is required.
 #[async_trait]
 pub trait LlmBackend: Send + Sync + 'static {
     /// Generate a single-turn response to `prompt`, streaming tokens
@@ -231,8 +233,8 @@ pub trait LlmBackend: Send + Sync + 'static {
 
     /// Answer `prompt` outside the conversation, returning the model's
     /// final text with reasoning discarded. Answers are budgeted from
-    /// the summary token allowance, so callers that want an answer
-    /// rather than a train of thought pass [`Thinking::Disabled`].
+    /// the summary token allowance, so pass [`Thinking::Disabled`] to
+    /// get an answer rather than a train of thought.
     async fn complete_oneshot(&self, _prompt: String, _thinking: Thinking) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),
@@ -253,6 +255,7 @@ impl Default for EchoBackend {
 }
 
 impl EchoBackend {
+    /// Create a backend with no pending user message.
     pub fn new() -> Self {
         Self {
             last_user: Mutex::new(String::new()),
@@ -293,6 +296,7 @@ pub struct FailedBackend {
 }
 
 impl FailedBackend {
+    /// Create a backend that fails every call with `reason`.
     pub fn new(reason: String) -> Self {
         Self { reason }
     }

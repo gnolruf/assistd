@@ -1,31 +1,31 @@
-//! Minimal byte-buffered SSE line parser for `/v1/chat/completions` streams.
-//!
-//! llama.cpp emits `data: {json}\n\n` frames followed by a terminal
-//! `data: [DONE]\n\n`. We only care about `data:` lines; `event:`, `id:`,
-//! `retry:`, comments, and blank lines are ignored. The buffer is raw bytes
-//! so that chunk boundaries landing inside a multi-byte UTF-8 character are
-//! safe; decoding happens per completed line, not per chunk.
+//! Minimal SSE line parser for `/v1/chat/completions` streams.
 
 use super::error::ChatClientError;
 
-/// A parsed SSE event from a `/v1/chat/completions` stream.
+/// A parsed SSE event from a `/v1/chat/completions` stream: the payload
+/// of a `data:` line, or the terminal `data: [DONE]`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SseEvent {
     Data(String),
     Done,
 }
 
-/// Byte-buffered SSE line parser that handles chunk boundaries safely.
+/// Byte-buffered SSE line parser. Buffering raw bytes keeps a chunk
+/// boundary inside a multi-byte UTF-8 character safe; decoding happens
+/// per completed line. Only `data:` lines yield events; other fields,
+/// comments and blank lines are skipped.
 #[derive(Debug, Default)]
 pub struct SseLineReader {
     buf: Vec<u8>,
 }
 
 impl SseLineReader {
+    /// Create a reader with an empty buffer.
     pub fn new() -> Self {
         Self { buf: Vec::new() }
     }
 
+    /// Append a chunk of raw stream bytes to the buffer.
     pub fn feed(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
     }

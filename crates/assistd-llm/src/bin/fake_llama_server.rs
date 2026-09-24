@@ -1,30 +1,6 @@
 //! Test-only fake llama-server, compiled under the `test-support` feature,
 //! for exercising lifecycle, presence, and chat-completion paths without a
 //! real llama-server binary.
-//!
-//! The mode comes from `--mode`, else from a file named `mode` in the
-//! directory of the invoked path (`argv[0]`), so a symlink to this binary
-//! carries its own mode; else `normal`:
-//!   normal              - bind, serve 200 on /health, block until SIGTERM
-//!   never-ready         - bind, serve 503 on /health forever
-//!   crash-after=<secs>  - bind, serve 200 OK, then `exit(0)` after N seconds
-//!   bind-fail           - immediately exit(1) without binding
-//!   load-failure        - /models/load returns 500 (for wake-failure tests)
-//!   slow-term=<secs>    - serve normally, then exit N seconds after SIGTERM
-//!
-//! Endpoints:
-//!   GET  /health                - 200 {"status":"ok"} (or 503 in never-ready)
-//!   POST /models/load           - 200, records hit, marks model loaded
-//!   POST /models/unload         - 200, records hit, marks model unloaded
-//!   GET  /models                - JSON list with current load state
-//!   POST /v1/chat/completions   - SSE chunked stream OR JSON summary
-//!   POST /test/script           - push a scripted chat reply (X-Test-Control: 1)
-//!   POST /test/reset            - clear queue + counters (X-Test-Control: 1)
-//!   GET  /debug/counters        - test introspection (PID, hits, last prompt)
-//!
-//! Default chat reply (when no script pushed): one delta `"hello"` + [DONE].
-//!
-//! Flags: --host <addr> --port <port> --mode <mode>
 
 use std::collections::VecDeque;
 use std::env;
@@ -39,13 +15,21 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 
+/// Server behaviour, from `--mode`, else a `mode` file beside the binary,
+/// else `normal`.
 #[derive(Debug, Clone)]
 enum Mode {
+    /// `normal`: serve 200 on `/health` until SIGTERM.
     Normal,
+    /// `never-ready`: serve 503 on `/health` forever.
     NeverReady,
+    /// `crash-after=<secs>`: serve normally, then exit 0 after that long.
     CrashAfter(u64),
+    /// `bind-fail`: exit 1 without binding.
     BindFail,
+    /// `load-failure`: fail `POST /models/load` with 500.
     LoadFailure,
+    /// `slow-term=<secs>`: serve normally, then exit that long after SIGTERM.
     SlowTerm(u64),
 }
 
@@ -73,11 +57,15 @@ struct Args {
     mode: Mode,
 }
 
+/// Mode named by a file called `mode` in the directory of `program`
+/// (`argv[0]`), so a symlink to this binary carries its own mode.
 fn mode_beside(program: &str) -> Option<Mode> {
     let text = std::fs::read_to_string(Path::new(program).with_file_name("mode")).ok()?;
     Some(parse_mode(text.trim()).expect("invalid mode file"))
 }
 
+/// Parses `--host <addr> --port <port> --mode <mode>`, skipping the other
+/// flags a router-mode spawn passes.
 fn parse_args() -> Args {
     let mut host = "127.0.0.1".to_string();
     let mut port: u16 = 0;
@@ -194,6 +182,15 @@ async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerSt
     }
 }
 
+/// Serves one request:
+/// - `GET /health`: 200 `{"status":"ok"}`, or 503 in never-ready mode.
+/// - `POST /models/load`, `POST /models/unload`: 200; counts the hit and
+///   updates the load state.
+/// - `GET /models`: the current load state.
+/// - `POST /v1/chat/completions`: an SSE stream or a JSON summary.
+/// - `POST /test/script`, `POST /test/reset`: queue a scripted chat reply,
+///   or clear the queue and counters. Both require `X-Test-Control: 1`.
+/// - `GET /debug/counters`: PID, hit counts and last prompt.
 async fn handle_request(
     mut sock: TcpStream,
     mode: Mode,
@@ -260,7 +257,7 @@ async fn write_one_shot(
 }
 
 /// Reads a full HTTP request: headers until `\r\n\r\n`, then `Content-Length`
-/// bytes of body if indicated. Returns (head_string, body_string).
+/// bytes of body if indicated.
 async fn read_request(sock: &mut TcpStream) -> std::io::Result<(String, String)> {
     let mut buf = Vec::with_capacity(2048);
     let mut tmp = [0u8; 1024];
@@ -496,7 +493,7 @@ async fn handle_test_reset(
 /// body terminated by `data: [DONE]`; non-streaming requests get a single
 /// JSON object with `choices[0].message.content`. Pops one entry off the
 /// scripted-reply queue per request; falls back to a single `"hello"` delta
-/// when the queue is empty so cross-crate tests can run without scripting.
+/// when the queue is empty.
 async fn handle_chat_completion(
     sock: &mut TcpStream,
     state: &Arc<Mutex<ServerState>>,
@@ -585,8 +582,9 @@ async fn write_final_chunk(sock: &mut TcpStream) -> std::io::Result<()> {
     sock.write_all(b"0\r\n\r\n").await
 }
 
-/// Pulls the `"model": "..."` field out of a JSON body without dragging in
-/// a full JSON dep. Good enough for the single-field requests we receive.
+/// Pulls the `"model": "..."` string out of a JSON body by text search,
+/// which suffices for the flat single-field model requests. Returns an
+/// empty string when the field is absent.
 fn extract_model_field(body: &str) -> String {
     let key = "\"model\"";
     let Some(start) = body.find(key) else {

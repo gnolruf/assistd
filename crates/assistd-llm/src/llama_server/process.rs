@@ -128,6 +128,7 @@ impl ChildProcess {
         self.child.id()
     }
 
+    /// Wait for the child to exit and return its status.
     pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
         self.child.wait().await
     }
