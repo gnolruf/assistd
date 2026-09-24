@@ -27,9 +27,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # Reads channel + components from rust-toolchain.toml so CI tracks
-      # the pinned toolchain instead of silently drifting to whatever
-      # "stable" resolves to on the runner.
+      # Reads channel + components from rust-toolchain.toml, which tracks
+      # the latest stable release.
       - name: Install Rust toolchain (from rust-toolchain.toml)
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:

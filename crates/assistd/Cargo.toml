@@ -3,7 +3,7 @@ name = "assistd-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version = "1.85"
+rust-version.workspace = true
 
 [[bin]]
 name = "assistd"

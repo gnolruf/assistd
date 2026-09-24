@@ -3,6 +3,7 @@ name = "assistd-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [features]
 i3 = ["assistd-wm/i3"]
