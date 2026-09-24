@@ -60,6 +60,9 @@ impl AppState {
             .await?;
         let _session_guards = self.acquire_query_guards(&id, &tx).await?;
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        if let Some(rev) = &self.subsystems.vision_revalidator {
+            rev.revalidate_if_stale(&self.subsystems.presence).await;
+        }
 
         let (current_session, turn_id) = self.open_persistence_turn(&text).await;
         self.assemble_transient_context(&text).await;
@@ -104,9 +107,6 @@ impl AppState {
         wire: &[assistd_ipc::ImageAttachment],
         tx: &mpsc::Sender<Event>,
     ) -> Result<Vec<Attachment>, DispatchError> {
-        if let Some(rev) = self.subsystems.vision_revalidator.as_ref() {
-            rev.revalidate().await;
-        }
         let decoded = decode_wire_attachments(wire);
         if let Err(e) = &decoded {
             send_error(tx, id.to_string(), e.to_string()).await;

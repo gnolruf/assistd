@@ -113,7 +113,7 @@ async fn start(
 
     assistd_core::install_panic_hook(Arc::downgrade(&presence));
 
-    let (vision_gate, vision_revalidator) = probe_vision(&config).await?;
+    let vision_revalidator = probe_vision(&config, &presence).await?;
 
     let health_probe: Arc<dyn assistd_llm::LlmHealthProbe> = Arc::new(
         assistd_core::presence::PresenceLlmHealthProbe::new(presence.clone()),
@@ -164,7 +164,7 @@ async fn start(
         config: &config,
         overflow_dir: overflow_dir.clone(),
         confirmation_gate: Arc::new(IpcConfirmationGate),
-        vision_gate: vision_gate.clone(),
+        vision_gate: vision_revalidator.gate(),
         memory_ops,
         embedder: embedder.clone(),
         semantic: semantic_store.clone(),
@@ -266,34 +266,25 @@ pub fn init_config() -> Result<()> {
     Ok(())
 }
 
-/// Probe llama-server for vision support once and build the gate plus
-/// the revalidator that keeps it current across model swaps.
+/// Probe llama-server for vision support once and build the revalidator
+/// whose gate it seeds.
 async fn probe_vision(
     config: &Config,
-) -> Result<(
-    Arc<assistd_tools::VisionGate>,
-    Arc<assistd_core::VisionRevalidator>,
-)> {
-    let host = config.llama_server.host.to_string();
-    let port = config.llama_server.port.get();
-    let control = assistd_llm::LlamaServerControl::new(&host, port)
-        .context("failed to construct llama-server control client for vision probe")?;
-    let initial =
-        assistd_llm::probe_capabilities_routed(&host, port, &config.model.name, &control).await;
-    if initial.vision_supported {
+    presence: &PresenceManager,
+) -> Result<Arc<assistd_core::VisionRevalidator>> {
+    let control = assistd_llm::LlamaServerControl::new(
+        &config.llama_server.host.to_string(),
+        config.llama_server.port.get(),
+    )
+    .context("failed to construct llama-server control client for vision probe")?;
+    let revalidator =
+        assistd_core::VisionRevalidator::new(control, config.model.name.clone(), presence).await;
+    if revalidator.gate().supported() {
         info!("vision: enabled (model has mmproj)");
     } else {
         tracing::warn!("Vision not available: mmproj not loaded.");
     }
-    let gate = assistd_tools::VisionGate::new(initial.vision_supported);
-    let revalidator = assistd_core::VisionRevalidator::new(
-        gate.clone(),
-        initial.model_id,
-        host,
-        port,
-        config.model.name.clone(),
-    );
-    Ok((gate, revalidator))
+    Ok(revalidator)
 }
 
 /// The daemon's own hotkeys route push-to-talk through its IPC socket,

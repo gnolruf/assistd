@@ -4,37 +4,29 @@
 //! `modalities` object. The probe fails closed: any HTTP error, parse
 //! failure, or absent field reads as no vision.
 
-use std::time::Duration;
-
 use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::control::LlamaServerControl;
+use super::error::LlamaServerError;
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Snapshot of one `/props` probe. `model_id` lets a caller detect a
-/// model swap between probes rather than trust a stale
-/// `vision_supported`.
+/// Snapshot of one `/props` probe. `model_id` is `None` when the probe
+/// never reached the loaded model, which tells a failed probe apart
+/// from a model that lacks vision.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VisionState {
     pub model_id: Option<String>,
     pub vision_supported: bool,
 }
 
-/// Probe the loaded model's capabilities, following router indirection
-/// when `/props` on `host:port` reports `role: "router"`: the model then
-/// lives in a child server whose port comes from `control`, and the
-/// child's `/props` is the answer. Fails closed to the default.
-pub async fn probe_capabilities_routed(
-    host: &str,
-    port: u16,
-    model: &str,
-    control: &LlamaServerControl,
-) -> VisionState {
-    let body = match fetch_props(host, port).await {
-        Some(v) => v,
-        None => return VisionState::default(),
+/// Probe the loaded model's capabilities through `control`, following
+/// router indirection when its `/props` reports `role: "router"`: the
+/// model then lives in a child server whose port the router's `/models`
+/// reports, and the child's `/props` is the answer. Fails closed to the
+/// default.
+pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str) -> VisionState {
+    let Some(body) = props_or_warn(control.props().await) else {
+        return VisionState::default();
     };
 
     if !is_router_props(&body) {
@@ -71,9 +63,8 @@ pub async fn probe_capabilities_routed(
         }
     };
 
-    let child_body = match fetch_props(host, child_port).await {
-        Some(v) => v,
-        None => return VisionState::default(),
+    let Some(child_body) = props_or_warn(control.child_props(child_port).await) else {
+        return VisionState::default();
     };
     let vision_supported = parse_vision_supported(&child_body);
 
@@ -93,50 +84,10 @@ fn is_router_props(body: &Value) -> bool {
     body.get("role").and_then(Value::as_str) == Some("router")
 }
 
-async fn fetch_props(host: &str, port: u16) -> Option<Value> {
-    let url = format!("http://{host}:{port}/props");
-    let client = match reqwest::Client::builder()
-        .no_proxy()
-        .timeout(PROBE_TIMEOUT)
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(
-                target: "assistd::llama_server",
-                "/props probe: failed to build HTTP client: {e}"
-            );
-            return None;
-        }
-    };
-    let resp = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(
-                target: "assistd::llama_server",
-                "/props probe: GET failed: {e}"
-            );
-            return None;
-        }
-    };
-    if !resp.status().is_success() {
-        warn!(
-            target: "assistd::llama_server",
-            "/props probe: GET returned {}",
-            resp.status()
-        );
-        return None;
-    }
-    match resp.json::<Value>().await {
-        Ok(v) => Some(v),
-        Err(e) => {
-            warn!(
-                target: "assistd::llama_server",
-                "/props body was not JSON: {e}"
-            );
-            None
-        }
-    }
+fn props_or_warn(props: Result<Value, LlamaServerError>) -> Option<Value> {
+    props
+        .inspect_err(|e| warn!(target: "assistd::llama_server", "/props probe failed: {e}"))
+        .ok()
 }
 
 fn parse_model_id(body: &Value) -> Option<String> {
