@@ -1,6 +1,5 @@
 //! CRUD façade over [`assistd_memory::MemoryStore`] and
-//! [`assistd_memory::ConversationStore`]. The LLM-callable tools built
-//! on it live in [`crate::memory_tools`].
+//! [`assistd_memory::ConversationStore`].
 
 use std::sync::Arc;
 
@@ -10,11 +9,11 @@ pub use assistd_memory::MemoryRecord;
 
 type Result<T> = std::result::Result<T, MemoryError>;
 
-/// Result cap applied when a caller passes `limit = 0`.
+/// Result cap applied when a search passes `limit = 0`.
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 
-/// Combined CRUD handle over both the flat KV store and the richer
-/// conversation history. Cheap to clone (just two `Arc`s).
+/// Combined handle over the key/value store and conversation history.
+/// Cheap to clone.
 #[derive(Clone)]
 pub struct MemoryOps {
     pub store: Arc<dyn MemoryStore>,
@@ -22,6 +21,7 @@ pub struct MemoryOps {
 }
 
 impl MemoryOps {
+    /// Bundle the two stores into one handle.
     pub fn new(store: Arc<dyn MemoryStore>, conversations: Arc<dyn ConversationStore>) -> Self {
         Self {
             store,

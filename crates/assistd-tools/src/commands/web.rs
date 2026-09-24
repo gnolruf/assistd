@@ -13,11 +13,13 @@ pub struct WebCommand {
 }
 
 impl WebCommand {
-    /// A client with a 30-second request timeout.
+    /// A command with a 30-second request timeout.
     pub fn new() -> Self {
         Self::with_timeout(Duration::from_secs(30))
     }
 
+    /// A command whose requests time out after `timeout`, with connecting
+    /// capped at 10 seconds.
     pub fn with_timeout(timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()

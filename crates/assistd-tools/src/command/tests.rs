@@ -73,16 +73,9 @@ fn registry_resolves_by_name_and_lists_alphabetically() {
     );
 }
 
-/// Acceptance for the error-message-as-navigation convention: every
-/// registered command, when driven into a failure path, emits stderr
-/// containing `[error] ` AND a hint word (`Use:` / `Try:` / `Check:` /
-/// `Available:`). This is the gate that catches new commands added
-/// without a convention-compliant error path.
-///
-/// Drives one case per command with an input that's guaranteed to
-/// fail. `echo` has no failure mode and is skipped. Permission-denied
-/// assertions live in platform-gated per-command tests because
-/// creating an unreadable file portably is brittle.
+/// `echo` has no failure mode and is skipped. Permission-denied cases
+/// live in platform-gated per-command tests because creating an
+/// unreadable file portably is brittle.
 #[test]
 fn every_registered_command_emits_convention_compliant_error() {
     use crate::commands::{
@@ -163,8 +156,8 @@ fn every_registered_command_emits_convention_compliant_error() {
                 vec!["file:///etc/passwd".into()],
             )),
         ),
-        // The timeout path deliberately emits a fixed, hint-free
-        // line and is not covered here.
+        // The timeout path emits a fixed, hint-free line and is not
+        // covered here.
         (
             "bash",
             rt.block_on(run_cmd(
@@ -184,10 +177,9 @@ fn every_registered_command_emits_convention_compliant_error() {
                 vec!["rm -rf /".into()],
             )),
         ),
-        // wm against the disconnected NoWindowManager exercises the
-        // mock-mode short-circuit; every subcommand returns the
-        // same `[error] wm: compositor not connected. Check: …`
-        // line, so any subcommand argv works as the failure driver.
+        // Against the disconnected NoWindowManager every subcommand
+        // returns `[error] wm: compositor not connected. Check: …`, so
+        // any argv drives the failure.
         (
             "wm",
             rt.block_on(run_cmd(
@@ -214,9 +206,6 @@ fn every_registered_command_emits_convention_compliant_error() {
     }
 }
 
-/// Every registered production command has non-empty `help()` and
-/// `summary()` text, with the summary inside the 80-char budget the
-/// tool schema shows the model.
 #[test]
 fn every_registered_command_has_nonempty_help_and_summary() {
     let reg = crate::commands::test_registry();

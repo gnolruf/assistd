@@ -1,11 +1,5 @@
 //! Word expansion: the step between parsing and dispatch that turns
 //! `~/notes` into an absolute path and `*.toml` into the files it names.
-//!
-//! Only unquoted words expand, and only tilde and globbing are
-//! implemented — `$VAR`, command substitution and brace expansion stay
-//! the `bash` command's job. An unmatched glob is left as written, which
-//! is bash's default and keeps a pattern that names nothing from
-//! silently vanishing from the argv.
 
 use glob::{MatchOptions, glob_with};
 
@@ -23,6 +17,12 @@ const MATCH_OPTIONS: MatchOptions = MatchOptions {
 /// Expand every word into the flat argument list a command receives.
 /// One word can yield several arguments (a matching glob) or exactly one
 /// (everything else).
+///
+/// Only unquoted words expand, and only tilde and globbing are
+/// implemented — `$VAR`, command substitution and brace expansion stay
+/// the `bash` command's job. An unmatched glob is left as written, which
+/// is bash's default and keeps a pattern that names nothing from
+/// silently vanishing from the argv.
 pub fn expand_args(words: &[Word]) -> Vec<String> {
     words.iter().flat_map(expand_word).collect()
 }
@@ -104,9 +104,9 @@ mod tests {
             // command untouched whenever it doesn't happen to name files.
             ("regex matching no file", Word::bare(".*ERROR")),
             ("quoted tilde", Word::quoted("~/notes.md")),
-            // `~alice` needs a passwd lookup we don't do; leaving it
-            // literal surfaces "file not found: ~alice/x" instead of a
-            // path silently pointing at the wrong home.
+            // `~alice` would need a passwd lookup; leaving it literal
+            // surfaces "file not found: ~alice/x" instead of a path
+            // silently pointing at the wrong home.
             ("named-user tilde", Word::bare("~alice/x")),
         ] {
             assert_eq!(

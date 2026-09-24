@@ -1,7 +1,6 @@
 //! `wm <subcommand> [args]`: drive the active [`WindowManager`] from the
-//! LLM's `run` tool. `wm open` spawns model-chosen argv, so it runs
-//! under the same policy as `bash`. When no compositor is connected
-//! every subcommand fails with one uniform error.
+//! LLM's `run` tool. When no compositor is connected every subcommand
+//! fails with one uniform error.
 
 use std::sync::Arc;
 
@@ -58,9 +57,9 @@ pub struct WmCommand {
 }
 
 impl WmCommand {
-    /// `cfg`, `sandbox`, and `gate` are the same policy `bash` runs
-    /// under; `wm open` is gated identically rather than by a parallel
-    /// policy that could drift.
+    /// A `wm` command driving `wm`. `wm open` spawns model-chosen argv,
+    /// so `cfg`, `sandbox` and `gate` apply to it exactly as they do to
+    /// `bash`, rather than through a parallel policy that could drift.
     pub fn new(
         wm: Arc<dyn WindowManager>,
         cfg: Arc<BashPolicyCfg>,
