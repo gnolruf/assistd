@@ -296,37 +296,43 @@ impl AppState {
         Fut: std::future::Future<Output = Result<(), assistd_memory::MemoryError>>,
     {
         let total = items.len() as u32;
-        for (done, (item_id, text)) in (1u32..).zip(items) {
-            match self.memory.embedder.embed(text).await {
-                Ok(vec) => {
-                    if let Err(e) = store(item_id, assistd_memory::vector_to_blob(&vec)).await {
+        let mut done = 0u32;
+        for batch in items.chunks(assistd_embed::BATCH_SIZE) {
+            let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
+            let results = assistd_embed::embed_each(&*self.memory.embedder, &texts).await;
+            for (&(item_id, _), result) in batch.iter().zip(results) {
+                match result {
+                    Ok(vec) => {
+                        if let Err(e) = store(item_id, assistd_memory::vector_to_blob(&vec)).await {
+                            tracing::warn!(
+                                target: "assistd::memory",
+                                kind = kind.as_str(),
+                                item_id,
+                                error = %e,
+                                "reindex: store embedding failed"
+                            );
+                        }
+                    }
+                    Err(e) => {
                         tracing::warn!(
                             target: "assistd::memory",
                             kind = kind.as_str(),
                             item_id,
                             error = %e,
-                            "reindex: store embedding failed"
+                            "reindex: embed failed"
                         );
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "assistd::memory",
-                        kind = kind.as_str(),
-                        item_id,
-                        error = %e,
-                        "reindex: embed failed"
-                    );
-                }
+                done += 1;
+                let _ = tx
+                    .send(Event::ReindexProgress {
+                        id: id.to_string(),
+                        kind,
+                        done,
+                        total,
+                    })
+                    .await;
             }
-            let _ = tx
-                .send(Event::ReindexProgress {
-                    id: id.to_string(),
-                    kind,
-                    done,
-                    total,
-                })
-                .await;
         }
     }
 }
