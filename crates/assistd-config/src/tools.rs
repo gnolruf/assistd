@@ -11,7 +11,7 @@ use crate::defaults::{
 
 /// Tools subsystem configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ToolsConfig {
     pub output: ToolsOutputConfig,
     pub bash: ToolsBashConfig,
@@ -22,7 +22,7 @@ pub struct ToolsConfig {
 /// Limits on a `run` result before it reaches the LLM; the excess spills
 /// to a file whose path the model is given.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ToolsOutputConfig {
     /// Max output lines shown to the LLM.
     pub max_lines: NonZeroU32,
@@ -68,7 +68,7 @@ pub enum BashSandboxMode {
 /// without confirmation only when every program it can run is allowed and
 /// it matches no destructive pattern; the denylist refuses outright.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ToolsBashConfig {
     /// `bash` timeout in seconds; on expiry the process group is killed
     /// (exit 137). Does not apply to `wm open`.
@@ -112,7 +112,7 @@ impl Default for ToolsBashConfig {
 
 /// Write-command policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ToolsWriteConfig {
     /// Path prefixes `write` may create or overwrite files under (exit 126
     /// elsewhere). `~` / `~user` expand; relative entries are rejected and
@@ -143,7 +143,7 @@ pub enum ScreenshotBackend {
 
 /// Screenshot-command settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ToolsScreenshotConfig {
     pub backend: ScreenshotBackend,
 }

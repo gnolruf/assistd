@@ -15,7 +15,7 @@ use crate::defaults::{
 
 /// Voice input and output settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct VoiceConfig {
     /// Enables voice input.
     pub enabled: bool,
@@ -47,7 +47,7 @@ impl Default for VoiceConfig {
 
 /// Whisper speech-to-text settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct TranscriptionConfig {
     /// Whisper GGML model as `<owner>/<repo>:<file>`, downloaded on first
     /// use. Validated when voice is enabled.
@@ -85,7 +85,7 @@ impl Default for TranscriptionConfig {
 /// Hands-free listening: VAD-segmented utterances are sent as queries.
 /// Runs only when both [`VoiceConfig::enabled`] and [`Self::enabled`] are set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ContinuousListenConfig {
     /// Makes continuous listening available; push-to-talk is unaffected.
     pub enabled: bool,
@@ -113,7 +113,7 @@ impl Default for ContinuousListenConfig {
 
 /// Piper text-to-speech settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct SynthesisConfig {
     /// Enables TTS. When `false`, piper is never spawned and no voice is
     /// downloaded.

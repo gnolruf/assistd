@@ -4,7 +4,7 @@ use crate::defaults::DEFAULT_PRESENCE_HOTKEY;
 
 /// Manual presence-control settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct PresenceConfig {
     /// Global hotkey cycling `Active → Drowsy → Sleeping`. Empty disables
     /// it; the listener works only on X11 (bind `assistd cycle` elsewhere).

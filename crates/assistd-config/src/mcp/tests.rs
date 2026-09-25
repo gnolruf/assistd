@@ -1,4 +1,5 @@
 use super::*;
+use crate::Config;
 
 #[test]
 fn parses_stdio_server_minimally() {
@@ -62,26 +63,22 @@ fn parses_sse_server_minimally() {
 #[test]
 fn transport_specific_keys_do_not_cross_variants() {
     let stdio_with_url = r#"
-        [[servers]]
+        [[mcp.servers]]
         name = "x"
         transport = "stdio"
         command = "npx"
         url = "https://example.com/sse"
     "#;
-    let err = toml::from_str::<McpConfig>(stdio_with_url)
-        .expect_err("`url` on a stdio server must not parse");
-    assert!(err.to_string().contains("url"), "{err}");
+    assert_eq!(unknown_keys(stdio_with_url), ["mcp.servers[0].url"]);
 
     let sse_with_command = r#"
-        [[servers]]
+        [[mcp.servers]]
         name = "x"
         transport = "sse"
         url = "https://example.com/sse"
         command = "npx"
     "#;
-    let err = toml::from_str::<McpConfig>(sse_with_command)
-        .expect_err("`command` on an sse server must not parse");
-    assert!(err.to_string().contains("command"), "{err}");
+    assert_eq!(unknown_keys(sse_with_command), ["mcp.servers[0].command"]);
 }
 
 #[test]
@@ -105,4 +102,10 @@ fn zero_request_timeout_is_rejected_at_load() {
         request_timeout_secs = 0
     "#;
     toml::from_str::<McpConfig>(toml).expect_err("a zero timeout must not parse");
+}
+
+fn unknown_keys(toml_src: &str) -> Vec<String> {
+    let cfg: Config = toml::from_str(toml_src).expect("config must parse");
+    let raw: toml::Table = toml::from_str(toml_src).expect("config must be valid TOML");
+    cfg.unknown_keys(&raw).expect("config must serialize")
 }

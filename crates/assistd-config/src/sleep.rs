@@ -9,7 +9,7 @@ use crate::defaults::{
 
 /// Sleep/idle policy settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct SleepConfig {
     /// Idle minutes before `Active → Drowsy` (weights unloaded, server
     /// kept). `0` disables.

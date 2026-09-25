@@ -12,7 +12,7 @@ pub enum CompositorType {
 
 /// Compositor integration settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct CompositorConfig {
     /// The `type` key.
     #[serde(rename = "type")]

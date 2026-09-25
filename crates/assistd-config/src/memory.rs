@@ -8,7 +8,7 @@ use crate::defaults::{DEFAULT_MEMORY_ENABLED, default_memory_db_path};
 
 /// SQLite-backed memory settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct MemoryConfig {
     /// When `false`, the database is never opened.
     pub enabled: bool,

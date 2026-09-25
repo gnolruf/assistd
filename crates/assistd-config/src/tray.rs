@@ -8,7 +8,7 @@ use crate::defaults::{
 
 /// System-tray settings for `assistd tray`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct TrayConfig {
     /// Floating activity popup. Parsed on every build; used only by
     /// `tray-popup` builds.
@@ -18,7 +18,7 @@ pub struct TrayConfig {
 /// Floating popup showing the latest reply and tool call. Geometry is in
 /// logical pixels; ranges are validated only when `enabled`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct TrayPopupConfig {
     pub enabled: bool,
     /// Screen corner (or centre) the offsets are measured from.
@@ -64,7 +64,7 @@ impl Default for TrayPopupConfig {
 
 /// Events that open the popup, each independent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct TrayPopupWakeConfig {
     /// Every tool call.
     pub tool_call: bool,

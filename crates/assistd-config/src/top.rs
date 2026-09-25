@@ -22,7 +22,7 @@ use crate::voice::{SynthesisConfig, VoiceConfig};
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Config {
     pub model: ModelConfig,
     pub llama_server: LlamaServerConfig,
@@ -75,16 +75,37 @@ impl Config {
         Ok(config_dir.join("assistd/config.toml"))
     }
 
-    /// Loads and deserializes a config from the given TOML file.
+    /// Loads and deserializes a config from the given TOML file. Keys the
+    /// schema doesn't know are skipped, with a warning logged for each.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&content).map_err(|source| ConfigError::Parse {
+        let parse_error = |source| ConfigError::Parse {
             path: path.to_path_buf(),
             source,
-        })
+        };
+        let config: Self = toml::from_str(&content).map_err(parse_error)?;
+        let raw: toml::Table = toml::from_str(&content).map_err(parse_error)?;
+        for key in config.unknown_keys(&raw)? {
+            tracing::warn!(
+                target: "assistd::config",
+                "ignoring unknown key `{key}` in {} (it may be left over from an older assistd; \
+                 see config.sample.toml for the current schema)",
+                path.display()
+            );
+        }
+        Ok(config)
+    }
+
+    /// Dotted paths of the keys in `raw` that no field of `self` accounts
+    /// for, given that `self` was deserialized from `raw`.
+    pub fn unknown_keys(&self, raw: &toml::Table) -> Result<Vec<String>, ConfigError> {
+        let known = toml::Table::try_from(self)?;
+        let mut unknown = Vec::new();
+        collect_unknown_keys(raw, &known, "", &mut unknown);
+        Ok(unknown)
     }
 
     /// Writes the default config to `path`. Errors if the file already exists.
@@ -111,6 +132,46 @@ impl Config {
             source,
         })?;
         Ok(())
+    }
+}
+
+/// Walks `raw` alongside `known`, the serialized parsed config, which holds
+/// every schema key because defaults fill the ones `raw` omits.
+fn collect_unknown_keys(
+    raw: &toml::Table,
+    known: &toml::Table,
+    prefix: &str,
+    unknown: &mut Vec<String>,
+) {
+    for (key, raw_value) in raw {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match (raw_value, known.get(key)) {
+            (_, None) => unknown.push(path),
+            (toml::Value::Table(raw_table), Some(toml::Value::Table(known_table))) => {
+                collect_unknown_keys(raw_table, known_table, &path, unknown);
+            }
+            (toml::Value::Array(raw_items), Some(toml::Value::Array(known_items))) => {
+                collect_unknown_array_keys(raw_items, known_items, &path, unknown);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_unknown_array_keys(
+    raw_items: &[toml::Value],
+    known_items: &[toml::Value],
+    path: &str,
+    unknown: &mut Vec<String>,
+) {
+    for (index, items) in raw_items.iter().zip(known_items).enumerate() {
+        if let (toml::Value::Table(raw_table), toml::Value::Table(known_table)) = items {
+            collect_unknown_keys(raw_table, known_table, &format!("{path}[{index}]"), unknown);
+        }
     }
 }
 

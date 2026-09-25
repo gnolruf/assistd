@@ -13,7 +13,7 @@ use crate::defaults::{
 
 /// Dedicated embedding llama-server and semantic-recall settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct EmbeddingConfig {
     /// When `false`, semantic recall is unavailable.
     pub enabled: bool,
