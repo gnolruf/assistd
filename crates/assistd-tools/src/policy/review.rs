@@ -8,7 +8,7 @@ use std::{fmt, iter};
 use super::allowlist::{Allowlist, Verdict};
 use super::shell::{self, Script, SimpleCommand, Word};
 
-/// How many scripts deep (`sh -c`, `eval`, here-documents, …) the matcher
+/// How many scripts deep (`eval`, `trap`, wrapped command lines, …) the matcher
 /// looks. A script nested deeper counts as unverifiable.
 const MAX_NESTED_SCRIPTS: usize = 16;
 
@@ -17,303 +17,21 @@ const COMMAND_PREFIX_WORDS: &[&str] = &[
     "!", "{", "if", "then", "else", "elif", "do", "while", "until",
 ];
 
-/// Shells, which run the argument of `-c` as a script, or a script read
-/// from stdin when given no script file.
-const SHELLS: &[&str] = &[
-    "ash",
-    "bash",
-    "bosh",
-    "csh",
-    "dash",
-    "elvish",
-    "es",
-    "fish",
-    "hush",
-    "ion",
-    "jsh",
-    "ksh",
-    "lksh",
-    "loksh",
-    "mksh",
-    "msh",
-    "murex",
-    "nu",
-    "nushell",
-    "oil",
-    "oksh",
-    "osh",
-    "pdksh",
-    "posh",
-    "powershell",
-    "pwsh",
-    "rbash",
-    "rc",
-    "rksh",
-    "rzsh",
-    "sash",
-    "sh",
-    "tcsh",
-    "xonsh",
-    "yash",
-    "ysh",
-    "zsh",
-];
-
-/// Interpreters whose inline or stdin code may call out to a shell. Their
-/// string literals are checked as commands.
-const INTERPRETERS: &[&str] = &[
-    "awk",
-    "bun",
-    "clisp",
-    "deno",
-    "elixir",
-    "erl",
-    "escript",
-    "expect",
-    "gawk",
-    "groovy",
-    "guile",
-    "irb",
-    "jruby",
-    "jshell",
-    "julia",
-    "jython",
-    "kotlin",
-    "lua",
-    "luajit",
-    "mawk",
-    "nawk",
-    "node",
-    "nodejs",
-    "ocaml",
-    "osascript",
-    "perl",
-    "php",
-    "pypy",
-    "python",
-    "r",
-    "racket",
-    "rscript",
-    "ruby",
-    "runghc",
-    "runhaskell",
-    "sbcl",
-    "scala",
-    "swift",
-    "tclsh",
-    "wish",
-];
-
-/// Programs that run a command given as their arguments, with the number
-/// of operands (a host, a lock file, a subcommand and its target) before
-/// that command. Every argument is a potential command name, since a
-/// wrapper's options cannot be told from its command without knowing its
-/// flags; arguments with spaces or shell syntax are also checked as
-/// scripts (`su -c '…'`, `ssh host '…'`, `env -S '…'`).
+/// Builtins, and the wrappers allowed by default, that run a command given
+/// as their arguments, with the number of operands before that command.
+/// Any other program that runs commands is trusted with them once allowed.
 const WRAPPERS: &[(&str, usize)] = &[
-    ("alacritty", 0),
-    ("arch", 0),
-    ("asdf", 1),
-    ("at", 1),
-    ("autossh", 1),
-    ("batch", 0),
     ("builtin", 0),
-    ("bundle", 1),
-    ("bunx", 0),
-    ("busybox", 0),
-    ("bwrap", 0),
-    ("caffeinate", 0),
-    ("capsh", 0),
-    ("catatonit", 0),
-    ("catchsegv", 0),
-    ("cgexec", 0),
-    ("chpst", 0),
-    ("chronic", 0),
-    ("chroot", 1),
-    ("chrt", 1),
     ("command", 0),
-    ("concurrently", 0),
-    ("conda", 1),
     ("coproc", 0),
-    ("cpulimit", 0),
-    ("daemonize", 0),
-    ("dbus-launch", 0),
-    ("dbus-run-session", 0),
-    ("direnv", 2),
-    ("distrobox", 2),
-    ("distrobox-host-exec", 0),
-    ("doas", 0),
-    ("docker", 2),
-    ("dumb-init", 0),
-    ("eatmydata", 0),
-    ("entr", 0),
     ("env", 0),
-    ("envdir", 1),
-    ("envuidgid", 1),
     ("exec", 0),
-    ("fakechroot", 0),
-    ("fakeroot", 0),
-    ("faketime", 1),
-    ("firejail", 0),
-    ("flatpak", 2),
-    ("flatpak-spawn", 0),
-    ("flock", 1),
-    ("foot", 0),
-    ("footclient", 0),
-    ("gamemoderun", 0),
-    ("gdb", 0),
-    ("ghostty", 0),
-    ("gnome-terminal", 0),
-    ("gosu", 1),
-    ("gtimeout", 1),
-    ("guake", 0),
-    ("host-spawn", 0),
-    ("hyperfine", 0),
-    ("hyprctl", 0),
-    ("i3-msg", 0),
-    ("incus", 2),
-    ("ionice", 0),
-    ("kgx", 0),
-    ("kitty", 0),
-    ("konsole", 0),
-    ("kubectl", 2),
-    ("linux", 0),
-    ("ltrace", 0),
-    ("lxc", 2),
-    ("lxc-attach", 0),
-    ("lxterminal", 0),
-    ("machinectl", 2),
-    ("mangohud", 0),
-    ("mate-terminal", 0),
-    ("mise", 1),
-    ("mosh", 1),
     ("nice", 0),
-    ("nix", 2),
-    ("nix-shell", 0),
-    ("nocache", 0),
-    ("nodemon", 0),
     ("nohup", 0),
-    ("npm", 1),
-    ("npx", 0),
-    ("nq", 0),
-    ("nsenter", 0),
-    ("numactl", 0),
-    ("optirun", 0),
-    ("parallel", 0),
-    ("perf", 1),
-    ("pipenv", 1),
-    ("pixi", 1),
-    ("pkexec", 0),
-    ("please", 0),
-    ("pnpm", 1),
-    ("pnpx", 0),
-    ("podman", 2),
-    ("poetry", 1),
-    ("prime-run", 0),
-    ("primusrun", 0),
-    ("prlimit", 0),
-    ("proot", 0),
-    ("proxychains", 0),
-    ("pueue", 1),
-    ("pyenv", 1),
-    ("qterminal", 0),
-    ("rbenv", 1),
-    ("riverctl", 0),
-    ("rlwrap", 0),
-    ("rr", 0),
-    ("rsh", 1),
-    ("run", 0),
-    ("runuser", 0),
-    ("rxvt", 0),
-    ("s6-setuidgid", 1),
-    ("sakura", 0),
-    ("sandbox-exec", 0),
-    ("schroot", 0),
-    ("screen", 0),
-    ("script", 0),
-    ("setarch", 1),
-    ("setpriv", 0),
-    ("setsid", 0),
-    ("setuidgid", 1),
-    ("sg", 1),
-    ("softlimit", 0),
-    ("ssh", 1),
-    ("sshpass", 0),
-    ("st", 0),
     ("stdbuf", 0),
-    ("strace", 0),
-    ("su", 1),
-    ("su-exec", 1),
-    ("sudo", 0),
-    ("sudo-rs", 0),
-    ("swaymsg", 0),
-    ("systemd-nspawn", 0),
-    ("systemd-run", 0),
-    ("taskset", 1),
-    ("terminator", 0),
-    ("terminology", 0),
-    ("tilix", 0),
     ("time", 0),
     ("timeout", 1),
-    ("tini", 0),
-    ("tmux", 1),
-    ("toolbox", 1),
-    ("torsocks", 0),
-    ("toybox", 0),
-    ("trickle", 0),
-    ("tsocks", 0),
-    ("tsp", 0),
-    ("unbuffer", 0),
-    ("unshare", 0),
-    ("urxvt", 0),
-    ("uv", 1),
-    ("uxterm", 0),
-    ("vagrant", 1),
-    ("valgrind", 0),
-    ("vglrun", 0),
-    ("watch", 0),
-    ("watchexec", 0),
-    ("wezterm", 1),
-    ("x-terminal-emulator", 0),
     ("xargs", 0),
-    ("xfce4-terminal", 0),
-    ("xterm", 0),
-    ("xvfb-run", 0),
-    ("yarn", 1),
-];
-
-/// Wrappers whose first operand is a subcommand (`docker rm`), which is
-/// not itself a command.
-const SUBCOMMAND_WRAPPERS: &[&str] = &[
-    "asdf",
-    "bundle",
-    "conda",
-    "direnv",
-    "distrobox",
-    "docker",
-    "flatpak",
-    "incus",
-    "kubectl",
-    "lxc",
-    "machinectl",
-    "mise",
-    "nix",
-    "npm",
-    "perf",
-    "pipenv",
-    "pixi",
-    "pnpm",
-    "podman",
-    "poetry",
-    "pueue",
-    "pyenv",
-    "rbenv",
-    "tmux",
-    "toolbox",
-    "uv",
-    "vagrant",
-    "wezterm",
-    "yarn",
 ];
 
 /// Reserved words, which run nothing themselves when unquoted.
@@ -350,7 +68,7 @@ const RISKY_BUILTINS: &[&str] = &[
 ];
 
 /// Characters that make one word a command line rather than a program
-/// name (`su -c 'rm -rf ~'`).
+/// name (`env -S 'rm -rf ~'`).
 const SHELL_SYNTAX: &str = ";&|()<>`$";
 
 /// Options of the wrappers allowed by default that always take the next
@@ -386,19 +104,15 @@ const VALUE_OPTIONS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// Wrappers that append arguments read from stdin to the command they run.
-const FEEDS_ARGUMENTS: &[&str] = &["parallel", "xargs"];
+/// The wrapper that appends arguments read from stdin to the command it
+/// runs.
+const FEEDS_ARGUMENTS: &str = "xargs";
 
-/// Where those wrappers put an input item inside the command instead.
+/// Where it puts an input item inside the command instead.
 const INPUT_PLACEHOLDER: &str = "{}";
 
-/// Programs that run a command given after one of these flags.
-const EXEC_FLAGS: &[(&str, &[&str])] = &[
-    ("fd", &["-x", "-X", "--exec", "--exec-batch"]),
-    ("fdfind", &["-x", "-X", "--exec", "--exec-batch"]),
-    ("find", &["-exec", "-execdir", "-ok", "-okdir"]),
-    ("gfind", &["-exec", "-execdir", "-ok", "-okdir"]),
-];
+/// `find` flags after which it runs a command.
+const FIND_EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// A configured destructive command: a command name followed by arguments
 /// that must all be present, in any order.
@@ -608,18 +322,20 @@ pub struct Rules<'a> {
 /// or a newline, in subshells and `$(…)`/backquote substitutions (also
 /// inside double quotes and here-documents), after reserved words such as
 /// `if` or `{`, after `NAME=value` assignments and redirections, after
-/// wrappers (`sudo`, `env`, `xargs`, `ssh`, …) and `find -exec`, and inside
-/// scripts handed to a shell (`sh -c`, `bash <<EOF`), `eval`, `trap` or
-/// `alias`. Each must be a shell builtin that runs no code, a function the
-/// script defined earlier, a known shell whose script is checked in turn,
-/// or on the allowlist. A script file (`./x.sh`, `bash x.sh`, `source x`)
-/// is never on it, since the file can change. String literals in
-/// interpreter code (`python -c`, `perl -e`) are checked against the
-/// patterns, as commands and as argv lists. Quoted text elsewhere stays
-/// one word, so `echo "rm -rf"` does not match.
+/// builtins such as `exec` or `command`, after the wrappers allowed by
+/// default (`env`, `nice`, `nohup`, `stdbuf`, `timeout`, `xargs`) and
+/// `find -exec`, and inside `eval`, `trap` or `alias`. Each must be a
+/// shell builtin that runs no code, a function the script defined
+/// earlier, or on the allowlist. Any other program is trusted with
+/// whatever it runs once allowed, so what a shell, interpreter or wrapper
+/// is handed (`sh -c '…'`, `python -c '…'`, `sudo …`) is not looked into.
+/// A script file (`./x.sh`, `source x`) is never on
+/// the allowlist, since the file can change. Quoted text stays one word,
+/// so `echo "rm -rf"` does not match.
 ///
 /// Unverifiable: a command whose name is only known at run time (`$cmd`,
-/// `$(echo rm)`, `/bin/r?`), a shell reading its script from stdin, a
+/// `$(echo rm)`, `/bin/r?`), `source` reading its script from stdin, an
+/// `env` option with its value attached (`env -Scmd`), a
 /// script ending inside a quote or substitution, nesting beyond what the
 /// matcher follows, a change to `PATH`, `BASH_ENV` or the dynamic loader
 /// (`LD_*`), and any word naming a protected directory.
@@ -823,8 +539,8 @@ impl<'a> Matcher<'a> {
             }
             if may_be_command {
                 self.allowed(word, index, script, depth, out);
-                self.runs(word, args, Site { cmd, script, depth }, fed, out);
-                fed |= FEEDS_ARGUMENTS.contains(&program(&word.text).as_str());
+                self.runs(word, args, Site { cmd, script, depth }, out);
+                fed |= program(&word.text) == FEEDS_ARGUMENTS;
             }
         }
     }
@@ -855,7 +571,6 @@ impl<'a> Matcher<'a> {
                 .functions
                 .iter()
                 .any(|(name, defined)| name == text && *defined <= index)
-            || (SHELLS.contains(&basename(text)) && self.allowlist.trusted(text))
         {
             return;
         }
@@ -872,29 +587,12 @@ impl<'a> Matcher<'a> {
     }
 
     /// What `word`, run with `args`, runs in turn: a script handed to a
-    /// shell, code handed to an interpreter, or commands embedded in a
-    /// wrapper's arguments. `fed` says an earlier wrapper fills in
-    /// arguments from its input.
-    fn runs(&self, word: &Word, args: &[Word], site: Site<'_>, fed: bool, out: &mut Findings<'a>) {
+    /// builtin, or a command line hidden in an `env` option.
+    fn runs(&self, word: &Word, args: &[Word], site: Site<'_>, out: &mut Findings<'a>) {
         let Site { cmd, script, depth } = site;
         let program = program(&word.text);
         let program = program.as_str();
         let inputs = script.inputs_of(cmd);
-        if SHELLS.contains(&program) {
-            self.shell(&word.text, args, inputs, fed, depth, out);
-            return;
-        }
-        if INTERPRETERS.contains(&program) {
-            if let Some(pattern) = args
-                .iter()
-                .map(|a| a.text.as_str())
-                .chain(inputs)
-                .find_map(|code| self.code(code, depth + 1))
-            {
-                out.pattern(pattern);
-            }
-            return;
-        }
         match program {
             "eval" => {
                 let joined: Vec<&str> = args.iter().map(|a| a.text.as_str()).collect();
@@ -930,74 +628,14 @@ impl<'a> Matcher<'a> {
                     self.script(body, depth + 1, out);
                 }
             }
-            _ if WRAPPERS.iter().any(|&(w, _)| w == program) => {
-                if let Some(pattern) = args
-                    .iter()
-                    .flat_map(|a| embedded_scripts(&a.text))
-                    .chain(inputs)
-                    .find_map(|s| self.patterns_in(s, depth + 1))
-                {
-                    out.pattern(pattern);
+            "env" => {
+                if let Some(option) = env_attached_option(args) {
+                    out.unverifiable(|| {
+                        format!("`env {option}` may run a command no check can see")
+                    });
                 }
             }
             _ => {}
-        }
-    }
-
-    fn shell<'i>(
-        &self,
-        name: &str,
-        args: &[Word],
-        inputs: impl Iterator<Item = &'i str>,
-        fed: bool,
-        depth: usize,
-        out: &mut Findings<'a>,
-    ) {
-        let mut command_string = false;
-        let mut reads_stdin = false;
-        let mut operands = Vec::new();
-        let mut value_next = false;
-        for arg in args {
-            if std::mem::take(&mut value_next) {
-                continue;
-            }
-            let text = arg.text.as_str();
-            if arg.dynamic || text == "-" || !text.starts_with(['-', '+']) {
-                reads_stdin |= is_stdin_path(text);
-                operands.push(arg);
-            } else if let Some(long) = text.strip_prefix("--") {
-                value_next = matches!(long, "rcfile" | "init-file");
-            } else {
-                let flags = &text[1..];
-                if text.starts_with('-') {
-                    command_string |= flags.contains('c');
-                    reads_stdin |= flags.contains(['s', 'i']);
-                }
-                value_next = flags.ends_with(['o', 'O']);
-            }
-        }
-        let filled_in = |op: &Word| fed && op.text.contains(INPUT_PLACEHOLDER);
-        let unknown =
-            |op: &Word| format!("`{name}` runs a script only known at run time: {}", op.text);
-        if command_string {
-            for op in operands {
-                if filled_in(op) {
-                    out.unverifiable(|| unknown(op));
-                } else {
-                    self.script(&op.text, depth + 1, out);
-                }
-            }
-            return;
-        }
-        match operands.iter().find(|op| !is_stdin_path(&op.text)) {
-            Some(file) if !reads_stdin => {
-                if file.dynamic || filled_in(file) {
-                    out.unverifiable(|| unknown(file));
-                } else {
-                    out.unlisted(&format!("{name} {}", file.text), false);
-                }
-            }
-            _ => self.stdin_script(name, inputs, depth, out),
         }
     }
 
@@ -1018,30 +656,6 @@ impl<'a> Matcher<'a> {
         for input in inputs {
             self.script(input, depth + 1, out);
         }
-    }
-
-    /// Pattern matches in interpreter code: each string literal checked
-    /// as a script and for literals of its own, then the literals in
-    /// order as an argv (`["rm", "-rf", path]`).
-    fn code(&self, code: &str, depth: usize) -> Option<&'a DestructivePattern> {
-        if depth > MAX_NESTED_SCRIPTS {
-            return None;
-        }
-        let literals = string_literals(code);
-        literals
-            .iter()
-            .find_map(|lit| {
-                self.patterns_in(lit, depth + 1)
-                    .or_else(|| self.code(lit, depth + 1))
-            })
-            .or_else(|| {
-                let words: Vec<Word> = literals.iter().map(|lit| Word::literal(lit)).collect();
-                (0..words.len()).find_map(|at| {
-                    self.patterns
-                        .iter()
-                        .find(|p| p.invoked_by(&words[at], &words[at + 1..], false))
-                })
-            })
     }
 }
 
@@ -1102,13 +716,9 @@ fn command_start(words: &[Word]) -> Option<usize> {
     None
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct Wrapping {
-    operands: usize,
-    subcommand: bool,
-}
-
-fn wrapping(word: &Word, next: Option<&Word>) -> Option<Wrapping> {
+/// How many operands `word` reads before the command it runs, when it is a
+/// wrapper.
+fn wrapping(word: &Word, next: Option<&Word>) -> Option<usize> {
     if word.dynamic_name {
         return None;
     }
@@ -1117,19 +727,10 @@ fn wrapping(word: &Word, next: Option<&Word>) -> Option<Wrapping> {
     if program == "command" && next.is_some_and(|n| matches!(n.text.as_str(), "-v" | "-V")) {
         return None;
     }
-    if SHELLS.contains(&program) || INTERPRETERS.contains(&program) {
-        return Some(Wrapping {
-            operands: 0,
-            subcommand: false,
-        });
-    }
     WRAPPERS
         .iter()
         .find(|&&(w, _)| w == program)
-        .map(|&(_, operands)| Wrapping {
-            operands,
-            subcommand: SUBCOMMAND_WRAPPERS.contains(&program),
-        })
+        .map(|&(_, operands)| operands)
 }
 
 struct Candidate {
@@ -1142,9 +743,7 @@ struct Candidate {
 struct Scan {
     /// The command word runs a command still to come, after this many
     /// more operands.
-    pending: Option<Wrapping>,
-    /// Its next operand is a subcommand, not a command.
-    subcommand: bool,
+    pending: Option<usize>,
     /// Flags after which it runs a command (`find -exec`).
     exec_flags: Option<&'static [&'static str]>,
     /// No exec flag has been seen yet, so its arguments are its own.
@@ -1161,11 +760,11 @@ struct Scan {
 impl Scan {
     fn enter(&mut self, word: &Word, next: Option<&Word>) {
         self.pending = wrapping(word, next);
-        self.subcommand = self.pending.is_some_and(|p| p.subcommand);
-        self.value_options = (!word.dynamic_name)
-            .then(|| program(&word.text))
-            .and_then(|program| VALUE_OPTIONS.iter().find(|&&(p, _)| p == program))
-            .map_or(&[], |&(_, options)| options);
+        self.value_options = if word.dynamic_name {
+            &[]
+        } else {
+            value_options(&program(&word.text))
+        };
         if let Some(flags) = exec_flags(word) {
             self.exec_flags = Some(flags);
             self.before_exec = true;
@@ -1194,7 +793,7 @@ fn candidates(words: &[Word], start: usize) -> Vec<Candidate> {
             .is_some_and(|flags| flags.contains(&word.text.as_str()))
         {
             scan.before_exec = false;
-            scan.pending = Some(Wrapping::default());
+            scan.pending = Some(0);
             scan.after_option = false;
             continue;
         }
@@ -1202,24 +801,19 @@ fn candidates(words: &[Word], start: usize) -> Vec<Candidate> {
             continue;
         }
         if !word.quoted && word.text == "--" {
-            scan.pending = scan.pending.map(|p| Wrapping { operands: 0, ..p });
+            scan.pending = scan.pending.map(|_| 0);
             scan.after_option = false;
             continue;
         }
         let option = !word.dynamic && word.text.starts_with('-');
         let operand = !option && !scan.after_option && !is_assignment(&word.text);
         match scan.pending {
-            Some(p) if operand && p.operands > 0 => {
-                if !std::mem::take(&mut scan.subcommand) {
-                    out.push(Candidate {
-                        at,
-                        may_be_command: false,
-                    });
-                }
-                scan.pending = Some(Wrapping {
-                    operands: p.operands - 1,
-                    ..p
+            Some(operands) if operand && operands > 0 => {
+                out.push(Candidate {
+                    at,
+                    may_be_command: false,
                 });
+                scan.pending = Some(operands - 1);
             }
             Some(_) if operand => {
                 out.push(Candidate {
@@ -1230,8 +824,8 @@ fn candidates(words: &[Word], start: usize) -> Vec<Candidate> {
             }
             _ => out.push(Candidate {
                 at,
-                may_be_command: scan.pending.is_some_and(|p| {
-                    p.operands == 0 || (scan.after_option && is_command_line(word))
+                may_be_command: scan.pending.is_some_and(|operands| {
+                    operands == 0 || (scan.after_option && is_command_line(word))
                 }) && !option
                     && !is_assignment(&word.text),
             }),
@@ -1245,7 +839,7 @@ fn candidates(words: &[Word], start: usize) -> Vec<Candidate> {
     out
 }
 
-/// A literal word holding a whole command line (`su -c 'rm -rf ~'`),
+/// A literal word holding a whole command line (`env -S 'rm -rf ~'`),
 /// not a program name.
 fn is_command_line(word: &Word) -> bool {
     !word.dynamic
@@ -1255,55 +849,37 @@ fn is_command_line(word: &Word) -> bool {
 }
 
 fn exec_flags(word: &Word) -> Option<&'static [&'static str]> {
-    if word.dynamic_name {
-        return None;
-    }
-    let program = program(&word.text);
-    EXEC_FLAGS
+    (!word.dynamic_name && program(&word.text) == "find").then_some(FIND_EXEC_FLAGS)
+}
+
+fn value_options(program: &str) -> &'static [&'static str] {
+    VALUE_OPTIONS
         .iter()
         .find(|&&(p, _)| p == program)
-        .map(|&(_, flags)| flags)
+        .map_or(&[], |&(_, options)| options)
 }
 
-/// Scripts an argument to a wrapper may carry: the argument itself, or
-/// the value of an option (`--split-string=…`, `-c…`), when it holds
-/// spaces or shell syntax.
-fn embedded_scripts(arg: &str) -> impl Iterator<Item = &str> {
-    let value = if arg.starts_with("--") {
-        arg.split_once('=').map(|(_, value)| value)
-    } else if arg.starts_with('-') {
-        arg.get(2..)
-    } else {
-        None
-    };
-    [Some(arg), value]
-        .into_iter()
-        .flatten()
-        .filter(|s| s.contains(|c: char| c.is_whitespace() || ";&|()<>`$".contains(c)))
-}
-
-/// The contents of every `'…'`, `"…"` and `` `…` `` literal in `code`, as
-/// written.
-fn string_literals(code: &str) -> Vec<&str> {
-    let mut literals = Vec::new();
-    let mut chars = code.char_indices();
-    while let Some((_, quote)) = chars.next() {
-        if !matches!(quote, '\'' | '"' | '`') {
+/// The first of `env`'s own options with its value attached (`-Sx`,
+/// `--split-string=x`, a cluster such as `-iS`). `-S` runs its value as a
+/// command line, and an attached value cannot be told apart from it
+/// without knowing every option, so any such option counts.
+fn env_attached_option(args: &[Word]) -> Option<&str> {
+    let value_options = value_options("env");
+    let mut value_next = false;
+    for arg in args {
+        let text = arg.text.as_str();
+        if std::mem::take(&mut value_next) {
             continue;
         }
-        let start = chars.offset();
-        let mut end = code.len();
-        while let Some((at, c)) = chars.next() {
-            if c == '\\' {
-                chars.next();
-            } else if c == quote {
-                end = at;
-                break;
-            }
+        if !text.starts_with('-') || text == "--" {
+            return None;
         }
-        literals.push(&code[start..end]);
+        if text.contains('=') || (!text.starts_with("--") && text.len() > 2) {
+            return Some(text);
+        }
+        value_next = value_options.contains(&text);
     }
-    literals
+    None
 }
 
 fn is_assignment(word: &str) -> bool {

@@ -96,7 +96,7 @@ pub struct ToolsBashConfig {
     /// list `|`-separated alternatives. `-rf` matches short options in any
     /// cluster, `--force` its abbreviations, and an argument ending in `=`
     /// matches as a prefix. Example: `"rm -r|--recursive"` matches
-    /// `/bin/rm foo -vfr` and `sh -c 'rm --rec foo'` but not
+    /// `/bin/rm foo -vfr` and `echo $(rm --rec foo)` but not
     /// `echo "rm -rf"`. Commands only known at run time also prompt.
     pub destructive_patterns: Vec<String>,
     /// Sandbox mode. See [`BashSandboxMode`].

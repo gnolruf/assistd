@@ -221,7 +221,7 @@ async fn running_a_script_file_asks_the_gate() {
     let target = scratch.path().join("file");
     std::fs::write(&target, b"x").unwrap();
     let script = format!(
-        "printf 'rm -rf %s\\n' {target} > {dir}/s.sh && bash {dir}/s.sh",
+        "printf 'rm -rf %s\\n' {target} > {dir}/s.sh && source {dir}/s.sh",
         target = target.display(),
         dir = scratch.path().display(),
     );

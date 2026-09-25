@@ -202,20 +202,6 @@ impl Allowlist {
         }
     }
 
-    /// Whether `word` names a program the user cannot modify: a bare name
-    /// that resolves to one, or an absolute path to one.
-    pub(super) fn trusted(&self, word: &str) -> bool {
-        if word.contains('/') {
-            let path = Path::new(word);
-            path.is_absolute()
-                && std::fs::metadata(path).is_ok_and(|m| m.is_file())
-                && self.cannot_be_modified(path)
-        } else {
-            self.resolve(word)
-                .is_some_and(|found| self.cannot_be_modified(&found))
-        }
-    }
-
     fn resolve(&self, name: &str) -> Option<PathBuf> {
         self.search_path
             .dirs

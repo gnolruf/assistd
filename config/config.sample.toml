@@ -338,17 +338,19 @@ hotkey = "Super+Escape"
 # Allowed programs: a command runs without confirmation only when every
 # program it can run is listed here and nothing in it matches a
 # destructive pattern below. That covers each command word, the command
-# behind a wrapper (`sudo X`, `xargs X`, `find -exec X`), and everything
-# inside `sh -c '…'`, `eval`, `$(…)` and here-documents fed to a shell.
-# Anything else asks first. Shell builtins that cannot run code (`cd`,
-# `echo`, `test`, …) are always allowed.
+# behind a default wrapper (`xargs X`, `timeout 5 X`, `find -exec X`), and
+# everything inside `eval` and `$(…)`. Anything else asks first. Shell
+# builtins that cannot run code (`cd`, `echo`, `test`, …) are always
+# allowed. Any other program that runs commands (`sh`, `python3`, `sudo`,
+# `ssh`, `docker`, …) is trusted with whatever it is handed once allowed,
+# so think twice before "always allow".
 #
 # Entries are bare names, looked up on the command's PATH, or absolute
 # paths. A bare name only counts when it resolves to a file you cannot
 # modify (such as /usr/bin/ls), so a copy planted earlier on PATH does
 # not inherit its trust. A script that changes PATH or LD_* variables
-# asks before running anything. Running a script file (`./x.sh`,
-# `bash x.sh`, `source x`) always asks, since the file can change.
+# asks before running anything. Running a script file directly
+# (`./x.sh`, `source x`) always asks, since the file can change.
 #
 # The prompt's "always allow" adds the programs it names for good. Those
 # approvals live in allowed_programs.toml beside this file, each pinned
@@ -394,15 +396,15 @@ hotkey = "Super+Escape"
 # Commands are found anywhere bash would run them: after `;`, `&&`, `|`
 # or a newline, in `( … )`, `$( … )` and backquotes (also inside double
 # quotes and here-documents), after redirections and assignments, after
-# wrappers (`sudo`, `env`, `xargs`, `ssh`, `timeout`, `find -exec`, …),
-# and in scripts handed to a shell (`sh -c '…'`, `bash <<EOF`), `eval`,
-# `trap` or `alias`. String literals in interpreter code (`python -c`,
-# `perl -e`, `node -e`) are checked too. Quoted text anywhere else stays
-# one word, so `echo "rm -rf"` does NOT match.
+# the default wrappers (`env`, `nice`, `nohup`, `stdbuf`, `timeout`,
+# `xargs`, `find -exec`), and in scripts handed to `eval`, `trap` or
+# `alias`. What any other program is handed (`sh -c '…'`, `sudo …`) is
+# not looked into; that program must be allowed or confirmed itself. Quoted
+# text stays one word, so `echo "rm -rf"` does NOT match.
 #
 # A command that cannot be checked also prompts: one whose name is only
-# known at run time (`$cmd`, `$(echo rm)`, `/bin/r?`), a shell reading its
-# script from stdin (`curl … | sh`), or a script ending inside a quote.
+# known at run time (`$cmd`, `$(echo rm)`, `/bin/r?`), `source` reading
+# its script from stdin, or a script ending inside a quote.
 # What a program does once running (a script file it executes, a library
 # call like Python's shutil.rmtree) is left to the sandbox.
 # destructive_patterns = [

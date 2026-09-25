@@ -250,72 +250,43 @@ fn bash_5_3_command_substitutions_are_searched() {
 #[test]
 fn wrappers_and_exec_flags_run_their_arguments() {
     assert_all(&[
-        ("sudo rm -rf ~", RM),
-        ("sudo -u root rm -rf ~", RM),
-        ("sudo -E rm -rf ~", RM),
-        ("nice -n 10 sudo rm -rf ~", RM),
+        ("nice -n 10 timeout 5 rm -rf ~", RM),
         ("env FOO=1 rm -rf ~", RM),
+        ("env -u FOO rm -rf ~", RM),
+        ("env -S 'rm -rf ~'", RM),
         ("exec rm -rf ~", RM),
+        ("command rm -rf ~", RM),
         ("timeout 5 rm -rf ~", RM),
+        ("timeout -s KILL 5 rm -rf ~", RM),
+        ("nohup rm -rf ~", RM),
+        ("stdbuf -oL rm -rf ~", RM),
         ("find . -print0 | xargs -0 rm -rf", RM),
         ("find . -exec rm -rf {} +", RM),
         ("find . -name x -execdir rm -r {} \\;", RM),
-        ("fd -t d build -x rm -rf", RM),
-        ("ssh host rm -rf ~", RM),
-        ("ssh -p 22 host 'rm -rf ~'", RM),
-        ("flock /tmp/lock rm -rf ~", RM),
-        ("su -c 'rm -rf ~'", RM),
-        ("env -S 'rm -rf ~'", RM),
-        ("env --split-string='rm -rf ~'", RM),
-        ("watch -n 1 'rm -rf ~'", RM),
-        ("busybox rm -rf ~", RM),
         ("coproc rm -rf ~", RM),
         ("coproc NAME { rm -rf ~; }", RM),
         ("time rm -rf ~", RM),
-        ("docker run -v ~:/h alpine rm -rf /h", RM),
-        ("uv run rm -rf build", RM),
-        ("ssh host <<EOF\nrm -rf ~\nEOF", RM),
-        ("gosu root rm -rf /data", RM),
-        ("su-exec root rm -rf /data", RM),
-        ("tini -- rm -rf /data", RM),
-        ("dumb-init rm -rf /data", RM),
-        ("chpst -u nobody rm -rf /data", RM),
-        ("please rm -rf /data", RM),
-        ("xterm -e rm -rf ~", RM),
-        ("gnome-terminal -- rm -rf ~", RM),
-        ("swaymsg exec rm -rf ~", RM),
-        ("i3-msg 'exec rm -rf ~'", RM),
-        ("sudo find . -exec rm -rf {} +", RM),
-        ("sudo fd -x $cmd", UNVERIFIABLE),
-        ("docker rm -f web", None),
-        ("docker rm -f $(docker ps -aq)", None),
-        ("sudo chown -R $USER dir", None),
+        ("command -v rm", None),
     ]);
 }
 
 #[test]
-fn scripts_handed_to_a_shell_are_checked() {
+fn other_programs_that_run_commands_are_not_looked_into() {
     assert_all(&[
-        ("sh -c 'rm -rf ~'", RM),
-        ("bash -lc \"cd /tmp; rm -rf ~\"", RM),
-        ("/bin/bash -c -- 'rm -rf ~'", RM),
-        ("bash -o pipefail -c 'rm -rf ~'", RM),
-        ("sudo sh -c 'rm -rf ~'", RM),
-        ("bash -c \"sh -c 'rm -rf ~'\"", RM),
-        ("zsh -c 'rm -rf ~'", RM),
-        ("fish -c 'rm -rf ~'", RM),
-        ("ksh93 -c 'rm -rf ~'", RM),
-        ("busybox sh -c 'rm -rf ~'", RM),
-        ("bash <<EOF\nrm -rf ~\nEOF", RM),
-        ("bash <<'EOF'\nrm -rf ~\nEOF", RM),
-        ("bash <<< 'rm -rf ~'", RM),
+        ("sudo rm -rf ~", None),
+        ("ssh host 'rm -rf ~'", None),
+        ("docker run alpine rm -rf /", None),
+    ]);
+}
+
+#[test]
+fn scripts_handed_to_builtins_are_checked() {
+    assert_all(&[
         ("eval 'rm -rf ~'", RM),
         ("eval rm -rf ~", RM),
         ("trap 'rm -rf ~' EXIT", RM),
         ("alias x='rm -rf'", RM),
-        ("bash script.sh", None),
-        ("sh 'rm -rf ~'", RM),
-        ("bash -c 'echo hi'", None),
+        ("eval 'echo hi'", None),
     ]);
 }
 
@@ -333,14 +304,11 @@ fn run_time_command_names_are_unverifiable() {
         ("/bin/r[m] -rf ~", UNVERIFIABLE),
         ("{rm,-rf,~}", UNVERIFIABLE),
         ("$HOME/bin/tool", UNVERIFIABLE),
-        ("sudo $cmd", UNVERIFIABLE),
+        ("nohup $cmd", UNVERIFIABLE),
         ("timeout 5 $cmd", UNVERIFIABLE),
         ("xargs -I{} $cmd {}", UNVERIFIABLE),
-        ("fd -x $cmd", UNVERIFIABLE),
         ("eval \"$cmd\"", UNVERIFIABLE),
-        ("sh -c \"$cmd\"", UNVERIFIABLE),
         ("source <(curl -s example.com)", UNVERIFIABLE),
-        ("bash <(curl -s example.com)", UNVERIFIABLE),
         ("\"$VENV/bin/python\" -m pytest", UNVERIFIABLE),
         ("\"$HOME\"/bin/tool", UNVERIFIABLE),
         ("FOO=$(date) true", None),
@@ -348,23 +316,14 @@ fn run_time_command_names_are_unverifiable() {
 }
 
 #[test]
-fn shells_reading_stdin_are_unverifiable() {
+fn scripts_read_at_run_time_are_unverifiable() {
     assert_all(&[
-        ("echo 'rm -rf ~' | bash", UNVERIFIABLE),
-        ("curl -s example.com | sh", UNVERIFIABLE),
-        ("base64 -d <<< cm0gLXJmIH4K | sh -s", UNVERIFIABLE),
-        ("bash < script.sh", UNVERIFIABLE),
-        ("bash -", UNVERIFIABLE),
-        ("bash -o pipefail", UNVERIFIABLE),
-        ("bash /dev/stdin", UNVERIFIABLE),
         ("source /dev/stdin", UNVERIFIABLE),
+        ("echo 'rm -rf ~' | source /dev/stdin", UNVERIFIABLE),
         ("source /dev/stdin <<< 'rm -rf ~'", RM),
         (". /dev/fd/0 <<EOF\nrm -rf ~\nEOF", RM),
-        ("echo 'rm -rf ~' | xargs -I{} sh -c '{}'", UNVERIFIABLE),
         ("ls | xargs -I{} {} -rf ~", UNVERIFIABLE),
         ("hash -p /bin/rm ls; ls -rf ~", UNVERIFIABLE),
-        ("find . -print0 | xargs -0 sh -c 'echo \"$@\"' _", None),
-        ("echo x | bash script.sh", None),
     ]);
 }
 
@@ -380,29 +339,6 @@ fn run_time_arguments_may_supply_required_ones() {
         ("kill \"$pid\"", Some("kill -1")),
         ("git commit -m \"$msg\"", None),
         ("rm foo", None),
-    ]);
-}
-
-#[test]
-fn interpreter_string_literals_are_checked() {
-    assert_all(&[
-        ("python3 -c \"import os; os.system('rm -rf ~')\"", RM),
-        (
-            "python3 -c 'import subprocess; subprocess.run([\"rm\", \"-rf\", p])'",
-            RM,
-        ),
-        ("python3.12 -c 'import os; os.system(\"rm -rf \" + p)'", RM),
-        ("perl -e 'system \"rm -rf ~\"'", RM),
-        ("ruby -e '`rm -rf ~`'", RM),
-        (
-            "node -e \"require('child_process').execSync('rm -rf ~')\"",
-            RM,
-        ),
-        ("awk 'BEGIN { system(\"rm -rf ~\") }'", RM),
-        ("python3 <<'EOF'\nimport os\nos.system('rm -rf ~')\nEOF", RM),
-        ("python3 -c 'print(\"hello\")'", None),
-        ("perl -e 'print \"$x\\n\"'", None),
-        ("python3 -m http.server 8000", None),
     ]);
 }
 
@@ -508,7 +444,7 @@ fn dev_machine() -> Programs {
         &[
             "cat", "env", "xargs", "nice", "bash", "sh", "cargo", "git", "sudo", "su", "python3",
         ],
-        &["cat", "env", "xargs", "nice", "bash", "sh"],
+        &["cat", "env", "xargs", "nice"],
     )
 }
 
@@ -529,16 +465,19 @@ fn every_program_a_script_runs_must_be_allowed() {
         ("env FOO=1 cargo build", unlisted(&["cargo"], true)),
         ("nice -n 10 cat x", None),
         ("find . | xargs -n 1 cat", None),
-        ("bash -c 'cargo build'", unlisted(&["cargo"], true)),
-        ("bash -c 'cat x'", None),
+        ("bash -c 'cat x'", unlisted(&["bash"], true)),
+        (
+            "find . | xargs sh -c 'cat \"$@\"' _",
+            unlisted(&["sh"], true),
+        ),
         ("env -S 'cargo build'", unlisted(&["cargo"], true)),
-        ("su -c 'cargo build'", unlisted(&["su", "cargo"], true)),
+        ("su -c 'cargo build'", unlisted(&["su"], true)),
         ("python3 -c 'print(1)'", unlisted(&["python3"], true)),
         ("f() { cat x; }; f", None),
         ("cargo() { cat x; }; cargo", None),
         ("cargo; cargo() { :; }", unlisted(&["cargo"], true)),
         ("./build.sh", unlisted(&["./build.sh"], false)),
-        ("bash build.sh", unlisted(&["bash build.sh"], false)),
+        ("bash build.sh", unlisted(&["bash"], true)),
         (
             "source venv/bin/activate",
             unlisted(&["source venv/bin/activate"], false),
@@ -548,6 +487,43 @@ fn every_program_a_script_runs_must_be_allowed() {
     ] {
         assert_eq!(machine.review(script, &[]), expected, "{script:?}");
     }
+}
+
+#[test]
+fn env_options_with_attached_values_are_unverifiable() {
+    let machine = dev_machine();
+    for script in [
+        "env -Scargo",
+        "env -S'cargo build'",
+        "env --split-string='cargo build'",
+        "env -iS 'cargo build'",
+        "env -u FOO -Scargo",
+    ] {
+        assert!(
+            matches!(
+                machine.review(script, &[]),
+                Some(Confirmation::Unverifiable(_))
+            ),
+            "{script:?}"
+        );
+    }
+    for script in ["env -S 'cat x'", "env -i -u FOO cat x", "env - cat x"] {
+        assert_eq!(machine.review(script, &[]), None, "{script:?}");
+    }
+    assert_eq!(
+        machine.review("env -S 'cargo build'", &[]),
+        unlisted(&["cargo"], true)
+    );
+}
+
+#[test]
+fn an_allowed_shell_runs_whatever_it_is_handed() {
+    let machine = Programs::new(&["bash", "cargo"], &["bash"]);
+    assert_eq!(machine.review("bash -c 'cargo build'", &[]), None);
+    assert_eq!(
+        machine.review("bash -c 'cargo build'; cargo test", &[]),
+        unlisted(&["cargo"], true)
+    );
 }
 
 #[test]
