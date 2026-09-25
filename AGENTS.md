@@ -24,27 +24,38 @@ Guidelines for AI agents (and humans) working in this repository.
   attributes. If clippy fires, fix the code. The only acceptable
   `allow` in the entire workspace is the `unsafe_code` carve-out
   above (and even that should be avoided).
-- **Comment sparingly.** Names and structure carry meaning; comments
-  rot. Only document:
-  - `pub` functions, `pub` items inside a public `impl`, and `pub`
-    structs/enums/traits (a short doc comment explaining purpose,
-    not restating the signature).
-  - Private functions whose logic genuinely cannot be understood by
-    reading them — a subtle invariant, a workaround for an upstream
-    bug, a non-obvious ordering requirement. This should be rare.
-  Do *not* annotate trivial code, narrate what the next line does,
-  reference the task or PR that introduced the code, or leave
-  "removed X" tombstones. If a comment only restates the code,
-  delete it.
-- **Docs describe the contract, not the context.** A doc comment
-  says what the item does, its invariants, and when it errors. It
-  never describes who calls it, how another crate uses it, what
-  the code used to do, or which milestone, ticket, or acceptance
-  criterion produced it. Never cite another crate's file by path
-  or line number; those references rot silently. Document a
-  design decision once, on the item that embodies it, not in every
-  module that touches it. Module-level `//!` docs are one short
-  paragraph; the crate map lives in `docs/architecture.md`.
+- **No comments inside function bodies.** A body that needs a
+  comment has a naming or structure problem: rename the variable, or
+  extract the step into a private helper whose name says what it
+  does. The only exception is a one-line note on an upstream bug
+  workaround.
+- **Doc comments are one to three lines.** Document `pub` items with
+  what they are or do, plus invariants and error conditions when
+  they exist. Private items get no doc unless the logic hides a
+  subtle invariant. Never write about history, regressions, bugs
+  that could happen, who calls the item, how another crate uses it,
+  or which ticket produced it. Never cite another file by path. If a
+  doc restates the name or signature, delete it. Module `//!` docs
+  are one or two sentences; the crate map lives in
+  `docs/architecture.md`.
+- **Config docs live in the schema.** Field docs in `assistd-config`
+  are the technical reference: units, valid range, and what the
+  boundary values mean. `config/config.sample.toml` gives each key
+  one short line at most; it is not a manual.
+- **Lay files out in one order.** Module doc, then every `use`
+  (grouped std, external crates, workspace crates, `crate`/`super`),
+  then `mod` declarations and re-exports, then consts, then types
+  each followed by their impls, then free functions, then
+  `#[cfg(test)] mod tests;`. No `use` between items or inside
+  function bodies.
+- **Keep functions short.** Aim for under 60 lines. Past 100, split
+  the function into named steps. Only flat data tables, such as test
+  case lists, may run longer.
+- **Name things for what they are.** A reader should know what a
+  function, type, or variable is for from its name alone. No vague
+  verbs without an object (`handle`, `process`, `do_work`), no
+  single-letter names outside short closures and loop indices, no
+  abbreviations the codebase doesn't already use.
 - **Keep test modules from swamping the file.** When a
   `#[cfg(test)]` module grows past the production code it tests,
   move it to a sibling file (`foo/tests.rs` via

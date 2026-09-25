@@ -1,10 +1,10 @@
+use async_trait::async_trait;
+
 use super::*;
 use crate::chain::parse_chain;
 use crate::command::{Command, CommandInput, CommandOutput, CommandRegistry};
-use async_trait::async_trait;
 
-/// Fake command: emits fixed stdout (and optionally stderr) with a
-/// fixed exit code, ignoring its input.
+/// Emits fixed stdout, stderr and exit code, ignoring its input.
 struct Stub {
     name: &'static str,
     stdout: &'static [u8],
@@ -150,9 +150,7 @@ async fn pipe_threads_stdout_through_every_stage() {
     assert_eq!(out.exit_code, 0);
 }
 
-/// Only a stage on the right of a pipe gets `Some` stdin, even when the
-/// upstream stage printed nothing; that is how a filter tells "nothing
-/// piped" from "empty input".
+/// A piped stage gets `Some` stdin even when upstream printed nothing.
 #[tokio::test]
 async fn only_piped_stages_receive_stdin() {
     let mut r = registry_of([Stub::new("silent", b"", 0)]);

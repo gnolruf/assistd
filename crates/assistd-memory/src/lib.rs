@@ -1,6 +1,7 @@
-//! Persistent memory: the flat key/value [`MemoryStore`] trait, the
-//! conversation and semantic stores under [`sqlite`], and no-op
-//! fallbacks for when memory is disabled.
+//! Persistent memory: the key/value [`MemoryStore`], the conversation and semantic
+//! stores under [`sqlite`], and no-op fallbacks for when memory is disabled.
+
+use async_trait::async_trait;
 
 pub mod chunking;
 mod error;
@@ -16,8 +17,6 @@ pub use sqlite::{
     SqliteSemanticStore, TurnId, TurnSummary, UndoOutcome, WriteOp, vector_to_blob,
 };
 
-use async_trait::async_trait;
-
 /// One row from the `memories` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryRecord {
@@ -29,20 +28,17 @@ pub struct MemoryRecord {
 /// Persistent string-keyed, string-valued memory.
 #[async_trait]
 pub trait MemoryStore: Send + Sync + 'static {
-    /// Persist `value` under `key`, overwriting any existing value.
-    /// Returns the row id of the saved memory; the next `load(key)`
-    /// from this process observes the write.
+    /// Persist `value` under `key`, overwriting any existing value; returns the row id.
+    /// A subsequent `load(key)` observes the write.
     async fn save(&self, key: &str, value: String) -> Result<i64>;
 
-    /// Value stored at `key`, or `None` when absent. `Err` is reserved
-    /// for backend failures.
+    /// Value stored at `key`, or `None` when absent.
     async fn load(&self, key: &str) -> Result<Option<String>>;
 
     /// Remove `key`. No-op when already absent.
     async fn delete(&self, key: &str) -> Result<()>;
 
-    /// Remove the row with `id`. Returns the deleted row's key, or
-    /// `None` when no row matched.
+    /// Remove the row with `id`; returns its key, or `None` when no row matched.
     async fn delete_by_id(&self, id: i64) -> Result<Option<String>>;
 
     /// Keys starting with `prefix`, in unspecified order.

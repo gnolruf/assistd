@@ -5,11 +5,11 @@
 
 #![cfg(feature = "test-support")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
-use assistd_voice::{Transcriber, WhisperTranscriber};
+use assistd_voice::{Transcriber, TranscriptionError, WhisperTranscriber};
 
 const TINY_MODEL_ID: &str = "ggerganov/whisper.cpp:ggml-tiny.en-q5_1.bin";
 const VAD_MODEL_ID: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
@@ -30,7 +30,7 @@ fn init_tracing() {
     });
 }
 
-async fn fetch_to(path: &std::path::Path, url: &str) {
+async fn fetch_to(path: &Path, url: &str) {
     let bytes = reqwest::get(url)
         .await
         .expect("download speech clip")
@@ -42,7 +42,7 @@ async fn fetch_to(path: &std::path::Path, url: &str) {
         .expect("write speech clip");
 }
 
-fn load_pcm_16k_mono(path: &std::path::Path) -> Vec<i16> {
+fn load_pcm_16k_mono(path: &Path) -> Vec<i16> {
     let mut reader = hound::WavReader::open(path).expect("open wav");
     let spec = reader.spec();
     assert_eq!(spec.sample_rate, 16000, "fixture must be 16 kHz");
@@ -54,8 +54,8 @@ fn load_pcm_16k_mono(path: &std::path::Path) -> Vec<i16> {
         .expect("decode wav samples")
 }
 
-fn normalize(s: &str) -> String {
-    s.to_lowercase()
+fn normalize(text: &str) -> String {
+    text.to_lowercase()
         .chars()
         .filter(|c| c.is_alphanumeric() || c.is_whitespace())
         .collect::<String>()
@@ -64,17 +64,17 @@ fn normalize(s: &str) -> String {
         .join(" ")
 }
 
-async fn make_transcriber(cache: &std::path::Path, vad: bool) -> WhisperTranscriber {
-    let mut b = WhisperTranscriber::builder()
+async fn make_transcriber(cache: &Path, vad: bool) -> WhisperTranscriber {
+    let mut builder = WhisperTranscriber::builder()
         .model(TINY_MODEL_ID)
         .cache_dir(Some(cache.to_path_buf()))
         .prefer_gpu(true)
         .beams(1)
         .vad_enabled(vad);
     if vad {
-        b = b.vad_model(VAD_MODEL_ID).vad_silence_secs(0.5);
+        builder = builder.vad_model(VAD_MODEL_ID).vad_silence_secs(0.5);
     }
-    b.build().await.expect("transcriber builds")
+    builder.build().await.expect("transcriber builds")
 }
 
 struct Fixture {
@@ -100,23 +100,23 @@ async fn setup() -> Fixture {
 #[ignore = "downloads ~80MB Whisper model + JFK clip; run with --ignored for real-fidelity coverage"]
 async fn transcribes_clear_english_speech() {
     init_tracing();
-    let fx = setup().await;
-    let pcm = load_pcm_16k_mono(&fx.wav);
+    let fixture = setup().await;
+    let pcm = load_pcm_16k_mono(&fixture.wav);
     assert!(pcm.len() >= 16000 * 5, "fixture should be at least 5s");
 
-    let transcriber = make_transcriber(&fx.cache, false).await;
+    let transcriber = make_transcriber(&fixture.cache, false).await;
     let started = Instant::now();
     let text = transcriber.transcribe(&pcm).await.expect("transcribe");
     let elapsed = started.elapsed();
 
-    let norm = normalize(&text);
+    let normalized = normalize(&text);
     assert!(
-        norm.contains("ask not"),
-        "expected 'ask not' in transcript: {norm:?}"
+        normalized.contains("ask not"),
+        "expected 'ask not' in transcript: {normalized:?}"
     );
     assert!(
-        norm.contains("country"),
-        "expected 'country' in transcript: {norm:?}"
+        normalized.contains("country"),
+        "expected 'country' in transcript: {normalized:?}"
     );
     assert!(
         elapsed < Duration::from_secs(60),
@@ -129,15 +129,15 @@ async fn transcribes_clear_english_speech() {
 #[ignore = "downloads Whisper + Silero VAD models; run with --ignored for real-fidelity coverage"]
 async fn vad_trims_silence_padding() {
     init_tracing();
-    let fx = setup().await;
-    let pcm = load_pcm_16k_mono(&fx.wav);
+    let fixture = setup().await;
+    let pcm = load_pcm_16k_mono(&fixture.wav);
     let silence: Vec<i16> = vec![0; 16000];
     let mut padded = Vec::with_capacity(silence.len() * 2 + pcm.len());
     padded.extend_from_slice(&silence);
     padded.extend_from_slice(&pcm);
     padded.extend_from_slice(&silence);
 
-    let transcriber = make_transcriber(&fx.cache, true).await;
+    let transcriber = make_transcriber(&fixture.cache, true).await;
     let plain = transcriber
         .transcribe(&pcm)
         .await
@@ -169,11 +169,11 @@ async fn vad_trims_silence_padding() {
 #[ignore = "shares the heavyweight setup() that downloads the Whisper model"]
 async fn empty_audio_is_rejected() {
     init_tracing();
-    let fx = setup().await;
-    let transcriber = make_transcriber(&fx.cache, false).await;
+    let fixture = setup().await;
+    let transcriber = make_transcriber(&fixture.cache, false).await;
     let err = transcriber
         .transcribe(&[])
         .await
         .expect_err("empty audio should fail");
-    assert!(matches!(err, assistd_voice::TranscriptionError::EmptyAudio));
+    assert!(matches!(err, TranscriptionError::EmptyAudio));
 }

@@ -1,8 +1,6 @@
-//! Connection machinery shared by the i3 and Sway backends: a command
-//! socket guarded by a per-call timeout, an event socket that keeps the
-//! focus snapshot current, and a supervisor that reconnects with backoff
-//! when a socket drops. [`IpcProtocol`] captures what differs between
-//! the two IPC client crates.
+//! Connection machinery shared by the i3 and Sway backends: a timed
+//! command socket, an event socket feeding the focus snapshot, and a
+//! reconnecting supervisor. [`IpcProtocol`] abstracts the client crates.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -12,6 +10,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 
+use crate::backoff::backoff_delay;
 use crate::criteria::format_place_floating_pixels;
 use crate::snapshot::{self, Snapshot, WindowChangeKind};
 use crate::{
@@ -122,9 +121,8 @@ pub(crate) struct IpcBackend<P: IpcProtocol> {
 }
 
 impl<P: IpcProtocol> IpcBackend<P> {
-    /// Connect, seed the focus snapshot, and spawn the supervisor that
-    /// drives events and reconnects on socket drops. Errors only when
-    /// the initial connect fails.
+    /// Connect, seed the focus snapshot, and spawn the reconnecting
+    /// supervisor. Errors only when the initial connect fails.
     pub(crate) async fn start(
         protocol: P,
         shutdown: watch::Receiver<bool>,
@@ -165,7 +163,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
     /// supervisor to reconnect.
     pub(crate) async fn with_conn<T, E: Into<TransportError>>(
         &self,
-        ctx: &'static str,
+        op_label: &'static str,
         op: impl AsyncFnOnce(&mut P::Cmd) -> Result<T, E>,
     ) -> WmResult<T> {
         let mut guard = self.cmd.lock().await;
@@ -173,7 +171,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
         let outcome = tokio::time::timeout(WM_IPC_TIMEOUT, op(conn)).await;
         let err = match outcome {
             Ok(Ok(value)) => return Ok(value),
-            Ok(Err(e)) => WmError::ipc(ctx, e),
+            Ok(Err(e)) => WmError::ipc(op_label, e),
             Err(_) => WmError::Timeout(WM_IPC_TIMEOUT),
         };
         self.set_conn(&mut guard, None);
@@ -189,13 +187,13 @@ impl<P: IpcProtocol> IpcBackend<P> {
         .map_err(|e| WmError::Rejected(format!("{payload}: {e}")))
     }
 
-    pub(crate) async fn workspaces(&self, ctx: &'static str) -> WmResult<Vec<Workspace>> {
-        self.with_conn(ctx, async |conn| P::get_workspaces(conn).await)
+    pub(crate) async fn workspaces(&self, op_label: &'static str) -> WmResult<Vec<Workspace>> {
+        self.with_conn(op_label, async |conn| P::get_workspaces(conn).await)
             .await
     }
 
-    async fn tree(&self, ctx: &'static str) -> WmResult<P::Node> {
-        self.with_conn(ctx, async |conn| P::get_tree(conn).await)
+    async fn tree(&self, op_label: &'static str) -> WmResult<P::Node> {
+        self.with_conn(op_label, async |conn| P::get_tree(conn).await)
             .await
     }
 
@@ -217,7 +215,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
             .workspaces(P::OPS.get_workspaces)
             .await?
             .into_iter()
-            .map(|w| w.info)
+            .map(|workspace| workspace.info)
             .collect())
     }
 
@@ -225,14 +223,13 @@ impl<P: IpcProtocol> IpcBackend<P> {
         self.workspaces(P::OPS.get_workspaces_focused_rect)
             .await?
             .into_iter()
-            .find(|w| w.info.focused)
-            .map(|w| w.rect)
+            .find(|workspace| workspace.info.focused)
+            .map(|workspace| workspace.rect)
             .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
     }
 
     /// Float and place the window matching `criteria`, sized from its
-    /// actual rect when it can be found: DPI scaling can map a
-    /// 360-logical-px request to 420 physical px.
+    /// actual rect when found, since DPI scaling can change its size.
     pub(crate) async fn place_floating(
         &self,
         criteria: &PlacementCriteria,
@@ -266,9 +263,8 @@ impl<P: IpcProtocol> IpcBackend<P> {
         .await
     }
 
-    /// Current rect of the window matching `criteria`. Subscribes to
-    /// window events before the first tree poll so a `window::new`
-    /// that lands between the poll and the wait is not missed.
+    /// Current rect of the window matching `criteria`. Subscribes before
+    /// the first tree poll so a `window::new` in between is not missed.
     async fn find_window_rect_by_criteria(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
         let mut events = self.window_events.subscribe();
 
@@ -279,8 +275,8 @@ impl<P: IpcProtocol> IpcBackend<P> {
         let waited = tokio::time::timeout(WINDOW_EVENT_WAIT, async {
             loop {
                 match events.recv().await {
-                    Ok(ev) => {
-                        if ev.matches_opened(criteria).is_some() {
+                    Ok(event) => {
+                        if event.matches_opened(criteria).is_some() {
                             return true;
                         }
                     }
@@ -324,8 +320,8 @@ impl<P: IpcProtocol> IpcBackend<P> {
                 _ = self.reconnect.notified() => {
                     return true;
                 }
-                evt = P::next_event(&mut events) => {
-                    match evt {
+                next = P::next_event(&mut events) => {
+                    match next {
                         Some(Ok(event)) => self.apply_event(event).await,
                         Some(Err(e)) => {
                             tracing::warn!("{} event stream error: {e}", P::NAME);
@@ -344,8 +340,8 @@ impl<P: IpcProtocol> IpcBackend<P> {
                 if let Some((kind, NodeIdentity { id, class, title })) = focus {
                     snapshot::apply_window_event(&self.snapshot, kind, id, class, title).await;
                 }
-                if let Some(ev) = event {
-                    let _ = self.window_events.send(ev);
+                if let Some(event) = event {
+                    let _ = self.window_events.send(event);
                 }
             }
             IpcEvent::WorkspaceFocused(name) => {
@@ -375,7 +371,7 @@ async fn supervise<P: IpcProtocol>(
             attempt + 1
         );
 
-        let delay = crate::backoff::backoff_delay(attempt);
+        let delay = backoff_delay(attempt);
         tokio::select! {
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
@@ -388,8 +384,8 @@ async fn supervise<P: IpcProtocol>(
 
         match backend.protocol.connect().await {
             Ok((mut cmd, events)) => {
-                if let Ok(s) = seed_snapshot::<P>(&mut cmd).await {
-                    *backend.snapshot.write().await = s;
+                if let Ok(seeded) = seed_snapshot::<P>(&mut cmd).await {
+                    *backend.snapshot.write().await = seeded;
                 }
                 backend.set_conn(&mut *backend.cmd.lock().await, Some(cmd));
                 attempt = 0;
@@ -417,7 +413,10 @@ async fn seed_snapshot<P: IpcProtocol>(cmd: &mut P::Cmd) -> WmResult<Snapshot> {
     .unwrap_or_default();
 
     let active_workspace = match P::get_workspaces(cmd).await {
-        Ok(ws) => ws.into_iter().find(|w| w.info.focused).map(|w| w.info.name),
+        Ok(workspaces) => workspaces
+            .into_iter()
+            .find(|workspace| workspace.info.focused)
+            .map(|workspace| workspace.info.name),
         Err(e) => {
             tracing::warn!("{} GET_WORKSPACES on seed failed: {e:#}", P::NAME);
             None
@@ -431,12 +430,12 @@ async fn seed_snapshot<P: IpcProtocol>(cmd: &mut P::Cmd) -> WmResult<Snapshot> {
     })
 }
 
-/// Pre-order search of the tree for the first node `f` maps to `Some`.
+/// Pre-order search of the tree for the first node `visit` maps to `Some`.
 fn find_map_node<P: IpcProtocol, T>(
     node: &P::Node,
-    f: &impl Fn(&P::Node) -> Option<T>,
+    visit: &impl Fn(&P::Node) -> Option<T>,
 ) -> Option<T> {
-    f(node).or_else(|| P::children(node).find_map(|child| find_map_node::<P, T>(child, f)))
+    visit(node).or_else(|| P::children(node).find_map(|child| find_map_node::<P, T>(child, visit)))
 }
 
 #[cfg(test)]

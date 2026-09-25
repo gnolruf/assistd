@@ -5,19 +5,14 @@ use regex::{Regex, RegexBuilder};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::commands::cat::sniff_binary;
+use crate::commands::read_regular_file;
 
-/// `grep [-icnrv] PATTERN [FILE|DIR]...`: print lines from the named
-/// files (or stdin) that match `PATTERN`.
-///
-/// Flags:
-/// - `-i` case-insensitive
-/// - `-v` invert match
-/// - `-c` print the count instead of the matching lines
-/// - `-n` prefix each line with its 1-based line number
-/// - `-r` descend into directory arguments
-///
-/// Flags can be combined (`-rn`). Exit 0 if any line matched (or the
-/// count is non-zero under `-c`), 1 otherwise, 2 on usage/input errors.
+/// BRE metacharacters spelled with a backslash, which the regex crate
+/// reads as the literal character.
+const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"];
+
+/// `grep [-icnrv] PATTERN [FILE|DIR]...`: print lines from the named files
+/// or stdin matching `PATTERN`. Exits 0 on a match, 1 on none, 2 on errors.
 pub struct GrepCommand;
 
 #[derive(Default)]
@@ -29,35 +24,28 @@ struct Flags {
     recursive: bool,
 }
 
-fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
-    let mut flags = Flags::default();
-    let mut i = 0;
-    while i < argv.len() {
-        let a = &argv[i];
-        if a == "--" {
-            i += 1;
-            break;
-        }
-        if let Some(rest) = a.strip_prefix('-') {
-            if rest.is_empty() {
-                break;
-            }
-            for ch in rest.chars() {
-                match ch {
-                    'i' => flags.case_insensitive = true,
-                    'v' => flags.invert = true,
-                    'c' => flags.count_only = true,
-                    'n' => flags.line_numbers = true,
-                    'r' => flags.recursive = true,
-                    other => return Err(format!("unknown flag '-{other}'")),
-                }
-            }
-            i += 1;
-        } else {
-            break;
+enum TargetError {
+    Unreadable {
+        path: String,
+        source: std::io::Error,
+    },
+    DirectoryWithoutRecursion {
+        path: String,
+    },
+}
+
+impl TargetError {
+    fn error_line(&self) -> String {
+        match self {
+            Self::Unreadable { path, source } => io_error_nav("grep", path, source),
+            Self::DirectoryWithoutRecursion { path } => error_line(
+                "grep",
+                format_args!("{path} is a directory"),
+                Hint::Use,
+                format_args!("grep -r PATTERN {path}"),
+            ),
         }
     }
-    Ok((flags, &argv[i..]))
 }
 
 #[async_trait]
@@ -154,6 +142,37 @@ impl Command for GrepCommand {
     }
 }
 
+fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
+    let mut flags = Flags::default();
+    let mut pos = 0;
+    while pos < argv.len() {
+        let arg = &argv[pos];
+        if arg == "--" {
+            pos += 1;
+            break;
+        }
+        if let Some(rest) = arg.strip_prefix('-') {
+            if rest.is_empty() {
+                break;
+            }
+            for ch in rest.chars() {
+                match ch {
+                    'i' => flags.case_insensitive = true,
+                    'v' => flags.invert = true,
+                    'c' => flags.count_only = true,
+                    'n' => flags.line_numbers = true,
+                    'r' => flags.recursive = true,
+                    other => return Err(format!("unknown flag '-{other}'")),
+                }
+            }
+            pos += 1;
+        } else {
+            break;
+        }
+    }
+    Ok((flags, &argv[pos..]))
+}
+
 fn search_stdin(re: &Regex, flags: &Flags, stdin: Vec<u8>) -> CommandOutput {
     let Ok(text) = std::str::from_utf8(&stdin) else {
         return CommandOutput::failed(
@@ -182,7 +201,7 @@ async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> Command
     let mut out = Vec::new();
     let mut total = 0usize;
     for path in targets {
-        let Ok(bytes) = super::read_regular_file(path).await else {
+        let Ok(bytes) = read_regular_file(path).await else {
             continue;
         };
         if sniff_binary(&bytes).is_some() {
@@ -209,7 +228,7 @@ async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> Command
 
 fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Vec<u8>) -> usize {
     let mut count = 0;
-    for (i, line) in text.split_inclusive('\n').enumerate() {
+    for (index, line) in text.split_inclusive('\n').enumerate() {
         if !(re.is_match(line) ^ flags.invert) {
             continue;
         }
@@ -222,16 +241,12 @@ fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Ve
             out.push(b':');
         }
         if flags.line_numbers {
-            out.extend_from_slice(format!("{}:", i + 1).as_bytes());
+            out.extend_from_slice(format!("{}:", index + 1).as_bytes());
         }
         out.extend_from_slice(line.as_bytes());
     }
     count
 }
-
-/// BRE metacharacters spelled with a backslash, which the regex crate
-/// reads as the literal character.
-const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"];
 
 /// A zero-match result is the only moment a dialect mismatch is
 /// visible, so that is where the explanation goes.
@@ -264,30 +279,6 @@ fn outcome(count: usize, stdout: Vec<u8>) -> CommandOutput {
     }
 }
 
-enum TargetError {
-    Unreadable {
-        path: String,
-        source: std::io::Error,
-    },
-    DirectoryWithoutRecursion {
-        path: String,
-    },
-}
-
-impl TargetError {
-    fn error_line(&self) -> String {
-        match self {
-            Self::Unreadable { path, source } => io_error_nav("grep", path, source),
-            Self::DirectoryWithoutRecursion { path } => error_line(
-                "grep",
-                format_args!("{path} is a directory"),
-                Hint::Use,
-                format_args!("grep -r PATTERN {path}"),
-            ),
-        }
-    }
-}
-
 async fn collect_targets(paths: &[String], recursive: bool) -> Result<Vec<PathBuf>, TargetError> {
     let mut targets = Vec::with_capacity(paths.len());
     for raw in paths {
@@ -311,6 +302,8 @@ async fn collect_targets(paths: &[String], recursive: bool) -> Result<Vec<PathBu
     Ok(targets)
 }
 
+/// Append every non-directory entry under `root` in sorted depth-first
+/// order, skipping symlinks and anything unreadable.
 async fn descend(root: &Path, targets: &mut Vec<PathBuf>) {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -335,15 +328,15 @@ async fn descend(root: &Path, targets: &mut Vec<PathBuf>) {
         files.sort();
         dirs.sort();
         targets.extend(files);
-        // Reversed so the pop order matches the sorted order.
         stack.extend(dirs.into_iter().rev());
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::{TempDir, tempdir};
+
+    use super::*;
 
     /// `root/top.txt`, `root/sub/deep.txt`, `root/sub/notes.bin`.
     fn tree() -> TempDir {

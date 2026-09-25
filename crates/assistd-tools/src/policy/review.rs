@@ -1,15 +1,14 @@
 //! Command review: whether a script or argv may run without the user's
-//! confirmation. It may only when every program it can run is allowed and
-//! nothing in it matches a destructive pattern or escapes the check.
+//! confirmation.
 
 use std::path::PathBuf;
-use std::{fmt, iter};
+use std::{fmt, iter, mem};
 
 use super::allowlist::{Allowlist, Verdict};
 use super::shell::{self, Script, SimpleCommand, Word};
 
-/// How many scripts deep (`eval`, `trap`, wrapped command lines, …) the matcher
-/// looks. A script nested deeper counts as unverifiable.
+/// How many scripts deep (`eval`, `trap`, …) the matcher looks before
+/// calling a script unverifiable.
 const MAX_NESTED_SCRIPTS: usize = 16;
 
 /// Reserved words that leave the word after them in command position.
@@ -17,9 +16,8 @@ const COMMAND_PREFIX_WORDS: &[&str] = &[
     "!", "{", "if", "then", "else", "elif", "do", "while", "until",
 ];
 
-/// Builtins, and the wrappers allowed by default, that run a command given
-/// as their arguments, with the number of operands before that command.
-/// Any other program that runs commands is trusted with them once allowed.
+/// Builtins and default-allowed wrappers that run a command given as their
+/// arguments, with the number of operands before that command.
 const WRAPPERS: &[(&str, usize)] = &[
     ("builtin", 0),
     ("command", 0),
@@ -49,14 +47,12 @@ const SAFE_BUILTINS: &[&str] = &[
     "unalias", "unset", "wait",
 ];
 
-/// Builtins and keywords that run their arguments, which are checked in
-/// their place.
+/// Builtins and keywords whose arguments are checked in their place.
 const RUNS_ITS_ARGUMENTS: &[&str] = &[
     ".", "alias", "builtin", "command", "coproc", "eval", "exec", "source", "time", "trap",
 ];
 
-/// Builtins that can run or load code no check can see (`enable -f`,
-/// `mapfile -C`, `fc`), so they always ask.
+/// Builtins that can run or load code no check can see, so they always ask.
 const RISKY_BUILTINS: &[&str] = &[
     "bind",
     "compgen",
@@ -71,10 +67,8 @@ const RISKY_BUILTINS: &[&str] = &[
 /// name (`env -S 'rm -rf ~'`).
 const SHELL_SYNTAX: &str = ";&|()<>`$";
 
-/// Options of the wrappers allowed by default that always take the next
-/// word as their value, so that word is never the command. Listing an
-/// option that is really a flag would hide the command after it, so only
-/// documented value options belong here.
+/// Wrapper options that take the next word as their value. Only documented
+/// value options belong here: a flag listed by mistake hides the command.
 const VALUE_OPTIONS: &[(&str, &[&str])] = &[
     ("env", &["-u", "--unset", "-C", "--chdir"]),
     ("nice", &["-n", "--adjustment"]),
@@ -104,32 +98,21 @@ const VALUE_OPTIONS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// The wrapper that appends arguments read from stdin to the command it
-/// runs.
+/// The wrapper that appends arguments read from stdin to its command.
 const FEEDS_ARGUMENTS: &str = "xargs";
 
-/// Where it puts an input item inside the command instead.
+/// Where [`FEEDS_ARGUMENTS`] puts an input item inside its command.
 const INPUT_PLACEHOLDER: &str = "{}";
 
 /// `find` flags after which it runs a command.
 const FIND_EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
-/// A configured destructive command: a command name followed by arguments
-/// that must all be present, in any order.
-///
-/// Any word may list alternatives separated by `|`. The name matches a
-/// command word or the last component of its path. An argument matches:
-/// - `-rf`: short options, each of which may sit in any option cluster
-///   (`-r -f`, `-vfr`);
-/// - `--force`: the long option, an abbreviation of it (`--forc`), or
-///   `--force=…`;
-/// - `of=`: any argument starting with it;
-/// - anything else: that exact argument.
-///
-/// All comparisons ignore ASCII case. An argument whose value is only
-/// known at run time (`"$f"`) may stand in for any one required argument,
-/// and one that may split into several words (`$opts`, `*`) for all of
-/// them.
+/// A destructive command: a name followed by arguments that must all be
+/// present, in any order, each word listing `|`-separated alternatives.
+/// `-rf` matches those short options in any cluster, `--force` the option
+/// or an abbreviation, `of=` any argument with that prefix, anything else
+/// itself, all ignoring ASCII case. A run-time argument (`"$f"`) stands in
+/// for one required argument; one that may split (`$opts`, `*`) for all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestructivePattern {
     display: String,
@@ -138,8 +121,7 @@ pub struct DestructivePattern {
 }
 
 impl DestructivePattern {
-    /// Build a pattern from its words. `None` when there are no words or a
-    /// word has no alternatives.
+    /// `None` when there are no words or a word has no alternatives.
     pub fn new<I, S>(words: I) -> Option<Self>
     where
         I: IntoIterator<Item = S>,
@@ -191,10 +173,6 @@ impl fmt::Display for DestructivePattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.display)
     }
-}
-
-fn alternatives(word: &str) -> impl Iterator<Item = &str> {
-    word.split('|').filter(|alt| !alt.is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,24 +229,15 @@ impl ArgSpec {
     }
 }
 
-fn short_options(arg: &str) -> Option<&str> {
-    arg.strip_prefix('-')
-        .filter(|opts| !opts.is_empty() && !opts.starts_with('-'))
-}
-
 /// Why a command needs the user's confirmation before it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirmation {
     /// It runs a command matching this destructive pattern.
     Pattern(String),
-    /// It may run something no check can see: a command named only at
-    /// run time, a script read from stdin, text too broken or deeply
-    /// nested to follow, anything after a change to `PATH` or the dynamic
-    /// loader, or a touch of assistd's own configuration. Holds a
-    /// description for the prompt.
+    /// It may run something no check can see; holds why, for the prompt.
     Unverifiable(String),
-    /// It runs programs that are not on the allowlist. `approvable` when
-    /// every one of them is a bare name "always allow" can add.
+    /// It runs programs not on the allowlist. `approvable` when "always
+    /// allow" can add every one of them.
     Unlisted {
         programs: Vec<String>,
         approvable: bool,
@@ -276,8 +245,7 @@ pub enum Confirmation {
 }
 
 impl Confirmation {
-    /// The programs an "always allow" answer would add; empty when the
-    /// prompt cannot be settled that way.
+    /// The programs an "always allow" answer would add; possibly empty.
     pub fn always_allow(&self) -> &[String] {
         match self {
             Self::Unlisted {
@@ -304,41 +272,18 @@ impl fmt::Display for Confirmation {
 /// What commands are checked against.
 #[derive(Debug, Clone, Copy)]
 pub struct Rules<'a> {
-    /// Commands that need confirmation even when every program they run
-    /// is allowed.
+    /// Commands that need confirmation even when every program is allowed.
     pub patterns: &'a [DestructivePattern],
-    /// Programs that run without confirmation.
     pub allowlist: &'a Allowlist,
     /// Directories a command may not name without confirmation.
     pub protected: &'a [PathBuf],
 }
 
-/// Whether `script` needs confirmation before it runs, and why. It does
-/// when it can run a program not on the allowlist, matches a destructive
-/// pattern, or can run something no check can see. A pattern match is
-/// reported first, then an unverifiable command, then unlisted programs.
-///
-/// Commands are found wherever bash would run them: after `;`, `&&`, `|`
-/// or a newline, in subshells and `$(…)`/backquote substitutions (also
-/// inside double quotes and here-documents), after reserved words such as
-/// `if` or `{`, after `NAME=value` assignments and redirections, after
-/// builtins such as `exec` or `command`, after the wrappers allowed by
-/// default (`env`, `nice`, `nohup`, `stdbuf`, `timeout`, `xargs`) and
-/// `find -exec`, and inside `eval`, `trap` or `alias`. Each must be a
-/// shell builtin that runs no code, a function the script defined
-/// earlier, or on the allowlist. Any other program is trusted with
-/// whatever it runs once allowed, so what a shell, interpreter or wrapper
-/// is handed (`sh -c '…'`, `python -c '…'`, `sudo …`) is not looked into.
-/// A script file (`./x.sh`, `source x`) is never on
-/// the allowlist, since the file can change. Quoted text stays one word,
-/// so `echo "rm -rf"` does not match.
-///
-/// Unverifiable: a command whose name is only known at run time (`$cmd`,
-/// `$(echo rm)`, `/bin/r?`), `source` reading its script from stdin, an
-/// `env` option with its value attached (`env -Scmd`), a
-/// script ending inside a quote or substitution, nesting beyond what the
-/// matcher follows, a change to `PATH`, `BASH_ENV` or the dynamic loader
-/// (`LD_*`), and any word naming a protected directory.
+/// Why `script` needs confirmation, if it does: it matches a destructive
+/// pattern, can run something no check can see, or runs a program not on
+/// the allowlist (reported in that order). Every command bash would run is
+/// checked, including those behind builtins and default-allowed wrappers;
+/// what an allowed program runs in turn (`sh -c`, `sudo`) is trusted.
 pub fn check_script(script: &str, rules: &Rules<'_>) -> Option<Confirmation> {
     let matcher = Matcher::new(rules);
     let mut findings = Findings::default();
@@ -346,10 +291,8 @@ pub fn check_script(script: &str, rules: &Rules<'_>) -> Option<Confirmation> {
     findings.into_confirmation()
 }
 
-/// [`check_script`] for an argv that is executed directly rather than
-/// through a shell. Each argument is also checked on its own as a script
-/// against the patterns, for one that smuggles a command to the program
-/// it is handed to (`xterm -e "rm -rf ~"`).
+/// [`check_script`] for an argv executed without a shell. Each argument is
+/// also matched against the patterns as a script (`xterm -e "rm -rf ~"`).
 pub fn check_argv(argv: &[String], rules: &Rules<'_>) -> Option<Confirmation> {
     let matcher = Matcher::new(rules);
     let mut findings = Findings::default();
@@ -371,7 +314,6 @@ pub fn check_argv(argv: &[String], rules: &Rules<'_>) -> Option<Confirmation> {
     findings.into_confirmation()
 }
 
-/// Everything found in a script so far.
 #[derive(Default)]
 struct Findings<'a> {
     pattern: Option<&'a DestructivePattern>,
@@ -400,8 +342,7 @@ impl<'a> Findings<'a> {
         }
     }
 
-    /// A pattern match is reported ahead of anything else, so nothing
-    /// found after it would change the prompt.
+    /// A pattern match outranks anything found after it.
     fn settled(&self) -> bool {
         self.pattern.is_some()
     }
@@ -420,7 +361,6 @@ impl<'a> Findings<'a> {
     }
 }
 
-/// The command a word sits in, and the script around it.
 #[derive(Clone, Copy)]
 struct Site<'s> {
     cmd: &'s SimpleCommand,
@@ -431,28 +371,19 @@ struct Site<'s> {
 struct Matcher<'a> {
     patterns: &'a [DestructivePattern],
     allowlist: &'a Allowlist,
-    /// The protected directories as a script may spell them.
+    /// Every spelling of the protected directories.
     protected: Vec<String>,
 }
 
 impl<'a> Matcher<'a> {
     fn new(rules: &Rules<'a>) -> Self {
         let home = std::env::var("HOME").ok();
-        let protected =
-            rules
-                .protected
-                .iter()
-                .filter_map(|dir| dir.to_str())
-                .flat_map(|dir| {
-                    let under_home = home
-                        .as_deref()
-                        .and_then(|home| dir.strip_prefix(home))
-                        .filter(|rest| rest.starts_with('/'));
-                    iter::once(dir.to_string()).chain(under_home.into_iter().flat_map(|rest| {
-                        ["~", "$HOME", "${HOME}"].map(|home| format!("{home}{rest}"))
-                    }))
-                })
-                .collect();
+        let protected = rules
+            .protected
+            .iter()
+            .filter_map(|dir| dir.to_str())
+            .flat_map(|dir| spellings(dir, home.as_deref()))
+            .collect();
         Self {
             patterns: rules.patterns,
             allowlist: rules.allowlist,
@@ -487,8 +418,7 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    /// Only the pattern matches in `src`, for text that may not be a
-    /// script at all.
+    /// The pattern match in `src`, for text that may not be a script.
     fn patterns_in(&self, src: &str, depth: usize) -> Option<&'a DestructivePattern> {
         let mut scratch = Findings::default();
         self.script(src, depth, &mut scratch);
@@ -564,14 +494,7 @@ impl<'a> Matcher<'a> {
             self.script(text, depth + 1, out);
             return;
         }
-        if (!word.quoted && KEYWORDS.contains(&text))
-            || SAFE_BUILTINS.contains(&text)
-            || RUNS_ITS_ARGUMENTS.contains(&text)
-            || script
-                .functions
-                .iter()
-                .any(|(name, defined)| name == text && *defined <= index)
-        {
+        if needs_no_allowlist(word, index, script) {
             return;
         }
         if RISKY_BUILTINS.contains(&text) {
@@ -591,26 +514,16 @@ impl<'a> Matcher<'a> {
     fn runs(&self, word: &Word, args: &[Word], site: Site<'_>, out: &mut Findings<'a>) {
         let Site { cmd, script, depth } = site;
         let program = program(&word.text);
-        let program = program.as_str();
-        let inputs = script.inputs_of(cmd);
-        match program {
+        match program.as_str() {
             "eval" => {
                 let joined: Vec<&str> = args.iter().map(|a| a.text.as_str()).collect();
                 self.script(&joined.join(" "), depth + 1, out);
             }
-            "source" | "." => match args.first() {
-                Some(file) if file.dynamic => out.unverifiable(|| {
-                    format!(
-                        "`{} {}` runs a script only known at run time",
-                        word.text, file.text
-                    )
-                }),
-                Some(file) if is_stdin_path(&file.text) => {
-                    self.stdin_script(&word.text, inputs, depth, out);
+            "source" | "." => {
+                if let Some(file) = args.first() {
+                    self.sourced(word, file, script.inputs_of(cmd), depth, out);
                 }
-                Some(file) => out.unlisted(&format!("{} {}", word.text, file.text), false),
-                None => {}
-            },
+            }
             "hash"
                 if args
                     .iter()
@@ -639,9 +552,31 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    /// Check `word file`, where `word` is `source` or `.`.
+    fn sourced<'i>(
+        &self,
+        word: &Word,
+        file: &Word,
+        inputs: impl Iterator<Item = &'i str>,
+        depth: usize,
+        out: &mut Findings<'a>,
+    ) {
+        if file.dynamic {
+            out.unverifiable(|| {
+                format!(
+                    "`{} {}` runs a script only known at run time",
+                    word.text, file.text
+                )
+            });
+        } else if is_stdin_path(&file.text) {
+            self.stdin_script(&word.text, inputs, depth, out);
+        } else {
+            out.unlisted(&format!("{} {}", word.text, file.text), false);
+        }
+    }
+
     /// A script `name` reads from stdin: the here-documents and
-    /// here-strings the script spells out, or unverifiable when stdin is
-    /// a pipe or a file.
+    /// here-strings spelled out for it, or unverifiable when there are none.
     fn stdin_script<'i>(
         &self,
         name: &str,
@@ -659,9 +594,135 @@ impl<'a> Matcher<'a> {
     }
 }
 
-/// The first variable the script may change whose change the allowlist
-/// cannot see past: the search path, what the dynamic loader injects, or
-/// what bash sources at startup.
+struct Candidate {
+    at: usize,
+    may_be_command: bool,
+}
+
+/// Where [`candidates`] is within a command word's arguments.
+#[derive(Default)]
+struct Scan {
+    /// The command word runs a command after this many more operands.
+    pending: Option<usize>,
+    /// Flags after which it runs a command (`find -exec`).
+    exec_flags: Option<&'static [&'static str]>,
+    /// No exec flag has been seen yet, so its arguments are its own.
+    before_exec: bool,
+    value_options: &'static [&'static str],
+    /// The previous word was one of `value_options`.
+    value_next: bool,
+    /// The previous word was an option that may take this one as its value.
+    after_option: bool,
+}
+
+impl Scan {
+    fn enter(&mut self, word: &Word, next: Option<&Word>) {
+        self.pending = wrapper_operands(word, next);
+        self.value_options = if word.dynamic_name {
+            &[]
+        } else {
+            value_options(&program(&word.text))
+        };
+        if let Some(flags) = exec_flags(word) {
+            self.exec_flags = Some(flags);
+            self.before_exec = true;
+        }
+    }
+
+    /// Classify the argument `word` at `at`; `None` when it can be neither
+    /// a command nor one of its arguments.
+    fn classify(&mut self, at: usize, word: &Word, next: Option<&Word>) -> Option<Candidate> {
+        if self
+            .exec_flags
+            .is_some_and(|flags| flags.contains(&word.text.as_str()))
+        {
+            self.before_exec = false;
+            self.pending = Some(0);
+            self.after_option = false;
+            return None;
+        }
+        if self.before_exec || mem::take(&mut self.value_next) {
+            return None;
+        }
+        if !word.quoted && word.text == "--" {
+            self.pending = self.pending.map(|_| 0);
+            self.after_option = false;
+            return None;
+        }
+        let option = !word.dynamic && word.text.starts_with('-');
+        let operand = !option && !self.after_option && !is_assignment(&word.text);
+        let may_be_command = match self.pending {
+            Some(operands) if operand && operands > 0 => {
+                self.pending = Some(operands - 1);
+                false
+            }
+            Some(_) if operand => {
+                self.enter(word, next);
+                true
+            }
+            _ => {
+                self.pending.is_some_and(|operands| {
+                    operands == 0 || (self.after_option && is_command_line(word))
+                }) && !option
+                    && !is_assignment(&word.text)
+            }
+        };
+        self.value_next = option && self.value_options.contains(&word.text.as_str());
+        self.after_option = option
+            && !self.value_next
+            && !word.text.contains('=')
+            && (word.text.len() == 2 || word.text.starts_with("--"));
+        Some(Candidate { at, may_be_command })
+    }
+}
+
+/// The words of a simple command that may name a command it runs:
+/// `start`, and the words after a wrapper or `find -exec`. Later words are
+/// that command's arguments, still checked against patterns.
+fn candidates(words: &[Word], start: usize) -> Vec<Candidate> {
+    let mut out = vec![Candidate {
+        at: start,
+        may_be_command: true,
+    }];
+    let mut scan = Scan::default();
+    scan.enter(&words[start], words.get(start + 1));
+    if scan.pending.is_none() && scan.exec_flags.is_none() {
+        return out;
+    }
+    for (at, word) in words.iter().enumerate().skip(start + 1) {
+        out.extend(scan.classify(at, word, words.get(at + 1)));
+    }
+    out
+}
+
+/// `dir` as a script may spell it: as is, and via `~` or `$HOME` when it
+/// lies under `home`.
+fn spellings(dir: &str, home: Option<&str>) -> impl Iterator<Item = String> {
+    let under_home = home
+        .and_then(|home| dir.strip_prefix(home))
+        .filter(|rest| rest.starts_with('/'));
+    iter::once(dir.to_string()).chain(
+        under_home
+            .into_iter()
+            .flat_map(|rest| ["~", "$HOME", "${HOME}"].map(|home| format!("{home}{rest}"))),
+    )
+}
+
+/// Keywords, builtins, and functions defined before command `index`,
+/// none of which need the allowlist.
+fn needs_no_allowlist(word: &Word, index: usize, script: &Script) -> bool {
+    let text = word.text.as_str();
+    (!word.quoted && KEYWORDS.contains(&text))
+        || SAFE_BUILTINS.contains(&text)
+        || RUNS_ITS_ARGUMENTS.contains(&text)
+        || script
+            .functions
+            .iter()
+            .any(|(name, defined)| name == text && *defined <= index)
+}
+
+/// The first variable the script may change that the allowlist cannot see
+/// past: the search path, the dynamic loader's, or bash's startup file.
 fn changed_sensitive_variable(script: &Script) -> Option<&str> {
     script
         .commands
@@ -700,6 +761,15 @@ fn changed_variables(text: &str) -> impl Iterator<Item = &str> {
         .chain(defaults)
 }
 
+fn alternatives(word: &str) -> impl Iterator<Item = &str> {
+    word.split('|').filter(|alt| !alt.is_empty())
+}
+
+fn short_options(arg: &str) -> Option<&str> {
+    arg.strip_prefix('-')
+        .filter(|opts| !opts.is_empty() && !opts.starts_with('-'))
+}
+
 fn command_start(words: &[Word]) -> Option<usize> {
     let mut at = 0;
     while let Some(word) = words.get(at) {
@@ -716,9 +786,9 @@ fn command_start(words: &[Word]) -> Option<usize> {
     None
 }
 
-/// How many operands `word` reads before the command it runs, when it is a
+/// How many operands `word` reads before the command it runs, if it is a
 /// wrapper.
-fn wrapping(word: &Word, next: Option<&Word>) -> Option<usize> {
+fn wrapper_operands(word: &Word, next: Option<&Word>) -> Option<usize> {
     if word.dynamic_name {
         return None;
     }
@@ -731,112 +801,6 @@ fn wrapping(word: &Word, next: Option<&Word>) -> Option<usize> {
         .iter()
         .find(|&&(w, _)| w == program)
         .map(|&(_, operands)| operands)
-}
-
-struct Candidate {
-    at: usize,
-    may_be_command: bool,
-}
-
-/// Where [`candidates`] is within a command word's arguments.
-#[derive(Default)]
-struct Scan {
-    /// The command word runs a command still to come, after this many
-    /// more operands.
-    pending: Option<usize>,
-    /// Flags after which it runs a command (`find -exec`).
-    exec_flags: Option<&'static [&'static str]>,
-    /// No exec flag has been seen yet, so its arguments are its own.
-    before_exec: bool,
-    /// Its options known to take a value.
-    value_options: &'static [&'static str],
-    /// The previous word was one of those, so this one is its value.
-    value_next: bool,
-    /// The previous word was an option that may take this one as its
-    /// value.
-    after_option: bool,
-}
-
-impl Scan {
-    fn enter(&mut self, word: &Word, next: Option<&Word>) {
-        self.pending = wrapping(word, next);
-        self.value_options = if word.dynamic_name {
-            &[]
-        } else {
-            value_options(&program(&word.text))
-        };
-        if let Some(flags) = exec_flags(word) {
-            self.exec_flags = Some(flags);
-            self.before_exec = true;
-        }
-    }
-}
-
-/// The words of a simple command that may name a command it runs:
-/// `start`, and the words after a wrapper or `find -exec`. A word "may be
-/// the command" while a wrapper is still reading its options and
-/// operands; later words are that command's arguments, still checked
-/// against patterns since a wrapper's flags are not known.
-fn candidates(words: &[Word], start: usize) -> Vec<Candidate> {
-    let mut out = vec![Candidate {
-        at: start,
-        may_be_command: true,
-    }];
-    let mut scan = Scan::default();
-    scan.enter(&words[start], words.get(start + 1));
-    if scan.pending.is_none() && scan.exec_flags.is_none() {
-        return out;
-    }
-    for (at, word) in words.iter().enumerate().skip(start + 1) {
-        if scan
-            .exec_flags
-            .is_some_and(|flags| flags.contains(&word.text.as_str()))
-        {
-            scan.before_exec = false;
-            scan.pending = Some(0);
-            scan.after_option = false;
-            continue;
-        }
-        if scan.before_exec || std::mem::take(&mut scan.value_next) {
-            continue;
-        }
-        if !word.quoted && word.text == "--" {
-            scan.pending = scan.pending.map(|_| 0);
-            scan.after_option = false;
-            continue;
-        }
-        let option = !word.dynamic && word.text.starts_with('-');
-        let operand = !option && !scan.after_option && !is_assignment(&word.text);
-        match scan.pending {
-            Some(operands) if operand && operands > 0 => {
-                out.push(Candidate {
-                    at,
-                    may_be_command: false,
-                });
-                scan.pending = Some(operands - 1);
-            }
-            Some(_) if operand => {
-                out.push(Candidate {
-                    at,
-                    may_be_command: true,
-                });
-                scan.enter(word, words.get(at + 1));
-            }
-            _ => out.push(Candidate {
-                at,
-                may_be_command: scan.pending.is_some_and(|operands| {
-                    operands == 0 || (scan.after_option && is_command_line(word))
-                }) && !option
-                    && !is_assignment(&word.text),
-            }),
-        }
-        scan.value_next = option && scan.value_options.contains(&word.text.as_str());
-        scan.after_option = option
-            && !scan.value_next
-            && !word.text.contains('=')
-            && (word.text.len() == 2 || word.text.starts_with("--"));
-    }
-    out
 }
 
 /// A literal word holding a whole command line (`env -S 'rm -rf ~'`),
@@ -859,16 +823,14 @@ fn value_options(program: &str) -> &'static [&'static str] {
         .map_or(&[], |&(_, options)| options)
 }
 
-/// The first of `env`'s own options with its value attached (`-Sx`,
-/// `--split-string=x`, a cluster such as `-iS`). `-S` runs its value as a
-/// command line, and an attached value cannot be told apart from it
-/// without knowing every option, so any such option counts.
+/// The first of `env`'s options with a value attached (`-Sx`, `-iS`,
+/// `--split-string=x`), any of which may hide an `-S` command line.
 fn env_attached_option(args: &[Word]) -> Option<&str> {
     let value_options = value_options("env");
     let mut value_next = false;
     for arg in args {
         let text = arg.text.as_str();
-        if std::mem::take(&mut value_next) {
+        if mem::take(&mut value_next) {
             continue;
         }
         if !text.starts_with('-') || text == "--" {
@@ -901,9 +863,8 @@ fn basename(word: &str) -> &str {
     word.rsplit_once('/').map_or(word, |(_, name)| name)
 }
 
-/// The program a command word runs, normalized for the lists above: its
-/// last path component, lowercased, without a trailing version
-/// (`python3.12` is `python`, `ksh93` is `ksh`).
+/// A command word's last path component, lowercased, without a trailing
+/// version (`python3.12` is `python`).
 fn program(word: &str) -> String {
     let name = basename(word).to_ascii_lowercase();
     match name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-') {

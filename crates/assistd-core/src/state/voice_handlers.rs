@@ -1,11 +1,15 @@
 //! Voice-input (PTT, listen) and voice-output (TTS) request handlers.
 
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tracing::{Instrument, debug, warn};
+
+use assistd_ipc::{Event, VoiceCaptureState};
+
 use super::{AppState, DispatchError, send_error};
 use crate::recovery::{Component, spawn_supervised};
-use assistd_ipc::{Event, VoiceCaptureState};
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tracing::Instrument;
 
 impl AppState {
     pub(super) async fn handle_ptt_start(
@@ -25,22 +29,8 @@ impl AppState {
         }
         match self.subsystems.voice.start_recording().await {
             Ok(()) => {
-                let presence = self.subsystems.presence.clone();
-                let warm = spawn_supervised(
-                    "ptt_warmup",
-                    Component::Llm,
-                    async move {
-                        if let Err(e) = presence.ensure_active().await {
-                            tracing::warn!(
-                                target: "assistd::state",
-                                error = %e,
-                                "presence warmup failed; query path will retry"
-                            );
-                        }
-                    }
-                    .in_current_span(),
-                );
-                *self.runtime.warmup_handle.lock().await = Some(warm);
+                let warmup = self.spawn_presence_warmup();
+                *self.runtime.warmup_handle.lock().await = Some(warmup);
                 let _ = tx
                     .send(Event::VoiceState {
                         id: id.clone(),
@@ -55,6 +45,89 @@ impl AppState {
                 Err(e.into())
             }
         }
+    }
+
+    #[tracing::instrument(skip_all, fields(correlation_id = %id))]
+    pub(super) async fn handle_ptt_stop(
+        self: Arc<Self>,
+        id: String,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<(), DispatchError> {
+        debug!(
+            target: "assistd::voice::latency",
+            stage = "audio_capture_stop",
+            "voice latency stage"
+        );
+        let _ = tx
+            .send(Event::VoiceState {
+                id: id.clone(),
+                state: VoiceCaptureState::Transcribing,
+            })
+            .await;
+
+        let warmup = self.runtime.warmup_handle.lock().await.take();
+        let (transcription, ()) =
+            tokio::join!(self.subsystems.voice.stop_and_transcribe(), async {
+                if let Some(warmup) = warmup {
+                    let _ = warmup.await;
+                }
+            });
+        debug!(
+            target: "assistd::voice::latency",
+            stage = "ensure_active_done",
+            "voice latency stage"
+        );
+        let text = match transcription {
+            Ok(text) => text,
+            Err(e) => {
+                let _ = tx
+                    .send(Event::VoiceState {
+                        id: id.clone(),
+                        state: VoiceCaptureState::Idle,
+                    })
+                    .await;
+                send_error(&tx, id, format!("ptt_stop failed: {e}")).await;
+                return Err(e.into());
+            }
+        };
+
+        let _ = tx
+            .send(Event::VoiceState {
+                id: id.clone(),
+                state: VoiceCaptureState::Idle,
+            })
+            .await;
+        let _ = tx
+            .send(Event::Transcription {
+                id: id.clone(),
+                text: text.clone(),
+            })
+            .await;
+
+        if text.trim().is_empty() {
+            let _ = tx.send(Event::Done { id }).await;
+            return Ok(());
+        }
+
+        self.handle_query(id, text, Vec::new(), tx).await
+    }
+
+    fn spawn_presence_warmup(&self) -> JoinHandle<()> {
+        let presence = self.subsystems.presence.clone();
+        spawn_supervised(
+            "ptt_warmup",
+            Component::Llm,
+            async move {
+                if let Err(e) = presence.ensure_active().await {
+                    warn!(
+                        target: "assistd::state",
+                        error = %e,
+                        "presence warmup failed; query path will retry"
+                    );
+                }
+            }
+            .in_current_span(),
+        )
     }
 
     pub(super) async fn handle_listen_start(
@@ -188,69 +261,5 @@ impl AppState {
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
-    }
-
-    #[tracing::instrument(skip_all, fields(correlation_id = %id))]
-    pub(super) async fn handle_ptt_stop(
-        self: Arc<Self>,
-        id: String,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<(), DispatchError> {
-        tracing::debug!(
-            target: "assistd::voice::latency",
-            stage = "audio_capture_stop",
-            "voice latency stage"
-        );
-        let _ = tx
-            .send(Event::VoiceState {
-                id: id.clone(),
-                state: VoiceCaptureState::Transcribing,
-            })
-            .await;
-
-        let warmup = self.runtime.warmup_handle.lock().await.take();
-        let (text_res, ()) = tokio::join!(self.subsystems.voice.stop_and_transcribe(), async {
-            if let Some(h) = warmup {
-                let _ = h.await;
-            }
-        });
-        tracing::debug!(
-            target: "assistd::voice::latency",
-            stage = "ensure_active_done",
-            "voice latency stage"
-        );
-        let text = match text_res {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = tx
-                    .send(Event::VoiceState {
-                        id: id.clone(),
-                        state: VoiceCaptureState::Idle,
-                    })
-                    .await;
-                send_error(&tx, id, format!("ptt_stop failed: {e}")).await;
-                return Err(e.into());
-            }
-        };
-
-        let _ = tx
-            .send(Event::VoiceState {
-                id: id.clone(),
-                state: VoiceCaptureState::Idle,
-            })
-            .await;
-        let _ = tx
-            .send(Event::Transcription {
-                id: id.clone(),
-                text: text.clone(),
-            })
-            .await;
-
-        if text.trim().is_empty() {
-            let _ = tx.send(Event::Done { id }).await;
-            return Ok(());
-        }
-
-        self.handle_query(id, text, Vec::new(), tx).await
     }
 }

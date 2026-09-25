@@ -46,13 +46,13 @@ pub fn drain_to_pcm(
     Ok(pcm)
 }
 
-/// Append `samples` to `pcm` up to `max`. True when the cap is reached.
-fn append_capped(samples: Option<&[f32]>, pcm: &mut Vec<i16>, max: usize) -> bool {
-    for &s in samples.unwrap_or_default() {
-        if pcm.len() >= max {
+/// Append `samples` to `pcm` up to `max_samples`. True when the cap is reached.
+fn append_capped(samples: Option<&[f32]>, pcm: &mut Vec<i16>, max_samples: usize) -> bool {
+    for &sample in samples.unwrap_or_default() {
+        if pcm.len() >= max_samples {
             return true;
         }
-        pcm.push(f32_to_i16(s));
+        pcm.push(f32_to_i16(sample));
     }
-    pcm.len() >= max
+    pcm.len() >= max_samples
 }

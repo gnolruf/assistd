@@ -9,7 +9,7 @@ use assistd_config::SynthesisConfig;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
-use crate::piper::cache::{default_cache_dir, ensure_voice};
+use crate::piper::cache::{VoiceFiles, default_cache_dir, ensure_voice};
 use crate::piper::config::{NOISE_SCALE, NOISE_W, PiperRuntimeConfig, SENTENCE_SILENCE_SECS};
 use crate::piper::error::PiperError;
 use crate::piper::playback::RodioPlaybackWorker;
@@ -31,67 +31,6 @@ struct CircuitState {
     ready: ReadyState,
     recent_failures: VecDeque<Instant>,
     logged_degraded: bool,
-}
-
-/// [`VoiceOutput`] backed by per-utterance piper subprocesses and
-/// rodio playback. After three failures within a minute the service is
-/// degraded and `speak` drops utterances without error; once a minute
-/// has passed since the last failure, one utterance is let through and
-/// either re-arms the service or re-opens the breaker.
-pub struct PiperVoiceOutput {
-    synth: Arc<OneShotSynth>,
-    playback: Arc<RodioPlaybackWorker>,
-    state: Arc<Mutex<CircuitState>>,
-}
-
-impl PiperVoiceOutput {
-    /// Resolve the voice files, open the audio device, and run a
-    /// health-check synthesis.
-    pub async fn start(cfg: SynthesisConfig) -> Result<Self, PiperError> {
-        which::which(&cfg.binary_path).map_err(|_| PiperError::BinaryMissing {
-            binary: cfg.binary_path.clone(),
-        })?;
-
-        let cache_dir = cfg
-            .model_cache_dir
-            .clone()
-            .unwrap_or_else(default_cache_dir);
-        let voice_files = ensure_voice(&cfg.voice, &cache_dir).await?;
-        tracing::info!(
-            target: "assistd::voice::piper",
-            onnx = %voice_files.onnx.display(),
-            sample_rate = voice_files.sample_rate,
-            "piper voice resolved"
-        );
-
-        let runtime = Arc::new(PiperRuntimeConfig {
-            binary_path: cfg.binary_path.clone(),
-            voice_files,
-            length_scale: cfg.length_scale,
-            noise_scale: NOISE_SCALE,
-            noise_w: NOISE_W,
-            sentence_silence_secs: SENTENCE_SILENCE_SECS,
-            espeak_data_dir: cfg.espeak_data_dir.clone(),
-            deadline: Duration::from_secs(u64::from(cfg.deadline_secs.get())),
-            use_cuda: cfg.use_cuda,
-            output_device: cfg.output_device.clone(),
-        });
-
-        let synth = Arc::new(OneShotSynth::new(runtime.clone()));
-        let playback = Arc::new(RodioPlaybackWorker::start(cfg.output_device.as_deref())?);
-
-        synth.health_check().await?;
-        tracing::info!(
-            target: "assistd::voice::piper",
-            "piper health-check passed"
-        );
-
-        Ok(Self {
-            synth,
-            playback,
-            state: Arc::new(Mutex::new(CircuitState::new())),
-        })
-    }
 }
 
 impl CircuitState {
@@ -137,12 +76,12 @@ impl CircuitState {
 
     fn record_failure(&mut self, err: &PiperError) {
         let now = Instant::now();
-        while let Some(&front) = self.recent_failures.front() {
-            if now.duration_since(front) > FAILURE_WINDOW {
-                self.recent_failures.pop_front();
-            } else {
-                break;
-            }
+        while self
+            .recent_failures
+            .front()
+            .is_some_and(|&oldest| now.duration_since(oldest) > FAILURE_WINDOW)
+        {
+            self.recent_failures.pop_front();
         }
         self.recent_failures.push_back(now);
         if self.recent_failures.len() >= FAILURE_THRESHOLD
@@ -161,10 +100,59 @@ impl CircuitState {
     }
 }
 
+/// [`VoiceOutput`] backed by per-utterance piper subprocesses and
+/// rodio playback. After three failures within a minute the service is
+/// degraded and `speak` drops utterances without error; once a minute
+/// has passed since the last failure, one utterance is let through and
+/// either re-arms the service or re-opens the breaker.
+pub struct PiperVoiceOutput {
+    synth: Arc<OneShotSynth>,
+    playback: Arc<RodioPlaybackWorker>,
+    circuit: Arc<Mutex<CircuitState>>,
+}
+
+impl PiperVoiceOutput {
+    /// Resolve the voice files, open the audio device, and run a
+    /// health-check synthesis.
+    pub async fn start(config: SynthesisConfig) -> Result<Self, PiperError> {
+        which::which(&config.binary_path).map_err(|_| PiperError::BinaryMissing {
+            binary: config.binary_path.clone(),
+        })?;
+
+        let cache_dir = config
+            .model_cache_dir
+            .clone()
+            .unwrap_or_else(default_cache_dir);
+        let voice_files = ensure_voice(&config.voice, &cache_dir).await?;
+        tracing::info!(
+            target: "assistd::voice::piper",
+            onnx = %voice_files.onnx.display(),
+            sample_rate = voice_files.sample_rate,
+            "piper voice resolved"
+        );
+
+        let runtime = Arc::new(runtime_config(&config, voice_files));
+        let synth = Arc::new(OneShotSynth::new(runtime));
+        let playback = Arc::new(RodioPlaybackWorker::start(config.output_device.as_deref())?);
+
+        synth.health_check().await?;
+        tracing::info!(
+            target: "assistd::voice::piper",
+            "piper health-check passed"
+        );
+
+        Ok(Self {
+            synth,
+            playback,
+            circuit: Arc::new(Mutex::new(CircuitState::new())),
+        })
+    }
+}
+
 #[async_trait]
 impl VoiceOutput for PiperVoiceOutput {
     async fn speak(&self, text: String) -> Result<(), VoiceOutputError> {
-        if !self.state.lock().admit() {
+        if !self.circuit.lock().admit() {
             return Ok(());
         }
 
@@ -173,38 +161,36 @@ impl VoiceOutput for PiperVoiceOutput {
         }
 
         let output = match self.synth.synthesize(&text).await {
-            Ok(o) => o,
-            Err(e) => {
+            Ok(output) => output,
+            Err(err) => {
                 tracing::warn!(
                     target: "assistd::voice::piper",
-                    error = %e,
+                    error = %err,
                     "piper synthesis failed"
                 );
-                self.state.lock().record_failure(&e);
-                return Err(VoiceOutputError::Synthesis(e));
+                self.circuit.lock().record_failure(&err);
+                return Err(VoiceOutputError::Synthesis(err));
             }
         };
 
-        if let Err(e) = self.playback.play(output).await {
+        if let Err(err) = self.playback.play(output).await {
             tracing::warn!(
                 target: "assistd::voice::piper",
-                error = %e,
+                error = %err,
                 "piper playback enqueue failed"
             );
-            self.state.lock().record_failure(&e);
-            return Err(VoiceOutputError::Playback(e));
+            self.circuit.lock().record_failure(&err);
+            return Err(VoiceOutputError::Playback(err));
         }
 
-        self.state.lock().record_success();
+        self.circuit.lock().record_success();
         Ok(())
     }
 
     async fn wait_idle(&self) -> Result<(), VoiceOutputError> {
-        {
-            let s = self.state.lock();
-            if matches!(s.ready, ReadyState::Degraded { .. }) {
-                return Ok(());
-            }
+        let degraded = matches!(self.circuit.lock().ready, ReadyState::Degraded { .. });
+        if degraded {
+            return Ok(());
         }
         self.playback.drain().await;
         Ok(())
@@ -212,6 +198,21 @@ impl VoiceOutput for PiperVoiceOutput {
 
     async fn cancel(&self) {
         self.playback.clear().await;
+    }
+}
+
+fn runtime_config(config: &SynthesisConfig, voice_files: VoiceFiles) -> PiperRuntimeConfig {
+    PiperRuntimeConfig {
+        binary_path: config.binary_path.clone(),
+        voice_files,
+        length_scale: config.length_scale,
+        noise_scale: NOISE_SCALE,
+        noise_w: NOISE_W,
+        sentence_silence_secs: SENTENCE_SILENCE_SECS,
+        espeak_data_dir: config.espeak_data_dir.clone(),
+        deadline: Duration::from_secs(u64::from(config.deadline_secs.get())),
+        use_cuda: config.use_cuda,
+        output_device: config.output_device.clone(),
     }
 }
 

@@ -4,10 +4,19 @@ use std::collections::VecDeque;
 
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
+/// Sample rate of every frame fed to the VAD.
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
 
 /// 20 ms at 16 kHz. webrtc-vad accepts exactly 10, 20, or 30 ms frames.
 pub const FRAME_SAMPLES: usize = 320;
+
+const FRAME_MS: u32 = 20;
+const MIN_UTTERANCE_MS: u32 = 400;
+const PREROLL_MS: u32 = 300;
+const ONSET_CONFIRM_MS: u32 = 60;
+/// webrtc-vad's most selective mode; lower modes admit keyboard and
+/// fan noise on a desktop mic.
+const AGGRESSIVENESS: u8 = 3;
 
 /// VAD state-machine thresholds, in whole frames.
 #[derive(Debug, Clone, Copy)]
@@ -26,26 +35,18 @@ pub struct VadTuning {
     pub aggressiveness: u8,
 }
 
-const MIN_UTTERANCE_MS: u32 = 400;
-const PREROLL_MS: u32 = 300;
-const ONSET_CONFIRM_MS: u32 = 60;
-/// webrtc-vad's most selective mode; lower modes admit keyboard and
-/// fan noise on a desktop mic.
-const AGGRESSIVENESS: u8 = 3;
-
 impl VadTuning {
     /// Convert the two configurable durations to frame counts.
     pub fn from_ms(silence_ms: u32, max_utterance_secs: u32) -> Self {
-        let frame_ms = 20u32;
         Self {
-            onset_confirm_frames: ONSET_CONFIRM_MS.div_ceil(frame_ms).max(1),
-            offset_frames: silence_ms.div_ceil(frame_ms).max(1),
-            min_utterance_frames: MIN_UTTERANCE_MS.div_ceil(frame_ms).max(1),
+            onset_confirm_frames: ONSET_CONFIRM_MS.div_ceil(FRAME_MS).max(1),
+            offset_frames: silence_ms.div_ceil(FRAME_MS).max(1),
+            min_utterance_frames: MIN_UTTERANCE_MS.div_ceil(FRAME_MS).max(1),
             max_utterance_frames: max_utterance_secs
                 .saturating_mul(1000)
-                .div_ceil(frame_ms)
+                .div_ceil(FRAME_MS)
                 .max(1),
-            preroll_frames: PREROLL_MS.div_ceil(frame_ms),
+            preroll_frames: PREROLL_MS.div_ceil(FRAME_MS),
             aggressiveness: AGGRESSIVENESS,
         }
     }
@@ -62,24 +63,20 @@ pub enum VadEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+enum Phase {
     Silent,
     PreVoice { voiced: u32 },
     Voiced,
     Trailing { silent: u32 },
 }
 
-/// Classifies 20 ms frames via webrtc-vad and emits utterances bounded
-/// by confirmed silence, moving Silent → PreVoice → Voiced → Trailing →
-/// Silent. Onset needs `onset_confirm_frames` consecutive voiced frames
-/// so a keystroke click does not start an utterance; offset needs
-/// `offset_frames` consecutive silent frames so a mid-word pause does
-/// not end one. A pre-roll ring is prepended to each utterance so the
-/// first syllable is not clipped.
+/// Classifies 20 ms frames via webrtc-vad and emits utterances bounded by
+/// confirmed silence. Onset and offset each need consecutive frames per
+/// [`VadTuning`]; a pre-roll ring is prepended so the first syllable is not clipped.
 pub struct UtteranceVad {
     vad: Vad,
     tuning: VadTuning,
-    state: State,
+    phase: Phase,
     preroll: VecDeque<[i16; FRAME_SAMPLES]>,
     utterance: Vec<i16>,
     utterance_frames: u32,
@@ -89,19 +86,13 @@ impl UtteranceVad {
     /// A segmenter in the silent state. An `aggressiveness` above 3 is
     /// treated as 3.
     pub fn new(tuning: VadTuning) -> Self {
-        let mode = match tuning.aggressiveness {
-            0 => VadMode::Quality,
-            1 => VadMode::LowBitrate,
-            2 => VadMode::Aggressive,
-            _ => VadMode::VeryAggressive,
-        };
-        let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, mode);
-        let preroll_cap = tuning.preroll_frames as usize;
+        let vad =
+            Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, vad_mode(tuning.aggressiveness));
         Self {
             vad,
             tuning,
-            state: State::Silent,
-            preroll: VecDeque::with_capacity(preroll_cap),
+            phase: Phase::Silent,
+            preroll: VecDeque::with_capacity(tuning.preroll_frames as usize),
             utterance: Vec::with_capacity((tuning.max_utterance_frames as usize) * FRAME_SAMPLES),
             utterance_frames: 0,
         }
@@ -120,69 +111,85 @@ impl UtteranceVad {
         frame: &[i16; FRAME_SAMPLES],
         is_voiced: bool,
     ) -> Option<VadEvent> {
-        match self.state {
-            State::Silent => {
-                self.push_preroll(frame);
-                if is_voiced {
-                    self.state = if self.tuning.onset_confirm_frames <= 1 {
-                        self.begin_utterance();
-                        self.append_frame(frame);
-                        State::Voiced
-                    } else {
-                        State::PreVoice { voiced: 1 }
-                    };
-                }
+        match self.phase {
+            Phase::Silent => {
+                self.feed_silent(frame, is_voiced);
                 None
             }
-            State::PreVoice { voiced } => {
-                if is_voiced {
-                    let confirmed = voiced + 1;
-                    if confirmed >= self.tuning.onset_confirm_frames {
-                        self.begin_utterance();
-                        self.append_frame(frame);
-                        self.state = State::Voiced;
-                    } else {
-                        self.push_preroll(frame);
-                        self.state = State::PreVoice { voiced: confirmed };
-                    }
-                    None
-                } else {
-                    self.push_preroll(frame);
-                    self.state = State::Silent;
-                    None
-                }
-            }
-            State::Voiced => {
-                self.append_frame(frame);
-                if self.utterance_frames >= self.tuning.max_utterance_frames {
-                    return Some(self.flush_truncated());
-                }
-                if !is_voiced {
-                    self.state = State::Trailing { silent: 1 };
-                    if self.tuning.offset_frames <= 1 {
-                        return self.finish_utterance();
-                    }
-                }
+            Phase::PreVoice { voiced } => {
+                self.feed_pre_voice(frame, is_voiced, voiced);
                 None
             }
-            State::Trailing { silent } => {
-                self.append_frame(frame);
-                if self.utterance_frames >= self.tuning.max_utterance_frames {
-                    return Some(self.flush_truncated());
-                }
-                if is_voiced {
-                    self.state = State::Voiced;
-                    None
-                } else {
-                    let silent = silent + 1;
-                    if silent >= self.tuning.offset_frames {
-                        self.finish_utterance()
-                    } else {
-                        self.state = State::Trailing { silent };
-                        None
-                    }
-                }
+            Phase::Voiced => self.feed_voiced(frame, is_voiced),
+            Phase::Trailing { silent } => self.feed_trailing(frame, is_voiced, silent),
+        }
+    }
+
+    fn feed_silent(&mut self, frame: &[i16; FRAME_SAMPLES], is_voiced: bool) {
+        self.push_preroll(frame);
+        if !is_voiced {
+            return;
+        }
+        self.phase = if self.tuning.onset_confirm_frames <= 1 {
+            self.begin_utterance();
+            self.append_frame(frame);
+            Phase::Voiced
+        } else {
+            Phase::PreVoice { voiced: 1 }
+        };
+    }
+
+    fn feed_pre_voice(&mut self, frame: &[i16; FRAME_SAMPLES], is_voiced: bool, voiced: u32) {
+        if !is_voiced {
+            self.push_preroll(frame);
+            self.phase = Phase::Silent;
+            return;
+        }
+        let confirmed = voiced + 1;
+        if confirmed >= self.tuning.onset_confirm_frames {
+            self.begin_utterance();
+            self.append_frame(frame);
+            self.phase = Phase::Voiced;
+        } else {
+            self.push_preroll(frame);
+            self.phase = Phase::PreVoice { voiced: confirmed };
+        }
+    }
+
+    fn feed_voiced(&mut self, frame: &[i16; FRAME_SAMPLES], is_voiced: bool) -> Option<VadEvent> {
+        self.append_frame(frame);
+        if self.utterance_frames >= self.tuning.max_utterance_frames {
+            return Some(self.flush_truncated());
+        }
+        if !is_voiced {
+            self.phase = Phase::Trailing { silent: 1 };
+            if self.tuning.offset_frames <= 1 {
+                return self.finish_utterance();
             }
+        }
+        None
+    }
+
+    fn feed_trailing(
+        &mut self,
+        frame: &[i16; FRAME_SAMPLES],
+        is_voiced: bool,
+        silent: u32,
+    ) -> Option<VadEvent> {
+        self.append_frame(frame);
+        if self.utterance_frames >= self.tuning.max_utterance_frames {
+            return Some(self.flush_truncated());
+        }
+        if is_voiced {
+            self.phase = Phase::Voiced;
+            return None;
+        }
+        let silent = silent + 1;
+        if silent >= self.tuning.offset_frames {
+            self.finish_utterance()
+        } else {
+            self.phase = Phase::Trailing { silent };
+            None
         }
     }
 
@@ -211,7 +218,7 @@ impl UtteranceVad {
     }
 
     fn finish_utterance(&mut self) -> Option<VadEvent> {
-        self.state = State::Silent;
+        self.phase = Phase::Silent;
         let frames = self.utterance_frames;
         let pcm = std::mem::take(&mut self.utterance);
         self.utterance_frames = 0;
@@ -222,10 +229,19 @@ impl UtteranceVad {
     }
 
     fn flush_truncated(&mut self) -> VadEvent {
-        self.state = State::Silent;
+        self.phase = Phase::Silent;
         let pcm = std::mem::take(&mut self.utterance);
         self.utterance_frames = 0;
         VadEvent::Truncated(pcm)
+    }
+}
+
+fn vad_mode(aggressiveness: u8) -> VadMode {
+    match aggressiveness {
+        0 => VadMode::Quality,
+        1 => VadMode::LowBitrate,
+        2 => VadMode::Aggressive,
+        _ => VadMode::VeryAggressive,
     }
 }
 
@@ -248,69 +264,70 @@ mod tests {
         }
     }
 
-    /// Feed `n` identical frames, collecting any events.
-    fn feed(v: &mut UtteranceVad, voiced: bool, n: usize) -> Vec<VadEvent> {
+    /// Feed `count` identical frames, collecting any events.
+    fn feed(vad: &mut UtteranceVad, voiced: bool, count: usize) -> Vec<VadEvent> {
         let frame = [if voiced { VOICED } else { SILENT }; FRAME_SAMPLES];
-        (0..n)
-            .filter_map(|_| v.feed_decided(&frame, voiced))
+        (0..count)
+            .filter_map(|_| vad.feed_decided(&frame, voiced))
             .collect()
     }
 
-    fn frames(sample: i16, n: usize) -> Vec<i16> {
-        vec![sample; n * FRAME_SAMPLES]
+    fn frames(sample: i16, count: usize) -> Vec<i16> {
+        vec![sample; count * FRAME_SAMPLES]
     }
 
     #[test]
     fn silent_input_produces_no_events() {
-        let mut v = UtteranceVad::new(tight_tuning());
-        assert_eq!(feed(&mut v, false, 100), NO_EVENTS);
+        let mut vad = UtteranceVad::new(tight_tuning());
+        assert_eq!(feed(&mut vad, false, 100), NO_EVENTS);
     }
 
     #[test]
     fn voiced_burst_bounded_by_silence_emits_one_utterance() {
-        let mut v = UtteranceVad::new(tight_tuning());
-        assert_eq!(feed(&mut v, false, 5), NO_EVENTS);
-        assert_eq!(feed(&mut v, true, 10), NO_EVENTS);
-        let events = feed(&mut v, false, 5);
+        let mut vad = UtteranceVad::new(tight_tuning());
+        assert_eq!(feed(&mut vad, false, 5), NO_EVENTS);
+        assert_eq!(feed(&mut vad, true, 10), NO_EVENTS);
+        let events = feed(&mut vad, false, 5);
 
-        // Pre-roll holds three frames, the last of which is the first
-        // voiced frame; the trailing silence that confirmed the offset
-        // is kept.
         let expected = [frames(SILENT, 2), frames(VOICED, 10), frames(SILENT, 2)].concat();
-        assert_eq!(events, [VadEvent::UtteranceComplete(expected)]);
+        assert_eq!(
+            events,
+            [VadEvent::UtteranceComplete(expected)],
+            "pre-roll ends at the first voiced frame; the confirming silence is kept"
+        );
     }
 
     #[test]
     fn utterance_below_min_is_dropped() {
-        let mut v = UtteranceVad::new(VadTuning {
+        let mut vad = UtteranceVad::new(VadTuning {
             min_utterance_frames: 20,
             ..tight_tuning()
         });
-        feed(&mut v, false, 5);
-        feed(&mut v, true, 2);
-        assert_eq!(feed(&mut v, false, 10), NO_EVENTS);
+        feed(&mut vad, false, 5);
+        feed(&mut vad, true, 2);
+        assert_eq!(feed(&mut vad, false, 10), NO_EVENTS);
     }
 
     #[test]
     fn continuous_voiced_input_force_flushes_at_max() {
-        let mut v = UtteranceVad::new(VadTuning {
+        let mut vad = UtteranceVad::new(VadTuning {
             max_utterance_frames: 10,
             offset_frames: 100,
             ..tight_tuning()
         });
         let truncated = VadEvent::Truncated(frames(VOICED, 10));
-        assert_eq!(feed(&mut v, true, 25), [truncated.clone(), truncated]);
+        assert_eq!(feed(&mut vad, true, 25), [truncated.clone(), truncated]);
     }
 
     #[test]
     fn onset_requires_multiple_confirmed_frames() {
-        let mut v = UtteranceVad::new(VadTuning {
+        let mut vad = UtteranceVad::new(VadTuning {
             onset_confirm_frames: 3,
             ..tight_tuning()
         });
-        feed(&mut v, false, 5);
-        feed(&mut v, true, 2);
-        assert_eq!(feed(&mut v, false, 10), NO_EVENTS);
+        feed(&mut vad, false, 5);
+        feed(&mut vad, true, 2);
+        assert_eq!(feed(&mut vad, false, 10), NO_EVENTS);
     }
 
     #[test]
@@ -318,9 +335,9 @@ mod tests {
         for (silence_ms, max_secs, offset_frames, max_utterance_frames) in
             [(800, 30, 40, 1500), (810, 30, 41, 1500), (1, 0, 1, 1)]
         {
-            let t = VadTuning::from_ms(silence_ms, max_secs);
+            let tuning = VadTuning::from_ms(silence_ms, max_secs);
             assert_eq!(
-                (t.offset_frames, t.max_utterance_frames),
+                (tuning.offset_frames, tuning.max_utterance_frames),
                 (offset_frames, max_utterance_frames),
                 "from_ms({silence_ms}, {max_secs})"
             );

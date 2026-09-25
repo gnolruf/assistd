@@ -2,66 +2,14 @@ use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};
 
-/// `echo [-ne] [ARGS...]`: write args joined by spaces, followed by a
-/// newline unless `-n` is given.
-///
-/// Flags:
-/// - `-n` omit the trailing newline
-/// - `-e` interpret `\n`, `\t`, `\r`, `\0` and `\\` in the arguments
+/// `echo [-ne] [ARGS...]`: write args joined by spaces, then a newline
+/// unless `-n` is given; `-e` interprets backslash escapes.
 pub struct EchoCommand;
 
 #[derive(Default)]
 struct Flags {
     no_newline: bool,
     escapes: bool,
-}
-
-fn parse_flags(argv: &[String]) -> (Flags, &[String]) {
-    let mut flags = Flags::default();
-    let mut i = 0;
-    while let Some(arg) = argv.get(i) {
-        let Some(letters) = arg.strip_prefix('-').filter(|l| !l.is_empty()) else {
-            break;
-        };
-        if !letters.chars().all(|c| matches!(c, 'n' | 'e' | 'E')) {
-            break;
-        }
-        for c in letters.chars() {
-            match c {
-                'n' => flags.no_newline = true,
-                'e' => flags.escapes = true,
-                _ => flags.escapes = false,
-            }
-        }
-        i += 1;
-    }
-    (flags, &argv[i..])
-}
-
-fn unescape(text: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            let mut buf = [0u8; 4];
-            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push(b'\n'),
-            Some('t') => out.push(b'\t'),
-            Some('r') => out.push(b'\r'),
-            Some('0') => out.push(0),
-            Some('\\') => out.push(b'\\'),
-            Some(other) => {
-                let mut buf = [0u8; 4];
-                out.push(b'\\');
-                out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
-            }
-            None => out.push(b'\\'),
-        }
-    }
-    out
 }
 
 #[async_trait]
@@ -108,6 +56,54 @@ impl Command for EchoCommand {
     }
 }
 
+fn parse_flags(argv: &[String]) -> (Flags, &[String]) {
+    let mut flags = Flags::default();
+    let mut consumed = 0;
+    while let Some(arg) = argv.get(consumed) {
+        let Some(letters) = arg.strip_prefix('-').filter(|l| !l.is_empty()) else {
+            break;
+        };
+        if !letters.chars().all(|c| matches!(c, 'n' | 'e' | 'E')) {
+            break;
+        }
+        for c in letters.chars() {
+            match c {
+                'n' => flags.no_newline = true,
+                'e' => flags.escapes = true,
+                _ => flags.escapes = false,
+            }
+        }
+        consumed += 1;
+    }
+    (flags, &argv[consumed..])
+}
+
+fn unescape(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            Some('r') => out.push(b'\r'),
+            Some('0') => out.push(0),
+            Some('\\') => out.push(b'\\'),
+            Some(other) => {
+                let mut buf = [0u8; 4];
+                out.push(b'\\');
+                out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            }
+            None => out.push(b'\\'),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,7 +134,6 @@ mod tests {
             (&["-ne", r"a\nb"], b"a\nb"),
             (&["-e", "-E", r"a\nb"], b"a\\nb\n"),
             (&["-e", r"a\qb"], b"a\\qb\n"),
-            // A flag after a word is data, so the newline stays.
             (&["hi", "-n"], b"hi -n\n"),
             (&["-"], b"-\n"),
         ];

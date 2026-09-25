@@ -20,6 +20,11 @@ fn make_stdio_config(label: &str) -> TransportConfig {
     TransportConfig::Stdio(cfg)
 }
 
+/// Resolves once the supervisor exits and drops its health sender.
+async fn supervisor_exited(health_rx: &mut watch::Receiver<HealthState>) {
+    while health_rx.changed().await.is_ok() {}
+}
+
 #[tokio::test]
 async fn discovers_and_invokes_a_tool_end_to_end() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -30,7 +35,7 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
     let tools = adapt_handle_as_tools(&handle, "mcp__fake")
         .await
         .expect("discovery should succeed");
-    let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
     assert_eq!(
         names,
         [
@@ -42,7 +47,7 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
 
     let echo = tools
         .iter()
-        .find(|t| t.name() == "mcp__fake__echo")
+        .find(|tool| tool.name() == "mcp__fake__echo")
         .unwrap();
     let result = echo.invoke(json!({"msg": "hi"})).await.unwrap();
     assert_eq!(result["type"], "text");
@@ -62,12 +67,9 @@ async fn external_shutdown_stops_the_supervisor() {
 
     shutdown_tx.send(true).unwrap();
 
-    // The supervisor drops its health sender only when it exits.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while health_rx.changed().await.is_ok() {}
-    })
-    .await
-    .expect("supervisor must exit on daemon-wide shutdown");
+    tokio::time::timeout(Duration::from_secs(5), supervisor_exited(&mut health_rx))
+        .await
+        .expect("supervisor must exit on daemon-wide shutdown");
     let err = handle.client().list_tools().await.unwrap_err();
     assert!(matches!(err, McpError::ServerDown), "{err}");
 
@@ -86,12 +88,9 @@ async fn dropping_handle_without_shutdown_aborts_supervisor() {
     let mut health_rx = handle.watch_health();
     drop(handle);
 
-    // The supervisor drops its health sender only when it exits.
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while health_rx.changed().await.is_ok() {}
-    })
-    .await
-    .expect("supervisor must release health_tx within 2s after Drop");
+    tokio::time::timeout(Duration::from_secs(2), supervisor_exited(&mut health_rx))
+        .await
+        .expect("supervisor must release health_tx within 2s after Drop");
 }
 
 #[tokio::test]
@@ -106,18 +105,16 @@ async fn server_crash_short_circuits_subsequent_calls() {
         .expect("discovery should succeed");
     let echo = tools
         .iter()
-        .find(|t| t.name() == "mcp__fake__echo")
+        .find(|tool| tool.name() == "mcp__fake__echo")
         .expect("echo present");
     let crasher = tools
         .iter()
-        .find(|t| t.name() == "mcp__fake__crash_me")
+        .find(|tool| tool.name() == "mcp__fake__crash_me")
         .expect("crash_me present");
 
     let pre = echo.invoke(json!({"msg": "before"})).await.unwrap();
     assert_eq!(pre["output"], "echo:before");
 
-    // The server exits without replying, so the call's own outcome is
-    // irrelevant; only the supervisor noticing the death matters.
     let _ = crasher.invoke(json!({})).await;
 
     let mut watch_health = handle.watch_health();
@@ -153,8 +150,6 @@ async fn server_crash_short_circuits_subsequent_calls() {
 
 #[tokio::test]
 async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
-    // A lost read loop under a live child must count as death, or the
-    // server stays `Healthy` while every call times out.
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
         .await
@@ -165,16 +160,15 @@ async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
         .expect("discovery should succeed");
     let echo = tools
         .iter()
-        .find(|t| t.name() == "mcp__fake__echo")
+        .find(|tool| tool.name() == "mcp__fake__echo")
         .expect("echo present");
     let flood = tools
         .iter()
-        .find(|t| t.name() == "mcp__fake__flood_stdout")
+        .find(|tool| tool.name() == "mcp__fake__flood_stdout")
         .expect("flood_stdout present");
 
     let mut watch_health = handle.watch_health();
 
-    // Kills the read loop; the child stays alive and keeps reading stdin.
     let _ = flood.invoke(json!({})).await;
 
     let flipped = tokio::time::timeout(Duration::from_secs(5), async {

@@ -71,9 +71,9 @@ impl IpcProtocol for FakeProtocol {
     }
 }
 
-async fn wait_until(what: &str, cond: impl Fn() -> bool) {
+async fn wait_until(what: &str, condition: impl Fn() -> bool) {
     tokio::time::timeout(Duration::from_secs(120), async {
-        while !cond() {
+        while !condition() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

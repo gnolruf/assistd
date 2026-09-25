@@ -1,14 +1,18 @@
 //! `GetCapabilities` handler.
 
-use super::AppState;
-use assistd_ipc::{Component, Event, StatusKind, StatusSeverity};
 use std::sync::Arc;
+
 use tokio::sync::mpsc;
 
+use assistd_ipc::{Component, Event, StatusKind, StatusSeverity};
+use assistd_llm::VisionState;
+
+use super::AppState;
+
 impl AppState {
-    /// Report MCP startup failures, then probe llama-server for vision
-    /// support and the model name. Probes live rather than reading the
-    /// vision gate, so the answer describes the server as it is now.
+    /// Report MCP startup failures, then the model name and whether
+    /// llama-server supports vision, probed live rather than read from the
+    /// vision gate.
     pub(super) async fn handle_get_capabilities(
         self: Arc<Self>,
         id: String,
@@ -30,8 +34,8 @@ impl AppState {
         }
 
         let probe = match &self.subsystems.vision_revalidator {
-            Some(rev) => rev.probe().await,
-            None => assistd_llm::VisionState::default(),
+            Some(revalidator) => revalidator.probe().await,
+            None => VisionState::default(),
         };
         let model_name = self
             .config

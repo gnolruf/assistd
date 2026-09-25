@@ -1,10 +1,9 @@
 //! JSON-RPC over the MCP HTTP+SSE binding: requests are POSTed to the
-//! URL the server's `endpoint` event names (or `base_url` if it emits
-//! none), replies arrive on a long-lived `GET` event stream. A ping
-//! task drops the connection when the server stops answering while
-//! the stream stays open.
+//! server's `endpoint` URL and replies arrive on a long-lived `GET`
+//! event stream, with a ping task to detect a silent server.
 
 use std::collections::HashMap;
+use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -68,15 +67,7 @@ impl SseMcpClient {
     pub async fn connect(cfg: SseConfig) -> Result<(Arc<Self>, SseLifeline), McpError> {
         let base_url = Url::parse(&cfg.url)
             .map_err(|e| McpError::config(format!("invalid SSE url `{}`", cfg.url), e))?;
-
-        let mut headers = HeaderMap::new();
-        for (k, v) in &cfg.headers {
-            let name = HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| McpError::config(format!("invalid header name `{k}`"), e))?;
-            let value = HeaderValue::from_str(v)
-                .map_err(|e| McpError::config(format!("invalid header value `{v}`"), e))?;
-            headers.insert(name, value);
-        }
+        let headers = build_headers(&cfg.headers)?;
 
         let http = reqwest::Client::builder()
             .read_timeout(cfg.read_timeout)
@@ -116,15 +107,7 @@ impl SseMcpClient {
         };
         let stream_task = AbortOnDropHandle::new(tokio::spawn(reader.run()));
 
-        let _ = tokio::time::timeout(Duration::from_secs(5), endpoint_ready_rx).await;
-        if post_url.read().await.is_none() {
-            *post_url.write().await = Some(base_url.clone());
-            debug!(
-                target: "assistd::mcp",
-                server = %cfg.label,
-                "no endpoint event received; defaulting POST URL to base URL",
-            );
-        }
+        await_endpoint(endpoint_ready_rx, &post_url, &base_url, &cfg.label).await;
 
         if let Err(e) = client.initialize().await {
             warn!(
@@ -166,45 +149,31 @@ impl SseMcpClient {
             .call("initialize", protocol::initialize_params())
             .await?;
         protocol::warn_on_version_mismatch(&self.label, &result);
-        let bytes = notification_line("notifications/initialized", json!({}))?;
-        let body = &bytes[..bytes.len().saturating_sub(1)];
-        let post = self
-            .post_url
-            .read()
+        let line = notification_line("notifications/initialized", json!({}))?;
+        let body = &line[..line.len().saturating_sub(1)];
+        self.post_json("notifications/initialized", body.to_vec())
             .await
-            .clone()
-            .unwrap_or_else(|| self.base_url.clone());
-        let resp = self
-            .http
-            .post(post)
-            .headers(self.headers.clone())
-            .body(body.to_vec())
-            .header("Content-Type", "application/json")
-            .send()
-            .await
-            .map_err(McpError::from)?;
-        if !resp.status().is_success() {
-            return Err(McpError::HttpStatus {
-                method: "notifications/initialized",
-                status: resp.status(),
-            });
-        }
-        Ok(())
     }
 
     async fn call(&self, method: &'static str, params: Value) -> Result<Value, McpError> {
         let mut pending = self.correlator.next_request(method, params)?;
         let body = pending.frame_json()?;
-        let post = self
+        self.post_json(method, body).await?;
+        protocol::await_reply(&mut pending.rx, self.request_timeout).await
+    }
+
+    /// POST `body` to the current endpoint; a non-success status is an
+    /// [`McpError::HttpStatus`] tagged with `method`.
+    async fn post_json(&self, method: &'static str, body: Vec<u8>) -> Result<(), McpError> {
+        let post_url = self
             .post_url
             .read()
             .await
             .clone()
             .unwrap_or_else(|| self.base_url.clone());
-
         let resp = self
             .http
-            .post(post)
+            .post(post_url)
             .headers(self.headers.clone())
             .body(body)
             .header("Content-Type", "application/json")
@@ -217,8 +186,7 @@ impl SseMcpClient {
                 status: resp.status(),
             });
         }
-
-        protocol::await_reply(&mut pending.rx, self.request_timeout).await
+        Ok(())
     }
 }
 
@@ -275,58 +243,54 @@ struct ReadLoop {
 }
 
 impl ReadLoop {
-    async fn run(self) {
-        let Self {
-            http,
-            base_url,
-            headers,
-            correlator,
-            post_url,
-            label,
-            mut cancel_rx,
-            mut endpoint_ready_tx,
-            done_tx,
-        } = self;
+    async fn run(mut self) {
+        if let Some(resp) = self.open_stream().await {
+            self.read_events(resp).await;
+        }
+        self.correlator.fail_all();
+        let _ = self.done_tx.send(());
+    }
 
-        let resp = match http
-            .get(base_url.clone())
-            .headers(headers)
+    async fn open_stream(&self) -> Option<reqwest::Response> {
+        let resp = match self
+            .http
+            .get(self.base_url.clone())
+            .headers(self.headers.clone())
             .header("Accept", "text/event-stream")
             .send()
             .await
         {
-            Ok(r) => r,
+            Ok(resp) => resp,
             Err(e) => {
                 warn!(
                     target: "assistd::mcp",
-                    server = %label,
+                    server = %self.label,
                     "SSE connect failed: {e}",
                 );
-                correlator.fail_all();
-                let _ = done_tx.send(());
-                return;
+                return None;
             }
         };
         if !resp.status().is_success() {
             warn!(
                 target: "assistd::mcp",
-                server = %label,
+                server = %self.label,
                 status = %resp.status(),
                 "SSE GET returned non-success status",
             );
-            correlator.fail_all();
-            let _ = done_tx.send(());
-            return;
+            return None;
         }
+        Some(resp)
+    }
 
+    async fn read_events(&mut self, resp: reqwest::Response) {
         let mut stream = resp.bytes_stream();
         let mut parser = EventParser::new();
 
         loop {
             let chunk = tokio::select! {
-                _ = cancel_rx.changed() => {
-                    if *cancel_rx.borrow() {
-                        debug!(target: "assistd::mcp", server = %label, "SSE read cancelled");
+                _ = self.cancel_rx.changed() => {
+                    if *self.cancel_rx.borrow() {
+                        debug!(target: "assistd::mcp", server = %self.label, "SSE read cancelled");
                         break;
                     }
                     continue;
@@ -337,27 +301,10 @@ impl ReadLoop {
             match chunk {
                 Some(Ok(bytes)) => {
                     parser.push(&bytes);
-                    let overflowed = loop {
-                        match parser.next_event() {
-                            Ok(Some(event)) => {
-                                handle_event(
-                                    event,
-                                    &correlator,
-                                    &base_url,
-                                    &post_url,
-                                    &mut endpoint_ready_tx,
-                                    &label,
-                                )
-                                .await;
-                            }
-                            Ok(None) => break false,
-                            Err(EventTooLarge) => break true,
-                        }
-                    };
-                    if overflowed {
+                    if self.dispatch_buffered(&mut parser).await.is_err() {
                         warn!(
                             target: "assistd::mcp",
-                            server = %label,
+                            server = %self.label,
                             "SSE event over {MAX_EVENT_BYTES} bytes; dropping connection",
                         );
                         break;
@@ -366,120 +313,69 @@ impl ReadLoop {
                 Some(Err(e)) => {
                     warn!(
                         target: "assistd::mcp",
-                        server = %label,
+                        server = %self.label,
                         "SSE stream error: {e}",
                     );
                     break;
                 }
                 None => {
-                    debug!(target: "assistd::mcp", server = %label, "SSE stream ended");
+                    debug!(target: "assistd::mcp", server = %self.label, "SSE stream ended");
                     break;
                 }
             }
         }
-
-        correlator.fail_all();
-        let _ = done_tx.send(());
     }
-}
 
-fn resolve_endpoint(base_url: &Url, data: &str) -> Result<Url, url::ParseError> {
-    base_url.join(data.trim())
-}
+    async fn dispatch_buffered(&mut self, parser: &mut EventParser) -> Result<(), EventTooLarge> {
+        while let Some(event) = parser.next_event()? {
+            self.dispatch_event(event).await;
+        }
+        Ok(())
+    }
 
-async fn handle_event(
-    event: SseEvent,
-    correlator: &Arc<Correlator>,
-    base_url: &Url,
-    post_url: &Arc<RwLock<Option<Url>>>,
-    endpoint_ready_tx: &mut Option<oneshot::Sender<()>>,
-    label: &str,
-) {
-    match event.event_type.as_str() {
-        "endpoint" => match resolve_endpoint(base_url, &event.data) {
-            Ok(url) => {
+    async fn dispatch_event(&mut self, event: SseEvent) {
+        let label = &self.label;
+        match event.event_type.as_str() {
+            "endpoint" => match resolve_endpoint(&self.base_url, &event.data) {
+                Ok(url) => {
+                    debug!(
+                        target: "assistd::mcp",
+                        server = %label,
+                        endpoint = %url,
+                        "received SSE endpoint event",
+                    );
+                    *self.post_url.write().await = Some(url);
+                    if let Some(tx) = self.endpoint_ready_tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        target: "assistd::mcp",
+                        server = %label,
+                        "unusable SSE endpoint event `{}`: {e}",
+                        event.data,
+                    );
+                }
+            },
+            "message" | "" => match serde_json::from_str::<Response>(&event.data) {
+                Ok(resp) => self.correlator.deliver(resp),
+                Err(e) => {
+                    warn!(
+                        target: "assistd::mcp",
+                        server = %label,
+                        "SSE message JSON parse error: {e}; data: {}",
+                        event.data,
+                    );
+                }
+            },
+            other => {
                 debug!(
                     target: "assistd::mcp",
                     server = %label,
-                    endpoint = %url,
-                    "received SSE endpoint event",
+                    event_type = %other,
+                    "ignoring SSE event of unknown type",
                 );
-                *post_url.write().await = Some(url);
-                if let Some(tx) = endpoint_ready_tx.take() {
-                    let _ = tx.send(());
-                }
-            }
-            Err(e) => {
-                warn!(
-                    target: "assistd::mcp",
-                    server = %label,
-                    "unusable SSE endpoint event `{}`: {e}",
-                    event.data,
-                );
-            }
-        },
-        "message" | "" => match serde_json::from_str::<Response>(&event.data) {
-            Ok(resp) => correlator.deliver(resp),
-            Err(e) => {
-                warn!(
-                    target: "assistd::mcp",
-                    server = %label,
-                    "SSE message JSON parse error: {e}; data: {}",
-                    event.data,
-                );
-            }
-        },
-        other => {
-            debug!(
-                target: "assistd::mcp",
-                server = %label,
-                event_type = %other,
-                "ignoring SSE event of unknown type",
-            );
-        }
-    }
-}
-
-async fn ping_loop(
-    client: Arc<SseMcpClient>,
-    interval: Duration,
-    label: String,
-    mut cancel_rx: watch::Receiver<bool>,
-    cancel_tx: watch::Sender<bool>,
-) {
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    ticker.tick().await;
-    loop {
-        tokio::select! {
-            _ = cancel_rx.changed() => {
-                if *cancel_rx.borrow() {
-                    return;
-                }
-            }
-            _ = ticker.tick() => {
-                match client.call("ping", json!({})).await {
-                    Ok(_) => {
-                        debug!(target: "assistd::mcp", server = %label, "ping ok");
-                    }
-                    Err(McpError::RpcError { code: -32601, message, .. }) => {
-                        debug!(
-                            target: "assistd::mcp",
-                            server = %label,
-                            "server does not implement ping ({message}); disabling pings",
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        warn!(
-                            target: "assistd::mcp",
-                            server = %label,
-                            "ping failed: {e}; flipping transport unhealthy",
-                        );
-                        let _ = cancel_tx.send(true);
-                        return;
-                    }
-                }
             }
         }
     }
@@ -528,28 +424,31 @@ impl EventParser {
     /// [`MAX_EVENT_BYTES`]; the parser should then be discarded.
     pub fn next_event(&mut self) -> Result<Option<SseEvent>, EventTooLarge> {
         loop {
-            let Some(nl) = self.buf.iter().position(|&b| b == b'\n') else {
+            let Some(newline) = self.buf.iter().position(|&b| b == b'\n') else {
                 return if self.buf.len() + self.cur.data.len() > MAX_EVENT_BYTES {
                     Err(EventTooLarge)
                 } else {
                     Ok(None)
                 };
             };
-            let mut line: Vec<u8> = self.buf.drain(..=nl).collect();
+            let mut line: Vec<u8> = self.buf.drain(..=newline).collect();
             line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
             if line.is_empty() {
-                let mut cur = std::mem::take(&mut self.cur);
-                if cur.event_type.is_none() && cur.data.is_empty() && cur.id.is_none() {
+                let mut finished = mem::take(&mut self.cur);
+                if finished.event_type.is_none()
+                    && finished.data.is_empty()
+                    && finished.id.is_none()
+                {
                     continue;
                 }
-                cur.data.pop();
+                finished.data.pop();
                 return Ok(Some(SseEvent {
-                    event_type: cur.event_type.unwrap_or_else(|| "message".to_string()),
-                    data: cur.data,
-                    id: cur.id,
+                    event_type: finished.event_type.unwrap_or_else(|| "message".to_string()),
+                    data: finished.data,
+                    id: finished.id,
                 }));
             }
             if line.first() == Some(&b':') {
@@ -559,10 +458,7 @@ impl EventParser {
                 continue;
             };
             let (field, value) = match line_str.split_once(':') {
-                Some((f, v)) => {
-                    let v = v.strip_prefix(' ').unwrap_or(v);
-                    (f, v)
-                }
+                Some((field, value)) => (field, value.strip_prefix(' ').unwrap_or(value)),
                 None => (line_str, ""),
             };
             match field {
@@ -581,6 +477,86 @@ impl EventParser {
     }
 }
 
+fn build_headers(raw: &HashMap<String, String>) -> Result<HeaderMap, McpError> {
+    let mut headers = HeaderMap::new();
+    for (key, value) in raw {
+        let name = HeaderName::from_bytes(key.as_bytes())
+            .map_err(|e| McpError::config(format!("invalid header name `{key}`"), e))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|e| McpError::config(format!("invalid header value `{value}`"), e))?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+/// Wait up to 5s for the `endpoint` event, then fall back to POSTing
+/// to `base_url` if none arrived.
+async fn await_endpoint(
+    endpoint_ready_rx: oneshot::Receiver<()>,
+    post_url: &RwLock<Option<Url>>,
+    base_url: &Url,
+    label: &str,
+) {
+    let _ = tokio::time::timeout(Duration::from_secs(5), endpoint_ready_rx).await;
+    if post_url.read().await.is_none() {
+        *post_url.write().await = Some(base_url.clone());
+        debug!(
+            target: "assistd::mcp",
+            server = %label,
+            "no endpoint event received; defaulting POST URL to base URL",
+        );
+    }
+}
+
+fn resolve_endpoint(base_url: &Url, data: &str) -> Result<Url, url::ParseError> {
+    base_url.join(data.trim())
+}
+
+async fn ping_loop(
+    client: Arc<SseMcpClient>,
+    interval: Duration,
+    label: String,
+    mut cancel_rx: watch::Receiver<bool>,
+    cancel_tx: watch::Sender<bool>,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    return;
+                }
+            }
+            _ = ticker.tick() => {
+                match client.call("ping", json!({})).await {
+                    Ok(_) => {
+                        debug!(target: "assistd::mcp", server = %label, "ping ok");
+                    }
+                    Err(McpError::RpcError { code: -32601, message, .. }) => {
+                        debug!(
+                            target: "assistd::mcp",
+                            server = %label,
+                            "server does not implement ping ({message}); disabling pings",
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "assistd::mcp",
+                            server = %label,
+                            "ping failed: {e}; flipping transport unhealthy",
+                        );
+                        let _ = cancel_tx.send(true);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,8 +565,8 @@ mod tests {
         let mut events = Vec::new();
         for chunk in chunks {
             parser.push(chunk);
-            while let Some(e) = parser.next_event().unwrap() {
-                events.push(e);
+            while let Some(event) = parser.next_event().unwrap() {
+                events.push(event);
             }
         }
         events
@@ -669,35 +645,35 @@ mod tests {
             ),
         ];
         for (label, chunks, expected) in cases {
-            let mut p = EventParser::new();
-            assert_eq!(drive(&mut p, chunks), expected, "{label}");
+            let mut parser = EventParser::new();
+            assert_eq!(drive(&mut parser, chunks), expected, "{label}");
         }
     }
 
     #[test]
     fn unterminated_line_past_cap_is_rejected() {
-        let mut p = EventParser::new();
-        p.push(&vec![b'x'; MAX_EVENT_BYTES + 1]);
-        assert_eq!(p.next_event(), Err(EventTooLarge));
+        let mut parser = EventParser::new();
+        parser.push(&vec![b'x'; MAX_EVENT_BYTES + 1]);
+        assert_eq!(parser.next_event(), Err(EventTooLarge));
     }
 
     #[test]
     fn data_lines_past_cap_are_rejected() {
-        let mut p = EventParser::new();
+        let mut parser = EventParser::new();
         let line = format!("data: {}\n", "x".repeat(1024));
         let err = (0..=MAX_EVENT_BYTES / 1024).find_map(|_| {
-            p.push(line.as_bytes());
-            p.next_event().err()
+            parser.push(line.as_bytes());
+            parser.next_event().err()
         });
         assert_eq!(err, Some(EventTooLarge));
     }
 
     #[test]
     fn events_under_cap_are_not_rejected_cumulatively() {
-        let mut p = EventParser::new();
+        let mut parser = EventParser::new();
         let event = format!("data: {}\n\n", "x".repeat(MAX_EVENT_BYTES / 2));
         let events = drive(
-            &mut p,
+            &mut parser,
             &[event.as_bytes(), event.as_bytes(), event.as_bytes()],
         );
         assert_eq!(events.len(), 3);

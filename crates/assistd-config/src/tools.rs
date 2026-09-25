@@ -1,37 +1,35 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::defaults::{
     DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
     DEFAULT_TOOLS_OVERFLOW_DIR, default_bash_allowed_programs, default_bash_denylist,
     default_bash_destructive_patterns, default_writable_paths,
 };
-use serde::{Deserialize, Serialize};
 
 /// Tools subsystem configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
-    /// Output presentation limits applied before handing results to the LLM.
     pub output: ToolsOutputConfig,
-    /// Bash command execution policy (timeout, denylist, sandbox mode).
     pub bash: ToolsBashConfig,
-    /// File-write command policy (allowlist of writable path prefixes).
     pub write: ToolsWriteConfig,
-    /// Screenshot capture settings (backend selector, timeout).
     pub screenshot: ToolsScreenshotConfig,
 }
 
-/// Limits applied to a `run` result before it is handed to the LLM.
+/// Limits on a `run` result before it reaches the LLM; the excess spills
+/// to a file whose path the model is given.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsOutputConfig {
-    /// Max lines of stdout surfaced to the LLM before overflow spill.
+    /// Max output lines shown to the LLM.
     pub max_lines: NonZeroU32,
-    /// Max bytes of the truncated head, in KB.
+    /// Max size of the shown head, in KB.
     pub max_kb: NonZeroU32,
-    /// Directory where overflow output is spilled as `cmd-<n>.txt`.
-    /// Cleared + recreated on daemon startup.
+    /// Spill directory for overflow (`cmd-<n>.txt`); recreated empty on
+    /// daemon startup. Must not be empty.
     pub overflow_dir: PathBuf,
 }
 
@@ -52,59 +50,50 @@ impl ToolsOutputConfig {
     }
 }
 
-/// Sandbox mode for bash subprocess execution.
-///
-/// * `Auto`: use bubblewrap if `bwrap` is found on `PATH` at daemon startup;
-///   log a warn and run unsandboxed if not.
-/// * `Bwrap`: require bubblewrap; fail daemon startup if `bwrap` is missing.
-/// * `None`: never wrap; run bash directly under the daemon's own user.
+/// Sandbox mode for spawned commands.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BashSandboxMode {
+    /// Use bubblewrap if `bwrap` is on `PATH` at startup; otherwise warn
+    /// and run unsandboxed.
     #[default]
     Auto,
+    /// Require bubblewrap; startup fails without `bwrap`.
     Bwrap,
+    /// Never sandbox.
     None,
 }
 
-/// Bash-command policy. A command runs without confirmation only when
-/// every program it can run is allowed and nothing in it matches a
-/// destructive pattern; the denylist refuses outright. The sandbox limits
-/// what a confirmed command can reach.
+/// Policy for every spawned command (`bash` and `wm open`). A command runs
+/// without confirmation only when every program it can run is allowed and
+/// it matches no destructive pattern; the denylist refuses outright.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsBashConfig {
-    /// Subprocess timeout in seconds. Must be > 0. Exceeding the timeout
-    /// kills the process group and returns exit 137.
+    /// `bash` timeout in seconds; on expiry the process group is killed
+    /// (exit 137). Does not apply to `wm open`.
     pub timeout_secs: NonZeroU64,
-    /// Literal substrings that, if present in a bash script (case-insensitive),
-    /// cause immediate rejection before spawn. Use for patterns that should
-    /// never be executed under any circumstances. An entry ending in
-    /// anything but a letter or digit must also end a shell word, so
-    /// `"rm -rf /"` rejects `rm -rf /` but not `rm -rf /tmp/build`.
+    /// Case-insensitive substrings that reject a script before spawn (exit
+    /// 126). An entry ending in a non-alphanumeric must also end a shell
+    /// word: `"rm -rf /"` rejects `rm -rf /` but not `rm -rf /tmp/build`.
     pub denylist: Vec<String>,
-    /// Programs that run without confirmation: bare names looked up on
-    /// the command's `PATH`, or absolute paths. Any other program asks
-    /// first, and the prompt can add it here for good; those approvals
-    /// are kept in `allowed_programs.toml` beside the config file. A bare
-    /// name only counts when it resolves to a file the user cannot
-    /// modify, or to the file it resolved to when approved.
+    /// Programs that run without confirmation: absolute paths, or bare
+    /// names resolved on `PATH` that count only if the file is not
+    /// user-writable or is the one approved. "Always allow" approvals
+    /// persist in `allowed_programs.toml` beside the config file.
     pub allowed_programs: Vec<String>,
-    /// Commands that require confirmation before executing, and are
-    /// rejected when no one can confirm. Each is a command name followed
-    /// by arguments that must all be present, in any order; any word may
-    /// list `|`-separated alternatives. `-rf` matches short options in any
-    /// cluster, `--force` its abbreviations, and an argument ending in `=`
-    /// matches as a prefix. Example: `"rm -r|--recursive"` matches
-    /// `/bin/rm foo -vfr` and `echo $(rm --rec foo)` but not
-    /// `echo "rm -rf"`. Commands only known at run time also prompt.
+    /// Commands that need confirmation, and are refused when no one can
+    /// confirm. Each is a command name (matching any path ending in it)
+    /// then arguments that must all appear, in any order; `a|b` lists
+    /// alternatives. `-rf` matches those short flags in any cluster,
+    /// `--force` also its abbreviations and `--force=…`, `of=` any argument
+    /// with that prefix; other words match exactly. Quoted text is one
+    /// word, so `"rm -r|--recursive"` matches `rm -vfr x` but not
+    /// `echo "rm -rf"`.
     pub destructive_patterns: Vec<String>,
-    /// Sandbox mode. See [`BashSandboxMode`].
     pub sandbox: BashSandboxMode,
-    /// Extra arguments appended to the bubblewrap invocation (before the
-    /// trailing `--`). Useful for widening binds (e.g.
-    /// `["--bind", "/srv", "/srv"]`) or tightening the sandbox (e.g.
-    /// `["--unshare-net"]`).
+    /// Extra bubblewrap arguments, inserted before the trailing `--`
+    /// (e.g. `["--unshare-net"]`; the network is shared by default).
     pub bwrap_extra_args: Vec<String>,
 }
 
@@ -121,17 +110,13 @@ impl Default for ToolsBashConfig {
     }
 }
 
-/// Write-command policy: the allowlist of path prefixes under which the
-/// `write` command is permitted to create or overwrite files. Attempts
-/// outside every entry return exit 126.
-///
-/// Supports `~` / `~user` expansion. Relative paths are rejected outright
-/// because the daemon's cwd is not a meaningful anchor. Non-existent
-/// allowlist entries are dropped with a warning at daemon startup.
+/// Write-command policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsWriteConfig {
-    /// Path prefixes (supporting `~` expansion) under which the `write` command may operate.
+    /// Path prefixes `write` may create or overwrite files under (exit 126
+    /// elsewhere). `~` / `~user` expand; relative entries are rejected and
+    /// missing ones dropped at startup. Must not be empty.
     pub writable_paths: Vec<String>,
 }
 
@@ -143,15 +128,16 @@ impl Default for ToolsWriteConfig {
     }
 }
 
-/// Screenshot capture backend selector. `Auto` picks Wayland when
-/// `XDG_SESSION_TYPE`/`WAYLAND_DISPLAY` is set, X11 otherwise. Override
-/// only when the auto-detect picks the wrong tool on a hybrid session.
+/// Screenshot capture backend.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ScreenshotBackend {
+    /// Wayland when `XDG_SESSION_TYPE`/`WAYLAND_DISPLAY` say so, else X11.
     #[default]
     Auto,
+    /// `maim`; `--focused` also needs `xdotool`.
     X11,
+    /// `grim`; `--focused` needs sway or Hyprland.
     Wayland,
 }
 

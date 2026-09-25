@@ -1,33 +1,10 @@
-//! Schema migrations for the SQLite store. Each `M::up(SQL)` is one
-//! schema version; [`run`] applies whatever is pending and is a no-op
-//! on an up-to-date database.
+//! Schema migrations for the SQLite store; each `M::up` is one schema version.
 
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
-/// V1 schema:
-/// - `schema_migrations` - reserved version log; applied migrations
-///   are tracked in `PRAGMA user_version`.
-/// - `sessions` - one row per daemon process (uuid PK), carries a
-///   nullable `title` (set some time after the session starts) and a
-///   `current_branch_id` pointer into `branches`.
-/// - `turns` - logical user-prompt-to-final-assistant grouping inside
-///   a session.
-/// - `conversations` - one row per `Message`. Tool results are
-///   `role='tool'` rows with `tool_call_id` / `tool_name` set.
-/// - `conversations_fts` - FTS5 mirror, kept in sync via triggers.
-/// - `memories` - flat KV with provenance (source_conversation_id).
-/// - `memory_embeddings` - sibling to `embeddings`, indexes the KV
-///   rows for semantic recall. `UNIQUE(memory_id)` keeps at most one
-///   vector per memory and backs the
-///   `INSERT ... ON CONFLICT(memory_id) DO UPDATE` upsert, so
-///   re-embedding a memory overwrites its vector in place.
-/// - `branches` + `branch_messages` - named branches per session plus
-///   a join table mapping `(branch_id, branch-local seq)` to
-///   `conversation_id`. Forks share `conversations` rows across
-///   branches via separate `branch_messages` entries; no row duplication.
-/// - `conversation_chunks` + `embeddings` - chunked conversation text
-///   with one embedding per chunk for semantic search.
+/// V1 schema. Applied versions live in `PRAGMA user_version`, not `schema_migrations`;
+/// forked branches share `conversations` rows through `branch_messages`.
 const V1_SQL: &str = r#"
 CREATE TABLE schema_migrations (
     version    INTEGER PRIMARY KEY,
@@ -149,7 +126,7 @@ pub fn migrations() -> Migrations<'static> {
     Migrations::new(vec![M::up(V1_SQL)])
 }
 
-/// Apply all pending migrations to `conn`.
+/// Apply all pending migrations to `conn`; a no-op on an up-to-date database.
 pub fn run(conn: &mut Connection) -> Result<(), rusqlite_migration::Error> {
     migrations().to_latest(conn)
 }

@@ -1,15 +1,13 @@
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
+use crate::commands::{read_regular_file, read_regular_head};
 
-/// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if no files
-/// given. Binary files are rejected so their raw bytes don't pollute the
-/// model's context window; pair with `see` (images) or `cat -b`
-/// (metadata-only) to inspect them safely.
-///
-/// Flags:
-/// - `-b` print metadata (mime, size) instead of content
-/// - `-n` prefix each output line with its 1-based number
+/// How much of a file's head [`sniff_binary`] looks at for a NUL byte.
+const SNIFF_LEN: usize = 8192;
+
+/// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if none are
+/// given. Binary files are rejected so their bytes stay out of the context.
 pub struct CatCommand;
 
 #[derive(Default)]
@@ -62,42 +60,51 @@ impl Command for CatCommand {
 
         let mut out = Vec::new();
         for path in &files {
-            if flags.metadata_only {
-                match super::read_regular_head(path, SNIFF_LEN as u64).await {
-                    Ok((head, size)) => out.extend_from_slice(&describe(&head, size, Some(path))),
-                    Err(e) => return read_failed(path, &e),
-                }
-                continue;
-            }
-
-            let bytes = match super::read_regular_file(path).await {
-                Ok(b) => b,
-                Err(e) => return read_failed(path, &e),
+            let chunk = if flags.metadata_only {
+                read_metadata(path).await
+            } else {
+                read_text(path).await
             };
-
-            if let Some(mime) = sniff_binary(&bytes) {
-                let size = human_size(bytes.len());
-                let msg = if mime.starts_with("image/") {
-                    error_line(
-                        "cat",
-                        format_args!("binary image file ({size}): {path}"),
-                        Hint::Use,
-                        format_args!("see {path}"),
-                    )
-                } else {
-                    error_line(
-                        "cat",
-                        format_args!("binary {mime} file ({size}): {path}"),
-                        Hint::Use,
-                        format_args!("cat -b {path}"),
-                    )
-                };
-                return CommandOutput::failed(1, msg.into_bytes());
+            match chunk {
+                Ok(bytes) => out.extend_from_slice(&bytes),
+                Err(failure) => return failure,
             }
-            out.extend_from_slice(&bytes);
         }
         CommandOutput::ok(number_if(out, &flags))
     }
+}
+
+async fn read_metadata(path: &str) -> Result<Vec<u8>, CommandOutput> {
+    let (head, size) = read_regular_head(path, SNIFF_LEN as u64)
+        .await
+        .map_err(|e| read_failed(path, &e))?;
+    Ok(describe(&head, size, Some(path)))
+}
+
+async fn read_text(path: &str) -> Result<Vec<u8>, CommandOutput> {
+    let bytes = read_regular_file(path)
+        .await
+        .map_err(|e| read_failed(path, &e))?;
+    let Some(mime) = sniff_binary(&bytes) else {
+        return Ok(bytes);
+    };
+    let size = human_size(bytes.len());
+    let msg = if mime.starts_with("image/") {
+        error_line(
+            "cat",
+            format_args!("binary image file ({size}): {path}"),
+            Hint::Use,
+            format_args!("see {path}"),
+        )
+    } else {
+        error_line(
+            "cat",
+            format_args!("binary {mime} file ({size}): {path}"),
+            Hint::Use,
+            format_args!("cat -b {path}"),
+        )
+    };
+    Err(CommandOutput::failed(1, msg.into_bytes()))
 }
 
 fn read_failed(path: &str, e: &std::io::Error) -> CommandOutput {
@@ -109,8 +116,8 @@ fn number_if(bytes: Vec<u8>, flags: &Flags) -> Vec<u8> {
         return bytes;
     }
     let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 16);
-    for (i, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
-        out.extend_from_slice(format!("{}\t", i + 1).as_bytes());
+    for (index, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        out.extend_from_slice(format!("{}\t", index + 1).as_bytes());
         out.extend_from_slice(line);
     }
     out
@@ -134,9 +141,6 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
     }
     Ok((flags, files))
 }
-
-/// How much of a file's head [`sniff_binary`] looks at for a NUL byte.
-const SNIFF_LEN: usize = 8192;
 
 /// `Some(mime)` if the bytes look binary: a recognised non-text magic
 /// number, or a NUL byte in the first 8 KB (GNU grep's heuristic).

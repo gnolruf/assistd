@@ -1,11 +1,13 @@
+use std::sync::Arc;
+
+use assistd_config::{LlamaServerConfig, ModelConfig};
+use parking_lot::Mutex;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
 use super::backoff::MAX_CONSECUTIVE_FAILURES;
 use super::error::LlamaServerError;
 use super::supervisor::Supervisor;
-use assistd_config::{LlamaServerConfig, ModelConfig};
-use parking_lot::Mutex;
-use std::sync::Arc;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 /// State broadcast by the supervisor as the child moves through its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,11 +35,8 @@ pub struct LlamaService {
 
 impl LlamaService {
     /// Spawns the supervisor and waits until the child reports Ready.
-    ///
-    /// Flipping `shutdown_rx` makes the supervisor tear down the child and
-    /// exit. Returns [`LlamaServerError::ShutdownDuringHealth`] if that
-    /// happens before Ready, and [`LlamaServerError::StartupFailed`] if the
-    /// supervisor gives up and enters Degraded.
+    /// Errors with [`LlamaServerError::ShutdownDuringHealth`] if the supervisor
+    /// exits first, or [`LlamaServerError::StartupFailed`] on Degraded.
     #[tracing::instrument(skip(cfg, model, shutdown_rx), fields(host = %cfg.host, port = cfg.port))]
     pub async fn start(
         cfg: LlamaServerConfig,
@@ -59,8 +58,6 @@ impl LlamaService {
         loop {
             match ready_rx.changed().await {
                 Err(_) => {
-                    // The supervisor exited and dropped its sender, which
-                    // before Ready normally means shutdown was signaled.
                     let _ = task.await;
                     return Err(LlamaServerError::ShutdownDuringHealth);
                 }
@@ -97,15 +94,12 @@ impl LlamaService {
         *self.ready_rx.borrow()
     }
 
-    /// Subscribe to the supervisor's readiness watch, to await a
-    /// transition (e.g. crash → restart → Ready) rather than snapshot the
-    /// current state.
+    /// Subscribe to the supervisor's readiness transitions.
     pub fn subscribe_ready(&self) -> watch::Receiver<ReadyState> {
         self.ready_rx.clone()
     }
 
     /// PID of the currently-running child, or `None` if no child is alive.
-    /// The value changes as the supervisor restarts the child.
     pub fn pid(&self) -> Option<u32> {
         *self.pid.lock()
     }

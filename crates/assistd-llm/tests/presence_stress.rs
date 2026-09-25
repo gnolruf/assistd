@@ -1,17 +1,21 @@
-//! Heavyweight stress tests for the presence state machine and the
-//! request-guard / chat-client interaction. Each test spawns a real
-//! `fake_llama_server` child process; they are gated behind `#[ignore]`
-//! so the default `cargo test` run stays fast.
+//! Heavyweight `#[ignore]`d stress tests for the presence state machine and
+//! the request-guard / chat-client interaction.
 
 #![cfg(feature = "test-support")]
 
-mod common;
-
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
-use std::sync::Arc;
-use std::sync::Once;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
+
+use serde_json::Value;
+use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::OwnedReadHalf;
+use tokio::net::{TcpListener, UnixStream};
+use tokio::sync::{oneshot, watch};
+use tokio::task::JoinHandle;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, Config, LlamaServerConfig, ModelConfig, TimeoutsConfig};
@@ -21,10 +25,10 @@ use assistd_core::{
 };
 use assistd_ipc::{Event, Request};
 use assistd_llm::{LlamaChatClient, LlmBackend};
+
 use common::FakeLlama;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, UnixStream};
-use tokio::sync::{oneshot, watch};
+
+mod common;
 
 fn init_tracing() {
     static ONCE: Once = Once::new();
@@ -80,7 +84,7 @@ async fn new_active_manager(
     port: u16,
 ) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     let (tx, rx) = watch::channel(false);
-    let m = PresenceManager::new_active(
+    let manager = PresenceManager::new_active(
         server_spec(fake, port),
         model_spec(),
         TimeoutsConfig::default(),
@@ -88,7 +92,7 @@ async fn new_active_manager(
     )
     .await
     .expect("cold-start wake failed");
-    (m, tx)
+    (manager, tx)
 }
 
 async fn get_counters(port: u16) -> (u32, u32, u32, Option<String>) {
@@ -99,18 +103,17 @@ async fn get_counters(port: u16) -> (u32, u32, u32, Option<String>) {
         .text()
         .await
         .expect("counters body");
-    let v: serde_json::Value = serde_json::from_str(&body).expect("counters json");
-    let load = v["load_count"].as_u64().expect("load_count") as u32;
-    let unload = v["unload_count"].as_u64().expect("unload_count") as u32;
-    let chat = v["chat_completions_count"]
+    let counters: Value = serde_json::from_str(&body).expect("counters json");
+    let load = counters["load_count"].as_u64().expect("load_count") as u32;
+    let unload = counters["unload_count"].as_u64().expect("unload_count") as u32;
+    let chat = counters["chat_completions_count"]
         .as_u64()
         .expect("chat_completions_count") as u32;
-    let pid = v["pid"].as_u64().map(|n| n.to_string());
+    let pid = counters["pid"].as_u64().map(|n| n.to_string());
     (load, unload, chat, pid)
 }
 
-/// Push a scripted chat reply onto the fake server's queue. Each
-/// subsequent /v1/chat/completions request pops the next entry.
+/// Queue a scripted reply for the fake server's next chat completion.
 async fn push_chat_script(port: u16, deltas: Vec<&str>, delay_ms_between: u64) {
     let body = serde_json::json!({
         "deltas": deltas,
@@ -127,78 +130,14 @@ async fn push_chat_script(port: u16, deltas: Vec<&str>, delay_ms_between: u64) {
     assert!(resp.status().is_success(), "push script failed: {resp:?}");
 }
 
-#[tokio::test]
-#[ignore = "spawns 10 real fake_llama_server cold-starts; ~10s; run with --ignored"]
-async fn ten_cold_start_cycles_no_deadlock() {
-    let fake = FakeLlama::new("normal");
-    init_tracing();
-    let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-
-    let initial_pid = m.llama_pid().await.expect("active after cold start");
-    let mut last_pid = initial_pid;
-
-    for i in 0..10 {
-        m.sleep()
-            .await
-            .unwrap_or_else(|e| panic!("sleep cycle {i}: {e}"));
-        assert_eq!(m.state(), PresenceState::Sleeping);
-
-        m.wake()
-            .await
-            .unwrap_or_else(|e| panic!("wake cycle {i}: {e}"));
-        assert_eq!(m.state(), PresenceState::Active);
-
-        let pid = m
-            .llama_pid()
-            .await
-            .unwrap_or_else(|| panic!("no llama PID after wake cycle {i}"));
-        assert_ne!(
-            pid, last_pid,
-            "cycle {i}: cold-start respawn must produce a fresh PID, but pid={pid} == previous={last_pid}"
-        );
-        last_pid = pid;
-    }
-
-    // Counters live in the child, so the final fresh child has seen
-    // exactly the one load its cold-start wake made.
-    let (load_count, _, _, _) = get_counters(port).await;
-    assert_eq!(load_count, 1);
-
-    m.sleep().await.unwrap();
-}
-
-#[tokio::test]
-#[ignore = "drives a real LlamaChatClient against fake_llama_server with a slow scripted stream; run with --ignored"]
-async fn sleep_defers_until_inflight_real_chat_stream_done() {
-    let fake = FakeLlama::new("normal");
-    init_tracing();
-
-    let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-
-    // Push a slow 5-delta script: 200 ms between deltas → ~800 ms stream.
-    push_chat_script(port, vec!["one ", "two ", "three ", "four ", "five"], 200).await;
-
-    let chat_cfg = ChatConfig {
-        request_timeout_secs: nz64(10),
-        ..ChatConfig::default()
-    };
-    let server_cfg = server_spec(&fake, port);
-
-    let client = LlamaChatClient::new(
-        &chat_cfg,
-        &server_cfg,
-        &model_spec(),
-        &TimeoutsConfig::default(),
-        None,
-    )
-    .expect("build chat client");
-
+async fn serve_daemon(
+    manager: &Arc<PresenceManager>,
+    backend: Arc<dyn LlmBackend>,
+) -> (PathBuf, oneshot::Sender<()>, JoinHandle<()>, TempDir) {
     let state = Arc::new(AppState::new(
         Config::default(),
-        Arc::new(client) as Arc<dyn LlmBackend>,
-        m.clone(),
+        backend,
+        manager.clone(),
         Arc::new(ToolRegistry::default()),
         Arc::new(NoVoiceInput::new()),
         Arc::new(NoContinuousListener::new()),
@@ -223,52 +162,120 @@ async fn sleep_defers_until_inflight_real_chat_stream_done() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    (sock_path, stop_tx, server, dir)
+}
 
-    let stream = UnixStream::connect(&sock_path).await.unwrap();
+async fn send_query(sock_path: &Path, id: &str, text: &str) -> BufReader<OwnedReadHalf> {
+    let stream = UnixStream::connect(sock_path).await.unwrap();
     let (read, mut write) = stream.into_split();
     let req = Request::Query {
-        id: "q-stream".into(),
-        text: "hello".into(),
+        id: id.into(),
+        text: text.into(),
         attachments: Vec::new(),
     };
     let mut body = serde_json::to_string(&req).unwrap();
     body.push('\n');
     write.write_all(body.as_bytes()).await.unwrap();
     write.shutdown().await.unwrap();
+    BufReader::new(read)
+}
 
-    let mut reader = BufReader::new(read);
-    let mut events: Vec<Event> = Vec::new();
+/// The next event on the stream, or `None` at EOF.
+async fn read_event(reader: &mut BufReader<OwnedReadHalf>) -> Option<Event> {
+    let mut line = String::new();
+    let n = reader.read_line(&mut line).await.unwrap();
+    (n != 0).then(|| serde_json::from_str(line.trim()).unwrap())
+}
 
-    // Read the first Delta to confirm the stream is mid-flight.
-    let mut first_delta_seen = false;
-    while !first_delta_seen {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await.unwrap();
-        if n == 0 {
-            panic!("connection closed before any Delta");
-        }
-        let e: Event = serde_json::from_str(line.trim()).unwrap();
-        if matches!(e, Event::Delta { .. }) {
-            first_delta_seen = true;
-        }
-        events.push(e);
+#[tokio::test]
+#[ignore = "spawns 10 real fake_llama_server cold-starts; ~10s; run with --ignored"]
+async fn ten_cold_start_cycles_no_deadlock() {
+    let fake = FakeLlama::new("normal");
+    init_tracing();
+    let port = grab_port().await;
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+
+    let initial_pid = manager.llama_pid().await.expect("active after cold start");
+    let mut last_pid = initial_pid;
+
+    for i in 0..10 {
+        manager
+            .sleep()
+            .await
+            .unwrap_or_else(|e| panic!("sleep cycle {i}: {e}"));
+        assert_eq!(manager.state(), PresenceState::Sleeping);
+
+        manager
+            .wake()
+            .await
+            .unwrap_or_else(|e| panic!("wake cycle {i}: {e}"));
+        assert_eq!(manager.state(), PresenceState::Active);
+
+        let pid = manager
+            .llama_pid()
+            .await
+            .unwrap_or_else(|| panic!("no llama PID after wake cycle {i}"));
+        assert_ne!(
+            pid, last_pid,
+            "cycle {i}: cold-start respawn must produce a fresh PID, but pid={pid} == previous={last_pid}"
+        );
+        last_pid = pid;
     }
 
-    // Stream is in flight. Trigger sleep concurrently; it must defer
-    // until all 5 deltas + Done are forwarded.
-    let m_for_sleep = m.clone();
-    let sleep_started = Instant::now();
-    let sleep_task = tokio::spawn(async move { m_for_sleep.sleep().await });
+    let (load_count, _, _, _) = get_counters(port).await;
+    assert_eq!(
+        load_count, 1,
+        "the final fresh child should have seen only its own cold-start load"
+    );
 
+    manager.sleep().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "drives a real LlamaChatClient against fake_llama_server with a slow scripted stream; run with --ignored"]
+async fn sleep_defers_until_inflight_real_chat_stream_done() {
+    let fake = FakeLlama::new("normal");
+    init_tracing();
+
+    let port = grab_port().await;
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+
+    push_chat_script(port, vec!["one ", "two ", "three ", "four ", "five"], 200).await;
+
+    let chat_cfg = ChatConfig {
+        request_timeout_secs: nz64(10),
+        ..ChatConfig::default()
+    };
+    let client = LlamaChatClient::new(
+        &chat_cfg,
+        &server_spec(&fake, port),
+        &model_spec(),
+        &TimeoutsConfig::default(),
+        None,
+    )
+    .expect("build chat client");
+    let (sock_path, stop_tx, server, _dir) = serve_daemon(&manager, Arc::new(client)).await;
+
+    let mut reader = send_query(&sock_path, "q-stream", "hello").await;
+    let mut events: Vec<Event> = Vec::new();
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await.unwrap();
-        if n == 0 {
+        let event = read_event(&mut reader)
+            .await
+            .expect("connection closed before any Delta");
+        let is_delta = matches!(event, Event::Delta { .. });
+        events.push(event);
+        if is_delta {
             break;
         }
-        let e: Event = serde_json::from_str(line.trim()).unwrap();
-        let terminal = matches!(e, Event::Done { .. } | Event::Error { .. });
-        events.push(e);
+    }
+
+    let sleeper = manager.clone();
+    let sleep_started = Instant::now();
+    let sleep_task = tokio::spawn(async move { sleeper.sleep().await });
+
+    while let Some(event) = read_event(&mut reader).await {
+        let terminal = matches!(event, Event::Done { .. } | Event::Error { .. });
+        events.push(event);
         if terminal {
             break;
         }
@@ -291,16 +298,13 @@ async fn sleep_defers_until_inflight_real_chat_stream_done() {
         "no Error events expected: {events:?}"
     );
 
-    // sleep should have blocked on the in-flight RequestGuard until the
-    // stream completed. The script runs ~800ms (4 gaps of 200ms each);
-    // accept >= 600ms to give a bit of slack for scheduler jitter.
     sleep_task.await.unwrap().expect("sleep returned Err");
     let elapsed = sleep_started.elapsed();
     assert!(
         elapsed >= Duration::from_millis(600),
         "sleep finished in {elapsed:?}; expected >=600ms (RequestGuard should block on the in-flight stream)"
     );
-    assert_eq!(m.state(), PresenceState::Sleeping);
+    assert_eq!(manager.state(), PresenceState::Sleeping);
 
     let _ = stop_tx.send(());
     server.await.unwrap();

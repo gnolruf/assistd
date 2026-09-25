@@ -1,19 +1,18 @@
-//! Single-writer task for the SQLite store. Every mutation is a
-//! [`WriteOp`] sent to one task that owns the connection; each op
-//! carries a `oneshot` ack the caller may await or ignore. On shutdown
-//! the task drains its queue so a write issued just before SIGTERM
-//! still lands.
+//! Single-writer task for the SQLite store: every mutation is a [`WriteOp`]
+//! carrying a `oneshot` ack, executed in order by the one task that owns writes.
 
 use std::time::Duration;
 
 use chrono::Utc;
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, Transaction};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_rusqlite::Connection;
 
 use super::conversations::{BranchId, PersistedMessage, TurnId, UndoOutcome};
 use crate::{MemoryError, Result};
+
+const DRAIN_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Mutations the writer task executes, each with a `oneshot` ack.
 pub enum WriteOp {
@@ -41,8 +40,7 @@ pub enum WriteOp {
         key: String,
         ack: oneshot::Sender<Result<()>>,
     },
-    /// Delete a memory by row id; acks the deleted key, or `None` on
-    /// miss. The embedding row cascades.
+    /// Delete a memory (and, by cascade, its embedding) by row id; acks the deleted key.
     DeleteMemoryById {
         id: i64,
         ack: oneshot::Sender<Result<Option<String>>>,
@@ -82,8 +80,7 @@ pub enum WriteOp {
         branch_id: BranchId,
         ack: oneshot::Sender<Result<()>>,
     },
-    /// Append `msg` and reference it from `branch_messages`, in one
-    /// transaction.
+    /// Append `msg` and reference it from `branch_messages` in one transaction.
     AppendMessageToBranch {
         session_id: String,
         branch_id: BranchId,
@@ -91,8 +88,7 @@ pub enum WriteOp {
         msg: PersistedMessage,
         ack: oneshot::Sender<Result<i64>>,
     },
-    /// Create a branch that references every message on `src`,
-    /// preserving seq; acks the new id.
+    /// Create a branch referencing every message on `src`; acks the new id.
     ForkBranch {
         src_branch_id: BranchId,
         new_name: String,
@@ -109,9 +105,8 @@ pub enum WriteOp {
     },
 }
 
-/// Spawn the writer task. It exits once every sender is dropped, or once
-/// `shutdown` flips to `true` and the queue then stays idle for two
-/// seconds.
+/// Spawn the writer task. It exits once every sender is dropped, or once `shutdown`
+/// flips to `true` and the queue then stays idle for two seconds.
 pub fn spawn_writer(
     conn: Connection,
     mut rx: mpsc::Receiver<WriteOp>,
@@ -135,26 +130,7 @@ pub fn spawn_writer(
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        // `recv` with a timeout rather than `try_recv`, so a
-                        // sender that is about to enqueue still wins.
-                        tracing::debug!(
-                            target: "assistd::memory",
-                            "shutdown received; draining writer queue"
-                        );
-                        let drain_deadline = Duration::from_secs(2);
-                        loop {
-                            match tokio::time::timeout(drain_deadline, rx.recv()).await {
-                                Ok(Some(op)) => execute(&conn, op).await,
-                                Ok(None) => break,
-                                Err(_) => {
-                                    tracing::debug!(
-                                        target: "assistd::memory",
-                                        "drain timed out with channel idle; exiting"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
+                        drain_queue(&conn, &mut rx).await;
                         break;
                     }
                 }
@@ -163,120 +139,114 @@ pub fn spawn_writer(
     })
 }
 
+/// Execute queued ops until the channel closes or stays idle for [`DRAIN_IDLE_TIMEOUT`].
+/// Uses a timed `recv` rather than `try_recv` so a sender about to enqueue still lands.
+async fn drain_queue(conn: &Connection, rx: &mut mpsc::Receiver<WriteOp>) {
+    tracing::debug!(
+        target: "assistd::memory",
+        "shutdown received; draining writer queue"
+    );
+    loop {
+        match tokio::time::timeout(DRAIN_IDLE_TIMEOUT, rx.recv()).await {
+            Ok(Some(op)) => execute(conn, op).await,
+            Ok(None) => break,
+            Err(_) => {
+                tracing::debug!(
+                    target: "assistd::memory",
+                    "drain timed out with channel idle; exiting"
+                );
+                break;
+            }
+        }
+    }
+}
+
 async fn execute(conn: &Connection, op: WriteOp) {
     match op {
-        WriteOp::EndSession { session_id, ack } => {
-            reply(ack, end_session(conn, session_id).await);
-        }
+        WriteOp::EndSession { session_id, ack } => reply(ack, end_session(conn, session_id).await),
         WriteOp::BeginTurn {
             session_id,
             user_text,
             ack,
-        } => {
-            reply(ack, begin_turn(conn, session_id, user_text).await);
-        }
-        WriteOp::EndTurn { turn_id, ack } => {
-            reply(ack, end_turn(conn, turn_id).await);
-        }
+        } => reply(ack, begin_turn(conn, session_id, user_text).await),
+        WriteOp::EndTurn { turn_id, ack } => reply(ack, end_turn(conn, turn_id).await),
         WriteOp::SaveMemory {
             key,
             value,
             source_conversation_id,
             ack,
-        } => {
-            reply(
-                ack,
-                save_memory(conn, key, value, source_conversation_id).await,
-            );
-        }
-        WriteOp::DeleteMemory { key, ack } => {
-            reply(ack, delete_memory(conn, key).await);
-        }
-        WriteOp::DeleteMemoryById { id, ack } => {
-            reply(ack, delete_memory_by_id(conn, id).await);
-        }
+        } => reply(
+            ack,
+            save_memory(conn, key, value, source_conversation_id).await,
+        ),
+        WriteOp::DeleteMemory { key, ack } => reply(ack, delete_memory(conn, key).await),
+        WriteOp::DeleteMemoryById { id, ack } => reply(ack, delete_memory_by_id(conn, id).await),
         WriteOp::StoreChunk {
             conversation_id,
             chunk_index,
             content,
             token_count,
             ack,
-        } => {
-            reply(
-                ack,
-                store_chunk(conn, conversation_id, chunk_index, content, token_count).await,
-            );
-        }
+        } => reply(
+            ack,
+            store_chunk(conn, conversation_id, chunk_index, content, token_count).await,
+        ),
         WriteOp::StoreChunkEmbedding {
             chunk_id,
             model,
             dim,
             vector,
             ack,
-        } => {
-            reply(
-                ack,
-                store_chunk_embedding(conn, chunk_id, model, dim, vector).await,
-            );
-        }
+        } => reply(
+            ack,
+            store_chunk_embedding(conn, chunk_id, model, dim, vector).await,
+        ),
         WriteOp::StoreMemoryEmbedding {
             memory_id,
             model,
             dim,
             vector,
             ack,
-        } => {
-            reply(
-                ack,
-                store_memory_embedding(conn, memory_id, model, dim, vector).await,
-            );
-        }
+        } => reply(
+            ack,
+            store_memory_embedding(conn, memory_id, model, dim, vector).await,
+        ),
         WriteOp::BeginSessionWithMainBranch {
             session_id,
             daemon_pid,
             ack,
-        } => {
-            reply(
-                ack,
-                begin_session_with_main_branch(conn, session_id, daemon_pid).await,
-            );
-        }
+        } => reply(
+            ack,
+            begin_session_with_main_branch(conn, session_id, daemon_pid).await,
+        ),
         WriteOp::SetCurrentBranch {
             session_id,
             branch_id,
             ack,
-        } => {
-            reply(ack, set_current_branch(conn, session_id, branch_id).await);
-        }
+        } => reply(ack, set_current_branch(conn, session_id, branch_id).await),
         WriteOp::AppendMessageToBranch {
             session_id,
             branch_id,
             turn_id,
             msg,
             ack,
-        } => {
-            reply(
-                ack,
-                append_message_to_branch(conn, session_id, branch_id, turn_id, msg).await,
-            );
-        }
+        } => reply(
+            ack,
+            append_message_to_branch(conn, session_id, branch_id, turn_id, msg).await,
+        ),
         WriteOp::ForkBranch {
             src_branch_id,
             new_name,
             ack,
-        } => {
-            reply(ack, fork_branch(conn, src_branch_id, new_name).await);
-        }
+        } => reply(ack, fork_branch(conn, src_branch_id, new_name).await),
         WriteOp::UndoLastTurn { branch_id, ack } => {
-            reply(ack, undo_last_turn(conn, branch_id).await);
+            reply(ack, undo_last_turn(conn, branch_id).await)
         }
         WriteOp::SetSessionTitle {
             session_id,
             title,
             ack,
-        } => {
-            reply(ack, set_session_title(conn, session_id, title).await);
-        }
+        } => reply(ack, set_session_title(conn, session_id, title).await),
     }
 }
 
@@ -474,8 +444,6 @@ async fn begin_session_with_main_branch(
     let created = started.clone();
     let branch_rowid = conn
         .call(move |c| -> rusqlite::Result<_> {
-            // One transaction so no session is ever persisted without
-            // its `main` branch.
             let tx = c.transaction()?;
             tx.execute(
                 "INSERT INTO sessions (id, started_at, daemon_pid) VALUES (?1, ?2, ?3)",
@@ -609,14 +577,7 @@ async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Resu
 async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutcome> {
     conn.call(move |c| -> rusqlite::Result<_> {
         let tx = c.transaction()?;
-        let last_turn: Option<i64> = tx.query_row(
-            "SELECT MAX(c.turn_id)
-             FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
-             WHERE bm.branch_id = ?1 AND c.turn_id IS NOT NULL",
-            rusqlite::params![branch.0],
-            |r| r.get(0),
-        )?;
-        let Some(turn_id) = last_turn else {
+        let Some(turn_id) = latest_turn_on_branch(&tx, branch)? else {
             tx.commit()?;
             return Ok(UndoOutcome::default());
         };
@@ -627,20 +588,7 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
                 |r| r.get(0),
             )
             .optional()?;
-
-        // Captured before the delete: these are the orphan candidates.
-        let target_conv_ids: Vec<i64> = {
-            let mut stmt = tx.prepare(
-                "SELECT bm.conversation_id
-                 FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
-                 WHERE bm.branch_id = ?1 AND c.turn_id = ?2",
-            )?;
-            let rows: Vec<i64> = stmt
-                .query_map(rusqlite::params![branch.0, turn_id], |r| r.get(0))?
-                .collect::<std::result::Result<_, _>>()?;
-            rows
-        };
-
+        let orphan_candidates = turn_conversation_ids(&tx, branch, turn_id)?;
         let removed: usize = tx.execute(
             "DELETE FROM branch_messages
              WHERE branch_id = ?1
@@ -649,34 +597,8 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
                )",
             rusqlite::params![branch.0, turn_id],
         )?;
-
-        for cid in &target_conv_ids {
-            let still_referenced: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM branch_messages WHERE conversation_id = ?1",
-                rusqlite::params![cid],
-                |r| r.get(0),
-            )?;
-            if still_referenced == 0 {
-                tx.execute(
-                    "DELETE FROM conversations WHERE id = ?1",
-                    rusqlite::params![cid],
-                )?;
-            }
-        }
-
-        // A forked sibling may still reference the turn; keep it then.
-        let turn_still_used: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM conversations WHERE turn_id = ?1",
-            rusqlite::params![turn_id],
-            |r| r.get(0),
-        )?;
-        if turn_still_used == 0 {
-            tx.execute(
-                "DELETE FROM turns WHERE id = ?1",
-                rusqlite::params![turn_id],
-            )?;
-        }
-
+        delete_unreferenced_conversations(&tx, &orphan_candidates)?;
+        delete_turn_if_unreferenced(&tx, turn_id)?;
         tx.commit()?;
         Ok(UndoOutcome {
             removed_messages: removed as u32,
@@ -686,6 +608,66 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
     })
     .await
     .map_err(MemoryError::sqlite("undo_last_turn"))
+}
+
+fn latest_turn_on_branch(tx: &Transaction<'_>, branch: BranchId) -> rusqlite::Result<Option<i64>> {
+    tx.query_row(
+        "SELECT MAX(c.turn_id)
+         FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
+         WHERE bm.branch_id = ?1 AND c.turn_id IS NOT NULL",
+        rusqlite::params![branch.0],
+        |r| r.get(0),
+    )
+}
+
+fn turn_conversation_ids(
+    tx: &Transaction<'_>,
+    branch: BranchId,
+    turn_id: i64,
+) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = tx.prepare(
+        "SELECT bm.conversation_id
+         FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
+         WHERE bm.branch_id = ?1 AND c.turn_id = ?2",
+    )?;
+    stmt.query_map(rusqlite::params![branch.0, turn_id], |r| r.get(0))?
+        .collect()
+}
+
+fn delete_unreferenced_conversations(
+    tx: &Transaction<'_>,
+    conversation_ids: &[i64],
+) -> rusqlite::Result<()> {
+    for conversation_id in conversation_ids {
+        let still_referenced: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM branch_messages WHERE conversation_id = ?1",
+            rusqlite::params![conversation_id],
+            |r| r.get(0),
+        )?;
+        if still_referenced == 0 {
+            tx.execute(
+                "DELETE FROM conversations WHERE id = ?1",
+                rusqlite::params![conversation_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Keeps the turn while a forked sibling branch still references its messages.
+fn delete_turn_if_unreferenced(tx: &Transaction<'_>, turn_id: i64) -> rusqlite::Result<()> {
+    let turn_still_used: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM conversations WHERE turn_id = ?1",
+        rusqlite::params![turn_id],
+        |r| r.get(0),
+    )?;
+    if turn_still_used == 0 {
+        tx.execute(
+            "DELETE FROM turns WHERE id = ?1",
+            rusqlite::params![turn_id],
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) async fn dispatch_write<T, F>(tx: &mpsc::Sender<WriteOp>, build: F) -> Result<T>

@@ -31,7 +31,7 @@ pub struct MicVoiceInput {
     /// Bumped per press so a stale transition from an aborted press
     /// cannot clobber the state of a newer one.
     active_session_id: Arc<AtomicU64>,
-    inner: Arc<Mutex<PttState>>,
+    ptt: Arc<Mutex<PttState>>,
 }
 
 struct PttState {
@@ -42,14 +42,14 @@ struct PttState {
 impl MicVoiceInput {
     /// Build from config with a bare [`crate::WhisperTranscriber`] (no
     /// queueing or CPU fallback). Downloads models on first use.
-    pub async fn from_config(cfg: &VoiceConfig) -> Result<Self, VoiceInputError> {
-        let transcriber = WhisperTranscriberBuilder::from_config(&cfg.transcription)
+    pub async fn from_config(config: &VoiceConfig) -> Result<Self, VoiceInputError> {
+        let transcriber = WhisperTranscriberBuilder::from_config(&config.transcription)
             .build()
             .await?;
         Ok(Self::new(
             Arc::new(transcriber),
-            cfg.mic_device.clone(),
-            cfg.max_recording_secs.get(),
+            config.mic_device.clone(),
+            config.max_recording_secs.get(),
         ))
     }
 
@@ -67,17 +67,45 @@ impl MicVoiceInput {
             max_recording_secs,
             state_tx,
             active_session_id: Arc::new(AtomicU64::new(0)),
-            inner: Arc::new(Mutex::new(PttState {
+            ptt: Arc::new(Mutex::new(PttState {
                 session: None,
                 forwarder: None,
             })),
         }
     }
 
+    /// Mirror the transcriber's `Queued`/`Transcribing` states until a newer
+    /// press starts; `stop_and_transcribe` owns the terminal `Idle`.
+    fn spawn_state_forwarder(
+        &self,
+        mut transcriber_state: watch::Receiver<VoiceCaptureState>,
+        session_id: u64,
+    ) -> JoinHandle<()> {
+        let state_tx = self.state_tx.clone();
+        let active_session_id = Arc::clone(&self.active_session_id);
+        tokio::spawn(async move {
+            loop {
+                if transcriber_state.changed().await.is_err() {
+                    return;
+                }
+                let state = *transcriber_state.borrow_and_update();
+                if active_session_id.load(Ordering::SeqCst) != session_id {
+                    return;
+                }
+                if matches!(
+                    state,
+                    VoiceCaptureState::Queued | VoiceCaptureState::Transcribing
+                ) {
+                    let _ = state_tx.send(state);
+                }
+            }
+        })
+    }
+
     async fn cleanup_forwarder_and_idle(&self, forwarder: Option<JoinHandle<()>>) {
-        if let Some(handle) = forwarder {
-            handle.abort();
-            let _ = handle.await;
+        if let Some(forwarder) = forwarder {
+            forwarder.abort();
+            let _ = forwarder.await;
         }
         let _ = self.state_tx.send(VoiceCaptureState::Idle);
     }
@@ -86,42 +114,21 @@ impl MicVoiceInput {
 #[async_trait]
 impl VoiceInput for MicVoiceInput {
     async fn start_recording(&self) -> Result<(), VoiceInputError> {
-        let mut inner = self.inner.lock().await;
-        if inner.session.is_some() {
+        let mut ptt = self.ptt.lock().await;
+        if ptt.session.is_some() {
             return Ok(());
         }
 
         let session_id = self.active_session_id.fetch_add(1, Ordering::SeqCst) + 1;
 
         let session = capture::start(self.mic_device.as_deref(), self.max_recording_secs);
-        inner.session = Some(session);
+        ptt.session = Some(session);
 
-        if let Some(mut rx) = self.transcriber.subscribe_state() {
-            let state_tx = self.state_tx.clone();
-            let session_id_at_spawn = session_id;
-            let counter = Arc::clone(&self.active_session_id);
-            let handle = tokio::spawn(async move {
-                loop {
-                    if rx.changed().await.is_err() {
-                        return;
-                    }
-                    let state = *rx.borrow_and_update();
-                    if counter.load(Ordering::SeqCst) != session_id_at_spawn {
-                        return;
-                    }
-                    // `stop_and_transcribe` owns the terminal Idle.
-                    if matches!(
-                        state,
-                        VoiceCaptureState::Queued | VoiceCaptureState::Transcribing
-                    ) {
-                        let _ = state_tx.send(state);
-                    }
-                }
-            });
-            inner.forwarder = Some(handle);
+        if let Some(transcriber_state) = self.transcriber.subscribe_state() {
+            ptt.forwarder = Some(self.spawn_state_forwarder(transcriber_state, session_id));
         }
 
-        drop(inner);
+        drop(ptt);
 
         let _ = self.state_tx.send(VoiceCaptureState::Recording);
         info!(target: "assistd::voice::mic", session_id, "recording started");
@@ -130,9 +137,9 @@ impl VoiceInput for MicVoiceInput {
 
     async fn stop_and_transcribe(&self) -> Result<String, VoiceInputError> {
         let (session, forwarder) = {
-            let mut inner = self.inner.lock().await;
-            match inner.session.take() {
-                Some(session) => (session, inner.forwarder.take()),
+            let mut ptt = self.ptt.lock().await;
+            match ptt.session.take() {
+                Some(session) => (session, ptt.forwarder.take()),
                 None => return Ok(String::new()),
             }
         };
@@ -142,9 +149,9 @@ impl VoiceInput for MicVoiceInput {
 
         let pcm = match session.handle.await {
             Ok(Ok(pcm)) => pcm,
-            Ok(Err(e)) => {
+            Ok(Err(err)) => {
                 self.cleanup_forwarder_and_idle(forwarder).await;
-                return Err(e.into());
+                return Err(err.into());
             }
             Err(join_err) => {
                 self.cleanup_forwarder_and_idle(forwarder).await;
@@ -166,20 +173,7 @@ impl VoiceInput for MicVoiceInput {
             return Ok(String::new());
         }
 
-        let duration_secs = pcm.len() as f32 / 16_000.0;
-        let peak = pcm.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
-        let peak_dbfs = if peak == 0 {
-            f32::NEG_INFINITY
-        } else {
-            20.0 * (peak as f32 / i16::MAX as f32).log10()
-        };
-        info!(
-            target: "assistd::voice::mic",
-            pcm_samples = pcm.len(),
-            duration_secs,
-            peak_dbfs,
-            "captured pcm; invoking transcriber"
-        );
+        log_captured_levels(&pcm);
 
         let result = self.transcriber.transcribe(&pcm).await;
         self.cleanup_forwarder_and_idle(forwarder).await;
@@ -203,4 +197,25 @@ impl VoiceInput for MicVoiceInput {
     fn subscribe(&self) -> watch::Receiver<VoiceCaptureState> {
         self.state_tx.subscribe()
     }
+}
+
+fn log_captured_levels(pcm: &[i16]) {
+    let duration_secs = pcm.len() as f32 / 16_000.0;
+    let peak = pcm
+        .iter()
+        .map(|sample| sample.unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    let peak_dbfs = if peak == 0 {
+        f32::NEG_INFINITY
+    } else {
+        20.0 * (peak as f32 / i16::MAX as f32).log10()
+    };
+    info!(
+        target: "assistd::voice::mic",
+        pcm_samples = pcm.len(),
+        duration_secs,
+        peak_dbfs,
+        "captured pcm; invoking transcriber"
+    );
 }

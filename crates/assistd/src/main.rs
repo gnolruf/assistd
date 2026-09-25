@@ -1,6 +1,9 @@
+//! `assistd` binary: CLI parsing and subcommand dispatch.
+
+use std::time::Duration;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::time::Duration;
 
 #[cfg(feature = "chat")]
 mod chat;
@@ -46,6 +49,10 @@ mod voice_probe;
 mod wm_backend;
 #[cfg(feature = "daemon")]
 mod wm_init;
+
+/// How long exit waits on `spawn_blocking` work (e.g. a Whisper model
+/// load abandoned by a shutdown during startup) before leaving it behind.
+const BLOCKING_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Parser)]
 #[command(
@@ -144,10 +151,6 @@ enum Commands {
     #[cfg(feature = "client")]
     Memory(memory_cli::MemoryArgs),
 }
-
-/// How long exit waits on `spawn_blocking` work (e.g. a Whisper model
-/// load abandoned by a shutdown during startup) before leaving it behind.
-const BLOCKING_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 fn main() -> Result<()> {
     let cli = Cli::parse();

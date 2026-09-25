@@ -2,68 +2,56 @@ use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::defaults::{
     DEFAULT_GPU_LAYERS, DEFAULT_LLAMA_BINARY, DEFAULT_LLAMA_HOST, DEFAULT_LLAMA_PORT,
     DEFAULT_READY_TIMEOUT_SECS,
 };
-use serde::{Deserialize, Serialize};
 
-/// llama-server process lifecycle settings.
+/// Chat llama-server process settings. `None` omits the matching flag.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlamaServerConfig {
-    /// Path to the llama-server binary. Absolute path or a name resolvable via `$PATH`.
+    /// Binary path, or a name on `$PATH`. Must not be empty.
     pub binary_path: PathBuf,
-    /// Host the managed llama-server binds to. Should be a loopback address.
+    /// Bind host. Should be loopback.
     pub host: IpAddr,
-    /// TCP port the managed llama-server binds to.
+    /// Bind port.
     pub port: NonZeroU16,
-    /// GPU layer count passed as `-ngl`. Default `9999` offloads all layers;
-    /// llama.cpp clamps to the model's actual layer count.
+    /// `-ngl`; values above the model's layer count offload every layer.
     pub gpu_layers: u32,
-    /// Backstop, in seconds, for two waits that are otherwise gated on
-    /// process liveness, not a clock: `/health` returning 200 after
-    /// spawn, and the model finishing its load afterwards. Neither trips
-    /// while llama-server is alive and progressing; this is only the
-    /// last-ditch cap. First-time HuggingFace downloads may need several
-    /// minutes — raise it on a slow connection.
+    /// Last-ditch cap, in seconds, on becoming healthy and loading the model
+    /// (chat and embedding servers); neither wait trips while progressing.
     pub ready_timeout_secs: NonZeroU64,
-    /// Optional alias passed as `--alias`. Useful when llama-server reports
-    /// the model name in `/v1/models`.
+    /// `--alias`: the model name reported in `/v1/models`.
     pub alias: Option<String>,
-    /// Optional tensor-override regex passed as `-ot`. Typical MoE offload
-    /// pattern: `\.ffn_(up|down|gate)_exps\.=CPU`.
+    /// `-ot` tensor-override regex, e.g. `\.ffn_(up|down|gate)_exps\.=CPU`.
     pub override_tensor: Option<String>,
-    /// Enable flash-attention (`--flash-attn on|off`). `None` omits the flag.
+    /// `--flash-attn on|off`.
     pub flash_attn: Option<bool>,
-    /// KV-cache K-tensor quantization (`--cache-type-k`), e.g. `q8_0`.
+    /// `--cache-type-k` KV-cache quantization, e.g. `q8_0`.
     pub cache_type_k: Option<String>,
-    /// KV-cache V-tensor quantization (`--cache-type-v`), e.g. `q8_0`.
+    /// `--cache-type-v` KV-cache quantization, e.g. `q8_0`.
     pub cache_type_v: Option<String>,
-    /// CPU thread count passed as `--threads`. `None` lets llama.cpp decide.
+    /// `--threads`.
     pub threads: Option<NonZeroU32>,
-    /// Logical max batch size passed as `--batch-size`. `None` uses
-    /// llama-server's default (2048).
+    /// `--batch-size` (llama-server default 2048).
     pub batch_size: Option<u32>,
-    /// Physical max batch size passed as `--ubatch-size`. `None` uses
-    /// llama-server's default (512). Raising to 1024–2048 speeds prefill
-    /// on MoE models at the cost of a small amount of compute-buffer VRAM.
+    /// `--ubatch-size` (llama-server default 512); larger speeds MoE prefill
+    /// for a little VRAM.
     pub ubatch_size: Option<u32>,
-    /// `--n-cpu-moe N`: keep the MoE expert weights of the first N layers
-    /// on CPU; the remainder go to GPU. Preferred over a blanket
-    /// `override_tensor` regex because it's layer-granular. Tune down until
-    /// VRAM is nearly full.
+    /// `--n-cpu-moe`: layers whose MoE experts stay on CPU, counted from
+    /// the first.
     pub n_cpu_moe: Option<u32>,
-    /// `--cache-ram N` prompt-checkpoint cache size in MiB. Default in
-    /// llama-server is 8192; raising this speeds up re-prefill on long
-    /// conversations at the cost of system RAM.
+    /// `--cache-ram`: prompt-checkpoint cache in MiB (llama-server default
+    /// 8192).
     pub cache_ram_mib: Option<u32>,
-    /// `--mlock`: pin loaded model pages in RAM so the OS can't page them
-    /// out. Guarantees no surprise page-faults mid-inference.
+    /// `--mlock`: pin model pages in RAM. Needs a large enough
+    /// `RLIMIT_MEMLOCK`.
     pub mlock: Option<bool>,
-    /// `--mmproj-offload` / `--no-mmproj-offload`: whether the multimodal
-    /// projector (vision encoder) runs on GPU. Set `false` when VRAM is
-    /// fully consumed by the LLM; image preprocessing falls back to CPU.
+    /// `--mmproj-offload` / `--no-mmproj-offload`: run the vision encoder on
+    /// GPU; `false` keeps it on CPU.
     pub mmproj_offload: Option<bool>,
 }
 

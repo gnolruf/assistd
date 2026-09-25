@@ -4,8 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
-/// Build a `NonZero` from a literal, rejecting a zero at compile time
-/// rather than at config load.
+/// Builds a `NonZero` from a literal; a zero fails at compile time.
 pub const fn nz16(v: u16) -> NonZeroU16 {
     match NonZeroU16::new(v) {
         Some(n) => n,
@@ -45,8 +44,7 @@ pub const DEFAULT_CHAT_TEMPERATURE: f32 = 0.7;
 pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: NonZeroU32 = nz32(1024);
 pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(120);
 pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
-/// Role-and-voice prose only. Tools reach the model through each
-/// request's `tools` array, so this must not name them.
+/// Must not name tools: each request already carries their schemas.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local desktop assistant \
      running on a Linux workstation. When a question is about this machine or its files, \
      prefer calling a tool over guessing. Answer precisely and in a conversational tone.";
@@ -118,8 +116,7 @@ pub const DEFAULT_TRAY_POPUP_HEIGHT: u32 = 120;
 pub const DEFAULT_TRAY_POPUP_OFFSET_X: i32 = -10;
 pub const DEFAULT_TRAY_POPUP_OFFSET_Y: i32 = 10;
 pub const DEFAULT_TRAY_POPUP_AUTO_HIDE_MS: u64 = 3000;
-/// `WM_CLASS` / `app_id` of the popup window, used both to create it
-/// and to place it, so it is not configurable.
+/// Popup `WM_CLASS` / `app_id`; not configurable because placement matches on it.
 pub const DEFAULT_TRAY_POPUP_APP_ID: &str = "dev.assistd.popup";
 pub const DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL: bool = true;
 pub const DEFAULT_TRAY_POPUP_WAKE_DELTA: bool = true;
@@ -166,9 +163,8 @@ pub fn default_bash_denylist() -> Vec<String> {
     ]
 }
 
-/// Programs that run without confirmation: tools that read and report
-/// and cannot run another program, plus wrappers whose command is
-/// checked in its own right.
+/// Programs that run without confirmation: read-only tools that cannot
+/// run another program, plus wrappers whose command is checked itself.
 pub fn default_bash_allowed_programs() -> Vec<String> {
     [
         "[",
@@ -245,10 +241,9 @@ pub fn default_bash_allowed_programs() -> Vec<String> {
     .into()
 }
 
-/// Commands that require confirmation even when their program is allowed:
-/// options that make a default-allowed program delete files or run
-/// another program, and dangerous uses of programs likely to be approved
-/// for good. A program with no safe use needs no entry; it is not allowed.
+/// Commands that need confirmation even when their program is allowed:
+/// options that delete files or run another program, and risky uses of
+/// commonly approved programs.
 pub fn default_bash_destructive_patterns() -> Vec<String> {
     [
         "rm -r|--recursive",

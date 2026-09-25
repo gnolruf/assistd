@@ -14,8 +14,9 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{debug, warn};
 
-use super::conversation::{Conversation, Summarizer, ToolCallRecord};
-use super::conversation::{Message, Role};
+use super::conversation::{
+    Conversation, Message, Role, Summarizer, TOOL_RESULT_PREFIX, ToolCallRecord,
+};
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
 use super::think_splitter::{Segment, ThinkSplitter};
@@ -42,9 +43,8 @@ pub struct LlamaChatClient {
     model: ModelConfig,
     timeouts: TimeoutsConfig,
     conv: Mutex<Conversation>,
-    /// Without a probe every HTTP failure is a transport fault; with
-    /// one, a failure that coincides with a supervisor restart becomes
-    /// [`LlmError::ServerRestarting`] so the request can be replayed.
+    /// When set, a failure coinciding with a supervisor restart becomes
+    /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
 }
 
@@ -75,8 +75,6 @@ impl LlamaChatClient {
         })
     }
 
-    /// A request carrying the configured sampling parameters and no
-    /// tools.
     fn base_request<'a>(&'a self, messages: Vec<wire::ChatMessage<'a>>) -> wire::ChatRequest<'a> {
         wire::ChatRequest {
             model: self.model.name.as_str(),
@@ -123,9 +121,8 @@ impl LlamaChatClient {
         }
     }
 
-    /// Whether an HTTP failure coincides with a supervisor restart: the
-    /// child's pid changed or vanished since the request was sent, or
-    /// the readiness state left `Ready`. Always false without a probe.
+    /// True when the child's pid changed or vanished since the request was
+    /// sent, or readiness left `Ready`. Always false without a probe.
     fn looks_like_server_crash(&self, pid_at_request: Option<u32>) -> bool {
         let Some(probe) = self.health.as_ref() else {
             return false;
@@ -143,7 +140,7 @@ impl LlamaChatClient {
 
     async fn stream_openai(&self, body: Vec<u8>, tx: &mpsc::Sender<LlmEvent>) -> StreamOutcome {
         let pid_at_request = self.health.as_ref().and_then(|h| h.pid());
-        tracing::debug!(
+        debug!(
             target: "assistd::voice::latency",
             stage = "llm_request_sent",
             "voice latency stage"
@@ -169,19 +166,18 @@ impl LlamaChatClient {
                 accum.tool_calls.len()
             );
         }
-        match accum.splitter.finish() {
-            Some(Segment::Reasoning(text)) => {
-                accum.reasoning.push_str(&text);
-                let _ = tx.send(LlmEvent::ReasoningDelta { text }).await;
-            }
-            Some(Segment::Visible(text)) if !text.is_empty() => {
-                accum.text.push_str(&text);
-                accum.has_emitted = true;
-                let _ = tx.send(LlmEvent::Delta { text }).await;
-            }
-            _ => {}
-        }
+        flush_splitter(&mut accum, tx).await;
         StreamOutcome::Ok(Box::new(accum))
+    }
+
+    async fn fit_budget(&self, conv: &mut Conversation) {
+        if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
+            warn!(
+                target: "assistd::chat",
+                "ensure_budget failed ({e}); falling back to truncation"
+            );
+            conv.truncate_to_budget(&self.chat, &self.model);
+        }
     }
 
     fn request_timeout(&self) -> Duration {
@@ -223,7 +219,6 @@ impl LlamaChatClient {
             }
         };
         if self.looks_like_server_crash(pid_at_request) {
-            // A 200 that raced the supervisor's teardown.
             return Err(StreamOutcome::ServerRestart {
                 accum: Box::default(),
                 pre_emit: true,
@@ -242,10 +237,8 @@ impl LlamaChatClient {
     }
 
     /// Drive the SSE stream until `[DONE]` or EOF, forwarding events
-    /// through `tx`. Returns whether `[DONE]` was seen. The first chunk
-    /// must arrive by `first_byte_by`; after that, each gap between
-    /// chunks is bounded by `stream_inactivity_secs`. The stream as a
-    /// whole has no deadline, so long generations are never truncated.
+    /// through `tx`; returns whether `[DONE]` was seen. Only the first
+    /// chunk and each inter-chunk gap are bounded, never the whole stream.
     async fn read_stream(
         &self,
         response: &mut reqwest::Response,
@@ -293,7 +286,7 @@ impl LlamaChatClient {
             loop {
                 match reader.next_event() {
                     Ok(Some(SseEvent::Data(payload))) => {
-                        self.handle_chunk(&payload, accum, tx, pid_at_request)
+                        self.apply_chunk(&payload, accum, tx, pid_at_request)
                             .await?;
                     }
                     Ok(Some(SseEvent::Done)) => return Ok(true),
@@ -305,7 +298,7 @@ impl LlamaChatClient {
     }
 
     /// Fold one `data:` payload into `accum`, forwarding its deltas.
-    async fn handle_chunk(
+    async fn apply_chunk(
         &self,
         payload: &str,
         accum: &mut StreamAccum,
@@ -341,55 +334,6 @@ impl LlamaChatClient {
     }
 }
 
-/// Send one classified segment, recording visible text on `accum`.
-async fn forward_segment(
-    tx: &mpsc::Sender<LlmEvent>,
-    segment: Segment,
-    accum: &mut StreamAccum,
-) -> Result<(), StreamOutcome> {
-    match segment {
-        Segment::Reasoning(text) => forward_reasoning(tx, text, accum).await,
-        Segment::Visible(text) => {
-            if text.is_empty() {
-                return Ok(());
-            }
-            if !accum.has_emitted {
-                tracing::debug!(
-                    target: "assistd::voice::latency",
-                    stage = "llm_first_token",
-                    "voice latency stage"
-                );
-            }
-            accum.text.push_str(&text);
-            accum.has_emitted = true;
-            forward(tx, LlmEvent::Delta { text }, accum).await
-        }
-    }
-}
-
-async fn forward_reasoning(
-    tx: &mpsc::Sender<LlmEvent>,
-    text: String,
-    accum: &mut StreamAccum,
-) -> Result<(), StreamOutcome> {
-    accum.reasoning.push_str(&text);
-    forward(tx, LlmEvent::ReasoningDelta { text }, accum).await
-}
-
-/// Send `event`, or hand back everything accumulated so far when the
-/// consumer has gone away.
-async fn forward(
-    tx: &mpsc::Sender<LlmEvent>,
-    event: LlmEvent,
-    accum: &mut StreamAccum,
-) -> Result<(), StreamOutcome> {
-    if tx.send(event).await.is_err() {
-        debug!(target: "assistd::chat", "client disconnected mid-stream");
-        return Err(StreamOutcome::ClientDisconnected(Box::new(take(accum))));
-    }
-    Ok(())
-}
-
 #[async_trait]
 impl LlmBackend for LlamaChatClient {
     async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
@@ -404,13 +348,7 @@ impl LlmBackend for LlamaChatClient {
                 );
             }
             conv.push_user(prompt);
-            if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
-                warn!(
-                    target: "assistd::chat",
-                    "ensure_budget failed ({e}); falling back to truncation"
-                );
-                conv.truncate_to_budget(&self.chat, &self.model);
-            }
+            self.fit_budget(&mut conv).await;
             let payload = self.base_request(conv.as_wire_messages());
             match serde_json::to_vec(&payload) {
                 Ok(b) => b,
@@ -461,11 +399,15 @@ impl LlmBackend for LlamaChatClient {
 
     async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
-        for r in results {
-            if r.attachments.is_empty() {
-                conv.push_tool_result(r.call_id, r.content);
+        for result in results {
+            if result.attachments.is_empty() {
+                conv.push_tool_result(result.call_id, result.content);
             } else {
-                conv.push_tool_result_with_attachments(&r.name, r.content, r.attachments);
+                conv.push_tool_result_with_attachments(
+                    &result.name,
+                    result.content,
+                    result.attachments,
+                );
             }
         }
         Ok(())
@@ -474,13 +416,7 @@ impl LlmBackend for LlamaChatClient {
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
         let body_bytes = {
             let mut conv = self.conv.lock().await;
-            if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
-                warn!(
-                    target: "assistd::chat",
-                    "ensure_budget failed ({e}); falling back to truncation"
-                );
-                conv.truncate_to_budget(&self.chat, &self.model);
-            }
+            self.fit_budget(&mut conv).await;
             let mut payload = self.base_request(conv.as_wire_messages());
             if !tools.is_empty() {
                 payload.tools = Some(tools);
@@ -497,8 +433,7 @@ impl LlmBackend for LlamaChatClient {
             | StreamOutcome::PartialAfterEmit(accum)
             | StreamOutcome::ClientDisconnected(accum) => {
                 let result = commit_step(&mut conv, *accum);
-                // `PreEmitError` leaves the note in place so a retry
-                // sees the same injected block.
+                // Only a committed step consumes the note; a retry must see it again.
                 let _ = conv.consume_transient_note();
                 result
             }
@@ -530,69 +465,12 @@ impl LlmBackend for LlamaChatClient {
     }
 
     async fn replace_history(&self, entries: Vec<HistoryEntry>) -> LlmResult<()> {
-        let mut msgs = Vec::with_capacity(entries.len());
-        for entry in entries {
-            match entry.role {
-                HistoryRole::System => msgs.push(Message {
-                    role: Role::System,
-                    content: entry.content,
-                    attachments: Vec::new(),
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                    reasoning: String::new(),
-                    context: None,
-                }),
-                HistoryRole::User => msgs.push(Message {
-                    role: Role::User,
-                    content: entry.content,
-                    attachments: Vec::new(),
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                    reasoning: String::new(),
-                    context: None,
-                }),
-                HistoryRole::Assistant => {
-                    let calls = parse_tool_calls(&entry.tool_calls_json)?;
-                    msgs.push(Message {
-                        role: Role::Assistant,
-                        content: entry.content,
-                        attachments: Vec::new(),
-                        tool_calls: calls,
-                        tool_call_id: None,
-                        reasoning: String::new(),
-                        context: None,
-                    });
-                }
-                // A tool row without a call id is an image-carrying result;
-                // replaying it as a tool message would leave the template
-                // without the id it needs, so it keeps the tagged user shape.
-                HistoryRole::Tool => match entry.tool_call_id {
-                    Some(call_id) => msgs.push(Message {
-                        role: Role::Tool,
-                        content: entry.content,
-                        attachments: Vec::new(),
-                        tool_calls: Vec::new(),
-                        tool_call_id: Some(call_id),
-                        reasoning: String::new(),
-                        context: None,
-                    }),
-                    None => {
-                        let name = entry.tool_name.unwrap_or_default();
-                        msgs.push(Message {
-                            role: Role::User,
-                            content: format!("[tool:{name}]\n{}", entry.content),
-                            attachments: Vec::new(),
-                            tool_calls: Vec::new(),
-                            tool_call_id: None,
-                            reasoning: String::new(),
-                            context: None,
-                        });
-                    }
-                },
-            }
-        }
+        let messages = entries
+            .into_iter()
+            .map(history_message)
+            .collect::<LlmResult<Vec<_>>>()?;
         let mut conv = self.conv.lock().await;
-        conv.replace_messages(msgs);
+        conv.replace_messages(messages);
         Ok(())
     }
 
@@ -603,13 +481,10 @@ impl LlmBackend for LlamaChatClient {
 
     async fn complete_oneshot(&self, prompt: String, thinking: Thinking) -> LlmResult<String> {
         let body_bytes = {
-            let mut payload = self.base_request(vec![wire::ChatMessage {
-                role: "user",
-                content: Some(wire::ContentBody::Text(prompt.as_str().into())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            }]);
+            let mut payload = self.base_request(vec![wire::ChatMessage::plain(
+                "user",
+                wire::ContentBody::Text(prompt.as_str().into()),
+            )]);
             payload.max_tokens = self.chat.max_summary_tokens();
             payload.chat_template_kwargs = match thinking {
                 Thinking::Enabled => None,
@@ -640,64 +515,6 @@ impl LlmBackend for LlamaChatClient {
     }
 }
 
-fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<super::conversation::ToolCallRecord>> {
-    use super::conversation::ToolCallRecord;
-    let Some(value) = json else {
-        return Ok(Vec::new());
-    };
-    let Some(arr) = value.as_array() else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::with_capacity(arr.len());
-    for entry in arr {
-        let id = entry
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let name = entry
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| LlmError::ToolCallParse("history tool_call missing name".into()))?
-            .to_string();
-        let arguments = match entry.get("arguments") {
-            Some(Value::String(s)) => s.clone(),
-            Some(other) => other.to_string(),
-            None => "{}".to_string(),
-        };
-        out.push(ToolCallRecord {
-            id,
-            name,
-            arguments,
-        });
-    }
-    Ok(out)
-}
-
-fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<StepOutcome> {
-    if accum.tool_calls.is_empty() {
-        conv.push_assistant(accum.text);
-        return Ok(StepOutcome::Final);
-    }
-    if !matches!(accum.finish_reason.as_deref(), None | Some("tool_calls")) {
-        warn!(
-            target: "assistd::chat",
-            finish_reason = accum.finish_reason.as_deref().unwrap_or("<none>"),
-            tool_calls = accum.tool_calls.len(),
-            "finish_reason disagrees with emitted tool calls; running them anyway"
-        );
-    }
-    let narration = std::mem::take(&mut accum.text);
-    let reasoning = std::mem::take(&mut accum.reasoning);
-    let (records, parsed) = accum.finalize_tool_calls()?;
-    conv.push_assistant_with_tool_calls(
-        (!narration.trim().is_empty()).then_some(narration),
-        reasoning,
-        records,
-    );
-    Ok(StepOutcome::ToolCalls(parsed))
-}
-
 #[async_trait]
 impl Summarizer for LlamaChatClient {
     async fn summarize(
@@ -710,20 +527,11 @@ impl Summarizer for LlamaChatClient {
         let payload = wire::ChatRequest {
             model: self.model.name.as_str(),
             messages: vec![
-                wire::ChatMessage {
-                    role: "system",
-                    content: Some(wire::ContentBody::Text(SUMMARY_SYSTEM_PROMPT.into())),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                },
-                wire::ChatMessage {
-                    role: "user",
-                    content: Some(wire::ContentBody::Text(dialogue.as_str().into())),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                },
+                wire::ChatMessage::plain(
+                    "system",
+                    wire::ContentBody::Text(SUMMARY_SYSTEM_PROMPT.into()),
+                ),
+                wire::ChatMessage::plain("user", wire::ContentBody::Text(dialogue.as_str().into())),
             ],
             stream: false,
             temperature: self.chat.summary_temperature,
@@ -777,8 +585,7 @@ struct StreamAccum {
 }
 
 impl StreamAccum {
-    /// Whether anything reached the consumer or a tool call is being
-    /// assembled.
+    /// Whether anything reached the consumer or a tool call is in progress.
     fn has_output(&self) -> bool {
         self.has_emitted || !self.tool_calls.is_empty()
     }
@@ -788,11 +595,11 @@ impl StreamAccum {
         if let Some(id) = delta.id {
             entry.id = id;
         }
-        if let Some(f) = delta.function {
-            if let Some(name) = f.name {
+        if let Some(function) = delta.function {
+            if let Some(name) = function.name {
                 entry.name = name;
             }
-            if let Some(args) = f.arguments {
+            if let Some(args) = function.arguments {
                 entry.arguments.push_str(&args);
             }
         }
@@ -801,33 +608,33 @@ impl StreamAccum {
     fn finalize_tool_calls(self) -> LlmResult<(Vec<ToolCallRecord>, Vec<ToolCall>)> {
         let mut records = Vec::with_capacity(self.tool_calls.len());
         let mut parsed = Vec::with_capacity(self.tool_calls.len());
-        for (index, b) in self.tool_calls {
-            if b.name.is_empty() {
+        for (index, builder) in self.tool_calls {
+            if builder.name.is_empty() {
                 return Err(LlmError::ToolCallParse(format!(
                     "tool call at index {index} has no name"
                 )));
             }
-            let id = if b.id.is_empty() {
+            let id = if builder.id.is_empty() {
                 format!("call-{index}")
             } else {
-                b.id.clone()
+                builder.id
             };
-            let arguments_json = if b.arguments.is_empty() {
+            let arguments_json = if builder.arguments.is_empty() {
                 "{}".to_string()
             } else {
-                b.arguments.clone()
+                builder.arguments
             };
             let arguments_value = serde_json::from_str::<Value>(&arguments_json).map_err(|e| {
                 LlmError::ToolCallParse(format!("tool call {id}: malformed arguments JSON: {e}"))
             })?;
             records.push(ToolCallRecord {
                 id: id.clone(),
-                name: b.name.clone(),
+                name: builder.name.clone(),
                 arguments: arguments_json,
             });
             parsed.push(ToolCall {
                 id,
-                name: b.name,
+                name: builder.name,
                 arguments: arguments_value,
             });
         }
@@ -857,6 +664,153 @@ enum StreamOutcome {
         accum: Box<StreamAccum>,
         pre_emit: bool,
     },
+}
+
+/// Send one classified segment, recording visible text on `accum`.
+async fn forward_segment(
+    tx: &mpsc::Sender<LlmEvent>,
+    segment: Segment,
+    accum: &mut StreamAccum,
+) -> Result<(), StreamOutcome> {
+    match segment {
+        Segment::Reasoning(text) => forward_reasoning(tx, text, accum).await,
+        Segment::Visible(text) => {
+            if text.is_empty() {
+                return Ok(());
+            }
+            if !accum.has_emitted {
+                debug!(
+                    target: "assistd::voice::latency",
+                    stage = "llm_first_token",
+                    "voice latency stage"
+                );
+            }
+            accum.text.push_str(&text);
+            accum.has_emitted = true;
+            forward(tx, LlmEvent::Delta { text }, accum).await
+        }
+    }
+}
+
+async fn forward_reasoning(
+    tx: &mpsc::Sender<LlmEvent>,
+    text: String,
+    accum: &mut StreamAccum,
+) -> Result<(), StreamOutcome> {
+    accum.reasoning.push_str(&text);
+    forward(tx, LlmEvent::ReasoningDelta { text }, accum).await
+}
+
+/// Send `event`, or hand back everything accumulated so far when the
+/// consumer has gone away.
+async fn forward(
+    tx: &mpsc::Sender<LlmEvent>,
+    event: LlmEvent,
+    accum: &mut StreamAccum,
+) -> Result<(), StreamOutcome> {
+    if tx.send(event).await.is_err() {
+        debug!(target: "assistd::chat", "client disconnected mid-stream");
+        return Err(StreamOutcome::ClientDisconnected(Box::new(take(accum))));
+    }
+    Ok(())
+}
+
+fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<ToolCallRecord>> {
+    let Some(value) = json else {
+        return Ok(Vec::new());
+    };
+    let Some(arr) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let id = entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| LlmError::ToolCallParse("history tool_call missing name".into()))?
+            .to_string();
+        let arguments = match entry.get("arguments") {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => "{}".to_string(),
+        };
+        out.push(ToolCallRecord {
+            id,
+            name,
+            arguments,
+        });
+    }
+    Ok(out)
+}
+
+fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<StepOutcome> {
+    if accum.tool_calls.is_empty() {
+        conv.push_assistant(accum.text);
+        return Ok(StepOutcome::Final);
+    }
+    if !matches!(accum.finish_reason.as_deref(), None | Some("tool_calls")) {
+        warn!(
+            target: "assistd::chat",
+            finish_reason = accum.finish_reason.as_deref().unwrap_or("<none>"),
+            tool_calls = accum.tool_calls.len(),
+            "finish_reason disagrees with emitted tool calls; running them anyway"
+        );
+    }
+    let narration = take(&mut accum.text);
+    let reasoning = take(&mut accum.reasoning);
+    let (records, parsed) = accum.finalize_tool_calls()?;
+    conv.push_assistant_with_tool_calls(
+        (!narration.trim().is_empty()).then_some(narration),
+        reasoning,
+        records,
+    );
+    Ok(StepOutcome::ToolCalls(parsed))
+}
+
+/// Replay one persisted row. A tool row without a call id is an
+/// image-carrying result, so it keeps the tagged user shape.
+fn history_message(entry: HistoryEntry) -> LlmResult<Message> {
+    Ok(match entry.role {
+        HistoryRole::System => Message::text(Role::System, entry.content),
+        HistoryRole::User => Message::text(Role::User, entry.content),
+        HistoryRole::Assistant => Message {
+            tool_calls: parse_tool_calls(&entry.tool_calls_json)?,
+            ..Message::text(Role::Assistant, entry.content)
+        },
+        HistoryRole::Tool => match entry.tool_call_id {
+            Some(call_id) => Message {
+                tool_call_id: Some(call_id),
+                ..Message::text(Role::Tool, entry.content)
+            },
+            None => {
+                let name = entry.tool_name.unwrap_or_default();
+                Message::text(
+                    Role::User,
+                    format!("{TOOL_RESULT_PREFIX}{name}]\n{}", entry.content),
+                )
+            }
+        },
+    })
+}
+
+async fn flush_splitter(accum: &mut StreamAccum, tx: &mpsc::Sender<LlmEvent>) {
+    match accum.splitter.finish() {
+        Some(Segment::Reasoning(text)) => {
+            accum.reasoning.push_str(&text);
+            let _ = tx.send(LlmEvent::ReasoningDelta { text }).await;
+        }
+        Some(Segment::Visible(text)) if !text.is_empty() => {
+            accum.text.push_str(&text);
+            accum.has_emitted = true;
+            let _ = tx.send(LlmEvent::Delta { text }).await;
+        }
+        _ => {}
+    }
 }
 
 async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> String {

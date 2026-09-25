@@ -39,8 +39,8 @@ impl EmbeddingSubsystem {
         if let Some(h) = self.task_handle {
             let _ = h.await;
         }
-        if let Some(svc) = self.service_handle
-            && let Err(e) = svc.shutdown().await
+        if let Some(service) = self.service_handle
+            && let Err(e) = service.shutdown().await
         {
             tracing::warn!("embed-server shutdown error: {e:#}");
         }
@@ -59,14 +59,14 @@ pub async fn init(
         return EmbeddingSubsystem::disabled(None);
     }
 
-    let svc = match EmbedService::start(
+    let service = match EmbedService::start(
         config.embedding.clone(),
         Duration::from_secs(config.llama_server.ready_timeout_secs.get()),
         shutdown_tx.subscribe(),
     )
     .await
     {
-        Ok(svc) => svc,
+        Ok(service) => service,
         Err(e) => {
             tracing::warn!("embedding: failed to start ({e:#}); semantic search disabled this run");
             return EmbeddingSubsystem::disabled(None);
@@ -86,13 +86,13 @@ pub async fn init(
             tracing::warn!(
                 "embedding: client probe failed ({e:#}); semantic search disabled this run"
             );
-            return EmbeddingSubsystem::disabled(Some(svc));
+            return EmbeddingSubsystem::disabled(Some(service));
         }
     };
 
     let model_name = config.embedding.model.clone();
     let embedder: Arc<dyn Embedder> = Arc::new(client);
-    let semantic: Arc<dyn SemanticStore> = match sqlite_handle {
+    let semantic_store: Arc<dyn SemanticStore> = match sqlite_handle {
         Some(h) => Arc::new(SqliteSemanticStore::new(h.clone())),
         None => Arc::new(NoSemanticStore),
     };
@@ -116,7 +116,20 @@ pub async fn init(
         config.embedding.port,
     );
 
-    match semantic.count_stale(&model_name).await {
+    warn_if_stale_rows(semantic_store.as_ref(), &model_name).await;
+
+    EmbeddingSubsystem {
+        embedder,
+        semantic_store,
+        embed_tx,
+        service_handle: Some(service),
+        task_handle: Some(task),
+        model_name,
+    }
+}
+
+async fn warn_if_stale_rows(semantic: &dyn SemanticStore, model_name: &str) {
+    match semantic.count_stale(model_name).await {
         Ok((n, models)) if n > 0 => {
             tracing::warn!(
                 "embedding: {n} rows exist under non-current model(s) {models:?}; \
@@ -127,14 +140,5 @@ pub async fn init(
         Err(e) => {
             tracing::debug!("embedding: count_stale check failed ({e:#}); skipping diagnostic");
         }
-    }
-
-    EmbeddingSubsystem {
-        embedder,
-        semantic_store: semantic,
-        embed_tx,
-        service_handle: Some(svc),
-        task_handle: Some(task),
-        model_name,
     }
 }

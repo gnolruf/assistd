@@ -1,57 +1,56 @@
 //! Fire-and-forget message persistence and its bounded drain.
 
-use super::AppState;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, warn};
+
 use assistd_embed::EmbedJob;
-use assistd_memory::{ChunkingConfig, PersistedMessage, PersistedRole, TurnId, chunk_message};
+use assistd_memory::{
+    ChunkingConfig, PersistedMessage, PersistedRole, SqliteHandle, TurnId, chunk_message,
+};
+
+use super::AppState;
+
+const PERSISTENCE_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+const PERSISTENCE_DRAIN_POLL: Duration = Duration::from_millis(5);
+
+/// Row id [`assistd_memory::NoConversationStore`] returns for a message it
+/// did not store.
+const UNSTORED_ROW_ID: i64 = 0;
 
 impl AppState {
-    /// Persist one message on a background task, then chunk and queue it
-    /// for embedding when it is user or assistant text. A full embed
-    /// queue drops the job; the chunk row stays unindexed until reindex.
+    /// Persist one message on a background task, then chunk and queue
+    /// user or assistant text for embedding (dropped if the queue is full).
     ///
-    /// Writes land in call order: each task takes the previous task's
-    /// completion signal off `runtime.persist_chain` in a synchronous
-    /// swap and awaits it before appending. The store assigns `seq` in
-    /// arrival order, so without the chain a tool result could be
-    /// sequenced ahead of the call that produced it. Chunking and
-    /// embedding run after the signal fires and stay off the chain.
+    /// Writes land in call order: each task awaits its predecessor's
+    /// completion signal from `runtime.persist_chain` before appending,
+    /// because the store assigns `seq` in arrival order.
     pub(super) fn persist_message_fire_and_forget(
         &self,
         turn: Option<TurnId>,
         msg: PersistedMessage,
     ) {
-        let conv = self.memory.conversations.clone();
+        let conversations = self.memory.conversations.clone();
         let conversation_ctx = self.runtime.conversation_ctx.clone();
-        let chunks_handle = self.memory.chunks.clone();
         let embed_tx = self.memory.embed_tx.clone();
-        let embedding_enabled = self.memory.embedding_cfg.enabled;
-        let chunking_cfg = ChunkingConfig::default();
-        let should_embed = embedding_enabled
-            && chunks_handle.is_some()
-            && matches!(msg.role, PersistedRole::User | PersistedRole::Assistant)
-            && !msg.content.is_empty();
-        let content_for_chunks = if should_embed {
-            Some(msg.content.clone())
-        } else {
-            None
-        };
-        let (landed_tx, landed_rx) = tokio::sync::oneshot::channel();
+        let chunk_target = self.chunk_target(&msg);
+        let (landed_tx, landed_rx) = oneshot::channel();
         let previous = self.runtime.persist_chain.lock().replace(landed_rx);
         self.runtime.persistence_tracker.spawn(async move {
-            // An `Err` here means the predecessor's task was dropped
-            // without writing; there is nothing left to wait for.
             if let Some(previous) = previous {
                 let _ = previous.await;
             }
             let (session, branch) = conversation_ctx.current().await;
-            let append = conv
+            let append = conversations
                 .append_message_to_branch(&session, branch, turn, msg)
                 .await;
             let _ = landed_tx.send(());
             let row_id = match append {
                 Ok(id) => id,
                 Err(e) => {
-                    tracing::warn!(
+                    warn!(
                         target: "assistd::memory",
                         error = %e,
                         "failed to persist message (continuing)"
@@ -59,64 +58,77 @@ impl AppState {
                     return;
                 }
             };
-            let Some(content) = content_for_chunks else {
-                return;
-            };
-            let Some(chunks_handle) = chunks_handle else {
-                return;
-            };
-            // NoConversationStore returns 0: nothing to chunk.
-            if row_id == 0 {
-                return;
-            }
-            for (idx, chunk) in chunk_message(&content, &chunking_cfg)
-                .into_iter()
-                .enumerate()
+            if let Some((chunks, content)) = chunk_target
+                && row_id != UNSTORED_ROW_ID
             {
-                match chunks_handle
-                    .store_chunk(row_id, idx as i64, chunk.clone(), None)
-                    .await
-                {
-                    Ok(chunk_id) => {
-                        if embed_tx
-                            .try_send(EmbedJob::Chunk {
-                                chunk_id,
-                                text: chunk,
-                            })
-                            .is_err()
-                        {
-                            tracing::debug!(
-                                target: "assistd::embed",
-                                chunk_id,
-                                "embed queue full or closed; dropping job"
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!(
-                        target: "assistd::memory",
-                        conversation_id = row_id,
-                        chunk_index = idx,
-                        error = %e,
-                        "failed to persist chunk (continuing)"
-                    ),
-                }
+                store_and_queue_chunks(&chunks, &embed_tx, row_id, &content).await;
             }
         });
+    }
+
+    /// The chunk store and text to chunk for `msg`, or `None` when it
+    /// should not be embedded.
+    fn chunk_target(&self, msg: &PersistedMessage) -> Option<(Arc<SqliteHandle>, String)> {
+        let embeddable = self.memory.embedding_cfg.enabled
+            && matches!(msg.role, PersistedRole::User | PersistedRole::Assistant)
+            && !msg.content.is_empty();
+        let chunks = self.memory.chunks.clone().filter(|_| embeddable)?;
+        Some((chunks, msg.content.clone()))
     }
 
     /// Wait, up to 500ms, for every queued persistence task to land.
     /// Hold `agent_turn_lock` across the call so no new tasks spawn
     /// during the wait.
     pub(super) async fn drain_persistence_inflight(&self) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while !self.runtime.persistence_tracker.is_empty() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let deadline = Instant::now() + PERSISTENCE_DRAIN_TIMEOUT;
+        while !self.runtime.persistence_tracker.is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(PERSISTENCE_DRAIN_POLL).await;
         }
         if !self.runtime.persistence_tracker.is_empty() {
-            tracing::warn!(
+            warn!(
                 target: "assistd::state",
                 "persistence drain timed out; in-flight writes may race branch op"
             );
+        }
+    }
+}
+
+async fn store_and_queue_chunks(
+    chunks: &SqliteHandle,
+    embed_tx: &mpsc::Sender<EmbedJob>,
+    row_id: i64,
+    content: &str,
+) {
+    for (idx, chunk) in chunk_message(content, &ChunkingConfig::default())
+        .into_iter()
+        .enumerate()
+    {
+        match chunks
+            .store_chunk(row_id, idx as i64, chunk.clone(), None)
+            .await
+        {
+            Ok(chunk_id) => {
+                if embed_tx
+                    .try_send(EmbedJob::Chunk {
+                        chunk_id,
+                        text: chunk,
+                    })
+                    .is_err()
+                {
+                    debug!(
+                        target: "assistd::embed",
+                        chunk_id,
+                        "embed queue full or closed; dropping job"
+                    );
+                }
+            }
+            Err(e) => warn!(
+                target: "assistd::memory",
+                conversation_id = row_id,
+                chunk_index = idx,
+                error = %e,
+                "failed to persist chunk (continuing)"
+            ),
         }
     }
 }

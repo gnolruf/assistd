@@ -1,329 +1,112 @@
-# assistd configuration
-# Copy to ~/.config/assistd/config.toml and edit to taste.
-# Every section and every key is optional: an omitted one takes the default
-# shown beside it. Unknown keys are a hard error, so a typo fails startup
-# with the offending line rather than silently reverting to the default.
+# assistd configuration. Copy to ~/.config/assistd/config.toml.
+# Every key is optional; commented keys show a default or an example. Unknown keys are an error.
+# Units, ranges and validation rules are documented on the assistd-config schema types.
 
 [model]
-# Model identifier passed to llama-server's --hf flag.
-# Format: owner/repo:quant (e.g. "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M")
-name = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
-# Context window length in tokens. Must be > 0.
+name = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"  # owner/repo:quant
 context_length = 8192
 
 [llama_server]
-# Path to the llama-server binary. Absolute path or a name resolvable via $PATH.
 binary_path = "llama-server"
-# Host llama-server binds to. Should be a loopback address.
 host = "127.0.0.1"
-# TCP port llama-server binds to. Must differ from embedding.port.
 port = 8385
-# GPU layer count passed as -ngl. Default 9999 offloads all layers; reduce if
-# running out of VRAM.
-# gpu_layers = 9999
-# Backstop, in seconds, for two waits: llama-server reporting healthy on
-# /health after spawn, and the model finishing its load afterwards.
-# Neither wait fails on elapsed time while the process is making
-# progress; this is only the last-ditch cap. Increase for first-time
-# HuggingFace downloads on slow connections.
-# ready_timeout_secs = 300
-# Optional alias passed as --alias. Cosmetic: it's the name llama-server
-# reports for the loaded model in /v1/models.
+# gpu_layers = 9999  # -ngl; 9999 offloads every layer
+# ready_timeout_secs = 300  # raise for slow first-time downloads
 # alias = "qwen3.6-35b-a3b"
-# Tensor-override regex passed as -ot. For MoE models, offloading expert
-# tensors to CPU frees VRAM for the rest of the model:
 # override_tensor = "\\.ffn_(up|down|gate)_exps\\.=CPU"
-# Enable flash-attention (--flash-attn on). Big speed + memory win on
-# GPUs that support it.
 # flash_attn = true
-# KV-cache quantization. "q8_0" roughly halves KV memory for a negligible
-# quality loss, essential for long contexts on consumer GPUs.
 # cache_type_k = "q8_0"
 # cache_type_v = "q8_0"
-# CPU thread count (--threads). Omit to let llama.cpp auto-detect.
 # threads = 8
-# --batch-size / --ubatch-size. Raising the ubatch speeds prefill on
-# MoE models; 1024–2048 is a good range if you have VRAM headroom.
 # batch_size = 2048
 # ubatch_size = 2048
-# --n-cpu-moe N: keep only the first N MoE layers' experts on CPU; the
-# remainder go to GPU. Preferred over override_tensor because it's
-# layer-granular, tune N down until VRAM is nearly full.
-# n_cpu_moe = 30
-# --cache-ram MiB: prompt-checkpoint cache size. Default is 8192. Raising
-# this speeds up re-prefill when a conversation grows, at the cost of RAM.
+# n_cpu_moe = 30  # MoE expert layers kept on CPU
 # cache_ram_mib = 32768
-# --mlock: pin model pages in RAM so the OS can't page them out. Useful
-# when running memory-hungry workloads alongside the daemon. NOTE: your
-# system's RLIMIT_MEMLOCK must allow enough pinning. See
-# /etc/security/limits.conf or LimitMEMLOCK= in a systemd unit.
-# mlock = true
-# --no-mmproj-offload: keep the vision encoder on CPU. Set false when
-# VRAM is fully consumed by the LLM, image preprocessing becomes
-# slightly slower but avoids CUDA OOM on image requests.
-# mmproj_offload = false
+# mlock = true  # needs a large enough RLIMIT_MEMLOCK
+# mmproj_offload = false  # keep the vision encoder on CPU
 
 [chat]
-# System prompt injected as the first message of every request. Leave empty
-# (system_prompt = "") to skip system-prompt injection entirely.
-# Do not enumerate tool names here: every request already carries the live
-# native and MCP tool schemas, so a hand-written roster only duplicates them
-# and drifts from the registry.
+# Empty disables the system prompt; don't list tools, requests already carry them.
 system_prompt = "You are assistd, a concise local desktop assistant running on a Linux workstation. When a question is about this machine or its files, prefer calling a tool over guessing. Answer precisely and in a conversational tone."
-# Approximate token budget for the full request (system + history). Must be
-# strictly less than model.context_length. When exceeded, older messages are
-# summarized and replaced by a single summary message.
-max_history_tokens = 6000
-# Approximate target length of a conversation summary, in tokens.
+max_history_tokens = 6000  # older history is summarized past this
 summary_target_tokens = 1000
-# Preserve the last N user/assistant exchanges verbatim when summarizing.
 preserve_recent_turns = 4
-# Sampling temperature, 0.0..=2.0.
 temperature = 0.7
-# Nucleus sampling cutoff, 0.0..=1.0. Omit to let llama-server pick its default.
 # top_p = 0.95
-# Top-k sampling limit.
 # top_k = 20
-# Min-p sampling cutoff, 0.0..=1.0.
 # min_p = 0.0
-# Presence penalty in -2.0..=2.0. Qwen3 reasoning variants recommend a small
-# positive value to reduce looping.
 # presence_penalty = 1.5
-# Maximum tokens the model may emit in a single streamed response.
 max_response_tokens = 1024
-# Deadline for the first streamed byte of a /v1/chat/completions call,
-# which is prompt prefill rather than a stall — raise it if a large model
-# on CPU-offloaded experts needs longer to reach its first token. Once
-# tokens are flowing only an internal 30s gap-between-chunks deadline
-# applies (not configurable), so long generations are never cut off.
-# Also caps the whole (non-streaming) summarization call.
-request_timeout_secs = 120
-# Sampling temperature for the non-streaming summarization call. Lower
-# than `temperature` by default because summaries should be deterministic.
-# Range: 0.0..=2.0.
+request_timeout_secs = 120  # wait for the first token
 # summary_temperature = 0.3
 
 [voice]
-# Enable voice input via microphone.
 enabled = false
-# ALSA/PulseAudio device name (optional). Omit for system default.
 # mic_device = "hw:0,0"
-# Hotkey to hold for push-to-talk. Release to transcribe and auto-submit.
-# Empty string disables the in-process hotkey listener; the IPC commands
-# (`assistd ptt-start` / `ptt-stop`) always work regardless, for i3/sway
-# `bindsym` users:
-#   bindsym           $mod+space exec --no-startup-id assistd ptt-start
-#   bindsym --release $mod+space exec --no-startup-id assistd ptt-stop
-hotkey = "Super+Space"
-# Upper bound on a single PTT recording in seconds. The ring buffer
-# drops newer samples past this length; transcription still runs on
-# what was captured. Also determines pre-allocated buffer size.
+hotkey = "Super+Space"  # hold to talk; empty disables
 # max_recording_secs = 60
 
 [voice.transcription]
-# HuggingFace identifier for the Whisper GGML model, formatted as
-# "<owner>/<repo>:<file>". Downloaded on first use and cached under
-# $XDG_CACHE_HOME/assistd/whisper/ (or ~/.cache/assistd/whisper/).
 # model = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin"
-# Prefer GPU inference. Falls back to CPU with a warning log when no
-# CUDA device is detected, or when assistd-voice was built without
-# the `cuda` cargo feature. On GPUs shared with llama-server, leave
-# an eye on total VRAM: large-v3-turbo Q5 uses ~1 GiB.
 # prefer_gpu = true
-# CPU thread count. Omit to let whisper.cpp auto-detect.
 # threads = 8
-# Decode beams. 1 = greedy (lowest latency). Higher values improve
-# accuracy at roughly linear cost.
-# beams = 1
-# Silero VAD trims leading/trailing silence before decoding. Disabling
-# VAD is useful only for debugging whisper.cpp hallucinations on
-# prolonged silence.
+# beams = 1  # 1 = greedy
 # vad_enabled = true
-# VAD GGML model (HF identifier).
 # vad_model = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin"
-# Override the on-disk model cache directory. Omit for the XDG default.
 # model_cache_dir = "/var/cache/assistd/whisper"
 
 [voice.continuous]
-# Hands-free continuous listening. When enabled, the daemon keeps the
-# mic open and uses webrtc-vad to detect speech onset/offset, transcribing
-# each completed utterance and auto-dispatching the text to the agent loop.
-# The mic is released while presence is Sleeping so stray room speech
-# doesn't repeatedly warm up llama-server.
+# Hands-free listening: each detected utterance is sent as a query.
 enabled = false
-# Start listening automatically at daemon launch. When false, the listener
-# is built but idle; toggle it with the hotkey or `assistd listen-toggle`.
 # start_on_launch = false
-# Hotkey that toggles listening on/off. Empty disables the binding.
-# hotkey = "Super+Shift+L"
-# Trailing silence (ms) that ends an utterance. Larger values tolerate
-# longer mid-sentence pauses.
-# silence_ms = 800
-# Force-flush cap, in seconds, to bound per-utterance memory use.
+# hotkey = "Super+Shift+L"  # toggles listening
+# silence_ms = 800  # trailing silence that ends an utterance
 # max_utterance_secs = 30
 
 [voice.synthesis]
-# Speak LLM responses aloud through a local Piper TTS subprocess. When
-# enabled, the daemon spawns piper per utterance, writes one sentence to
-# stdin, reads raw PCM from stdout, and plays it through the default
-# audio device via rodio. Falls back silently with a warning log if the
-# piper binary is missing, the voice model fails to download, or no
-# audio device is available; the daemon stays up either way.
+# Speak replies with Piper TTS.
 enabled = false
-# Path to (or name of) the piper binary. A bare command name is looked
-# up via $PATH.
 # binary_path = "piper"
-# HuggingFace identifier for the Piper voice ONNX, formatted as
-# "<owner>/<repo>:<file>" where <file> is the path of the .onnx inside
-# the repo. The matching .onnx.json is downloaded alongside it. Cached
-# under $XDG_CACHE_HOME/assistd/piper/ (or ~/.cache/assistd/piper/).
 # voice = "rhasspy/piper-voices:en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-# Override the on-disk voice cache directory. Omit for the XDG default.
 # model_cache_dir = "/var/cache/assistd/piper"
-# Speaking-rate scale. 1.0 is the voice's natural rate; lower = faster.
-# length_scale = 1.0
-# Optional override for Piper's espeak-ng data directory. Only set when
-# piper logs "Failed to load espeak-ng"; most distro packages handle
-# this themselves.
+# length_scale = 1.0  # lower speaks faster
 # espeak_data_dir = "/usr/share/espeak-ng-data"
-# Per-utterance synthesis deadline in seconds. Piper is killed if it
-# hasn't returned PCM by this point.
 # deadline_secs = 30
-# Maximum sentence length fed to Piper. The sentence buffer flushes at
-# the last whitespace before this cap when no terminator appears within
-# the limit. Minimum 50.
 # max_sentence_chars = 400
-# Idle gap (ms) between LLM deltas after which the sentence buffer is
-# flushed even without a sentence terminator, so a reply that trails off
-# still gets spoken. 0 disables the timeout flush, leaving only the
-# end-of-turn flush. Inhibited while a tool call is in flight, since the
-# model is waiting on a tool rather than stalled.
-# partial_flush_ms = 750
-# How fenced code blocks in the reply are spoken. "skip" drops them
-# silently; "summarize" drops them but says "Code block in <lang>." so
-# the listener knows something was elided.
-# code_block_mode = "skip"
-# Pass --cuda to piper, routing ONNX inference through the CUDA
-# execution provider. Requires a piper binary linked against
-# onnxruntime-gpu; a CPU-only build exits with "CUDA execution provider
-# not available".
+# partial_flush_ms = 750  # 0 disables
+# code_block_mode = "skip"  # skip | summarize
 # use_cuda = false
-# Global hotkey that toggles TTS on/off at runtime. Empty = no
-# binding (use `assistd voice-toggle` from the CLI instead). Off
-# silences current playback; on resumes for the next sentence.
-# Examples: "Super+Shift+M", "Ctrl+Alt+M".
-# toggle_hotkey = ""
-# Global hotkey that aborts the current response: drops the rest of
-# the audio queue and any pending sentences for the in-flight query
-# without starting recording. Empty = no binding (use
-# `assistd voice-skip` instead).
-# skip_hotkey = ""
+# toggle_hotkey = ""  # toggles TTS
+# skip_hotkey = ""  # stops the current reply
 
 [compositor]
-# Tiling compositor to integrate with. One of: auto, i3, sway, hyprland.
-# `auto` (the default) inspects the running session at startup and picks
-# a backend. Detection priority: $SWAYSOCK → sway, $I3SOCK → i3,
-# $HYPRLAND_INSTANCE_SIGNATURE → hyprland, then $XDG_CURRENT_DESKTOP.
-# Set this explicitly only to override the detection (e.g. when you
-# want to run a sway session against the i3 backend, or vice versa).
-type = "auto"
+type = "auto"  # auto | i3 | sway | hyprland
 
 [sleep]
-# ---- Idle-based auto-sleep ----
-# Minutes of no user interaction after which the daemon drops Active → Drowsy
-# (model weights unloaded, server stays alive). 0 disables this transition.
-# idle_to_drowsy_mins = 30
-# Minutes of no user interaction after which the daemon drops to Sleeping
-# (llama-server stopped, all VRAM freed). Must be greater than
-# idle_to_drowsy_mins when both are non-zero. 0 disables this transition.
-# idle_to_sleep_mins = 120
-
-# ---- GPU contention monitor ----
-# Background NVML poller that transitions the daemon to Sleeping when another
-# process (e.g. a game) claims VRAM. Silently disables itself when no NVIDIA
-# GPU is available.
-#
-# Enable the monitor. Default true.
-# gpu_monitor_enabled = true
-# NVML poll interval in seconds. Must be > 0 when enabled.
+# idle_to_drowsy_mins = 30  # 0 disables
+# idle_to_sleep_mins = 120  # 0 disables
+# gpu_monitor_enabled = true  # sleep when another process claims VRAM
 # gpu_poll_secs = 5
-# Per-process VRAM threshold in MiB. A non-assistd process holding at least
-# this much VRAM triggers sleep. 2048 = 2 GiB. Must be > 0 when enabled.
 # gpu_vram_threshold_mb = 2048
-# When true, the daemon auto-wakes once the contending process exits. Default
-# false so the daemon stays out of the way while you are still gaming.
 # gpu_auto_wake = false
-# Process basenames that never trigger sleep, even above the threshold.
-# Matched against /proc/<pid>/comm, which the kernel truncates at 16 bytes
-# (e.g. "chromium_main" fits but "systemd-userdbd" becomes "systemd-userdb").
-# gpu_allowlist = ["Xorg", "Xwayland", "gnome-shell", "kwin_x11",
-#                  "kwin_wayland", "firefox", "chromium", "chrome"]
-# Process basenames that always trigger sleep regardless of VRAM usage.
+# gpu_allowlist = ["Xorg", "Xwayland", "gnome-shell", "kwin_x11", "kwin_wayland", "firefox", "chromium", "chrome"]
 # gpu_denylist = []
 
 [presence]
-# Global hotkey that cycles Active → Drowsy → Sleeping → Active.
-# Empty string disables the in-daemon global hotkey listener.
-#
-# The in-daemon listener only works on X11. On Wayland compositors
-# (Sway, Hyprland), leave this empty and bind `assistd cycle` in your
-# compositor config instead, e.g. Sway:
-#   bindsym $mod+Escape exec assistd cycle
-hotkey = "Super+Escape"
+hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 
 [daemon]
-# Seconds to wait for in-flight IPC connections (e.g. streaming LLM
-# responses) to finish before aborting them on daemon shutdown. 0 aborts
-# all in-flight work immediately; higher values let clients receive a
-# final Done event before the daemon exits.
-# shutdown_grace_secs = 5
-
-# ---------------------------------------------------------------------------
-# Tool execution safety
-# ---------------------------------------------------------------------------
-# The bash policy (allowed_programs, destructive_patterns,
-# denylist) decides which commands run without asking, but it only sees
-# the command line. What an allowed or approved program does once
-# running is out of its reach. The bubblewrap sandbox is the real
-# defense-in-depth; install bubblewrap (package: bubblewrap) and keep
-# tools.bash.sandbox = "auto" to benefit from it.
+# shutdown_grace_secs = 5  # 0 aborts in-flight requests immediately
 
 [tools.output]
-# Presentation limits applied to a tool's final output before it reaches
-# the LLM. Output past either cap is truncated and the full text spilled
-# to a file under `overflow_dir`, whose path the model is told about so
-# it can `grep`/`tail` the spill rather than re-run the command.
-# Max lines of stdout surfaced to the LLM before the spill.
 # max_lines = 200
-# Max size of the surfaced head, in KB.
 # max_kb = 50
-# Directory the spill files are written to. Cleared and recreated on
-# daemon startup.
 # overflow_dir = "/tmp/assistd-output"
 
 [tools.bash]
-# This section governs every command that spawns a real subprocess:
-# `bash` itself and `wm open`, which launches argv the model chose. Both
-# run through the same denylist, allowlist and destructive-pattern
-# confirmation, and sandbox; there is no separate policy for `wm open` to drift out of step
-# with. The timeout below is the one setting that does not apply to it:
-# a launched application is meant to outlive the tool call.
-
-# Subprocess timeout in seconds. Applies to `bash` only. Must be > 0. Exceeding the timeout
-# kills the process group and returns exit 137 with the message
-#   [error] bash: timed out after 30s [exit:137 | 30.0s]
+# Policy for every command `bash` or `wm open` spawns.
 # timeout_secs = 30
-
-# Denylist: literal substrings that, if present in a bash script
-# (case-insensitive), cause immediate rejection before spawn with exit
-# 126. Use for patterns that should never be executed under any
-# circumstances. The matched pattern is echoed back in the error line
-# so the LLM sees exactly what triggered the rejection.
-# An entry ending in anything but a letter or digit must also end a
-# shell word (whitespace, an operator, a quote, or the end of the script
-# follows it), so `"rm -rf /"` blocks `rm -rf /` but not
-# `rm -rf /tmp/build`. An entry ending in a letter or digit also matches
-# longer words: `"mkfs"` blocks `mkfs.ext4`.
+# Substrings refused outright.
 # denylist = [
 #     "rm -rf /",
 #     "rm -rf /*",
@@ -334,32 +117,7 @@ hotkey = "Super+Escape"
 #     "> /dev/sda",
 #     "> /dev/nvme",
 # ]
-
-# Allowed programs: a command runs without confirmation only when every
-# program it can run is listed here and nothing in it matches a
-# destructive pattern below. That covers each command word, the command
-# behind a default wrapper (`xargs X`, `timeout 5 X`, `find -exec X`), and
-# everything inside `eval` and `$(…)`. Anything else asks first. Shell
-# builtins that cannot run code (`cd`, `echo`, `test`, …) are always
-# allowed. Any other program that runs commands (`sh`, `python3`, `sudo`,
-# `ssh`, `docker`, …) is trusted with whatever it is handed once allowed,
-# so think twice before "always allow".
-#
-# Entries are bare names, looked up on the command's PATH, or absolute
-# paths. A bare name only counts when it resolves to a file you cannot
-# modify (such as /usr/bin/ls), so a copy planted earlier on PATH does
-# not inherit its trust. A script that changes PATH or LD_* variables
-# asks before running anything. Running a script file directly
-# (`./x.sh`, `source x`) always asks, since the file can change.
-#
-# The prompt's "always allow" adds the programs it names for good. Those
-# approvals live in allowed_programs.toml beside this file, each pinned
-# to the file its name resolved to; if the name later resolves elsewhere
-# it asks again. Commands cannot modify this directory: `write` refuses
-# it and the sandbox mounts it read-only.
-#
-# The default holds tools that read and report and cannot run another
-# program, plus wrappers whose command is checked in its own right.
+# Programs that run without asking; "always allow" approvals go to allowed_programs.toml.
 # allowed_programs = [
 #     "[", "b2sum", "base64", "basename", "cat", "cksum", "cmp", "column", "comm", "cut",
 #     "date", "df", "diff", "dirname", "du", "echo", "egrep", "env", "expand", "false", "fgrep",
@@ -369,44 +127,7 @@ hotkey = "Super+Escape"
 #     "stat", "stdbuf", "strings", "tac", "tail", "test", "timeout", "tr", "tree", "true",
 #     "uname", "unexpand", "uniq", "wc", "which", "whoami", "xargs", "xxd",
 # ]
-
-# Destructive patterns: commands that trigger an interactive Y/N
-# confirmation prompt in the chat TUI (or are denied by default over IPC,
-# where no confirmation channel exists) even when every program they run
-# is allowed. The allowlist judges programs; these judge what an allowed
-# program is asked to do: options that make it delete files or run
-# another program (`find -delete`, `sort --compress-program`, `rg --pre`),
-# and dangerous uses of programs you may "always allow" (`rm -r`,
-# `git push --force`). A pattern prompt never offers "always allow".
-# A program with no safe use needs no pattern; leave it off the allowlist.
-#
-# Each pattern is a command name followed by arguments that must all be
-# present, in any order. Any word may list alternatives separated by `|`.
-# The name also matches a path ending in it (`rm` matches `/bin/rm`). An
-# argument matches:
-#   -rf      short options, each of which may sit in any cluster
-#            (`-r -f`, `-vfr`, `-R`: case is ignored)
-#   --force  the long option, an abbreviation (`--forc`), or `--force=…`
-#   of=      any argument starting with it
-#   other    that exact argument
-# An argument whose value is only known at run time (`"$f"`) may stand in
-# for one required argument, and one that can split into several words
-# (`$opts`, `*`) for all of them, so `rm "$f"` prompts for `rm -r`.
-#
-# Commands are found anywhere bash would run them: after `;`, `&&`, `|`
-# or a newline, in `( … )`, `$( … )` and backquotes (also inside double
-# quotes and here-documents), after redirections and assignments, after
-# the default wrappers (`env`, `nice`, `nohup`, `stdbuf`, `timeout`,
-# `xargs`, `find -exec`), and in scripts handed to `eval`, `trap` or
-# `alias`. What any other program is handed (`sh -c '…'`, `sudo …`) is
-# not looked into; that program must be allowed or confirmed itself. Quoted
-# text stays one word, so `echo "rm -rf"` does NOT match.
-#
-# A command that cannot be checked also prompts: one whose name is only
-# known at run time (`$cmd`, `$(echo rm)`, `/bin/r?`), `source` reading
-# its script from stdin, or a script ending inside a quote.
-# What a program does once running (a script file it executes, a library
-# call like Python's shutil.rmtree) is left to the sandbox.
+# Commands that always need confirmation.
 # destructive_patterns = [
 #     "rm -r|--recursive",
 #     "find -delete",
@@ -419,130 +140,31 @@ hotkey = "Super+Escape"
 #     "sort --compress-program",
 #     "rg --pre",
 # ]
-
-# Sandbox mode for bash subprocess execution. One of:
-#   auto:  use bubblewrap if found on PATH; log warn and run unsandboxed if not.
-#   bwrap: require bubblewrap; fail daemon startup if `bwrap` is missing.
-#   none:  never wrap; run bash directly under the daemon's user.
-# Default "auto" gives defense-in-depth on systems with bubblewrap without
-# breaking systems without it.
-# sandbox = "auto"
-
-# Extra arguments appended to the bubblewrap invocation (before the
-# trailing `--`). Useful for widening binds or tightening the sandbox.
-# The default profile is:
-#   --ro-bind / /            (root is read-only)
-#   --bind $HOME $HOME       ($HOME is writable)
-#   --bind /tmp /tmp         (/tmp is writable)
-#   --dev /dev --proc /proc  (standard)
-#   --tmpfs /run             (fresh, empty /run)
-#   --unshare-pid --unshare-ipc --unshare-uts
-#   --new-session --die-with-parent
-# Crucially NOT --unshare-net: network is available by default because the
-# assistant legitimately needs curl/pip/etc. Opt into network isolation via:
-#   bwrap_extra_args = ["--unshare-net"]
-#
-# `wm open` uses this same profile plus `--bind $XDG_RUNTIME_DIR` over the
-# /run tmpfs: without the compositor and D-Bus session sockets a GUI
-# application cannot start at all. It is skipped, with a warning, when
-# XDG_RUNTIME_DIR is unset or stale. Note that --die-with-parent is what
-# bounds a launched application's lifetime: it exits with the daemon.
-# bwrap_extra_args = []
+# sandbox = "auto"  # auto | bwrap | none
+# bwrap_extra_args = []  # e.g. ["--unshare-net"]
 
 [tools.write]
-# Writable-path allowlist for the `write` command. Paths outside every
-# entry are rejected with exit 126. Supports `~` and `~/` expansion.
-# Relative paths are always rejected (the daemon's cwd is not a meaningful
-# anchor). Non-existent allowlist entries are dropped with a warning at
-# startup, so missing `~/Documents` on a fresh install won't break the
-# command entirely.
 # writable_paths = ["~", "/tmp"]
 
 [tools.screenshot]
-# Capture the user's screen as a PNG on demand and attach it as a vision
-# input for the next LLM turn. The agent invokes this via `run` with
-# `screenshot` (full screen) or `screenshot --focused` (focused window).
-# Bytes are kept in memory; nothing is written to disk by default.
-#
-# Privacy: the captured pixels reach the LLM as part of its next turn.
-# The default backend (`auto`) picks maim on X11 and grim on Wayland.
-#
-# Backend selector. One of:
-#   auto:    XDG_SESSION_TYPE / WAYLAND_DISPLAY / DISPLAY decide.
-#   x11:     always use maim (requires xdotool for --focused).
-#   wayland: always use grim (--focused requires sway or Hyprland).
-# backend = "auto"
+# backend = "auto"  # auto | x11 | wayland
 
 [memory]
-# Persistent memory: SQLite-backed conversation history + saved facts (the
-# `remember` / `recall` LLM tools). Master switch: when false, the daemon
-# binds the no-op placeholder and skips opening the DB.
 # enabled = true
-# Path to the SQLite database file. Default resolves to
-# $XDG_DATA_HOME/assistd/memory.db (or $HOME/.local/share/assistd/memory.db).
 # db_path = "/home/you/.local/share/assistd/memory.db"
 
 [embedding]
-# Semantic memory search: a separate, dedicated llama-server instance
-# (port distinct from llama_server.port) that serves /v1/embeddings.
-# Independent of the chat router, so embeddings keep working when chat
-# is Drowsy/Sleeping. Each user query auto-injects the top-K most
-# similar past chunks as a "Relevant past context: …" block on the turn,
-# and the LLM gets the `recall` (saved facts) and `reminisce` (past
-# conversation) tools, both backed by semantic search.
-#
-# Master switch. When false the daemon binds NoEmbedder + NoSemanticStore
-# and the retrieval-touching tools register but no-op silently.
+# A second llama-server for semantic recall.
 # enabled = true
-# HuggingFace id passed verbatim to the embed server's --hf-repo.
-# Format: <owner>/<repo>:<quant-tag> (e.g. `Q4_K_M`), NOT a full
-# filename: llama-server parses the `:` suffix as a quant tag against
-# its preset manifest. Passing a `.gguf` filename makes preset
-# resolution fail with a misleading "no GGUF files found" error.
-# The default is a small (~140 MB Q4), 768-dim model with strong
-# retrieval quality on conversational text.
-# model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"
-# Bind host. Should be loopback.
+# model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"  # suffix is a quant tag, not a filename
 # host = "127.0.0.1"
-# Bind port. MUST differ from llama_server.port.
-# port = 8386
-# -ngl count for the embed server. Default 0 (CPU only) so the embed
-# model never competes with the chat model for VRAM. Small embedders
-# are CPU-fast; only raise this if your chat model leaves VRAM headroom.
+# port = 8386  # must differ from llama_server.port
 # gpu_layers = 0
-# The embed server shares llama_server.ready_timeout_secs as its
-# come-up backstop; a slow first-time HF download affects both alike.
-# How many nearest-neighbor matches to retrieve per query for
-# auto-injection and the reminisce tool's default.
 # top_k = 5
-# When true, every user query auto-injects the top-K conversation
-# chunks as a "Relevant past context: …" block on the turn. Set false
-# to require explicit `reminisce` tool invocations only.
 # auto_inject = true
 
-# ----------------------------------------------------------------------
-# [mcp]: Model Context Protocol client
-# ----------------------------------------------------------------------
-# Connect to external MCP servers and surface their tools to the LLM
-# alongside the daemon's native tools (`run`, `remember`, etc.). Each
-# discovered tool is exposed under the registry name
-# `mcp__<server-name>__<tool-name>`.
-#
-# Two transports:
-#   * "stdio": daemon spawns a child process and speaks newline-delimited
-#     JSON-RPC over its stdin/stdout. Required: `command` (and optional
-#     `args` / `env`).
-#   * "sse":   daemon connects to an HTTP+SSE endpoint. Required: `url`
-#     (and optional `headers`). A read timeout and a periodic ping detect
-#     a wedged remote server even when the SSE socket stays open.
-#
-# Crash handling: if a server dies, the supervisor restarts it with
-# exponential backoff (1s, 2s, 4s, ..., 60s); after 5 consecutive
-# failures it parks permanently for the rest of the daemon lifetime.
-# While a server is down, calls to its tools return a typed error to
-# the model rather than hanging.
-
 # [mcp]
+# External tool servers, exposed to the model as mcp__<name>__<tool>.
 # enabled = false
 #
 # [[mcp.servers]]
@@ -560,46 +182,17 @@ hotkey = "Super+Escape"
 # [mcp.servers.headers]
 # Authorization = "Bearer YOUR_TOKEN_HERE"
 
-# ---- Tray popup ---------------------------------------------------------
-# Borderless ~360×120 floating window spawned by `assistd tray` (only
-# in builds compiled with `--features tray-popup`, which is on by
-# default). Anchored near the system-tray icon; surfaces the daemon's
-# most-recent assistant reply text plus the last tool call. Shown on
-# tray left-click and on the events you enable below; hidden on
-# focus-out or after `auto_hide_ms` of idle.
-#
-# Placement is delegated to the compositor (i3 / sway) — the tray sends
-# `floating enable, resize set W H, move position …` over the
-# compositor's IPC, templated from the values below. Hyprland users get
-# the popup at the compositor's default placement until a Hyprland
-# backend lands in assistd-wm.
-#
 # [tray.popup]
-# enabled        = true
-# anchor         = "top_right"   # top_left | top_right | bottom_left | bottom_right | center
-# offset_x       = -10           # px from the anchored corner; negative moves inward on right-anchors
-# offset_y       = 10
-# width          = 360           # validated 100..=1200
-# height         = 120           # validated 60..=800
-# auto_hide_ms   = 3000          # idle timeout; reset by every new event while visible.
-#                                # The timer is suspended entirely while a turn is in
-#                                # flight, so a long-running tool call doesn't blink the
-#                                # popup out mid-response (500..=60000). While continuous
-#                                # listening is on, the popup uses 3x this so the user
-#                                # can reply verbally without pressing a key.
-#
-# HiDPI scaling is detected from the WM backend automatically: sway
-# reads its own per-output scale over IPC, and the i3 backend cascades
-# through `WINIT_X11_SCALE_FACTOR`, `Xft.dpi` in xrdb, and RandR
-# physical-size DPI to match whatever winit will apply to the popup
-# window. No knob is needed in normal use.
-#
-# Which events automatically open the popup. The tray left-click always
-# opens it regardless of these flags. With `delta = true` the popup
-# surfaces on every chat turn — flip it to `false` if you live in the
-# chat TUI and don't want a popup on every reply.
+# Floating activity window shown by `assistd tray`.
+# enabled = true
+# anchor = "top_right"  # top_left | top_right | bottom_left | bottom_right | center
+# offset_x = -10
+# offset_y = 10
+# width = 360
+# height = 120
+# auto_hide_ms = 3000
 #
 # [tray.popup.wake_on]
 # tool_call = true
-# delta     = true
-# error     = true
+# delta = true
+# error = true

@@ -347,12 +347,14 @@ fn thinking_block_renders_past_tense_after_finish() {
 
 #[test]
 fn begin_thinking_prunes_empty_open_assistant() {
-    // A submit opens an empty assistant block before any delta; reasoning
-    // arriving first must replace it rather than leave a stray blank line.
     let mut p = OutputPane::new();
     p.begin_assistant();
     p.append_thinking("first thoughts");
-    assert_eq!(item_texts(&p), ["[thinking:live:first thoughts]"]);
+    assert_eq!(
+        item_texts(&p),
+        ["[thinking:live:first thoughts]"],
+        "reasoning replaces the empty block a submit opened"
+    );
     assert_eq!(p.open_assistant, None);
 }
 

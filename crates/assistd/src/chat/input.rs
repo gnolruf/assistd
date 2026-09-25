@@ -20,9 +20,9 @@ pub struct InputLine {
 #[derive(Debug, PartialEq, Eq)]
 pub enum InputAction {
     None,
-    /// The user pressed Enter with non-empty input; contains the submitted text.
+    /// Enter on a non-blank buffer.
     Submit(String),
-    /// The user pressed Ctrl+C or Ctrl+D on an empty buffer.
+    /// Ctrl+C or Ctrl+D on an empty buffer.
     Quit,
 }
 
@@ -217,13 +217,7 @@ impl InputLine {
     }
 
     fn kill_word_back(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
         let chars: Vec<(usize, char)> = self.buffer[..self.cursor].char_indices().collect();
-        if chars.is_empty() {
-            return;
-        }
         let mut n = chars.len();
         while n > 0 && chars[n - 1].1.is_whitespace() {
             n -= 1;
@@ -231,10 +225,8 @@ impl InputLine {
         while n > 0 && !chars[n - 1].1.is_whitespace() {
             n -= 1;
         }
-        let new_cursor = if n == chars.len() {
+        let Some(&(new_cursor, _)) = chars.get(n) else {
             return;
-        } else {
-            chars[n].0
         };
         self.buffer.drain(new_cursor..self.cursor);
         self.cursor = new_cursor;
@@ -301,8 +293,9 @@ impl InputLine {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyEventState;
+
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

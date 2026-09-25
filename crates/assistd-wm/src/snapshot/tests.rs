@@ -1,16 +1,22 @@
 use super::*;
 
-fn id(n: u64) -> WindowId {
-    WindowId::new(n).expect("test ids are non-zero")
+fn id(raw: u64) -> WindowId {
+    WindowId::new(raw).expect("test ids are non-zero")
 }
 
 fn snap() -> RwLock<Snapshot> {
     RwLock::new(Snapshot::default())
 }
 
-async fn event(s: &RwLock<Snapshot>, kind: WindowChangeKind, raw: u64, class: &str, title: &str) {
+async fn event(
+    snapshot: &RwLock<Snapshot>,
+    kind: WindowChangeKind,
+    raw: u64,
+    class: &str,
+    title: &str,
+) {
     apply_window_event(
-        s,
+        snapshot,
         kind,
         Some(id(raw)),
         Some(class.into()),
@@ -30,29 +36,39 @@ fn focused(raw: u64, class: &str, title: &str) -> Option<FocusedWindowContext> {
 
 #[tokio::test]
 async fn focus_event_overwrites_all_fields() {
-    let s = snap();
-    event(&s, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
-    event(&s, WindowChangeKind::Focus, 7, "kitty", "shell").await;
-    assert_eq!(read_focused_context(&s).await, focused(7, "kitty", "shell"));
+    let snapshot = snap();
+    event(&snapshot, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
+    event(&snapshot, WindowChangeKind::Focus, 7, "kitty", "shell").await;
+    assert_eq!(
+        read_focused_context(&snapshot).await,
+        focused(7, "kitty", "shell")
+    );
 }
 
 #[tokio::test]
 async fn title_event_for_focused_id_updates_title_and_class() {
-    let s = snap();
-    event(&s, WindowChangeKind::Focus, 42, "Firefox", "Old").await;
-    event(&s, WindowChangeKind::Title, 42, "firefox", "New").await;
+    let snapshot = snap();
+    event(&snapshot, WindowChangeKind::Focus, 42, "Firefox", "Old").await;
+    event(&snapshot, WindowChangeKind::Title, 42, "firefox", "New").await;
     assert_eq!(
-        read_focused_context(&s).await,
+        read_focused_context(&snapshot).await,
         focused(42, "firefox", "New")
     );
 }
 
 #[tokio::test]
 async fn title_event_for_other_id_is_ignored() {
-    let s = snap();
-    event(&s, WindowChangeKind::Focus, 42, "Firefox", "foreground").await;
+    let snapshot = snap();
     event(
-        &s,
+        &snapshot,
+        WindowChangeKind::Focus,
+        42,
+        "Firefox",
+        "foreground",
+    )
+    .await;
+    event(
+        &snapshot,
         WindowChangeKind::Title,
         99,
         "Firefox",
@@ -60,26 +76,26 @@ async fn title_event_for_other_id_is_ignored() {
     )
     .await;
     assert_eq!(
-        read_focused_context(&s).await,
+        read_focused_context(&snapshot).await,
         focused(42, "Firefox", "foreground")
     );
 }
 
 #[tokio::test]
 async fn close_event_for_focused_id_clears_focus() {
-    let s = snap();
-    event(&s, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
-    event(&s, WindowChangeKind::Close, 42, "Firefox", "GitHub").await;
-    assert_eq!(read_focused_context(&s).await, None);
+    let snapshot = snap();
+    event(&snapshot, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
+    event(&snapshot, WindowChangeKind::Close, 42, "Firefox", "GitHub").await;
+    assert_eq!(read_focused_context(&snapshot).await, None);
 }
 
 #[tokio::test]
 async fn close_event_for_other_id_is_ignored() {
-    let s = snap();
-    event(&s, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
-    event(&s, WindowChangeKind::Close, 99, "Other", "Other").await;
+    let snapshot = snap();
+    event(&snapshot, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
+    event(&snapshot, WindowChangeKind::Close, 99, "Other", "Other").await;
     assert_eq!(
-        read_focused_context(&s).await,
+        read_focused_context(&snapshot).await,
         focused(42, "Firefox", "GitHub")
     );
 }
@@ -91,10 +107,10 @@ async fn read_focused_context_returns_none_for_empty() {
 
 #[tokio::test]
 async fn workspace_focus_alone_yields_a_partial_context() {
-    let s = snap();
-    apply_workspace_focus(&s, Some("3".into())).await;
+    let snapshot = snap();
+    apply_workspace_focus(&snapshot, Some("3".into())).await;
     assert_eq!(
-        read_focused_context(&s).await,
+        read_focused_context(&snapshot).await,
         Some(FocusedWindowContext {
             workspace: Some("3".into()),
             ..FocusedWindowContext::default()

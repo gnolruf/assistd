@@ -1,7 +1,8 @@
 use std::time::Duration;
+
 use thiserror::Error;
 
-/// Errors produced by the embed-server supervisor and its supporting components.
+/// Failures of the embed-server supervisor and its child process.
 #[derive(Debug, Error)]
 pub enum EmbedServerError {
     #[error("I/O error: {0}")]

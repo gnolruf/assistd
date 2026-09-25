@@ -81,70 +81,62 @@ impl Command for SeeCommand {
         }
         let path = &input.args[0];
         match load_image_attachment(Path::new(path)).await {
-            Ok((attachment, size)) => {
-                let mime = match &attachment {
-                    Attachment::Image { mime, .. } => mime.clone(),
-                };
-                let stdout = format!("attached {mime} ({}) from {path}\n", human_size(size));
-                CommandOutput {
-                    stdout: stdout.into_bytes(),
-                    stderr: Vec::new(),
-                    exit_code: 0,
-                    attachments: vec![attachment],
-                }
-            }
-            Err(LoadImageError::Io { source, .. }) => {
-                CommandOutput::failed(1, io_error_nav("see", path, &source).into_bytes())
-            }
-            Err(e @ LoadImageError::TooLarge { .. }) => CommandOutput::failed(
-                1,
-                error_line(
-                    "see",
-                    e.user_message(),
-                    Hint::Use,
-                    "a smaller image (resize or crop)",
-                )
-                .into_bytes(),
-            ),
-            Err(LoadImageError::Unrecognized { .. }) => CommandOutput::failed(
-                1,
-                error_line(
-                    "see",
-                    format_args!("not an image file: {path}"),
-                    Hint::Use,
-                    format_args!("cat {path}"),
-                )
-                .into_bytes(),
-            ),
-            Err(LoadImageError::NotAnImage { detected, .. }) => CommandOutput::failed(
-                1,
-                error_line(
-                    "see",
-                    format_args!("not an image file: {path} (detected {detected})"),
-                    Hint::Use,
-                    format_args!("cat {path}"),
-                )
-                .into_bytes(),
-            ),
-            Err(LoadImageError::UnsupportedFormat { mime, .. }) => CommandOutput::failed(
-                1,
-                error_line(
-                    "see",
-                    format_args!("unsupported image format: {path} ({mime})"),
-                    Hint::Use,
-                    "PNG, JPEG, or WebP",
-                )
-                .into_bytes(),
-            ),
+            Ok((attachment, size)) => attached(attachment, size, path),
+            Err(e) => load_failed(e, path),
         }
     }
 }
 
+fn attached(attachment: Attachment, size: usize, path: &str) -> CommandOutput {
+    let mime = match &attachment {
+        Attachment::Image { mime, .. } => mime.clone(),
+    };
+    let stdout = format!("attached {mime} ({}) from {path}\n", human_size(size));
+    CommandOutput {
+        stdout: stdout.into_bytes(),
+        stderr: Vec::new(),
+        exit_code: 0,
+        attachments: vec![attachment],
+    }
+}
+
+fn load_failed(err: LoadImageError, path: &str) -> CommandOutput {
+    let line = match err {
+        LoadImageError::Io { source, .. } => io_error_nav("see", path, &source),
+        e @ LoadImageError::TooLarge { .. } => error_line(
+            "see",
+            e.user_message(),
+            Hint::Use,
+            "a smaller image (resize or crop)",
+        ),
+        LoadImageError::Unrecognized { .. } => error_line(
+            "see",
+            format_args!("not an image file: {path}"),
+            Hint::Use,
+            format_args!("cat {path}"),
+        ),
+        LoadImageError::NotAnImage { detected, .. } => error_line(
+            "see",
+            format_args!("not an image file: {path} (detected {detected})"),
+            Hint::Use,
+            format_args!("cat {path}"),
+        ),
+        LoadImageError::UnsupportedFormat { mime, .. } => error_line(
+            "see",
+            format_args!("unsupported image format: {path} ({mime})"),
+            Hint::Use,
+            "PNG, JPEG, or WebP",
+        ),
+    };
+    CommandOutput::failed(1, line.into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::fixtures::PNG_BYTES;
-    use tempfile::tempdir;
 
     async fn run_see(cmd: &SeeCommand, args: &[&str]) -> CommandOutput {
         cmd.run(CommandInput {
@@ -217,8 +209,6 @@ mod tests {
         );
     }
 
-    /// With vision disabled `see` never touches the filesystem, so the
-    /// path argument is irrelevant.
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
         let cmd = SeeCommand::new(VisionGate::new(false));

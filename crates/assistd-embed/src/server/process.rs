@@ -1,11 +1,16 @@
-use super::error::EmbedServerError;
-use assistd_config::EmbeddingConfig;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
+
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
+
+use assistd_config::EmbeddingConfig;
+
+use super::error::EmbedServerError;
+
+const OUTPUT_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// A running embedding llama-server child plus the tasks forwarding
 /// its output to tracing.
@@ -16,8 +21,8 @@ pub struct ChildProcess {
 }
 
 impl ChildProcess {
-    /// Spawn `llama-server --embedding` for `cfg` in its own process
-    /// group. With `gpu_layers == 0` the child sees no CUDA devices.
+    /// Spawn `llama-server --embedding` for `cfg` in its own process group. With
+    /// `gpu_layers == 0` the child sees no CUDA devices.
     pub fn spawn(cfg: &EmbeddingConfig) -> Result<Self, EmbedServerError> {
         let mut cmd = Command::new("llama-server");
         cmd.arg("--embedding")
@@ -106,10 +111,10 @@ impl ChildProcess {
         }
 
         if let Some(task) = self.stdout_task.take() {
-            let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
+            let _ = tokio::time::timeout(OUTPUT_FLUSH_TIMEOUT, task).await;
         }
         if let Some(task) = self.stderr_task.take() {
-            let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
+            let _ = tokio::time::timeout(OUTPUT_FLUSH_TIMEOUT, task).await;
         }
 
         Ok(())

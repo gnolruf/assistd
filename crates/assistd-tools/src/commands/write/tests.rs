@@ -1,5 +1,6 @@
-use super::*;
 use tempfile::tempdir;
+
+use super::*;
 
 fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
     let abs: Vec<PathBuf> = paths
@@ -147,8 +148,6 @@ fn expand_tilde_without_home_errors() {
     assert!(matches!(err, PathResolveError::HomeNotSet));
 }
 
-/// A missing parent passes the allowlist (the anchor is its nearest
-/// existing ancestor) and fails only at the write, with exit 1.
 #[tokio::test]
 async fn missing_parent_passes_policy_but_fails_the_write() {
     let dir = tempdir().unwrap();
@@ -228,8 +227,6 @@ async fn write_no_follow_refuses_final_symlink() {
     assert!(!target.exists());
 }
 
-/// The old content is longer than the new, so a missing truncate would
-/// leave its tail behind.
 #[tokio::test]
 async fn overwrites_and_truncates_existing_file() {
     let dir = tempdir().unwrap();

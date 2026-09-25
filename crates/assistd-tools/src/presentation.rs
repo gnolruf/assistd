@@ -1,8 +1,6 @@
 //! Renders a completed chain's [`CommandOutput`] for the model: refuses
-//! binary bytes, truncates long output while spilling the full text to
-//! a file, attaches stderr whenever any stage wrote to it (not only on
-//! failure, since `find . | head` reports `head`'s exit code), and ends
-//! with an `[exit:N | Mms]` footer.
+//! binary, truncates long output (spilling it to a file), always shows
+//! stderr, and ends with an `[exit:N | Mms]` footer.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,8 +14,7 @@ use crate::commands::cat::{human_size, sniff_binary};
 pub struct PresentSpec {
     /// Max lines of stdout surfaced before truncation.
     pub max_lines: usize,
-    /// Max bytes of the truncated head, so a single huge line is also
-    /// bounded.
+    /// Max bytes of the truncated head, bounding a single huge line too.
     pub max_bytes: usize,
     /// Directory where full overflow output is spilled as `cmd-<n>.txt`.
     pub overflow_dir: PathBuf,
@@ -36,8 +33,7 @@ impl Default for PresentSpec {
 /// A rendered chain result.
 #[derive(Debug, Clone)]
 pub struct PresentResult {
-    /// Full LLM-facing body: head or binary-guard error, optional
-    /// `[stderr]` block, and the `[exit:N | Mms]` footer.
+    /// Full model-facing body, ending with the `[exit:N | Mms]` footer.
     pub output: String,
     /// Lossy-decoded stdout head; empty when the binary guard fired.
     pub stdout_raw: String,
@@ -64,28 +60,7 @@ pub fn present(
     let stderr_raw = String::from_utf8_lossy(&out.stderr).into_owned();
 
     if let Some(label) = binary_label(&out.stdout) {
-        let mut body = format!(
-            "[error] binary output ({}, {}). Use: cat -b <path>",
-            label,
-            human_size(out.stdout.len()),
-        );
-        if !stderr_raw.is_empty() {
-            body.push('\n');
-            body.push_str("[stderr] ");
-            body.push_str(stderr_raw.trim_end_matches('\n'));
-        }
-        body.push('\n');
-        body.push_str(&footer);
-        return PresentResult {
-            output: body,
-            stdout_raw: String::new(),
-            stderr_raw,
-            exit_code: out.exit_code,
-            duration_ms,
-            truncated: false,
-            overflow_file: None,
-            attachments: out.attachments,
-        };
+        return present_binary(out, &label, &footer, stderr_raw, duration_ms);
     }
 
     let stdout_str = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -94,22 +69,11 @@ pub fn present(
 
     let overflow = line_count > spec.max_lines || byte_count > spec.max_bytes;
     let (visible_head, overflow_file) = if overflow {
-        let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let write_result = write_overflow_file(&out.stdout, &spec.overflow_dir, n);
+        let spilled = spill_overflow(&out.stdout, spec, counter);
         let head = truncate_lines_bytes(&stdout_str, spec.max_lines, spec.max_bytes);
-        let path = match write_result {
-            Ok(p) => Some(p),
-            Err(e) => {
-                tracing::warn!(
-                    "failed to write overflow file cmd-{n}.txt to {}: {e}",
-                    spec.overflow_dir.display()
-                );
-                None
-            }
-        };
-        (head, path)
+        (head, spilled)
     } else {
-        (stdout_str.clone(), None)
+        (stdout_str, None)
     };
 
     let mut body = String::new();
@@ -120,23 +84,9 @@ pub fn present(
         }
     }
     if overflow {
-        body.push_str(&format!(
-            "--- output truncated ({} lines, {}) ---\n",
-            line_count,
-            human_size(byte_count),
-        ));
-        if let Some(p) = &overflow_file {
-            let display = p.display();
-            body.push_str(&format!("Full output: {display}\n"));
-            body.push_str(&format!("Explore: cat {display} | grep\n"));
-            body.push_str(&format!("cat {display} | tail -n 100\n"));
-        }
+        push_truncation_notice(&mut body, line_count, byte_count, overflow_file.as_deref());
     }
-    if !stderr_raw.is_empty() {
-        body.push_str("[stderr] ");
-        body.push_str(stderr_raw.trim_end_matches('\n'));
-        body.push('\n');
-    }
+    push_stderr(&mut body, &stderr_raw);
     body.push_str(&footer);
 
     PresentResult {
@@ -151,10 +101,78 @@ pub fn present(
     }
 }
 
-/// Why `raw` must not reach the model verbatim: a sniffed MIME type or
-/// `application/octet-stream` for NUL bytes, `invalid-utf8`, or
-/// `control-chars` when over 10% of characters are non-whitespace
-/// controls. `None` when it is plain text (or empty).
+fn present_binary(
+    out: CommandOutput,
+    label: &str,
+    footer: &str,
+    stderr_raw: String,
+    duration_ms: u128,
+) -> PresentResult {
+    let mut body = format!(
+        "[error] binary output ({}, {}). Use: cat -b <path>\n",
+        label,
+        human_size(out.stdout.len()),
+    );
+    push_stderr(&mut body, &stderr_raw);
+    body.push_str(footer);
+    PresentResult {
+        output: body,
+        stdout_raw: String::new(),
+        stderr_raw,
+        exit_code: out.exit_code,
+        duration_ms,
+        truncated: false,
+        overflow_file: None,
+        attachments: out.attachments,
+    }
+}
+
+/// Write the full stdout to the next numbered spill file, logging and
+/// returning `None` when that fails.
+fn spill_overflow(raw: &[u8], spec: &PresentSpec, counter: &AtomicU64) -> Option<PathBuf> {
+    let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+    match write_overflow_file(raw, &spec.overflow_dir, n) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            tracing::warn!(
+                "failed to write overflow file cmd-{n}.txt to {}: {e}",
+                spec.overflow_dir.display()
+            );
+            None
+        }
+    }
+}
+
+fn push_truncation_notice(
+    body: &mut String,
+    line_count: usize,
+    byte_count: usize,
+    overflow_file: Option<&Path>,
+) {
+    body.push_str(&format!(
+        "--- output truncated ({} lines, {}) ---\n",
+        line_count,
+        human_size(byte_count),
+    ));
+    if let Some(path) = overflow_file {
+        let display = path.display();
+        body.push_str(&format!("Full output: {display}\n"));
+        body.push_str(&format!("Explore: cat {display} | grep\n"));
+        body.push_str(&format!("cat {display} | tail -n 100\n"));
+    }
+}
+
+fn push_stderr(body: &mut String, stderr_raw: &str) {
+    if !stderr_raw.is_empty() {
+        body.push_str("[stderr] ");
+        body.push_str(stderr_raw.trim_end_matches('\n'));
+        body.push('\n');
+    }
+}
+
+/// Why `raw` must not reach the model: a sniffed MIME type (or
+/// `application/octet-stream`) for NUL bytes, `invalid-utf8`, or
+/// `control-chars` above 10% controls. `None` for plain text.
 pub(crate) fn binary_label(raw: &[u8]) -> Option<String> {
     if raw.is_empty() {
         return None;
@@ -164,9 +182,8 @@ pub(crate) fn binary_label(raw: &[u8]) -> Option<String> {
         return Some(sniff_binary(raw).unwrap_or_else(|| "application/octet-stream".into()));
     }
 
-    let s = match std::str::from_utf8(raw) {
-        Ok(s) => s,
-        Err(_) => return Some("invalid-utf8".into()),
+    let Ok(s) = std::str::from_utf8(raw) else {
+        return Some("invalid-utf8".into());
     };
 
     let total = s.chars().count();

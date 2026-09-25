@@ -1,12 +1,13 @@
-use crate::defaults::DEFAULT_PRESENCE_HOTKEY;
 use serde::{Deserialize, Serialize};
+
+use crate::defaults::DEFAULT_PRESENCE_HOTKEY;
 
 /// Manual presence-control settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct PresenceConfig {
-    /// Global hotkey that cycles `Active → Drowsy → Sleeping → Active`.
-    /// Empty string disables the in-daemon global hotkey listener.
+    /// Global hotkey cycling `Active → Drowsy → Sleeping`. Empty disables
+    /// it; the listener works only on X11 (bind `assistd cycle` elsewhere).
     pub hotkey: String,
 }
 

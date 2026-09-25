@@ -3,13 +3,8 @@ use async_trait::async_trait;
 use crate::command::{Command, CommandInput, CommandOutput};
 use crate::commands::collect_input;
 
-/// `uniq [-c] [FILE]...`: collapse runs of identical adjacent lines
-/// from the named files, or from stdin when none are given. Only
-/// *adjacent* duplicates collapse, so the usual spelling is
-/// `sort | uniq`.
-///
-/// Flags:
-/// - `-c` prefix each line with `<count>\t`
+/// `uniq [-c] [FILE]...`: collapse runs of identical adjacent lines from
+/// the named files or stdin; `-c` prefixes each with `<count>\t`.
 pub struct UniqCommand;
 
 #[async_trait]
@@ -55,17 +50,17 @@ impl Command for UniqCommand {
             }
         }
 
-        let stdin = match collect_input("uniq", &files, input.stdin).await {
+        let text = match collect_input("uniq", &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return CommandOutput::usage(self.help()),
             Err(failure) => return failure,
         };
-        let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
+        let mut lines: Vec<&[u8]> = text.split(|b| *b == b'\n').collect();
         if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
 
-        let mut out = Vec::with_capacity(stdin.len());
+        let mut out = Vec::with_capacity(text.len());
         for run in lines.chunk_by(|a, b| a == b) {
             emit(&mut out, run[0], count_runs.then_some(run.len()));
         }
@@ -126,9 +121,9 @@ mod tests {
     #[tokio::test]
     async fn named_file_is_read_instead_of_stdin() {
         let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("lines.txt");
-        std::fs::write(&f, b"a\na\nb\n").unwrap();
-        let out = run_uniq(&["-c", f.to_str().unwrap()], b"ignored\n").await;
+        let file = dir.path().join("lines.txt");
+        std::fs::write(&file, b"a\na\nb\n").unwrap();
+        let out = run_uniq(&["-c", file.to_str().unwrap()], b"ignored\n").await;
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"2\ta\n1\tb\n");
     }

@@ -12,19 +12,27 @@ use uuid::Uuid;
 
 use super::state::{PopupState, PopupTracker};
 
+const TICK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Messages consumed by [`drive_visibility`].
 #[derive(Debug)]
 pub enum DriverInput {
     Event(Box<Event>),
     Disconnected,
     Show,
+    /// User closed the popup; also interrupts the current turn.
     Dismiss,
+    /// The window finished its first paint after being shown.
     Mapped,
     Shutdown,
 }
 
+/// Ask the window manager to place the popup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaceRequest;
 
+/// Own the popup's visibility: show on request, hide on dismiss (also
+/// interrupting the turn) or once idle past the auto-hide window.
 pub async fn drive_visibility(
     state_tx: watch::Sender<PopupState>,
     mut rx: UnboundedReceiver<DriverInput>,
@@ -32,14 +40,8 @@ pub async fn drive_visibility(
     cfg: TrayPopupConfig,
     ipc: IpcClient,
 ) {
-    let mut tracker = PopupTracker::default();
-    let mut visible = false;
-    let mut last_activity = Instant::now();
-    let mut was_busy = false;
-    let mut was_speaking = false;
-    let auto_hide_default = Duration::from_millis(cfg.auto_hide_ms);
-    let auto_hide_listening = Duration::from_millis(cfg.listen_auto_hide_ms());
-    let mut ticker = interval(Duration::from_millis(250));
+    let mut driver = Driver::new(state_tx, &cfg);
+    let mut ticker = interval(TICK_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut interrupts = JoinSet::new();
 
@@ -50,39 +52,15 @@ pub async fn drive_visibility(
                 let Some(msg) = msg else { break };
                 match msg {
                     DriverInput::Shutdown => break,
-                    DriverInput::Disconnected => {
-                        tracker.set_disconnected();
-                        was_busy = false;
-                        was_speaking = false;
-                        push_with_visibility(&state_tx, tracker.snapshot(), visible);
-                    }
-                    DriverInput::Event(ev) => {
-                        let snap = tracker.ingest(&ev);
-                        if visible {
-                            last_activity = Instant::now();
-                        }
-                        let is_busy = tracker.is_busy();
-                        let is_speaking = tracker.is_speaking();
-                        if (was_busy && !is_busy) || (was_speaking && !is_speaking) {
-                            last_activity = Instant::now();
-                        }
-                        was_busy = is_busy;
-                        was_speaking = is_speaking;
-                        push_with_visibility(&state_tx, snap, visible);
-                    }
+                    DriverInput::Disconnected => driver.disconnect(),
+                    DriverInput::Event(ev) => driver.ingest(&ev),
                     DriverInput::Show => {
-                        last_activity = Instant::now();
-                        if !visible {
-                            visible = true;
-                            push_with_visibility(&state_tx, tracker.snapshot(), visible);
+                        if driver.show() {
                             let _ = place_tx.send(PlaceRequest);
                         }
                     }
                     DriverInput::Dismiss => {
-                        if visible {
-                            visible = false;
-                            push_with_visibility(&state_tx, tracker.snapshot(), visible);
-                        }
+                        driver.hide();
                         interrupts.spawn(interrupt_turn(ipc.clone()));
                     }
                     DriverInput::Mapped => {}
@@ -93,23 +71,93 @@ pub async fn drive_visibility(
                     tracing::warn!(target: "tray", "popup dismiss: interrupt_turn task failed: {e}");
                 }
             }
-            _ = ticker.tick() => {
-                if !visible {
-                    continue;
-                }
-                if tracker.is_busy() || tracker.is_speaking() {
-                    continue;
-                }
-                let auto_hide = if tracker.is_listening() {
-                    auto_hide_listening
-                } else {
-                    auto_hide_default
-                };
-                if last_activity.elapsed() >= auto_hide {
-                    visible = false;
-                    push_with_visibility(&state_tx, tracker.snapshot(), visible);
-                }
-            }
+            _ = ticker.tick() => driver.hide_if_idle(),
+        }
+    }
+}
+
+struct Driver {
+    state_tx: watch::Sender<PopupState>,
+    tracker: PopupTracker,
+    visible: bool,
+    last_activity: Instant,
+    was_busy: bool,
+    was_speaking: bool,
+    auto_hide: Duration,
+    listen_auto_hide: Duration,
+}
+
+impl Driver {
+    fn new(state_tx: watch::Sender<PopupState>, cfg: &TrayPopupConfig) -> Self {
+        Self {
+            state_tx,
+            tracker: PopupTracker::default(),
+            visible: false,
+            last_activity: Instant::now(),
+            was_busy: false,
+            was_speaking: false,
+            auto_hide: Duration::from_millis(cfg.auto_hide_ms),
+            listen_auto_hide: Duration::from_millis(cfg.listen_auto_hide_ms()),
+        }
+    }
+
+    fn publish(&self) {
+        push_with_visibility(&self.state_tx, self.tracker.snapshot(), self.visible);
+    }
+
+    fn disconnect(&mut self) {
+        self.tracker.set_disconnected();
+        self.was_busy = false;
+        self.was_speaking = false;
+        self.publish();
+    }
+
+    /// Any event while visible, or a turn or speech finishing, restarts the
+    /// auto-hide timer.
+    fn ingest(&mut self, ev: &Event) {
+        self.tracker.ingest(ev);
+        if self.visible {
+            self.last_activity = Instant::now();
+        }
+        let is_busy = self.tracker.is_busy();
+        let is_speaking = self.tracker.is_speaking();
+        if (self.was_busy && !is_busy) || (self.was_speaking && !is_speaking) {
+            self.last_activity = Instant::now();
+        }
+        self.was_busy = is_busy;
+        self.was_speaking = is_speaking;
+        self.publish();
+    }
+
+    /// Returns `true` when the popup was hidden and is now shown.
+    fn show(&mut self) -> bool {
+        self.last_activity = Instant::now();
+        if self.visible {
+            return false;
+        }
+        self.visible = true;
+        self.publish();
+        true
+    }
+
+    fn hide(&mut self) {
+        if self.visible {
+            self.visible = false;
+            self.publish();
+        }
+    }
+
+    fn hide_if_idle(&mut self) {
+        if !self.visible || self.tracker.is_busy() || self.tracker.is_speaking() {
+            return;
+        }
+        let timeout = if self.tracker.is_listening() {
+            self.listen_auto_hide
+        } else {
+            self.auto_hide
+        };
+        if self.last_activity.elapsed() >= timeout {
+            self.hide();
         }
     }
 }
@@ -143,258 +191,4 @@ async fn interrupt_turn(ipc: IpcClient) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use tokio::sync::mpsc;
-
-    fn cfg(auto_hide_ms: u64) -> TrayPopupConfig {
-        TrayPopupConfig {
-            auto_hide_ms,
-            ..TrayPopupConfig::default()
-        }
-    }
-
-    fn dummy_ipc() -> IpcClient {
-        IpcClient::with_path("/tmp/assistd-popup-tests-nonexistent.sock")
-    }
-
-    async fn drain_watch(rx: &mut watch::Receiver<PopupState>) -> PopupState {
-        rx.changed().await.expect("watch sender alive");
-        rx.borrow_and_update().clone()
-    }
-
-    #[tokio::test]
-    async fn show_makes_state_visible_and_requests_placement() {
-        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
-        let (in_tx, in_rx) = mpsc::unbounded_channel();
-        let (place_tx, mut place_rx) = mpsc::unbounded_channel();
-
-        let handle = tokio::spawn(drive_visibility(
-            state_tx,
-            in_rx,
-            place_tx,
-            cfg(60_000),
-            dummy_ipc(),
-        ));
-        in_tx.send(DriverInput::Show).expect("send");
-        let s = drain_watch(&mut state_rx).await;
-        assert!(s.visible);
-        assert_eq!(
-            place_rx.recv().await,
-            Some(PlaceRequest),
-            "show triggers placement"
-        );
-        in_tx.send(DriverInput::Shutdown).expect("send");
-        handle.await.expect("driver join");
-    }
-
-    #[tokio::test]
-    async fn body_updates_while_visible_reset_the_auto_hide_timer() {
-        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
-        let (in_tx, in_rx) = mpsc::unbounded_channel();
-        let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(drive_visibility(
-            state_tx,
-            in_rx,
-            place_tx,
-            cfg(1_000),
-            dummy_ipc(),
-        ));
-
-        in_tx.send(DriverInput::Show).expect("send");
-        let _ = drain_watch(&mut state_rx).await;
-
-        for n in 0..5 {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            in_tx
-                .send(DriverInput::Event(Box::new(Event::LastDelta {
-                    id: "a".into(),
-                    text: format!("chunk {n}"),
-                })))
-                .expect("send");
-            let _ = drain_watch(&mut state_rx).await;
-        }
-
-        let still_visible = state_rx.borrow().visible;
-        assert!(still_visible, "events should keep the popup open");
-
-        in_tx.send(DriverInput::Shutdown).expect("send");
-        handle.await.expect("driver join");
-    }
-
-    #[tokio::test]
-    async fn in_flight_turn_pins_popup_open_past_auto_hide() {
-        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
-        let (in_tx, in_rx) = mpsc::unbounded_channel();
-        let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(drive_visibility(
-            state_tx,
-            in_rx,
-            place_tx,
-            cfg(500),
-            dummy_ipc(),
-        ));
-
-        in_tx.send(DriverInput::Show).expect("send");
-        let _ = drain_watch(&mut state_rx).await;
-        in_tx
-            .send(DriverInput::Event(Box::new(Event::ToolCall {
-                id: "a".into(),
-                name: "bash".into(),
-                args: json!({"command": "sleep 2"}),
-            })))
-            .expect("send");
-        let _ = drain_watch(&mut state_rx).await;
-
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        assert!(
-            state_rx.borrow().visible,
-            "popup should stay visible while turn is in flight"
-        );
-
-        in_tx
-            .send(DriverInput::Event(Box::new(Event::Done { id: "a".into() })))
-            .expect("send");
-        let _ = drain_watch(&mut state_rx).await;
-
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        assert!(
-            !state_rx.borrow().visible,
-            "popup should auto-hide after the turn finishes"
-        );
-
-        in_tx.send(DriverInput::Shutdown).expect("send");
-        handle.await.expect("driver join");
-    }
-
-    #[tokio::test]
-    async fn listening_swaps_in_the_longer_auto_hide_window() {
-        let popup_cfg = cfg(500);
-        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
-        let (in_tx, in_rx) = mpsc::unbounded_channel();
-        let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(drive_visibility(
-            state_tx,
-            in_rx,
-            place_tx,
-            popup_cfg,
-            dummy_ipc(),
-        ));
-
-        in_tx
-            .send(DriverInput::Event(Box::new(Event::ListenState {
-                id: "ls".into(),
-                active: true,
-            })))
-            .expect("send");
-        in_tx.send(DriverInput::Show).expect("send");
-        let _ = drain_watch(&mut state_rx).await;
-
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        assert!(
-            state_rx.borrow().visible,
-            "listening should extend the auto-hide window"
-        );
-
-        in_tx.send(DriverInput::Shutdown).expect("send");
-        handle.await.expect("driver join");
-    }
-
-    #[tokio::test]
-    async fn speaking_pins_popup_past_done_then_auto_hides_after_silence() {
-        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
-        let (in_tx, in_rx) = mpsc::unbounded_channel();
-        let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(drive_visibility(
-            state_tx,
-            in_rx,
-            place_tx,
-            cfg(500),
-            dummy_ipc(),
-        ));
-
-        in_tx.send(DriverInput::Show).expect("send");
-        let _ = drain_watch(&mut state_rx).await;
-
-        in_tx
-            .send(DriverInput::Event(Box::new(Event::LastDelta {
-                id: "a".into(),
-                text: "hi".into(),
-            })))
-            .expect("send");
-        let _ = drain_watch(&mut state_rx).await;
-        in_tx
-            .send(DriverInput::Event(Box::new(Event::SpeakingState {
-                id: "a".into(),
-                speaking: true,
-            })))
-            .expect("send");
-        in_tx
-            .send(DriverInput::Event(Box::new(Event::Done { id: "a".into() })))
-            .expect("send");
-        let _ = drain_watch(&mut state_rx).await;
-
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        assert!(
-            state_rx.borrow().visible,
-            "popup should stay visible while TTS is playing"
-        );
-
-        in_tx
-            .send(DriverInput::Event(Box::new(Event::SpeakingState {
-                id: "a".into(),
-                speaking: false,
-            })))
-            .expect("send");
-        let _ = drain_watch(&mut state_rx).await;
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        assert!(
-            !state_rx.borrow().visible,
-            "popup should auto-hide after TTS finishes"
-        );
-
-        in_tx.send(DriverInput::Shutdown).expect("send");
-        handle.await.expect("driver join");
-    }
-
-    #[test]
-    fn push_with_visibility_skips_unchanged_snapshots() {
-        let (tx, mut rx) = watch::channel(PopupState::default());
-        push_with_visibility(&tx, PopupState::default(), false);
-        assert!(!rx.has_changed().expect("sender alive"));
-        push_with_visibility(&tx, PopupState::default(), true);
-        assert!(rx.has_changed().expect("sender alive"));
-        assert!(rx.borrow_and_update().visible);
-        push_with_visibility(&tx, PopupState::default(), true);
-        assert!(!rx.has_changed().expect("sender alive"));
-    }
-
-    #[tokio::test]
-    async fn tool_call_event_pushes_the_tracker_snapshot() {
-        let (state_tx, mut state_rx) = watch::channel(PopupState::default());
-        let (in_tx, in_rx) = mpsc::unbounded_channel();
-        let (place_tx, _place_rx) = mpsc::unbounded_channel();
-        let handle = tokio::spawn(drive_visibility(
-            state_tx,
-            in_rx,
-            place_tx,
-            cfg(60_000),
-            dummy_ipc(),
-        ));
-
-        in_tx
-            .send(DriverInput::Event(Box::new(Event::ToolCall {
-                id: "a".into(),
-                name: "bash".into(),
-                args: json!({"command": "ls"}),
-            })))
-            .expect("send");
-        let s = drain_watch(&mut state_rx).await;
-        let footer = s.footer.expect("footer present");
-        assert_eq!(footer.name, "bash");
-
-        in_tx.send(DriverInput::Shutdown).expect("send");
-        handle.await.expect("driver join");
-    }
-}
+mod tests;

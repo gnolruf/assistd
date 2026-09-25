@@ -11,12 +11,11 @@ use crate::{MemoryError, Result, migrations};
 
 use super::writer::{WriteOp, dispatch_write, spawn_writer};
 
-/// Writer queue depth: enough to absorb one bursty agent step (roughly
-/// ten tool call/result pairs) without backpressuring the sender.
+/// Deep enough to absorb one bursty agent step without backpressuring the sender.
 const WRITER_QUEUE_DEPTH: usize = 256;
 
-/// Cheaply cloneable handle shared by every store: reads use `conn`
-/// directly, writes go through the writer task.
+/// Cheaply cloneable handle shared by every store: reads hit the connection directly,
+/// writes go through the writer task.
 #[derive(Clone)]
 pub struct SqliteHandle {
     pub(super) conn: Connection,
@@ -24,10 +23,8 @@ pub struct SqliteHandle {
 }
 
 impl SqliteHandle {
-    /// Open `path` (creating parent directories), apply pragmas, run
-    /// migrations, and spawn the writer task. Returns the handle and
-    /// the writer task's `JoinHandle`; see [`spawn_writer`] for when
-    /// the task exits.
+    /// Open `path` (creating parent directories), apply pragmas, run migrations, and
+    /// spawn the writer task, returning it alongside the handle.
     pub async fn open(
         path: &Path,
         shutdown: watch::Receiver<bool>,
@@ -81,8 +78,7 @@ impl SqliteHandle {
         &self.writer_tx
     }
 
-    /// Clone of the writer sender, for producers that enqueue
-    /// [`WriteOp`]s directly.
+    /// Clone of the writer sender, for enqueueing [`WriteOp`]s directly.
     pub fn writer_tx(&self) -> Arc<mpsc::Sender<WriteOp>> {
         self.writer_tx.clone()
     }
@@ -118,7 +114,7 @@ mod tests {
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
 
-        let n: i64 = handle
+        let table_count: i64 = handle
             .conn()
             .call(|c| -> rusqlite::Result<_> {
                 c.query_row(
@@ -129,7 +125,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(table_count, 1);
 
         drop(handle);
         writer.await.unwrap();

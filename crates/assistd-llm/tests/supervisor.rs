@@ -3,18 +3,23 @@
 
 #![cfg(feature = "test-support")]
 
-mod common;
+use std::net::Ipv4Addr;
+use std::num::NonZeroU16;
+use std::path::Path;
+use std::sync::Once;
+use std::time::{Duration, Instant};
+
+use rustix::process::{Pid, Signal, kill_process};
+use tokio::net::TcpListener;
+use tokio::sync::watch;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig};
 use assistd_llm::{LlamaServerError, LlamaService, ReadyState};
+
 use common::FakeLlama;
-use std::net::Ipv4Addr;
-use std::num::NonZeroU16;
-use std::sync::Once;
-use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
-use tokio::sync::watch;
+
+mod common;
 
 fn init_tracing() {
     static ONCE: Once = Once::new();
@@ -29,8 +34,7 @@ fn init_tracing() {
     });
 }
 
-/// Grab an ephemeral port by binding and dropping. Small race window, good
-/// enough for tests.
+/// Grab an ephemeral port by binding and dropping it.
 async fn grab_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -96,11 +100,9 @@ async fn restarts_after_external_kill() {
     let (service, shutdown_tx) = start_service(&fake, port).await;
 
     let first_pid = service.pid().expect("first pid");
-    let pid = rustix::process::Pid::from_raw(first_pid as i32).expect("nonzero pid");
-    rustix::process::kill_process(pid, rustix::process::Signal::KILL)
-        .expect("SIGKILL on test child");
+    let pid = Pid::from_raw(first_pid as i32).expect("nonzero pid");
+    kill_process(pid, Signal::KILL).expect("SIGKILL on test child");
 
-    // Wait for the supervisor to notice and respawn.
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         if Instant::now() >= deadline {
@@ -135,11 +137,9 @@ async fn enters_degraded_after_five_failures() {
         matches!(err, LlamaServerError::StartupFailed { attempts: 5 }),
         "{err:?}"
     );
-    // Backoff budget: 1 + 2 + 4 + 8 = 15s of sleeps between 4 retries. Add
-    // generous slack for scheduler jitter + spawn time.
     assert!(
         elapsed >= Duration::from_secs(14),
-        "start returned too quickly: {elapsed:?}"
+        "start returned too quickly for 1+2+4+8s of backoff: {elapsed:?}"
     );
     assert!(
         elapsed < Duration::from_secs(40),
@@ -153,11 +153,10 @@ async fn respects_shutdown_during_backoff() {
     let port = grab_port().await;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Flip the shutdown watch after ~3 seconds: enough time to hit the first
-    // backoff sleep but far short of the full 5-failure timeline.
+    let during_early_backoff = Duration::from_secs(3);
     let flip_tx = shutdown_tx.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(during_early_backoff).await;
         let _ = flip_tx.send(true);
     });
 
@@ -185,16 +184,15 @@ async fn shutdown_kills_running_child() {
 
     let pid = service.pid().expect("running child");
     assert!(
-        std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        Path::new(&format!("/proc/{pid}")).exists(),
         "fake child should be alive before shutdown"
     );
 
     let _ = shutdown_tx.send(true);
     service.shutdown().await.unwrap();
 
-    // Give the kernel a beat to reap the process.
     for _ in 0..50 {
-        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        if !Path::new(&format!("/proc/{pid}")).exists() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

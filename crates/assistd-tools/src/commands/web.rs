@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -6,6 +7,8 @@ use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 
 /// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
+
+const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
 
 /// `web URL`: HTTP GET a URL and return the response body as stdout.
 pub struct WebCommand {
@@ -81,80 +84,58 @@ impl Command for WebCommand {
         let response = match self.client.get(url).send().await {
             Ok(r) => r,
             Err(e) => {
-                return CommandOutput::failed(
-                    1,
-                    error_line(
-                        "web",
-                        format_args!("transport error: {url}: {e}"),
-                        Hint::Try,
-                        "a different URL or check the endpoint is reachable",
-                    )
-                    .into_bytes(),
-                );
+                return fetch_failed(format_args!("transport error: {url}: {e}"), UNREACHABLE);
             }
         };
         let status = response.status();
         if !status.is_success() {
-            return CommandOutput::failed(
-                1,
-                error_line(
-                    "web",
-                    format_args!(
-                        "HTTP {} {}: {url}",
-                        status.as_u16(),
-                        status.canonical_reason().unwrap_or("")
-                    ),
-                    Hint::Try,
-                    "a different URL or check the endpoint is reachable",
-                )
-                .into_bytes(),
+            return fetch_failed(
+                format_args!(
+                    "HTTP {} {}: {url}",
+                    status.as_u16(),
+                    status.canonical_reason().unwrap_or("")
+                ),
+                UNREACHABLE,
             );
         }
 
         let body = match response.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                return CommandOutput::failed(
-                    1,
-                    error_line(
-                        "web",
-                        format_args!("body read failed: {url}: {e}"),
-                        Hint::Try,
-                        "re-running or a different URL",
-                    )
-                    .into_bytes(),
+                return fetch_failed(
+                    format_args!("body read failed: {url}: {e}"),
+                    "re-running or a different URL",
                 );
             }
         };
         if body.len() > BODY_MAX {
-            return CommandOutput::failed(
-                1,
-                error_line(
-                    "web",
-                    format_args!(
-                        "response body exceeded {BODY_MAX} bytes (got {}): {url}",
-                        body.len()
-                    ),
-                    Hint::Try,
-                    "a URL path that returns less content",
-                )
-                .into_bytes(),
+            return fetch_failed(
+                format_args!(
+                    "response body exceeded {BODY_MAX} bytes (got {}): {url}",
+                    body.len()
+                ),
+                "a URL path that returns less content",
             );
         }
         CommandOutput::ok(body.to_vec())
     }
 }
 
+fn fetch_failed(what: impl Display, recovery: &str) -> CommandOutput {
+    CommandOutput::failed(1, error_line("web", what, Hint::Try, recovery).into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::net::SocketAddr;
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
-    /// Spin up a one-shot HTTP server that replies with `body`, then return
-    /// its address and task. Handles a single request then closes.
+    use super::*;
+
+    /// A one-shot HTTP server answering a single request with `body`.
     async fn serve_once(
         status_line: &'static str,
         body: &'static [u8],
@@ -229,8 +210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_failure_exits_1() {
-        // 127.0.0.1:1 is reserved and won't answer.
+    async fn connection_failure_to_reserved_port_exits_1() {
         let cmd = WebCommand::with_timeout(Duration::from_millis(200));
         let out = run_web(&cmd, &["http://127.0.0.1:1/"]).await;
         assert_eq!(out.exit_code, 1);

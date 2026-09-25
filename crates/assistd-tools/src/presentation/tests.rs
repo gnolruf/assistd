@@ -1,7 +1,7 @@
-use super::*;
-use crate::command::CommandOutput;
-use crate::fixtures::PNG_BYTES;
 use tempfile::tempdir;
+
+use super::*;
+use crate::fixtures::PNG_BYTES;
 
 fn spec_in(dir: &Path) -> PresentSpec {
     PresentSpec {
@@ -40,14 +40,16 @@ fn binary_label_flags_bytes_the_model_should_not_see() {
             &[0xC3, 0x28, b' ', b'h', b'i'][..],
             Some("invalid-utf8"),
         ),
-        // 3 of 20 characters are controls: over the 10% threshold.
         (
             "15% controls",
             b"abcdef\x01\x02\x03ghijklmnopq",
             Some("control-chars"),
         ),
-        // Exactly 10% is still text; the rule is strictly greater.
-        ("10% controls", b"abcdefgh\x01\x02ijklmnopqr", None),
+        (
+            "exactly 10% controls is still text",
+            b"abcdefgh\x01\x02ijklmnopqr",
+            None,
+        ),
         ("tabs and newlines", b"a\tb\nc\td\ne\tf\n", None),
         ("empty", b"", None),
         ("multibyte utf-8", "héllo wörld ñ 日本語\n".as_bytes(), None),
@@ -75,8 +77,6 @@ fn truncate_lines_bytes_applies_both_caps() {
     for (s, max_lines, max_bytes, expected) in [
         ("a\nb\nc\nd\ne\n", 3, 1024, "a\nb\nc\n"),
         ("abcdefghij\n", 100, 5, "abcde"),
-        // A byte cap inside a multi-byte character backs off to the
-        // previous boundary.
         ("日本", 100, 4, "日"),
         ("a\nb\nc\n", 100, 1024, "a\nb\nc\n"),
     ] {

@@ -2,6 +2,8 @@
 //! never opens the SQLite file itself, because the daemon owns the
 //! writer.
 
+use std::io::Write;
+
 use anyhow::Result;
 use assistd_ipc::{Event, ReindexKind, Request};
 use clap::{Args, Subcommand};
@@ -140,15 +142,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             Event::ReindexProgress {
                 kind, done, total, ..
             } if !reindex_quiet => {
-                use std::io::Write;
-                let mut err = std::io::stderr();
-                let kind_changed = last_reindex_kind != Some(*kind);
-                if kind_changed && last_reindex_kind.is_some() {
-                    let _ = writeln!(err);
-                }
-                last_reindex_kind = Some(*kind);
-                let _ = write!(err, "\rreindex {kind}: {done}/{total}");
-                let _ = err.flush();
+                print_reindex_progress(*kind, *done, *total, &mut last_reindex_kind);
             }
             Event::Done { .. } if last_reindex_kind.is_some() && !reindex_quiet => {
                 eprintln!();
@@ -158,4 +152,21 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
         Ok(())
     })
     .await
+}
+
+/// Overwrite the stderr progress line in place, starting a new line when
+/// the reindex moves on to another kind.
+fn print_reindex_progress(
+    kind: ReindexKind,
+    done: u32,
+    total: u32,
+    last_kind: &mut Option<ReindexKind>,
+) {
+    let mut err = std::io::stderr();
+    if last_kind.is_some_and(|last| last != kind) {
+        let _ = writeln!(err);
+    }
+    *last_kind = Some(kind);
+    let _ = write!(err, "\rreindex {kind}: {done}/{total}");
+    let _ = err.flush();
 }

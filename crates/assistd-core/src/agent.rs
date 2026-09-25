@@ -4,40 +4,38 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::recovery::{Component, StatusSeverity};
-use crate::recovery_event;
+use base64::Engine;
+use serde_json::Value;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, instrument, warn};
+
 use assistd_ipc::StatusKind;
 use assistd_llm::{
     HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
     ToolResultPayload,
 };
 use assistd_tools::{Attachment, ToolRegistry};
-use serde_json::Value;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
 
-/// Wall-clock budget for waiting on an LLM restart before the turn
-/// fails. Covers the supervisor's worst-case backoff sum (63s) plus
-/// headroom for spawn and health-probe latency.
+use crate::recovery::{Component, StatusSeverity};
+use crate::recovery_event;
+
+/// How long a turn waits for an LLM restart: the supervisor's worst-case
+/// backoff (63s) plus spawn and probe headroom.
 const REPLAY_WAIT_BUDGET: Duration = Duration::from_secs(75);
 
-/// Consecutive identical tool calls after which the model is treated
-/// as stuck and told to stop calling tools.
+/// Consecutive identical tool calls after which the model is treated as
+/// stuck.
 const DUPLICATE_CALL_LIMIT: usize = 3;
 
-/// Ceiling on tool-calling steps per turn. Only bounds a turn that keeps
-/// making *different* calls without answering; repeats are caught by
-/// [`DUPLICATE_CALL_LIMIT`] long before this.
+/// Ceiling on tool-calling steps per turn that keep making different calls.
 const MAX_TOOL_STEPS: u32 = 200;
 
 /// Long-lived agent dependencies, reused across turns.
 ///
-/// With a `health` probe the loop recovers from one llama-server crash
-/// per step: it waits for the supervisor to report ready and replays the
-/// step. Without one, a crash ends the turn. A tool invocation still
-/// running after `tool_deadline` is dropped and reported to the model as
-/// a failed call.
+/// With a `health` probe the loop replays a step once after a
+/// llama-server crash; without one, a crash ends the turn. A tool still
+/// running after `tool_deadline` is reported to the model as failed.
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
@@ -62,18 +60,12 @@ impl Agent {
         }
     }
 
-    /// Run one agent turn: stream events on `tx` until the model answers,
-    /// the turn is cancelled, or the backend fails.
+    /// Run one agent turn, streaming events on `tx` until the model
+    /// answers. Stops without error when `tx` closes or `cancel` fires.
+    /// Turns must not run concurrently on one agent.
     ///
-    /// The turn stops without error when `tx` closes or `cancel` fires;
-    /// both are checked between iterations and raced against the LLM
-    /// step and each tool dispatch, so a slow tool is abandoned promptly.
-    ///
-    /// Turns must not run concurrently: two overlapping calls would
-    /// interleave in the backend's conversation state.
-    ///
-    /// Errors when the backend fails; a restart the supervisor could not
-    /// complete surfaces as [`LlmError::ServerRestarting`].
+    /// Errors when the backend fails; an incomplete restart surfaces as
+    /// [`LlmError::ServerRestarting`].
     #[instrument(skip_all, name = "agent_turn")]
     pub async fn run_turn(
         &self,
@@ -103,9 +95,8 @@ impl Agent {
                 return Ok(());
             }
 
-            let outcome = match self.step_with_replay(&turn).await? {
-                Some(outcome) => outcome,
-                None => return Ok(()),
+            let Some(outcome) = self.step_with_replay(&turn).await? else {
+                return Ok(());
             };
 
             match outcome {
@@ -114,31 +105,13 @@ impl Agent {
                     return Ok(());
                 }
                 StepOutcome::ToolCalls(calls) if turn.tools_withdrawn => {
-                    warn!(
-                        target: "assistd::agent",
-                        iteration = turn.iteration,
-                        "model requested tools after they were withdrawn; ending turn"
-                    );
-                    let results = calls
-                        .iter()
-                        .map(|call| cancelled_tool_result(call, "ended; tools are unavailable").0)
-                        .collect();
-                    self.backend.push_tool_results(results).await?;
-                    let _ = turn.tx.send(LlmEvent::Done).await;
-                    return Ok(());
+                    return self.refuse_withdrawn_calls(&turn, &calls).await;
                 }
                 StepOutcome::ToolCalls(calls) => {
                     let (results, stuck) = self.dispatch_tool_calls(&mut turn, calls).await;
                     self.backend.push_tool_results(results).await?;
                     turn.iteration += 1;
-                    let exhausted = if stuck {
-                        Some(ToolBudgetExhausted::Repeating)
-                    } else if turn.iteration >= MAX_TOOL_STEPS {
-                        Some(ToolBudgetExhausted::StepCeiling)
-                    } else {
-                        None
-                    };
-                    if let Some(why) = exhausted {
+                    if let Some(why) = ToolBudgetExhausted::check(stuck, turn.iteration) {
                         self.withdraw_tools(&mut turn, why).await;
                     }
                 }
@@ -146,10 +119,28 @@ impl Agent {
         }
     }
 
-    /// One LLM step. `Ok(None)` means the turn was cancelled while
-    /// waiting. A crash mid-step is retried once after the supervisor
-    /// reports the server ready again; any other failure, or a second
-    /// crash, ends the turn with an error after telling the client.
+    async fn refuse_withdrawn_calls(
+        &self,
+        turn: &Turn,
+        calls: &[ToolCall],
+    ) -> Result<(), LlmError> {
+        warn!(
+            target: "assistd::agent",
+            iteration = turn.iteration,
+            "model requested tools after they were withdrawn; ending turn"
+        );
+        let results = calls
+            .iter()
+            .map(|call| cancelled_tool_result(call, "ended; tools are unavailable").0)
+            .collect();
+        self.backend.push_tool_results(results).await?;
+        let _ = turn.tx.send(LlmEvent::Done).await;
+        Ok(())
+    }
+
+    /// One LLM step; `Ok(None)` means the turn was cancelled. A crash is
+    /// replayed once after the server is ready again; any other failure
+    /// ends the turn with an error after telling the client.
     async fn step_with_replay(&self, turn: &Turn) -> Result<Option<StepOutcome>, LlmError> {
         let mut restart_attempted = false;
         loop {
@@ -180,24 +171,16 @@ impl Agent {
                     }
                 }
                 (Err(e), _) => {
-                    let label = match &e {
-                        LlmError::Chat(_) => "chat backend",
-                        LlmError::ToolCallParse(_) => "tool-call parse",
-                        LlmError::Unavailable(_) => "backend unavailable",
-                        LlmError::ServerRestarting(_) => "llm restarting",
-                    };
-                    fail_turn(&turn.tx, &format!("{label}: {e}")).await;
+                    fail_turn(&turn.tx, &format!("{}: {e}", llm_error_label(&e))).await;
                     return Err(e);
                 }
             }
         }
     }
 
-    /// Announce the step's calls with one `ToolCallsRequested`, then
-    /// dispatch each in order, emitting `ToolCall` and `ToolResult`
-    /// events. Stops early, with cancelled payloads for the rest, when the
-    /// client goes away or the turn is cancelled. The flag is `true` when
-    /// a call repeated [`DUPLICATE_CALL_LIMIT`] times in a row.
+    /// Announce the step's calls, then dispatch each in order. Stops early
+    /// with cancelled payloads when the client leaves or the turn is
+    /// cancelled. The flag is `true` when a call hit [`DUPLICATE_CALL_LIMIT`].
     async fn dispatch_tool_calls(
         &self,
         turn: &mut Turn,
@@ -320,9 +303,108 @@ enum Replay {
     Abandoned(String),
 }
 
+/// Why the loop stopped accepting tool calls for the rest of the turn.
+///
+/// The schemas stay in the request after withdrawal; without them the
+/// server stops parsing tool-call markup and would stream it as text.
+#[derive(Debug, Clone, Copy)]
+enum ToolBudgetExhausted {
+    Repeating,
+    StepCeiling,
+}
+
+impl ToolBudgetExhausted {
+    fn check(stuck: bool, iteration: u32) -> Option<Self> {
+        if stuck {
+            Some(Self::Repeating)
+        } else if iteration >= MAX_TOOL_STEPS {
+            Some(Self::StepCeiling)
+        } else {
+            None
+        }
+    }
+
+    fn reason(self) -> String {
+        match self {
+            Self::Repeating => {
+                format!("the same tool call was repeated {DUPLICATE_CALL_LIMIT} times in a row")
+            }
+            Self::StepCeiling => {
+                format!("the turn reached its ceiling of {MAX_TOOL_STEPS} tool steps")
+            }
+        }
+    }
+
+    fn model_note(self) -> String {
+        format!(
+            "Tool access for this turn has been withdrawn because {}. Do not request \
+             any more tool calls. Answer the user now using what you have already \
+             learned, and say plainly which parts you could not finish.",
+            self.reason()
+        )
+    }
+}
+
+/// How many times in a row the model has issued the same tool call.
+#[derive(Default)]
+struct CallStreak {
+    last: Option<(String, Value)>,
+    count: usize,
+}
+
+impl CallStreak {
+    fn record(&mut self, call: &ToolCall) -> usize {
+        let same = self
+            .last
+            .as_ref()
+            .is_some_and(|(name, args)| *name == call.name && *args == call.arguments);
+        if same {
+            self.count += 1;
+        } else {
+            self.last = Some((call.name.clone(), call.arguments.clone()));
+            self.count = 1;
+        }
+        self.count
+    }
+}
+
+fn llm_error_label(error: &LlmError) -> &'static str {
+    match error {
+        LlmError::Chat(_) => "chat backend",
+        LlmError::ToolCallParse(_) => "tool-call parse",
+        LlmError::Unavailable(_) => "backend unavailable",
+        LlmError::ServerRestarting(_) => "llm restarting",
+    }
+}
+
 /// Tell the client the server crashed, wait for the supervisor to bring
 /// it back, and report whether the step can be replayed.
 async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &str) -> Replay {
+    announce_crash(turn, reason).await;
+
+    let wait_result = tokio::select! {
+        biased;
+        () = turn.cancel.cancelled() => {
+            debug!(
+                target: "assistd::agent",
+                iteration = turn.iteration,
+                "cancellation fired while waiting for LLM restart"
+            );
+            return Replay::Cancelled;
+        }
+        res = probe.wait_for_ready(REPLAY_WAIT_BUDGET) => res,
+    };
+
+    match wait_result {
+        Ok(()) => {
+            announce_replay(turn).await;
+            Replay::Ready
+        }
+        Err(wait_err) => Replay::Abandoned(abandon_replay(turn, wait_err).await),
+    }
+}
+
+async fn announce_crash(turn: &Turn, reason: &str) {
     recovery_event!(
         StatusSeverity::Warning,
         Component::Llm,
@@ -340,68 +422,53 @@ async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &st
             "LLM crashed: restarting and replaying your query".to_string(),
         ))
         .await;
+}
 
-    let wait_result = tokio::select! {
-        biased;
-        () = turn.cancel.cancelled() => {
-            debug!(
-                target: "assistd::agent",
-                iteration = turn.iteration,
-                "cancellation fired while waiting for LLM restart"
-            );
-            return Replay::Cancelled;
-        }
-        res = probe.wait_for_ready(REPLAY_WAIT_BUDGET) => res,
+async fn announce_replay(turn: &Turn) {
+    recovery_event!(
+        StatusSeverity::Info,
+        Component::Llm,
+        "replay_ready",
+        iteration = turn.iteration,
+        "supervisor reported Ready; replaying user query"
+    );
+    let _ = turn
+        .tx
+        .send(status_event(
+            StatusSeverity::Info,
+            Component::Llm,
+            StatusKind::Replaying,
+            "LLM restored: replaying your query".to_string(),
+        ))
+        .await;
+}
+
+/// Report the failed restart to the client and return the turn's final
+/// error message.
+async fn abandon_replay(turn: &Turn, wait_err: HealthWaitError) -> String {
+    recovery_event!(
+        StatusSeverity::Error,
+        Component::Llm,
+        "replay_abandoned",
+        iteration = turn.iteration,
+        wait_error = %wait_err,
+        "supervisor did not return to Ready; abandoning replay"
+    );
+    let final_msg = match wait_err {
+        HealthWaitError::Timeout => "LLM did not recover before timeout",
+        HealthWaitError::Degraded => "LLM supervisor entered degraded state; restart abandoned",
+        HealthWaitError::NoService => "LLM service is not currently attached",
     };
-
-    match wait_result {
-        Ok(()) => {
-            recovery_event!(
-                StatusSeverity::Info,
-                Component::Llm,
-                "replay_ready",
-                iteration = turn.iteration,
-                "supervisor reported Ready; replaying user query"
-            );
-            let _ = turn
-                .tx
-                .send(status_event(
-                    StatusSeverity::Info,
-                    Component::Llm,
-                    StatusKind::Replaying,
-                    "LLM restored: replaying your query".to_string(),
-                ))
-                .await;
-            Replay::Ready
-        }
-        Err(wait_err) => {
-            recovery_event!(
-                StatusSeverity::Error,
-                Component::Llm,
-                "replay_abandoned",
-                iteration = turn.iteration,
-                wait_error = %wait_err,
-                "supervisor did not return to Ready; abandoning replay"
-            );
-            let final_msg = match wait_err {
-                HealthWaitError::Timeout => "LLM did not recover before timeout",
-                HealthWaitError::Degraded => {
-                    "LLM supervisor entered degraded state; restart abandoned"
-                }
-                HealthWaitError::NoService => "LLM service is not currently attached",
-            };
-            let _ = turn
-                .tx
-                .send(status_event(
-                    StatusSeverity::Error,
-                    Component::Llm,
-                    StatusKind::Degraded,
-                    final_msg.to_string(),
-                ))
-                .await;
-            Replay::Abandoned(final_msg.to_string())
-        }
-    }
+    let _ = turn
+        .tx
+        .send(status_event(
+            StatusSeverity::Error,
+            Component::Llm,
+            StatusKind::Degraded,
+            final_msg.to_string(),
+        ))
+        .await;
+    final_msg.to_string()
 }
 
 async fn fail_turn(tx: &mpsc::Sender<LlmEvent>, message: &str) {
@@ -424,63 +491,6 @@ fn status_event(
         component,
         event,
         message,
-    }
-}
-
-/// Why the loop stopped accepting tool calls for the rest of the turn.
-///
-/// The schemas stay in the request after withdrawal. Without them the
-/// server stops parsing tool-call markup, so a model that calls a tool
-/// anyway would stream the raw markup to the user as its answer.
-#[derive(Debug, Clone, Copy)]
-enum ToolBudgetExhausted {
-    Repeating,
-    StepCeiling,
-}
-
-impl ToolBudgetExhausted {
-    fn reason(self) -> String {
-        match self {
-            Self::Repeating => {
-                format!("the same tool call was repeated {DUPLICATE_CALL_LIMIT} times in a row")
-            }
-            Self::StepCeiling => {
-                format!("the turn reached its ceiling of {MAX_TOOL_STEPS} tool steps")
-            }
-        }
-    }
-
-    fn model_note(self) -> String {
-        format!(
-            "Tool access for this turn has been withdrawn because {}. Do not request \
-             any more tool calls. Answer the user now using what you have already \
-             learned, and say plainly which parts you could not finish.",
-            self.reason()
-        )
-    }
-}
-
-/// Tracks how many times in a row the model has issued the same tool
-/// call, so a stuck loop is caught by content rather than by count.
-#[derive(Default)]
-struct CallStreak {
-    last: Option<(String, Value)>,
-    count: usize,
-}
-
-impl CallStreak {
-    fn record(&mut self, call: &ToolCall) -> usize {
-        let same = self
-            .last
-            .as_ref()
-            .is_some_and(|(name, args)| *name == call.name && *args == call.arguments);
-        if same {
-            self.count += 1;
-        } else {
-            self.last = Some((call.name.clone(), call.arguments.clone()));
-            self.count = 1;
-        }
-        self.count
     }
 }
 
@@ -524,23 +534,7 @@ async fn dispatch_tool_call(
     let start = Instant::now();
 
     let Some(tool) = tools.get(&call.name) else {
-        let duration_ms = start.elapsed().as_millis();
-        warn!(
-            target: "assistd::agent",
-            iteration,
-            tool = %call.name,
-            duration_ms = duration_ms,
-            "unknown tool"
-        );
-        let available = tools.names().collect::<Vec<_>>().join(", ");
-        return error_tool_result(
-            call,
-            format!(
-                "[error] agent: unknown tool '{}'. Available: {available}.",
-                call.name
-            ),
-            duration_ms,
-        );
+        return unknown_tool_result(tools, call, iteration, start.elapsed().as_millis());
     };
 
     let Ok(result) = tokio::time::timeout(deadline, tool.invoke(call.arguments.clone())).await
@@ -550,7 +544,7 @@ async fn dispatch_tool_call(
             target: "assistd::agent",
             iteration,
             tool = %call.name,
-            duration_ms = duration_ms,
+            duration_ms,
             "tool call exceeded its deadline; abandoning it"
         );
         return error_tool_result(
@@ -565,35 +559,65 @@ async fn dispatch_tool_call(
     };
     let duration_ms = start.elapsed().as_millis();
 
-    let raw = match result {
-        Ok(v) => v,
+    match result {
+        Ok(raw) => completed_tool_result(call, raw, iteration, duration_ms),
         Err(e) => {
             warn!(
                 target: "assistd::agent",
                 iteration,
                 tool = %call.name,
-                duration_ms = duration_ms,
+                duration_ms,
                 error = %e,
                 "tool invocation errored"
             );
-            return error_tool_result(
+            error_tool_result(
                 call,
                 format!(
                     "[error] {}: tool invocation failed. Check: {e}. Try: a different command.",
                     call.name
                 ),
                 duration_ms,
-            );
+            )
         }
-    };
+    }
+}
 
+fn unknown_tool_result(
+    tools: &ToolRegistry,
+    call: &ToolCall,
+    iteration: u32,
+    duration_ms: u128,
+) -> (ToolResultPayload, Value) {
+    warn!(
+        target: "assistd::agent",
+        iteration,
+        tool = %call.name,
+        duration_ms,
+        "unknown tool"
+    );
+    let available = tools.names().collect::<Vec<_>>().join(", ");
+    error_tool_result(
+        call,
+        format!(
+            "[error] agent: unknown tool '{}'. Available: {available}.",
+            call.name
+        ),
+        duration_ms,
+    )
+}
+
+fn completed_tool_result(
+    call: &ToolCall,
+    raw: Value,
+    iteration: u32,
+    duration_ms: u128,
+) -> (ToolResultPayload, Value) {
     let content = raw
         .get("output")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
     let exit_code = raw.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
-    let output_size = content.len();
     let command = call
         .arguments
         .get("command")
@@ -605,9 +629,9 @@ async fn dispatch_tool_call(
         iteration,
         tool = %call.name,
         command = %command,
-        exit_code = exit_code,
-        output_size = output_size,
-        duration_ms = duration_ms,
+        exit_code,
+        output_size = content.len(),
+        duration_ms,
         "tool call complete"
     );
 
@@ -628,14 +652,13 @@ async fn dispatch_tool_call(
     )
 }
 
-fn parse_attachment(v: &Value) -> Option<Attachment> {
-    let kind = v.get("type")?.as_str()?;
+fn parse_attachment(value: &Value) -> Option<Attachment> {
+    let kind = value.get("type")?.as_str()?;
     if kind != "image" {
         return None;
     }
-    let mime = v.get("mime")?.as_str()?.to_string();
-    let data_b64 = v.get("data")?.as_str()?;
-    use base64::Engine;
+    let mime = value.get("mime")?.as_str()?.to_string();
+    let data_b64 = value.get("data")?.as_str()?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
         .ok()?;

@@ -1,29 +1,26 @@
 //! `RuntimeState`: per-process bookkeeping owned by `AppState`.
 
-use assistd_ipc::{Event, EventKind, SubscribeFilter};
-use assistd_memory::{BranchId, SessionId};
+use std::sync::Arc;
+
 use parking_lot::Mutex as StdMutex;
 use serde_json::Value;
-use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{Mutex, broadcast, oneshot, watch};
+use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+
+use assistd_ipc::{Event, EventKind, SubscribeFilter};
+use assistd_memory::{BranchId, SessionId};
 
 const EVENTS_BUS_CAPACITY: usize = 256;
 
 /// The active (session, branch) pair, always read and replaced together.
 pub struct ConversationContext {
-    inner: tokio::sync::RwLock<ConversationContextInner>,
+    inner: RwLock<ConversationContextInner>,
     /// Lets holders that cannot await the lock read the session
     /// synchronously.
     session: watch::Sender<Arc<SessionId>>,
-}
-
-#[derive(Clone)]
-struct ConversationContextInner {
-    session_id: Arc<SessionId>,
-    branch_id: BranchId,
 }
 
 impl ConversationContext {
@@ -36,7 +33,7 @@ impl ConversationContext {
     pub fn from_arc(session_id: Arc<SessionId>, branch_id: BranchId) -> Self {
         let (session, _) = watch::channel(session_id.clone());
         Self {
-            inner: tokio::sync::RwLock::new(ConversationContextInner {
+            inner: RwLock::new(ConversationContextInner {
                 session_id,
                 branch_id,
             }),
@@ -51,18 +48,24 @@ impl ConversationContext {
 
     /// The active session and branch.
     pub async fn current(&self) -> (Arc<SessionId>, BranchId) {
-        let g = self.inner.read().await;
-        (g.session_id.clone(), g.branch_id)
+        let active = self.inner.read().await;
+        (active.session_id.clone(), active.branch_id)
     }
 
     /// Make `branch_id` of `session_id` active and notify
     /// [`Self::session_updates`] watchers.
     pub async fn replace(&self, session_id: Arc<SessionId>, branch_id: BranchId) {
-        let mut g = self.inner.write().await;
-        g.session_id = session_id.clone();
-        g.branch_id = branch_id;
+        let mut active = self.inner.write().await;
+        active.session_id = session_id.clone();
+        active.branch_id = branch_id;
         self.session.send_replace(session_id);
     }
+}
+
+#[derive(Clone)]
+struct ConversationContextInner {
+    session_id: Arc<SessionId>,
+    branch_id: BranchId,
 }
 
 /// Per-process request bookkeeping: the active conversation, turn
@@ -75,12 +78,11 @@ pub struct RuntimeState {
     /// Fire-and-forget persistence tasks, drained at daemon shutdown.
     pub(in crate::state) persistence_tracker: TaskTracker,
     /// Presence warmup spawned by PTT-start and joined by PTT-stop.
-    pub(in crate::state) warmup_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    pub(in crate::state) warmup_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Cancellation token for the running agent turn.
     pub(in crate::state) current_cancel: Arc<Mutex<Option<CancellationToken>>>,
-    /// Completion signal of the most recently queued persistence write.
-    /// Each new write swaps it out synchronously and awaits it first, so
-    /// `seq` follows emission order rather than scheduler order.
+    /// Completion signal of the most recently queued persistence write,
+    /// which the next write awaits so `seq` follows emission order.
     pub(in crate::state) persist_chain: StdMutex<Option<oneshot::Receiver<()>>>,
     events_bus: broadcast::Sender<Event>,
     /// Filters of the live [`BusSubscription`]s.
@@ -120,10 +122,9 @@ impl RuntimeState {
     }
 
     /// Attach a receiver to the events bus that yields only events
-    /// matching `filter`.
+    /// matching `filter`. The filter is registered first, so no matching
+    /// event published after this returns is skipped.
     pub fn subscribe_events(&self, filter: SubscribeFilter) -> BusSubscription {
-        // Registered before subscribing, so an event published once the
-        // receiver exists is never skipped for lack of interest.
         self.bus_interest.lock().push(filter.clone());
         BusSubscription {
             rx: self.events_bus.subscribe(),
@@ -133,15 +134,13 @@ impl RuntimeState {
     }
 
     /// Whether any attached [`BusSubscription`] wants events of `kind`.
-    /// Lets a publisher skip building an event nobody would receive.
     pub fn bus_wants(&self, kind: EventKind) -> bool {
         self.bus_interest.lock().iter().any(|f| f.matches(kind))
     }
 
     /// Publish a copy of `event` on the events bus if any subscriber
-    /// wants its kind. A `ToolResult` copy leaves out the result's
-    /// `attachments`: no subscriber reads the base64 images, and every
-    /// receiver would otherwise clone them.
+    /// wants its kind. A `ToolResult` copy omits the result's
+    /// `attachments`, which no subscriber reads.
     pub fn publish(&self, event: &Event) {
         if event.kind().is_some_and(|kind| self.bus_wants(kind)) {
             let _ = self.events_bus.send(bus_copy(event));
@@ -149,23 +148,9 @@ impl RuntimeState {
     }
 }
 
-fn bus_copy(event: &Event) -> Event {
-    match event {
-        Event::ToolResult { id, name, result } => Event::ToolResult {
-            id: id.clone(),
-            name: name.clone(),
-            result: match result.as_object() {
-                Some(fields) => Value::Object(
-                    fields
-                        .iter()
-                        .filter(|(key, _)| key.as_str() != "attachments")
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect(),
-                ),
-                None => result.clone(),
-            },
-        },
-        other => other.clone(),
+impl Default for RuntimeState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -192,15 +177,29 @@ impl BusSubscription {
 impl Drop for BusSubscription {
     fn drop(&mut self) {
         let mut filters = self.interest.lock();
-        if let Some(i) = filters.iter().position(|f| *f == self.filter) {
-            filters.swap_remove(i);
+        if let Some(idx) = filters.iter().position(|f| *f == self.filter) {
+            filters.swap_remove(idx);
         }
     }
 }
 
-impl Default for RuntimeState {
-    fn default() -> Self {
-        Self::new()
+fn bus_copy(event: &Event) -> Event {
+    match event {
+        Event::ToolResult { id, name, result } => Event::ToolResult {
+            id: id.clone(),
+            name: name.clone(),
+            result: match result.as_object() {
+                Some(fields) => Value::Object(
+                    fields
+                        .iter()
+                        .filter(|(key, _)| key.as_str() != "attachments")
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
+                None => result.clone(),
+            },
+        },
+        other => other.clone(),
     }
 }
 

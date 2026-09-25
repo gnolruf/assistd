@@ -31,9 +31,8 @@ pub async fn run_one_shot(
     }
 }
 
-/// Convert an [`IpcClientError`] to `anyhow`, phrasing `NotReachable`
-/// as "daemon is not running" with the socket path.
-pub fn map_not_reachable(e: IpcClientError) -> Error {
+/// Phrase `NotReachable` as "daemon is not running" with the socket path.
+fn map_not_reachable(e: IpcClientError) -> Error {
     match e {
         IpcClientError::NotReachable { path, source } => Error::msg(format!(
             "assistd daemon is not running (could not connect to {}): {source}",

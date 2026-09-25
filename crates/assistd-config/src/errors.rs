@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// Errors produced while loading, writing, or validating configuration.
@@ -46,9 +47,9 @@ pub enum ConfigError {
 }
 
 fn format_validation_errors(errors: &[String]) -> String {
-    let mut s = format!("configuration has {} error(s):", errors.len());
-    for (i, e) in errors.iter().enumerate() {
-        s.push_str(&format!("\n  {}: {}", i + 1, e));
+    let mut report = format!("configuration has {} error(s):", errors.len());
+    for (i, error) in errors.iter().enumerate() {
+        report.push_str(&format!("\n  {}: {}", i + 1, error));
     }
-    s
+    report
 }

@@ -2,6 +2,7 @@
 //! expose a stable `Arc<dyn McpClient>` that answers `ServerDown`
 //! while the transport is away.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,13 +36,9 @@ pub enum TransportConfig {
     Sse(SseConfig),
 }
 
-/// Stable handle for a single MCP server. The `Arc<dyn McpClient>`
-/// returned by [`Self::client`] survives transport restarts.
-///
-/// Dropping the handle without [`Self::shutdown`] aborts the
-/// supervisor, which drops the live transport: a stdio child is
-/// SIGKILLed (`kill_on_drop`, direct child only) and an SSE
-/// connection's tasks are aborted.
+/// Stable handle for a single MCP server; [`Self::client`] survives
+/// transport restarts. Dropping it without [`Self::shutdown`] aborts the
+/// supervisor and kills the live transport.
 pub struct McpServerHandle {
     pub name: String,
     switch: Arc<SwitchingClient>,
@@ -68,13 +65,15 @@ impl McpServerHandle {
         let supervisor = Supervisor {
             name: name.clone(),
             transport_cfg,
-            initial_lifeline: initial.lifeline,
             switch: switch.clone(),
             health_tx,
             supervisor_shutdown_rx,
             external_shutdown_rx,
+            policy: RestartPolicy::default(),
+            session_start: Instant::now(),
         };
-        let supervisor_task = AbortOnDropHandle::new(tokio::spawn(supervisor.run()));
+        let supervisor_task =
+            AbortOnDropHandle::new(tokio::spawn(supervisor.run(initial.lifeline)));
 
         Ok(Self {
             name,
@@ -155,35 +154,35 @@ enum Lifeline {
 impl Lifeline {
     async fn wait(&mut self) {
         match self {
-            Lifeline::Stdio(c) => c.wait_for_death().await,
-            Lifeline::Sse(s) => s.wait_for_disconnect().await,
+            Lifeline::Stdio(child) => child.wait_for_death().await,
+            Lifeline::Sse(connection) => connection.wait_for_disconnect().await,
         }
     }
 
     async fn shutdown(self) {
         match self {
-            Lifeline::Stdio(c) => c.shutdown(Duration::from_secs(10)).await,
-            Lifeline::Sse(s) => s.shutdown().await,
+            Lifeline::Stdio(child) => child.shutdown(Duration::from_secs(10)).await,
+            Lifeline::Sse(connection) => connection.shutdown().await,
         }
     }
 }
 
 async fn spawn_transport(cfg: &TransportConfig) -> Result<TransportInstance, McpError> {
     match cfg {
-        TransportConfig::Stdio(s) => {
-            let (c, l) = StdioMcpClient::spawn(s.clone()).await?;
-            let client: Arc<dyn McpClient> = c;
+        TransportConfig::Stdio(stdio_cfg) => {
+            let (stdio_client, lifeline) = StdioMcpClient::spawn(stdio_cfg.clone()).await?;
+            let client: Arc<dyn McpClient> = stdio_client;
             Ok(TransportInstance {
                 client,
-                lifeline: Lifeline::Stdio(l),
+                lifeline: Lifeline::Stdio(lifeline),
             })
         }
-        TransportConfig::Sse(s) => {
-            let (c, l) = SseMcpClient::connect(s.clone()).await?;
-            let client: Arc<dyn McpClient> = c;
+        TransportConfig::Sse(sse_cfg) => {
+            let (sse_client, lifeline) = SseMcpClient::connect(sse_cfg.clone()).await?;
+            let client: Arc<dyn McpClient> = sse_client;
             Ok(TransportInstance {
                 client,
-                lifeline: Lifeline::Sse(l),
+                lifeline: Lifeline::Sse(lifeline),
             })
         }
     }
@@ -192,131 +191,147 @@ async fn spawn_transport(cfg: &TransportConfig) -> Result<TransportInstance, Mcp
 struct Supervisor {
     name: String,
     transport_cfg: TransportConfig,
-    initial_lifeline: Lifeline,
     switch: Arc<SwitchingClient>,
     health_tx: watch::Sender<HealthState>,
     supervisor_shutdown_rx: watch::Receiver<bool>,
     external_shutdown_rx: watch::Receiver<bool>,
+    policy: RestartPolicy,
+    session_start: Instant,
 }
 
 impl Supervisor {
-    async fn run(self) {
-        let Self {
-            name,
-            transport_cfg,
-            initial_lifeline,
-            switch,
-            health_tx,
-            mut supervisor_shutdown_rx,
-            mut external_shutdown_rx,
-        } = self;
-
+    async fn run(mut self, initial_lifeline: Lifeline) {
         info!(
             target: "assistd::mcp",
-            server = %name,
-            transport = %transport_label(&transport_cfg),
+            server = %self.name,
+            transport = %transport_label(&self.transport_cfg),
             "MCP supervisor running",
         );
 
-        let mut policy = RestartPolicy::default();
-        let mut current_lifeline: Option<Lifeline> = Some(initial_lifeline);
-        let mut session_start = Instant::now();
-
+        let mut current_lifeline = Some(initial_lifeline);
         loop {
-            if let Some(mut lifeline) = current_lifeline.take() {
-                tokio::select! {
-                    _ = lifeline.wait() => {
-                        let ran_for = session_start.elapsed();
-                        warn!(
-                            target: "assistd::mcp",
-                            server = %name,
-                            ran_for_secs = ran_for.as_secs(),
-                            "MCP server transport died",
-                        );
-                        lifeline.shutdown().await;
-                        policy.record_session_end(ran_for);
-                        let _ = health_tx.send(HealthState::Restarting);
-                        switch.swap(None).await;
-                    }
-                    reason = shutdown_reason(&mut supervisor_shutdown_rx, &mut external_shutdown_rx) => {
-                        info!(target: "assistd::mcp", server = %name, reason, "supervisor shutdown");
-                        switch.swap(None).await;
-                        lifeline.shutdown().await;
-                        return;
-                    }
-                }
+            if let Some(lifeline) = current_lifeline.take()
+                && self.supervise_session(lifeline).await.is_break()
+            {
+                return;
             }
 
-            let delay = match policy.next_restart(Instant::now()) {
-                RestartDecision::Backoff { delay, failures } => {
-                    warn!(
-                        target: "assistd::mcp",
-                        server = %name,
-                        failures,
-                        "restarting MCP server in {delay:?}",
-                    );
-                    delay
-                }
-                RestartDecision::ConsecutiveCapReached { failures } => {
-                    error!(
-                        target: "assistd::mcp",
-                        server = %name,
-                        failures,
-                        retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
-                        "MCP server failed {failures} times in a row; marking unhealthy and retrying at slow cadence",
-                    );
-                    let _ = health_tx.send(HealthState::Unhealthy);
-                    UNHEALTHY_RETRY_INTERVAL
-                }
-                RestartDecision::WindowCapReached { restarts } => {
-                    error!(
-                        target: "assistd::mcp",
-                        server = %name,
-                        restarts,
-                        window_secs = RESTART_WINDOW.as_secs(),
-                        retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
-                        "MCP server restarted {restarts} times in the rolling window; marking unhealthy and retrying at slow cadence",
-                    );
-                    let _ = health_tx.send(HealthState::Unhealthy);
-                    UNHEALTHY_RETRY_INTERVAL
-                }
-            };
+            let delay = self.restart_delay();
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = shutdown_reason(&mut supervisor_shutdown_rx, &mut external_shutdown_rx) => return,
+                _ = self.shutdown_requested() => return,
             }
 
-            match spawn_transport(&transport_cfg).await {
-                Ok(instance) => {
-                    session_start = Instant::now();
-                    switch.swap(Some(instance.client)).await;
-                    let _ = health_tx.send(HealthState::Healthy);
-                    info!(target: "assistd::mcp", server = %name, "MCP server restarted");
-                    current_lifeline = Some(instance.lifeline);
-                }
-                Err(e) => {
-                    policy.record_spawn_failure();
-                    warn!(
-                        target: "assistd::mcp",
-                        server = %name,
-                        error = %e,
-                        "MCP server restart failed",
-                    );
-                }
+            current_lifeline = self.respawn().await;
+        }
+    }
+
+    /// Wait for `lifeline` to end; `Break` means shutdown was requested.
+    async fn supervise_session(&mut self, mut lifeline: Lifeline) -> ControlFlow<()> {
+        tokio::select! {
+            _ = lifeline.wait() => {
+                let ran_for = self.session_start.elapsed();
+                warn!(
+                    target: "assistd::mcp",
+                    server = %self.name,
+                    ran_for_secs = ran_for.as_secs(),
+                    "MCP server transport died",
+                );
+                lifeline.shutdown().await;
+                self.policy.record_session_end(ran_for);
+                let _ = self.health_tx.send(HealthState::Restarting);
+                self.switch.swap(None).await;
+                ControlFlow::Continue(())
+            }
+            reason = self.shutdown_requested() => {
+                info!(target: "assistd::mcp", server = %self.name, reason, "supervisor shutdown");
+                self.switch.swap(None).await;
+                lifeline.shutdown().await;
+                ControlFlow::Break(())
             }
         }
+    }
+
+    /// Register the next restart and pick its delay, publishing
+    /// `Unhealthy` when a restart cap is hit.
+    fn restart_delay(&mut self) -> Duration {
+        let name = &self.name;
+        match self.policy.next_restart(Instant::now()) {
+            RestartDecision::Backoff { delay, failures } => {
+                warn!(
+                    target: "assistd::mcp",
+                    server = %name,
+                    failures,
+                    "restarting MCP server in {delay:?}",
+                );
+                delay
+            }
+            RestartDecision::ConsecutiveCapReached { failures } => {
+                error!(
+                    target: "assistd::mcp",
+                    server = %name,
+                    failures,
+                    retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
+                    "MCP server failed {failures} times in a row; marking unhealthy and retrying at slow cadence",
+                );
+                let _ = self.health_tx.send(HealthState::Unhealthy);
+                UNHEALTHY_RETRY_INTERVAL
+            }
+            RestartDecision::WindowCapReached { restarts } => {
+                error!(
+                    target: "assistd::mcp",
+                    server = %name,
+                    restarts,
+                    window_secs = RESTART_WINDOW.as_secs(),
+                    retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
+                    "MCP server restarted {restarts} times in the rolling window; marking unhealthy and retrying at slow cadence",
+                );
+                let _ = self.health_tx.send(HealthState::Unhealthy);
+                UNHEALTHY_RETRY_INTERVAL
+            }
+        }
+    }
+
+    async fn respawn(&mut self) -> Option<Lifeline> {
+        match spawn_transport(&self.transport_cfg).await {
+            Ok(instance) => {
+                self.session_start = Instant::now();
+                self.switch.swap(Some(instance.client)).await;
+                let _ = self.health_tx.send(HealthState::Healthy);
+                info!(target: "assistd::mcp", server = %self.name, "MCP server restarted");
+                Some(instance.lifeline)
+            }
+            Err(err) => {
+                self.policy.record_spawn_failure();
+                warn!(
+                    target: "assistd::mcp",
+                    server = %self.name,
+                    error = %err,
+                    "MCP server restart failed",
+                );
+                None
+            }
+        }
+    }
+
+    async fn shutdown_requested(&mut self) -> &'static str {
+        shutdown_reason(
+            &mut self.supervisor_shutdown_rx,
+            &mut self.external_shutdown_rx,
+        )
+        .await
     }
 }
 
 /// Resolves when either shutdown watch turns true or its sender is
 /// gone.
 async fn shutdown_reason(
-    handle: &mut watch::Receiver<bool>,
-    daemon: &mut watch::Receiver<bool>,
+    handle_rx: &mut watch::Receiver<bool>,
+    daemon_rx: &mut watch::Receiver<bool>,
 ) -> &'static str {
     tokio::select! {
-        _ = handle.wait_for(|v| *v) => "handle.shutdown",
-        _ = daemon.wait_for(|v| *v) => "daemon-wide",
+        _ = handle_rx.wait_for(|stop| *stop) => "handle.shutdown",
+        _ = daemon_rx.wait_for(|stop| *stop) => "daemon-wide",
     }
 }
 
@@ -329,9 +344,10 @@ fn transport_label(cfg: &TransportConfig) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use parking_lot::Mutex;
     use serde_json::json;
+
+    use super::*;
 
     struct FakeClient {
         invocations: Arc<Mutex<u32>>,

@@ -1,7 +1,7 @@
 use super::*;
 
-fn id(n: u64) -> WindowId {
-    WindowId::new(n).expect("test ids are non-zero")
+fn id(raw: u64) -> WindowId {
+    WindowId::new(raw).expect("test ids are non-zero")
 }
 
 fn anchor() -> PlacementAnchor {
@@ -58,10 +58,14 @@ struct MinimalWm;
 
 #[async_trait]
 impl WindowManager for MinimalWm {
-    async fn focus(&self, _w: &WindowId) -> WmResult<()> {
+    async fn focus(&self, _window: &WindowId) -> WmResult<()> {
         Ok(())
     }
-    async fn move_to_workspace(&self, _w: &WindowId, _ws: &WorkspaceId) -> WmResult<()> {
+    async fn move_to_workspace(
+        &self,
+        _window: &WindowId,
+        _workspace: &WorkspaceId,
+    ) -> WmResult<()> {
         Ok(())
     }
     async fn focused_window(&self) -> WmResult<Option<WindowId>> {
@@ -73,10 +77,15 @@ impl WindowManager for MinimalWm {
     async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
         Ok(Vec::new())
     }
-    async fn resize_width(&self, _w: &WindowId, _d: ResizeDir, _p: u32) -> WmResult<()> {
+    async fn resize_width(
+        &self,
+        _window: &WindowId,
+        _direction: ResizeDir,
+        _pixels: u32,
+    ) -> WmResult<()> {
         Ok(())
     }
-    async fn set_layout(&self, _l: Layout) -> WmResult<()> {
+    async fn set_layout(&self, _layout: Layout) -> WmResult<()> {
         Ok(())
     }
 }
@@ -98,24 +107,24 @@ async fn default_list_outputs_reports_unsupported() {
 
 #[test]
 fn resize_dir_round_trips() {
-    for (s, dir) in [("grow", ResizeDir::Grow), ("shrink", ResizeDir::Shrink)] {
-        assert_eq!(s.parse::<ResizeDir>(), Ok(dir));
-        assert_eq!(dir.to_string(), s);
+    for (keyword, dir) in [("grow", ResizeDir::Grow), ("shrink", ResizeDir::Shrink)] {
+        assert_eq!(keyword.parse::<ResizeDir>(), Ok(dir));
+        assert_eq!(dir.to_string(), keyword);
     }
     assert_eq!("sideways".parse::<ResizeDir>(), Err(ParseResizeDirError));
 }
 
 #[test]
 fn layout_round_trips() {
-    for (s, l) in [
+    for (keyword, layout) in [
         ("default", Layout::Default),
         ("tabbed", Layout::Tabbed),
         ("stacking", Layout::Stacking),
         ("splith", Layout::SplitH),
         ("splitv", Layout::SplitV),
     ] {
-        assert_eq!(s.parse::<Layout>(), Ok(l));
-        assert_eq!(l.to_string(), s);
+        assert_eq!(keyword.parse::<Layout>(), Ok(layout));
+        assert_eq!(layout.to_string(), keyword);
     }
     assert_eq!("spinning".parse::<Layout>(), Err(ParseLayoutError));
 }

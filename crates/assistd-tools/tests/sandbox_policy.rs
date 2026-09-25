@@ -1,10 +1,12 @@
-//! Integration tests for the bash command's policy and sandbox layers,
-//! in the order they fire: the denylist, the confirmation gate (for
-//! destructive patterns and programs not on the allowlist), and the bwrap
-//! sandbox. Bwrap-dependent tests return early when `bwrap` is not on
-//! PATH.
+//! The bash command's denylist, confirmation gate and bwrap sandbox.
+//! Bwrap tests return early when `bwrap` is not on PATH.
 
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use parking_lot::Mutex;
 
 use assistd_tools::commands::{BashCommand, BashPolicyCfg};
 use assistd_tools::policy::{ResolvedSandboxMode, probe_sandbox};
@@ -13,8 +15,6 @@ use assistd_tools::{
     ConfirmationRequest, DenyAllGate, DestructivePattern, Protected, SandboxInfo, SandboxRequest,
     SearchPath,
 };
-use async_trait::async_trait;
-use parking_lot::Mutex;
 
 const POLICY_DENIED_EXIT: i32 = 126;
 
@@ -25,7 +25,7 @@ fn bash_with(
     sandbox: Arc<SandboxInfo>,
 ) -> BashCommand {
     let cfg = BashPolicyCfg {
-        timeout: std::time::Duration::from_secs(10),
+        timeout: Duration::from_secs(10),
         denylist: denylist.into_iter().map(|s| s.to_string()).collect(),
         destructive_patterns: destructive
             .into_iter()
@@ -36,14 +36,9 @@ fn bash_with(
     BashCommand::new(Arc::new(cfg), sandbox, gate)
 }
 
-/// Bash whose allowlist holds `allowed`, with approvals kept in `store`,
-/// resolving names on the system directories as a sandbox would: read
-/// only, so their owner does not matter to the test.
-fn bash_allowing(
-    allowed: &[&str],
-    store: &std::path::Path,
-    gate: Arc<dyn ConfirmationGate>,
-) -> BashCommand {
+/// Bash allowing `allowed` on a read-only system search path, with
+/// approvals kept in `store`.
+fn bash_allowing(allowed: &[&str], store: &Path, gate: Arc<dyn ConfirmationGate>) -> BashCommand {
     let allowlist = Allowlist::load(
         allowed.iter().map(|s| s.to_string()),
         SearchPath {
@@ -186,8 +181,6 @@ async fn quoted_literal_does_not_trigger_destructive_pattern() {
     assert_eq!(out.stdout, b"rm -rf /\n");
 }
 
-/// A command whose name is only known at run time cannot be checked, so
-/// the gate is asked rather than the script run unseen.
 #[tokio::test]
 async fn run_time_command_names_ask_the_gate() {
     for template in ["$(echo rm) -rf {}", "r=rm; $r -rf {}"] {
@@ -213,10 +206,8 @@ async fn run_time_command_names_ask_the_gate() {
     }
 }
 
-/// A script file can change before it runs, so running one always asks,
-/// and the prompt cannot be settled for good.
 #[tokio::test]
-async fn running_a_script_file_asks_the_gate() {
+async fn running_a_script_file_asks_the_gate_without_offering_always() {
     let scratch = tempfile::tempdir().unwrap();
     let target = scratch.path().join("file");
     std::fs::write(&target, b"x").unwrap();
@@ -256,8 +247,6 @@ async fn allowed_programs_run_without_asking() {
     assert_eq!(out.stdout, b"HI");
 }
 
-/// "Always allow" adds exactly the programs the prompt offered, keeps
-/// them in the approvals file, and later commands run them unasked.
 #[tokio::test]
 async fn always_allow_adds_the_offered_programs_for_good() {
     let scratch = tempfile::tempdir().unwrap();
@@ -322,8 +311,6 @@ async fn bwrap_blocks_writes_to_read_only_root() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
     };
-    // /usr is part of the `--ro-bind / /` mount, so any write under it
-    // fails with EROFS regardless of the host user's permissions.
     let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
     let unique = format!("/usr/assistd-sandbox-test-{}", std::process::id());
     let out = cmd.run(input(&format!("touch {unique}"))).await;
@@ -347,8 +334,6 @@ async fn bwrap_unshares_pid_namespace() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
     };
-    // Inside a fresh PID namespace bwrap is PID 1 and bash a small
-    // number after it; host PIDs are far larger.
     let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd.run(input("echo $$")).await;
     assert_eq!(out.exit_code, 0);

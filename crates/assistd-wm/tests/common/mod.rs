@@ -1,6 +1,5 @@
-//! Read-only assertions shared by the live i3 and Sway tests. None
-//! issues a focus or move command, so they are safe to run against a
-//! live session.
+//! Read-only assertions shared by the live i3 and Sway tests, safe to
+//! run against a live session.
 
 use std::sync::Arc;
 
@@ -23,19 +22,18 @@ pub async fn assert_focused_context_agrees(wm: &Arc<dyn WindowManager>) {
         .focused_window()
         .await
         .expect("focused_window query failed");
-    let ctx = wm
+    let context = wm
         .focused_context()
         .await
         .expect("focused_context query failed")
         .expect("expected Some(FocusedWindowContext) for a focused session");
     assert_eq!(
-        ctx.id, focused,
+        context.id, focused,
         "focused_context().id should agree with focused_window()"
     );
 }
 
-/// Multi-monitor setups report one focused workspace per output, so
-/// this asserts at least one rather than exactly one.
+/// At least one, since multi-monitor setups focus one workspace per output.
 pub async fn assert_at_least_one_workspace_focused(wm: &Arc<dyn WindowManager>) {
     let workspaces = wm
         .list_workspaces()
@@ -46,25 +44,23 @@ pub async fn assert_at_least_one_workspace_focused(wm: &Arc<dyn WindowManager>) 
         "expected list_workspaces() to return at least one row"
     );
     assert!(
-        workspaces.iter().any(|w| w.focused),
+        workspaces.iter().any(|workspace| workspace.focused),
         "expected at least one workspace to be marked focused"
     );
 }
 
-/// Catches drift between the cached focus snapshot and a freshly
-/// walked tree.
+/// Catches drift between the cached focus snapshot and the live tree.
 pub async fn assert_focused_window_in_list_windows(wm: &Arc<dyn WindowManager>) {
-    let focused = match wm
+    let Some(focused) = wm
         .focused_window()
         .await
         .expect("focused_window query failed")
-    {
-        Some(c) => c,
-        None => return,
+    else {
+        return;
     };
     let windows = wm.list_windows().await.expect("list_windows query failed");
     assert!(
-        windows.iter().any(|w| w.id == focused),
+        windows.iter().any(|window| window.id == focused),
         "expected focused class {focused:?} to appear in list_windows() result"
     );
 }

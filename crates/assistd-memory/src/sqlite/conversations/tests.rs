@@ -1,8 +1,7 @@
 use super::*;
 use tokio::sync::watch;
 
-/// The guard keeps the database directory and the writer's shutdown
-/// sender alive for the test's duration.
+/// The returned guard keeps the temp dir and the writer's shutdown sender alive.
 async fn fresh_store() -> (
     SqliteConversationStore,
     (tempfile::TempDir, watch::Sender<bool>),
@@ -164,9 +163,11 @@ async fn fork_creates_independent_branch_sharing_history() {
     let fork = store.fork_branch(main, "experiment").await.unwrap();
     let main_history = store.load_branch_history(main).await.unwrap();
     let fork_history = store.load_branch_history(fork).await.unwrap();
-    // Same conversation rows are referenced; no row duplication.
     assert_eq!(main_history.len(), 2);
-    assert_eq!(fork_history, main_history);
+    assert_eq!(
+        fork_history, main_history,
+        "fork references the same conversation rows"
+    );
 
     let branches = store.list_branches().await.unwrap();
     let fork_info = branches.iter().find(|b| b.name == "experiment").unwrap();

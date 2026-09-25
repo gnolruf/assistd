@@ -86,29 +86,25 @@ impl Tool for McpToolAdapter {
         self.schema.input_schema.clone()
     }
 
-    /// Always `Ok`: a failed call comes back as an error envelope
-    /// (`exit_code: -1`, with a [`mcp_error_line`] as `output`) so the
-    /// model keeps its recovery hint.
+    /// Always `Ok`: a failed call becomes an error envelope carrying an
+    /// [`mcp_error_line`].
     async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
         let outcome = self.client.invoke(&self.schema.name, args).await;
         let duration_ms = start.elapsed().as_millis();
         match outcome {
-            Ok(r) => Ok(tool_result_to_json(r, duration_ms)),
-            Err(e) => Ok(error_envelope(&self.registry_name, &e, duration_ms)),
+            Ok(result) => Ok(tool_result_to_json(result, duration_ms)),
+            Err(err) => Ok(error_envelope(&self.registry_name, &err, duration_ms)),
         }
     }
 }
 
-/// The tool-error envelope. It has the same `output` / `exit_code` /
-/// `duration_ms` / `truncated` shape as a successful result, with
-/// `exit_code: -1` and an `[error] <tool>: <what>. <Hint>: <recovery>`
-/// line as `output`, so the model handles every failure the same way.
-/// [`HealthRoutedTool`] emits the same shape without an RPC.
-fn error_envelope(tool_name: &str, e: &McpError, duration_ms: u128) -> Value {
+/// Same shape as a successful result, with `exit_code: -1` and an
+/// [`mcp_error_line`] as `output`.
+fn error_envelope(tool_name: &str, err: &McpError, duration_ms: u128) -> Value {
     json!({
         "type": "error",
-        "output": mcp_error_line(tool_name, e),
+        "output": mcp_error_line(tool_name, err),
         "exit_code": -1,
         "duration_ms": duration_ms,
         "truncated": false,
@@ -117,19 +113,19 @@ fn error_envelope(tool_name: &str, e: &McpError, duration_ms: u128) -> Value {
 
 /// Render a [`ToolResult`] as the tool-result envelope; an image goes
 /// into `attachments[].data` as base64.
-fn tool_result_to_json(r: ToolResult, duration_ms: u128) -> Value {
-    match r {
-        ToolResult::Text(s) => json!({
+fn tool_result_to_json(result: ToolResult, duration_ms: u128) -> Value {
+    match result {
+        ToolResult::Text(text) => json!({
             "type": "text",
-            "output": s,
+            "output": text,
             "exit_code": 0,
             "duration_ms": duration_ms,
             "truncated": false,
         }),
-        ToolResult::Json(v) => json!({
+        ToolResult::Json(value) => json!({
             "type": "json",
-            "output": v.to_string(),
-            "value": v,
+            "output": value.to_string(),
+            "value": value,
             "exit_code": 0,
             "duration_ms": duration_ms,
             "truncated": false,
@@ -162,14 +158,14 @@ pub async fn adapt_handle_as_tools(
     let health_rx = handle.watch_health();
     let server_name = handle.name.clone();
 
-    let mut out: Vec<Box<dyn Tool>> = Vec::with_capacity(schemas.len());
+    let mut tools: Vec<Box<dyn Tool>> = Vec::with_capacity(schemas.len());
     for schema in schemas {
         let registry_name = registry_name(name_prefix, &schema.name);
         let adapter = McpToolAdapter::new(client.clone(), schema, registry_name);
         let routed = HealthRoutedTool::new(adapter, server_name.clone(), health_rx.clone());
-        out.push(Box::new(routed));
+        tools.push(Box::new(routed));
     }
-    Ok(out)
+    Ok(tools)
 }
 
 #[cfg(test)]
@@ -197,6 +193,8 @@ fn registry_name(prefix: &str, server_native: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     /// Returns a static tool list and echoes arguments back as text.
@@ -218,7 +216,7 @@ mod tests {
     /// Fails its one `invoke` with a pre-armed error after `sleep`.
     struct ErrFakeClient {
         err: parking_lot::Mutex<Option<McpError>>,
-        sleep: std::time::Duration,
+        sleep: Duration,
     }
 
     #[async_trait]
@@ -247,7 +245,7 @@ mod tests {
         })
     }
 
-    async fn failing_tool(err: McpError, sleep: std::time::Duration) -> Box<dyn Tool> {
+    async fn failing_tool(err: McpError, sleep: Duration) -> Box<dyn Tool> {
         let client = Arc::new(ErrFakeClient {
             err: parking_lot::Mutex::new(Some(err)),
             sleep,
@@ -337,7 +335,7 @@ mod tests {
             message: "missing field 'query'".into(),
             data: None,
         };
-        let tool = failing_tool(err(), std::time::Duration::ZERO).await;
+        let tool = failing_tool(err(), Duration::ZERO).await;
         let mut out = tool.invoke(json!({})).await.unwrap();
         assert!(out["duration_ms"].is_u64(), "{out}");
         out.as_object_mut().unwrap().remove("duration_ms");
@@ -354,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_records_real_duration_ms() {
-        let tool = failing_tool(McpError::ServerDown, std::time::Duration::from_millis(20)).await;
+        let tool = failing_tool(McpError::ServerDown, Duration::from_millis(20)).await;
         let out = tool.invoke(json!({})).await.unwrap();
         let dur = out["duration_ms"].as_u64().expect("duration_ms u64");
         assert!(

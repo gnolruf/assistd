@@ -20,9 +20,8 @@ fn patterns() -> Vec<DestructivePattern> {
     .collect()
 }
 
-/// An allowlist over an empty, read-only search path: no program is on
-/// it, and a name that resolves to nothing is harmless, so only paths,
-/// script files and risky builtins come back unlisted.
+/// An allowlist on which only paths, script files and risky builtins come
+/// back unlisted.
 fn no_programs() -> Allowlist {
     Allowlist::unsaved(
         Vec::new(),
@@ -33,9 +32,8 @@ fn no_programs() -> Allowlist {
     )
 }
 
-/// `Some("rm -r|--recursive")` for a pattern match, `Some("?")` for an
-/// unverifiable command, and `None` otherwise: these tests are about
-/// patterns and what the review can see, not the allowlist.
+/// The matched pattern, `Some("?")` when unverifiable, or `None`, ignoring
+/// the allowlist.
 fn check(script: &str) -> Option<String> {
     let patterns = patterns();
     let allowlist = no_programs();
@@ -390,8 +388,8 @@ fn argv_is_matched_without_reparsing_it() {
     );
 }
 
-/// A search path holding a program for each of `names`, read-only as in
-/// the sandbox, with `allowed` on the allowlist.
+/// A read-only search path holding each of `names`, with `allowed` on the
+/// allowlist.
 struct Programs {
     dir: tempfile::TempDir,
     allowlist: Allowlist,

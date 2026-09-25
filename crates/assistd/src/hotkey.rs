@@ -249,112 +249,123 @@ fn on_hotkey(
     let pressed = state == HotKeyState::Pressed;
     match binding {
         Binding::Presence if pressed => {
-            let Some(presence) = subsystems.presence.clone() else {
-                return;
-            };
-            handlers.spawn(async move {
-                match presence.cycle().await {
-                    Ok(target) => info!(
-                        target: "assistd::hotkey",
-                        "hotkey cycled presence → {target:?}"
-                    ),
-                    Err(e) => warn!(
-                        target: "assistd::hotkey",
-                        "hotkey cycle failed: {e:#}"
-                    ),
-                }
-            });
+            if let Some(presence) = subsystems.presence.clone() {
+                handlers.spawn(cycle_presence(presence));
+            }
         }
         Binding::Voice if pressed => {
-            let voice = subsystems.voice.clone();
-            let voice_output = subsystems.voice_output.clone();
-            handlers.spawn(async move {
-                if let Some(ctrl) = voice_output {
-                    ctrl.interrupt().await;
-                }
-                if let Err(e) = voice.start_recording().await {
-                    warn!(
-                        target: "assistd::hotkey",
-                        "voice start_recording failed: {e:#}"
-                    );
-                }
-            });
+            handlers.spawn(begin_push_to_talk(
+                subsystems.voice.clone(),
+                subsystems.voice_output.clone(),
+            ));
         }
         Binding::Voice => {
-            let voice = subsystems.voice.clone();
-            handlers.spawn(async move {
-                match voice.stop_and_transcribe().await {
-                    Ok(text) if text.trim().is_empty() => {
-                        info!(
-                            target: "assistd::hotkey",
-                            "voice released: no speech detected (VAD)"
-                        );
-                    }
-                    Ok(text) => {
-                        info!(
-                            target: "assistd::hotkey",
-                            chars = text.chars().count(),
-                            "voice released: transcription complete"
-                        );
-                    }
-                    Err(e) => warn!(
-                        target: "assistd::hotkey",
-                        "voice stop_and_transcribe failed: {e:#}"
-                    ),
-                }
-            });
+            handlers.spawn(end_push_to_talk(subsystems.voice.clone()));
         }
         Binding::Listen if pressed => {
-            let Some(listener) = subsystems.listener.clone() else {
-                return;
-            };
-            handlers.spawn(async move {
-                let result = if listener.is_active() {
-                    listener.stop().await.map(|()| false)
-                } else {
-                    listener.start().await.map(|()| true)
-                };
-                match result {
-                    Ok(active) => info!(
-                        target: "assistd::hotkey",
-                        active,
-                        "hotkey toggled continuous listening"
-                    ),
-                    Err(e) => warn!(
-                        target: "assistd::hotkey",
-                        "continuous-listen toggle failed: {e:#}"
-                    ),
-                }
-            });
+            if let Some(listener) = subsystems.listener.clone() {
+                handlers.spawn(toggle_listening(listener));
+            }
         }
         Binding::Toggle if pressed => {
-            let Some(ctrl) = subsystems.voice_output.clone() else {
-                return;
-            };
-            handlers.spawn(async move {
-                let new_state = !ctrl.enabled();
-                ctrl.set_enabled(new_state).await;
-                info!(
-                    target: "assistd::hotkey",
-                    enabled = new_state,
-                    "hotkey toggled voice output"
-                );
-            });
+            if let Some(ctrl) = subsystems.voice_output.clone() {
+                handlers.spawn(toggle_voice_output(ctrl));
+            }
         }
         Binding::Skip if pressed => {
-            let Some(ctrl) = subsystems.voice_output.clone() else {
-                return;
-            };
-            handlers.spawn(async move {
-                ctrl.skip().await;
-                info!(
-                    target: "assistd::hotkey",
-                    "hotkey skipped current voice-output response"
-                );
-            });
+            if let Some(ctrl) = subsystems.voice_output.clone() {
+                handlers.spawn(skip_voice_output(ctrl));
+            }
         }
         Binding::Presence | Binding::Listen | Binding::Toggle | Binding::Skip => {}
     }
+}
+
+async fn cycle_presence(presence: Arc<PresenceManager>) {
+    match presence.cycle().await {
+        Ok(target) => info!(
+            target: "assistd::hotkey",
+            "hotkey cycled presence → {target:?}"
+        ),
+        Err(e) => warn!(
+            target: "assistd::hotkey",
+            "hotkey cycle failed: {e:#}"
+        ),
+    }
+}
+
+async fn begin_push_to_talk(
+    voice: Arc<dyn VoiceInput>,
+    voice_output: Option<Arc<VoiceOutputController>>,
+) {
+    if let Some(ctrl) = voice_output {
+        ctrl.interrupt().await;
+    }
+    if let Err(e) = voice.start_recording().await {
+        warn!(
+            target: "assistd::hotkey",
+            "voice start_recording failed: {e:#}"
+        );
+    }
+}
+
+async fn end_push_to_talk(voice: Arc<dyn VoiceInput>) {
+    match voice.stop_and_transcribe().await {
+        Ok(text) if text.trim().is_empty() => {
+            info!(
+                target: "assistd::hotkey",
+                "voice released: no speech detected (VAD)"
+            );
+        }
+        Ok(text) => {
+            info!(
+                target: "assistd::hotkey",
+                chars = text.chars().count(),
+                "voice released: transcription complete"
+            );
+        }
+        Err(e) => warn!(
+            target: "assistd::hotkey",
+            "voice stop_and_transcribe failed: {e:#}"
+        ),
+    }
+}
+
+async fn toggle_listening(listener: Arc<dyn ContinuousListener>) {
+    let result = if listener.is_active() {
+        listener.stop().await.map(|()| false)
+    } else {
+        listener.start().await.map(|()| true)
+    };
+    match result {
+        Ok(active) => info!(
+            target: "assistd::hotkey",
+            active,
+            "hotkey toggled continuous listening"
+        ),
+        Err(e) => warn!(
+            target: "assistd::hotkey",
+            "continuous-listen toggle failed: {e:#}"
+        ),
+    }
+}
+
+async fn toggle_voice_output(ctrl: Arc<VoiceOutputController>) {
+    let enabled = !ctrl.enabled();
+    ctrl.set_enabled(enabled).await;
+    info!(
+        target: "assistd::hotkey",
+        enabled,
+        "hotkey toggled voice output"
+    );
+}
+
+async fn skip_voice_output(ctrl: Arc<VoiceOutputController>) {
+    ctrl.skip().await;
+    info!(
+        target: "assistd::hotkey",
+        "hotkey skipped current voice-output response"
+    );
 }
 
 fn is_wayland_only() -> bool {

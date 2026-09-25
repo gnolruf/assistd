@@ -1,8 +1,5 @@
-//! HTTP control plane for llama.cpp's router-mode server: `POST
-//! /models/load` and `POST /models/unload` attach and detach model
-//! weights without restarting the process, and `GET /props` reports
-//! what is loaded. The server is assumed to be listening already;
-//! [`super::LlamaService`] supervises the process.
+//! HTTP control plane for llama.cpp's router-mode server: load and unload
+//! model weights without restarting the process, and query what is loaded.
 
 use std::time::Duration;
 
@@ -16,8 +13,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const PROPS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// HTTP client for the model-management endpoints on llama-server.
-/// Stateless apart from the connection pool, so it survives restarts of
-/// the server behind its fixed base URL.
+/// Stateless apart from the connection pool, so it survives server restarts.
 pub struct LlamaServerControl {
     client: reqwest::Client,
     host: String,
@@ -38,8 +34,7 @@ impl LlamaServerControl {
         })
     }
 
-    /// `GET /props` on the server, bounded by a short timeout because
-    /// it is a capability probe rather than a model operation.
+    /// `GET /props` on the server, under a short probe timeout.
     pub async fn props(&self) -> Result<Value, LlamaServerError> {
         self.fetch_props(&self.base_url).await
     }
@@ -69,10 +64,8 @@ impl LlamaServerControl {
         Ok(self.fetch_models().await?.contains_loaded(model))
     }
 
-    /// Port of the child server that hosts `model`, or `None` when the
+    /// Port of the router child that hosts `model`, or `None` when the
     /// model is missing, unloaded, or the server is not in router mode.
-    /// `/props` and `/health` on the router describe the router itself,
-    /// so reaching the model means talking to this port.
     pub async fn find_loaded_child_port(
         &self,
         model: &str,
@@ -80,10 +73,8 @@ impl LlamaServerControl {
         Ok(self.fetch_models().await?.find_loaded_child_port(model))
     }
 
-    /// Poll `/models` until `model` reports loaded or `deadline` elapses.
-    /// `POST /models/load` returns 200 as soon as the router accepts the
-    /// spawn request, so anything that needs the weights live must wait
-    /// for this transition explicitly.
+    /// Poll `/models` until `model` reports loaded, erroring with
+    /// [`LlamaServerError::HealthTimeout`] once `deadline` elapses.
     pub async fn wait_for_loaded(
         &self,
         model: &str,
@@ -143,18 +134,6 @@ impl LlamaServerControl {
     }
 }
 
-fn control_http_error(
-    method: &'static str,
-    path: &'static str,
-    status: reqwest::StatusCode,
-) -> LlamaServerError {
-    LlamaServerError::ControlHttp {
-        method,
-        path,
-        status: status.as_u16(),
-    }
-}
-
 #[derive(Serialize)]
 struct ModelActionRequest<'a> {
     model: &'a str,
@@ -187,6 +166,20 @@ struct ModelEntry {
     status: Option<ModelStatus>,
 }
 
+impl ModelEntry {
+    fn matches(&self, model: &str) -> bool {
+        self.id.as_deref() == Some(model)
+    }
+
+    fn is_loaded(&self) -> bool {
+        self.status.as_ref().is_some_and(ModelStatus::is_loaded)
+    }
+
+    fn child_port(&self) -> Option<u16> {
+        self.status.as_ref().and_then(ModelStatus::child_port)
+    }
+}
+
 #[derive(Deserialize)]
 struct ModelStatus {
     value: String,
@@ -200,27 +193,25 @@ impl ModelStatus {
     }
 
     fn child_port(&self) -> Option<u16> {
-        let mut iter = self.args.iter();
-        while let Some(arg) = iter.next() {
+        let mut args = self.args.iter();
+        while let Some(arg) = args.next() {
             if arg == "--port" {
-                return iter.next().and_then(|s| s.parse::<u16>().ok());
+                return args.next().and_then(|s| s.parse::<u16>().ok());
             }
         }
         None
     }
 }
 
-impl ModelEntry {
-    fn matches(&self, model: &str) -> bool {
-        self.id.as_deref() == Some(model)
-    }
-
-    fn is_loaded(&self) -> bool {
-        self.status.as_ref().is_some_and(ModelStatus::is_loaded)
-    }
-
-    fn child_port(&self) -> Option<u16> {
-        self.status.as_ref().and_then(ModelStatus::child_port)
+fn control_http_error(
+    method: &'static str,
+    path: &'static str,
+    status: reqwest::StatusCode,
+) -> LlamaServerError {
+    LlamaServerError::ControlHttp {
+        method,
+        path,
+        status: status.as_u16(),
     }
 }
 

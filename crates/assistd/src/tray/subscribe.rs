@@ -13,10 +13,22 @@ use super::menu::TrayItem;
 #[cfg(feature = "tray-popup")]
 use super::popup::PopupSink;
 
+const BACKOFF_CAP_SECS: u64 = 60;
+
 #[cfg(feature = "tray-popup")]
 pub type OptionalPopup = Option<PopupSink>;
 #[cfg(not(feature = "tray-popup"))]
 pub type OptionalPopup = Option<()>;
+
+#[cfg(feature = "tray-popup")]
+type PopupSinkRef = PopupSink;
+#[cfg(not(feature = "tray-popup"))]
+type PopupSinkRef = ();
+
+enum ExitReason {
+    ServiceShutdown,
+    DaemonClosed,
+}
 
 pub async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: OptionalPopup) {
     let mut attempt: u32 = 0;
@@ -37,18 +49,10 @@ pub async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: OptionalPopup)
         {
             return;
         }
-        #[cfg(feature = "tray-popup")]
-        if let Some(p) = popup.as_ref() {
-            p.set_disconnected();
-        }
+        disconnect_popup(popup.as_ref());
         tokio::time::sleep(backoff_delay(attempt)).await;
         attempt = attempt.saturating_add(1);
     }
-}
-
-enum ExitReason {
-    ServiceShutdown,
-    DaemonClosed,
 }
 
 async fn try_once(
@@ -99,22 +103,12 @@ async fn pump_events(
                 if push(handle, |item| item.ingest(&ev)).await.is_none() {
                     return Ok(ExitReason::ServiceShutdown);
                 }
-                #[cfg(feature = "tray-popup")]
-                if let Some(p) = popup {
-                    p.ingest(&ev);
-                }
-                let _ = popup;
-                let _ = &ev;
+                forward_to_popup(popup, &ev);
             }
             None => return Ok(ExitReason::DaemonClosed),
         }
     }
 }
-
-#[cfg(feature = "tray-popup")]
-type PopupSinkRef = PopupSink;
-#[cfg(not(feature = "tray-popup"))]
-type PopupSinkRef = ();
 
 async fn seed_initial_state(
     handle: &Handle<TrayItem>,
@@ -150,11 +144,7 @@ async fn consume_until_terminal(
                 if push(handle, |item| item.ingest(&ev)).await.is_none() {
                     return;
                 }
-                #[cfg(feature = "tray-popup")]
-                if let Some(p) = popup {
-                    p.ingest(&ev);
-                }
-                let _ = popup;
+                forward_to_popup(popup, &ev);
                 if terminal {
                     return;
                 }
@@ -164,16 +154,38 @@ async fn consume_until_terminal(
     }
 }
 
-async fn push<F>(handle: &Handle<TrayItem>, f: F) -> Option<bool>
+async fn push<F>(handle: &Handle<TrayItem>, update: F) -> Option<bool>
 where
     F: FnOnce(&mut TrayItem) -> bool + Send,
 {
-    handle.update(f).await
+    handle.update(update).await
 }
 
+#[cfg(feature = "tray-popup")]
+fn forward_to_popup(popup: Option<&PopupSink>, ev: &Event) {
+    if let Some(p) = popup {
+        p.ingest(ev);
+    }
+}
+
+#[cfg(not(feature = "tray-popup"))]
+fn forward_to_popup(_popup: Option<&()>, _ev: &Event) {}
+
+#[cfg(feature = "tray-popup")]
+fn disconnect_popup(popup: Option<&PopupSink>) {
+    if let Some(p) = popup {
+        p.set_disconnected();
+    }
+}
+
+#[cfg(not(feature = "tray-popup"))]
+fn disconnect_popup(_popup: Option<&()>) {}
+
 fn backoff_delay(attempt: u32) -> Duration {
-    const CAP_SECS: u64 = 60;
-    let secs = 1u64.checked_shl(attempt).unwrap_or(CAP_SECS).min(CAP_SECS);
+    let secs = 1u64
+        .checked_shl(attempt)
+        .unwrap_or(BACKOFF_CAP_SECS)
+        .min(BACKOFF_CAP_SECS);
     Duration::from_secs(secs)
 }
 

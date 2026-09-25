@@ -1,7 +1,5 @@
-//! Vision-capability probe. llama.cpp loads a multimodal projector
-//! automatically when the HF repo bundles one, so the only way to know
-//! whether the model accepts images is to ask `/props` for its
-//! `modalities` object.
+//! Vision-capability probe: asks `/props` for the loaded model's
+//! `modalities`, since llama.cpp loads a projector implicitly.
 
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -10,20 +8,16 @@ use super::control::LlamaServerControl;
 use super::error::LlamaServerError;
 
 /// Snapshot of one `/props` probe. `model_id` is `None` when the probe
-/// never reached the loaded model, which tells a failed probe apart
-/// from a model that lacks vision.
+/// never reached the loaded model.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VisionState {
     pub model_id: Option<String>,
     pub vision_supported: bool,
 }
 
-/// Probe the loaded model's capabilities through `control`, following
-/// router indirection when its `/props` reports `role: "router"`: the
-/// model then lives in a child server whose port the router's `/models`
-/// reports, and the child's `/props` is the answer. Fails closed: any
-/// HTTP error, parse failure or absent field yields the default (no
-/// vision).
+/// Probe the loaded model's capabilities through `control`, following a
+/// router's `/models` to the child hosting `model`. Fails closed: any error
+/// or missing field yields the default (no vision).
 pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str) -> VisionState {
     let Some(body) = props_or_warn(control.props().await) else {
         return VisionState::default();
@@ -36,31 +30,8 @@ pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str
         };
     }
 
-    let child_port = match control.find_loaded_child_port(model).await {
-        Ok(Some(p)) if p != 0 => p,
-        Ok(Some(_)) => {
-            debug!(
-                target: "assistd::llama_server",
-                "router /models reports `--port 0` for {model}; child not yet bound — \
-                 reporting vision unsupported until the next probe"
-            );
-            return VisionState::default();
-        }
-        Ok(None) => {
-            debug!(
-                target: "assistd::llama_server",
-                "router /models has no loaded entry for {model}; reporting vision \
-                 unsupported until the next probe"
-            );
-            return VisionState::default();
-        }
-        Err(e) => {
-            warn!(
-                target: "assistd::llama_server",
-                "router /models lookup for {model} failed: {e}"
-            );
-            return VisionState::default();
-        }
+    let Some(child_port) = bound_child_port(control, model).await else {
+        return VisionState::default();
     };
 
     let Some(child_body) = props_or_warn(control.child_props(child_port).await) else {
@@ -77,6 +48,35 @@ pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str
     VisionState {
         model_id,
         vision_supported,
+    }
+}
+
+async fn bound_child_port(control: &LlamaServerControl, model: &str) -> Option<u16> {
+    match control.find_loaded_child_port(model).await {
+        Ok(Some(port)) if port != 0 => Some(port),
+        Ok(Some(_)) => {
+            debug!(
+                target: "assistd::llama_server",
+                "router /models reports `--port 0` for {model}; child not yet bound — \
+                 reporting vision unsupported until the next probe"
+            );
+            None
+        }
+        Ok(None) => {
+            debug!(
+                target: "assistd::llama_server",
+                "router /models has no loaded entry for {model}; reporting vision \
+                 unsupported until the next probe"
+            );
+            None
+        }
+        Err(e) => {
+            warn!(
+                target: "assistd::llama_server",
+                "router /models lookup for {model} failed: {e}"
+            );
+            None
+        }
     }
 }
 
@@ -114,8 +114,9 @@ fn parse_vision_supported(body: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn vision_requires_modalities_vision_true() {

@@ -1,7 +1,6 @@
 //! Live i3 integration test, ignored by default; run it with
 //! `cargo test -p assistd-wm --test i3_live -- --ignored --nocapture`.
-//! Read-only: it never issues `focus` or `move_to_workspace`, which
-//! would mutate the user's window state.
+//! Read-only: it never changes the user's window state.
 
 #![cfg(feature = "i3")]
 
@@ -30,7 +29,6 @@ async fn connects_and_passes_shared_assertions() {
     common::assert_at_least_one_workspace_focused(&wm).await;
     common::assert_focused_window_in_list_windows(&wm).await;
 
-    // Exercises the event loop briefly; nothing is asserted.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let _ = shutdown_tx.send(true);

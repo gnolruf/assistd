@@ -5,6 +5,11 @@ use std::collections::{HashMap, HashSet};
 use assistd_ipc::Event;
 use serde_json::Value;
 
+const FOOTER_ARGS_MAX_CHARS: usize = 80;
+/// The popup renders only the last `BODY_CHARS` codepoints of the reply,
+/// sized to its default 360x120 geometry.
+const BODY_CHARS: usize = 300;
+
 /// Everything the popup window renders, as one snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PopupState {
@@ -116,42 +121,31 @@ impl PopupTracker {
         PopupActivity::Idle
     }
 
+    /// Apply `ev` and return the new snapshot. The body comes only from
+    /// `LastDelta`, which carries the whole reply; `Delta` never appends.
     pub fn ingest(&mut self, ev: &Event) -> PopupState {
         match ev {
             Event::Delta { id, .. } => {
-                // `LastDelta` carries the whole body; appending here would
-                // double-count.
-                self.bring_turn_to_front(id);
-                self.in_flight.insert(id.clone());
-                self.turns.entry(id.clone()).or_default().activity = Some(TurnActivity::Streaming);
+                self.activate_turn(id).activity = Some(TurnActivity::Streaming);
             }
             Event::LastDelta { id, text } => {
-                self.bring_turn_to_front(id);
-                self.in_flight.insert(id.clone());
-                let turn = self.turns.entry(id.clone()).or_default();
+                let turn = self.activate_turn(id);
                 turn.body = text.clone();
                 turn.activity = Some(TurnActivity::Streaming);
             }
             Event::ReasoningDelta { id, .. } => {
-                self.bring_turn_to_front(id);
-                self.in_flight.insert(id.clone());
-                self.turns.entry(id.clone()).or_default().activity = Some(TurnActivity::Thinking);
+                self.activate_turn(id).activity = Some(TurnActivity::Thinking);
             }
             Event::ToolCall { id, name, args } => {
-                self.bring_turn_to_front(id);
-                self.in_flight.insert(id.clone());
-                let line = ToolCallLine {
+                let turn = self.activate_turn(id);
+                turn.footer = Some(ToolCallLine {
                     name: name.clone(),
                     args_summary: summarize_args(args, FOOTER_ARGS_MAX_CHARS),
-                };
-                let turn = self.turns.entry(id.clone()).or_default();
-                turn.footer = Some(line);
+                });
                 turn.activity = Some(TurnActivity::RunningTool(name.clone()));
             }
             Event::ToolResult { id, .. } => {
-                self.bring_turn_to_front(id);
-                self.in_flight.insert(id.clone());
-                self.turns.entry(id.clone()).or_default().activity = Some(TurnActivity::Thinking);
+                self.activate_turn(id).activity = Some(TurnActivity::Thinking);
             }
             Event::Done { id } | Event::Error { id, .. } => {
                 self.in_flight.remove(id);
@@ -176,6 +170,12 @@ impl PopupTracker {
         self.snapshot()
     }
 
+    fn activate_turn(&mut self, id: &str) -> &mut TurnState {
+        self.bring_turn_to_front(id);
+        self.in_flight.insert(id.to_string());
+        self.turns.entry(id.to_string()).or_default()
+    }
+
     fn bring_turn_to_front(&mut self, id: &str) {
         if self.displayed.as_deref() != Some(id)
             && let Some(prev) = self.displayed.take()
@@ -186,8 +186,6 @@ impl PopupTracker {
         self.displayed = Some(id.to_string());
     }
 }
-
-const FOOTER_ARGS_MAX_CHARS: usize = 80;
 
 /// Single-line, ≤`max_chars`-codepoint preview of a JSON value.
 pub fn summarize_args(v: &Value, max_chars: usize) -> String {
@@ -208,7 +206,7 @@ pub fn summarize_args(v: &Value, max_chars: usize) -> String {
                 "{}".to_string()
             } else {
                 map.iter()
-                    .map(|(k, vv)| format!("{k}={}", value_inline(vv)))
+                    .map(|(key, value)| format!("{key}={}", value_inline(value)))
                     .collect::<Vec<_>>()
                     .join(" ")
             }
@@ -254,11 +252,6 @@ fn flatten_whitespace(s: &str) -> String {
     out
 }
 
-/// Cap on the body text rendered in the popup: the last `BODY_CHARS`
-/// codepoints of the running reply. Sized to the popup's default
-/// 360x120 geometry.
-const BODY_CHARS: usize = 300;
-
 fn truncate_chars_from_end(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -284,8 +277,9 @@ fn truncate_chars_from_start(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn summarize_args_renders_a_single_line_preview() {

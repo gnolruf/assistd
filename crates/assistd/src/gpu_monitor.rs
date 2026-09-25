@@ -14,9 +14,8 @@ use tracing::{info, warn};
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
-/// Whether the monitor caused the current `Sleeping` state. Only a sleep
-/// the monitor itself triggered may be auto-woken; a user-requested
-/// sleep stays.
+/// Whether the monitor caused the current `Sleeping` state; only its own
+/// sleeps are auto-woken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SleepCause {
     None,
@@ -177,13 +176,10 @@ async fn apply(action: Action, presence: &PresenceManager, cause: &mut SleepCaus
                 target: "assistd::gpu_monitor",
                 "GPU contention cleared; auto-waking"
             );
-            match presence.wake().await {
-                Ok(()) => *cause = SleepCause::None,
-                Err(e) => {
-                    warn!(target: "assistd::gpu_monitor", "wake transition failed: {e:#}");
-                    *cause = SleepCause::None;
-                }
+            if let Err(e) = presence.wake().await {
+                warn!(target: "assistd::gpu_monitor", "wake transition failed: {e:#}");
             }
+            *cause = SleepCause::None;
         }
     }
 }
@@ -259,8 +255,9 @@ fn read_comm(pid: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assistd_config::defaults::nz64;
+
+    use super::*;
 
     fn cfg() -> SleepConfig {
         SleepConfig {

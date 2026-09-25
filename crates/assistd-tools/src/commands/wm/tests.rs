@@ -1,14 +1,16 @@
-use super::*;
+use std::time::{Duration, Instant};
 
-use crate::commands::RecordingGate;
-use crate::commands::test_patterns as patterns;
-use crate::exec::POLICY_DENIED_EXIT;
-use crate::policy::{AlwaysAllowGate, DenyAllGate};
 use assistd_wm::{
     FocusedWindowContext, Layout, NoWindowManager, OutputInfo, ResizeDir, Window, WindowId,
     WmResult, WorkspaceId, WorkspaceInfo,
 };
 use parking_lot::Mutex;
+
+use super::*;
+use crate::commands::RecordingGate;
+use crate::commands::test_patterns as patterns;
+use crate::exec::POLICY_DENIED_EXIT;
+use crate::policy::{AlwaysAllowGate, DenyAllGate};
 
 fn id(n: u64) -> WindowId {
     WindowId::new(n).expect("test ids are non-zero")
@@ -22,9 +24,8 @@ fn ipc_err(msg: &str) -> WmError {
     }
 }
 
-/// [`WindowManager`] fixture that records every mutating call with its
-/// typed arguments. `error` makes every operation fail with that message
-/// as a [`WmError::Ipc`].
+/// [`WindowManager`] fixture recording every mutating call; `error` makes
+/// every operation fail with that message.
 #[derive(Default)]
 struct StubWm {
     connected: bool,
@@ -32,7 +33,6 @@ struct StubWm {
     workspaces: Vec<WorkspaceInfo>,
     outputs: Vec<OutputInfo>,
     focused: Option<WindowId>,
-    /// Surfaced as `focused_context().class`, independently of `focused`.
     focused_app: Option<String>,
     focus_calls: Mutex<Vec<WindowId>>,
     move_calls: Mutex<Vec<(WindowId, WorkspaceId)>>,
@@ -148,10 +148,8 @@ async fn unknown_subcommand_errors_with_available_list() {
     );
 }
 
-/// The connection check comes before argument parsing, so even a
-/// malformed id reports the missing compositor.
 #[tokio::test]
-async fn disconnected_backend_short_circuits() {
+async fn disconnected_backend_short_circuits_before_argument_parsing() {
     let backends: [Arc<dyn WindowManager>; 2] =
         [Arc::new(StubWm::default()), Arc::new(NoWindowManager)];
     for wm in backends {
@@ -259,7 +257,7 @@ fn hint_for_picks_label_per_error_variant() {
             "wm list",
         ),
         (
-            WmError::Timeout(std::time::Duration::from_secs(5)),
+            WmError::Timeout(Duration::from_secs(5)),
             Hint::Note,
             "retry",
         ),
@@ -281,9 +279,8 @@ fn hint_for_picks_label_per_error_variant() {
     }
 }
 
-/// A numeric workspace argument reaches the backend as a number.
 #[tokio::test]
-async fn move_calls_backend() {
+async fn move_calls_backend_with_numeric_workspace() {
     let stub = Arc::new(StubWm::connected());
     let out = run_wm(stub.clone(), &["move", "42", "3"]).await;
     assert_eq!(out.exit_code, 0);
@@ -390,8 +387,6 @@ async fn open_destructive_argv_consults_gate() {
     );
 }
 
-/// A script handed to `bash -c` as one argument still has to reach the
-/// gate.
 #[tokio::test]
 async fn open_destructive_inside_bash_c_argument_consults_gate() {
     let gate = RecordingGate::new(false);
@@ -429,15 +424,13 @@ async fn open_gate_approval_lets_the_process_run() {
     );
 }
 
-/// An application outliving the startup probe keeps running, and the
-/// launch reports success rather than blocking the turn.
 #[tokio::test]
 async fn open_leaves_a_surviving_process_running() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("finished");
 
     let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let out = run_open(
         &cmd,
         &[
@@ -451,7 +444,7 @@ async fn open_leaves_a_surviving_process_running() {
     assert_eq!(out.exit_code, 0, "surviving launch should report success");
     assert!(out.stdout.is_empty());
     assert!(
-        started.elapsed() < std::time::Duration::from_millis(900),
+        started.elapsed() < Duration::from_millis(900),
         "launch should return on the probe, not on the child exiting"
     );
     assert!(!marker.exists(), "child should not have finished yet");
@@ -462,7 +455,7 @@ async fn open_leaves_a_surviving_process_running() {
             finished = true;
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(
         finished,
@@ -481,8 +474,6 @@ async fn open_reports_a_failed_startup_with_its_output() {
     );
 }
 
-/// Policy is scoped to `open`; the compositor subcommands never
-/// consult the gate or the denylist.
 #[tokio::test]
 async fn non_open_subcommands_skip_the_policy() {
     let gate = RecordingGate::new(false);
@@ -504,7 +495,6 @@ async fn non_open_subcommands_skip_the_policy() {
     assert!(gate.prompts().is_empty(), "{:?}", gate.prompts());
 }
 
-/// `wm active` prints `<id>\t<app>` so either column can be piped on.
 #[tokio::test]
 async fn active_prints_id_tab_app() {
     let cases: [(Option<u64>, Option<&str>, &[u8]); 3] = [
@@ -659,8 +649,6 @@ async fn outputs_handles_missing_fields_with_dash() {
     assert_eq!(out.stdout, b"HDMI-A-1\t-\t-\t-\t-\t-\n");
 }
 
-/// An i3-class backend that cannot list outputs gets an explanatory
-/// error rather than empty stdout.
 #[tokio::test]
 async fn outputs_unsupported_backend_emits_error_with_note() {
     let stub = Arc::new(StubWm {

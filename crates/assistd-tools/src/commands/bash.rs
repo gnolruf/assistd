@@ -1,9 +1,5 @@
-//! `bash SCRIPT`: spawn a real `bash -c <script>` subprocess behind the
-//! denylist, allowlist and destructive-pattern confirmation, sandbox, and
-//! timeout policy. Denylist hits exit 126 without prompting; scripts that
-//! run unlisted programs or match a destructive pattern prompt through the
-//! gate and exit 126 when refused; a timeout kills the process group and
-//! exits 137.
+//! `bash SCRIPT`: a real `bash -c` subprocess behind the subprocess policy
+//! (denylist, allowlist, destructive-pattern confirmation, sandbox, timeout).
 
 use std::sync::Arc;
 
@@ -15,7 +11,8 @@ use crate::policy::{
     BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy, check_script,
 };
 
-/// `bash SCRIPT`: spawn a real `bash -c <script>` subprocess, policy-gated.
+/// `bash SCRIPT`: run a policy-gated `bash -c <script>` subprocess. Policy
+/// refusals exit 126; a timeout kills the process group and exits 137.
 pub struct BashCommand {
     policy: SubprocessPolicy,
 }
@@ -37,11 +34,10 @@ impl BashCommand {
 #[cfg(test)]
 impl Default for BashCommand {
     fn default() -> Self {
-        use crate::policy::AlwaysAllowGate;
         Self::new(
             Arc::new(BashPolicyCfg::default()),
             SandboxInfo::none(),
-            Arc::new(AlwaysAllowGate),
+            Arc::new(crate::policy::AlwaysAllowGate),
         )
     }
 }

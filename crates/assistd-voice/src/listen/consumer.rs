@@ -31,21 +31,10 @@ pub fn drain_to_frames(
     loop {
         if consumer.occupied_len() >= CHUNK_SIZE {
             if let Some(samples) = resampler.pull(&mut consumer)? {
-                pending.extend(samples.iter().map(|&s| f32_to_i16(s)));
+                pending.extend(samples.iter().map(|&sample| f32_to_i16(sample)));
             }
-            while pending.len() >= FRAME_SAMPLES {
-                let mut frame = Box::new([0i16; FRAME_SAMPLES]);
-                frame.copy_from_slice(&pending[..FRAME_SAMPLES]);
-                pending.drain(..FRAME_SAMPLES);
-                if frame_tx.blocking_send(frame).is_err() {
-                    debug!(
-                        target: "assistd::voice::listen",
-                        frames_emitted,
-                        "frame receiver dropped; stopping capture"
-                    );
-                    return Ok(());
-                }
-                frames_emitted += 1;
+            if !send_full_frames(&mut pending, &frame_tx, &mut frames_emitted) {
+                return Ok(());
             }
             continue;
         }
@@ -61,4 +50,27 @@ pub fn drain_to_frames(
 
         std::thread::park_timeout(IDLE_PARK);
     }
+}
+
+/// Send every complete frame buffered in `pending`. False once the receiver is dropped.
+fn send_full_frames(
+    pending: &mut Vec<i16>,
+    frame_tx: &mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
+    frames_emitted: &mut u64,
+) -> bool {
+    while pending.len() >= FRAME_SAMPLES {
+        let mut frame = Box::new([0i16; FRAME_SAMPLES]);
+        frame.copy_from_slice(&pending[..FRAME_SAMPLES]);
+        pending.drain(..FRAME_SAMPLES);
+        if frame_tx.blocking_send(frame).is_err() {
+            debug!(
+                target: "assistd::voice::listen",
+                frames_emitted = *frames_emitted,
+                "frame receiver dropped; stopping capture"
+            );
+            return false;
+        }
+        *frames_emitted += 1;
+    }
+    true
 }

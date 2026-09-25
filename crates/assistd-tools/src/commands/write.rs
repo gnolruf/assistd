@@ -5,13 +5,9 @@ use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
-
 use crate::exec::POLICY_DENIED_EXIT;
 
-/// Writable-path allowlist, non-empty by construction: a policy with no
-/// permitted prefixes would gate nothing, so that state is not
-/// representable. Prefixes are canonical paths compared with
-/// `Path::starts_with`.
+/// Writable-path allowlist of canonical prefixes, non-empty by construction.
 #[derive(Debug, Clone)]
 pub struct WritePolicyCfg {
     first: PathBuf,
@@ -20,8 +16,8 @@ pub struct WritePolicyCfg {
 }
 
 impl WritePolicyCfg {
-    /// Construct a policy from canonicalized writable path prefixes, or
-    /// `None` if none were given.
+    /// A policy over canonicalized writable prefixes, or `None` if none
+    /// were given.
     pub fn new(writable_paths: Vec<PathBuf>) -> Option<Self> {
         let mut prefixes = writable_paths.into_iter();
         let first = prefixes.next()?;
@@ -33,8 +29,7 @@ impl WritePolicyCfg {
     }
 
     /// Also refuse anything under the canonical `dirs`, even inside a
-    /// writable prefix: assistd's own configuration, which would
-    /// otherwise let a write widen what commands may do.
+    /// writable prefix.
     pub fn protecting(mut self, dirs: Vec<PathBuf>) -> Self {
         self.protected = dirs;
         self
@@ -59,24 +54,8 @@ impl WritePolicyCfg {
     }
 }
 
-/// `write PATH [CONTENT...]`: write to PATH, subject to the configured
-/// writable-path allowlist.
-///
-/// Two shapes:
-/// - `echo "hi" | write /tmp/x`: stdin is the content (pipeline form).
-/// - `write /tmp/x hello world`: args beyond the path are joined with
-///   single spaces and written (convenience form for when the model
-///   already has the content inline).
-///
-/// If both args and stdin are provided, args win and stdin is silently
-/// discarded.
-///
-/// # Policy
-///
-/// Rejections return exit 126 with a convention-compliant `[error]` line
-/// that names the offending path and points at `[tools.write] writable_paths`
-/// so the user can widen the allowlist if needed. Relative paths are always
-/// rejected because the daemon's cwd is not a meaningful anchor.
+/// `write PATH [CONTENT...]`: write the joined args (or else stdin) to an
+/// absolute, allowlisted PATH. Policy refusals exit 126.
 pub struct WriteCommand {
     cfg: Arc<WritePolicyCfg>,
 }
@@ -151,18 +130,6 @@ impl Command for WriteCommand {
     }
 }
 
-async fn write_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .await?;
-    file.write_all(content).await?;
-    file.flush().await
-}
-
 #[derive(Debug)]
 enum PathResolveError {
     Relative,
@@ -205,6 +172,18 @@ impl PathResolveError {
     }
 }
 
+async fn write_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .await?;
+    file.write_all(content).await?;
+    file.flush().await
+}
+
 fn resolve_for_allowlist(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
     let expanded = expand_tilde(raw, home)?;
     if !expanded.is_absolute() {
@@ -237,26 +216,27 @@ fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveErr
 /// `/..` is discarded, as the kernel does.
 pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
     let mut out: Vec<Component<'_>> = Vec::new();
-    for comp in path.components() {
-        match comp {
+    for component in path.components() {
+        match component {
             Component::CurDir => {}
             Component::ParentDir => match out.last() {
                 Some(Component::Normal(_)) => {
                     out.pop();
                 }
                 Some(Component::RootDir) => {}
-                _ => out.push(comp),
+                _ => out.push(component),
             },
-            _ => out.push(comp),
+            _ => out.push(component),
         }
     }
     let mut result = PathBuf::new();
-    for c in out {
-        result.push(c.as_os_str());
+    for component in out {
+        result.push(component.as_os_str());
     }
     result
 }
 
+/// Split `path` into its deepest existing ancestor and the remainder.
 fn split_at_existing(path: &Path) -> (PathBuf, PathBuf) {
     let mut anchor = path.to_path_buf();
     let mut tail = PathBuf::new();
@@ -270,13 +250,10 @@ fn split_at_existing(path: &Path) -> (PathBuf, PathBuf) {
         let Some(file_name) = anchor.file_name() else {
             return (anchor, tail);
         };
-        let new_tail = if tail.as_os_str().is_empty() {
-            PathBuf::from(file_name)
-        } else {
-            let mut nt = PathBuf::from(file_name);
-            nt.push(&tail);
-            nt
-        };
+        let mut new_tail = PathBuf::from(file_name);
+        if !tail.as_os_str().is_empty() {
+            new_tail.push(&tail);
+        }
         tail = new_tail;
         anchor = parent.to_path_buf();
     }

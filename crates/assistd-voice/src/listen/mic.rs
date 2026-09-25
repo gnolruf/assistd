@@ -11,23 +11,22 @@ use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::transcribe::Transcriber;
-
 use super::capture::{self, ListenCaptureSession};
 use super::vad::{FRAME_SAMPLES, UtteranceVad, VadEvent, VadTuning};
 use super::{ContinuousListener, ListenError};
-
-type CaptureJoin = JoinHandle<Result<(), crate::mic::capture::AudioCaptureError>>;
+use crate::mic::capture::AudioCaptureError;
+use crate::transcribe::Transcriber;
 
 const UTTERANCE_CHANNEL_DEPTH: usize = 16;
 
 /// ~2.5 s of 20 ms frames, enough to ride out scheduling hiccups.
 const FRAME_CHANNEL_DEPTH: usize = 128;
 
-/// Utterances awaiting transcription. Each one holds its PCM until the
-/// single transcription worker reaches it; beyond this, new utterances
-/// are dropped rather than letting a slow transcriber accumulate audio.
+/// Utterances awaiting transcription; beyond this, new utterances are dropped
+/// rather than letting a slow transcriber accumulate audio.
 const PENDING_UTTERANCE_DEPTH: usize = 4;
+
+type CaptureJoin = JoinHandle<Result<(), AudioCaptureError>>;
 
 /// cpal + webrtc-vad implementation of [`ContinuousListener`].
 pub struct MicContinuousListener {
@@ -37,7 +36,7 @@ pub struct MicContinuousListener {
     active: AtomicBool,
     state_tx: watch::Sender<bool>,
     utterances: broadcast::Sender<String>,
-    inner: Arc<Mutex<ListenState>>,
+    listen_state: Arc<Mutex<ListenState>>,
 }
 
 struct ListenState {
@@ -51,33 +50,47 @@ struct ListenSession {
     transcribe_handle: JoinHandle<()>,
 }
 
-impl MicContinuousListener {
-    /// The audio device is opened on [`Self::start`], not here.
-    pub fn new(transcriber: Arc<dyn Transcriber>, cfg: &VoiceConfig) -> Self {
-        let tuning = tuning_from_config(&cfg.continuous);
-        let (state_tx, _) = watch::channel(false);
-        let (utterances, _) = broadcast::channel(UTTERANCE_CHANNEL_DEPTH);
-        Self {
-            transcriber,
-            mic_device: cfg.mic_device.clone(),
-            tuning,
-            active: AtomicBool::new(false),
-            state_tx,
-            utterances,
-            inner: Arc::new(Mutex::new(ListenState { session: None })),
+impl ListenSession {
+    /// Signal capture to stop, then wait for each worker in pipeline order.
+    async fn shutdown(self) {
+        self.capture_stop.store(true, Ordering::SeqCst);
+        match self.capture_handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => warn!(target: "assistd::voice::listen", "capture worker error: {err}"),
+            Err(err) => warn!(target: "assistd::voice::listen", "capture worker panicked: {err}"),
+        }
+        if let Err(err) = self.vad_handle.await {
+            warn!(target: "assistd::voice::listen", "VAD worker panicked: {err}");
+        }
+        if let Err(err) = self.transcribe_handle.await {
+            warn!(target: "assistd::voice::listen", "transcription worker panicked: {err}");
         }
     }
 }
 
-fn tuning_from_config(cfg: &ContinuousListenConfig) -> VadTuning {
-    VadTuning::from_ms(cfg.silence_ms.get(), cfg.max_utterance_secs.get())
+impl MicContinuousListener {
+    /// The audio device is opened on [`Self::start`], not here.
+    pub fn new(transcriber: Arc<dyn Transcriber>, config: &VoiceConfig) -> Self {
+        let tuning = tuning_from_config(&config.continuous);
+        let (state_tx, _) = watch::channel(false);
+        let (utterances, _) = broadcast::channel(UTTERANCE_CHANNEL_DEPTH);
+        Self {
+            transcriber,
+            mic_device: config.mic_device.clone(),
+            tuning,
+            active: AtomicBool::new(false),
+            state_tx,
+            utterances,
+            listen_state: Arc::new(Mutex::new(ListenState { session: None })),
+        }
+    }
 }
 
 #[async_trait]
 impl ContinuousListener for MicContinuousListener {
     async fn start(&self) -> Result<(), ListenError> {
-        let mut inner = self.inner.lock().await;
-        if inner.session.is_some() {
+        let mut listen_state = self.listen_state.lock().await;
+        if listen_state.session.is_some() {
             return Ok(());
         }
         self.active.store(true, Ordering::SeqCst);
@@ -99,7 +112,7 @@ impl ContinuousListener for MicContinuousListener {
         let tuning = self.tuning;
         let vad_handle = tokio::task::spawn_blocking(move || vad_loop(tuning, frame_rx, pcm_tx));
 
-        inner.session = Some(ListenSession {
+        listen_state.session = Some(ListenSession {
             capture_stop,
             capture_handle,
             vad_handle,
@@ -111,27 +124,13 @@ impl ContinuousListener for MicContinuousListener {
     }
 
     async fn stop(&self) -> Result<(), ListenError> {
-        let session = {
-            let mut inner = self.inner.lock().await;
-            inner.session.take()
-        };
+        let session = self.listen_state.lock().await.session.take();
         let Some(session) = session else {
             self.active.store(false, Ordering::SeqCst);
             return Ok(());
         };
 
-        session.capture_stop.store(true, Ordering::SeqCst);
-        match session.capture_handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => warn!(target: "assistd::voice::listen", "capture worker error: {e}"),
-            Err(e) => warn!(target: "assistd::voice::listen", "capture worker panicked: {e}"),
-        }
-        if let Err(e) = session.vad_handle.await {
-            warn!(target: "assistd::voice::listen", "VAD worker panicked: {e}");
-        }
-        if let Err(e) = session.transcribe_handle.await {
-            warn!(target: "assistd::voice::listen", "transcription worker panicked: {e}");
-        }
+        session.shutdown().await;
 
         self.active.store(false, Ordering::SeqCst);
         let _ = self.state_tx.send(false);
@@ -152,6 +151,10 @@ impl ContinuousListener for MicContinuousListener {
     }
 }
 
+fn tuning_from_config(config: &ContinuousListenConfig) -> VadTuning {
+    VadTuning::from_ms(config.silence_ms.get(), config.max_utterance_secs.get())
+}
+
 /// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer. Never
 /// waits on `pcm_tx`: stalling here would back up the frame channel and
 /// silently truncate live audio, so a full queue drops the utterance.
@@ -166,7 +169,7 @@ fn vad_loop(
             continue;
         };
         let pcm = match event {
-            VadEvent::UtteranceComplete(p) | VadEvent::Truncated(p) => p,
+            VadEvent::UtteranceComplete(pcm) | VadEvent::Truncated(pcm) => pcm,
         };
         match pcm_tx.try_send(pcm) {
             Ok(()) => {}
@@ -198,8 +201,8 @@ async fn transcribe_loop(
                     );
                 }
             }
-            Err(e) => {
-                warn!(target: "assistd::voice::listen", "transcription failed: {e:#}");
+            Err(err) => {
+                warn!(target: "assistd::voice::listen", "transcription failed: {err:#}");
             }
         }
     }

@@ -87,9 +87,8 @@ async fn run_monitor(
     }
 }
 
-/// Calls `drowse()` / `sleep()` directly rather than `set_presence`, so
-/// an automatic transition does not reset the idle timer and the monitor
-/// can progress Active → Drowsy → Sleeping.
+/// Calls `drowse()`/`sleep()` rather than `set_presence` so the idle timer
+/// is not reset and Active → Drowsy → Sleeping can progress.
 async fn apply(action: Action, presence: &PresenceManager) {
     match action {
         Action::None => {}
@@ -137,6 +136,8 @@ fn decide(state: PresenceState, idle: Duration, cfg: &SleepConfig) -> Action {
 
 #[cfg(test)]
 mod tests {
+    use assistd_core::PresenceState::{Active, Drowsy, Sleeping};
+
     use super::*;
 
     fn cfg(drowsy: u64, sleep: u64) -> SleepConfig {
@@ -168,7 +169,6 @@ mod tests {
 
     #[test]
     fn decide_by_state_idle_time_and_thresholds() {
-        use PresenceState::{Active, Drowsy, Sleeping};
         let cases = [
             ("active before drowsy", Active, 10, (30, 120), Action::None),
             ("active at drowsy", Active, 30, (30, 120), Action::Drowse),

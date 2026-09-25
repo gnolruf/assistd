@@ -9,14 +9,15 @@ use clap::Args;
 use ksni::TrayMethods;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use menu::TrayItem;
 
 mod menu;
 #[cfg(feature = "tray-popup")]
 pub mod popup;
 mod state;
 mod subscribe;
-
-use menu::TrayItem;
 
 #[derive(Args)]
 pub struct TrayArgs {
@@ -56,8 +57,6 @@ pub async fn run(args: TrayArgs) -> Result<()> {
         Ok(cfg) => popup::spawn_popup(cfg, ipc.clone()).await?,
         Err(_) => None,
     };
-    #[cfg(not(feature = "tray-popup"))]
-    let _ = &config;
     #[cfg(feature = "tray-popup")]
     let popup_sink = popup_handle.as_ref().map(|h| h.sink.clone());
     #[cfg(not(feature = "tray-popup"))]
@@ -115,7 +114,7 @@ fn build_activate_callback(_sink: &Option<()>) -> Option<menu::ActivateCallback>
     None
 }
 
-async fn wait_for_shutdown(action_task: tokio::task::JoinHandle<Result<()>>) {
+async fn wait_for_shutdown(action_task: JoinHandle<Result<()>>) {
     let mut sigterm = match signal(SignalKind::terminate()) {
         Ok(s) => s,
         Err(e) => {

@@ -11,32 +11,26 @@ use crate::defaults::{
     DEFAULT_EMBEDDING_TOP_K,
 };
 
-/// `[embedding]` section of `config.toml`.
+/// Dedicated embedding llama-server and semantic-recall settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmbeddingConfig {
-    /// Master switch. When `false` semantic recall is unavailable.
+    /// When `false`, semantic recall is unavailable.
     pub enabled: bool,
-    /// HuggingFace model id passed verbatim to llama-server's
-    /// `--hf-repo` flag, as `<owner>/<repo>:<quant>`. The suffix must be a
-    /// quant tag, not a `.gguf` filename: llama-server resolves it against
-    /// its preset manifest, and a filename fails with a misleading "no GGUF
-    /// files found".
+    /// `--hf-repo` value, `<owner>/<repo>:<quant>`. The suffix must be a
+    /// quant tag; a `.gguf` filename fails with "no GGUF files found".
     pub model: String,
-    /// Bind host for the embedding llama-server. Should be loopback.
+    /// Bind host. Should be loopback.
     pub host: IpAddr,
-    /// TCP port the embedding llama-server binds to. Must differ from
-    /// `llama_server.port`.
+    /// Bind port. Must differ from `llama_server.port`.
     pub port: NonZeroU16,
-    /// `-ngl` count for the embed server. `0` keeps it on CPU.
+    /// `-ngl` count. `0` keeps it on CPU.
     pub gpu_layers: u32,
-    /// How many nearest-neighbor matches to retrieve per query for
-    /// auto-injection and the `reminisce` tool's default.
+    /// Nearest-neighbour matches per query, for auto-injection and as the
+    /// `reminisce` default.
     pub top_k: NonZeroU32,
-    /// When `true`, every user query embeds the prompt and prepends
-    /// the top-K conversation chunks to it as a "Relevant past
-    /// context:" block. Disable to require explicit `reminisce` tool
-    /// invocations instead.
+    /// Prepend the `top_k` most similar past chunks to every query; when
+    /// `false`, recall happens only through `reminisce`.
     pub auto_inject: bool,
 }
 

@@ -1,5 +1,5 @@
-//! Supervisor for the embedding llama-server child: spawn, health
-//! check, restart on crash with backoff.
+//! Supervisor for the embedding llama-server child: spawn, health check, and restart
+//! on crash with backoff.
 
 pub mod backoff;
 pub mod error;

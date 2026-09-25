@@ -8,15 +8,15 @@ use crate::{
 
 /// Escape `\` and `"` inside a quoted criteria value. Backslashes go
 /// first so the ones inserted before quotes aren't doubled.
-pub fn escape_for_criteria(s: &str) -> String {
-    s.replace('\\', r"\\").replace('"', r#"\""#)
+pub fn escape_for_criteria(value: &str) -> String {
+    value.replace('\\', r"\\").replace('"', r#"\""#)
 }
 
 /// `workspace number N` for numeric ids, `workspace "<name>"` otherwise.
-pub fn format_workspace_target(ws: &WorkspaceId) -> String {
-    match ws {
+pub fn format_workspace_target(workspace: &WorkspaceId) -> String {
+    match workspace {
         WorkspaceId::Num(n) => format!("workspace number {n}"),
-        WorkspaceId::Name(s) => format!(r#"workspace "{}""#, escape_for_criteria(s)),
+        WorkspaceId::Name(name) => format!(r#"workspace "{}""#, escape_for_criteria(name)),
     }
 }
 
@@ -51,11 +51,15 @@ pub fn format_layout(layout: Layout) -> String {
 
 /// The `[key="value"]` prefix for a [`PlacementCriteria`]. `Title` is
 /// anchored with `^…$` because the compositor treats it as a regex.
-pub fn format_criteria_clause(c: &PlacementCriteria) -> String {
-    match c {
-        PlacementCriteria::AppId(s) => format!(r#"[app_id="{}"]"#, escape_for_criteria(s)),
-        PlacementCriteria::Class(s) => format!(r#"[class="{}"]"#, escape_for_criteria(s)),
-        PlacementCriteria::Title(s) => format!(r#"[title="^{}$"]"#, escape_for_criteria(s)),
+pub fn format_criteria_clause(criteria: &PlacementCriteria) -> String {
+    match criteria {
+        PlacementCriteria::AppId(app_id) => {
+            format!(r#"[app_id="{}"]"#, escape_for_criteria(app_id))
+        }
+        PlacementCriteria::Class(class) => format!(r#"[class="{}"]"#, escape_for_criteria(class)),
+        PlacementCriteria::Title(title) => {
+            format!(r#"[title="^{}$"]"#, escape_for_criteria(title))
+        }
         PlacementCriteria::ConId(id) => format!(r#"[con_id="{}"]"#, id.get()),
     }
 }
@@ -64,11 +68,11 @@ pub fn format_criteria_clause(c: &PlacementCriteria) -> String {
 /// Positions are absolute pixels because i3's ppt-based positioning
 /// silently clamps off-screen values.
 pub fn format_place_floating_pixels(
-    c: &PlacementCriteria,
+    criteria: &PlacementCriteria,
     anchor: PlacementAnchor,
     workspace: Rect,
 ) -> String {
-    let prefix = format_criteria_clause(c);
+    let prefix = format_criteria_clause(criteria);
     let (x, y) = compute_target_position(anchor, workspace);
     format!(
         "{prefix} floating enable, {prefix} resize set {} {}, \
@@ -80,18 +84,16 @@ pub fn format_place_floating_pixels(
 /// Top-left corner of the window in output-relative pixels. Negative
 /// results are allowed.
 pub fn compute_target_position(anchor: PlacementAnchor, workspace: Rect) -> (i32, i32) {
-    let w = anchor.width as i32;
-    let h = anchor.height as i32;
-    let ww = workspace.width as i32;
-    let wh = workspace.height as i32;
+    let free_width = workspace.width as i32 - anchor.width as i32;
+    let free_height = workspace.height as i32 - anchor.height as i32;
     match anchor.corner {
         AnchorCorner::TopLeft => (anchor.offset_x, anchor.offset_y),
-        AnchorCorner::TopRight => (ww - w + anchor.offset_x, anchor.offset_y),
-        AnchorCorner::BottomLeft => (anchor.offset_x, wh - h + anchor.offset_y),
-        AnchorCorner::BottomRight => (ww - w + anchor.offset_x, wh - h + anchor.offset_y),
+        AnchorCorner::TopRight => (free_width + anchor.offset_x, anchor.offset_y),
+        AnchorCorner::BottomLeft => (anchor.offset_x, free_height + anchor.offset_y),
+        AnchorCorner::BottomRight => (free_width + anchor.offset_x, free_height + anchor.offset_y),
         AnchorCorner::Center => (
-            (ww - w) / 2 + anchor.offset_x,
-            (wh - h) / 2 + anchor.offset_y,
+            free_width / 2 + anchor.offset_x,
+            free_height / 2 + anchor.offset_y,
         ),
     }
 }

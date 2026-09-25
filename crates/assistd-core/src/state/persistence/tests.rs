@@ -1,9 +1,5 @@
-use super::*;
-use crate::VoiceOutputController;
-use crate::presence::PresenceManager;
-use crate::state::memory_stack::MemoryStack;
-use crate::state::runtime::RuntimeState;
-use crate::state::subsystems::Subsystems;
+use parking_lot::Mutex;
+
 use assistd_config::Config;
 use assistd_ipc::PresenceState;
 use assistd_llm::EchoBackend;
@@ -12,9 +8,13 @@ use assistd_memory::{
     UndoOutcome,
 };
 use assistd_tools::ToolRegistry;
-use parking_lot::Mutex;
-use std::sync::Arc;
-use std::time::Duration;
+
+use super::*;
+use crate::VoiceOutputController;
+use crate::presence::PresenceManager;
+use crate::state::memory_stack::MemoryStack;
+use crate::state::runtime::RuntimeState;
+use crate::state::subsystems::Subsystems;
 
 /// Records the order writes arrive in, and makes each write finish
 /// faster than the one before it. Unchained, that inverts the order

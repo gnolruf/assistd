@@ -1,10 +1,11 @@
 //! Persistence survives closing and reopening the store at the same path.
 
+use std::sync::Arc;
+
 use assistd_memory::{
     BranchId, ConversationStore, MemoryStore, PersistedMessage, PersistedRole,
     SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
 };
-use std::sync::Arc;
 use tokio::sync::watch;
 
 #[tokio::test]
@@ -56,8 +57,7 @@ async fn turn_persists_across_store_reopen() {
 
         mems.save("fact:lang", "rust".into()).await.unwrap();
 
-        // Dropping the last sender lets the writer exit; awaiting it
-        // flushes the DB before the reopen.
+        // Awaiting the writer once every sender is dropped flushes the DB before reopening.
         drop(convs);
         drop(mems);
         writer.await.unwrap();

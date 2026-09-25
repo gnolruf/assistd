@@ -3,15 +3,11 @@ use async_trait::async_trait;
 use crate::command::{Command, CommandInput, CommandOutput};
 use crate::commands::collect_input;
 
-/// `wc [-lwc] [FILE]...`: count what the named files, or stdin, hold.
-/// With no flags the output is
-/// `<lines> <words> <bytes>`; each flag narrows it to that one count.
-/// Flags can be combined, and the selected counts print in the
-/// canonical lines-words-bytes order regardless of how they were given.
+/// `wc [-lwc] [FILE]...`: print `<lines> <words> <bytes>` of the named
+/// files or stdin; flags narrow it, always in that order.
 pub struct WcCommand;
 
-/// Which counts to print. Nothing selected means all three, matching
-/// bare `wc`.
+/// Which counts to print; nothing selected means all three.
 #[derive(Default)]
 struct Selected {
     lines: bool,
@@ -73,31 +69,35 @@ impl Command for WcCommand {
             }
         }
 
-        let stdin = match collect_input("wc", &files, input.stdin).await {
+        let text = match collect_input("wc", &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return CommandOutput::usage(self.help()),
             Err(failure) => return failure,
         };
-        let lines = stdin.iter().filter(|b| **b == b'\n').count();
-        let words = stdin
-            .split(u8::is_ascii_whitespace)
-            .filter(|w| !w.is_empty())
-            .count();
-        let bytes = stdin.len();
-
-        let show_all = !selected.any();
-        let counts = [
-            (selected.lines || show_all, lines),
-            (selected.words || show_all, words),
-            (selected.bytes || show_all, bytes),
-        ];
-        let out: Vec<String> = counts
-            .iter()
-            .filter(|(wanted, _)| *wanted)
-            .map(|(_, n)| n.to_string())
-            .collect();
-        CommandOutput::ok(format!("{}\n", out.join(" ")).into_bytes())
+        CommandOutput::ok(format_counts(&text, &selected).into_bytes())
     }
+}
+
+fn format_counts(text: &[u8], selected: &Selected) -> String {
+    let lines = text.iter().filter(|b| **b == b'\n').count();
+    let words = text
+        .split(u8::is_ascii_whitespace)
+        .filter(|w| !w.is_empty())
+        .count();
+    let bytes = text.len();
+
+    let show_all = !selected.any();
+    let counts = [
+        (selected.lines || show_all, lines),
+        (selected.words || show_all, words),
+        (selected.bytes || show_all, bytes),
+    ];
+    let shown: Vec<String> = counts
+        .iter()
+        .filter(|(wanted, _)| *wanted)
+        .map(|(_, n)| n.to_string())
+        .collect();
+    format!("{}\n", shown.join(" "))
 }
 
 fn unsupported(flag: &str) -> CommandOutput {
@@ -129,7 +129,6 @@ mod tests {
             (&["-w"], b"a b\nc\n", "3\n"),
             (&["-c"], b"abc\n", "4\n"),
             (&["-w"], b"a \xff b\n", "3\n"),
-            // Asked for words then lines; printed lines then words.
             (&["-wl"], b"a b\nc\n", "2 3\n"),
         ];
         for (args, stdin, expected) in cases {

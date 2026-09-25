@@ -1,12 +1,14 @@
 //! `Subsystems`: LLM, voice, presence, tools, and WM handles owned by
 //! `AppState`.
 
-use crate::PresenceManager;
+use std::sync::Arc;
+
 use assistd_llm::LlmBackend;
 use assistd_tools::ToolRegistry;
 use assistd_voice::{ContinuousListener, VoiceInput, VoiceOutputController};
 use assistd_wm::{NoWindowManager, WindowManager};
-use std::sync::Arc;
+
+use crate::{PresenceManager, VisionRevalidator};
 
 /// One MCP server that failed to start during daemon boot.
 #[derive(Debug, Clone)]
@@ -24,7 +26,7 @@ pub struct Subsystems {
     pub listener: Arc<dyn ContinuousListener>,
     pub voice_output: Arc<VoiceOutputController>,
     pub window_manager: Arc<dyn WindowManager>,
-    pub vision_revalidator: Option<Arc<crate::VisionRevalidator>>,
+    pub vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub mcp_startup_failures: Vec<McpStartupFailure>,
 }
 
@@ -53,14 +55,14 @@ impl Subsystems {
     }
 
     /// Replace the window manager.
-    pub fn with_window_manager(mut self, wm: Arc<dyn WindowManager>) -> Self {
-        self.window_manager = wm;
+    pub fn with_window_manager(mut self, window_manager: Arc<dyn WindowManager>) -> Self {
+        self.window_manager = window_manager;
         self
     }
 
     /// Attach a vision revalidator.
-    pub fn with_vision_revalidator(mut self, r: Arc<crate::VisionRevalidator>) -> Self {
-        self.vision_revalidator = Some(r);
+    pub fn with_vision_revalidator(mut self, revalidator: Arc<VisionRevalidator>) -> Self {
+        self.vision_revalidator = Some(revalidator);
         self
     }
 

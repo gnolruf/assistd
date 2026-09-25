@@ -30,7 +30,7 @@ pub fn start(
 ) -> ListenCaptureSession {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let overrun = Arc::new(AtomicU64::new(0));
-    let device_hint_owned = device_hint.map(|s| s.to_string());
+    let device_hint_owned = device_hint.map(str::to_string);
 
     let worker_stop = Arc::clone(&stop_flag);
     let worker_overrun = Arc::clone(&overrun);
@@ -56,12 +56,12 @@ fn capture_continuous(
     overrun: Arc<AtomicU64>,
     frame_tx: mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
 ) -> Result<(), AudioCaptureError> {
-    let ring_cap = LISTEN_RING_SECONDS.saturating_mul(LISTEN_RING_NATIVE_RATE_ASSUMED);
+    let ring_capacity = LISTEN_RING_SECONDS.saturating_mul(LISTEN_RING_NATIVE_RATE_ASSUMED);
     let ProducerStream {
         consumer,
         native_rate,
         stream,
-    } = open_producer_stream(device_hint, ring_cap, overrun.clone())?;
+    } = open_producer_stream(device_hint, ring_capacity, overrun.clone())?;
 
     debug!(
         target: "assistd::voice::listen",

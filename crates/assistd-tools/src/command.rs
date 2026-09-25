@@ -1,16 +1,14 @@
-//! Internal command abstraction: Rust handlers the chain executor
-//! dispatches to, operating on raw bytes with a Unix-style exit code so
-//! `&&`/`||` composition works. The model never sees a [`Command`]
-//! directly, only the [`crate::RunTool`] that walks the chain.
+//! Internal commands: byte-oriented handlers with Unix exit codes that the
+//! chain executor dispatches to from behind [`crate::RunTool`].
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::{self, ErrorKind};
 
 use async_trait::async_trait;
 
-/// The recovery label on an error line. `Use` and `Try` introduce an
-/// alternative to run; `Check` and `Available` introduce a diagnostic;
-/// `Install` names a package; `Note` explains a condition.
+/// The recovery label on an [`error_line`]: `Use`/`Try` offer an alternative,
+/// `Check`/`Available` a diagnostic, `Install` a package, `Note` a condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hint {
     Use,
@@ -41,17 +39,9 @@ impl fmt::Display for Hint {
     }
 }
 
-/// Format a stderr line in the error-navigation convention every
-/// command follows: `[error] <cmd>: <what>. <hint>: <recovery>\n`.
-///
-/// Each line says both what went wrong and what to do instead, so the
-/// model recovers in one step rather than retrying blindly. `cmd` is the
-/// command name, or a pseudo-tag (`parse`, `pipe`, `unknown command`) for
-/// failures before dispatch. `recovery` is either a command the model can
-/// run verbatim (`see photo.png`, `ls /dir`) or a short check instruction
-/// (`ls -l <path>`). A command should not return a bare non-zero exit
-/// code: it emits such a line, or forwards the subprocess stderr that
-/// explains the failure.
+/// Format a stderr line as `[error] <cmd>: <what>. <hint>: <recovery>\n`.
+/// `cmd` is the command name or a pre-dispatch tag (`parse`, `pipe`);
+/// `recovery` is a command the model can run next or a short check.
 pub fn error_line(
     cmd: &str,
     what: impl fmt::Display,
@@ -61,15 +51,11 @@ pub fn error_line(
     format!("[error] {cmd}: {what}. {hint}: {recovery}\n")
 }
 
-/// Classify a `std::io::Error` against the `path` that produced it and
-/// build an [`error_line`] whose hint suits the error kind.
-pub fn io_error_nav(cmd: &str, path: &str, e: &std::io::Error) -> String {
-    use std::io::ErrorKind;
+/// Build an [`error_line`] for an I/O error on `path`, with a hint suited to
+/// the error kind. A missing path that still holds glob metacharacters is
+/// reported as an unmatched glob rather than a missing file.
+pub fn io_error_nav(cmd: &str, path: &str, e: &io::Error) -> String {
     match e.kind() {
-        // A path still carrying glob metacharacters got here because the
-        // expander found nothing to match and passed the pattern through
-        // (POSIX behaviour). Saying "file not found" sends the model
-        // looking for a file it never asked for.
         ErrorKind::NotFound if has_glob_meta(path) => error_line(
             cmd,
             format_args!("no file matches {path}"),
@@ -119,9 +105,8 @@ fn has_glob_meta(path: &str) -> bool {
     path.contains(['*', '?', '['])
 }
 
-/// Directory containing `path`, cut before the first glob metacharacter
-/// when there is one, so the hint points at a directory that can
-/// actually be listed.
+/// Directory containing `path`, cut before any glob metacharacter so the
+/// hint names a directory that can actually be listed.
 fn parent_dir(path: &str) -> &str {
     let head = path
         .find(['*', '?', '['])
@@ -135,29 +120,22 @@ fn parent_dir(path: &str) -> &str {
 
 /// Input to a single chain stage.
 pub struct CommandInput {
-    /// Positional arguments after `argv[0]`; the command's own name is
-    /// not included.
+    /// Arguments after `argv[0]`.
     pub args: Vec<String>,
-    /// Bytes piped in from the previous chain stage. `None` when the
-    /// command is not on the right of a pipe, so a filter can tell
-    /// "nothing was piped" (reply with usage) from "the upstream stage
-    /// produced nothing" (an empty result).
+    /// Bytes piped from the previous stage; `None` when nothing was piped,
+    /// as distinct from an upstream stage that printed nothing.
     pub stdin: Option<Vec<u8>>,
 }
 
-/// A side-channel payload a command attaches alongside its stdout. The
-/// chain executor threads attachments through pipes untouched, so
-/// `see X | wc` still surfaces the image.
+/// A side-channel payload alongside stdout, carried through pipes untouched
+/// so `see X | wc` still surfaces the image.
 #[derive(Debug, Clone)]
 pub enum Attachment {
     Image { mime: String, bytes: Vec<u8> },
 }
 
-/// Output of a single chain stage.
-///
-/// Every failure is reported here, as a non-zero `exit_code` with a
-/// stderr line, so `&&` and `||` can react to it: `cat missing || echo
-/// 'not found'` runs the `echo`.
+/// Output of a single chain stage. Failures are a non-zero `exit_code` plus
+/// a stderr line, so `&&` and `||` can react to them.
 #[derive(Debug, Default, Clone)]
 pub struct CommandOutput {
     pub stdout: Vec<u8>,
@@ -187,9 +165,7 @@ impl CommandOutput {
         }
     }
 
-    /// Construct the reply to a call with insufficient arguments: the
-    /// usage text on stdout with exit 2, so it reads as help rather
-    /// than a failure.
+    /// Usage text on stdout with exit 2, the reply to insufficient arguments.
     pub fn usage(help: String) -> Self {
         Self {
             stdout: help.into_bytes(),
@@ -198,8 +174,8 @@ impl CommandOutput {
         }
     }
 
-    /// The reply to a call whose arguments could not be understood:
-    /// `[error] <cmd>: <what>. Use: <recovery>` with exit 2.
+    /// `[error] <cmd>: <what>. Use: <recovery>` with exit 2, the reply to
+    /// arguments that could not be understood.
     pub fn usage_error(cmd: &str, what: impl fmt::Display, recovery: impl fmt::Display) -> Self {
         Self::failed(2, error_line(cmd, what, Hint::Use, recovery).into_bytes())
     }
@@ -215,27 +191,19 @@ impl CommandOutput {
     }
 }
 
-/// A single internal command (`cat`, `grep`, `bash`, …).
-///
-/// Help is progressive: [`Command::summary`] is the one-liner listed in
-/// the `run` tool's description, [`Command::help`] is the full usage
-/// block returned when the command is called with insufficient
-/// arguments, and commands with subcommands return subcommand help from
-/// their own [`Command::run`].
+/// A single internal command (`cat`, `grep`, `bash`, …). Its
+/// [`Command::summary`] is listed in the `run` tool description and its
+/// [`Command::help`] is returned for insufficient arguments.
 #[async_trait]
 pub trait Command: Send + Sync + 'static {
     /// Name the command is dispatched by (e.g. `"cat"`).
     fn name(&self) -> &str;
-    /// One line of at most 80 chars with no trailing newline, phrased as
-    /// a terse verb phrase such as
-    /// `"filter lines matching a pattern (supports -i, -v, -c)"`.
+    /// A terse verb phrase of at most 80 chars with no trailing newline.
     fn summary(&self) -> &'static str;
-    /// Full usage block, written verbatim to stdout. The first line
-    /// begins with `usage: <name> …` so help reads distinctly from an
-    /// `[error] <name>: …` failure.
+    /// Full usage block, written verbatim to stdout; its first line begins
+    /// `usage: <name>`.
     fn help(&self) -> String;
-    /// Execute the command with the given input and return its output.
-    /// Failures are reported through the output's exit code and stderr.
+    /// Execute the command; failures are reported through exit code and stderr.
     async fn run(&self, input: CommandInput) -> CommandOutput;
 }
 

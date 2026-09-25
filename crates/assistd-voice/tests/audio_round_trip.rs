@@ -21,16 +21,18 @@ async fn queued_transcriber_uses_primary_and_publishes_terminal_idle() {
             Box::pin(async move { Ok(cpu as Arc<dyn Transcriber>) })
         })
     };
-    let q = QueuedTranscriber::new(
+    let queued = QueuedTranscriber::new(
         primary.clone(),
         factory,
         Arc::new(NullBusyProbe),
         QueueConfig::default(),
     );
-    let rx = q.subscribe_state().expect("queued exposes state stream");
+    let rx = queued
+        .subscribe_state()
+        .expect("queued exposes state stream");
     assert_eq!(*rx.borrow(), VoiceCaptureState::Idle);
 
-    let text = q.transcribe(&[0i16; 8_000]).await.unwrap();
+    let text = queued.transcribe(&[0i16; 8_000]).await.unwrap();
     assert_eq!(text, "queued result");
     assert_eq!(primary.calls(), 1);
     assert_eq!(cpu.calls(), 0);

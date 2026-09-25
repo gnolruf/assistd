@@ -1,13 +1,15 @@
-use super::*;
-use async_trait::async_trait;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Returns `vec` for every input except `"bad"`, which fails any call
-/// that includes it. Records the inputs of every call.
+use async_trait::async_trait;
+
+use super::*;
+
+/// Returns `embedding` for every input, but fails any call that includes `"bad"`.
+/// Records the inputs of every call.
 struct MockEmbedder {
     calls: Mutex<Vec<Vec<String>>>,
-    vec: Vec<f32>,
+    embedding: Vec<f32>,
 }
 
 #[async_trait]
@@ -26,13 +28,13 @@ impl Embedder for MockEmbedder {
         if texts.contains(&"bad") {
             return Err(EmbedError::Disabled);
         }
-        Ok(vec![self.vec.clone(); texts.len()])
+        Ok(vec![self.embedding.clone(); texts.len()])
     }
     fn model(&self) -> &str {
         "mock"
     }
     fn dim(&self) -> usize {
-        self.vec.len()
+        self.embedding.len()
     }
 }
 
@@ -45,15 +47,15 @@ struct Harness {
 }
 
 impl Harness {
-    fn spawn(vec: Vec<f32>) -> Self {
+    fn spawn(embedding: Vec<f32>) -> Self {
         let embedder = Arc::new(MockEmbedder {
             calls: Mutex::new(Vec::new()),
-            vec,
+            embedding,
         });
         let (write_tx, writes) = mpsc::channel(8);
         let (jobs, job_rx) = mpsc::channel(8);
-        let (shutdown, sd_rx) = watch::channel(false);
-        let task = spawn_embedder_task(embedder.clone(), Arc::new(write_tx), job_rx, sd_rx);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let task = spawn_embedder_task(embedder.clone(), Arc::new(write_tx), job_rx, shutdown_rx);
         Self {
             embedder,
             jobs,
@@ -94,9 +96,8 @@ impl Harness {
         }
     }
 
-    /// Signal shutdown while keeping the job sender alive, so only
-    /// the shutdown path can end the worker. Returns the inputs of
-    /// every embed call.
+    /// Signal shutdown with the job sender still alive, so only the shutdown path can end
+    /// the worker. Returns the inputs of every embed call.
     async fn shut_down(mut self) -> Vec<Vec<String>> {
         self.shutdown.send_replace(true);
         tokio::time::timeout(Duration::from_secs(2), self.task)
@@ -110,8 +111,9 @@ impl Harness {
 
 #[tokio::test]
 async fn worker_routes_chunk_job_to_storechunkembedding() {
-    let mut h = Harness::spawn(vec![1.0, 0.0]);
-    h.jobs
+    let mut harness = Harness::spawn(vec![1.0, 0.0]);
+    harness
+        .jobs
         .send(EmbedJob::Chunk {
             chunk_id: 42,
             text: "hello".into(),
@@ -119,7 +121,7 @@ async fn worker_routes_chunk_job_to_storechunkembedding() {
         .await
         .unwrap();
 
-    match h.next_write().await {
+    match harness.next_write().await {
         WriteOp::StoreChunkEmbedding {
             chunk_id,
             model,
@@ -135,13 +137,14 @@ async fn worker_routes_chunk_job_to_storechunkembedding() {
         }
         _ => panic!("expected StoreChunkEmbedding"),
     }
-    assert_eq!(h.shut_down().await, vec![vec!["hello"]]);
+    assert_eq!(harness.shut_down().await, vec![vec!["hello"]]);
 }
 
 #[tokio::test]
 async fn worker_routes_memory_job_to_storememoryembedding() {
-    let mut h = Harness::spawn(vec![0.0, 1.0]);
-    h.jobs
+    let mut harness = Harness::spawn(vec![0.0, 1.0]);
+    harness
+        .jobs
         .send(EmbedJob::Memory {
             memory_id: 7,
             text: "vim".into(),
@@ -149,7 +152,7 @@ async fn worker_routes_memory_job_to_storememoryembedding() {
         .await
         .unwrap();
 
-    match h.next_write().await {
+    match harness.next_write().await {
         WriteOp::StoreMemoryEmbedding {
             memory_id,
             model,
@@ -165,36 +168,36 @@ async fn worker_routes_memory_job_to_storememoryembedding() {
         }
         _ => panic!("expected StoreMemoryEmbedding"),
     }
-    assert_eq!(h.shut_down().await, vec![vec!["vim"]]);
+    assert_eq!(harness.shut_down().await, vec![vec!["vim"]]);
 }
 
 #[tokio::test]
 async fn worker_coalesces_queued_jobs_into_one_embed_call() {
-    let mut h = Harness::spawn(vec![1.0]);
-    h.send_chunks(&["t0", "t1", "t2"]).await;
+    let mut harness = Harness::spawn(vec![1.0]);
+    harness.send_chunks(&["t0", "t1", "t2"]).await;
 
-    h.expect_chunk_writes(&[0, 1, 2]).await;
-    assert_eq!(h.shut_down().await, vec![vec!["t0", "t1", "t2"]]);
+    harness.expect_chunk_writes(&[0, 1, 2]).await;
+    assert_eq!(harness.shut_down().await, vec![vec!["t0", "t1", "t2"]]);
 }
 
 #[tokio::test]
 async fn worker_drops_only_the_bad_job_when_a_batch_fails() {
-    let mut h = Harness::spawn(vec![1.0]);
-    h.send_chunks(&["t0", "bad", "t2"]).await;
+    let mut harness = Harness::spawn(vec![1.0]);
+    harness.send_chunks(&["t0", "bad", "t2"]).await;
 
-    h.expect_chunk_writes(&[0, 2]).await;
+    harness.expect_chunk_writes(&[0, 2]).await;
     assert_eq!(
-        h.shut_down().await,
+        harness.shut_down().await,
         vec![vec!["t0", "bad", "t2"], vec!["t0"], vec!["bad"], vec!["t2"]]
     );
 }
 
 #[tokio::test]
 async fn worker_embeds_queued_jobs_before_honouring_shutdown() {
-    let mut h = Harness::spawn(vec![1.0]);
-    h.send_chunks(&["t0", "t1", "t2"]).await;
-    h.shutdown.send(true).unwrap();
+    let mut harness = Harness::spawn(vec![1.0]);
+    harness.send_chunks(&["t0", "t1", "t2"]).await;
+    harness.shutdown.send(true).unwrap();
 
-    h.expect_chunk_writes(&[0, 1, 2]).await;
-    assert_eq!(h.shut_down().await.concat(), vec!["t0", "t1", "t2"]);
+    harness.expect_chunk_writes(&[0, 1, 2]).await;
+    assert_eq!(harness.shut_down().await.concat(), vec!["t0", "t1", "t2"]);
 }

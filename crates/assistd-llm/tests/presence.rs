@@ -3,14 +3,22 @@
 
 #![cfg(feature = "test-support")]
 
-mod common;
-
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Once;
-use std::time::Duration;
+use std::sync::{Arc, Once};
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use rustix::io::Errno;
+use rustix::process::{Pid, test_kill_process};
+use serde_json::Value;
+use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::net::unix::OwnedReadHalf;
+use tokio::net::{TcpListener, TcpStream, UnixStream};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
@@ -19,15 +27,12 @@ use assistd_core::{
     PresenceManager, PresenceState, ToolRegistry, VoiceOutputController,
 };
 use assistd_ipc::{Event, Request};
-use assistd_llm::{EchoBackend, LlmBackend, LlmEvent};
-use async_trait::async_trait;
+use assistd_llm::{EchoBackend, LlmBackend, LlmEvent, LlmResult, StepOutcome, ToolResultPayload};
+use assistd_tools::Attachment;
+
 use common::FakeLlama;
-use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::net::unix::OwnedReadHalf;
-use tokio::net::{TcpListener, UnixStream};
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+
+mod common;
 
 fn init_tracing() {
     static ONCE: Once = Once::new();
@@ -83,7 +88,7 @@ async fn new_active_manager(
     port: u16,
 ) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     let (tx, rx) = watch::channel(false);
-    let m = PresenceManager::new_active(
+    let manager = PresenceManager::new_active(
         server_spec(fake, port),
         model_spec(),
         TimeoutsConfig::default(),
@@ -91,24 +96,20 @@ async fn new_active_manager(
     )
     .await
     .expect("cold-start wake failed");
-    (m, tx)
+    (manager, tx)
 }
 
+/// `kill(pid, 0)` existence probe; EPERM still means the process exists.
 fn pid_alive(pid: u32) -> bool {
-    // `test_kill_process` is `kill(pid, 0)`: an existence probe that sends
-    // no signal. EPERM means the process exists but cannot be signaled.
-    let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
+    let Some(pid) = Pid::from_raw(pid as i32) else {
         return false;
     };
-    matches!(
-        rustix::process::test_kill_process(pid),
-        Ok(()) | Err(rustix::io::Errno::PERM)
-    )
+    matches!(test_kill_process(pid), Ok(()) | Err(Errno::PERM))
 }
 
 async fn wait_for_pid_gone(pid: u32, timeout: Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
         if !pid_alive(pid) {
             return true;
         }
@@ -119,9 +120,9 @@ async fn wait_for_pid_gone(pid: u32, timeout: Duration) -> bool {
 
 async fn wait_for_port_closed(port: u16, timeout: Duration) -> bool {
     let addr = format!("127.0.0.1:{port}");
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if tokio::net::TcpStream::connect(&addr).await.is_err() {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if TcpStream::connect(&addr).await.is_err() {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -137,10 +138,10 @@ async fn get_counters(port: u16) -> (u32, u32, Option<String>) {
         .text()
         .await
         .expect("counters body");
-    let v: serde_json::Value = serde_json::from_str(&body).expect("counters json");
-    let load = v["load_count"].as_u64().expect("load_count") as u32;
-    let unload = v["unload_count"].as_u64().expect("unload_count") as u32;
-    let loaded = v["loaded_model"].as_str().map(|s| s.to_string());
+    let counters: Value = serde_json::from_str(&body).expect("counters json");
+    let load = counters["load_count"].as_u64().expect("load_count") as u32;
+    let unload = counters["unload_count"].as_u64().expect("unload_count") as u32;
+    let loaded = counters["loaded_model"].as_str().map(|s| s.to_string());
     (load, unload, loaded)
 }
 
@@ -149,10 +150,10 @@ async fn cold_start_puts_manager_in_active_and_loads_model() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
 
-    assert_eq!(m.state(), PresenceState::Active);
-    let pid = m.llama_pid().await.expect("child running after wake");
+    assert_eq!(manager.state(), PresenceState::Active);
+    let pid = manager.llama_pid().await.expect("child running after wake");
     assert!(pid_alive(pid));
 
     let (load_count, unload_count, loaded) = get_counters(port).await;
@@ -160,7 +161,7 @@ async fn cold_start_puts_manager_in_active_and_loads_model() {
     assert_eq!(unload_count, 0);
     assert_eq!(loaded.as_deref(), Some(model_spec().name.as_str()));
 
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }
 
 #[tokio::test]
@@ -168,14 +169,14 @@ async fn sleep_stops_supervisor_and_kills_child() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-    let pid = m.llama_pid().await.expect("child running");
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let pid = manager.llama_pid().await.expect("child running");
     assert!(pid_alive(pid));
 
-    m.sleep().await.expect("sleep should succeed");
-    assert_eq!(m.state(), PresenceState::Sleeping);
+    manager.sleep().await.expect("sleep should succeed");
+    assert_eq!(manager.state(), PresenceState::Sleeping);
     assert!(
-        m.llama_pid().await.is_none(),
+        manager.llama_pid().await.is_none(),
         "llama handle should be taken"
     );
 
@@ -190,14 +191,14 @@ async fn drowse_calls_unload_and_keeps_process_alive() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-    let pid_before = m.llama_pid().await.expect("child running");
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let pid_before = manager.llama_pid().await.expect("child running");
     let (_, unload_before, _) = get_counters(port).await;
 
-    m.drowse().await.expect("drowse should succeed");
-    assert_eq!(m.state(), PresenceState::Drowsy);
+    manager.drowse().await.expect("drowse should succeed");
+    assert_eq!(manager.state(), PresenceState::Drowsy);
 
-    let pid_after = m.llama_pid().await.expect("child still running");
+    let pid_after = manager.llama_pid().await.expect("child still running");
     assert_eq!(pid_before, pid_after, "drowse must not respawn the process");
     assert!(pid_alive(pid_after));
 
@@ -208,7 +209,7 @@ async fn drowse_calls_unload_and_keeps_process_alive() {
         "expected no loaded model after unload, got {loaded:?}"
     );
 
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }
 
 #[tokio::test]
@@ -216,17 +217,20 @@ async fn wake_from_drowsy_reuses_process_and_only_loads_model() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-    let pid_initial = m.llama_pid().await.expect("child running");
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let pid_initial = manager.llama_pid().await.expect("child running");
     let (load_initial, _, _) = get_counters(port).await;
 
-    m.drowse().await.unwrap();
-    assert_eq!(m.state(), PresenceState::Drowsy);
+    manager.drowse().await.unwrap();
+    assert_eq!(manager.state(), PresenceState::Drowsy);
 
-    m.wake().await.expect("wake from Drowsy should succeed");
-    assert_eq!(m.state(), PresenceState::Active);
+    manager
+        .wake()
+        .await
+        .expect("wake from Drowsy should succeed");
+    assert_eq!(manager.state(), PresenceState::Active);
 
-    let pid_after = m.llama_pid().await.expect("child still running");
+    let pid_after = manager.llama_pid().await.expect("child still running");
     assert_eq!(
         pid_initial, pid_after,
         "wake from Drowsy must not respawn the process"
@@ -236,7 +240,7 @@ async fn wake_from_drowsy_reuses_process_and_only_loads_model() {
     assert_eq!(load_after, load_initial + 1);
     assert_eq!(loaded.as_deref(), Some(model_spec().name.as_str()));
 
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }
 
 #[tokio::test]
@@ -244,22 +248,25 @@ async fn wake_from_sleeping_cold_starts_and_returns_active() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-    let pid_before = m.llama_pid().await.expect("child running");
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let pid_before = manager.llama_pid().await.expect("child running");
 
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
     assert!(wait_for_pid_gone(pid_before, Duration::from_secs(5)).await);
 
-    m.wake().await.expect("wake from Sleeping should succeed");
-    assert_eq!(m.state(), PresenceState::Active);
-    let pid_after = m.llama_pid().await.expect("child running after wake");
+    manager
+        .wake()
+        .await
+        .expect("wake from Sleeping should succeed");
+    assert_eq!(manager.state(), PresenceState::Active);
+    let pid_after = manager.llama_pid().await.expect("child running after wake");
     assert_ne!(
         pid_before, pid_after,
         "cold-start wake must spawn a new child"
     );
     assert!(pid_alive(pid_after));
 
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }
 
 #[tokio::test]
@@ -267,23 +274,22 @@ async fn failed_wake_leaves_nothing_behind_for_sleep_to_miss() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-    let pid_before = m.llama_pid().await.expect("child running");
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let pid_before = manager.llama_pid().await.expect("child running");
 
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
     assert!(wait_for_pid_gone(pid_before, Duration::from_secs(5)).await);
 
-    // The child spawns and reports healthy, then /models/load 500s.
     fake.set_mode("load-failure");
-    let err = m
+    let err = manager
         .wake()
         .await
         .expect_err("wake must fail when /models/load errors");
     assert!(matches!(err, PresenceError::Load { .. }), "{err:?}");
 
-    assert_eq!(m.state(), PresenceState::Sleeping);
+    assert_eq!(manager.state(), PresenceState::Sleeping);
     assert!(
-        m.llama_pid().await.is_none(),
+        manager.llama_pid().await.is_none(),
         "a failed wake must not leave a handle the Sleeping manager cannot reach"
     );
     assert!(
@@ -291,28 +297,26 @@ async fn failed_wake_leaves_nothing_behind_for_sleep_to_miss() {
         "the child started by the failed wake must be torn down, not stranded"
     );
 
-    // Sleep stays a no-op, and the next wake gets the port to itself.
-    m.sleep().await.expect("sleep after a failed wake");
+    manager.sleep().await.expect("sleep after a failed wake");
     fake.set_mode("normal");
-    m.wake().await.expect("wake after a failed wake");
-    assert_eq!(m.state(), PresenceState::Active);
+    manager.wake().await.expect("wake after a failed wake");
+    assert_eq!(manager.state(), PresenceState::Active);
 
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }
 
 #[tokio::test]
 async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
     init_tracing();
     let port = grab_port().await;
-    // The child outlives SIGTERM by longer than sleep's shutdown budget, so
-    // the join times out rather than completing.
+    // Outlives SIGTERM past the 1s sleep budget, so the join times out.
     let fake = FakeLlama::new("slow-term=3");
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let timeouts = TimeoutsConfig {
         presence_sleep_secs: 1,
         ..TimeoutsConfig::default()
     };
-    let m = PresenceManager::new_active(
+    let manager = PresenceManager::new_active(
         server_spec(&fake, port),
         model_spec(),
         timeouts,
@@ -320,9 +324,9 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
     )
     .await
     .expect("cold-start wake failed");
-    let pid = m.llama_pid().await.expect("child running");
+    let pid = manager.llama_pid().await.expect("child running");
 
-    let err = m
+    let err = manager
         .sleep()
         .await
         .expect_err("sleep must report a shutdown it could not join");
@@ -332,12 +336,12 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
     );
 
     assert_eq!(
-        m.state(),
+        manager.state(),
         PresenceState::Sleeping,
         "the teardown signal cannot be recalled, so the state must follow it"
     );
     assert!(
-        m.llama_pid().await.is_none(),
+        manager.llama_pid().await.is_none(),
         "an Active manager with an empty slot can never be woken or slept again"
     );
     assert!(
@@ -355,11 +359,11 @@ struct Daemon {
 }
 
 impl Daemon {
-    async fn serve(m: &Arc<PresenceManager>, backend: Arc<dyn LlmBackend>) -> Self {
+    async fn serve(manager: &Arc<PresenceManager>, backend: Arc<dyn LlmBackend>) -> Self {
         let state = Arc::new(AppState::new(
             Config::default(),
             backend,
-            Arc::clone(m),
+            Arc::clone(manager),
             Arc::new(ToolRegistry::default()),
             Arc::new(NoVoiceInput::new()),
             Arc::new(NoContinuousListener::new()),
@@ -415,9 +419,9 @@ async fn send_query(sock: &Path, id: &str, text: &str) -> EventLines {
 /// Read events into `events` until a terminal one or the end of the stream.
 async fn read_to_terminal(lines: &mut EventLines, events: &mut Vec<Event>) {
     while let Some(line) = lines.next_line().await.unwrap() {
-        let e: Event = serde_json::from_str(&line).unwrap();
-        let terminal = e.is_terminal();
-        events.push(e);
+        let event: Event = serde_json::from_str(&line).unwrap();
+        let terminal = event.is_terminal();
+        events.push(event);
         if terminal {
             break;
         }
@@ -436,13 +440,12 @@ async fn query_during_sleeping_triggers_auto_wake() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
 
-    m.sleep().await.unwrap();
-    assert_eq!(m.state(), PresenceState::Sleeping);
+    manager.sleep().await.unwrap();
+    assert_eq!(manager.state(), PresenceState::Sleeping);
 
-    // EchoBackend: this exercises the auto-wake hook, not the chat path.
-    let daemon = Daemon::serve(&m, Arc::new(EchoBackend::new())).await;
+    let daemon = Daemon::serve(&manager, Arc::new(EchoBackend::new())).await;
     let events = query(&daemon.sock_path, "q1", "hello").await;
 
     assert!(
@@ -456,61 +459,45 @@ async fn query_during_sleeping_triggers_auto_wake() {
         "{events:?}"
     );
     assert_eq!(
-        m.state(),
+        manager.state(),
         PresenceState::Active,
         "auto-wake must leave manager in Active"
     );
 
     daemon.stop().await;
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }
 
-/// Backend that emits one Delta, sleeps for `delay`, then emits Done,
-/// leaving a predictable gap between the first visible token and the
-/// terminal event.
+/// Backend that leaves a `delay` gap between its one Delta and the end of
+/// the turn.
 struct DelayBackend {
     delay: Duration,
-    last_user: tokio::sync::Mutex<String>,
+    last_user: Mutex<String>,
 }
 
 #[async_trait]
 impl LlmBackend for DelayBackend {
-    async fn generate(
-        &self,
-        prompt: String,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
+    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
         let _ = tx.send(LlmEvent::Delta { text: prompt }).await;
         tokio::time::sleep(self.delay).await;
         let _ = tx.send(LlmEvent::Done).await;
         Ok(())
     }
 
-    async fn push_user(
-        &self,
-        text: String,
-        _attachments: Vec<assistd_tools::Attachment>,
-    ) -> assistd_llm::LlmResult<()> {
+    async fn push_user(&self, text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         *self.last_user.lock().await = text;
         Ok(())
     }
 
-    async fn push_tool_results(
-        &self,
-        _results: Vec<assistd_llm::ToolResultPayload>,
-    ) -> assistd_llm::LlmResult<()> {
+    async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> LlmResult<()> {
         Ok(())
     }
 
-    async fn step(
-        &self,
-        _tools: Vec<serde_json::Value>,
-        tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
+    async fn step(&self, _tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
         let text = self.last_user.lock().await.clone();
         let _ = tx.send(LlmEvent::Delta { text }).await;
         tokio::time::sleep(self.delay).await;
-        Ok(assistd_llm::StepOutcome::Final)
+        Ok(StepOutcome::Final)
     }
 }
 
@@ -519,16 +506,14 @@ async fn sleep_defers_until_inflight_query_done() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
 
     let backend = Arc::new(DelayBackend {
         delay: Duration::from_millis(500),
-        last_user: tokio::sync::Mutex::new(String::new()),
+        last_user: Mutex::new(String::new()),
     });
-    let daemon = Daemon::serve(&m, backend).await;
+    let daemon = Daemon::serve(&manager, backend).await;
 
-    // Once the first Delta arrives the query holds its request guard and
-    // the backend has ~500ms of generation left.
     let mut lines = send_query(&daemon.sock_path, "q1", "hello").await;
     let mut events = Vec::new();
     while !events.iter().any(|e| matches!(e, Event::Delta { .. })) {
@@ -540,9 +525,9 @@ async fn sleep_defers_until_inflight_query_done() {
         events.push(serde_json::from_str::<Event>(&line).unwrap());
     }
 
-    let m_for_sleep = Arc::clone(&m);
-    let sleep_started = std::time::Instant::now();
-    let sleep_task = tokio::spawn(async move { m_for_sleep.sleep().await });
+    let sleeper = Arc::clone(&manager);
+    let sleep_started = Instant::now();
+    let sleep_task = tokio::spawn(async move { sleeper.sleep().await });
 
     read_to_terminal(&mut lines, &mut events).await;
     assert!(
@@ -567,7 +552,7 @@ async fn sleep_defers_until_inflight_query_done() {
         "sleep finished in {sleep_elapsed:?}, expected it to wait out most of the \
          500ms still left in the generation"
     );
-    assert_eq!(m.state(), PresenceState::Sleeping);
+    assert_eq!(manager.state(), PresenceState::Sleeping);
 
     daemon.stop().await;
 }
@@ -577,13 +562,12 @@ async fn concurrent_queries_during_wake_all_complete() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, _shutdown) = new_active_manager(&fake, port).await;
-    let daemon = Daemon::serve(&m, Arc::new(EchoBackend::new())).await;
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let daemon = Daemon::serve(&manager, Arc::new(EchoBackend::new())).await;
 
-    m.sleep().await.unwrap();
-    assert_eq!(m.state(), PresenceState::Sleeping);
+    manager.sleep().await.unwrap();
+    assert_eq!(manager.state(), PresenceState::Sleeping);
 
-    // One query wins the wake; the rest queue on the transition lock.
     let handles: Vec<_> = (0..5)
         .map(|i| {
             let id = format!("q{i}");
@@ -595,8 +579,8 @@ async fn concurrent_queries_during_wake_all_complete() {
         })
         .collect();
 
-    for (id, text, h) in handles {
-        let events = h.await.unwrap();
+    for (id, text, handle) in handles {
+        let events = handle.await.unwrap();
         assert!(
             !events.iter().any(|e| matches!(e, Event::Error { .. })),
             "query {id} received Error events: {events:?}"
@@ -614,11 +598,11 @@ async fn concurrent_queries_during_wake_all_complete() {
     }
 
     assert_eq!(
-        m.state(),
+        manager.state(),
         PresenceState::Active,
         "wake must leave manager Active"
     );
 
     daemon.stop().await;
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }

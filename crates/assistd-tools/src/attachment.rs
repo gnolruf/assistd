@@ -5,8 +5,8 @@ use assistd_ipc::attachment::{LoadedImage, load_image};
 
 use crate::command::Attachment;
 
-/// Read `path` and validate it is a supported image. Returns the
-/// attachment and its size in bytes.
+/// Read `path` as a supported image, returning the attachment and its size
+/// in bytes.
 pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), LoadImageError> {
     let LoadedImage { mime, bytes } = load_image(path).await?;
     let size = bytes.len();
@@ -15,9 +15,10 @@ pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), L
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::fixtures::PNG_BYTES;
-    use tempfile::tempdir;
 
     #[tokio::test]
     async fn loads_png() {

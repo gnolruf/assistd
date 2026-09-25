@@ -8,11 +8,6 @@ use serde::Deserialize;
 use crate::hf_download::{self, cached_path, ensure_file, parse_hf_id};
 use crate::piper::error::PiperError;
 
-/// The `piper` subdirectory of the shared model cache.
-pub fn default_cache_dir() -> PathBuf {
-    hf_download::default_cache_dir("piper")
-}
-
 /// Resolved on-disk paths for a voice, plus the sample rate read from
 /// its `.onnx.json`.
 #[derive(Debug, Clone)]
@@ -20,6 +15,21 @@ pub struct VoiceFiles {
     pub onnx: PathBuf,
     pub json: PathBuf,
     pub sample_rate: u32,
+}
+
+#[derive(Deserialize)]
+struct AudioConfig {
+    sample_rate: u32,
+}
+
+#[derive(Deserialize)]
+struct VoiceConfigJson {
+    audio: AudioConfig,
+}
+
+/// The `piper` subdirectory of the shared model cache.
+pub fn default_cache_dir() -> PathBuf {
+    hf_download::default_cache_dir("piper")
 }
 
 /// Ensure both voice files exist locally, downloading whichever is
@@ -40,16 +50,8 @@ pub async fn ensure_voice(hf_id: &str, cache_dir: &Path) -> Result<VoiceFiles, P
     })
 }
 
-#[derive(Deserialize)]
-struct AudioConfig {
-    sample_rate: u32,
-}
-
-#[derive(Deserialize)]
-struct VoiceConfigJson {
-    audio: AudioConfig,
-}
-
+/// Rejects a body that is not a JSON object up front, since HuggingFace serves
+/// a 200-OK HTML "not found" page for missing files.
 async fn read_sample_rate(json: &Path) -> Result<u32, PiperError> {
     let body = tokio::fs::read_to_string(json)
         .await
@@ -58,7 +60,6 @@ async fn read_sample_rate(json: &Path) -> Result<u32, PiperError> {
             source,
         })?;
 
-    // HuggingFace serves a 200-OK HTML "not found" page for missing files.
     let trimmed = body.trim_start();
     if !trimmed.starts_with('{') {
         let prefix: String = trimmed.chars().take(40).collect();
@@ -68,12 +69,12 @@ async fn read_sample_rate(json: &Path) -> Result<u32, PiperError> {
         });
     }
 
-    let cfg: VoiceConfigJson =
+    let config: VoiceConfigJson =
         serde_json::from_str(&body).map_err(|source| PiperError::JsonParse {
             path: json.to_path_buf(),
             source,
         })?;
-    Ok(cfg.audio.sample_rate)
+    Ok(config.audio.sample_rate)
 }
 
 #[cfg(test)]

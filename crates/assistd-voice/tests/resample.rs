@@ -14,21 +14,21 @@ use ringbuf::traits::{Producer, Split};
 /// Push one second of a 440 Hz mono sine at `rate_hz` into a ring and
 /// drain it with the stop flag already set.
 fn drain_one_second(rate_hz: u32) -> Vec<i16> {
-    let n_in = rate_hz as usize;
-    let rb = HeapRb::<f32>::new(n_in);
-    let (mut prod, cons) = rb.split();
-    for i in 0..n_in {
-        let t = i as f32 / rate_hz as f32;
-        prod.try_push((2.0 * PI * 440.0 * t).sin() * 0.5)
+    let sample_count = rate_hz as usize;
+    let (mut producer, consumer) = HeapRb::<f32>::new(sample_count).split();
+    for index in 0..sample_count {
+        let secs = index as f32 / rate_hz as f32;
+        producer
+            .try_push((2.0 * PI * 440.0 * secs).sin() * 0.5)
             .expect("ring sized for the whole clip");
     }
-    drop(prod);
+    drop(producer);
     let stop = Arc::new(AtomicBool::new(true));
-    drain_to_pcm(cons, rate_hz, 16_000 * 4, stop).expect("drain_to_pcm error")
+    drain_to_pcm(consumer, rate_hz, 16_000 * 4, stop).expect("drain_to_pcm error")
 }
 
 fn assert_mostly_nonzero(pcm: &[i16], label: &str) {
-    let nonzero = pcm.iter().filter(|s| **s != 0).count();
+    let nonzero = pcm.iter().filter(|&&sample| sample != 0).count();
     assert!(
         nonzero > pcm.len() / 2,
         "{label}: {nonzero} of {} samples non-zero",
@@ -40,11 +40,9 @@ fn assert_mostly_nonzero(pcm: &[i16], label: &str) {
 fn drain_resamples_common_device_rates_to_16k() {
     for rate in [48_000, 44_100] {
         let pcm = drain_one_second(rate);
-        // The resampler consumes fixed 1024-sample chunks and zero-pads
-        // the last one, so the tail length is approximate.
         assert!(
             pcm.len().abs_diff(16_000) <= 600,
-            "{rate} Hz: resampled to {} samples",
+            "{rate} Hz: resampled to {} samples (zero-padded last chunk allows slack)",
             pcm.len()
         );
         assert_mostly_nonzero(&pcm, &format!("{rate} Hz"));

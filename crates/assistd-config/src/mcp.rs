@@ -9,14 +9,12 @@ use url::Url;
 
 use crate::defaults::{DEFAULT_MCP_ENABLED, DEFAULT_MCP_REQUEST_TIMEOUT_SECS};
 
-/// `[mcp]` section of `config.toml`.
+/// Model Context Protocol client settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct McpConfig {
-    /// Master switch. When `false` the daemon doesn't connect to any
-    /// MCP server, regardless of `servers`.
+    /// When `false`, no server in `servers` is connected.
     pub enabled: bool,
-    /// One entry per server the daemon should connect to at startup.
     pub servers: Vec<McpServerConfig>,
 }
 
@@ -29,25 +27,21 @@ impl Default for McpConfig {
     }
 }
 
-/// One `[[mcp.servers]]` entry, discriminated by `transport`.
-///
-/// The transport-specific keys live inside their variant, so `url` on a
-/// stdio server or `env` on an SSE one is a parse error rather than a
-/// silently ignored key.
+/// One `[[mcp.servers]]` entry, discriminated by `transport`. A key of the
+/// other transport (`url` on stdio, `env` on SSE) is a parse error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "transport", rename_all = "lowercase", deny_unknown_fields)]
 pub enum McpServerConfig {
     /// Newline-delimited JSON-RPC over a child process's stdin/stdout.
     Stdio {
-        /// Stable label used in tool-name prefixes (`mcp__<name>__<tool>`)
-        /// and in tracing logs. Must be unique within `[mcp.servers]`.
-        /// Convention: lowercase, no spaces.
+        /// Label in tool names (`mcp__<name>__<tool>`) and logs. Must be
+        /// unique and use only ASCII letters, digits, `_` or `-`.
         name: String,
-        /// Command to spawn. A bare name is resolved via `$PATH`.
+        /// Command to spawn; a bare name is resolved via `$PATH`.
         command: PathBuf,
         #[serde(default)]
         args: Vec<String>,
-        /// Environment variables injected into the child process.
+        /// Extra environment variables for the child.
         #[serde(default)]
         env: HashMap<String, String>,
         /// Per-request JSON-RPC timeout in seconds.
@@ -56,12 +50,11 @@ pub enum McpServerConfig {
     },
     /// HTTP Server-Sent Events endpoint.
     Sse {
-        /// See the `stdio` variant's `name`.
+        /// As for [`Self::Stdio`].
         name: String,
-        /// Endpoint URL. Parsed at load, so a malformed address fails
-        /// with the config rather than at connect time.
+        /// Endpoint URL, validated at load.
         url: Url,
-        /// Extra HTTP headers sent with each request.
+        /// Extra HTTP headers for every request.
         #[serde(default)]
         headers: HashMap<String, String>,
         /// Per-request JSON-RPC timeout in seconds.
@@ -106,113 +99,4 @@ fn default_request_timeout_secs() -> NonZeroU64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_stdio_server_minimally() {
-        let toml = r#"
-            enabled = true
-
-            [[servers]]
-            name = "filesystem"
-            transport = "stdio"
-            command = "npx"
-            args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-        "#;
-        let cfg: McpConfig = toml::from_str(toml).unwrap();
-        assert_eq!(
-            cfg,
-            McpConfig {
-                enabled: true,
-                servers: vec![McpServerConfig::Stdio {
-                    name: "filesystem".into(),
-                    command: "npx".into(),
-                    args: vec![
-                        "-y".into(),
-                        "@modelcontextprotocol/server-filesystem".into(),
-                        "/tmp".into(),
-                    ],
-                    env: HashMap::new(),
-                    request_timeout_secs: DEFAULT_MCP_REQUEST_TIMEOUT_SECS,
-                }],
-            }
-        );
-    }
-
-    #[test]
-    fn parses_sse_server_minimally() {
-        let toml = r#"
-            enabled = true
-
-            [[servers]]
-            name = "remote"
-            transport = "sse"
-            url = "https://mcp.example.com/sse"
-
-            [servers.headers]
-            Authorization = "Bearer xyz"
-        "#;
-        let cfg: McpConfig = toml::from_str(toml).unwrap();
-        assert_eq!(
-            cfg,
-            McpConfig {
-                enabled: true,
-                servers: vec![McpServerConfig::Sse {
-                    name: "remote".into(),
-                    url: Url::parse("https://mcp.example.com/sse").unwrap(),
-                    headers: HashMap::from([("Authorization".into(), "Bearer xyz".into())]),
-                    request_timeout_secs: DEFAULT_MCP_REQUEST_TIMEOUT_SECS,
-                }],
-            }
-        );
-    }
-
-    #[test]
-    fn transport_specific_keys_do_not_cross_variants() {
-        let stdio_with_url = r#"
-            [[servers]]
-            name = "x"
-            transport = "stdio"
-            command = "npx"
-            url = "https://example.com/sse"
-        "#;
-        let err = toml::from_str::<McpConfig>(stdio_with_url)
-            .expect_err("`url` on a stdio server must not parse");
-        assert!(err.to_string().contains("url"), "{err}");
-
-        let sse_with_command = r#"
-            [[servers]]
-            name = "x"
-            transport = "sse"
-            url = "https://example.com/sse"
-            command = "npx"
-        "#;
-        let err = toml::from_str::<McpConfig>(sse_with_command)
-            .expect_err("`command` on an sse server must not parse");
-        assert!(err.to_string().contains("command"), "{err}");
-    }
-
-    #[test]
-    fn malformed_url_is_rejected_at_load() {
-        let toml = r#"
-            [[servers]]
-            name = "x"
-            transport = "sse"
-            url = "not a url"
-        "#;
-        toml::from_str::<McpConfig>(toml).expect_err("a malformed url must not parse");
-    }
-
-    #[test]
-    fn zero_request_timeout_is_rejected_at_load() {
-        let toml = r#"
-            [[servers]]
-            name = "x"
-            transport = "stdio"
-            command = "npx"
-            request_timeout_secs = 0
-        "#;
-        toml::from_str::<McpConfig>(toml).expect_err("a zero timeout must not parse");
-    }
-}
+mod tests;

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::PresenceManager;
+use assistd_core::{PresenceManager, PresenceState};
 use assistd_voice::BusyProbe;
 use async_trait::async_trait;
 use nvml_wrapper::Nvml;
@@ -22,10 +22,8 @@ pub struct PresenceGpuProbe {
     presence: Arc<PresenceManager>,
     nvml: Option<Arc<Nvml>>,
     self_pid: u32,
-    /// Process names that may hold VRAM without counting as foreign. Must
-    /// include `llama-server`: in router mode the model-running child is
-    /// a separate PID from the one presence tracks, so the PID filter
-    /// alone would push every transcription onto the CPU.
+    /// Process names never counted as foreign. Must include `llama-server`:
+    /// in router mode the model runner is a child PID presence doesn't track.
     allowlist: Vec<String>,
 }
 
@@ -64,10 +62,7 @@ impl BusyProbe for PresenceGpuProbe {
         let llama_pid = self.presence.llama_pid_blocking();
         match gpu_monitor::collect_foreign_usage(nvml.as_ref(), self.self_pid, llama_pid) {
             Ok(samples) => samples.iter().any(|p| {
-                if self.allowlist.iter().any(|n| n == &p.name) {
-                    return false;
-                }
-                p.used_mb >= FOREIGN_VRAM_THRESHOLD_MB
+                !self.allowlist.contains(&p.name) && p.used_mb >= FOREIGN_VRAM_THRESHOLD_MB
             }),
             Err(err) => {
                 tracing::debug!(
@@ -80,6 +75,6 @@ impl BusyProbe for PresenceGpuProbe {
     }
 
     fn presence_active(&self) -> bool {
-        self.presence.state() == assistd_ipc::PresenceState::Active
+        self.presence.state() == PresenceState::Active
     }
 }

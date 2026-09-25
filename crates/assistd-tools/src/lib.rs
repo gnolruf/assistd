@@ -1,7 +1,8 @@
-//! Tool-use subsystem. A [`Tool`] is what the model calls (JSON in, JSON
-//! out); the built-in one, [`RunTool`], parses a shell-style command line
-//! into a [`chain::Chain`] and dispatches each stage to a [`Command`]
-//! (bytes in, bytes out, Unix exit code) from a [`CommandRegistry`].
+//! Tool-use subsystem: [`Tool`]s the model calls with JSON, chiefly
+//! [`RunTool`], which runs shell-style chains of byte-oriented [`Command`]s.
+
+use async_trait::async_trait;
+use serde_json::{Value, json};
 
 pub mod attachment;
 pub mod chain;
@@ -30,21 +31,15 @@ pub use policy::{AlwaysAllowGate, DenyAllGate};
 pub use run::RunTool;
 pub use vision::VisionGate;
 
-use async_trait::async_trait;
-use serde_json::{Value, json};
-
-/// Prefix every MCP-adapted tool's `name()` carries
-/// (`mcp__<server>__<tool>`), so a registry can be partitioned into
-/// native and MCP tools.
+/// Prefix of every MCP-adapted tool's name (`mcp__<server>__<tool>`).
 pub const MCP_TOOL_NAME_PREFIX: &str = "mcp__";
 
-/// Why [`Tool::invoke`] produced no result. A failure the model can
-/// recover from by running something else belongs in the returned
-/// result envelope instead.
+/// Why [`Tool::invoke`] produced no result. Failures the model can recover
+/// from belong in the result envelope instead.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    /// The model's arguments violate the tool's schema or constraints.
-    /// The message names the offending argument.
+    /// The model's arguments violate the tool's schema; the message names
+    /// the offending argument.
     #[error("{0}")]
     InvalidArgs(String),
     /// A memory, conversation, or semantic store call failed.
@@ -58,15 +53,13 @@ pub trait Tool: Send + Sync + 'static {
     /// Identifier the model calls this tool by.
     fn name(&self) -> &str;
 
-    /// Human-readable description the LLM sees when deciding whether to
-    /// call the tool.
+    /// Description the model sees when deciding whether to call the tool.
     fn description(&self) -> &str;
 
     /// JSON Schema for the `arguments` object [`Tool::invoke`] accepts.
     fn parameters_schema(&self) -> Value;
 
-    /// Execute the tool with JSON-shaped arguments and return a
-    /// JSON-shaped result.
+    /// Execute the tool with JSON arguments and return a JSON result.
     async fn invoke(&self, args: Value) -> Result<Value, ToolError>;
 }
 
@@ -115,10 +108,8 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.name())
     }
 
-    /// Render the registry as an OpenAI chat-completions `tools` array.
-    /// Each entry is a `{"type": "function", "function": {...}}` object
-    /// with `strict: true`, guaranteeing the model's arguments conform
-    /// to `parameters_schema()`.
+    /// Render the registry as an OpenAI chat-completions `tools` array, each
+    /// entry `strict` so the model's arguments conform to its schema.
     pub fn openai_schemas(&self) -> Vec<Value> {
         self.tools
             .iter()
@@ -137,6 +128,11 @@ impl ToolRegistry {
     }
 }
 
+/// Crate version.
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 /// Test fixtures shared across the crate's unit tests.
 #[cfg(test)]
 pub(crate) mod fixtures {
@@ -148,11 +144,6 @@ pub(crate) mod fixtures {
         0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
         0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
-}
-
-/// Crate version.
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
 }
 
 #[cfg(test)]

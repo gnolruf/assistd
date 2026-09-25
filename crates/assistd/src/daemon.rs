@@ -1,23 +1,40 @@
 //! Daemon entrypoint: bring up every subsystem, serve the IPC socket,
 //! tear down in order.
 
-use anyhow::{Context, Result};
-use assistd_core::{AppState, Config, MemoryStack, PresenceManager, RuntimeState, Subsystems};
-use assistd_llm::LlamaChatClient;
-use assistd_tools::{IpcConfirmationGate, MemoryOps};
-use clap::Args;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::{Context, Result};
+use assistd_core::presence::PresenceLlmHealthProbe;
+use assistd_core::{
+    AppState, BuildToolsDeps, Component, Config, ContinuousListener, ConversationContext,
+    MemoryStack, PresenceManager, RuntimeState, Subsystems, VisionRevalidator, spawn_supervised,
+};
+use assistd_ipc::IpcClient;
+use assistd_llm::{LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
+use assistd_memory::HistoryRow;
+use assistd_tools::{IpcConfirmationGate, MemoryOps};
+use clap::Args;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio_util::task::TaskTracker;
 use tracing::info;
 
+use crate::embed_init::EmbeddingSubsystem;
+use crate::ipc_voice_proxy::IpcVoiceProxy;
+use crate::listen_dispatcher::ListenDispatcherHandles;
+use crate::mcp_init::McpSubsystem;
+use crate::memory_init::MemorySubsystem;
+use crate::voice_init::VoiceSubsystem;
+use crate::wm_init::WindowSubsystem;
 use crate::{
-    embed_init, gpu_monitor, hotkey, idle_monitor, ipc_voice_proxy, listen_dispatcher, mcp_init,
-    memory_init, voice_init, wm_init,
+    embed_init, gpu_monitor, hotkey, idle_monitor, listen_dispatcher, mcp_init, memory_init,
+    voice_init, wm_init,
 };
+
+const PERSISTENCE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
@@ -30,6 +47,58 @@ pub struct DaemonArgs {
     /// `assistd chat`.
     #[arg(long, default_value_t = false)]
     pub client_mode: bool,
+}
+
+struct DaemonShutdown {
+    persistence_tracker: TaskTracker,
+    presence: Arc<PresenceManager>,
+    memory: MemorySubsystem,
+    embed: EmbeddingSubsystem,
+    window: WindowSubsystem,
+    mcp: McpSubsystem,
+    hotkey_handle: Option<JoinHandle<()>>,
+    gpu_monitor_handle: Option<JoinHandle<()>>,
+    idle_monitor_handle: Option<JoinHandle<()>>,
+    listen_handles: Option<ListenDispatcherHandles>,
+}
+
+impl DaemonShutdown {
+    async fn shutdown(self) {
+        self.persistence_tracker.close();
+        if tokio::time::timeout(PERSISTENCE_DRAIN_BUDGET, self.persistence_tracker.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                target: "assistd::memory",
+                in_flight = self.persistence_tracker.len(),
+                "persistence task drain timed out at shutdown; abandoning remaining tasks"
+            );
+        }
+
+        if let Err(e) = self.presence.sleep().await {
+            tracing::error!("presence shutdown error: {e:#}");
+        }
+
+        self.memory.shutdown().await;
+
+        if let Some(h) = self.hotkey_handle {
+            let _ = h.await;
+        }
+        if let Some(h) = self.gpu_monitor_handle {
+            let _ = h.await;
+        }
+        if let Some(h) = self.idle_monitor_handle {
+            let _ = h.await;
+        }
+        if let Some(handles) = self.listen_handles {
+            let _ = handles.forwarder.await;
+            let _ = handles.presence_gate.await;
+        }
+        self.window.shutdown().await;
+        self.mcp.shutdown().await;
+        self.embed.shutdown().await;
+    }
 }
 
 /// Run the daemon until shutdown.
@@ -85,7 +154,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
     let serve_result = assistd_core::socket::serve(state, socket_shutdown).await;
 
-    shutdown_subsystems(subsystems).await;
+    subsystems.shutdown().await;
 
     serve_result?;
     info!("assistd stopped");
@@ -94,31 +163,14 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
 async fn start(
     config: Config,
-    config_path: &std::path::Path,
+    config_path: &Path,
     client_mode: bool,
     shutdown_tx: &watch::Sender<bool>,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
-    let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
-
-    let presence = PresenceManager::new_active(
-        config.llama_server.clone(),
-        config.model.clone(),
-        config.timeouts.clone(),
-        shutdown_tx.subscribe(),
-    )
-    .await?;
-    info!(
-        "presence: Active (llama-server ready on {}:{})",
-        config.llama_server.host, config.llama_server.port
-    );
-
-    assistd_core::install_panic_hook(Arc::downgrade(&presence));
-
+    let presence = start_presence(&config, shutdown_tx).await?;
     let vision_revalidator = probe_vision(&config, &presence).await?;
-
-    let health_probe: Arc<dyn assistd_llm::LlmHealthProbe> = Arc::new(
-        assistd_core::presence::PresenceLlmHealthProbe::new(presence.clone()),
-    );
+    let health_probe: Arc<dyn LlmHealthProbe> =
+        Arc::new(PresenceLlmHealthProbe::new(presence.clone()));
 
     let voice = voice_init::init(&config, &presence).await;
 
@@ -134,47 +186,33 @@ async fn start(
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
 
     let mut memory = memory_init::init(&config, shutdown_tx).await;
-    let memory_store = memory.memory_store.clone();
-    let conversation_store = memory.conversation_store.clone();
-    let session_id_for_state = memory.session_id.clone();
-    let branch_id_for_state = memory.branch_id;
-    let resumed_history = std::mem::take(&mut memory.resumed_history);
-    let sqlite_handle = memory.sqlite_handle.clone();
-
-    let memory_ops = Arc::new(MemoryOps::new(memory_store.clone(), conversation_store));
-
-    let embed = embed_init::init(&config, sqlite_handle.as_ref(), shutdown_tx).await;
-    let embedder = embed.embedder.clone();
-    let semantic_store = embed.semantic_store.clone();
-    let embed_tx = embed.embed_tx.clone();
-    let embedding_model_name = embed.model_name.clone();
-
+    let embed = embed_init::init(&config, memory.sqlite_handle.as_ref(), shutdown_tx).await;
     let window = wm_init::init(&config, shutdown_tx).await;
-    let window_manager = window.manager.clone();
-
     let mut mcp = mcp_init::init(&config, shutdown_tx).await;
-    let mcp_tools = std::mem::take(&mut mcp.tools);
-    let mcp_startup_failures = mcp.startup_failures.clone();
 
-    let conversation_ctx = Arc::new(assistd_core::ConversationContext::from_arc(
-        session_id_for_state,
-        branch_id_for_state,
+    let conversation_ctx = Arc::new(ConversationContext::from_arc(
+        memory.session_id.clone(),
+        memory.branch_id,
     ));
 
-    let tools = assistd_core::build_tools(assistd_core::BuildToolsDeps {
+    let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
+    let tools = assistd_core::build_tools(BuildToolsDeps {
         config: &config,
         config_path,
         overflow_dir: overflow_dir.clone(),
         confirmation_gate: Arc::new(IpcConfirmationGate),
         vision_gate: vision_revalidator.gate(),
-        memory_ops,
-        embedder: embedder.clone(),
-        semantic: semantic_store.clone(),
-        embed_tx: embed_tx.clone(),
-        embedding_model: embedding_model_name,
+        memory_ops: Arc::new(MemoryOps::new(
+            memory.memory_store.clone(),
+            memory.conversation_store.clone(),
+        )),
+        embedder: embed.embedder.clone(),
+        semantic: embed.semantic_store.clone(),
+        embed_tx: embed.embed_tx.clone(),
+        embedding_model: embed.model_name.clone(),
         current_session: conversation_ctx.session_updates(),
-        window_manager: window_manager.clone(),
-        mcp_tools,
+        window_manager: window.manager.clone(),
+        mcp_tools: std::mem::take(&mut mcp.tools),
     })?;
     info!(
         "tools: registered {} (overflow dir {})",
@@ -182,20 +220,8 @@ async fn start(
         overflow_dir.display()
     );
 
-    let chat = LlamaChatClient::new(
-        &config.chat,
-        &config.llama_server,
-        &config.model,
-        &config.timeouts,
-        Some(health_probe.clone()),
-    )?;
-
-    let continuous_enabled = config.voice.enabled && config.voice.continuous.enabled;
-    let continuous_start_on_launch = config.voice.continuous.start_on_launch;
-
-    let embedding_cfg_for_state = config.embedding.clone();
-    let chat: Arc<dyn assistd_llm::LlmBackend> = Arc::new(chat);
-
+    let chat = build_chat_backend(&config, health_probe)?;
+    let resumed_history = std::mem::take(&mut memory.resumed_history);
     replay_history(chat.as_ref(), &resumed_history).await;
 
     let subsystems = Subsystems::new(
@@ -206,41 +232,19 @@ async fn start(
         voice.listener.clone(),
         voice.output,
     )
-    .with_window_manager(window_manager)
+    .with_window_manager(window.manager.clone())
     .with_vision_revalidator(vision_revalidator)
-    .with_mcp_startup_failures(mcp_startup_failures);
-
-    let mut memory_stack = MemoryStack::disabled(embedding_cfg_for_state)
-        .with_memory(memory_store)
-        .with_conversations(memory.conversation_store.clone())
-        .with_embedder(embedder)
-        .with_semantic(semantic_store)
-        .with_embed_tx(embed_tx);
-    if let Some(handle) = sqlite_handle {
-        memory_stack = memory_stack.with_chunks(handle);
-    }
-
-    let runtime = RuntimeState::new().with_conversation_ctx(conversation_ctx);
+    .with_mcp_startup_failures(mcp.startup_failures.clone());
+    let memory_stack = build_memory_stack(&config, &memory, &embed);
 
     let state = Arc::new(AppState {
         config,
         subsystems,
         memory: memory_stack,
-        runtime,
+        runtime: RuntimeState::new().with_conversation_ctx(conversation_ctx),
     });
     let persistence_tracker = state.runtime.persistence_tracker_handle();
-
-    let listen_handles = if continuous_enabled {
-        Some(listen_dispatcher::spawn_dispatcher(
-            state.clone(),
-            voice.listener.clone(),
-            presence.clone(),
-            continuous_start_on_launch,
-            shutdown_tx.subscribe(),
-        ))
-    } else {
-        None
-    };
+    let listen_handles = spawn_listen_dispatcher(&state, &voice.listener, &presence, shutdown_tx);
 
     Ok((
         state,
@@ -268,19 +272,37 @@ pub fn init_config() -> Result<()> {
     Ok(())
 }
 
+async fn start_presence(
+    config: &Config,
+    shutdown_tx: &watch::Sender<bool>,
+) -> Result<Arc<PresenceManager>> {
+    let presence = PresenceManager::new_active(
+        config.llama_server.clone(),
+        config.model.clone(),
+        config.timeouts.clone(),
+        shutdown_tx.subscribe(),
+    )
+    .await?;
+    info!(
+        "presence: Active (llama-server ready on {}:{})",
+        config.llama_server.host, config.llama_server.port
+    );
+    assistd_core::install_panic_hook(Arc::downgrade(&presence));
+    Ok(presence)
+}
+
 /// Probe llama-server for vision support once and build the revalidator
 /// whose gate it seeds.
 async fn probe_vision(
     config: &Config,
     presence: &PresenceManager,
-) -> Result<Arc<assistd_core::VisionRevalidator>> {
-    let control = assistd_llm::LlamaServerControl::new(
+) -> Result<Arc<VisionRevalidator>> {
+    let control = LlamaServerControl::new(
         &config.llama_server.host.to_string(),
         config.llama_server.port.get(),
     )
     .context("failed to construct llama-server control client for vision probe")?;
-    let revalidator =
-        assistd_core::VisionRevalidator::new(control, config.model.name.clone(), presence).await;
+    let revalidator = VisionRevalidator::new(control, config.model.name.clone(), presence).await;
     if revalidator.gate().supported() {
         info!("vision: enabled (model has mmproj)");
     } else {
@@ -294,12 +316,11 @@ async fn probe_vision(
 fn spawn_hotkeys(
     config: &Config,
     presence: &Arc<PresenceManager>,
-    voice: &voice_init::VoiceSubsystem,
+    voice: &VoiceSubsystem,
     shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
-    let voice_proxy: Arc<dyn assistd_voice::VoiceInput> = Arc::new(
-        ipc_voice_proxy::IpcVoiceProxy::new(Arc::new(assistd_ipc::IpcClient::new()), None),
-    );
+    let voice_proxy: Arc<dyn assistd_voice::VoiceInput> =
+        Arc::new(IpcVoiceProxy::new(Arc::new(IpcClient::new()), None));
     hotkey::spawn_listener(
         &config.presence,
         &config.voice,
@@ -313,38 +334,90 @@ fn spawn_hotkeys(
     )
 }
 
+fn build_chat_backend(
+    config: &Config,
+    health_probe: Arc<dyn LlmHealthProbe>,
+) -> Result<Arc<dyn LlmBackend>> {
+    let chat = LlamaChatClient::new(
+        &config.chat,
+        &config.llama_server,
+        &config.model,
+        &config.timeouts,
+        Some(health_probe),
+    )?;
+    Ok(Arc::new(chat))
+}
+
+fn build_memory_stack(
+    config: &Config,
+    memory: &MemorySubsystem,
+    embed: &EmbeddingSubsystem,
+) -> MemoryStack {
+    let stack = MemoryStack::disabled(config.embedding.clone())
+        .with_memory(memory.memory_store.clone())
+        .with_conversations(memory.conversation_store.clone())
+        .with_embedder(embed.embedder.clone())
+        .with_semantic(embed.semantic_store.clone())
+        .with_embed_tx(embed.embed_tx.clone());
+    match memory.sqlite_handle.clone() {
+        Some(handle) => stack.with_chunks(handle),
+        None => stack,
+    }
+}
+
+fn spawn_listen_dispatcher(
+    state: &Arc<AppState>,
+    listener: &Arc<dyn ContinuousListener>,
+    presence: &Arc<PresenceManager>,
+    shutdown_tx: &watch::Sender<bool>,
+) -> Option<ListenDispatcherHandles> {
+    let voice = &state.config.voice;
+    (voice.enabled && voice.continuous.enabled).then(|| {
+        listen_dispatcher::spawn_dispatcher(
+            state.clone(),
+            listener.clone(),
+            presence.clone(),
+            voice.continuous.start_on_launch,
+            shutdown_tx.subscribe(),
+        )
+    })
+}
+
 fn spawn_signal_handler(shutdown_tx: &watch::Sender<bool>) {
-    let signal_tx = shutdown_tx.clone();
-    assistd_core::spawn_supervised(
+    spawn_supervised(
         "signal_handler",
-        assistd_core::Component::Daemon,
-        async move {
-            let (mut int, mut term) = match (
-                signal(SignalKind::interrupt()),
-                signal(SignalKind::terminate()),
-            ) {
-                (Ok(int), Ok(term)) => (int, term),
-                (Err(e), _) | (_, Err(e)) => {
-                    tracing::error!("failed to install signal handlers: {e}");
-                    return;
-                }
-            };
-            loop {
-                let (name, exit_code) = tokio::select! {
-                    _ = int.recv() => ("SIGINT", 130),
-                    _ = term.recv() => ("SIGTERM", 143),
-                };
-                if signal_tx.send_replace(true) {
-                    tracing::warn!("received {name} again; exiting without cleanup");
-                    std::process::exit(exit_code);
-                }
-                info!("received {name}; shutting down (send again to force exit)");
-            }
-        },
+        Component::Daemon,
+        forward_signals(shutdown_tx.clone()),
     );
 }
 
-async fn replay_history(chat: &dyn assistd_llm::LlmBackend, rows: &[assistd_memory::HistoryRow]) {
+/// Flag shutdown on the first SIGINT/SIGTERM; a second signal exits
+/// immediately without cleanup.
+async fn forward_signals(shutdown_tx: watch::Sender<bool>) {
+    let (mut int, mut term) = match (
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::terminate()),
+    ) {
+        (Ok(int), Ok(term)) => (int, term),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!("failed to install signal handlers: {e}");
+            return;
+        }
+    };
+    loop {
+        let (name, exit_code) = tokio::select! {
+            _ = int.recv() => ("SIGINT", 130),
+            _ = term.recv() => ("SIGTERM", 143),
+        };
+        if shutdown_tx.send_replace(true) {
+            tracing::warn!("received {name} again; exiting without cleanup");
+            std::process::exit(exit_code);
+        }
+        info!("received {name}; shutting down (send again to force exit)");
+    }
+}
+
+async fn replay_history(chat: &dyn LlmBackend, rows: &[HistoryRow]) {
     if rows.is_empty() {
         return;
     }
@@ -357,57 +430,6 @@ async fn replay_history(chat: &dyn assistd_llm::LlmBackend, rows: &[assistd_memo
     } else {
         info!("memory: resumed {count} message(s) from prior branch");
     }
-}
-
-struct DaemonShutdown {
-    persistence_tracker: tokio_util::task::TaskTracker,
-    presence: Arc<PresenceManager>,
-    memory: memory_init::MemorySubsystem,
-    embed: embed_init::EmbeddingSubsystem,
-    window: wm_init::WindowSubsystem,
-    mcp: mcp_init::McpSubsystem,
-    hotkey_handle: Option<JoinHandle<()>>,
-    gpu_monitor_handle: Option<JoinHandle<()>>,
-    idle_monitor_handle: Option<JoinHandle<()>>,
-    listen_handles: Option<listen_dispatcher::ListenDispatcherHandles>,
-}
-
-async fn shutdown_subsystems(s: DaemonShutdown) {
-    s.persistence_tracker.close();
-    let drain_budget = Duration::from_secs(5);
-    if tokio::time::timeout(drain_budget, s.persistence_tracker.wait())
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            target: "assistd::memory",
-            in_flight = s.persistence_tracker.len(),
-            "persistence task drain timed out at shutdown; abandoning remaining tasks"
-        );
-    }
-
-    if let Err(e) = s.presence.sleep().await {
-        tracing::error!("presence shutdown error: {e:#}");
-    }
-
-    s.memory.shutdown().await;
-
-    if let Some(h) = s.hotkey_handle {
-        let _ = h.await;
-    }
-    if let Some(h) = s.gpu_monitor_handle {
-        let _ = h.await;
-    }
-    if let Some(h) = s.idle_monitor_handle {
-        let _ = h.await;
-    }
-    if let Some(handles) = s.listen_handles {
-        let _ = handles.forwarder.await;
-        let _ = handles.presence_gate.await;
-    }
-    s.window.shutdown().await;
-    s.mcp.shutdown().await;
-    s.embed.shutdown().await;
 }
 
 fn init_tracing() {

@@ -1,21 +1,65 @@
-use super::*;
-use crate::command::{Command, CommandInput, CommandOutput};
-use crate::commands::{CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, WcCommand};
-use crate::fixtures::PNG_BYTES;
-use async_trait::async_trait;
-use regex::Regex;
 use std::path::Path;
+
+use assistd_config::defaults::nz32;
+use regex::Regex;
 use tempfile::{TempDir, tempdir};
 
+use super::*;
+use crate::command::{Command, CommandInput};
+use crate::commands::{
+    CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, TailCommand, WcCommand,
+};
+use crate::fixtures::PNG_BYTES;
+
+/// Fake command: emits a configurable number of lines.
+struct Lines(usize);
+#[async_trait]
+impl Command for Lines {
+    fn name(&self) -> &str {
+        "lines"
+    }
+    fn summary(&self) -> &'static str {
+        "test: emit N lines"
+    }
+    fn help(&self) -> String {
+        "usage: lines".to_string()
+    }
+    async fn run(&self, _input: CommandInput) -> CommandOutput {
+        let mut stdout = Vec::with_capacity(self.0 * 8);
+        for i in 1..=self.0 {
+            stdout.extend_from_slice(format!("line {i}\n").as_bytes());
+        }
+        CommandOutput::ok(stdout)
+    }
+}
+
+/// Fake command: counts how many bytes flow in on stdin.
+struct ByteCount;
+#[async_trait]
+impl Command for ByteCount {
+    fn name(&self) -> &str {
+        "bytecount"
+    }
+    fn summary(&self) -> &'static str {
+        "test: count bytes"
+    }
+    fn help(&self) -> String {
+        "usage: bytecount".to_string()
+    }
+    async fn run(&self, input: CommandInput) -> CommandOutput {
+        CommandOutput::ok(format!("{}\n", input.stdin.map_or(0, |s| s.len())).into_bytes())
+    }
+}
+
 fn registry() -> Arc<CommandRegistry> {
-    let mut r = CommandRegistry::new();
-    r.register(CatCommand);
-    r.register(EchoCommand);
-    r.register(GrepCommand);
-    r.register(LsCommand);
-    r.register(WcCommand);
-    r.register(SeeCommand::default());
-    Arc::new(r)
+    let mut reg = CommandRegistry::new();
+    reg.register(CatCommand);
+    reg.register(EchoCommand);
+    reg.register(GrepCommand);
+    reg.register(LsCommand);
+    reg.register(WcCommand);
+    reg.register(SeeCommand::default());
+    Arc::new(reg)
 }
 
 fn full_registry() -> Arc<CommandRegistry> {
@@ -50,8 +94,8 @@ fn assert_footer(output: &str, expected_exit: i32) {
 #[test]
 fn run_cat_returns_file_contents() {
     let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    let path = tmp.path().join("notes.md");
+    let files = tempdir().unwrap();
+    let path = files.path().join("notes.md");
     std::fs::write(&path, b"hello notes\n").unwrap();
     let tool = tool_with_dir(dir.path());
     let cmd = format!("cat {}", path.to_string_lossy());
@@ -66,8 +110,8 @@ fn run_cat_returns_file_contents() {
 #[test]
 fn run_see_returns_attachment_as_base64() {
     let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    let path = tmp.path().join("shot.png");
+    let files = tempdir().unwrap();
+    let path = files.path().join("shot.png");
     std::fs::write(&path, PNG_BYTES).unwrap();
     let tool = tool_with_dir(dir.path());
     let cmd = format!("see {}", path.to_string_lossy());
@@ -82,8 +126,8 @@ fn run_see_returns_attachment_as_base64() {
 #[test]
 fn run_attachments_flow_through_pipeline() {
     let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    let path = tmp.path().join("shot.png");
+    let files = tempdir().unwrap();
+    let path = files.path().join("shot.png");
     std::fs::write(&path, PNG_BYTES).unwrap();
     let tool = tool_with_dir(dir.path());
     let cmd = format!("see {} | wc -l", path.to_string_lossy());
@@ -99,12 +143,12 @@ fn run_attachments_flow_through_pipeline() {
 #[test]
 fn run_composes_flags_globs_and_stream_filters() {
     let dir = fresh_dir();
-    let tmp = tempdir().unwrap();
-    std::fs::write(tmp.path().join("a.log"), b"ERROR one\ninfo\n").unwrap();
-    std::fs::write(tmp.path().join("b.log"), b"ERROR two\nERROR three\n").unwrap();
-    std::fs::write(tmp.path().join("notes.txt"), b"ERROR ignored\n").unwrap();
+    let files = tempdir().unwrap();
+    std::fs::write(files.path().join("a.log"), b"ERROR one\ninfo\n").unwrap();
+    std::fs::write(files.path().join("b.log"), b"ERROR two\nERROR three\n").unwrap();
+    std::fs::write(files.path().join("notes.txt"), b"ERROR ignored\n").unwrap();
     let tool = tool_with(dir.path(), full_registry());
-    let root = tmp.path().to_string_lossy().into_owned();
+    let root = files.path().to_string_lossy().into_owned();
 
     let globbed = invoke(&tool, &format!("grep ERROR {root}/*.log | wc -l"));
     assert_eq!(globbed["exit_code"], 0, "{globbed}");
@@ -114,7 +158,7 @@ fn run_composes_flags_globs_and_stream_filters() {
     assert_eq!(recursive["exit_code"], 0, "{recursive}");
     assert_eq!(recursive["stdout"], "4\n");
 
-    std::fs::write(tmp.path().join("hits.txt"), b"b\na\nb\n").unwrap();
+    std::fs::write(files.path().join("hits.txt"), b"b\na\nb\n").unwrap();
     let freq = invoke(
         &tool,
         &format!("cat {root}/hits.txt | sort | uniq -c | sort -nr | head -1"),
@@ -123,16 +167,14 @@ fn run_composes_flags_globs_and_stream_filters() {
 
     let numbered = invoke(&tool, &format!("cat -n {root}/b.log | tail -1"));
     assert_eq!(numbered["stdout"], "2\tERROR three\n");
-    // a.log, b.log, notes.txt, hits.txt.
+
     let listed = invoke(&tool, &format!("ls -la {root} | wc -l"));
     assert_eq!(listed["exit_code"], 0, "{listed}");
-    assert_eq!(listed["stdout"], "4\n");
+    assert_eq!(listed["stdout"], "4\n", "a.log, b.log, notes.txt, hits.txt");
 }
 
-/// A failing stage followed by a succeeding one reports the exit
-/// code of the last stage, per Unix. The failure is then only
-/// visible in stderr, so the model has to be shown it — otherwise
-/// `find . | head` reads as "ran fine, found nothing".
+/// A pipeline reports its last stage's exit code, so an earlier failure is
+/// visible only in stderr and must be shown.
 #[test]
 fn run_surfaces_a_failed_stage_behind_a_successful_one() {
     let dir = fresh_dir();
@@ -155,8 +197,8 @@ fn run_quoted_glob_reaches_the_command_literally() {
     assert_eq!(result["stdout"], "a*b\n");
 }
 
-/// Usage text goes to stdout with exit 2 and an empty stderr, so the
-/// model can tell help apart from a failure.
+/// Usage goes to stdout with exit 2 and empty stderr; bare `ls` and `echo`
+/// do real work, so only `--help` reaches their usage.
 #[test]
 fn run_prints_usage_on_stdout_for_bare_calls_and_help_flags() {
     let dir = fresh_dir();
@@ -167,8 +209,6 @@ fn run_prints_usage_on_stdout_for_bare_calls_and_help_flags() {
         ("write", "usage: write"),
         ("web", "usage: web"),
         ("bash", "usage: bash"),
-        // Bare `ls` and `echo` do real work, so only `--help` reaches
-        // their usage.
         ("ls --help", "usage: ls"),
         ("echo --help", "usage: echo"),
         ("grep --help", "usage: grep"),
@@ -217,8 +257,7 @@ fn run_rejects_wrong_argument_key() {
     );
 }
 
-/// Parse errors flow through `present()` like any other failure rather
-/// than surfacing as an `Err` at the tool boundary.
+/// Parse errors are presented like any other failure, not returned as `Err`.
 #[test]
 fn run_parse_error_surfaces_as_present_result() {
     let dir = fresh_dir();
@@ -240,46 +279,6 @@ fn run_omits_attachments_key_when_empty() {
     let tool = tool_with_dir(dir.path());
     let result = invoke(&tool, "echo hi");
     assert!(result.get("attachments").is_none(), "{result}");
-}
-
-/// Fake command: emits a configurable number of lines.
-struct Lines(usize);
-#[async_trait]
-impl Command for Lines {
-    fn name(&self) -> &str {
-        "lines"
-    }
-    fn summary(&self) -> &'static str {
-        "test: emit N lines"
-    }
-    fn help(&self) -> String {
-        "usage: lines".to_string()
-    }
-    async fn run(&self, _input: CommandInput) -> CommandOutput {
-        let mut v = Vec::with_capacity(self.0 * 8);
-        for i in 1..=self.0 {
-            v.extend_from_slice(format!("line {i}\n").as_bytes());
-        }
-        CommandOutput::ok(v)
-    }
-}
-
-/// Fake command: counts how many bytes flow in on stdin.
-struct ByteCount;
-#[async_trait]
-impl Command for ByteCount {
-    fn name(&self) -> &str {
-        "bytecount"
-    }
-    fn summary(&self) -> &'static str {
-        "test: count bytes"
-    }
-    fn help(&self) -> String {
-        "usage: bytecount".to_string()
-    }
-    async fn run(&self, input: CommandInput) -> CommandOutput {
-        CommandOutput::ok(format!("{}\n", input.stdin.map_or(0, |s| s.len())).into_bytes())
-    }
 }
 
 /// Truncation applies only to the final output: a stage in the middle
@@ -325,7 +324,6 @@ fn run_overflow_end_to_end_writes_temp_file() {
 /// `tail` rejects a bare count, so the banner has to spell `-n`.
 #[test]
 fn run_overflow_tail_hint_runs_as_printed() {
-    use crate::commands::TailCommand;
     let mut reg = CommandRegistry::new();
     reg.register(Lines(5000));
     reg.register(CatCommand);
@@ -403,8 +401,7 @@ fn run_tool_description_states_configured_truncation_limits() {
     );
 }
 
-/// A real usage error (unknown flag) keeps the executor's `[grep]\t`
-/// stderr prefix, distinct from help on stdout, though both exit 2.
+/// An unknown flag is an error on stderr, unlike help on stdout.
 #[test]
 fn run_grep_real_usage_error_still_on_stderr() {
     let dir = fresh_dir();

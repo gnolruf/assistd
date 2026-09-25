@@ -1,6 +1,8 @@
-use super::*;
+use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 
+use super::*;
 use crate::commands::RecordingGate;
 use crate::commands::test_patterns as patterns;
 use crate::exec::{OUTPUT_BUF_MAX, OUTPUT_OVERFLOW_EXIT};
@@ -87,8 +89,7 @@ async fn bash_without_script_emits_usage() {
     assert!(out.stdout.starts_with(b"usage: bash"), "{out:?}");
 }
 
-/// The subprocess's own "command not found" must reach the model so it
-/// sees *which* dependency is missing, not a bare exit 127.
+/// The model must see *which* dependency is missing, not a bare exit 127.
 #[tokio::test]
 async fn bash_missing_dependency_forwards_subprocess_stderr() {
     let out = run(
@@ -123,8 +124,6 @@ async fn denylist_match_is_rejected_before_spawn() {
     );
 }
 
-/// `true` stands in for a destructive command so an approval runs
-/// nothing harmful.
 #[tokio::test]
 async fn destructive_pattern_prompts_and_runs_when_approved() {
     let gate = RecordingGate::new(true);
@@ -154,7 +153,6 @@ async fn destructive_pattern_is_cancelled_when_denied() {
     );
 }
 
-/// `echo "rm -rf"` is harmless, so the quoted literal must not prompt.
 #[tokio::test]
 async fn quoted_destructive_literal_does_not_prompt() {
     let gate = RecordingGate::new(false);
@@ -164,8 +162,8 @@ async fn quoted_destructive_literal_does_not_prompt() {
     assert!(gate.prompts().is_empty(), "{:?}", gate.prompts());
 }
 
-/// `yes` floods faster than any timeout, so the child must be killed at
-/// the capture cap (141) rather than buffered until the timeout (137).
+/// `yes` must be killed at the capture cap (141), not buffered until the
+/// timeout (137).
 #[tokio::test]
 async fn bash_output_overflow_kills_child_and_returns_141() {
     let out = run(&with_timeout(Duration::from_secs(10)), "yes", None).await;
@@ -197,8 +195,6 @@ async fn bash_below_cap_returns_full_output() {
     assert_eq!(out.stdout, vec![b'x'; 51200]);
 }
 
-/// A signal death reports `128 + signum` (139 for SIGSEGV), distinct
-/// from the timeout sentinel 137.
 #[cfg(unix)]
 #[tokio::test]
 async fn bash_signal_death_reports_128_plus_signum_not_timeout() {
@@ -206,15 +202,13 @@ async fn bash_signal_death_reports_128_plus_signum_not_timeout() {
     assert_eq!(out.exit_code, 139);
 }
 
-/// Poll `kill -0` until `pid` is gone, up to two seconds. Returns
-/// whether it exited; a SIGKILL'd orphan reparents to init and is
-/// reaped within a few milliseconds.
+/// Poll `kill -0` for up to two seconds; returns whether `pid` exited.
 #[cfg(unix)]
 async fn waited_for_exit(pid: &str) -> bool {
     for _ in 0..40 {
         let alive = std::process::Command::new("kill")
             .args(["-0", pid])
-            .stderr(std::process::Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success());
         if !alive {
@@ -225,15 +219,13 @@ async fn waited_for_exit(pid: &str) -> bool {
     false
 }
 
-/// Run `script` (which must write a background child's PID to
-/// `pidfile`) and return the output plus that PID. The whole call is
-/// bounded: an un-killed grandchild holds the output pipe open, so
-/// without the group kill `supervise` never reaches EOF and hangs for
-/// as long as the orphan lives.
+/// Run `script`, which must write a background child's PID to `pidfile`,
+/// and return the output plus that PID. Bounded, since a surviving
+/// grandchild would hold the output pipe open forever.
 #[cfg(unix)]
 async fn run_leaving_background_child(
     cfg: BashPolicyCfg,
-    script: impl Fn(&std::path::Path) -> String,
+    script: impl Fn(&Path) -> String,
 ) -> (CommandOutput, String) {
     let dir = tempfile::tempdir().unwrap();
     let pidfile = dir.path().join("child.pid");
@@ -249,10 +241,8 @@ async fn run_leaving_background_child(
     (out, pid)
 }
 
-/// A timed-out script must take its whole process group down, not
-/// just the `bash` group leader. `sleep 300 &` outlives a
-/// leader-only SIGKILL, reparents to init, and keeps the inherited
-/// stdout pipe open.
+/// `sleep 300 &` outlives a leader-only SIGKILL, so this checks the whole
+/// process group is killed.
 #[cfg(unix)]
 #[tokio::test]
 async fn timeout_kills_backgrounded_grandchild() {
@@ -271,9 +261,8 @@ async fn timeout_kills_backgrounded_grandchild() {
     );
 }
 
-/// Same requirement on the overflow path: the flood (`yes`) dies of
-/// SIGPIPE once the read end is dropped, but a quiet background child
-/// only dies if the group is signalled.
+/// `yes` dies of SIGPIPE on its own; the quiet background child only dies
+/// if the group is signalled.
 #[cfg(unix)]
 #[tokio::test]
 async fn output_overflow_kills_backgrounded_grandchild() {
@@ -292,8 +281,6 @@ async fn output_overflow_kills_backgrounded_grandchild() {
     );
 }
 
-/// A clean exit must not wait on a background child that inherited the
-/// output pipes, and must not leave it running either.
 #[cfg(unix)]
 #[tokio::test]
 async fn normal_exit_kills_backgrounded_grandchild() {
@@ -309,8 +296,6 @@ async fn normal_exit_kills_backgrounded_grandchild() {
     );
 }
 
-/// More stdin than a pipe buffers, fed to a script that never reads it,
-/// must not keep the timeout from arming.
 #[tokio::test]
 async fn unread_stdin_does_not_block_the_timeout() {
     let cmd = with_timeout(Duration::from_millis(200));

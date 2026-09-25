@@ -1,17 +1,19 @@
-//! Latency benchmarks for the auto-wake-on-query path, measured to the
-//! first Delta through the full daemon stack against `fake_llama_server`.
-//! Thresholds are generous so they catch a 10× regression rather than CI
-//! jitter; actual durations are logged at `info`.
+//! First-Delta latency benchmarks for auto-wake-on-query through the full
+//! daemon stack. Thresholds catch a 10× regression, not CI jitter.
 
 #![cfg(feature = "test-support")]
 
-mod common;
-
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
-use std::sync::Arc;
-use std::sync::Once;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
+
+use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, UnixStream};
+use tokio::sync::{oneshot, watch};
+use tokio::task::JoinHandle;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, Config, LlamaServerConfig, ModelConfig, TimeoutsConfig};
@@ -21,10 +23,10 @@ use assistd_core::{
 };
 use assistd_ipc::{Event, Request};
 use assistd_llm::{LlamaChatClient, LlmBackend};
+
 use common::FakeLlama;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, UnixStream};
-use tokio::sync::{oneshot, watch};
+
+mod common;
 
 fn init_tracing() {
     static ONCE: Once = Once::new();
@@ -80,7 +82,7 @@ async fn new_active_manager(
     port: u16,
 ) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     let (tx, rx) = watch::channel(false);
-    let m = PresenceManager::new_active(
+    let manager = PresenceManager::new_active(
         server_spec(fake, port),
         model_spec(),
         TimeoutsConfig::default(),
@@ -88,23 +90,22 @@ async fn new_active_manager(
     )
     .await
     .expect("cold-start wake failed");
-    (m, tx)
+    (manager, tx)
 }
 
-/// Serve an `AppState` backed by a real `LlamaChatClient` against the fake
-/// server on a temp Unix socket. Returns the manager, the socket path, the
-/// server's stop sender and task, and the backing tempdir.
+/// Serve an `AppState` backed by a real `LlamaChatClient` on a temp Unix
+/// socket, returning the manager, socket path, stop sender, task and tempdir.
 async fn build_running_daemon(
     fake: &FakeLlama,
     port: u16,
 ) -> (
     Arc<PresenceManager>,
-    std::path::PathBuf,
+    PathBuf,
     oneshot::Sender<()>,
-    tokio::task::JoinHandle<()>,
-    tempfile::TempDir,
+    JoinHandle<()>,
+    TempDir,
 ) {
-    let (m, _shutdown) = new_active_manager(fake, port).await;
+    let (manager, _shutdown) = new_active_manager(fake, port).await;
     let chat_cfg = ChatConfig {
         request_timeout_secs: nz64(10),
         ..ChatConfig::default()
@@ -120,13 +121,11 @@ async fn build_running_daemon(
     )
     .expect("build chat client");
     let mut config = Config::default();
-    // The default 5s grace would add 5s per test for no gain; 1s keeps
-    // wall time tracking the actual work.
     config.daemon.shutdown_grace_secs = 1;
     let state = Arc::new(AppState::new(
         config,
         Arc::new(client) as Arc<dyn LlmBackend>,
-        m.clone(),
+        manager.clone(),
         Arc::new(ToolRegistry::default()),
         Arc::new(NoVoiceInput::new()),
         Arc::new(NoContinuousListener::new()),
@@ -151,13 +150,12 @@ async fn build_running_daemon(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    (m, sock_path, stop_tx, server, dir)
+    (manager, sock_path, stop_tx, server, dir)
 }
 
-/// Send a Query to the daemon and return the latency to its first Delta
-/// and its terminal event. The connection is dropped at the end so tests
-/// don't accumulate open sockets.
-async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Duration, Event) {
+/// Send a Query and return the latency to its first Delta plus its terminal
+/// event.
+async fn measure_query_latency(sock_path: &Path, id: &str) -> (Duration, Event) {
     let stream = UnixStream::connect(sock_path).await.unwrap();
     let (read, mut write) = stream.into_split();
     let req = Request::Query {
@@ -168,7 +166,7 @@ async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Durati
     let mut body = serde_json::to_string(&req).unwrap();
     body.push('\n');
 
-    let t0 = Instant::now();
+    let sent_at = Instant::now();
     write.write_all(body.as_bytes()).await.unwrap();
     write.shutdown().await.unwrap();
 
@@ -181,13 +179,12 @@ async fn measure_query_latency(sock_path: &std::path::Path, id: &str) -> (Durati
         if n == 0 {
             break;
         }
-        let e: Event = serde_json::from_str(line.trim()).unwrap();
-        if matches!(e, Event::Delta { .. }) && first_delta_at.is_none() {
-            first_delta_at = Some(t0.elapsed());
+        let event: Event = serde_json::from_str(line.trim()).unwrap();
+        if matches!(event, Event::Delta { .. }) && first_delta_at.is_none() {
+            first_delta_at = Some(sent_at.elapsed());
         }
-        let is_terminal = matches!(e, Event::Done { .. } | Event::Error { .. });
-        if is_terminal {
-            terminal = Some(e);
+        if matches!(event, Event::Done { .. } | Event::Error { .. }) {
+            terminal = Some(event);
             break;
         }
     }
@@ -200,8 +197,8 @@ async fn active_query_baseline_under_200ms() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
-    assert_eq!(m.state(), PresenceState::Active);
+    let (manager, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
+    assert_eq!(manager.state(), PresenceState::Active);
 
     let (latency, terminal) = measure_query_latency(&sock_path, "active-baseline").await;
     tracing::info!(?latency, "active baseline first-Delta latency");
@@ -213,7 +210,7 @@ async fn active_query_baseline_under_200ms() {
 
     let _ = stop_tx.send(());
     server.await.unwrap();
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }
 
 #[tokio::test]
@@ -221,10 +218,10 @@ async fn wake_from_drowsy_first_delta_under_1s() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
+    let (manager, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
 
-    m.drowse().await.expect("drowse");
-    assert_eq!(m.state(), PresenceState::Drowsy);
+    manager.drowse().await.expect("drowse");
+    assert_eq!(manager.state(), PresenceState::Drowsy);
 
     let (latency, terminal) = measure_query_latency(&sock_path, "wake-from-drowsy").await;
     tracing::info!(?latency, "wake-from-Drowsy first-Delta latency");
@@ -233,11 +230,11 @@ async fn wake_from_drowsy_first_delta_under_1s() {
         latency < Duration::from_secs(1),
         "wake-from-Drowsy regressed: first Delta took {latency:?}, expected <1s"
     );
-    assert_eq!(m.state(), PresenceState::Active);
+    assert_eq!(manager.state(), PresenceState::Active);
 
     let _ = stop_tx.send(());
     server.await.unwrap();
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }
 
 #[tokio::test]
@@ -245,10 +242,10 @@ async fn wake_from_sleeping_first_delta_under_5s() {
     let fake = FakeLlama::new("normal");
     init_tracing();
     let port = grab_port().await;
-    let (m, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
+    let (manager, sock_path, stop_tx, server, _dir) = build_running_daemon(&fake, port).await;
 
-    m.sleep().await.expect("sleep");
-    assert_eq!(m.state(), PresenceState::Sleeping);
+    manager.sleep().await.expect("sleep");
+    assert_eq!(manager.state(), PresenceState::Sleeping);
 
     let (latency, terminal) = measure_query_latency(&sock_path, "wake-from-sleeping").await;
     tracing::info!(?latency, "wake-from-Sleeping first-Delta latency");
@@ -257,9 +254,9 @@ async fn wake_from_sleeping_first_delta_under_5s() {
         latency < Duration::from_secs(5),
         "wake-from-Sleeping regressed: first Delta took {latency:?}, expected <5s"
     );
-    assert_eq!(m.state(), PresenceState::Active);
+    assert_eq!(manager.state(), PresenceState::Active);
 
     let _ = stop_tx.send(());
     server.await.unwrap();
-    m.sleep().await.unwrap();
+    manager.sleep().await.unwrap();
 }

@@ -2,17 +2,13 @@
 //! rendering, key handling, the local hotkey grab, resource probes and
 //! attachment staging; every service lives in the daemon.
 
-mod app;
-mod input;
-mod output;
-mod throughput;
-mod ui;
-mod voice;
-mod vram;
-
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use assistd_core::{Config, SleepConfig};
@@ -30,11 +26,26 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::info;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
 use self::app::{App, ChatEvent, WireStream};
 
+mod app;
+mod input;
+mod output;
+mod throughput;
+mod ui;
+mod voice;
+mod vram;
+
 const CHAT_CHANNEL_CAPACITY: usize = 64;
+const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const RESUME_RECENCY_SECS: u64 = 10;
+const TICK_INTERVAL: Duration = Duration::from_millis(250);
+const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const TITLE_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Args)]
 pub struct ChatArgs {
@@ -53,6 +64,48 @@ struct TuiContext {
     sleep_cfg: SleepConfig,
     vision_enabled: bool,
     startup_error: Option<String>,
+}
+
+/// Restores the terminal on drop.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    /// Enter raw mode and the alternate screen, and install a panic hook
+    /// that restores the terminal before the previous hook runs.
+    fn enter() -> Result<Self> {
+        terminal::enable_raw_mode().context("enable_raw_mode")?;
+        if let Err(e) = execute!(
+            io::stdout(),
+            terminal::EnterAlternateScreen,
+            event::EnableMouseCapture
+        ) {
+            let _ = terminal::disable_raw_mode();
+            return Err(e).context("EnterAlternateScreen");
+        }
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = Self::cleanup();
+            previous_hook(info);
+        }));
+        Ok(Self)
+    }
+
+    fn cleanup() -> io::Result<()> {
+        terminal::disable_raw_mode()?;
+        execute!(
+            io::stdout(),
+            event::DisableMouseCapture,
+            terminal::LeaveAlternateScreen,
+            cursor::Show,
+        )?;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = Self::cleanup();
+    }
 }
 
 /// Run the TUI, auto-spawning the daemon when nothing is listening.
@@ -75,48 +128,9 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     let _signal_handler = AbortOnDropHandle::new(install_signal_handler(shutdown_tx.clone()));
 
     let ipc = Arc::new(IpcClient::new());
-    let mut startup_error: Option<String> = None;
-    if UnixStream::connect(ipc.socket_path()).await.is_err() {
-        info!(
-            "daemon not reachable at {}; auto-spawning",
-            ipc.socket_path().display()
-        );
-        match spawn_daemon_detached(args.config.as_deref()) {
-            Ok(()) => {
-                if let Err(e) = wait_for_socket(ipc.socket_path(), Duration::from_secs(30)).await {
-                    startup_error =
-                        Some(format!("daemon spawned but socket never became ready: {e}"));
-                }
-            }
-            Err(e) => {
-                startup_error = Some(format!(
-                    "could not auto-start daemon: {e}; run `assistd daemon` manually then retry"
-                ));
-            }
-        }
-    }
-
-    let (vision_enabled, daemon_model_name) = if startup_error.is_none() {
-        match get_capabilities(&ipc).await {
-            Ok((vision, name)) => (vision, name),
-            Err(e) => {
-                info!("get_capabilities failed: {e:#}");
-                (false, String::new())
-            }
-        }
-    } else {
-        (false, String::new())
-    };
-    let model_name = if daemon_model_name.is_empty() {
-        config
-            .model
-            .name
-            .rsplit_once('/')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_else(|| config.model.name.clone())
-    } else {
-        daemon_model_name
-    };
+    let startup_error = ensure_daemon(&ipc, args.config.as_deref()).await.err();
+    let (vision_enabled, model_name) =
+        resolve_capabilities(&ipc, &config, startup_error.is_none()).await;
 
     let (resource_rx, resource_probe) = vram::spawn_probe(shutdown_tx.subscribe());
     let _resource_probe = AbortOnDropHandle::new(resource_probe);
@@ -160,6 +174,48 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     run_result
 }
 
+/// Spawn the daemon and wait for its socket when nothing is listening.
+/// `Err` is the message shown in the output pane.
+async fn ensure_daemon(ipc: &IpcClient, config: Option<&Path>) -> Result<(), String> {
+    if UnixStream::connect(ipc.socket_path()).await.is_ok() {
+        return Ok(());
+    }
+    info!(
+        "daemon not reachable at {}; auto-spawning",
+        ipc.socket_path().display()
+    );
+    spawn_daemon_detached(config).map_err(|e| {
+        format!("could not auto-start daemon: {e}; run `assistd daemon` manually then retry")
+    })?;
+    wait_for_socket(ipc.socket_path(), DAEMON_STARTUP_TIMEOUT)
+        .await
+        .map_err(|e| format!("daemon spawned but socket never became ready: {e}"))
+}
+
+/// Vision support and the display model name: the daemon's when it
+/// answers, else the configured model's basename.
+async fn resolve_capabilities(ipc: &IpcClient, config: &Config, daemon_up: bool) -> (bool, String) {
+    let (vision_enabled, daemon_model_name) = if daemon_up {
+        get_capabilities(ipc).await.unwrap_or_else(|e| {
+            info!("get_capabilities failed: {e:#}");
+            (false, String::new())
+        })
+    } else {
+        (false, String::new())
+    };
+    let model_name = if daemon_model_name.is_empty() {
+        config
+            .model
+            .name
+            .rsplit_once('/')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| config.model.name.clone())
+    } else {
+        daemon_model_name
+    };
+    (vision_enabled, model_name)
+}
+
 async fn run_tui(ctx: TuiContext) -> Result<()> {
     let TuiContext {
         ipc,
@@ -173,86 +229,31 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         startup_error,
     } = ctx;
 
-    terminal::enable_raw_mode().context("enable_raw_mode")?;
-    if let Err(e) = execute!(
-        std::io::stdout(),
-        terminal::EnterAlternateScreen,
-        event::EnableMouseCapture
-    ) {
-        let _ = terminal::disable_raw_mode();
-        return Err(e).context("EnterAlternateScreen");
-    }
-
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = TerminalGuard::cleanup();
-        previous_hook(info);
-    }));
-    let _guard = TerminalGuard;
-
-    let picker = match Picker::from_query_stdio() {
-        Ok(p)
-            if matches!(
-                p.protocol_type(),
-                ProtocolType::Kitty | ProtocolType::Sixel | ProtocolType::Iterm2
-            ) =>
-        {
-            tracing::info!(
-                "terminal graphics: {:?} (font_size {:?})",
-                p.protocol_type(),
-                p.font_size()
-            );
-            Some(p)
-        }
-        Ok(p) => {
-            tracing::info!(
-                "terminal graphics: {:?} → /attach will display filenames only",
-                p.protocol_type()
-            );
-            None
-        }
-        Err(e) => {
-            tracing::info!(
-                "terminal graphics probe failed ({e}); /attach will display filenames only"
-            );
-            None
-        }
-    };
-
-    let backend = CrosstermBackend::new(std::io::stdout());
+    let _guard = TerminalGuard::enter()?;
+    let picker = probe_graphics();
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
     let mut app = App::new(ipc, chat_tx, model_name, sleep_cfg, vision_enabled, picker);
-
-    if let Some(err) = startup_error {
-        app.output.push_error(&format!("daemon startup: {err}"));
-        app.output
-            .push_error("once the daemon is reachable, retry your query");
-    } else {
-        app.spawn_resume_or_new(10);
+    match startup_error {
+        Some(err) => {
+            app.output.push_error(&format!("daemon startup: {err}"));
+            app.output
+                .push_error("once the daemon is reachable, retry your query");
+        }
+        None => app.spawn_resume_or_new(RESUME_RECENCY_SECS),
     }
 
     let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut tick = tokio::time::interval(TICK_INTERVAL);
 
     terminal.draw(|f| ui::render(f, &mut app))?;
 
-    loop {
-        if app.should_quit() {
-            break;
-        }
+    while !app.should_quit() {
         tokio::select! {
             maybe_ev = events.next() => {
-                match maybe_ev {
-                    Some(Ok(TermEvent::Key(k))) => app.on_key(k),
-                    Some(Ok(TermEvent::Mouse(m))) => app.on_mouse(m),
-                    Some(Ok(TermEvent::Resize(_, _))) => {}
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => {
-                        tracing::error!("terminal event error: {e}");
-                        break;
-                    }
-                    None => break,
+                if apply_terminal_event(&mut app, maybe_ev).is_break() {
+                    break;
                 }
             }
             Some(ev) = chat_rx.recv() => {
@@ -277,10 +278,56 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     Ok(())
 }
 
+/// A picker for terminals that can draw images inline; `None` means
+/// `/attach` shows filenames only.
+fn probe_graphics() -> Option<Picker> {
+    match Picker::from_query_stdio() {
+        Ok(p)
+            if matches!(
+                p.protocol_type(),
+                ProtocolType::Kitty | ProtocolType::Sixel | ProtocolType::Iterm2
+            ) =>
+        {
+            info!(
+                "terminal graphics: {:?} (font_size {:?})",
+                p.protocol_type(),
+                p.font_size()
+            );
+            Some(p)
+        }
+        Ok(p) => {
+            info!(
+                "terminal graphics: {:?} → /attach will display filenames only",
+                p.protocol_type()
+            );
+            None
+        }
+        Err(e) => {
+            info!("terminal graphics probe failed ({e}); /attach will display filenames only");
+            None
+        }
+    }
+}
+
+/// Breaks when the terminal event stream ends or fails.
+fn apply_terminal_event(app: &mut App, maybe_ev: Option<io::Result<TermEvent>>) -> ControlFlow<()> {
+    match maybe_ev {
+        Some(Ok(TermEvent::Key(k))) => app.on_key(k),
+        Some(Ok(TermEvent::Mouse(m))) => app.on_mouse(m),
+        Some(Ok(_)) => {}
+        Some(Err(e)) => {
+            tracing::error!("terminal event error: {e}");
+            return ControlFlow::Break(());
+        }
+        None => return ControlFlow::Break(()),
+    }
+    ControlFlow::Continue(())
+}
+
 /// Apply channel events that are already queued so a burst of deltas
-/// costs one frame. Bounded by the channel capacity so a producer that
-/// keeps pace cannot starve redraws. Terminal events are left to the
-/// select loop: polling `EventStream` outside it would drop its waker.
+/// costs one frame, bounded so a producer that keeps pace cannot starve
+/// redraws. Terminal events stay with the select loop: polling
+/// `EventStream` outside it would drop its waker.
 fn drain_queued(
     app: &mut App,
     chat_rx: &mut mpsc::Receiver<ChatEvent>,
@@ -299,8 +346,6 @@ fn drain_queued(
 }
 
 fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
-    use std::process::{Command, Stdio};
-
     let exe = std::env::current_exe().context("std::env::current_exe()")?;
     let mut cmd = Command::new(&exe);
     cmd.arg("daemon").arg("--client-mode");
@@ -320,7 +365,7 @@ fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
 }
 
 async fn wait_for_socket(path: &Path, deadline: Duration) -> Result<()> {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     loop {
         if UnixStream::connect(path).await.is_ok() {
             return Ok(());
@@ -367,29 +412,62 @@ fn spawn_status_polling(
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        let mut tick = tokio::time::interval(STATUS_POLL_INTERVAL);
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
-                _ = tick.tick() => {
-                    poll_one(&ipc, &chat_tx, Request::GetPresence { id: Uuid::new_v4().to_string() }).await;
-                    poll_one(&ipc, &chat_tx, Request::GetVoiceState { id: Uuid::new_v4().to_string() }).await;
-                    poll_one(&ipc, &chat_tx, Request::GetListenState { id: Uuid::new_v4().to_string() }).await;
-                }
+                _ = tick.tick() => poll_status(&ipc, &chat_tx).await,
             }
         }
     })
 }
 
-/// Session titles arrive on the daemon's broadcast bus long after the
-/// turn that triggered them has closed its connection. Reconnects on a
-/// fixed delay; a missing title is cosmetic.
+async fn poll_status(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
+    let requests = [
+        Request::GetPresence {
+            id: Uuid::new_v4().to_string(),
+        },
+        Request::GetVoiceState {
+            id: Uuid::new_v4().to_string(),
+        },
+        Request::GetListenState {
+            id: Uuid::new_v4().to_string(),
+        },
+    ];
+    for req in requests {
+        poll_one(ipc, chat_tx, req).await;
+    }
+}
+
+async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Request) {
+    let kind = req.kind();
+    let mut stream = match ipc.one_shot(req).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("status poll {kind} failed: {e}");
+            return;
+        }
+    };
+    while let Ok(Some(ev)) = stream.next_event().await {
+        if ev.is_terminal() {
+            break;
+        }
+        let _ = chat_tx
+            .send(ChatEvent::Wire {
+                stream: WireStream::Status,
+                event: ev,
+            })
+            .await;
+    }
+}
+
+/// Session titles arrive on the daemon's broadcast bus after the turn that
+/// produced them has closed. Reconnects on a fixed delay.
 fn spawn_title_subscription(
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
-    const RECONNECT_DELAY: Duration = Duration::from_secs(2);
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -397,7 +475,7 @@ fn spawn_title_subscription(
                 () = pump_titles(&ipc, &chat_tx) => {
                     tokio::select! {
                         _ = shutdown.changed() => break,
-                        _ = tokio::time::sleep(RECONNECT_DELAY) => {}
+                        _ = tokio::time::sleep(TITLE_RECONNECT_DELAY) => {}
                     }
                 }
             }
@@ -433,28 +511,6 @@ async fn pump_titles(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
     }
 }
 
-async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Request) {
-    let kind = req.kind();
-    let mut stream = match ipc.one_shot(req).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!("status poll {kind} failed: {e}");
-            return;
-        }
-    };
-    while let Ok(Some(ev)) = stream.next_event().await {
-        if ev.is_terminal() {
-            break;
-        }
-        let _ = chat_tx
-            .send(ChatEvent::Wire {
-                stream: WireStream::Status,
-                event: ev,
-            })
-            .await;
-    }
-}
-
 fn install_signal_handler(shutdown_tx: watch::Sender<bool>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut term = match signal(SignalKind::terminate()) {
@@ -482,9 +538,7 @@ fn log_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn init_file_tracing() -> Result<tracing_appender::non_blocking::WorkerGuard> {
-    use tracing_subscriber::{EnvFilter, fmt};
-
+fn init_file_tracing() -> Result<WorkerGuard> {
     let file_appender = tracing_appender::rolling::daily(log_dir()?, "chat.log");
     let (writer, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -499,9 +553,7 @@ fn init_file_tracing() -> Result<tracing_appender::non_blocking::WorkerGuard> {
     Ok(guard)
 }
 
-fn redirect_stderr_to_log() -> Result<std::fs::File> {
-    use std::fs::OpenOptions;
-
+fn redirect_stderr_to_log() -> Result<File> {
     let path = log_dir()?.join("chat-stderr.log");
     let file = OpenOptions::new()
         .create(true)
@@ -511,25 +563,4 @@ fn redirect_stderr_to_log() -> Result<std::fs::File> {
     rustix::stdio::dup2_stderr(&file)
         .with_context(|| format!("dup2 stderr → {}", path.display()))?;
     Ok(file)
-}
-
-struct TerminalGuard;
-
-impl TerminalGuard {
-    fn cleanup() -> std::io::Result<()> {
-        terminal::disable_raw_mode()?;
-        execute!(
-            std::io::stdout(),
-            event::DisableMouseCapture,
-            terminal::LeaveAlternateScreen,
-            cursor::Show,
-        )?;
-        Ok(())
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = Self::cleanup();
-    }
 }

@@ -1,9 +1,17 @@
 //! Handlers for the `Memory*` variants of `Request`.
 
-use super::{AppState, DispatchError, send_error, wire_role};
-use assistd_ipc::{Event, ReindexKind};
+use std::future::Future;
 use std::sync::Arc;
+
 use tokio::sync::mpsc;
+use tracing::warn;
+
+use assistd_embed::{BATCH_SIZE, embed_each};
+use assistd_ipc::{Event, ReindexKind};
+use assistd_memory::{MemoryError, vector_to_blob};
+use assistd_tools::DEFAULT_SEARCH_LIMIT;
+
+use super::{AppState, DispatchError, send_error, wire_role};
 
 impl AppState {
     pub(super) async fn handle_memory_semantic_search(
@@ -19,12 +27,12 @@ impl AppState {
             return Ok(());
         }
         let limit = if limit == 0 {
-            assistd_tools::DEFAULT_SEARCH_LIMIT
+            DEFAULT_SEARCH_LIMIT
         } else {
             limit as usize
         };
-        let vec = match self.memory.embedder.embed(query).await {
-            Ok(v) => v,
+        let embedding = match self.memory.embedder.embed(query).await {
+            Ok(embedding) => embedding,
             Err(e) => {
                 send_error(&tx, id, format!("embed failed: {e}")).await;
                 return Err(e.into());
@@ -33,21 +41,21 @@ impl AppState {
         match self
             .memory
             .semantic
-            .nearest_chunks(vec, limit, &model, None)
+            .nearest_chunks(embedding, limit, &model, None)
             .await
         {
             Ok(hits) => {
-                for h in hits {
+                for hit in hits {
                     let _ = tx
                         .send(Event::SemanticHit {
                             id: id.clone(),
-                            conversation_id: h.conversation_id,
-                            chunk_id: h.chunk_id,
-                            session_id: h.session_id,
-                            timestamp: h.timestamp,
-                            role: wire_role(h.role),
-                            content: h.content,
-                            similarity: h.similarity,
+                            conversation_id: hit.conversation_id,
+                            chunk_id: hit.chunk_id,
+                            session_id: hit.session_id,
+                            timestamp: hit.timestamp,
+                            role: wire_role(hit.role),
+                            content: hit.content,
+                            similarity: hit.similarity,
                         })
                         .await;
                 }
@@ -206,10 +214,9 @@ impl AppState {
         }
     }
 
-    /// Embed every memory and conversation chunk that lacks an embedding
-    /// under the current model, streaming `ReindexProgress` as items
-    /// complete. Per-item failures are logged and counted as done so one
-    /// bad row cannot wedge the run.
+    /// Embed every memory and chunk lacking an embedding under the current
+    /// model, streaming `ReindexProgress`. Per-item failures are logged and
+    /// counted as done.
     pub(super) async fn handle_memory_reindex(
         self: Arc<Self>,
         id: String,
@@ -228,7 +235,7 @@ impl AppState {
         let dim = self.memory.embedder.dim() as i64;
 
         let chunks = match self.memory.semantic.chunks_missing_embedding(&model).await {
-            Ok(v) => v,
+            Ok(chunks) => chunks,
             Err(e) => {
                 send_error(&tx, id, format!("reindex: list missing chunks: {e}")).await;
                 return Err(e.into());
@@ -240,7 +247,7 @@ impl AppState {
             .memories_missing_embedding(&model)
             .await
         {
-            Ok(v) => v,
+            Ok(memories) => memories,
             Err(e) => {
                 send_error(&tx, id, format!("reindex: list missing memories: {e}")).await;
                 return Err(e.into());
@@ -293,18 +300,18 @@ impl AppState {
         store: F,
     ) where
         F: Fn(i64, Vec<u8>) -> Fut,
-        Fut: std::future::Future<Output = Result<(), assistd_memory::MemoryError>>,
+        Fut: Future<Output = Result<(), MemoryError>>,
     {
         let total = items.len() as u32;
         let mut done = 0u32;
-        for batch in items.chunks(assistd_embed::BATCH_SIZE) {
+        for batch in items.chunks(BATCH_SIZE) {
             let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
-            let results = assistd_embed::embed_each(&*self.memory.embedder, &texts).await;
+            let results = embed_each(&*self.memory.embedder, &texts).await;
             for (&(item_id, _), result) in batch.iter().zip(results) {
                 match result {
-                    Ok(vec) => {
-                        if let Err(e) = store(item_id, assistd_memory::vector_to_blob(&vec)).await {
-                            tracing::warn!(
+                    Ok(embedding) => {
+                        if let Err(e) = store(item_id, vector_to_blob(&embedding)).await {
+                            warn!(
                                 target: "assistd::memory",
                                 kind = kind.as_str(),
                                 item_id,
@@ -314,7 +321,7 @@ impl AppState {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
+                        warn!(
                             target: "assistd::memory",
                             kind = kind.as_str(),
                             item_id,

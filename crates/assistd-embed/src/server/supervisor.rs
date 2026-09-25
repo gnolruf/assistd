@@ -1,13 +1,16 @@
+use std::process::ExitStatus;
+use std::time::{Duration, Instant};
+
+use tokio::sync::watch;
+use tracing::{error, info, warn};
+
+use assistd_config::EmbeddingConfig;
+
 use super::backoff::{MAX_CONSECUTIVE_FAILURES, backoff_delay};
 use super::error::EmbedServerError;
 use super::health::HealthChecker;
 use super::process::ChildProcess;
 use super::service::ReadyState;
-use assistd_config::EmbeddingConfig;
-use std::process::ExitStatus;
-use std::time::{Duration, Instant};
-use tokio::sync::watch;
-use tracing::{error, info, warn};
 
 const MIN_HEALTHY_SECONDS: u64 = 30;
 const TERM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -52,68 +55,44 @@ impl Supervisor {
             let _ = self.ready_tx.send(ReadyState::Starting);
 
             let outcome = self.supervise_once().await;
-
-            match outcome {
-                Ok(CycleResult::ShutdownRequested) => {
-                    info!(target: "assistd::embed_server", "supervisor shutdown");
-                    return;
-                }
-                Ok(CycleResult::CrashedAfterReady { status, ran_for }) => {
-                    warn!(
-                        target: "assistd::embed_server",
-                        "embed-server exited after {ran_for:?} post-ready: {status}; restarting"
-                    );
-                    if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
-                        consecutive_failures = 0;
-                    } else {
-                        consecutive_failures += 1;
-                    }
-                }
-                Ok(CycleResult::FailedToStart { status }) => {
-                    error!(
-                        target: "assistd::embed_server",
-                        "embed-server exited before reaching ready: {status}"
-                    );
-                    consecutive_failures += 1;
-                }
-                Err(e) => {
-                    error!(
-                        target: "assistd::embed_server",
-                        "embed-server startup failed: {e}"
-                    );
-                    consecutive_failures += 1;
-                }
-            }
+            let Some(failures) = tally_failures(outcome, consecutive_failures) else {
+                return;
+            };
+            consecutive_failures = failures;
 
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                error!(
-                    target: "assistd::embed_server",
-                    "{MAX_CONSECUTIVE_FAILURES} consecutive failures; entering degraded state"
-                );
-                let _ = self.ready_tx.send(ReadyState::Degraded);
-                let _ = self.shutdown_rx.wait_for(|v| *v).await;
+                self.park_degraded().await;
                 return;
             }
-
-            if consecutive_failures == 0 {
-                continue;
+            if consecutive_failures > 0 && !self.wait_backoff(consecutive_failures).await {
+                return;
             }
+        }
+    }
 
-            let delay = backoff_delay(consecutive_failures - 1);
-            warn!(
-                target: "assistd::embed_server",
-                "restarting embed-server in {delay:?} (attempt {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})"
-            );
-            let _ = self.ready_tx.send(ReadyState::BackingOff {
-                attempt: consecutive_failures,
-            });
+    async fn park_degraded(&mut self) {
+        error!(
+            target: "assistd::embed_server",
+            "{MAX_CONSECUTIVE_FAILURES} consecutive failures; entering degraded state"
+        );
+        let _ = self.ready_tx.send(ReadyState::Degraded);
+        let _ = self.shutdown_rx.wait_for(|v| *v).await;
+    }
 
-            tokio::select! {
-                _ = tokio::time::sleep(delay) => {}
-                _ = self.shutdown_rx.changed() => {
-                    info!(target: "assistd::embed_server", "supervisor shutdown during backoff");
-                    return;
-                }
+    /// Returns `false` if shutdown arrived during the wait.
+    async fn wait_backoff(&mut self, attempt: u32) -> bool {
+        let delay = backoff_delay(attempt - 1);
+        warn!(
+            target: "assistd::embed_server",
+            "restarting embed-server in {delay:?} (attempt {attempt}/{MAX_CONSECUTIVE_FAILURES})"
+        );
+        let _ = self.ready_tx.send(ReadyState::BackingOff { attempt });
+
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => true,
+            _ = self.shutdown_rx.changed() => {
+                info!(target: "assistd::embed_server", "supervisor shutdown during backoff");
+                false
             }
         }
     }
@@ -170,6 +149,45 @@ impl Supervisor {
                 child.shutdown(TERM_TIMEOUT).await?;
                 Ok(CycleResult::ShutdownRequested)
             }
+        }
+    }
+}
+
+/// Log one cycle's outcome and return the updated consecutive-failure count, or `None`
+/// on shutdown. A crash after [`MIN_HEALTHY_SECONDS`] of uptime resets the count.
+fn tally_failures(
+    outcome: Result<CycleResult, EmbedServerError>,
+    consecutive_failures: u32,
+) -> Option<u32> {
+    match outcome {
+        Ok(CycleResult::ShutdownRequested) => {
+            info!(target: "assistd::embed_server", "supervisor shutdown");
+            None
+        }
+        Ok(CycleResult::CrashedAfterReady { status, ran_for }) => {
+            warn!(
+                target: "assistd::embed_server",
+                "embed-server exited after {ran_for:?} post-ready: {status}; restarting"
+            );
+            if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
+                Some(0)
+            } else {
+                Some(consecutive_failures + 1)
+            }
+        }
+        Ok(CycleResult::FailedToStart { status }) => {
+            error!(
+                target: "assistd::embed_server",
+                "embed-server exited before reaching ready: {status}"
+            );
+            Some(consecutive_failures + 1)
+        }
+        Err(e) => {
+            error!(
+                target: "assistd::embed_server",
+                "embed-server startup failed: {e}"
+            );
+            Some(consecutive_failures + 1)
         }
     }
 }

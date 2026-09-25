@@ -1,24 +1,27 @@
+use std::time::Duration;
+
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+use assistd_config::EmbeddingConfig;
+
 use super::backoff::MAX_CONSECUTIVE_FAILURES;
 use super::error::EmbedServerError;
 use super::supervisor::Supervisor;
-use assistd_config::EmbeddingConfig;
-use std::time::Duration;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 /// Lifecycle state broadcast by the supervisor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadyState {
-    /// Child is spawning or waiting for its `/health` check to pass.
+    /// Spawning, or waiting for `/health` to pass.
     Starting,
-    /// Child responded `200 OK` to `/health` and is accepting requests.
+    /// `/health` returned 200; accepting requests.
     Ready,
-    /// Child failed and the supervisor is waiting before the next restart attempt.
+    /// Waiting before the next restart.
     BackingOff {
-        /// 1-based count of consecutive failures so far.
+        /// 1-based count of consecutive failures.
         attempt: u32,
     },
-    /// Too many consecutive failures; supervisor has parked and will not restart.
+    /// Too many consecutive failures; no further restarts.
     Degraded,
 }
 

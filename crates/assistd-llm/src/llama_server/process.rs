@@ -1,14 +1,19 @@
-use super::error::LlamaServerError;
-use assistd_config::{LlamaServerConfig, ModelConfig};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
+
+use assistd_config::{LlamaServerConfig, ModelConfig};
+#[cfg(unix)]
+use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tracing::{info, warn};
 
-/// Wraps a running llama-server child process plus the tasks forwarding its
-/// stdout/stderr to tracing.
+use super::error::LlamaServerError;
+
+/// A running llama-server child plus the tasks forwarding its output to
+/// tracing. On unix the child leads its own process group (pgid == pid).
 pub struct ChildProcess {
     child: Child,
     stdout_task: Option<JoinHandle<()>>,
@@ -18,78 +23,14 @@ pub struct ChildProcess {
 impl ChildProcess {
     /// Spawn a llama-server child and forward its stdout/stderr to tracing.
     pub fn spawn(cfg: &LlamaServerConfig, model: &ModelConfig) -> Result<Self, LlamaServerError> {
-        // Router mode: no `--hf-repo`, so weights are loaded on demand
-        // through `POST /models/load` and dropped through `/models/unload`
-        // while the process stays alive. `-c` still sets the server-wide
-        // context window.
-        let mut cmd = Command::new(&cfg.binary_path);
-        cmd.arg("--jinja")
-            .arg("-ngl")
-            .arg(cfg.gpu_layers.to_string())
-            .arg("--host")
-            .arg(cfg.host.to_string())
-            .arg("--port")
-            .arg(cfg.port.to_string())
-            .arg("-c")
-            .arg(model.context_length.to_string());
-
-        if let Some(alias) = &cfg.alias {
-            cmd.arg("--alias").arg(alias);
-        }
-        if let Some(ot) = &cfg.override_tensor {
-            cmd.arg("-ot").arg(ot);
-        }
-        if let Some(flash) = cfg.flash_attn {
-            cmd.arg("--flash-attn")
-                .arg(if flash { "on" } else { "off" });
-        }
-        if let Some(k) = &cfg.cache_type_k {
-            cmd.arg("--cache-type-k").arg(k);
-        }
-        if let Some(v) = &cfg.cache_type_v {
-            cmd.arg("--cache-type-v").arg(v);
-        }
-        if let Some(t) = cfg.threads {
-            cmd.arg("--threads").arg(t.to_string());
-        }
-        if let Some(b) = cfg.batch_size {
-            cmd.arg("--batch-size").arg(b.to_string());
-        }
-        if let Some(ub) = cfg.ubatch_size {
-            cmd.arg("--ubatch-size").arg(ub.to_string());
-        }
-        if let Some(n) = cfg.n_cpu_moe {
-            cmd.arg("--n-cpu-moe").arg(n.to_string());
-        }
-        if let Some(c) = cfg.cache_ram_mib {
-            cmd.arg("--cache-ram").arg(c.to_string());
-        }
-        if cfg.mlock == Some(true) {
-            cmd.arg("--mlock");
-        }
-        if let Some(offload) = cfg.mmproj_offload {
-            cmd.arg(if offload {
-                "--mmproj-offload"
-            } else {
-                "--no-mmproj-offload"
-            });
-        }
-
+        let mut cmd = router_command(cfg, model);
+        push_tuning_args(&mut cmd, cfg);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-
         #[cfg(unix)]
-        {
-            // Put the child in its own process group so `kill(-pid, SIGTERM)`
-            // takes down any grandchildren along with it.
-            cmd.process_group(0);
-        }
-
-        // Orphan prevention: when the daemon dies, including by SIGKILL
-        // (which bypasses Drop and `kill_on_drop`), the kernel delivers
-        // SIGTERM to this child.
+        cmd.process_group(0);
         #[cfg(target_os = "linux")]
         set_parent_death_signal(&mut cmd);
 
@@ -134,21 +75,16 @@ impl ChildProcess {
     }
 
     /// SIGTERM the child's process group, wait up to `term_timeout`, then
-    /// SIGKILL if it is still running. Both log forwarders are awaited
-    /// briefly so their buffered output lands before returning.
+    /// SIGKILL if it is still running. Log forwarders are drained briefly.
     pub async fn shutdown(mut self, term_timeout: Duration) -> Result<(), LlamaServerError> {
-        // The child leads its own process group, so pgid == pid.
         #[cfg(unix)]
-        let pgid = self
-            .child
-            .id()
-            .and_then(|pid| rustix::process::Pid::from_raw(pid as i32));
+        let pgid = self.child.id().and_then(|pid| Pid::from_raw(pid as i32));
         #[cfg(unix)]
         if let Some(pgid) = pgid {
-            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+            let _ = kill_process_group(pgid, Signal::TERM);
         }
 
-        match tokio::time::timeout(term_timeout, self.child.wait()).await {
+        match timeout(term_timeout, self.child.wait()).await {
             Ok(Ok(status)) => {
                 info!(
                     target: "assistd::llama_server",
@@ -163,8 +99,7 @@ impl ChildProcess {
                 );
                 #[cfg(unix)]
                 if let Some(pgid) = pgid {
-                    let _ =
-                        rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+                    let _ = kill_process_group(pgid, Signal::KILL);
                 }
                 let _ = self.child.start_kill();
                 let _ = self.child.wait().await;
@@ -172,17 +107,78 @@ impl ChildProcess {
         }
 
         if let Some(task) = self.stdout_task.take() {
-            let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
+            let _ = timeout(Duration::from_millis(500), task).await;
         }
         if let Some(task) = self.stderr_task.take() {
-            let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
+            let _ = timeout(Duration::from_millis(500), task).await;
         }
 
         Ok(())
     }
 }
 
-// `pre_exec` is the only way to set PDEATHSIG on a spawned child, and it is unsafe.
+/// Router-mode command line: no model is named, so weights load on demand
+/// through `/models/load` while the process stays alive.
+fn router_command(cfg: &LlamaServerConfig, model: &ModelConfig) -> Command {
+    let mut cmd = Command::new(&cfg.binary_path);
+    cmd.arg("--jinja")
+        .arg("-ngl")
+        .arg(cfg.gpu_layers.to_string())
+        .arg("--host")
+        .arg(cfg.host.to_string())
+        .arg("--port")
+        .arg(cfg.port.to_string())
+        .arg("-c")
+        .arg(model.context_length.to_string());
+    cmd
+}
+
+fn push_tuning_args(cmd: &mut Command, cfg: &LlamaServerConfig) {
+    if let Some(alias) = &cfg.alias {
+        cmd.arg("--alias").arg(alias);
+    }
+    if let Some(override_tensor) = &cfg.override_tensor {
+        cmd.arg("-ot").arg(override_tensor);
+    }
+    if let Some(flash) = cfg.flash_attn {
+        cmd.arg("--flash-attn")
+            .arg(if flash { "on" } else { "off" });
+    }
+    if let Some(cache_type_k) = &cfg.cache_type_k {
+        cmd.arg("--cache-type-k").arg(cache_type_k);
+    }
+    if let Some(cache_type_v) = &cfg.cache_type_v {
+        cmd.arg("--cache-type-v").arg(cache_type_v);
+    }
+    if let Some(threads) = cfg.threads {
+        cmd.arg("--threads").arg(threads.to_string());
+    }
+    if let Some(batch_size) = cfg.batch_size {
+        cmd.arg("--batch-size").arg(batch_size.to_string());
+    }
+    if let Some(ubatch_size) = cfg.ubatch_size {
+        cmd.arg("--ubatch-size").arg(ubatch_size.to_string());
+    }
+    if let Some(n_cpu_moe) = cfg.n_cpu_moe {
+        cmd.arg("--n-cpu-moe").arg(n_cpu_moe.to_string());
+    }
+    if let Some(cache_ram_mib) = cfg.cache_ram_mib {
+        cmd.arg("--cache-ram").arg(cache_ram_mib.to_string());
+    }
+    if cfg.mlock == Some(true) {
+        cmd.arg("--mlock");
+    }
+    if let Some(offload) = cfg.mmproj_offload {
+        cmd.arg(if offload {
+            "--mmproj-offload"
+        } else {
+            "--no-mmproj-offload"
+        });
+    }
+}
+
+/// Have the kernel SIGTERM the child when the daemon dies, even by SIGKILL.
+/// `pre_exec` is the only way to set PDEATHSIG on a spawned child.
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 fn set_parent_death_signal(cmd: &mut Command) {
@@ -191,8 +187,7 @@ fn set_parent_death_signal(cmd: &mut Command) {
     // which is async-signal-safe.
     unsafe {
         cmd.pre_exec(|| {
-            rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))
-                .map_err(Into::into)
+            rustix::process::set_parent_process_death_signal(Some(Signal::TERM)).map_err(Into::into)
         });
     }
 }

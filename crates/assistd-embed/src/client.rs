@@ -1,8 +1,9 @@
 //! HTTP client for llama-server's `/v1/embeddings` endpoint.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 use crate::{EmbedError, Embedder};
 
@@ -34,9 +35,8 @@ pub struct LlamaEmbedder {
 }
 
 impl LlamaEmbedder {
-    /// Probe the server once to learn the vector dimension.
-    /// `request_timeout` applies to the probe and every embed request.
-    /// Errors if the probe fails or returns an empty vector.
+    /// Probe the server once to learn the vector dimension; `request_timeout` applies to
+    /// the probe and every later request. Errors if the probe fails or returns no vector.
     pub async fn new(
         host: &str,
         port: u16,
@@ -123,26 +123,25 @@ async fn embed_raw(
 ) -> Result<Vec<Vec<f32>>, EmbedError> {
     let url = format!("{base_url}/v1/embeddings");
     let body = EmbedRequest { input, model };
-    let resp = client
+    let response = client
         .post(&url)
         .json(&body)
         .send()
         .await
         .map_err(|source| EmbedError::Request { url, source })?;
-    let status = resp.status();
+    let status = response.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = response.text().await.unwrap_or_default();
         return Err(EmbedError::Status {
             status,
             body: body.chars().take(200).collect(),
         });
     }
-    let parsed: EmbedResponse = resp.json().await.map_err(EmbedError::Decode)?;
+    let parsed: EmbedResponse = response.json().await.map_err(EmbedError::Decode)?;
     order_by_index(parsed.data, input.len())
 }
 
-/// Place each entry at its `index`; the server is free to return
-/// entries in any order.
+/// Place each entry at its `index`, since the server may return entries in any order.
 fn order_by_index(data: Vec<EmbedDatum>, expected: usize) -> Result<Vec<Vec<f32>>, EmbedError> {
     if data.len() != expected {
         return Err(EmbedError::CountMismatch {
@@ -160,20 +159,20 @@ fn order_by_index(data: Vec<EmbedDatum>, expected: usize) -> Result<Vec<Vec<f32>
     Ok(slots.into_iter().flatten().collect())
 }
 
-fn l2_normalize(mut v: Vec<f32>) -> Vec<f32> {
-    let norm = v
+fn l2_normalize(mut vector: Vec<f32>) -> Vec<f32> {
+    let norm = vector
         .iter()
         .map(|&x| f64::from(x) * f64::from(x))
         .sum::<f64>()
         .sqrt();
     if !norm.is_finite() || norm == 0.0 {
-        return v;
+        return vector;
     }
-    let inv = (1.0 / norm) as f32;
-    for x in &mut v {
-        *x *= inv;
+    let inverse_norm = (1.0 / norm) as f32;
+    for value in &mut vector {
+        *value *= inverse_norm;
     }
-    v
+    vector
 }
 
 #[cfg(test)]

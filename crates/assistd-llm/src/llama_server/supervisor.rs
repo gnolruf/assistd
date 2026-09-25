@@ -1,3 +1,14 @@
+use std::collections::VecDeque;
+use std::ops::ControlFlow;
+use std::process::ExitStatus;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use assistd_config::{LlamaServerConfig, ModelConfig};
+use parking_lot::Mutex;
+use tokio::sync::watch;
+use tracing::{error, info, warn};
+
 use super::backoff::{
     MAX_CONSECUTIVE_FAILURES, MAX_RESTARTS_PER_WINDOW, RESTART_WINDOW, backoff_delay,
 };
@@ -5,18 +16,9 @@ use super::error::LlamaServerError;
 use super::health::HealthChecker;
 use super::process::ChildProcess;
 use super::service::ReadyState;
-use assistd_config::{LlamaServerConfig, ModelConfig};
-use parking_lot::Mutex;
-use std::collections::VecDeque;
-use std::process::ExitStatus;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::watch;
-use tracing::{error, info, warn};
 
-/// Seconds a child must stay healthy after reaching Ready before a subsequent
-/// exit is treated as a runtime crash (counter reset) rather than a startup
-/// flap (counter increment).
+/// Seconds a child must stay healthy after Ready for its exit to count as a
+/// runtime crash (counter reset) rather than a startup flap.
 pub(crate) const MIN_HEALTHY_SECONDS: u64 = 30;
 
 /// Graceful shutdown budget per child; fits under systemd's 15s stop budget.
@@ -24,15 +26,23 @@ const TERM_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What happened during one supervisor cycle.
 enum CycleResult {
-    /// The shutdown watch flipped; the cycle tore down cleanly.
     ShutdownRequested,
     /// Child exited before `/health` ever returned 200.
-    FailedToStart { status: ExitStatus },
-    /// Child reached Ready, ran for `ran_for`, then exited.
+    FailedToStart {
+        status: ExitStatus,
+    },
     CrashedAfterReady {
         status: ExitStatus,
         ran_for: Duration,
     },
+}
+
+/// How a freshly spawned child's startup ended.
+enum StartupOutcome {
+    Ready,
+    ChildExited(ExitStatus),
+    ShuttingDown,
+    StartupError(LlamaServerError),
 }
 
 /// Drives the llama-server restart loop, broadcasting [`ReadyState`] transitions.
@@ -51,7 +61,6 @@ impl Supervisor {
     /// [`ReadyState::Degraded`] and stops restarting until shutdown.
     pub async fn run(mut self) {
         let mut consecutive_failures: u32 = 0;
-
         let mut restart_history: VecDeque<Instant> = VecDeque::new();
 
         loop {
@@ -61,70 +70,16 @@ impl Supervisor {
             let _ = self.ready_tx.send(ReadyState::Starting);
 
             let outcome = self.supervise_once().await;
-
-            let recorded_restart = !matches!(outcome, Ok(CycleResult::ShutdownRequested));
-            if recorded_restart {
-                let now = Instant::now();
-                while let Some(&oldest) = restart_history.front() {
-                    if now.duration_since(oldest) > RESTART_WINDOW {
-                        restart_history.pop_front();
-                    } else {
-                        break;
-                    }
-                }
-                restart_history.push_back(now);
+            if !matches!(outcome, Ok(CycleResult::ShutdownRequested)) {
+                record_restart(&mut restart_history, Instant::now());
             }
+            let Some(failures) = failures_after(outcome, consecutive_failures) else {
+                return;
+            };
+            consecutive_failures = failures;
 
-            match outcome {
-                Ok(CycleResult::ShutdownRequested) => {
-                    info!(target: "assistd::llama_server", "supervisor shutdown");
-                    return;
-                }
-                Ok(CycleResult::CrashedAfterReady { status, ran_for }) => {
-                    warn!(
-                        target: "assistd::llama_server",
-                        "llama-server exited after {ran_for:?} post-ready: {status}; restarting"
-                    );
-                    if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
-                        consecutive_failures = 0;
-                    } else {
-                        consecutive_failures += 1;
-                    }
-                }
-                Ok(CycleResult::FailedToStart { status }) => {
-                    error!(
-                        target: "assistd::llama_server",
-                        "llama-server exited before reaching ready: {status}"
-                    );
-                    consecutive_failures += 1;
-                }
-                Err(e) => {
-                    error!(
-                        target: "assistd::llama_server",
-                        "llama-server startup failed: {e}"
-                    );
-                    consecutive_failures += 1;
-                }
-            }
-
-            let consecutive_tripped = consecutive_failures >= MAX_CONSECUTIVE_FAILURES;
-            let window_tripped = restart_history.len() >= MAX_RESTARTS_PER_WINDOW;
-            if consecutive_tripped || window_tripped {
-                if window_tripped {
-                    error!(
-                        target: "assistd::llama_server",
-                        restarts = restart_history.len(),
-                        window_secs = RESTART_WINDOW.as_secs(),
-                        "llama-server hit {MAX_RESTARTS_PER_WINDOW} restarts in rolling window; entering degraded state"
-                    );
-                } else {
-                    error!(
-                        target: "assistd::llama_server",
-                        "{MAX_CONSECUTIVE_FAILURES} consecutive failures; entering degraded state"
-                    );
-                }
+            if restart_budget_exhausted(consecutive_failures, restart_history.len()) {
                 let _ = self.ready_tx.send(ReadyState::Degraded);
-
                 let _ = self.shutdown_rx.wait_for(|v| *v).await;
                 return;
             }
@@ -132,22 +87,26 @@ impl Supervisor {
             if consecutive_failures == 0 {
                 continue;
             }
+            if self.back_off(consecutive_failures).await.is_break() {
+                return;
+            }
+        }
+    }
 
-            let delay = backoff_delay(consecutive_failures - 1);
-            warn!(
-                target: "assistd::llama_server",
-                "restarting llama-server in {delay:?} (attempt {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})"
-            );
-            let _ = self.ready_tx.send(ReadyState::BackingOff {
-                attempt: consecutive_failures,
-            });
+    /// Sleep out the backoff for `attempt`; breaks if shutdown arrives first.
+    async fn back_off(&mut self, attempt: u32) -> ControlFlow<()> {
+        let delay = backoff_delay(attempt - 1);
+        warn!(
+            target: "assistd::llama_server",
+            "restarting llama-server in {delay:?} (attempt {attempt}/{MAX_CONSECUTIVE_FAILURES})"
+        );
+        let _ = self.ready_tx.send(ReadyState::BackingOff { attempt });
 
-            tokio::select! {
-                _ = tokio::time::sleep(delay) => {}
-                _ = self.shutdown_rx.changed() => {
-                    info!(target: "assistd::llama_server", "supervisor shutdown during backoff");
-                    return;
-                }
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => ControlFlow::Continue(()),
+            _ = self.shutdown_rx.changed() => {
+                info!(target: "assistd::llama_server", "supervisor shutdown during backoff");
+                ControlFlow::Break(())
             }
         }
     }
@@ -162,37 +121,18 @@ impl Supervisor {
             ready_timeout,
         )?;
 
-        enum Phase1 {
-            Ready,
-            ChildExited(ExitStatus),
-            ShuttingDown,
-            StartupError(LlamaServerError),
-        }
-
-        let phase1 = tokio::select! {
-            res = health.wait_ready(&mut self.shutdown_rx) => match res {
-                Ok(()) => Phase1::Ready,
-                Err(LlamaServerError::ShutdownDuringHealth) => Phase1::ShuttingDown,
-                Err(e) => Phase1::StartupError(e),
-            },
-            exit = child.wait() => match exit {
-                Ok(status) => Phase1::ChildExited(status),
-                Err(e) => Phase1::StartupError(LlamaServerError::Io(e)),
-            }
-        };
-
-        match phase1 {
-            Phase1::Ready => {}
-            Phase1::ChildExited(status) => {
+        match wait_for_startup(&mut child, &health, &mut self.shutdown_rx).await {
+            StartupOutcome::Ready => {}
+            StartupOutcome::ChildExited(status) => {
                 *self.pid.lock() = None;
                 return Ok(CycleResult::FailedToStart { status });
             }
-            Phase1::ShuttingDown => {
+            StartupOutcome::ShuttingDown => {
                 child.shutdown(TERM_TIMEOUT).await?;
                 *self.pid.lock() = None;
                 return Ok(CycleResult::ShutdownRequested);
             }
-            Phase1::StartupError(e) => {
+            StartupOutcome::StartupError(e) => {
                 child.shutdown(TERM_TIMEOUT).await?;
                 *self.pid.lock() = None;
                 return Err(e);
@@ -219,4 +159,96 @@ impl Supervisor {
         *self.pid.lock() = None;
         result
     }
+}
+
+async fn wait_for_startup(
+    child: &mut ChildProcess,
+    health: &HealthChecker,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> StartupOutcome {
+    tokio::select! {
+        res = health.wait_ready(shutdown_rx) => match res {
+            Ok(()) => StartupOutcome::Ready,
+            Err(LlamaServerError::ShutdownDuringHealth) => StartupOutcome::ShuttingDown,
+            Err(e) => StartupOutcome::StartupError(e),
+        },
+        exit = child.wait() => match exit {
+            Ok(status) => StartupOutcome::ChildExited(status),
+            Err(e) => StartupOutcome::StartupError(LlamaServerError::Io(e)),
+        }
+    }
+}
+
+/// Push `now` onto the rolling restart window, evicting entries older than
+/// [`RESTART_WINDOW`].
+fn record_restart(history: &mut VecDeque<Instant>, now: Instant) {
+    while let Some(&oldest) = history.front() {
+        if now.duration_since(oldest) > RESTART_WINDOW {
+            history.pop_front();
+        } else {
+            break;
+        }
+    }
+    history.push_back(now);
+}
+
+/// Log a finished cycle and return the updated consecutive-failure count, or
+/// `None` when the cycle ended because shutdown was requested.
+fn failures_after(
+    outcome: Result<CycleResult, LlamaServerError>,
+    consecutive_failures: u32,
+) -> Option<u32> {
+    match outcome {
+        Ok(CycleResult::ShutdownRequested) => {
+            info!(target: "assistd::llama_server", "supervisor shutdown");
+            None
+        }
+        Ok(CycleResult::CrashedAfterReady { status, ran_for }) => {
+            warn!(
+                target: "assistd::llama_server",
+                "llama-server exited after {ran_for:?} post-ready: {status}; restarting"
+            );
+            if ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS) {
+                Some(0)
+            } else {
+                Some(consecutive_failures + 1)
+            }
+        }
+        Ok(CycleResult::FailedToStart { status }) => {
+            error!(
+                target: "assistd::llama_server",
+                "llama-server exited before reaching ready: {status}"
+            );
+            Some(consecutive_failures + 1)
+        }
+        Err(e) => {
+            error!(
+                target: "assistd::llama_server",
+                "llama-server startup failed: {e}"
+            );
+            Some(consecutive_failures + 1)
+        }
+    }
+}
+
+/// Whether either restart limit has tripped, logging which one did.
+fn restart_budget_exhausted(consecutive_failures: u32, restarts_in_window: usize) -> bool {
+    let window_tripped = restarts_in_window >= MAX_RESTARTS_PER_WINDOW;
+    if window_tripped {
+        error!(
+            target: "assistd::llama_server",
+            restarts = restarts_in_window,
+            window_secs = RESTART_WINDOW.as_secs(),
+            "llama-server hit {MAX_RESTARTS_PER_WINDOW} restarts in rolling window; entering degraded state"
+        );
+        return true;
+    }
+    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+        error!(
+            target: "assistd::llama_server",
+            "{MAX_CONSECUTIVE_FAILURES} consecutive failures; entering degraded state"
+        );
+        return true;
+    }
+    false
 }
