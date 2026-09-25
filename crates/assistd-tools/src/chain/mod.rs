@@ -1,5 +1,5 @@
-//! Parsed-command AST (`Chain`), the parser that builds it, the word
-//! expander, and the executor that walks it.
+//! The command-line AST ([`Chain`]) with its parser, word expander, and
+//! executor.
 
 pub mod executor;
 pub mod expand;
@@ -9,13 +9,8 @@ pub use executor::{PIPE_BUF_MAX, execute};
 pub use expand::expand_args;
 pub use parser::{ParseError, Redirection, parse_chain};
 
-/// One argv entry as written on the command line, plus whether any part
-/// of it was quoted.
-///
-/// Quoting rides along in the AST because it is what suppresses
-/// expansion: `cat *.toml` names every TOML file in the directory,
-/// while `grep '.*ERROR'` is a regex that must reach `grep` untouched.
-/// Without the flag the executor cannot tell the two apart.
+/// One argv entry as written, plus whether any part of it was quoted.
+/// Quoting suppresses tilde and glob expansion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Word {
     pub text: String,
@@ -40,11 +35,8 @@ impl Word {
     }
 }
 
-/// A parsed command line. The tree is right-skewed per precedence level:
-/// looser operators sit closer to the root so a post-order walk runs the
-/// leftmost stage first. Operator precedence (lowest → highest):
-/// `;` < `&&`/`||` < `|`. All operators are left-associative, matching
-/// bash.
+/// A parsed command line. Precedence, lowest first: `;` < `&&`/`||` < `|`;
+/// all operators are left-associative, as in bash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Chain {
     /// `argv[0]` is the command name; `argv[1..]` are its positional args.

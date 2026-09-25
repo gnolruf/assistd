@@ -3,19 +3,8 @@ use async_trait::async_trait;
 use crate::command::{Command, CommandInput, CommandOutput};
 use crate::commands::collect_input;
 
-/// `sort [-fnr] [FILE]...`: sort the lines of the named files, or of
-/// stdin when none are given.
-///
-/// Flags:
-/// - `-n` compare by leading integer instead of bytes
-/// - `-r` reverse the result
-/// - `-f` fold case, so `Beta` and `beta` sort together
-///
-/// Comparison is byte-wise, matching `LC_ALL=C sort`, so the ordering
-/// doesn't depend on the daemon's locale. Every emitted line is
-/// newline-terminated even when the input's last line was not, because
-/// reordering an unterminated line would otherwise glue it to its new
-/// neighbour.
+/// `sort [-fnr] [FILE]...`: sort the lines of the named files or stdin
+/// byte-wise (`LC_ALL=C`). Every emitted line is newline-terminated.
 pub struct SortCommand;
 
 #[derive(Default)]
@@ -23,39 +12,6 @@ struct Flags {
     numeric: bool,
     reverse: bool,
     fold_case: bool,
-}
-
-fn parse_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
-    let mut flags = Flags::default();
-    let mut files = Vec::new();
-    for arg in argv {
-        let Some(rest) = arg.strip_prefix('-').filter(|r| !r.is_empty()) else {
-            files.push(arg.clone());
-            continue;
-        };
-        for ch in rest.chars() {
-            match ch {
-                'n' => flags.numeric = true,
-                'r' => flags.reverse = true,
-                'f' => flags.fold_case = true,
-                other => return Err(format!("unknown flag '-{other}'")),
-            }
-        }
-    }
-    Ok((flags, files))
-}
-
-fn numeric_key(line: &[u8]) -> i64 {
-    let trimmed = line.trim_ascii_start();
-    let len = trimmed
-        .iter()
-        .enumerate()
-        .take_while(|(i, b)| b.is_ascii_digit() || (*i == 0 && **b == b'-'))
-        .count();
-    std::str::from_utf8(&trimmed[..len])
-        .ok()
-        .and_then(|digits| digits.parse().ok())
-        .unwrap_or(i64::MIN)
 }
 
 #[async_trait]
@@ -98,12 +54,12 @@ impl Command for SortCommand {
             }
         };
 
-        let stdin = match collect_input("sort", &files, input.stdin).await {
+        let text = match collect_input("sort", &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return CommandOutput::usage(self.help()),
             Err(failure) => return failure,
         };
-        let mut lines: Vec<&[u8]> = stdin.split(|b| *b == b'\n').collect();
+        let mut lines: Vec<&[u8]> = text.split(|b| *b == b'\n').collect();
         if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
@@ -118,13 +74,46 @@ impl Command for SortCommand {
             lines.reverse();
         }
 
-        let mut out = Vec::with_capacity(stdin.len());
+        let mut out = Vec::with_capacity(text.len());
         for line in lines {
             out.extend_from_slice(line);
             out.push(b'\n');
         }
         CommandOutput::ok(out)
     }
+}
+
+fn parse_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
+    let mut flags = Flags::default();
+    let mut files = Vec::new();
+    for arg in argv {
+        let Some(rest) = arg.strip_prefix('-').filter(|r| !r.is_empty()) else {
+            files.push(arg.clone());
+            continue;
+        };
+        for ch in rest.chars() {
+            match ch {
+                'n' => flags.numeric = true,
+                'r' => flags.reverse = true,
+                'f' => flags.fold_case = true,
+                other => return Err(format!("unknown flag '-{other}'")),
+            }
+        }
+    }
+    Ok((flags, files))
+}
+
+fn numeric_key(line: &[u8]) -> i64 {
+    let trimmed = line.trim_ascii_start();
+    let len = trimmed
+        .iter()
+        .enumerate()
+        .take_while(|(i, b)| b.is_ascii_digit() || (*i == 0 && **b == b'-'))
+        .count();
+    std::str::from_utf8(&trimmed[..len])
+        .ok()
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(i64::MIN)
 }
 
 #[cfg(test)]
@@ -145,12 +134,9 @@ mod tests {
         let cases: [(&[&str], &str, &str); 8] = [
             (&[], "pear\napple\nfig\n", "apple\nfig\npear\n"),
             (&["-r"], "apple\npear\nfig\n", "pear\nfig\napple\n"),
-            // Byte order would put "10" before "9".
             (&["-n"], "9\n10\n2\n", "2\n9\n10\n"),
             (&["-nr"], "3\n10\n7\n", "10\n7\n3\n"),
-            // `uniq -c` output orders by its leading count.
             (&["-nr"], "2\tbeta\n11\talpha\n", "11\talpha\n2\tbeta\n"),
-            // Byte order puts every capital before every lowercase letter.
             (&["-f"], "beta\nAlpha\ngamma\n", "Alpha\nbeta\ngamma\n"),
             (&[], "b\na", "a\nb\n"),
             (&[], "", ""),

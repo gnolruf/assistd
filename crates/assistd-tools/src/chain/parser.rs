@@ -1,11 +1,12 @@
-//! Command-line tokenizer and recursive-descent parser that produces a
-//! [`super::Chain`] AST.
+//! Tokenizer and recursive-descent parser producing a [`Chain`].
 
+use std::fmt;
 use std::iter::Peekable;
 use std::vec::IntoIter;
 
-use super::{Chain, Word};
 use thiserror::Error;
+
+use super::{Chain, Word};
 
 /// Error returned by [`parse_chain`] when the input cannot be parsed.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -31,10 +32,8 @@ pub enum ParseError {
     UnquotedAlternation,
 }
 
-/// Which redirection the line asked for. Kept apart from
-/// [`ParseError::Unsupported`] because the way out differs per shape:
-/// output goes through `write`, input through a pipe, and stderr is
-/// already part of every result.
+/// Which redirection the line asked for; each shape has a different
+/// alternative to suggest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Redirection {
     Output,
@@ -44,8 +43,8 @@ pub enum Redirection {
     Stderr,
 }
 
-impl std::fmt::Display for Redirection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Redirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Redirection::Output => "output redirection ('>')",
             Redirection::Append => "append redirection ('>>')",
@@ -107,7 +106,7 @@ pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
 fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
     let bytes = input.as_bytes();
     let mut i = 0;
-    let mut out = Vec::new();
+    let mut tokens = Vec::new();
 
     while i < bytes.len() {
         let c = bytes[i];
@@ -118,25 +117,18 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
         match c {
             b'|' => {
                 if bytes.get(i + 1) == Some(&b'|') {
-                    out.push(Token::Op(Op::Or));
+                    tokens.push(Token::Op(Op::Or));
                     i += 2;
+                } else if follows_unquoted_backslash(&tokens) {
+                    return Err(ParseError::UnquotedAlternation);
                 } else {
-                    // `a\|b` unquoted: the word keeps the backslash and
-                    // the pipe splits the line, so a BRE-style
-                    // alternation silently becomes two commands. Catch
-                    // it here rather than let the second half surface as
-                    // `unknown command`.
-                    if matches!(out.last(), Some(Token::Word(w)) if !w.quoted && w.text.ends_with('\\'))
-                    {
-                        return Err(ParseError::UnquotedAlternation);
-                    }
-                    out.push(Token::Op(Op::Pipe));
+                    tokens.push(Token::Op(Op::Pipe));
                     i += 1;
                 }
             }
             b'&' => {
                 if bytes.get(i + 1) == Some(&b'&') {
-                    out.push(Token::Op(Op::And));
+                    tokens.push(Token::Op(Op::And));
                     i += 2;
                 } else if bytes.get(i + 1) == Some(&b'>') {
                     return Err(ParseError::Redirection(Redirection::Stderr));
@@ -147,30 +139,34 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 }
             }
             b';' => {
-                out.push(Token::Op(Op::Seq));
+                tokens.push(Token::Op(Op::Seq));
                 i += 1;
             }
             b'>' | b'<' => {
-                return Err(ParseError::Redirection(redirection_kind(&out, bytes, i)));
+                return Err(ParseError::Redirection(redirection_kind(&tokens, bytes, i)));
             }
             _ => {
                 let (word, next) = read_word(input, i)?;
-                out.push(Token::Word(word));
+                tokens.push(Token::Word(word));
                 i = next;
             }
         }
     }
 
-    Ok(out)
+    Ok(tokens)
 }
 
-/// Classify the redirection starting at `i`. A bare `2` (or `1`) token
-/// immediately before `>` is the file-descriptor prefix of a stderr
-/// redirect — the tokenizer has already pushed it as a word by the time
-/// the operator is seen, so the lookback happens here.
-fn redirection_kind(out: &[Token], bytes: &[u8], i: usize) -> Redirection {
+/// An unquoted `a\|b` is a BRE alternation that the pipe would silently
+/// split into two commands.
+fn follows_unquoted_backslash(tokens: &[Token]) -> bool {
+    matches!(tokens.last(), Some(Token::Word(w)) if !w.quoted && w.text.ends_with('\\'))
+}
+
+/// Classify the redirection starting at `i`. An unquoted `1` or `2` word
+/// just before `>` is a file-descriptor prefix, making it a stderr redirect.
+fn redirection_kind(tokens: &[Token], bytes: &[u8], i: usize) -> Redirection {
     let fd_prefixed = matches!(
-        out.last(),
+        tokens.last(),
         Some(Token::Word(w)) if !w.quoted && matches!(w.text.as_str(), "1" | "2")
     );
     match bytes[i] {
@@ -182,79 +178,78 @@ fn redirection_kind(out: &[Token], bytes: &[u8], i: usize) -> Redirection {
     }
 }
 
-/// Read a single shell-style word starting at byte offset `start`.
-/// Returns the assembled word (with quotes stripped / escapes resolved)
-/// and the byte offset just past the word's end.
-///
-/// Rules:
-/// - Single quotes `'…'`: everything up to the next `'` is literal. No
-///   escapes (bash-compatible).
-/// - Double quotes `"…"`: everything up to the next unescaped `"` is
-///   literal. `\` escapes only `"` and `\`; before anything else it is
-///   itself literal, as in bash.
-/// - Unquoted chars: stop on whitespace or the start of an operator
-///   (`|`, `&`, `;`). Backslash outside quotes is treated as literal.
+/// Read one word starting at `start`, returning it with quotes resolved and
+/// the offset just past it. Single quotes are fully literal; in double quotes
+/// `\` escapes only `"` and `\`; unquoted, `\` is literal.
 fn read_word(input: &str, start: usize) -> Result<(Word, usize), ParseError> {
     let bytes = input.as_bytes();
-    let mut buf = String::new();
+    let mut text = String::new();
     let mut quoted = false;
     let mut i = start;
 
     while i < bytes.len() {
-        let c = bytes[i];
-        match c {
+        match bytes[i] {
             b'\'' => {
                 quoted = true;
-                i += 1;
-                let begin = i;
-                while i < bytes.len() && bytes[i] != b'\'' {
-                    i += 1;
-                }
-                if i >= bytes.len() {
-                    return Err(ParseError::UnterminatedQuote);
-                }
-                buf.push_str(&input[begin..i]);
-                i += 1;
+                i = read_single_quoted(input, i + 1, &mut text)?;
             }
             b'"' => {
                 quoted = true;
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    // A backslash only guards a quote or another
-                    // backslash. Consuming it before anything else
-                    // would silently turn the regex "\d+" into "d+".
-                    if bytes[i] == b'\\' && matches!(bytes.get(i + 1), Some(b'"' | b'\\')) {
-                        buf.push(bytes[i + 1] as char);
-                        i += 2;
-                        continue;
-                    }
-                    let ch = input[i..].chars().next().unwrap();
-                    buf.push(ch);
-                    i += ch.len_utf8();
-                }
-                if i >= bytes.len() {
-                    return Err(ParseError::UnterminatedQuote);
-                }
-                i += 1;
+                i = read_double_quoted(input, i + 1, &mut text)?;
             }
-            _ if c.is_ascii_whitespace() => break,
+            c if c.is_ascii_whitespace() => break,
             b'|' | b'&' | b';' | b'>' | b'<' => break,
-            _ => {
-                let ch = input[i..].chars().next().unwrap();
-                buf.push(ch);
-                i += ch.len_utf8();
-            }
+            _ => i = push_char(input, i, &mut text),
         }
     }
 
-    Ok((Word { text: buf, quoted }, i))
+    Ok((Word { text, quoted }, i))
 }
+
+/// Append the single-quoted body starting at `begin`; returns the offset
+/// past the closing quote.
+fn read_single_quoted(input: &str, begin: usize, text: &mut String) -> Result<usize, ParseError> {
+    let bytes = input.as_bytes();
+    let mut i = begin;
+    while i < bytes.len() && bytes[i] != b'\'' {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return Err(ParseError::UnterminatedQuote);
+    }
+    text.push_str(&input[begin..i]);
+    Ok(i + 1)
+}
+
+/// Append the double-quoted body starting at `i`; returns the offset past
+/// the closing quote.
+fn read_double_quoted(input: &str, mut i: usize, text: &mut String) -> Result<usize, ParseError> {
+    let bytes = input.as_bytes();
+    while i < bytes.len() && bytes[i] != b'"' {
+        if bytes[i] == b'\\' && matches!(bytes.get(i + 1), Some(b'"' | b'\\')) {
+            text.push(bytes[i + 1] as char);
+            i += 2;
+        } else {
+            i = push_char(input, i, text);
+        }
+    }
+    if i >= bytes.len() {
+        return Err(ParseError::UnterminatedQuote);
+    }
+    Ok(i + 1)
+}
+
+fn push_char(input: &str, i: usize, text: &mut String) -> usize {
+    let ch = input[i..].chars().next().unwrap();
+    text.push(ch);
+    i + ch.len_utf8()
+}
+
+type ParseFn = fn(&mut Parser) -> Result<Chain, ParseError>;
 
 struct Parser {
     tokens: Peekable<IntoIter<Token>>,
 }
-
-type ParseFn = fn(&mut Parser) -> Result<Chain, ParseError>;
 
 impl Parser {
     fn peek_op(&mut self) -> Option<Op> {
@@ -385,19 +380,29 @@ mod tests {
                 vec![bare("echo"), quoted("he said \"hi\"")],
             ),
             (r#"echo "a\\b""#, vec![bare("echo"), quoted(r"a\b")]),
-            // A backslash before anything but `"` or `\` is literal, so
-            // the regex the model writes reaches grep intact.
-            (r#"grep "\d+\s""#, vec![bare("grep"), quoted(r"\d+\s")]),
             (
                 "grep '.*ERROR' log.txt",
                 vec![bare("grep"), quoted(".*ERROR"), bare("log.txt")],
             ),
-            // An unquoted prefix glued to a quoted tail is treated as
-            // quoted as a whole: the safe reading for expansion.
-            ("echo pre\"fix\"", vec![bare("echo"), quoted("prefix")]),
         ] {
             assert_eq!(tokenize(line), Ok(expected), "{line:?}");
         }
+    }
+
+    #[test]
+    fn a_backslash_before_other_chars_in_double_quotes_stays_literal() {
+        assert_eq!(
+            tokenize(r#"grep "\d+\s""#),
+            Ok(vec![bare("grep"), quoted(r"\d+\s")])
+        );
+    }
+
+    #[test]
+    fn a_partly_quoted_word_counts_as_quoted() {
+        assert_eq!(
+            tokenize("echo pre\"fix\""),
+            Ok(vec![bare("echo"), quoted("prefix")])
+        );
     }
 
     #[test]

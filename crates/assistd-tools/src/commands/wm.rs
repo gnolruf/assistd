@@ -1,14 +1,12 @@
 //! `wm <subcommand> [args]`: drive the active [`WindowManager`] from the
-//! LLM's `run` tool. When no compositor is connected every subcommand
-//! fails with one uniform error.
+//! LLM's `run` tool.
 
+use std::fmt::{Display, Write};
+use std::io;
 use std::sync::Arc;
 
-use std::fmt::Display;
-
+use assistd_wm::{Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 use async_trait::async_trait;
-
-use assistd_wm::{Layout, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::{DetachedReaders, SPAWN_FAILED_EXIT, spawn_detached};
@@ -16,37 +14,47 @@ use crate::policy::{
     BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy, check_argv,
 };
 
-/// The `[error] wm: <op> failed: …` line for a backend error, with the
-/// recovery hint chosen by the error variant.
-fn wm_error(op: impl Display, err: &WmError) -> CommandOutput {
-    let (label, hint) = hint_for(err);
-    CommandOutput::failed(
-        1,
-        error_line(NAME, format_args!("{op} failed: {err}"), label, hint).into_bytes(),
-    )
-}
-
-fn hint_for(err: &WmError) -> (Hint, &'static str) {
-    match err {
-        WmError::Disconnected => (
-            Hint::Check,
-            "[compositor] in config.toml and that i3/sway/hyprland is running",
-        ),
-        WmError::Rejected(_) => (Hint::Try, "wm list to verify the window/workspace exists"),
-        WmError::Timeout(_) => (
-            Hint::Note,
-            "compositor unresponsive; retry once before assuming it crashed",
-        ),
-        WmError::Unsupported(_) => (
-            Hint::Note,
-            "the active backend may not support this operation (i3 does not list outputs)",
-        ),
-        WmError::Ipc { .. } => (Hint::Check, "compositor connection (see daemon logs)"),
-    }
-}
-
 const NAME: &str = "wm";
 const SUMMARY: &str = "manage windows and workspaces (focus, move, open, list, workspaces, etc.)";
+
+const FOCUS_HELP: &str = "usage: wm focus <id>\n\
+    \n\
+    Focus the window with the given decimal con_id. Run `wm list` \
+    first to find ids; the first column is the id, the second is \
+    the application label.\n";
+
+const MOVE_HELP: &str = "usage: wm move <id> <workspace>\n\
+    \n\
+    Move the window with the given con_id to the named workspace. \
+    Numeric workspace identifiers (e.g. `3`) match by number; \
+    non-numeric identifiers match by exact name.\n";
+
+const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
+    \n\
+    Launch an application. <app> is resolved through PATH; remaining \
+    arguments are forwarded to the spawned process.\n\
+    \n\
+    Runs under the same policy as `bash`: denylist, allowlist and \
+    destructive-pattern confirmation, and the bubblewrap sandbox (widened only to reach the \
+    compositor and D-Bus session sockets).\n\
+    \n\
+    The application is briefly watched, then left running. If it exits \
+    during that window its exit code and output are returned, which is \
+    how a failed launch surfaces; if it is still alive, exit 0 with no \
+    output means the launch succeeded. Stdin is not forwarded, and no \
+    timeout applies once it is running.\n";
+
+const RESIZE_HELP: &str = "usage: wm resize <id> <grow|shrink> <px>\n\
+    \n\
+    Resize the named window's width by the given pixel amount. \
+    Direction is one of `grow` or `shrink`; <px> is a non-negative \
+    integer count of pixels.\n";
+
+const LAYOUT_HELP: &str = "usage: wm layout <default|tabbed|stacking|splith|splitv>\n\
+    \n\
+    Set the layout of the currently focused container. `default` \
+    toggles between split, tabbed, and stacking based on the \
+    container's previous layout.\n";
 
 /// `wm <subcommand> [args]`: drive the active window manager from the LLM's `run` tool.
 pub struct WmCommand {
@@ -56,9 +64,8 @@ pub struct WmCommand {
 }
 
 impl WmCommand {
-    /// A `wm` command driving `wm`. `wm open` spawns model-chosen argv,
-    /// so `cfg`, `sandbox` and `gate` apply to it exactly as they do to
-    /// `bash`, rather than through a parallel policy that could drift.
+    /// A `wm` command driving `wm`; `wm open` runs under the same `cfg`,
+    /// `sandbox` and `gate` as `bash`.
     pub fn new(
         wm: Arc<dyn WindowManager>,
         cfg: Arc<BashPolicyCfg>,
@@ -71,17 +78,39 @@ impl WmCommand {
             launched: DetachedReaders::default(),
         }
     }
+
+    async fn open(&self, args: &[String]) -> CommandOutput {
+        let Some((app, extra)) = args.split_first() else {
+            return CommandOutput::usage(OPEN_HELP.to_string());
+        };
+        let argv = args.join(" ");
+        let confirmation = check_argv(args, &self.policy.cfg.rules());
+        if let Err(denied) = self
+            .policy
+            .authorize(NAME, "open", &argv, confirmation)
+            .await
+        {
+            return denied;
+        }
+
+        let cmd = self
+            .policy
+            .sandbox
+            .command(SandboxAccess::Session, app, extra);
+        spawn_detached(NAME, cmd, &self.launched)
+            .await
+            .unwrap_or_else(|e| spawn_failed(app, &e))
+    }
 }
 
 #[cfg(test)]
 impl WmCommand {
     pub(crate) fn for_test(wm: Arc<dyn WindowManager>) -> Self {
-        use crate::policy::AlwaysAllowGate;
         Self::new(
             wm,
             Arc::new(BashPolicyCfg::default()),
             SandboxInfo::none(),
-            Arc::new(AlwaysAllowGate),
+            Arc::new(crate::policy::AlwaysAllowGate),
         )
     }
 }
@@ -166,19 +195,13 @@ impl Command for WmCommand {
     }
 }
 
-const FOCUS_HELP: &str = "usage: wm focus <id>\n\
-    \n\
-    Focus the window with the given decimal con_id. Run `wm list` \
-    first to find ids; the first column is the id, the second is \
-    the application label.\n";
-
 async fn focus(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
     if args.is_empty() {
         return CommandOutput::usage(FOCUS_HELP.to_string());
     }
     let id_arg = &args[0];
     let id: WindowId = match id_arg.parse() {
-        Ok(i) => i,
+        Ok(id) => id,
         Err(_) => return parse_id_error("focus", id_arg),
     };
     match wm.focus(&id).await {
@@ -195,12 +218,6 @@ fn parse_id_error(op: &'static str, raw: &str) -> CommandOutput {
     )
 }
 
-const MOVE_HELP: &str = "usage: wm move <id> <workspace>\n\
-    \n\
-    Move the window with the given con_id to the named workspace. \
-    Numeric workspace identifiers (e.g. `3`) match by number; \
-    non-numeric identifiers match by exact name.\n";
-
 async fn move_window(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
     if args.len() < 2 {
         return CommandOutput::usage(MOVE_HELP.to_string());
@@ -208,7 +225,7 @@ async fn move_window(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
     let id_arg = &args[0];
     let workspace_arg = &args[1];
     let id: WindowId = match id_arg.parse() {
-        Ok(i) => i,
+        Ok(id) => id,
         Err(_) => return parse_id_error("move", id_arg),
     };
     let workspace: WorkspaceId = workspace_arg
@@ -220,68 +237,30 @@ async fn move_window(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
     }
 }
 
-const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
-    \n\
-    Launch an application. <app> is resolved through PATH; remaining \
-    arguments are forwarded to the spawned process.\n\
-    \n\
-    Runs under the same policy as `bash`: denylist, allowlist and \
-    destructive-pattern confirmation, and the bubblewrap sandbox (widened only to reach the \
-    compositor and D-Bus session sockets).\n\
-    \n\
-    The application is briefly watched, then left running. If it exits \
-    during that window its exit code and output are returned, which is \
-    how a failed launch surfaces; if it is still alive, exit 0 with no \
-    output means the launch succeeded. Stdin is not forwarded, and no \
-    timeout applies once it is running.\n";
-
-impl WmCommand {
-    async fn open(&self, args: &[String]) -> CommandOutput {
-        let Some((app, extra)) = args.split_first() else {
-            return CommandOutput::usage(OPEN_HELP.to_string());
-        };
-        let argv = args.join(" ");
-        let confirmation = check_argv(args, &self.policy.cfg.rules());
-        if let Err(denied) = self
-            .policy
-            .authorize(NAME, "open", &argv, confirmation)
-            .await
-        {
-            return denied;
-        }
-
-        let cmd = self
-            .policy
-            .sandbox
-            .command(SandboxAccess::Session, app, extra);
-        spawn_detached(NAME, cmd, &self.launched)
-            .await
-            .unwrap_or_else(|e| {
-                let line = if e.kind() == std::io::ErrorKind::NotFound {
-                    error_line(
-                        NAME,
-                        format_args!("open: binary '{app}' not found on PATH"),
-                        Hint::Check,
-                        format_args!("which {app}"),
-                    )
-                } else {
-                    error_line(
-                        NAME,
-                        format_args!("open '{app}' failed: {e}"),
-                        Hint::Try,
-                        "a different binary or absolute path",
-                    )
-                };
-                CommandOutput::failed(SPAWN_FAILED_EXIT, line.into_bytes())
-            })
-    }
+fn spawn_failed(app: &str, err: &io::Error) -> CommandOutput {
+    let line = if err.kind() == io::ErrorKind::NotFound {
+        error_line(
+            NAME,
+            format_args!("open: binary '{app}' not found on PATH"),
+            Hint::Check,
+            format_args!("which {app}"),
+        )
+    } else {
+        error_line(
+            NAME,
+            format_args!("open '{app}' failed: {err}"),
+            Hint::Try,
+            "a different binary or absolute path",
+        )
+    };
+    CommandOutput::failed(SPAWN_FAILED_EXIT, line.into_bytes())
 }
 
 async fn active(wm: &dyn WindowManager) -> CommandOutput {
     match wm.focused_context().await {
         Ok(Some(ctx)) => {
             let id_str = match ctx.id {
-                Some(i) => i.to_string(),
+                Some(id) => id.to_string(),
                 None => "-".into(),
             };
             let app = ctx.class.as_deref().unwrap_or("-");
@@ -292,23 +271,17 @@ async fn active(wm: &dyn WindowManager) -> CommandOutput {
     }
 }
 
-const RESIZE_HELP: &str = "usage: wm resize <id> <grow|shrink> <px>\n\
-    \n\
-    Resize the named window's width by the given pixel amount. \
-    Direction is one of `grow` or `shrink`; <px> is a non-negative \
-    integer count of pixels.\n";
-
 async fn resize(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
     if args.len() < 3 {
         return CommandOutput::usage(RESIZE_HELP.to_string());
     }
     let id_arg = &args[0];
     let id: WindowId = match id_arg.parse() {
-        Ok(i) => i,
+        Ok(id) => id,
         Err(_) => return parse_id_error("resize", id_arg),
     };
     let direction: ResizeDir = match args[1].parse() {
-        Ok(d) => d,
+        Ok(direction) => direction,
         Err(_) => {
             return CommandOutput::usage_error(
                 NAME,
@@ -321,7 +294,7 @@ async fn resize(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
         }
     };
     let amount: u32 = match args[2].parse() {
-        Ok(n) => n,
+        Ok(amount) => amount,
         Err(_) => {
             return CommandOutput::usage_error(
                 NAME,
@@ -340,7 +313,6 @@ async fn resize(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
 }
 
 async fn list(wm: &dyn WindowManager) -> CommandOutput {
-    use std::fmt::Write;
     match wm.list_windows().await {
         Ok(mut windows) => {
             windows.sort_by(|a, b| {
@@ -357,14 +329,14 @@ async fn list(wm: &dyn WindowManager) -> CommandOutput {
                     .then_with(|| a.id.cmp(&b.id))
             });
             let mut out = String::new();
-            for w in windows {
-                let _ = write!(&mut out, "{}", w.id);
+            for window in windows {
+                let _ = write!(&mut out, "{}", window.id);
                 out.push('\t');
-                out.push_str(w.app.as_deref().unwrap_or("-"));
+                out.push_str(window.app.as_deref().unwrap_or("-"));
                 out.push('\t');
-                out.push_str(w.workspace.as_deref().unwrap_or("-"));
+                out.push_str(window.workspace.as_deref().unwrap_or("-"));
                 out.push('\t');
-                out.push_str(w.title.as_deref().unwrap_or(""));
+                out.push_str(window.title.as_deref().unwrap_or(""));
                 out.push('\n');
             }
             CommandOutput::ok(out.into_bytes())
@@ -378,38 +350,44 @@ async fn outputs(wm: &dyn WindowManager) -> CommandOutput {
         Ok(mut outputs) => {
             outputs.sort_by(|a, b| a.name.cmp(&b.name));
             let mut out = String::new();
-            for o in outputs {
-                out.push_str(&o.name);
-                out.push('\t');
-                out.push(if o.active { '*' } else { '-' });
-                out.push('\t');
-                out.push(if o.primary { '*' } else { '-' });
-                out.push('\t');
-                match o.current_mode {
-                    Some((w, h, hz)) => {
-                        // Sway reports refresh in mHz.
-                        let hz_int = hz / 1000;
-                        let hz_frac = hz % 1000;
-                        if hz_frac == 0 {
-                            out.push_str(&format!("{w}x{h}@{hz_int}Hz"));
-                        } else {
-                            out.push_str(&format!("{w}x{h}@{hz_int}.{:03}Hz", hz_frac));
-                        }
-                    }
-                    None => out.push('-'),
-                }
-                out.push('\t');
-                match o.scale {
-                    Some(s) => out.push_str(&format!("{s}")),
-                    None => out.push('-'),
-                }
-                out.push('\t');
-                out.push_str(o.focused_workspace.as_deref().unwrap_or("-"));
-                out.push('\n');
+            for output in &outputs {
+                push_output_row(&mut out, output);
             }
             CommandOutput::ok(out.into_bytes())
         }
         Err(e) => wm_error("outputs", &e),
+    }
+}
+
+fn push_output_row(out: &mut String, output: &OutputInfo) {
+    out.push_str(&output.name);
+    out.push('\t');
+    out.push(if output.active { '*' } else { '-' });
+    out.push('\t');
+    out.push(if output.primary { '*' } else { '-' });
+    out.push('\t');
+    match output.current_mode {
+        Some((width, height, millihertz)) => out.push_str(&format_mode(width, height, millihertz)),
+        None => out.push('-'),
+    }
+    out.push('\t');
+    match output.scale {
+        Some(scale) => out.push_str(&format!("{scale}")),
+        None => out.push('-'),
+    }
+    out.push('\t');
+    out.push_str(output.focused_workspace.as_deref().unwrap_or("-"));
+    out.push('\n');
+}
+
+/// `WxH@RHz`, from a refresh rate in mHz as Sway reports it.
+fn format_mode(width: u32, height: u32, millihertz: u32) -> String {
+    let hz_int = millihertz / 1000;
+    let hz_frac = millihertz % 1000;
+    if hz_frac == 0 {
+        format!("{width}x{height}@{hz_int}Hz")
+    } else {
+        format!("{width}x{height}@{hz_int}.{:03}Hz", hz_frac)
     }
 }
 
@@ -418,14 +396,14 @@ async fn workspaces(wm: &dyn WindowManager) -> CommandOutput {
         Ok(mut workspaces) => {
             workspaces.sort_by_key(|w| w.num);
             let mut out = String::new();
-            for w in workspaces {
-                out.push_str(&w.num.to_string());
+            for workspace in workspaces {
+                out.push_str(&workspace.num.to_string());
                 out.push('\t');
-                out.push_str(&w.name);
+                out.push_str(&workspace.name);
                 out.push('\t');
-                out.push(if w.focused { '*' } else { '-' });
+                out.push(if workspace.focused { '*' } else { '-' });
                 out.push('\t');
-                out.push_str(&w.output);
+                out.push_str(&workspace.output);
                 out.push('\n');
             }
             CommandOutput::ok(out.into_bytes())
@@ -434,19 +412,13 @@ async fn workspaces(wm: &dyn WindowManager) -> CommandOutput {
     }
 }
 
-const LAYOUT_HELP: &str = "usage: wm layout <default|tabbed|stacking|splith|splitv>\n\
-    \n\
-    Set the layout of the currently focused container. `default` \
-    toggles between split, tabbed, and stacking based on the \
-    container's previous layout.\n";
-
 async fn layout(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
     if args.is_empty() {
         return CommandOutput::usage(LAYOUT_HELP.to_string());
     }
     let raw = args[0].as_str();
     let layout: Layout = match raw.parse() {
-        Ok(l) => l,
+        Ok(layout) => layout,
         Err(_) => {
             return CommandOutput::usage_error(
                 NAME,
@@ -458,6 +430,35 @@ async fn layout(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
     match wm.set_layout(layout).await {
         Ok(()) => CommandOutput::ok(Vec::new()),
         Err(e) => wm_error(format_args!("layout '{layout}'"), &e),
+    }
+}
+
+/// The `[error] wm: <op> failed: …` line for a backend error, with the
+/// recovery hint chosen by the error variant.
+fn wm_error(op: impl Display, err: &WmError) -> CommandOutput {
+    let (label, hint) = hint_for(err);
+    CommandOutput::failed(
+        1,
+        error_line(NAME, format_args!("{op} failed: {err}"), label, hint).into_bytes(),
+    )
+}
+
+fn hint_for(err: &WmError) -> (Hint, &'static str) {
+    match err {
+        WmError::Disconnected => (
+            Hint::Check,
+            "[compositor] in config.toml and that i3/sway/hyprland is running",
+        ),
+        WmError::Rejected(_) => (Hint::Try, "wm list to verify the window/workspace exists"),
+        WmError::Timeout(_) => (
+            Hint::Note,
+            "compositor unresponsive; retry once before assuming it crashed",
+        ),
+        WmError::Unsupported(_) => (
+            Hint::Note,
+            "the active backend may not support this operation (i3 does not list outputs)",
+        ),
+        WmError::Ipc { .. } => (Hint::Check, "compositor connection (see daemon logs)"),
     }
 }
 

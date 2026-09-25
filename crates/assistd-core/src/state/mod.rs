@@ -1,4 +1,14 @@
-use crate::{Config, PresenceError, PresenceManager};
+//! `AppState` and the request dispatcher; each submodule adds the
+//! handlers for one family of `Request` variants.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::task::JoinError;
+use tracing::warn;
+
 use assistd_embed::EmbedError;
 use assistd_ipc::{Event, Request, Role};
 use assistd_llm::{LlmBackend, LlmError};
@@ -7,11 +17,8 @@ use assistd_tools::ToolRegistry;
 use assistd_voice::{
     ContinuousListener, ListenError, VoiceInput, VoiceInputError, VoiceOutputController,
 };
-use std::sync::Arc;
-use std::time::Duration;
-use thiserror::Error;
-use tokio::sync::mpsc;
-use tokio::task::JoinError;
+
+use crate::{Config, PresenceError, PresenceManager};
 
 pub(crate) mod branches;
 pub(crate) mod capabilities;
@@ -64,19 +71,6 @@ pub enum DispatchError {
     Listen(#[from] ListenError),
 }
 
-async fn send_error(tx: &mpsc::Sender<Event>, id: String, message: String) {
-    let _ = tx.send(Event::Error { id, message }).await;
-}
-
-fn wire_role(role: PersistedRole) -> Role {
-    match role {
-        PersistedRole::System => Role::System,
-        PersistedRole::User => Role::User,
-        PersistedRole::Assistant => Role::Assistant,
-        PersistedRole::Tool => Role::Tool,
-    }
-}
-
 /// Shared, long-lived daemon state handed to every request handler.
 pub struct AppState {
     pub config: Config,
@@ -108,14 +102,13 @@ impl AppState {
     }
 
     /// Route one request to its handler, streaming events back on `tx`.
-    /// No events are sent after this returns; the caller surfaces `Err`
-    /// as an [`Event::Error`] if the handler did not already.
+    /// No events are sent after this returns. Every request except
+    /// `Subscribe` is bounded by the dispatch envelope timeout.
     pub async fn dispatch(
         self: Arc<Self>,
         req: Request,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
-        // Subscribe lives for the client's lifetime; no envelope cap.
         if matches!(req, Request::Subscribe { .. }) {
             return self.dispatch_inner(req, tx).await;
         }
@@ -127,7 +120,7 @@ impl AppState {
         match tokio::time::timeout(envelope, inner).await {
             Ok(result) => result,
             Err(_) => {
-                tracing::warn!(
+                warn!(
                     target: "assistd::state",
                     id = %req_id,
                     kind = req_kind,
@@ -219,6 +212,19 @@ impl AppState {
             }
         }
         Ok(())
+    }
+}
+
+async fn send_error(tx: &mpsc::Sender<Event>, id: String, message: String) {
+    let _ = tx.send(Event::Error { id, message }).await;
+}
+
+fn wire_role(role: PersistedRole) -> Role {
+    match role {
+        PersistedRole::System => Role::System,
+        PersistedRole::User => Role::User,
+        PersistedRole::Assistant => Role::Assistant,
+        PersistedRole::Tool => Role::Tool,
     }
 }
 

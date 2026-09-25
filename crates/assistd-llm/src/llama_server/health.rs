@@ -1,7 +1,9 @@
-use super::error::LlamaServerError;
 use std::time::{Duration, Instant};
+
 use tokio::sync::watch;
 use tracing::debug;
+
+use super::error::LlamaServerError;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);

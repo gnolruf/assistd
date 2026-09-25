@@ -4,33 +4,34 @@
 #![cfg(feature = "test-support")]
 
 use std::collections::VecDeque;
+use std::io;
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_llm::{
     ChatClientError, LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome, Thinking,
-    ToolCall,
+    ToolCall, ToolResultPayload,
 };
-use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
 
-/// Scripted behavior for a single incoming request, keyed by the `stream`
-/// field of the request body.
+const MAX_REQUEST_HEADER_BYTES: usize = 128 * 1024;
+
+/// Scripted replies for the fake server, chosen by the request's `stream`
+/// field. Each request pops the front reply; the last one is reused.
 #[derive(Clone)]
 struct Script {
-    /// Responses returned to streaming (`stream: true`) requests, in order.
-    /// Each request pops the front entry, except the last, which is reused.
     stream_responses: Arc<Mutex<VecDeque<StreamResponse>>>,
-    /// Responses returned to non-streaming (summarize, `stream: false`) calls.
     summary_responses: Arc<Mutex<VecDeque<SummaryResponse>>>,
-    /// Request bodies the fake server observed.
     captured: Arc<Mutex<Vec<CapturedRequest>>>,
 }
 
@@ -43,21 +44,16 @@ struct CapturedRequest {
 
 #[derive(Clone)]
 enum StreamResponse {
-    /// Serve a 200 OK chunked SSE stream of these deltas, then `[DONE]`.
+    /// The deltas, then `[DONE]`.
     Deltas(Vec<String>),
-    /// Serve a 200 OK chunked stream of these exact `data: ...\n\n` frames.
+    /// These exact `data: ...\n\n` frames.
     RawFrames(Vec<String>),
-    /// Serve a 200 OK chunked stream of the deltas, then drop the connection
-    /// before emitting `[DONE]`.
+    /// The deltas, then close without `[DONE]`.
     DropAfterDeltas(Vec<String>),
-    /// Serve a 200 OK chunked stream of the deltas, then go quiet: hold
-    /// the socket open without writing further bytes until the test drops
-    /// the server.
+    /// The deltas, then silence past any client-side inactivity timeout.
     StallAfterDeltas(Vec<String>),
-    /// Serve a 200 OK chunked SSE stream of the deltas, sleeping for the
-    /// given gap before each one, then `[DONE]`.
+    /// The deltas with the given gap before each one, then `[DONE]`.
     PacedDeltas(Vec<String>, Duration),
-    /// Respond with a non-200 status and the given body.
     HttpError(u16, String),
 }
 
@@ -76,12 +72,12 @@ impl Script {
         }
     }
 
-    async fn push_stream(&self, r: StreamResponse) {
-        self.stream_responses.lock().await.push_back(r);
+    async fn push_stream(&self, response: StreamResponse) {
+        self.stream_responses.lock().await.push_back(response);
     }
 
-    async fn push_summary(&self, r: SummaryResponse) {
-        self.summary_responses.lock().await.push_back(r);
+    async fn push_summary(&self, response: SummaryResponse) {
+        self.summary_responses.lock().await.push_back(response);
     }
 
     async fn captured(&self) -> Vec<CapturedRequest> {
@@ -89,20 +85,20 @@ impl Script {
     }
 
     async fn next_stream(&self) -> Option<StreamResponse> {
-        let mut q = self.stream_responses.lock().await;
-        if q.len() > 1 {
-            q.pop_front()
+        let mut queue = self.stream_responses.lock().await;
+        if queue.len() > 1 {
+            queue.pop_front()
         } else {
-            q.front().cloned()
+            queue.front().cloned()
         }
     }
 
     async fn next_summary(&self) -> Option<SummaryResponse> {
-        let mut q = self.summary_responses.lock().await;
-        if q.len() > 1 {
-            q.pop_front()
+        let mut queue = self.summary_responses.lock().await;
+        if queue.len() > 1 {
+            queue.pop_front()
         } else {
-            q.front().cloned()
+            queue.front().cloned()
         }
     }
 }
@@ -110,41 +106,71 @@ impl Script {
 async fn spawn_fake(script: Script) -> (u16, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let handle = tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         loop {
             let (sock, _) = match listener.accept().await {
-                Ok(x) => x,
+                Ok(accepted) => accepted,
                 Err(_) => return,
             };
-            let s = script.clone();
+            let script = script.clone();
             tokio::spawn(async move {
-                let _ = handle_connection(sock, s).await;
+                let _ = serve_connection(sock, script).await;
             });
         }
     });
-    (port, handle)
+    (port, server)
 }
 
-async fn handle_connection(mut sock: tokio::net::TcpStream, script: Script) -> std::io::Result<()> {
+async fn serve_connection(mut sock: TcpStream, script: Script) -> io::Result<()> {
+    let Some((path, body_json)) = read_request(&mut sock).await? else {
+        return Ok(());
+    };
+    let is_stream = body_json
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    script.captured.lock().await.push(CapturedRequest {
+        path,
+        body: body_json,
+        stream: is_stream,
+    });
+
+    if is_stream {
+        let response = script.next_stream().await.unwrap_or_else(|| {
+            StreamResponse::HttpError(500, "no scripted stream response".into())
+        });
+        write_stream_response(&mut sock, response).await?;
+    } else {
+        let response = script.next_summary().await.unwrap_or_else(|| {
+            SummaryResponse::HttpError(500, "no scripted summary response".into())
+        });
+        write_summary_response(&mut sock, response).await?;
+    }
+    Ok(())
+}
+
+/// Read one request's path and JSON body, or `None` if the client hung up
+/// or sent oversized headers.
+async fn read_request(sock: &mut TcpStream) -> io::Result<Option<(String, Value)>> {
     let mut buf = Vec::with_capacity(4096);
     let mut header_end = None;
     while header_end.is_none() {
-        let mut tmp = [0u8; 2048];
-        let n = sock.read(&mut tmp).await?;
+        let mut read_buf = [0u8; 2048];
+        let n = sock.read(&mut read_buf).await?;
         if n == 0 {
-            return Ok(());
+            return Ok(None);
         }
-        buf.extend_from_slice(&tmp[..n]);
+        buf.extend_from_slice(&read_buf[..n]);
         if let Some(pos) = find_double_crlf(&buf) {
             header_end = Some(pos);
         }
-        if buf.len() > 128 * 1024 {
-            return Ok(());
+        if buf.len() > MAX_REQUEST_HEADER_BYTES {
+            return Ok(None);
         }
     }
     let header_end = header_end.unwrap();
-    let headers_bytes = &buf[..header_end];
-    let headers_str = std::str::from_utf8(headers_bytes).unwrap_or("");
+    let headers_str = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
 
     let mut lines = headers_str.split("\r\n");
     let request_line = lines.next().unwrap_or("");
@@ -165,97 +191,53 @@ async fn handle_connection(mut sock: tokio::net::TcpStream, script: Script) -> s
 
     let body_start = header_end + 4;
     while buf.len() < body_start + content_length {
-        let mut tmp = [0u8; 2048];
-        let n = sock.read(&mut tmp).await?;
+        let mut read_buf = [0u8; 2048];
+        let n = sock.read(&mut read_buf).await?;
         if n == 0 {
             break;
         }
-        buf.extend_from_slice(&tmp[..n]);
+        buf.extend_from_slice(&read_buf[..n]);
     }
     let body_bytes = &buf[body_start..body_start + content_length.min(buf.len() - body_start)];
-    let body_json: Value = serde_json::from_slice(body_bytes).unwrap_or(Value::Null);
-    let is_stream = body_json
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    script.captured.lock().await.push(CapturedRequest {
-        path: path.clone(),
-        body: body_json,
-        stream: is_stream,
-    });
-
-    if is_stream {
-        let response = script.next_stream().await.unwrap_or_else(|| {
-            StreamResponse::HttpError(500, "no scripted stream response".into())
-        });
-        handle_stream_response(&mut sock, response).await?;
-    } else {
-        let response = script.next_summary().await.unwrap_or_else(|| {
-            SummaryResponse::HttpError(500, "no scripted summary response".into())
-        });
-        handle_summary_response(&mut sock, response).await?;
-    }
-    Ok(())
+    let body_json = serde_json::from_slice(body_bytes).unwrap_or(Value::Null);
+    Ok(Some((path, body_json)))
 }
 
-async fn handle_stream_response(
-    sock: &mut tokio::net::TcpStream,
-    resp: StreamResponse,
-) -> std::io::Result<()> {
-    match resp {
+async fn write_stream_response(sock: &mut TcpStream, response: StreamResponse) -> io::Result<()> {
+    match response {
         StreamResponse::Deltas(deltas) => {
             write_sse_headers(sock).await?;
-            for d in deltas {
-                let frame = format!(
-                    "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
-                    serde_json::to_string(&d).unwrap()
-                );
-                write_chunk(sock, frame.as_bytes()).await?;
+            for text in deltas {
+                write_delta(sock, &text).await?;
             }
             write_chunk(sock, b"data: [DONE]\n\n").await?;
             write_final_chunk(sock).await?;
         }
         StreamResponse::RawFrames(frames) => {
             write_sse_headers(sock).await?;
-            for f in frames {
-                write_chunk(sock, f.as_bytes()).await?;
+            for frame in frames {
+                write_chunk(sock, frame.as_bytes()).await?;
             }
             write_final_chunk(sock).await?;
         }
         StreamResponse::DropAfterDeltas(deltas) => {
             write_sse_headers(sock).await?;
-            for d in deltas {
-                let frame = format!(
-                    "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
-                    serde_json::to_string(&d).unwrap()
-                );
-                write_chunk(sock, frame.as_bytes()).await?;
+            for text in deltas {
+                write_delta(sock, &text).await?;
             }
-            // Deliberately do not write [DONE] or a final chunk; just close.
         }
         StreamResponse::StallAfterDeltas(deltas) => {
             write_sse_headers(sock).await?;
-            for d in deltas {
-                let frame = format!(
-                    "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
-                    serde_json::to_string(&d).unwrap()
-                );
-                write_chunk(sock, frame.as_bytes()).await?;
+            for text in deltas {
+                write_delta(sock, &text).await?;
             }
-            // Stay silent far longer than any client-side timeout, so the
-            // per-chunk inactivity timeout fires first.
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
         StreamResponse::PacedDeltas(deltas, gap) => {
             write_sse_headers(sock).await?;
-            for d in deltas {
+            for text in deltas {
                 tokio::time::sleep(gap).await;
-                let frame = format!(
-                    "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
-                    serde_json::to_string(&d).unwrap()
-                );
-                write_chunk(sock, frame.as_bytes()).await?;
+                write_delta(sock, &text).await?;
             }
             write_chunk(sock, b"data: [DONE]\n\n").await?;
             write_final_chunk(sock).await?;
@@ -268,11 +250,8 @@ async fn handle_stream_response(
     Ok(())
 }
 
-async fn handle_summary_response(
-    sock: &mut tokio::net::TcpStream,
-    resp: SummaryResponse,
-) -> std::io::Result<()> {
-    match resp {
+async fn write_summary_response(sock: &mut TcpStream, response: SummaryResponse) -> io::Result<()> {
+    match response {
         SummaryResponse::Ok(text) => {
             let body = format!(
                 "{{\"choices\":[{{\"message\":{{\"role\":\"assistant\",\"content\":{}}}}}]}}",
@@ -293,12 +272,20 @@ async fn handle_summary_response(
     Ok(())
 }
 
-async fn write_sse_headers(sock: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+async fn write_sse_headers(sock: &mut TcpStream) -> io::Result<()> {
     let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
     sock.write_all(headers).await
 }
 
-async fn write_chunk(sock: &mut tokio::net::TcpStream, payload: &[u8]) -> std::io::Result<()> {
+async fn write_delta(sock: &mut TcpStream, text: &str) -> io::Result<()> {
+    let frame = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
+        serde_json::to_string(text).unwrap()
+    );
+    write_chunk(sock, frame.as_bytes()).await
+}
+
+async fn write_chunk(sock: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
     let header = format!("{:x}\r\n", payload.len());
     sock.write_all(header.as_bytes()).await?;
     sock.write_all(payload).await?;
@@ -306,15 +293,11 @@ async fn write_chunk(sock: &mut tokio::net::TcpStream, payload: &[u8]) -> std::i
     Ok(())
 }
 
-async fn write_final_chunk(sock: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+async fn write_final_chunk(sock: &mut TcpStream) -> io::Result<()> {
     sock.write_all(b"0\r\n\r\n").await
 }
 
-async fn write_error(
-    sock: &mut tokio::net::TcpStream,
-    status: u16,
-    body: &str,
-) -> std::io::Result<()> {
+async fn write_error(sock: &mut TcpStream, status: u16, body: &str) -> io::Result<()> {
     let reason = match status {
         400 => "Bad Request",
         500 => "Internal Server Error",
@@ -516,14 +499,13 @@ async fn conv_lock_is_not_held_while_streaming() {
     let (port, _server) = spawn_fake(script).await;
 
     let client = Arc::new(build_client(&chat_spec(port)));
-    // With a one-slot channel the test stops draining, the stream parks
-    // on its next send, so it is guaranteed to be mid-flight below.
+    // One slot: once the test stops draining, the stream parks mid-flight.
     let (tx, mut rx) = mpsc::channel(1);
     let gen_client = Arc::clone(&client);
     let stream_task = tokio::spawn(async move { gen_client.generate("first".into(), tx).await });
     rx.recv().await.expect("first delta");
 
-    tokio::time::timeout(
+    timeout(
         Duration::from_secs(2),
         client.set_transient_context("hello".into()),
     )
@@ -554,8 +536,8 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
     let client = build_client(&spec);
 
     let (tx, mut rx) = mpsc::channel(32);
-    let started = std::time::Instant::now();
-    let res = tokio::time::timeout(Duration::from_secs(5), client.generate("hi".into(), tx))
+    let started = Instant::now();
+    let res = timeout(Duration::from_secs(5), client.generate("hi".into(), tx))
         .await
         .expect("generate must return within outer 5s budget");
     res.expect("partial-after-emit path returns Ok");
@@ -585,8 +567,8 @@ async fn slow_first_token_is_not_treated_as_a_stall() {
     let client = build_client(&spec);
 
     let (tx, mut rx) = mpsc::channel(32);
-    let started = std::time::Instant::now();
-    let res = tokio::time::timeout(Duration::from_secs(15), client.generate("hi".into(), tx))
+    let started = Instant::now();
+    let res = timeout(Duration::from_secs(15), client.generate("hi".into(), tx))
         .await
         .expect("generate must return within outer 15s budget");
     let err = res.expect_err("a first byte that never arrives is still an error");
@@ -622,7 +604,7 @@ async fn generation_longer_than_request_timeout_is_not_truncated() {
     let client = build_client(&spec);
 
     let (tx, mut rx) = mpsc::channel(32);
-    tokio::time::timeout(Duration::from_secs(10), client.generate("hi".into(), tx))
+    timeout(Duration::from_secs(10), client.generate("hi".into(), tx))
         .await
         .expect("generate must return within outer 10s budget")
         .expect("generate completed");
@@ -696,7 +678,6 @@ async fn first_chunk_role_only_delta_is_ignored() {
 #[tokio::test]
 async fn summarization_triggered_when_over_budget() {
     let script = Script::new();
-    // Enough deltas to blow the tiny budget on the next turn.
     let long_reply: String = "long ".repeat(30);
     script
         .push_stream(StreamResponse::Deltas(vec![long_reply.clone()]))
@@ -947,7 +928,7 @@ async fn step_parses_tool_call_across_argument_chunks() {
         .await
         .unwrap();
     let (tx, mut rx) = mpsc::channel(32);
-    let tools = vec![serde_json::json!({
+    let tools = vec![json!({
         "type": "function",
         "function": {
             "name": "run",
@@ -978,7 +959,6 @@ async fn step_parses_tool_call_across_argument_chunks() {
 #[tokio::test]
 async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
     let script = Script::new();
-    // Turn 1: model asks for a tool call.
     script
         .push_stream(StreamResponse::RawFrames(tool_call_frames(
             "call-7",
@@ -986,7 +966,6 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
             &[r#"{"command":"echo hi"}"#],
         )))
         .await;
-    // Turn 2, after push_tool_results: plain text answer.
     script
         .push_stream(StreamResponse::Deltas(vec!["done".into()]))
         .await;
@@ -998,7 +977,7 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
         .await
         .unwrap();
 
-    let tools = vec![serde_json::json!({
+    let tools = vec![json!({
         "type": "function",
         "function": {"name":"run","parameters":{"type":"object"},"strict":true}
     })];
@@ -1009,7 +988,7 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
     };
     drain(&mut rx1).await;
 
-    let result = assistd_llm::ToolResultPayload {
+    let result = ToolResultPayload {
         call_id: calls[0].id.clone(),
         name: "run".into(),
         content: "hi\n[exit:0 | 2ms]".into(),
@@ -1022,8 +1001,6 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
     assert!(matches!(outcome2, StepOutcome::Final));
     drain(&mut rx2).await;
 
-    // A text-only result rides back on the tool role with the id of the
-    // call it answers, not as a second user turn.
     let captured = script.captured().await;
     assert_eq!(captured.len(), 2);
     assert_eq!(
@@ -1040,7 +1017,8 @@ async fn agent_round_trip_commits_tool_calls_and_result_to_history() {
                 }],
             },
             {"role": "tool", "content": "hi\n[exit:0 | 2ms]", "tool_call_id": "call-7"},
-        ])
+        ]),
+        "a text-only result must ride the tool role with the id of its call"
     );
 }
 
@@ -1066,7 +1044,7 @@ async fn narration_before_a_tool_call_stays_in_history() {
         .await
         .unwrap();
 
-    let tools = vec![serde_json::json!({
+    let tools = vec![json!({
         "type": "function",
         "function": {"name":"run","parameters":{"type":"object"},"strict":true}
     })];
@@ -1079,7 +1057,7 @@ async fn narration_before_a_tool_call_stays_in_history() {
     drain(&mut rx1).await;
 
     client
-        .push_tool_results(vec![assistd_llm::ToolResultPayload {
+        .push_tool_results(vec![ToolResultPayload {
             call_id: calls[0].id.clone(),
             name: "run".into(),
             content: "hi\n[exit:0 | 2ms]".into(),
@@ -1106,7 +1084,6 @@ async fn narration_before_a_tool_call_stays_in_history() {
 
 #[tokio::test]
 async fn request_timeout_surfaces_as_error() {
-    // Bind but never respond: reqwest will time out on read.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -1137,7 +1114,7 @@ async fn complete_oneshot_survives_a_response_larger_than_the_channel() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let client = build_client(&chat_spec(port));
-    let text = tokio::time::timeout(
+    let text = timeout(
         Duration::from_secs(10),
         client.complete_oneshot("title?".into(), Thinking::Enabled),
     )
@@ -1257,7 +1234,7 @@ async fn reasoning_rides_along_with_its_tool_call_until_the_next_user_turn() {
     assert!(matches!(outcome, StepOutcome::ToolCalls(_)));
     drain(&mut rx).await;
     client
-        .push_tool_results(vec![assistd_llm::ToolResultPayload {
+        .push_tool_results(vec![ToolResultPayload {
             call_id: "call-1".into(),
             name: "run".into(),
             content: "a.txt".into(),

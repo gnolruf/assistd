@@ -1,9 +1,10 @@
 //! Whisper-rs-backed [`Transcriber`].
 
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use assistd_config::TranscriptionConfig;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use whisper_rs::{
@@ -14,6 +15,10 @@ use whisper_rs::{
 use crate::gpu;
 use crate::hf_download;
 use crate::transcribe::{Transcriber, TranscriptionError};
+
+/// Minimum trailing silence, in seconds, before Silero VAD trims a
+/// segment. Maps to whisper.cpp's `min_silence_duration_ms`.
+pub const VAD_SILENCE_SECS: f32 = 0.5;
 
 #[derive(Debug, Clone)]
 struct InferenceConfig {
@@ -28,12 +33,8 @@ struct SileroVadParams {
     silence_secs: f32,
 }
 
-/// Idle inference states kept for reuse. A whisper state owns the KV
-/// cache and compute buffers (VRAM under CUDA), so allocating one per
-/// utterance is expensive. Each call checks out its own state, so
-/// concurrent calls never share one and the lock is held only to pop
-/// or push. A state is returned only after a successful run; one whose
-/// run failed is dropped, and the next call allocates a fresh one.
+/// Idle whisper states (KV cache and compute buffers) reused across calls.
+/// Each call checks out its own state; only a state whose run succeeded is returned.
 struct StatePool<S> {
     idle: Mutex<Vec<S>>,
 }
@@ -67,7 +68,7 @@ impl<S> StatePool<S> {
 pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
     states: Arc<StatePool<WhisperState>>,
-    cfg: InferenceConfig,
+    inference: InferenceConfig,
     is_gpu: bool,
 }
 
@@ -98,14 +99,14 @@ impl Transcriber for WhisperTranscriber {
             .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
         let ctx = self.ctx.clone();
         let states = self.states.clone();
-        let cfg = self.cfg.clone();
+        let inference = self.inference.clone();
         let result = tokio::task::spawn_blocking(move || {
             states.with_state(
                 || {
                     ctx.create_state()
                         .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))
                 },
-                |state| run_inference(state, &cfg, &audio_f32),
+                |state| run_inference(state, &inference, &audio_f32),
             )
         })
         .await?;
@@ -117,64 +118,6 @@ impl Transcriber for WhisperTranscriber {
         result
     }
 }
-
-fn run_inference(
-    state: &mut WhisperState,
-    cfg: &InferenceConfig,
-    audio: &[f32],
-) -> Result<String, TranscriptionError> {
-    let strategy = if cfg.beams <= 1 {
-        SamplingStrategy::Greedy { best_of: 1 }
-    } else {
-        SamplingStrategy::BeamSearch {
-            beam_size: cfg.beams as i32,
-            patience: -1.0,
-        }
-    };
-    let mut params = FullParams::new(strategy);
-    params.set_language(Some("en"));
-    params.set_translate(false);
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_no_context(true);
-    params.set_suppress_blank(true);
-    if let Some(threads) = cfg.threads {
-        params.set_n_threads(threads as i32);
-    }
-    if let Some(vad) = &cfg.vad {
-        params.set_vad_model_path(Some(vad.model_path.as_str()));
-        params.enable_vad(true);
-        let mut vad_params = WhisperVadParams::default();
-        let ms = (vad.silence_secs * 1000.0)
-            .round()
-            .clamp(0.0, i32::MAX as f32) as i32;
-        vad_params.set_min_silence_duration(ms);
-        params.set_vad_params(vad_params);
-    }
-
-    state
-        .full(params, audio)
-        .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
-
-    let segment_count = state.full_n_segments();
-    let mut out = String::new();
-    for i in 0..segment_count {
-        let Some(segment) = state.get_segment(i) else {
-            continue;
-        };
-        let text = segment
-            .to_str_lossy()
-            .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
-        out.push_str(text.as_ref());
-    }
-    Ok(out.trim().to_string())
-}
-
-/// Minimum trailing silence, in seconds, before Silero VAD trims a
-/// segment. Maps to whisper.cpp's `min_silence_duration_ms`.
-pub const VAD_SILENCE_SECS: f32 = 0.5;
 
 /// Builder for [`WhisperTranscriber`]. `build()` is async because it
 /// may download model files.
@@ -242,16 +185,16 @@ impl WhisperTranscriberBuilder {
         self
     }
 
-    /// Populate from a [`TranscriptionConfig`](assistd_config::TranscriptionConfig).
-    pub fn from_config(cfg: &assistd_config::TranscriptionConfig) -> Self {
+    /// Populate from a [`TranscriptionConfig`].
+    pub fn from_config(config: &TranscriptionConfig) -> Self {
         Self {
-            model: Some(cfg.model.clone()),
-            cache_dir: cfg.model_cache_dir.clone(),
-            prefer_gpu: cfg.prefer_gpu,
-            threads: cfg.threads.map(NonZeroU32::get),
-            beams: cfg.beams.get(),
-            vad_enabled: cfg.vad_enabled,
-            vad_model: Some(cfg.vad_model.clone()),
+            model: Some(config.model.clone()),
+            cache_dir: config.model_cache_dir.clone(),
+            prefer_gpu: config.prefer_gpu,
+            threads: config.threads.map(NonZeroU32::get),
+            beams: config.beams.get(),
+            vad_enabled: config.vad_enabled,
+            vad_model: Some(config.vad_model.clone()),
             vad_silence_secs: VAD_SILENCE_SECS,
         }
     }
@@ -271,39 +214,22 @@ impl WhisperTranscriberBuilder {
             .unwrap_or_else(|| hf_download::default_cache_dir("whisper"));
 
         let model_path = hf_download::ensure_cached(&model, &cache_dir).await?;
-        let vad_runtime = if self.vad_enabled {
-            let vad_id = self
-                .vad_model
-                .ok_or_else(|| TranscriptionError::ModelParse {
-                    id: String::new(),
-                    reason: "vad_model identifier is required when vad_enabled".into(),
-                })?;
-            let vad_path = hf_download::ensure_cached(&vad_id, &cache_dir).await?;
-            Some(SileroVadParams {
-                model_path: vad_path.to_string_lossy().into_owned(),
-                silence_secs: self.vad_silence_secs.max(0.0),
-            })
+        let vad = if self.vad_enabled {
+            Some(fetch_vad(self.vad_model, self.vad_silence_secs, &cache_dir).await?)
         } else {
             None
         };
 
         let use_gpu = should_use_gpu(self.prefer_gpu);
-        let model_path_str = model_path.to_string_lossy().into_owned();
-        let ctx = tokio::task::spawn_blocking(move || {
-            let mut params = WhisperContextParameters::new();
-            params.use_gpu(use_gpu);
-            WhisperContext::new_with_params(&model_path_str, params)
-        })
-        .await?
-        .map_err(|err| TranscriptionError::WhisperInit(err.to_string()))?;
+        let ctx = load_context(&model_path, use_gpu).await?;
 
         Ok(WhisperTranscriber {
             ctx: Arc::new(ctx),
             states: Arc::default(),
-            cfg: InferenceConfig {
+            inference: InferenceConfig {
                 threads: self.threads,
                 beams: self.beams.max(1),
-                vad: vad_runtime,
+                vad,
             },
             is_gpu: use_gpu,
         })
@@ -313,15 +239,103 @@ impl WhisperTranscriberBuilder {
 /// Build a CPU-backed [`WhisperTranscriber`] from the same config as
 /// the primary, sharing its cached model files.
 pub async fn build_cpu_fallback(
-    cfg: &assistd_config::TranscriptionConfig,
+    config: &TranscriptionConfig,
     cache_dir_override: Option<PathBuf>,
 ) -> Result<WhisperTranscriber, TranscriptionError> {
-    let cache_dir = cache_dir_override.or_else(|| cfg.model_cache_dir.clone());
-    WhisperTranscriberBuilder::from_config(cfg)
+    let cache_dir = cache_dir_override.or_else(|| config.model_cache_dir.clone());
+    WhisperTranscriberBuilder::from_config(config)
         .cache_dir(cache_dir)
         .prefer_gpu(false)
         .build()
         .await
+}
+
+fn run_inference(
+    state: &mut WhisperState,
+    inference: &InferenceConfig,
+    audio: &[f32],
+) -> Result<String, TranscriptionError> {
+    let mut params = FullParams::new(sampling_strategy(inference.beams));
+    params.set_language(Some("en"));
+    params.set_translate(false);
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_no_context(true);
+    params.set_suppress_blank(true);
+    if let Some(threads) = inference.threads {
+        params.set_n_threads(threads as i32);
+    }
+    if let Some(vad) = &inference.vad {
+        params.set_vad_model_path(Some(vad.model_path.as_str()));
+        params.enable_vad(true);
+        params.set_vad_params(silero_vad_params(vad.silence_secs));
+    }
+
+    state
+        .full(params, audio)
+        .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
+
+    let mut transcript = String::new();
+    for index in 0..state.full_n_segments() {
+        let Some(segment) = state.get_segment(index) else {
+            continue;
+        };
+        let text = segment
+            .to_str_lossy()
+            .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?;
+        transcript.push_str(text.as_ref());
+    }
+    Ok(transcript.trim().to_string())
+}
+
+fn sampling_strategy(beams: u32) -> SamplingStrategy {
+    if beams <= 1 {
+        SamplingStrategy::Greedy { best_of: 1 }
+    } else {
+        SamplingStrategy::BeamSearch {
+            beam_size: beams as i32,
+            patience: -1.0,
+        }
+    }
+}
+
+fn silero_vad_params(silence_secs: f32) -> WhisperVadParams {
+    let mut vad_params = WhisperVadParams::default();
+    let silence_ms = (silence_secs * 1000.0).round().clamp(0.0, i32::MAX as f32) as i32;
+    vad_params.set_min_silence_duration(silence_ms);
+    vad_params
+}
+
+async fn fetch_vad(
+    vad_model: Option<String>,
+    silence_secs: f32,
+    cache_dir: &Path,
+) -> Result<SileroVadParams, TranscriptionError> {
+    let vad_id = vad_model.ok_or_else(|| TranscriptionError::ModelParse {
+        id: String::new(),
+        reason: "vad_model identifier is required when vad_enabled".into(),
+    })?;
+    let vad_path = hf_download::ensure_cached(&vad_id, cache_dir).await?;
+    Ok(SileroVadParams {
+        model_path: vad_path.to_string_lossy().into_owned(),
+        silence_secs: silence_secs.max(0.0),
+    })
+}
+
+async fn load_context(
+    model_path: &Path,
+    use_gpu: bool,
+) -> Result<WhisperContext, TranscriptionError> {
+    let model_path = model_path.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut params = WhisperContextParameters::new();
+        params.use_gpu(use_gpu);
+        WhisperContext::new_with_params(&model_path, params)
+    })
+    .await?
+    .map_err(|err| TranscriptionError::WhisperInit(err.to_string()))
 }
 
 fn should_use_gpu(prefer: bool) -> bool {
@@ -356,8 +370,9 @@ fn should_use_gpu(prefer: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::StatePool;
     use std::cell::Cell;
+
+    use super::StatePool;
 
     fn counting_create(created: &Cell<u32>) -> impl FnOnce() -> Result<u32, &'static str> + '_ {
         move || {

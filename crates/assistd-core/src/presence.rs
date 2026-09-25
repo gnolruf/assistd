@@ -1,26 +1,32 @@
-//! Daemon presence state machine: `Active`, `Drowsy`, `Sleeping`. Lets
-//! the daemon free GPU resources on demand while the control socket keeps
-//! listening in every state; a query that arrives while not `Active`
-//! blocks on an automatic wake and then streams as usual.
+//! Daemon presence state machine (`Active`, `Drowsy`, `Sleeping`), which
+//! frees GPU resources on demand and auto-wakes when a query arrives.
 
 use std::sync::Arc;
-
-use parking_lot::Mutex as StdMutex;
 use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use parking_lot::Mutex as StdMutex;
+use thiserror::Error;
+use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, mpsc, watch};
+use tokio::time::timeout;
+use tokio_util::task::AbortOnDropHandle;
+use tracing::{debug, info, warn};
 
 #[cfg(test)]
 use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
-use assistd_ipc::{Component, PresenceState, StatusKind, StatusSeverity};
+use assistd_ipc::{Component, Event, PresenceState, StatusKind, StatusSeverity};
 use assistd_llm::{
     HealthWaitError, LlamaServerControl, LlamaServerError, LlamaService, LlmHealthProbe, ReadyState,
 };
-use async_trait::async_trait;
-use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, watch};
-use tokio::time::timeout;
-use tokio_util::task::AbortOnDropHandle;
-use tracing::{debug, info, warn};
+
+use crate::recovery::spawn_supervised;
+
+const GUARD_ACQUIRE_RETRIES: usize = 3;
+const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const LOAD_PROGRESS_INTERVAL: Duration = Duration::from_secs(3);
+
+type InnerShutdownSlot = Arc<StdMutex<Option<watch::Sender<bool>>>>;
 
 /// Why a presence transition, or a request guard waiting on one, failed.
 #[derive(Debug, Error)]
@@ -82,12 +88,10 @@ pub enum PresenceError {
 }
 
 /// Owner of the llama-server handle and the daemon-wide presence state.
-///
-/// Transitions are serialised by a mutex, so an auto-wake triggered by a
-/// query cannot race an explicit `sleep` from an IPC request.
+/// Transitions are serialised, so an auto-wake cannot race an explicit
+/// `sleep`.
 pub struct PresenceManager {
     state: StdMutex<PresenceState>,
-    /// Held across awaits, so a tokio mutex rather than std.
     transition: AsyncMutex<()>,
     llama_server: LlamaServerConfig,
     model: ModelConfig,
@@ -95,98 +99,24 @@ pub struct PresenceManager {
     control: LlamaServerControl,
     /// `Some` iff state is `Active` or `Drowsy`.
     llama: AsyncMutex<Option<LlamaService>>,
-    /// Per-epoch watch that `sleep()` flips to tear down the current
-    /// supervisor without disturbing the daemon-wide shutdown watch.
-    current_inner_shutdown: Arc<StdMutex<Option<watch::Sender<bool>>>>,
+    /// Flipped by `sleep()` to stop the current supervisor only.
+    current_inner_shutdown: InnerShutdownSlot,
     state_tx: watch::Sender<PresenceState>,
-    /// Never read. The shutdown forwarder spawned in `new_active` needs
-    /// the daemon shutdown watch to stay open for the manager's whole
-    /// lifetime; without this receiver it can miss the signal.
+    /// Keeps the daemon shutdown watch open so the forwarder cannot miss it.
     _daemon_shutdown_keepalive: watch::Receiver<bool>,
-    /// Last user-initiated interaction. Automatic monitors (GPU, idle)
-    /// deliberately do not update it, so their own transitions don't
-    /// defer further idle progress.
+    /// Last user-initiated interaction; automatic monitors don't bump it.
     last_activity: StdMutex<Instant>,
-    /// Request handlers hold the read side for a generation; `sleep` and
-    /// `drowse` take the write side to wait for them to drain. The lock
-    /// is writer-preferring, so requests queued behind a pending
-    /// transition wait for it rather than starving it.
+    /// Read by request guards, written by `sleep`/`drowse` to drain them.
+    /// Writer-preferring, so queued requests cannot starve a transition.
     inflight: Arc<RwLock<()>>,
-    /// `Some(started_at)` while a `wake` transition is executing.
+    /// `Some(started_at)` while a `wake` is executing.
     wake_started: Arc<StdMutex<Option<Instant>>>,
-    /// LLM streams in flight. Separate from `inflight` because some
-    /// request paths hold a request guard without streaming on the GPU
-    /// (presence queries, cycles), and those must not push Whisper off it.
+    /// LLM streams in flight, which can be fewer than live request guards.
     stream_count_tx: watch::Sender<usize>,
 }
 
-/// Held by request handlers for the duration of a query. While any guard
-/// is alive, [`PresenceManager::sleep`] and [`PresenceManager::drowse`]
-/// block, so a streaming response is never torn down mid-generation.
-pub struct RequestGuard {
-    _guard: OwnedRwLockReadGuard<()>,
-}
-
-/// Exposes a [`PresenceManager`] through the [`LlmHealthProbe`] trait.
-pub struct PresenceLlmHealthProbe {
-    presence: Arc<PresenceManager>,
-}
-
-impl PresenceLlmHealthProbe {
-    /// Wrap `presence` as a health probe.
-    pub fn new(presence: Arc<PresenceManager>) -> Self {
-        Self { presence }
-    }
-}
-
-#[async_trait]
-impl LlmHealthProbe for PresenceLlmHealthProbe {
-    fn pid(&self) -> Option<u32> {
-        self.presence.llama_pid_blocking()
-    }
-
-    fn state(&self) -> Option<ReadyState> {
-        self.presence.llama_state_blocking()
-    }
-
-    async fn wait_for_ready(&self, budget: Duration) -> Result<(), HealthWaitError> {
-        self.presence.wait_llama_ready(budget).await
-    }
-}
-
-/// Counts one in-flight LLM stream for as long as it is held. Unlike
-/// [`RequestGuard`], does not block sleep/drowse.
-pub struct LlmStreamGuard {
-    tx: watch::Sender<usize>,
-}
-
-impl Drop for LlmStreamGuard {
-    fn drop(&mut self) {
-        self.tx.send_modify(|n| *n = n.saturating_sub(1));
-    }
-}
-
-/// Sets `wake_started` while held and clears it on every return path.
-struct WakeMarker {
-    slot: Arc<StdMutex<Option<Instant>>>,
-}
-
-impl WakeMarker {
-    fn new(slot: Arc<StdMutex<Option<Instant>>>) -> Self {
-        *slot.lock() = Some(Instant::now());
-        Self { slot }
-    }
-}
-
-impl Drop for WakeMarker {
-    fn drop(&mut self) {
-        *self.slot.lock() = None;
-    }
-}
-
 impl PresenceManager {
-    /// Create a manager and perform the initial cold-start wake, so the
-    /// daemon is `Active` before it serves the socket. Flipping
+    /// Create a manager and cold-start it to `Active`. Flipping
     /// `daemon_shutdown` cancels an in-flight wake.
     pub async fn new_active(
         llama_server: LlamaServerConfig,
@@ -198,26 +128,8 @@ impl PresenceManager {
             LlamaServerControl::new(&llama_server.host.to_string(), llama_server.port.get())
                 .map_err(PresenceError::Control)?;
 
-        let current_inner_shutdown: Arc<StdMutex<Option<watch::Sender<bool>>>> =
-            Arc::new(StdMutex::new(None));
-
-        {
-            let mut daemon_rx = daemon_shutdown.clone();
-            let current = Arc::clone(&current_inner_shutdown);
-            crate::recovery::spawn_supervised(
-                "presence_shutdown_forwarder",
-                crate::recovery::Component::Daemon,
-                async move {
-                    if daemon_rx.wait_for(|v| *v).await.is_err() {
-                        return;
-                    }
-                    let tx = current.lock().clone();
-                    if let Some(tx) = tx {
-                        let _ = tx.send(true);
-                    }
-                },
-            );
-        }
+        let current_inner_shutdown: InnerShutdownSlot = Arc::new(StdMutex::new(None));
+        spawn_shutdown_forwarder(daemon_shutdown.clone(), Arc::clone(&current_inner_shutdown));
 
         let (state_tx, _) = watch::channel(PresenceState::Sleeping);
         let (stream_count_tx, _) = watch::channel(0usize);
@@ -254,19 +166,23 @@ impl PresenceManager {
         *self.last_activity.lock() = Instant::now();
     }
 
+    fn publish_state(&self, state: PresenceState) {
+        *self.state.lock() = state;
+        let _ = self.state_tx.send(state);
+    }
+
     /// Time since the last user-initiated interaction.
     pub fn idle_duration(&self) -> Duration {
         self.last_activity.lock().elapsed()
     }
 
-    /// Subscribe to presence-state changes. The returned receiver starts at
-    /// the current state; each successful transition sends the new value.
+    /// Subscribe to presence-state changes, starting at the current state.
     pub fn subscribe(&self) -> watch::Receiver<PresenceState> {
         self.state_tx.subscribe()
     }
 
-    /// PID of the currently-managed llama-server child, or `None` if the
-    /// daemon is `Sleeping` or the child has not yet been spawned.
+    /// PID of the managed llama-server child, or `None` if `Sleeping` or
+    /// not yet spawned.
     pub async fn llama_pid(&self) -> Option<u32> {
         self.llama.lock().await.as_ref().and_then(|s| s.pid())
     }
@@ -308,7 +224,7 @@ impl PresenceManager {
             return Err(HealthWaitError::Degraded);
         }
 
-        let res = timeout(budget, async {
+        timeout(budget, async {
             loop {
                 match rx.changed().await {
                     Ok(()) => match *rx.borrow() {
@@ -320,12 +236,8 @@ impl PresenceManager {
                 }
             }
         })
-        .await;
-
-        match res {
-            Ok(inner) => inner,
-            Err(_) => Err(HealthWaitError::Timeout),
-        }
+        .await
+        .unwrap_or(Err(HealthWaitError::Timeout))
     }
 
     /// Wake unless already `Active`. Racing callers serialise on the
@@ -339,34 +251,26 @@ impl PresenceManager {
         self.wake().await
     }
 
-    /// Acquire a [`RequestGuard`] that holds the daemon `Active`, waking
-    /// it first if needed.
-    ///
-    /// The guard is taken before the state check, so `Active` observed
-    /// under it holds for the guard's lifetime: a sleep must first take
-    /// the write side of the same lock. A bounded retry covers sleep/wake
-    /// churn between the wake and the re-check.
-    ///
-    /// While a wake is in progress, also emits `Event::Status` progress
-    /// on `tx` every few seconds, so a long model load is
-    /// distinguishable from a hang. Wakes shorter than one tick emit
-    /// nothing.
+    /// Acquire a [`RequestGuard`] that holds the daemon `Active`, waking it
+    /// first if needed. While a wake runs, emits `ModelLoading` status on
+    /// `tx` every few seconds.
     pub async fn acquire_request_guard_with_progress(
         self: &Arc<Self>,
         request_id: String,
-        tx: tokio::sync::mpsc::Sender<assistd_ipc::Event>,
+        tx: mpsc::Sender<Event>,
     ) -> Result<RequestGuard, PresenceError> {
         self.acquire_request_guard_inner(Some((request_id, tx)))
             .await
     }
 
+    /// The guard is taken before the state check, so an observed `Active`
+    /// holds for its lifetime; the retry covers sleep/wake churn.
     async fn acquire_request_guard_inner(
         self: &Arc<Self>,
-        progress: Option<(String, tokio::sync::mpsc::Sender<assistd_ipc::Event>)>,
+        progress: Option<(String, mpsc::Sender<Event>)>,
     ) -> Result<RequestGuard, PresenceError> {
         self.mark_activity();
-        const MAX_RETRIES: usize = 3;
-        for _ in 0..MAX_RETRIES {
+        for _ in 0..GUARD_ACQUIRE_RETRIES {
             let guard = self.inflight.clone().read_owned().await;
             if self.state() == PresenceState::Active {
                 return Ok(RequestGuard { _guard: guard });
@@ -383,7 +287,7 @@ impl PresenceManager {
             result?;
         }
         Err(PresenceError::GuardRetriesExhausted {
-            attempts: MAX_RETRIES,
+            attempts: GUARD_ACQUIRE_RETRIES,
         })
     }
 
@@ -424,11 +328,8 @@ impl PresenceManager {
         }
     }
 
-    /// Advance one step along `Active → Drowsy → Sleeping → Active`.
-    ///
-    /// Two racing calls can both target the same state, in which case the
-    /// loser is a no-op; the transition mutex still guarantees a step is
-    /// never skipped or split.
+    /// Advance one step along `Active → Drowsy → Sleeping → Active`. Of two
+    /// racing calls targeting the same state, the loser is a no-op.
     pub async fn cycle(&self) -> Result<PresenceState, PresenceError> {
         self.mark_activity();
         let target = self.state().next();
@@ -436,10 +337,8 @@ impl PresenceManager {
         Ok(target)
     }
 
-    /// `Active|Drowsy → Sleeping`. Idempotent from `Sleeping`.
-    ///
-    /// Blocks until every outstanding [`RequestGuard`] has been dropped,
-    /// so an in-flight generation is never killed mid-stream.
+    /// `Active|Drowsy → Sleeping`. Idempotent from `Sleeping`. Waits for
+    /// every outstanding [`RequestGuard`] to drop first.
     pub async fn sleep(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
         let prior = self.state();
@@ -454,8 +353,7 @@ impl PresenceManager {
         let service = self.llama.lock().await.take();
         let outcome = self.teardown_llama(service).await;
 
-        *self.state.lock() = PresenceState::Sleeping;
-        let _ = self.state_tx.send(PresenceState::Sleeping);
+        self.publish_state(PresenceState::Sleeping);
         info!(
             target: "assistd::presence",
             prior = ?prior,
@@ -490,11 +388,8 @@ impl PresenceManager {
         }
     }
 
-    /// `Active → Drowsy`. Idempotent from `Drowsy`. Errors from `Sleeping`.
-    ///
-    /// Blocks until every outstanding [`RequestGuard`] has been dropped,
-    /// so an in-flight generation completes before the model weights
-    /// are unloaded.
+    /// `Active → Drowsy`. Idempotent from `Drowsy`; errors from `Sleeping`.
+    /// Waits for every outstanding [`RequestGuard`] to drop first.
     pub async fn drowse(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
         let prior = self.state();
@@ -507,28 +402,9 @@ impl PresenceManager {
         let _inflight = self.inflight.write().await;
 
         let started = Instant::now();
-        let secs = self.timeouts.presence_drowse_secs;
-        let unload = self.control.unload_model(&self.model.name);
-        match timeout(Duration::from_secs(secs), unload).await {
-            Ok(Ok(())) => {}
-            Ok(Err(source)) => {
-                return Err(PresenceError::Unload {
-                    model: self.model.name.clone(),
-                    source,
-                });
-            }
-            Err(_) => {
-                warn!(
-                    target: "assistd::presence",
-                    timeout_secs = secs,
-                    "llama-server /models/unload timed out during drowse; transition aborted"
-                );
-                return Err(PresenceError::UnloadTimeout { secs });
-            }
-        }
+        self.unload_model().await?;
 
-        *self.state.lock() = PresenceState::Drowsy;
-        let _ = self.state_tx.send(PresenceState::Drowsy);
+        self.publish_state(PresenceState::Drowsy);
         info!(
             target: "assistd::presence",
             prior = ?prior,
@@ -537,6 +413,26 @@ impl PresenceManager {
             "transitioned Active → Drowsy"
         );
         Ok(())
+    }
+
+    async fn unload_model(&self) -> Result<(), PresenceError> {
+        let secs = self.timeouts.presence_drowse_secs;
+        let unload = self.control.unload_model(&self.model.name);
+        match timeout(Duration::from_secs(secs), unload).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(source)) => Err(PresenceError::Unload {
+                model: self.model.name.clone(),
+                source,
+            }),
+            Err(_) => {
+                warn!(
+                    target: "assistd::presence",
+                    timeout_secs = secs,
+                    "llama-server /models/unload timed out during drowse; transition aborted"
+                );
+                Err(PresenceError::UnloadTimeout { secs })
+            }
+        }
     }
 
     /// `Sleeping|Drowsy → Active`. Idempotent from `Active`.
@@ -556,8 +452,7 @@ impl PresenceManager {
             PresenceState::Active => unreachable!("short-circuited above"),
         }
 
-        *self.state.lock() = PresenceState::Active;
-        let _ = self.state_tx.send(PresenceState::Active);
+        self.publish_state(PresenceState::Active);
         info!(
             target: "assistd::presence",
             prior = ?prior,
@@ -616,8 +511,6 @@ impl PresenceManager {
     }
 
     async fn await_model_loaded(&self) -> Result<(), PresenceError> {
-        const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
-
         let mut ready_rx = {
             let guard = self.llama.lock().await;
             guard
@@ -646,48 +539,10 @@ impl PresenceManager {
     }
 }
 
-async fn wait_until_not_ready(rx: &mut watch::Receiver<ReadyState>) {
-    let _ = rx.wait_for(|s| *s != ReadyState::Ready).await;
-}
-
-const LOAD_PROGRESS_INTERVAL: Duration = Duration::from_secs(3);
-
-fn spawn_load_progress_emitter(
-    presence: Arc<PresenceManager>,
-    request_id: String,
-    tx: tokio::sync::mpsc::Sender<assistd_ipc::Event>,
-) -> AbortOnDropHandle<()> {
-    AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(LOAD_PROGRESS_INTERVAL);
-        // Skip the first immediate tick so sub-interval wakes stay quiet.
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            let Some(started) = presence.wake_in_progress() else {
-                return;
-            };
-            let elapsed_secs = started.elapsed().as_secs();
-            if tx
-                .send(assistd_ipc::Event::Status {
-                    id: request_id.clone(),
-                    severity: StatusSeverity::Info,
-                    component: Component::Llm,
-                    event: StatusKind::ModelLoading,
-                    message: format!("loading model ({elapsed_secs}s elapsed)"),
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-    }))
-}
-
+#[cfg(test)]
 impl PresenceManager {
     /// Manager in a fixed state with no llama child. Transitions that hit
     /// the network (`drowse`, cold-start `wake`) error.
-    #[cfg(test)]
     pub(crate) fn stub(state: PresenceState) -> Arc<Self> {
         let (_tx, rx) = watch::channel(false);
         let (state_tx, _) = watch::channel(state);
@@ -735,11 +590,129 @@ impl PresenceManager {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_state_for_test(&self, s: PresenceState) {
-        *self.state.lock() = s;
-        let _ = self.state_tx.send(s);
+    pub(crate) fn set_state_for_test(&self, state: PresenceState) {
+        self.publish_state(state);
     }
+}
+
+/// Holds the daemon `Active` for a query: [`PresenceManager::sleep`] and
+/// [`PresenceManager::drowse`] wait until every guard drops.
+pub struct RequestGuard {
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+/// Counts one in-flight LLM stream for as long as it is held. Unlike
+/// [`RequestGuard`], does not block sleep/drowse.
+pub struct LlmStreamGuard {
+    tx: watch::Sender<usize>,
+}
+
+impl Drop for LlmStreamGuard {
+    fn drop(&mut self) {
+        self.tx.send_modify(|n| *n = n.saturating_sub(1));
+    }
+}
+
+/// Exposes a [`PresenceManager`] through the [`LlmHealthProbe`] trait.
+pub struct PresenceLlmHealthProbe {
+    presence: Arc<PresenceManager>,
+}
+
+impl PresenceLlmHealthProbe {
+    /// Wrap `presence` as a health probe.
+    pub fn new(presence: Arc<PresenceManager>) -> Self {
+        Self { presence }
+    }
+}
+
+#[async_trait]
+impl LlmHealthProbe for PresenceLlmHealthProbe {
+    fn pid(&self) -> Option<u32> {
+        self.presence.llama_pid_blocking()
+    }
+
+    fn state(&self) -> Option<ReadyState> {
+        self.presence.llama_state_blocking()
+    }
+
+    async fn wait_for_ready(&self, budget: Duration) -> Result<(), HealthWaitError> {
+        self.presence.wait_llama_ready(budget).await
+    }
+}
+
+/// Sets `wake_started` while held and clears it on every return path.
+struct WakeMarker {
+    slot: Arc<StdMutex<Option<Instant>>>,
+}
+
+impl WakeMarker {
+    fn new(slot: Arc<StdMutex<Option<Instant>>>) -> Self {
+        *slot.lock() = Some(Instant::now());
+        Self { slot }
+    }
+}
+
+impl Drop for WakeMarker {
+    fn drop(&mut self) {
+        *self.slot.lock() = None;
+    }
+}
+
+/// Once `daemon_shutdown` flips, stop whichever supervisor epoch is current.
+fn spawn_shutdown_forwarder(
+    mut daemon_shutdown: watch::Receiver<bool>,
+    current_inner_shutdown: InnerShutdownSlot,
+) {
+    spawn_supervised(
+        "presence_shutdown_forwarder",
+        Component::Daemon,
+        async move {
+            if daemon_shutdown.wait_for(|v| *v).await.is_err() {
+                return;
+            }
+            let tx = current_inner_shutdown.lock().clone();
+            if let Some(tx) = tx {
+                let _ = tx.send(true);
+            }
+        },
+    );
+}
+
+async fn wait_until_not_ready(rx: &mut watch::Receiver<ReadyState>) {
+    let _ = rx.wait_for(|s| *s != ReadyState::Ready).await;
+}
+
+/// Emit a `ModelLoading` status every [`LOAD_PROGRESS_INTERVAL`] while a
+/// wake runs. The first immediate tick is skipped so short wakes stay quiet.
+fn spawn_load_progress_emitter(
+    presence: Arc<PresenceManager>,
+    request_id: String,
+    tx: mpsc::Sender<Event>,
+) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(LOAD_PROGRESS_INTERVAL);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(started) = presence.wake_in_progress() else {
+                return;
+            };
+            let elapsed_secs = started.elapsed().as_secs();
+            if tx
+                .send(Event::Status {
+                    id: request_id.clone(),
+                    severity: StatusSeverity::Info,
+                    component: Component::Llm,
+                    event: StatusKind::ModelLoading,
+                    message: format!("loading model ({elapsed_secs}s elapsed)"),
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }))
 }
 
 #[cfg(test)]

@@ -30,7 +30,17 @@ impl WmBackend {
 /// Start the configured (or detected) compositor backend, disconnected
 /// when none is available.
 pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) -> WmBackend {
-    let resolved = match config.compositor.compositor_type {
+    connect(
+        resolve_compositor(config.compositor.compositor_type),
+        shutdown_rx,
+    )
+    .await
+}
+
+/// Resolve `Auto` from the session environment; stays `Auto` when no
+/// supported compositor is detected.
+fn resolve_compositor(configured: CompositorType) -> CompositorType {
+    match configured {
         CompositorType::Auto => match detect_from_env(&SessionEnv::from_process()) {
             Some(c) => {
                 tracing::info!(target: "assistd::wm", "auto-detected compositor = {c:?}");
@@ -47,12 +57,14 @@ pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) 
             }
         },
         explicit => explicit,
-    };
+    }
+}
 
+async fn connect(compositor: CompositorType, shutdown_rx: watch::Receiver<bool>) -> WmBackend {
     #[cfg(not(any(feature = "i3", feature = "sway")))]
     drop(shutdown_rx);
 
-    match resolved {
+    match compositor {
         #[cfg(feature = "i3")]
         CompositorType::I3 => match I3Backend::start(shutdown_rx).await {
             Ok(handle) => {

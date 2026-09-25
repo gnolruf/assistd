@@ -3,12 +3,15 @@
 //! keep waking llama-server.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use assistd_core::{
-    AppState, Component, ContinuousListener, PresenceManager, PresenceState, spawn_supervised,
+    AppState, Component, ContinuousListener, PresenceManager, PresenceState, drain_join_set,
+    spawn_supervised,
 };
 use assistd_ipc::Event;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, error, info, warn};
@@ -55,48 +58,18 @@ async fn run_utterance_forwarder(
                 match res {
                     Ok(text) => {
                         let trimmed = text.trim();
-                        if trimmed.is_empty() {
-                            continue;
+                        if !trimmed.is_empty() {
+                            spawn_listen_query(&mut handlers, &state, trimmed.to_string());
                         }
-                        let id = format!("listen-{}", short_id());
-                        let state = state.clone();
-                        let text = trimmed.to_string();
-                        let span = tracing::info_span!(
-                            "listen",
-                            id = %id,
-                            req = "query",
-                        );
-                        handlers.spawn(
-                            async move {
-                                let (tx, mut rx) = mpsc::channel::<Event>(32);
-                                let forward = async {
-                                    while let Some(ev) = rx.recv().await {
-                                        state.runtime.publish(&ev);
-                                    }
-                                };
-                                let query = async {
-                                    if let Err(e) =
-                                        state.clone().handle_query(id, text, Vec::new(), tx).await
-                                    {
-                                        warn!(
-                                            target: "assistd::listen",
-                                            "listen-triggered query failed: {e:#}"
-                                        );
-                                    }
-                                };
-                                tokio::join!(forward, query);
-                            }
-                            .instrument(span),
-                        );
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    Err(RecvError::Lagged(n)) => {
                         warn!(
                             target: "assistd::listen",
                             dropped = n,
                             "utterance subscriber lagged; dropped transcripts"
                         );
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    Err(RecvError::Closed) => {
                         info!(
                             target: "assistd::listen",
                             "utterance broadcast closed; forwarder exiting"
@@ -123,7 +96,37 @@ async fn run_utterance_forwarder(
         }
     }
 
-    assistd_core::drain_join_set(&mut handlers, grace, "listen-triggered query").await;
+    drain_join_set(&mut handlers, grace, "listen-triggered query").await;
+}
+
+fn spawn_listen_query(handlers: &mut JoinSet<()>, state: &Arc<AppState>, text: String) {
+    let id = format!("listen-{}", short_id());
+    let span = tracing::info_span!(
+        "listen",
+        id = %id,
+        req = "query",
+    );
+    handlers.spawn(run_listen_query(state.clone(), id, text).instrument(span));
+}
+
+/// Run one utterance as a query turn, publishing its events on the
+/// daemon's broadcast bus.
+async fn run_listen_query(state: Arc<AppState>, id: String, text: String) {
+    let (tx, mut rx) = mpsc::channel::<Event>(32);
+    let forward = async {
+        while let Some(ev) = rx.recv().await {
+            state.runtime.publish(&ev);
+        }
+    };
+    let query = async {
+        if let Err(e) = state.clone().handle_query(id, text, Vec::new(), tx).await {
+            warn!(
+                target: "assistd::listen",
+                "listen-triggered query failed: {e:#}"
+            );
+        }
+    };
+    tokio::join!(forward, query);
 }
 
 async fn run_presence_gate(
@@ -135,16 +138,7 @@ async fn run_presence_gate(
     let mut rx = presence.subscribe();
     if start_on_launch {
         let initial = *rx.borrow();
-        if initial == PresenceState::Sleeping {
-            info!(
-                target: "assistd::listen",
-                "start_on_launch deferred: presence is {initial:?}"
-            );
-        } else if let Err(e) = listener.start().await {
-            warn!(target: "assistd::listen", "start_on_launch failed: {e:#}");
-        } else {
-            info!(target: "assistd::listen", "continuous listening auto-started");
-        }
+        start_unless_sleeping(listener.as_ref(), initial).await;
     }
 
     let mut paused_by_gate = false;
@@ -199,9 +193,20 @@ async fn run_presence_gate(
     }
 }
 
+async fn start_unless_sleeping(listener: &dyn ContinuousListener, initial: PresenceState) {
+    if initial == PresenceState::Sleeping {
+        info!(
+            target: "assistd::listen",
+            "start_on_launch deferred: presence is {initial:?}"
+        );
+    } else if let Err(e) = listener.start().await {
+        warn!(target: "assistd::listen", "start_on_launch failed: {e:#}");
+    } else {
+        info!(target: "assistd::listen", "continuous listening auto-started");
+    }
+}
+
 fn short_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)

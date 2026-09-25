@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::env;
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -14,6 +15,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
+
+const MAX_HEADER_BYTES: usize = 16 * 1024;
 
 /// Server behaviour, from `--mode`, else a `mode` file beside the binary,
 /// else `normal`.
@@ -33,6 +36,28 @@ enum Mode {
     SlowTerm(u64),
 }
 
+struct Args {
+    host: String,
+    port: u16,
+    mode: Mode,
+}
+
+#[derive(Clone, Default)]
+struct ChatScript {
+    deltas: Vec<String>,
+    delay_ms_between: u64,
+}
+
+#[derive(Default)]
+struct ServerState {
+    loaded_model: Option<String>,
+    load_count: u32,
+    unload_count: u32,
+    chat_completions_count: u32,
+    last_prompt: Option<String>,
+    chat_scripts: VecDeque<ChatScript>,
+}
+
 fn parse_mode(s: &str) -> Option<Mode> {
     if let Some(rest) = s.strip_prefix("crash-after=") {
         let secs: u64 = rest.parse().ok()?;
@@ -49,12 +74,6 @@ fn parse_mode(s: &str) -> Option<Mode> {
         "load-failure" => Some(Mode::LoadFailure),
         _ => None,
     }
-}
-
-struct Args {
-    host: String,
-    port: u16,
-    mode: Mode,
 }
 
 /// Mode named by a file called `mode` in the directory of `program`
@@ -90,30 +109,12 @@ fn parse_args() -> Args {
                 mode = parse_mode(&argv[i + 1]).expect("invalid --mode");
                 i += 2;
             }
-            // Ignore llama-server args we don't implement but real
-            // router-mode spawns pass through.
             "--jinja" => i += 1,
             "-ngl" | "-c" => i += 2,
             _ => i += 1,
         }
     }
     Args { host, port, mode }
-}
-
-#[derive(Clone, Default)]
-struct ChatScript {
-    deltas: Vec<String>,
-    delay_ms_between: u64,
-}
-
-#[derive(Default)]
-struct ServerState {
-    loaded_model: Option<String>,
-    load_count: u32,
-    unload_count: u32,
-    chat_completions_count: u32,
-    last_prompt: Option<String>,
-    chat_scripts: VecDeque<ChatScript>,
 }
 
 #[tokio::main]
@@ -126,7 +127,7 @@ async fn main() -> ExitCode {
     }
 
     let listener = match TcpListener::bind((args.host.as_str(), args.port)).await {
-        Ok(l) => l,
+        Ok(listener) => listener,
         Err(e) => {
             eprintln!("fake_llama_server: bind failed: {e}");
             return ExitCode::from(2);
@@ -144,7 +145,7 @@ async fn main() -> ExitCode {
         tokio::spawn(async move {
             serve_loop(listener, Mode::Normal, state).await;
         });
-        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+        tokio::time::sleep(Duration::from_secs(secs)).await;
         eprintln!("fake_llama_server: crash-after elapsed; exiting 0");
         return ExitCode::SUCCESS;
     }
@@ -168,7 +169,7 @@ async fn main() -> ExitCode {
 async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerState>>) {
     loop {
         let (sock, _) = match listener.accept().await {
-            Ok(x) => x,
+            Ok(accepted) => accepted,
             Err(e) => {
                 eprintln!("fake_llama_server: accept error: {e}");
                 continue;
@@ -177,7 +178,7 @@ async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerSt
         let mode = mode.clone();
         let state = state.clone();
         tokio::spawn(async move {
-            let _ = handle_request(sock, mode, state).await;
+            let _ = serve_connection(sock, mode, state).await;
         });
     }
 }
@@ -191,28 +192,25 @@ async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerSt
 /// - `POST /test/script`, `POST /test/reset`: queue a scripted chat reply,
 ///   or clear the queue and counters. Both require `X-Test-Control: 1`.
 /// - `GET /debug/counters`: PID, hit counts and last prompt.
-async fn handle_request(
+async fn serve_connection(
     mut sock: TcpStream,
     mode: Mode,
     state: Arc<Mutex<ServerState>>,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let (head, body) = read_request(&mut sock).await?;
     let (method, path) = parse_request_line(&head);
 
     match (method.as_str(), path.as_str()) {
-        // Streaming chat: written directly to the socket so SSE chunks
-        // flow as they're produced instead of being buffered into a
-        // single Content-Length response.
         ("POST", "/v1/chat/completions") => {
-            handle_chat_completion(&mut sock, &state, &body).await?;
+            serve_chat_completion(&mut sock, &state, &body).await?;
             return Ok(());
         }
         ("POST", "/test/script") | ("POST", "/test/reset") => {
             let resp = if has_test_control_header(&head) {
                 if path == "/test/script" {
-                    handle_test_script(&state, &body).await
+                    queue_script_response(&state, &body).await
                 } else {
-                    handle_test_reset(&state).await
+                    reset_response(&state).await
                 }
             } else {
                 (
@@ -246,7 +244,7 @@ async fn handle_request(
 async fn write_one_shot(
     sock: &mut TcpStream,
     (status_line, content_type, body): (&'static str, &'static str, String),
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let resp = format!(
         "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -258,22 +256,21 @@ async fn write_one_shot(
 
 /// Reads a full HTTP request: headers until `\r\n\r\n`, then `Content-Length`
 /// bytes of body if indicated.
-async fn read_request(sock: &mut TcpStream) -> std::io::Result<(String, String)> {
+async fn read_request(sock: &mut TcpStream) -> io::Result<(String, String)> {
     let mut buf = Vec::with_capacity(2048);
-    let mut tmp = [0u8; 1024];
+    let mut read_buf = [0u8; 1024];
     let header_end;
     loop {
-        let n = sock.read(&mut tmp).await?;
+        let n = sock.read(&mut read_buf).await?;
         if n == 0 {
             return Ok((String::from_utf8_lossy(&buf).into_owned(), String::new()));
         }
-        buf.extend_from_slice(&tmp[..n]);
+        buf.extend_from_slice(&read_buf[..n]);
         if let Some(idx) = find_header_end(&buf) {
             header_end = idx;
             break;
         }
-        if buf.len() > 16 * 1024 {
-            // Prevent unbounded growth in case a client keeps sending.
+        if buf.len() > MAX_HEADER_BYTES {
             header_end = buf.len();
             break;
         }
@@ -322,9 +319,7 @@ fn parse_request_line(head: &str) -> (String, String) {
     (method, path)
 }
 
-/// Header-gate for test-control endpoints. Production-shaped clients can't
-/// hit `/test/*` without explicitly setting this header, which prevents a
-/// misbehaving-client test from accidentally reconfiguring scripted state.
+/// Whether the request carries `X-Test-Control: 1`, which gates `/test/*`.
 fn has_test_control_header(head: &str) -> bool {
     for line in head.lines() {
         if let Some(colon) = line.find(':') {
@@ -367,9 +362,9 @@ async fn load_response(
         );
     }
     let model = extract_model_field(body);
-    let mut s = state.lock().await;
-    s.load_count += 1;
-    s.loaded_model = Some(model.clone());
+    let mut server = state.lock().await;
+    server.load_count += 1;
+    server.loaded_model = Some(model.clone());
     (
         "HTTP/1.1 200 OK",
         "application/json",
@@ -385,9 +380,9 @@ async fn unload_response(
     body: &str,
 ) -> (&'static str, &'static str, String) {
     let model = extract_model_field(body);
-    let mut s = state.lock().await;
-    s.unload_count += 1;
-    s.loaded_model = None;
+    let mut server = state.lock().await;
+    server.unload_count += 1;
+    server.loaded_model = None;
     (
         "HTTP/1.1 200 OK",
         "application/json",
@@ -401,8 +396,8 @@ async fn unload_response(
 async fn list_models_response(
     state: &Arc<Mutex<ServerState>>,
 ) -> (&'static str, &'static str, String) {
-    let s = state.lock().await;
-    let body = match &s.loaded_model {
+    let server = state.lock().await;
+    let body = match &server.loaded_model {
         Some(name) => format!(
             "{{\"data\":[{{\"id\":\"{}\",\"status\":{{\"value\":\"loaded\",\"args\":[]}}}}]}}",
             escape_json(name)
@@ -415,25 +410,30 @@ async fn list_models_response(
 async fn counters_response(
     state: &Arc<Mutex<ServerState>>,
 ) -> (&'static str, &'static str, String) {
-    let s = state.lock().await;
+    let server = state.lock().await;
     let pid = std::process::id();
-    let loaded = match &s.loaded_model {
-        Some(n) => format!("\"{}\"", escape_json(n)),
+    let loaded = match &server.loaded_model {
+        Some(name) => format!("\"{}\"", escape_json(name)),
         None => "null".to_string(),
     };
-    let last_prompt = match &s.last_prompt {
-        Some(p) => format!("\"{}\"", escape_json(p)),
+    let last_prompt = match &server.last_prompt {
+        Some(prompt) => format!("\"{}\"", escape_json(prompt)),
         None => "null".to_string(),
     };
     let body = format!(
         "{{\"pid\":{},\"load_count\":{},\"unload_count\":{},\"loaded_model\":{},\
          \"chat_completions_count\":{},\"last_prompt\":{}}}",
-        pid, s.load_count, s.unload_count, loaded, s.chat_completions_count, last_prompt
+        pid,
+        server.load_count,
+        server.unload_count,
+        loaded,
+        server.chat_completions_count,
+        last_prompt
     );
     ("HTTP/1.1 200 OK", "application/json", body)
 }
 
-async fn handle_test_script(
+async fn queue_script_response(
     state: &Arc<Mutex<ServerState>>,
     body: &str,
 ) -> (&'static str, &'static str, String) {
@@ -463,8 +463,8 @@ async fn handle_test_script(
         .get("delay_ms_between")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let mut s = state.lock().await;
-    s.chat_scripts.push_back(ChatScript {
+    let mut server = state.lock().await;
+    server.chat_scripts.push_back(ChatScript {
         deltas,
         delay_ms_between,
     });
@@ -475,13 +475,11 @@ async fn handle_test_script(
     )
 }
 
-async fn handle_test_reset(
-    state: &Arc<Mutex<ServerState>>,
-) -> (&'static str, &'static str, String) {
-    let mut s = state.lock().await;
-    s.chat_scripts.clear();
-    s.chat_completions_count = 0;
-    s.last_prompt = None;
+async fn reset_response(state: &Arc<Mutex<ServerState>>) -> (&'static str, &'static str, String) {
+    let mut server = state.lock().await;
+    server.chat_scripts.clear();
+    server.chat_completions_count = 0;
+    server.last_prompt = None;
     (
         "HTTP/1.1 200 OK",
         "application/json",
@@ -489,16 +487,13 @@ async fn handle_test_reset(
     )
 }
 
-/// Handle `POST /v1/chat/completions`. Streaming requests get a chunked SSE
-/// body terminated by `data: [DONE]`; non-streaming requests get a single
-/// JSON object with `choices[0].message.content`. Pops one entry off the
-/// scripted-reply queue per request; falls back to a single `"hello"` delta
-/// when the queue is empty.
-async fn handle_chat_completion(
+/// Answer `POST /v1/chat/completions` with the next scripted reply (default
+/// `"hello"`): a chunked SSE stream written as produced, or one JSON body.
+async fn serve_chat_completion(
     sock: &mut TcpStream,
     state: &Arc<Mutex<ServerState>>,
     body: &str,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let stream = parsed
         .get("stream")
@@ -520,12 +515,12 @@ async fn handle_chat_completion(
         });
 
     let script = {
-        let mut s = state.lock().await;
-        s.chat_completions_count += 1;
-        if let Some(p) = last_user {
-            s.last_prompt = Some(p);
+        let mut server = state.lock().await;
+        server.chat_completions_count += 1;
+        if let Some(prompt) = last_user {
+            server.last_prompt = Some(prompt);
         }
-        s.chat_scripts.pop_front().unwrap_or(ChatScript {
+        server.chat_scripts.pop_front().unwrap_or(ChatScript {
             deltas: vec!["hello".to_string()],
             delay_ms_between: 0,
         })
@@ -550,7 +545,7 @@ async fn handle_chat_completion(
     Ok(())
 }
 
-async fn write_sse_stream(sock: &mut TcpStream, script: &ChatScript) -> std::io::Result<()> {
+async fn write_sse_stream(sock: &mut TcpStream, script: &ChatScript) -> io::Result<()> {
     let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
     sock.write_all(headers).await?;
 
@@ -570,7 +565,7 @@ async fn write_sse_stream(sock: &mut TcpStream, script: &ChatScript) -> std::io:
     Ok(())
 }
 
-async fn write_chunk(sock: &mut TcpStream, payload: &[u8]) -> std::io::Result<()> {
+async fn write_chunk(sock: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
     let header = format!("{:x}\r\n", payload.len());
     sock.write_all(header.as_bytes()).await?;
     sock.write_all(payload).await?;
@@ -578,13 +573,12 @@ async fn write_chunk(sock: &mut TcpStream, payload: &[u8]) -> std::io::Result<()
     Ok(())
 }
 
-async fn write_final_chunk(sock: &mut TcpStream) -> std::io::Result<()> {
+async fn write_final_chunk(sock: &mut TcpStream) -> io::Result<()> {
     sock.write_all(b"0\r\n\r\n").await
 }
 
-/// Pulls the `"model": "..."` string out of a JSON body by text search,
-/// which suffices for the flat single-field model requests. Returns an
-/// empty string when the field is absent.
+/// The `"model": "..."` string from a flat JSON body, found by text search;
+/// empty when absent.
 fn extract_model_field(body: &str) -> String {
     let key = "\"model\"";
     let Some(start) = body.find(key) else {

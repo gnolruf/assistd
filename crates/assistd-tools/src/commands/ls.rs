@@ -1,62 +1,14 @@
-use std::io::ErrorKind;
+use std::fs::Metadata;
+use std::io::{self, ErrorKind};
 
 use async_trait::async_trait;
+use tokio::fs::ReadDir;
 
 use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
 
-/// `ls [-al] [PATH]`: list directory entries alphabetically, one per
-/// line, formatted as `<type>\t<size>\t<name>`. Type is `dir`, `file`,
-/// or `symlink`; size is raw bytes from the entry's (symlink-preserving)
-/// metadata. A PATH that is not a directory yields a single row named
-/// by PATH as given. Defaults to the daemon's CWD if no path given.
-///
-/// Flags:
-/// - `-a` include entries whose name starts with `.`
-/// - `-l` long format; accepted for shell familiarity, and already the
-///   only format this command emits
+/// `ls [-al] [PATH]`: list PATH (default CWD) as sorted
+/// `<type>\t<size>\t<name>` rows, without following symlinks.
 pub struct LsCommand;
-
-fn parse_flags(argv: &[String]) -> Result<(bool, &str), String> {
-    let mut show_hidden = false;
-    let mut path = None;
-    for arg in argv {
-        match arg.strip_prefix('-') {
-            Some(flags) if !flags.is_empty() && path.is_none() => {
-                for ch in flags.chars() {
-                    match ch {
-                        'a' => show_hidden = true,
-                        'l' => {}
-                        other => return Err(format!("unknown flag '-{other}'")),
-                    }
-                }
-            }
-            _ => path = Some(arg.as_str()),
-        }
-    }
-    Ok((show_hidden, path.unwrap_or(".")))
-}
-
-fn kind_and_size(md: &std::fs::Metadata) -> (&'static str, u64) {
-    let ft = md.file_type();
-    let kind = if ft.is_symlink() {
-        "symlink"
-    } else if ft.is_dir() {
-        "dir"
-    } else {
-        "file"
-    };
-    (kind, md.len())
-}
-
-async fn list_file(path: &str) -> CommandOutput {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(md) => {
-            let (kind, size) = kind_and_size(&md);
-            CommandOutput::ok(format!("{kind}\t{size}\t{path}\n").into_bytes())
-        }
-        Err(e) => CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes()),
-    }
-}
 
 #[async_trait]
 impl Command for LsCommand {
@@ -88,32 +40,19 @@ impl Command for LsCommand {
             Ok(v) => v,
             Err(msg) => return CommandOutput::usage_error("ls", msg, "ls -al PATH"),
         };
-        let mut reader = match tokio::fs::read_dir(path).await {
+        let reader = match tokio::fs::read_dir(path).await {
             Ok(r) => r,
             Err(e) if e.kind() == ErrorKind::NotADirectory => return list_file(path).await,
             Err(e) => {
                 return CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes());
             }
         };
-        let mut rows: Vec<(String, &'static str, u64)> = Vec::new();
-        loop {
-            match reader.next_entry().await {
-                Ok(Some(entry)) => {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if !show_hidden && name.starts_with('.') {
-                        continue;
-                    }
-                    let (kind, size) = tokio::fs::symlink_metadata(entry.path())
-                        .await
-                        .map_or(("file", 0), |md| kind_and_size(&md));
-                    rows.push((name, kind, size));
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    return CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes());
-                }
+        let mut rows = match read_rows(reader, show_hidden).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                return CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes());
             }
-        }
+        };
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         let mut out = Vec::new();
         for (name, kind, size) in rows {
@@ -123,10 +62,71 @@ impl Command for LsCommand {
     }
 }
 
+fn parse_flags(argv: &[String]) -> Result<(bool, &str), String> {
+    let mut show_hidden = false;
+    let mut path = None;
+    for arg in argv {
+        match arg.strip_prefix('-') {
+            Some(flags) if !flags.is_empty() && path.is_none() => {
+                for ch in flags.chars() {
+                    match ch {
+                        'a' => show_hidden = true,
+                        'l' => {}
+                        other => return Err(format!("unknown flag '-{other}'")),
+                    }
+                }
+            }
+            _ => path = Some(arg.as_str()),
+        }
+    }
+    Ok((show_hidden, path.unwrap_or(".")))
+}
+
+fn kind_and_size(md: &Metadata) -> (&'static str, u64) {
+    let file_type = md.file_type();
+    let kind = if file_type.is_symlink() {
+        "symlink"
+    } else if file_type.is_dir() {
+        "dir"
+    } else {
+        "file"
+    };
+    (kind, md.len())
+}
+
+async fn list_file(path: &str) -> CommandOutput {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(md) => {
+            let (kind, size) = kind_and_size(&md);
+            CommandOutput::ok(format!("{kind}\t{size}\t{path}\n").into_bytes())
+        }
+        Err(e) => CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes()),
+    }
+}
+
+async fn read_rows(
+    mut reader: ReadDir,
+    show_hidden: bool,
+) -> io::Result<Vec<(String, &'static str, u64)>> {
+    let mut rows = Vec::new();
+    while let Some(entry) = reader.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !show_hidden && name.starts_with('.') {
+            continue;
+        }
+        let (kind, size) = tokio::fs::symlink_metadata(entry.path())
+            .await
+            .map_or(("file", 0), |md| kind_and_size(&md));
+        rows.push((name, kind, size));
+    }
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     async fn run_ls(args: &[&str]) -> CommandOutput {
         LsCommand
@@ -189,8 +189,6 @@ mod tests {
         );
     }
 
-    /// Once a path is set, a dash-prefixed argument is a path too, so a
-    /// file literally named `-weird` stays reachable.
     #[tokio::test]
     async fn ls_treats_dash_prefixed_path_after_path_as_path() {
         let out = run_ls(&["/tmp", "-weird"]).await;

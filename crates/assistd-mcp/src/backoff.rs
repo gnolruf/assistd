@@ -5,14 +5,11 @@ use std::time::{Duration, Instant};
 /// slow [`UNHEALTHY_RETRY_INTERVAL`] cadence.
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
-/// A transport that ran successfully for at least this many seconds
-/// before exiting resets the consecutive-failure counter; i.e. a
-/// long-lived server that occasionally crashes does not get parked.
+/// A session at least this long resets the consecutive-failure counter.
 pub const MIN_HEALTHY_SECONDS: u64 = 30;
 
-/// Rolling-window cap on restarts. Without it a server that stays up
-/// just past [`MIN_HEALTHY_SECONDS`] before each crash would reset the
-/// consecutive counter every cycle and restart forever.
+/// Rolling-window cap on restarts; catches a server that crashes just
+/// after each [`MIN_HEALTHY_SECONDS`] reset.
 pub const MAX_RESTARTS_PER_WINDOW: usize = 10;
 
 /// Width of the rolling window used by [`MAX_RESTARTS_PER_WINDOW`].
@@ -21,8 +18,7 @@ pub const RESTART_WINDOW: Duration = Duration::from_secs(600);
 /// Upper bound on [`backoff_delay`], in seconds.
 pub const RECONNECT_MAX_SECS: u64 = 60;
 
-/// Spawn cadence once either cap is hit: slow enough not to thrash,
-/// fast enough that a fixed config self-heals within minutes.
+/// Spawn cadence once either cap is hit.
 pub const UNHEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (capped).

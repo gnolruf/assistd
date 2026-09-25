@@ -23,27 +23,18 @@ const OPEN_TAG: &str = "<think>";
 const CLOSE_TAG: &str = "</think>";
 
 /// Stateful `<think>` / `</think>` tag tracker for streamed `content`
-/// chunks. Some llama.cpp builds and reasoning models (Qwen3,
-/// DeepSeek-R1) emit reasoning inline in `content` rather than on the
-/// separate `reasoning_content` channel unless the server runs with
-/// `--reasoning-format`, which cannot be relied on.
-///
-/// A tag split across chunks (`"<thi"` then `"nk>hello"`) is held back
-/// until it completes; at most `CLOSE_TAG.len() - 1 == 7` bytes carry
-/// over between calls. The tags are ASCII, so byte offsets into the
-/// carried-over text never land inside a multibyte UTF-8 character.
+/// chunks. A tag split across chunks is held back until it completes, so
+/// at most `CLOSE_TAG.len() - 1` bytes carry over between calls.
 #[derive(Debug, Default)]
 pub struct ThinkSplitter {
     state: State,
-    /// Carryover bytes from the previous chunk's tail that might be the
-    /// start of a tag completing on the next chunk.
+    /// Tail of the previous chunk that may begin a tag.
     pending: String,
 }
 
 impl ThinkSplitter {
-    /// Push the next `content` chunk and return zero or more
-    /// classified segments in order. Pending bytes carried over from
-    /// the previous call are prepended transparently.
+    /// Push the next `content` chunk and return its classified segments in
+    /// order, prepending any bytes held back from the previous call.
     pub fn feed(&mut self, chunk: &str) -> Vec<Segment> {
         let mut out = Vec::new();
         if chunk.is_empty() && self.pending.is_empty() {
@@ -71,15 +62,8 @@ impl ThinkSplitter {
                 };
                 continue;
             }
-            // Hold back a tail that could be the start of `target`.
             let tail = &buf[cursor..];
-            let mut hold = 0usize;
-            for n in (1..target.len()).rev() {
-                if n <= tail.len() && tail.ends_with(&target[..n]) {
-                    hold = n;
-                    break;
-                }
-            }
+            let hold = partial_tag_len(tail, target);
             let emit_end = tail.len() - hold;
             if emit_end > 0 {
                 push_segment(&mut out, self.state, &tail[..emit_end]);
@@ -104,6 +88,14 @@ impl ThinkSplitter {
             State::InsideThink => Segment::Reasoning(text),
         })
     }
+}
+
+/// Length of the longest proper prefix of `tag` that `tail` ends with.
+fn partial_tag_len(tail: &str, tag: &str) -> usize {
+    (1..tag.len())
+        .rev()
+        .find(|&n| n <= tail.len() && tail.ends_with(&tag[..n]))
+        .unwrap_or(0)
 }
 
 /// Append `text` classified by `state`, coalescing with the previous

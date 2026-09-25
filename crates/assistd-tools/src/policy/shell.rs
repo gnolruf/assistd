@@ -1,32 +1,24 @@
-//! A bash lexer for policy checks. It finds every simple command a script
-//! can run, including those inside substitutions, subshells and
-//! here-document expansions, and records which words are only known at
-//! run time. Where it cannot follow bash exactly it errs toward seeing
+//! A bash lexer for policy checks: it finds every simple command a script
+//! can run. Where it cannot follow bash exactly it errs toward seeing
 //! commands that are not there, never toward hiding ones that are.
 
 use std::mem;
 
-/// How deeply substitutions, subshells and parameter expansions may nest
-/// before [`parse`] gives up.
+/// How deeply constructs may nest before [`parse`] gives up.
 const MAX_DEPTH: usize = 64;
 
 /// A shell word after quote removal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Word {
-    /// The word with quotes and escapes removed. Expansions and
-    /// substitutions are kept as written.
+    /// Quotes and escapes removed; expansions kept as written.
     pub text: String,
-    /// Some part of the word is only known at run time: an expansion, a
-    /// substitution, or a glob or brace expansion.
+    /// Some part is only known at run time (expansion, substitution, glob).
     pub dynamic: bool,
-    /// The word may become several words at run time: an unquoted
-    /// expansion, a glob, a brace expansion, or `"$@"`.
+    /// It may become several words at run time.
     pub splits: bool,
-    /// Which program the word runs is only known at run time: it
-    /// [`splits`](Self::splits), or has a dynamic part after its last `/`.
+    /// It [`splits`](Self::splits) or is dynamic after its last `/`.
     pub dynamic_name: bool,
-    /// Some part of the word was quoted or escaped, so it is never a
-    /// reserved word.
+    /// Some part was quoted or escaped, so it is never a reserved word.
     pub quoted: bool,
 }
 
@@ -44,10 +36,9 @@ impl Word {
 #[derive(Debug, Default)]
 pub(super) struct SimpleCommand {
     pub words: Vec<Word>,
-    /// Indexes into [`Script::inputs`] of the here-documents and
-    /// here-strings fed to this command's stdin.
+    /// Indexes into [`Script::inputs`] of what is fed to its stdin.
     pub inputs: Vec<usize>,
-    /// The files it redirects to or from.
+    /// Redirection targets.
     pub redirects: Vec<Word>,
 }
 
@@ -58,9 +49,8 @@ pub(super) struct Script {
     pub commands: Vec<SimpleCommand>,
     /// Here-document bodies and here-string words, as written.
     pub inputs: Vec<String>,
-    /// Functions the script defines, each with the index into
-    /// [`Script::commands`] of the first command after its definition
-    /// began.
+    /// Each function defined, with the index into [`Script::commands`] of
+    /// the first command after its definition began.
     pub functions: Vec<(String, usize)>,
     /// The script ended inside a quote, substitution or subshell.
     pub incomplete: bool,
@@ -76,21 +66,6 @@ impl Script {
 /// Constructs nest more than [`MAX_DEPTH`] levels deep.
 #[derive(Debug)]
 pub(super) struct TooDeep;
-
-/// Lex `src` into its simple commands.
-///
-/// # Errors
-///
-/// [`TooDeep`] when substitutions, subshells or parameter expansions nest
-/// more than [`MAX_DEPTH`] levels deep.
-pub(super) fn parse(src: &str) -> Result<Script, TooDeep> {
-    let mut script = Script::default();
-    let mut lexer = Lexer::new(src, &mut script, 0);
-    lexer.commands(false)?;
-    let incomplete = lexer.incomplete;
-    script.incomplete = incomplete;
-    Ok(script)
-}
 
 struct Heredoc {
     input: usize,
@@ -179,11 +154,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
                     self.end_command(&mut cmd);
                     self.heredoc_bodies()?;
                 }
-                '#' => {
-                    while self.peek().is_some_and(|c| c != '\n') {
-                        self.next();
-                    }
-                }
+                '#' => self.skip_comment(),
                 ';' | '|' => {
                     self.skip(1);
                     self.end_command(&mut cmd);
@@ -215,14 +186,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 '&' | '<' | '>' if c == '&' || self.peek_at(1) != Some('(') => {
                     self.redirect(&mut cmd)?;
                 }
-                _ => {
-                    if let Some(word) = self.word()? {
-                        let fd = matches!(self.peek(), Some('<' | '>')) && is_fd(&word);
-                        if !fd {
-                            cmd.words.push(word);
-                        }
-                    }
-                }
+                _ => self.command_word(&mut cmd)?,
             }
         }
         self.end_command(&mut cmd);
@@ -230,9 +194,26 @@ impl<'s, 'o> Lexer<'s, 'o> {
         Ok(())
     }
 
-    /// After a `(`: whether it opens `name ()`, a function definition.
-    /// If so, consumes the `)` and records the name in place of a
-    /// command.
+    fn skip_comment(&mut self) {
+        while self.peek().is_some_and(|c| c != '\n') {
+            self.next();
+        }
+    }
+
+    /// Lex one word into `cmd`, dropping a file-descriptor prefix on a
+    /// redirection.
+    fn command_word(&mut self, cmd: &mut SimpleCommand) -> Result<(), TooDeep> {
+        if let Some(word) = self.word()? {
+            let fd = matches!(self.peek(), Some('<' | '>')) && is_fd(&word);
+            if !fd {
+                cmd.words.push(word);
+            }
+        }
+        Ok(())
+    }
+
+    /// After a `(`: whether it opens a `name ()` function definition. If
+    /// so, consumes the `)` and records the name in place of a command.
     fn function_definition(&mut self, cmd: &mut SimpleCommand) -> bool {
         let [name] = cmd.words.as_slice() else {
             return false;
@@ -265,7 +246,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
         }
     }
 
-    fn input(&mut self, text: String) -> usize {
+    fn push_input(&mut self, text: String) -> usize {
         self.out.inputs.push(text);
         self.out.inputs.len() - 1
     }
@@ -274,7 +255,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
         if self.eat("<<<") {
             self.skip_blanks();
             if let Some(word) = self.word()? {
-                let input = self.input(word.text);
+                let input = self.push_input(word.text);
                 cmd.inputs.push(input);
             }
             return Ok(());
@@ -283,7 +264,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
             let strip_tabs = self.eat("-");
             self.skip_blanks();
             let delimiter = self.word()?.unwrap_or_default();
-            let input = self.input(String::new());
+            let input = self.push_input(String::new());
             cmd.inputs.push(input);
             self.heredocs.push(Heredoc {
                 input,
@@ -306,31 +287,12 @@ impl<'s, 'o> Lexer<'s, 'o> {
     }
 
     /// Read the bodies of the here-documents opened on the line just
-    /// ended. A body whose delimiter is unquoted undergoes expansion, so
-    /// its substitutions are lexed as commands. A body never closed by
-    /// its delimiter marks the script incomplete: bash runs it anyway, but
-    /// it is also what a `<<` misread as a here-document looks like.
+    /// ended, lexing the substitutions of those with an unquoted delimiter.
+    /// An unclosed body marks the script incomplete, as a `<<` misread as a
+    /// here-document would look.
     fn heredoc_bodies(&mut self) -> Result<(), TooDeep> {
-        let src = self.src;
         for doc in mem::take(&mut self.heredocs) {
-            let mut body = String::new();
-            let mut closed = false;
-            while self.pos < src.len() {
-                let rest = &src[self.pos..];
-                let line = &rest[..rest.find('\n').map_or(rest.len(), |i| i + 1)];
-                self.pos += line.len();
-                let bare = line.strip_suffix('\n').unwrap_or(line);
-                let bare = if doc.strip_tabs {
-                    bare.trim_start_matches('\t')
-                } else {
-                    bare
-                };
-                if bare == doc.delimiter {
-                    closed = true;
-                    break;
-                }
-                body.push_str(line);
-            }
+            let (body, closed) = self.heredoc_body(&doc);
             self.incomplete |= !closed;
             if doc.expands {
                 let mut lexer = Lexer::new(&body, &mut *self.out, self.depth);
@@ -342,6 +304,29 @@ impl<'s, 'o> Lexer<'s, 'o> {
         Ok(())
     }
 
+    /// Consume lines up to `doc`'s delimiter, returning the body and
+    /// whether the delimiter was found.
+    fn heredoc_body(&mut self, doc: &Heredoc) -> (String, bool) {
+        let src = self.src;
+        let mut body = String::new();
+        while self.pos < src.len() {
+            let rest = &src[self.pos..];
+            let line = &rest[..rest.find('\n').map_or(rest.len(), |i| i + 1)];
+            self.pos += line.len();
+            let bare = line.strip_suffix('\n').unwrap_or(line);
+            let bare = if doc.strip_tabs {
+                bare.trim_start_matches('\t')
+            } else {
+                bare
+            };
+            if bare == doc.delimiter {
+                return (body, true);
+            }
+            body.push_str(line);
+        }
+        (body, false)
+    }
+
     /// Lex `src` as a script of its own, adding its commands to ours.
     fn nested(&mut self, src: &str) -> Result<(), TooDeep> {
         let mut lexer = Lexer::new(src, &mut *self.out, self.depth);
@@ -350,13 +335,9 @@ impl<'s, 'o> Lexer<'s, 'o> {
         Ok(())
     }
 
-    /// Consume up to the `close` that balances `depth` already-consumed
-    /// `open`s and lex what lies between as commands. Arithmetic, array
-    /// subscripts and extended globs take this path: bash runs only their
-    /// substitutions, which this finds, at the cost of also seeing
-    /// commands that are not there. Lexing them apart keeps a `<<` shift
-    /// inside from being read as a here-document that swallows the lines
-    /// after it.
+    /// Consume up to the `close` that balances `depth` consumed `open`s and
+    /// lex what lies between as commands. Used for arithmetic, subscripts
+    /// and extglobs, so a `<<` shift inside is never read as a here-document.
     fn balanced(&mut self, open: char, close: char, mut depth: usize) -> Result<(), TooDeep> {
         let src = self.src;
         let start = self.pos;
@@ -385,8 +366,8 @@ impl<'s, 'o> Lexer<'s, 'o> {
         self.nested(&src[start..end])
     }
 
-    /// Consume the `( … )` of an array assignment. Its elements are
-    /// values, not a command, but their substitutions still run.
+    /// Consume the `( … )` of an array assignment, whose elements are
+    /// values but whose substitutions still run.
     fn array(&mut self) -> Result<(), TooDeep> {
         self.descend()?;
         loop {
@@ -400,11 +381,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
                     break;
                 }
                 Some(' ' | '\t' | '\n') => self.skip(1),
-                Some('#') => {
-                    while self.peek().is_some_and(|c| c != '\n') {
-                        self.next();
-                    }
-                }
+                Some('#') => self.skip_comment(),
                 Some(_) => {
                     let before = self.pos;
                     self.word()?;
@@ -436,75 +413,83 @@ impl<'s, 'o> Lexer<'s, 'o> {
 
     fn word(&mut self) -> Result<Option<Word>, TooDeep> {
         let src = self.src;
-        let mut w = WordBuf::default();
+        let mut buf = WordBuf::default();
         if matches!(self.peek(), Some('<' | '>')) && self.peek_at(1) == Some('(') {
-            let start = self.pos;
-            self.skip(2);
-            self.commands(true)?;
-            w.expansion(&src[start..self.pos], true);
+            self.process_substitution(&mut buf)?;
         }
         while let Some(c) = self.peek() {
             match c {
                 ' ' | '\t' | '\n' | ';' | '&' | '|' | ')' | '<' | '>' => break,
-                '(' if w.before_extglob() => {
+                '(' if buf.before_extglob() => {
                     let start = self.pos;
                     self.skip(1);
                     self.balanced('(', ')', 1)?;
-                    w.expansion(&src[start..self.pos], true);
+                    buf.expansion(&src[start..self.pos], true);
                 }
-                '(' if w.is_array_assignment() => {
+                '(' if buf.is_array_assignment() => {
                     let start = self.pos;
                     self.skip(1);
                     self.array()?;
-                    w.expansion(&src[start..self.pos], false);
+                    buf.expansion(&src[start..self.pos], false);
                 }
-                '[' if w.is_bare_name() => {
+                '[' if buf.is_bare_name() => {
                     let start = self.pos;
                     self.skip(1);
                     self.balanced('[', ']', 1)?;
-                    w.expansion(&src[start..self.pos], true);
+                    buf.expansion(&src[start..self.pos], true);
                 }
                 '(' => break,
                 '\\' => {
                     self.skip(1);
                     match self.next() {
                         Some('\n') | None => {}
-                        Some(escaped) => w.quoted_char(escaped),
+                        Some(escaped) => buf.quoted_char(escaped),
                     }
                 }
-                '\'' => {
-                    self.skip(1);
-                    w.open_quote();
-                    loop {
-                        match self.next() {
-                            Some('\'') => break,
-                            Some(q) => w.quoted_char(q),
-                            None => {
-                                self.incomplete = true;
-                                break;
-                            }
-                        }
-                    }
-                }
+                '\'' => self.single_quoted(&mut buf),
                 '"' => {
                     self.skip(1);
-                    w.open_quote();
-                    self.double_quoted(&mut w, true)?;
+                    buf.open_quote();
+                    self.double_quoted(&mut buf, true)?;
                 }
-                '$' => self.dollar(&mut w, false)?,
-                '`' => self.backtick(&mut w, false)?,
+                '$' => self.dollar(&mut buf, false)?,
+                '`' => self.backtick(&mut buf, false)?,
                 _ => {
                     self.skip(1);
-                    w.unquoted_char(c);
+                    buf.unquoted_char(c);
                 }
             }
         }
-        Ok(w.finish())
+        Ok(buf.finish())
     }
 
-    /// Lex double-quoted text up to its closing `"` or, when not
-    /// `closed`, to the end of input (a here-document body).
-    fn double_quoted(&mut self, w: &mut WordBuf, closed: bool) -> Result<(), TooDeep> {
+    fn process_substitution(&mut self, buf: &mut WordBuf) -> Result<(), TooDeep> {
+        let src = self.src;
+        let start = self.pos;
+        self.skip(2);
+        self.commands(true)?;
+        buf.expansion(&src[start..self.pos], true);
+        Ok(())
+    }
+
+    fn single_quoted(&mut self, buf: &mut WordBuf) {
+        self.skip(1);
+        buf.open_quote();
+        loop {
+            match self.next() {
+                Some('\'') => return,
+                Some(c) => buf.quoted_char(c),
+                None => {
+                    self.incomplete = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Lex double-quoted text up to its closing `"` or, when not `closed`,
+    /// to the end of input.
+    fn double_quoted(&mut self, buf: &mut WordBuf, closed: bool) -> Result<(), TooDeep> {
         loop {
             let Some(c) = self.peek() else {
                 self.incomplete |= closed;
@@ -521,26 +506,44 @@ impl<'s, 'o> Lexer<'s, 'o> {
                         Some('\n') => self.skip(1),
                         Some(escaped @ ('"' | '\\' | '$' | '`')) => {
                             self.skip(1);
-                            w.quoted_char(escaped);
+                            buf.quoted_char(escaped);
                         }
-                        _ => w.quoted_char('\\'),
+                        _ => buf.quoted_char('\\'),
                     }
                 }
-                '$' => self.dollar(w, true)?,
-                '`' => self.backtick(w, true)?,
+                '$' => self.dollar(buf, true)?,
+                '`' => self.backtick(buf, true)?,
                 _ => {
                     self.skip(1);
-                    w.quoted_char(c);
+                    buf.quoted_char(c);
                 }
             }
         }
     }
 
-    fn dollar(&mut self, w: &mut WordBuf, quoted: bool) -> Result<(), TooDeep> {
+    fn dollar(&mut self, buf: &mut WordBuf, quoted: bool) -> Result<(), TooDeep> {
         let src = self.src;
         let start = self.pos;
         self.skip(1);
-        let mut splits = !quoted;
+        if !quoted && self.peek() == Some('"') {
+            self.skip(1);
+            buf.open_quote();
+            return self.double_quoted(buf, true);
+        }
+        match self.after_dollar(quoted)? {
+            Some(splits) => {
+                let raw = &src[start..self.pos];
+                buf.expansion(raw, splits || raw.contains('@'));
+            }
+            None if quoted => buf.quoted_char('$'),
+            None => buf.unquoted_char('$'),
+        }
+        Ok(())
+    }
+
+    /// Consume the expansion after a `$`, returning whether it splits, or
+    /// `None` when the `$` is literal.
+    fn after_dollar(&mut self, quoted: bool) -> Result<Option<bool>, TooDeep> {
         match self.peek() {
             Some('(') if self.peek_at(1) == Some('(') => {
                 self.skip(2);
@@ -565,12 +568,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
             Some('\'') if !quoted => {
                 self.skip(1);
                 self.ansi_c();
-                splits = false;
-            }
-            Some('"') if !quoted => {
-                self.skip(1);
-                w.open_quote();
-                return self.double_quoted(w, true);
+                return Ok(Some(false));
             }
             Some(c) if c.is_ascii_alphabetic() || c == '_' => {
                 while self
@@ -581,18 +579,9 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 }
             }
             Some(c) if c.is_ascii_digit() || "@*#?-$!".contains(c) => self.skip(1),
-            _ => {
-                if quoted {
-                    w.quoted_char('$');
-                } else {
-                    w.unquoted_char('$');
-                }
-                return Ok(());
-            }
+            _ => return Ok(None),
         }
-        let raw = &src[start..self.pos];
-        w.expansion(raw, splits || raw.contains('@'));
-        Ok(())
+        Ok(Some(!quoted))
     }
 
     /// Consume a `${…}` body, lexing the substitutions inside it.
@@ -643,9 +632,8 @@ impl<'s, 'o> Lexer<'s, 'o> {
         }
     }
 
-    /// A backquoted substitution. Its body ends at the first unescaped
-    /// backquote, and is lexed after bash's backslash unescaping.
-    fn backtick(&mut self, w: &mut WordBuf, quoted: bool) -> Result<(), TooDeep> {
+    /// A backquoted substitution, lexed after bash's backslash unescaping.
+    fn backtick(&mut self, buf: &mut WordBuf, quoted: bool) -> Result<(), TooDeep> {
         let src = self.src;
         let start = self.pos;
         self.skip(1);
@@ -669,26 +657,9 @@ impl<'s, 'o> Lexer<'s, 'o> {
             }
         }
         self.nested(&body)?;
-        w.expansion(&src[start..self.pos], !quoted);
+        buf.expansion(&src[start..self.pos], !quoted);
         Ok(())
     }
-}
-
-/// Whether `text` is a shell variable name.
-pub(super) fn is_name(text: &str) -> bool {
-    text.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// A file-descriptor prefix on a redirection: the `2` of `2>&1` or the
-/// `{fd}` of `{fd}>file`.
-fn is_fd(word: &Word) -> bool {
-    let text = word.text.as_str();
-    !word.quoted
-        && !word.dynamic
-        && !text.is_empty()
-        && (text.bytes().all(|b| b.is_ascii_digit())
-            || (text.starts_with('{') && text.ends_with('}')))
 }
 
 #[derive(Default)]
@@ -700,6 +671,7 @@ struct WordBuf {
     splits: bool,
     tail_dynamic: bool,
     bracket: bool,
+    /// An open `{`; `Some(true)` once it has seen `,` or `..`.
     brace: Option<bool>,
     last_unquoted: Option<char>,
 }
@@ -758,8 +730,7 @@ impl WordBuf {
         self.last_unquoted = None;
     }
 
-    /// The word so far is a bare variable name, so a `[` opens an
-    /// array subscript.
+    /// The word so far is a bare name, so a `[` opens a subscript.
     fn is_bare_name(&self) -> bool {
         !self.quoted && !self.dynamic && is_name(&self.text)
     }
@@ -788,4 +759,33 @@ impl WordBuf {
             quoted: self.quoted,
         })
     }
+}
+
+/// Lex `src` into its simple commands.
+///
+/// # Errors
+/// [`TooDeep`] when constructs nest more than [`MAX_DEPTH`] levels deep.
+pub(super) fn parse(src: &str) -> Result<Script, TooDeep> {
+    let mut script = Script::default();
+    let mut lexer = Lexer::new(src, &mut script, 0);
+    lexer.commands(false)?;
+    script.incomplete = lexer.incomplete;
+    Ok(script)
+}
+
+/// Whether `text` is a shell variable name.
+pub(super) fn is_name(text: &str) -> bool {
+    text.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A redirection's file-descriptor prefix: `2` of `2>&1`, `{fd}` of
+/// `{fd}>file`.
+fn is_fd(word: &Word) -> bool {
+    let text = word.text.as_str();
+    !word.quoted
+        && !word.dynamic
+        && !text.is_empty()
+        && (text.bytes().all(|b| b.is_ascii_digit())
+            || (text.starts_with('{') && text.ends_with('}')))
 }

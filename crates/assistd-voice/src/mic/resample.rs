@@ -47,22 +47,20 @@ impl ChunkResampler {
         })
     }
 
-    /// Pull up to one chunk from `consumer` and return it at 16 kHz.
-    /// `None` when the ring is empty. A partial chunk is zero-padded
-    /// to the resampler's fixed input size, so the tail of an
-    /// utterance is kept.
+    /// Pull up to one chunk from `consumer` at 16 kHz; `None` when the ring is
+    /// empty. A partial chunk is zero-padded so an utterance's tail is kept.
     pub fn pull(
         &mut self,
         consumer: &mut HeapCons<f32>,
     ) -> Result<Option<&[f32]>, AudioCaptureError> {
-        let got = consumer.pop_slice(&mut self.input);
-        if got == 0 {
+        let popped = consumer.pop_slice(&mut self.input);
+        if popped == 0 {
             return Ok(None);
         }
         let Some(resampler) = &mut self.resampler else {
-            return Ok(Some(&self.input[..got]));
+            return Ok(Some(&self.input[..popped]));
         };
-        self.input[got..].fill(0.0);
+        self.input[popped..].fill(0.0);
 
         let input = SequentialSlice::new(&self.input[..], 1, CHUNK_SIZE)
             .map_err(|e| AudioCaptureError::DeviceError(format!("rubato input adapter: {e}")))?;
@@ -77,8 +75,8 @@ impl ChunkResampler {
 }
 
 #[inline]
-pub(crate) fn f32_to_i16(s: f32) -> i16 {
-    (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
+pub(crate) fn f32_to_i16(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
 }
 
 #[cfg(test)]

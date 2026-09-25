@@ -1,11 +1,14 @@
 //! `Subscribe` handler: forwards bus events to a passive client.
 
-use super::AppState;
-use assistd_ipc::{Event, SubscribeFilter};
 use std::sync::Arc;
+
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+
+use assistd_ipc::{Event, SubscribeFilter};
+
+use super::AppState;
 
 impl AppState {
     pub(super) async fn handle_subscribe(

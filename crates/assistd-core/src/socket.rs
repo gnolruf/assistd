@@ -1,41 +1,42 @@
-use crate::AppState;
-use assistd_ipc::{Event, Request};
-use assistd_tools::{Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter};
+//! Unix-socket IPC server: one newline-delimited JSON request per
+//! connection, answered by a stream of events.
+
 use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
+use assistd_ipc::{Event, Request};
+use assistd_tools::{Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter};
+
+use crate::AppState;
+use crate::recovery::drain_join_set;
+
 const EVENT_CHANNEL_CAPACITY: usize = 32;
 
-/// Longest a single event write may block on a client that has stopped
-/// reading. A query turn holds the agent turn lock while its events are
-/// forwarded, so a stalled reader would otherwise stall every later
-/// query behind it.
+/// Longest one event write may block on a client that stopped reading,
+/// since a stalled reader holds the agent turn lock for later queries.
 const EVENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Hard cap on a single newline-delimited request frame. `read_line` is
-/// otherwise unbounded; a runaway client streaming a multi-GB prompt
-/// would OOM the daemon. 64 MiB fits a single 32 MiB image attachment
-/// (`MAX_IMAGE_BYTES`) base64-encoded plus JSON overhead with margin.
+/// Cap on one request frame: a 32 MiB image base64-encoded plus JSON
+/// overhead, so a runaway client cannot OOM the daemon.
 const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Backoff applied when `accept()` returns EMFILE/ENFILE. Without it the
-/// select! arm spins, because the error is returned synchronously and
-/// nothing else changes to clear the condition.
+/// Pause after EMFILE/ENFILE from `accept()`, which would otherwise spin.
 const FD_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(100);
 
-/// Matches the raw errno because EMFILE maps to the unstable
-/// `io::ErrorKind::Uncategorized` on current stable Rust.
-fn is_fd_exhaustion(err: &std::io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE))
-}
+/// How long an existing socket gets to accept a probe before it is
+/// treated as stale; one that hangs past this is treated as live.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Errors produced by the socket listener and per-connection handlers.
 #[derive(Debug, Error)]
@@ -50,18 +51,18 @@ pub enum SocketError {
     StaleCleanup {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
 
     #[error("failed to bind unix socket at {path}: {source}")]
     Bind {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
 
     #[error("socket I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 
     #[error("client did not accept an event within {0:?}")]
     WriteTimeout(Duration),
@@ -70,10 +71,38 @@ pub enum SocketError {
     Json(#[from] serde_json::Error),
 }
 
-/// How long an existing socket gets to accept a probe connection before
-/// it is treated as stale. A socket that hangs past this is treated as
-/// live to avoid clobbering it.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+/// [`serve_at`] on the default path from [`assistd_ipc::socket_path`].
+pub async fn serve<F>(state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
+where
+    F: Future<Output = ()>,
+{
+    let path = assistd_ipc::socket_path();
+    serve_at(&path, state, shutdown).await
+}
+
+/// Serve the IPC socket at `path` until `shutdown` resolves, then drain
+/// in-flight connections for up to `daemon.shutdown_grace_secs`. A stale
+/// socket file at `path` is removed first; a live one is an error.
+pub async fn serve_at<F>(path: &Path, state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
+where
+    F: Future<Output = ()>,
+{
+    prepare_socket_path(path).await?;
+
+    let listener = UnixListener::bind(path).map_err(|source| SocketError::Bind {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    info!("listening on {}", path.display());
+
+    let result = accept_loop(listener, state, shutdown).await;
+
+    if let Err(e) = std::fs::remove_file(path) {
+        warn!("failed to remove socket file at {}: {}", path.display(), e);
+    }
+
+    result
+}
 
 async fn prepare_socket_path(path: &Path) -> Result<(), SocketError> {
     match path.try_exists() {
@@ -104,44 +133,6 @@ async fn prepare_socket_path(path: &Path) -> Result<(), SocketError> {
     }
 }
 
-/// [`serve_at`] on the default path from [`assistd_ipc::socket_path`].
-pub async fn serve<F>(state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
-where
-    F: Future<Output = ()>,
-{
-    let path = assistd_ipc::socket_path();
-    serve_at(&path, state, shutdown).await
-}
-
-/// Serve the IPC socket at `path` until `shutdown` resolves, then drain
-/// in-flight connections for up to `daemon.shutdown_grace_secs`. A stale
-/// socket file at `path` is removed first; a live one is an error.
-pub async fn serve_at<F>(path: &Path, state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
-where
-    F: Future<Output = ()>,
-{
-    prepare_socket_path(path).await?;
-
-    let listener = UnixListener::bind(path).map_err(|source| SocketError::Bind {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    info!("listening on {}", path.display());
-
-    let owned_path = PathBuf::from(path);
-    let result = accept_loop(listener, state, shutdown).await;
-
-    if let Err(e) = std::fs::remove_file(&owned_path) {
-        warn!(
-            "failed to remove socket file at {}: {}",
-            owned_path.display(),
-            e
-        );
-    }
-
-    result
-}
-
 async fn accept_loop<F>(
     listener: UnixListener,
     state: Arc<AppState>,
@@ -153,7 +144,7 @@ where
     let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
     let mut connections: JoinSet<()> = JoinSet::new();
     let mut fd_exhausted = false;
-    let (drain_tx, drain_rx) = tokio::sync::watch::channel(false);
+    let (drain_tx, drain_rx) = watch::channel(false);
 
     tokio::pin!(shutdown);
     loop {
@@ -172,27 +163,10 @@ where
                             );
                             fd_exhausted = false;
                         }
-                        let conn_state = state.clone();
-                        let conn_drain = drain_rx.clone();
-                        connections.spawn(async move {
-                            if let Err(e) = handle_connection(stream, conn_state, conn_drain).await
-                            {
-                                error!("connection error: {e}");
-                            }
-                        });
+                        spawn_connection(&mut connections, stream, state.clone(), drain_rx.clone());
                     }
                     Err(e) if is_fd_exhaustion(&e) => {
-                        if !fd_exhausted {
-                            warn!(
-                                error = %e,
-                                backoff_ms = FD_EXHAUSTION_BACKOFF.as_millis() as u64,
-                                "accept failed: file-descriptor limit reached; backing \
-                                 off until in-flight connections release descriptors. \
-                                 Repeat occurrences suppressed until recovery."
-                            );
-                            fd_exhausted = true;
-                        }
-                        tokio::time::sleep(FD_EXHAUSTION_BACKOFF).await;
+                        back_off_from_fd_exhaustion(&e, &mut fd_exhausted).await;
                     }
                     Err(e) => {
                         error!("accept error: {e}");
@@ -211,131 +185,69 @@ where
 
     drop(listener);
     let _ = drain_tx.send(true);
-    crate::recovery::drain_join_set(&mut connections, grace, "connection").await;
+    drain_join_set(&mut connections, grace, "connection").await;
     Ok(())
+}
+
+fn spawn_connection(
+    connections: &mut JoinSet<()>,
+    stream: UnixStream,
+    state: Arc<AppState>,
+    drain: watch::Receiver<bool>,
+) {
+    connections.spawn(async move {
+        if let Err(e) = handle_connection(stream, state, drain).await {
+            error!("connection error: {e}");
+        }
+    });
+}
+
+/// Warns only on the first failure of a run, then sleeps.
+async fn back_off_from_fd_exhaustion(err: &io::Error, fd_exhausted: &mut bool) {
+    if !*fd_exhausted {
+        warn!(
+            error = %err,
+            backoff_ms = FD_EXHAUSTION_BACKOFF.as_millis() as u64,
+            "accept failed: file-descriptor limit reached; backing \
+             off until in-flight connections release descriptors. \
+             Repeat occurrences suppressed until recovery."
+        );
+        *fd_exhausted = true;
+    }
+    tokio::time::sleep(FD_EXHAUSTION_BACKOFF).await;
+}
+
+/// Matches the raw errno because EMFILE maps to the unstable
+/// `io::ErrorKind::Uncategorized`.
+fn is_fd_exhaustion(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE))
 }
 
 async fn handle_connection(
     stream: UnixStream,
     state: Arc<AppState>,
-    drain: tokio::sync::watch::Receiver<bool>,
+    mut drain: watch::Receiver<bool>,
 ) -> Result<(), SocketError> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
-    let n = (&mut reader)
-        .take(MAX_REQUEST_BYTES)
-        .read_line(&mut line)
-        .await?;
-    if n == 0 {
-        debug!("client disconnected without sending a request");
+    let Some(req) = read_initial_request(&mut reader, &mut write_half).await? else {
         return Ok(());
-    }
-    if !line.ends_with('\n') {
-        let err = Event::Error {
-            id: String::new(),
-            message: format!("request exceeded {MAX_REQUEST_BYTES}-byte limit"),
-        };
-        write_event(&mut write_half, &err).await?;
-        write_half.shutdown().await?;
-        return Ok(());
-    }
-
-    let req = match serde_json::from_str::<Request>(line.trim()) {
-        Ok(req) => req,
-        Err(e) => {
-            let err = Event::Error {
-                id: String::new(),
-                message: format!("invalid request: {e}"),
-            };
-            write_event(&mut write_half, &err).await?;
-            write_half.shutdown().await?;
-            return Ok(());
-        }
     };
 
-    let (tx, mut rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
-    let dispatch_state = state.clone();
-
+    let (tx, rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
     let span = tracing::info_span!("ipc", id = %req.id(), req = req.kind());
-
     let router = ConfirmRouter::new(req.id().to_string(), tx.clone(), CONFIRM_TIMEOUT);
-
     let is_subscribe = matches!(req, Request::Subscribe { .. });
-    let bus_state = state.clone();
 
+    let dispatch_state = state.clone();
     let router_for_dispatch = router.clone();
     let dispatch_fut = async move {
         CONFIRM_ROUTER
             .scope(router_for_dispatch, dispatch_state.dispatch(req, tx))
             .await
     };
-    let forward_fut = async move {
-        while let Some(event) = rx.recv().await {
-            // Subscribe forwarders read from the bus; teeing back
-            // onto it would loop.
-            if !is_subscribe {
-                bus_state.runtime.publish(&event);
-            }
-            write_event(&mut write_half, &event).await?;
-        }
-        Ok::<_, SocketError>(write_half)
-    };
-
-    let read_fut = async move {
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            match (&mut reader)
-                .take(MAX_REQUEST_BYTES)
-                .read_line(&mut buf)
-                .await
-            {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    debug!("connection read loop ended: {e}");
-                    break;
-                }
-            }
-            if !buf.ends_with('\n') {
-                warn!(
-                    bytes = buf.len(),
-                    "mid-stream request exceeded {MAX_REQUEST_BYTES}-byte limit; closing read \
-                     side"
-                );
-                break;
-            }
-            let trimmed = buf.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<Request>(trimmed) {
-                Ok(Request::ConfirmResponse {
-                    confirm_id,
-                    allow,
-                    always,
-                    ..
-                }) => {
-                    let approval = Approval::from_answer(allow, always);
-                    if let Err(e) = router.route_response(&confirm_id, approval) {
-                        warn!(confirm_id = %confirm_id, reason = %e, "unmatched ConfirmResponse");
-                    }
-                }
-                Ok(other) => {
-                    warn!(
-                        kind = other.kind(),
-                        "unexpected mid-stream request; only ConfirmResponse is honored after the \
-                         initial request"
-                    );
-                }
-                Err(e) => {
-                    warn!(error = %e, "invalid mid-stream JSON; ignoring line");
-                }
-            }
-        }
-        router.close();
-    };
+    let forward_fut = forward_events(rx, write_half, state, is_subscribe);
+    let read_fut = route_confirm_responses(reader, router);
 
     let dispatch_and_read = async {
         tokio::pin!(dispatch_fut);
@@ -346,7 +258,6 @@ async fn handle_connection(
         }
     };
 
-    let mut drain = drain;
     let dispatch_and_read = async move {
         if is_subscribe {
             tokio::select! {
@@ -370,10 +281,113 @@ async fn handle_connection(
     Ok(())
 }
 
-async fn write_event(
-    write_half: &mut tokio::net::unix::OwnedWriteHalf,
-    event: &Event,
-) -> Result<(), SocketError> {
+/// Read and parse the connection's first frame. `None` means the client
+/// left or was already sent an error and closed.
+async fn read_initial_request(
+    reader: &mut BufReader<OwnedReadHalf>,
+    write_half: &mut OwnedWriteHalf,
+) -> Result<Option<Request>, SocketError> {
+    let mut line = String::new();
+    let bytes_read = reader.take(MAX_REQUEST_BYTES).read_line(&mut line).await?;
+    if bytes_read == 0 {
+        debug!("client disconnected without sending a request");
+        return Ok(None);
+    }
+    let rejection = if !line.ends_with('\n') {
+        format!("request exceeded {MAX_REQUEST_BYTES}-byte limit")
+    } else {
+        match serde_json::from_str::<Request>(line.trim()) {
+            Ok(req) => return Ok(Some(req)),
+            Err(e) => format!("invalid request: {e}"),
+        }
+    };
+    let err = Event::Error {
+        id: String::new(),
+        message: rejection,
+    };
+    write_event(write_half, &err).await?;
+    write_half.shutdown().await?;
+    Ok(None)
+}
+
+/// Write every dispatched event to the client, teeing it onto the bus
+/// unless this connection is itself a bus subscriber.
+async fn forward_events(
+    mut rx: mpsc::Receiver<Event>,
+    mut write_half: OwnedWriteHalf,
+    state: Arc<AppState>,
+    is_subscribe: bool,
+) -> Result<OwnedWriteHalf, SocketError> {
+    while let Some(event) = rx.recv().await {
+        if !is_subscribe {
+            state.runtime.publish(&event);
+        }
+        write_event(&mut write_half, &event).await?;
+    }
+    Ok(write_half)
+}
+
+/// Route mid-stream `ConfirmResponse` frames to `router` until the client
+/// closes its write side, then close the router.
+async fn route_confirm_responses(mut reader: BufReader<OwnedReadHalf>, router: Arc<ConfirmRouter>) {
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        match (&mut reader)
+            .take(MAX_REQUEST_BYTES)
+            .read_line(&mut buf)
+            .await
+        {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => {
+                debug!("connection read loop ended: {e}");
+                break;
+            }
+        }
+        if !buf.ends_with('\n') {
+            warn!(
+                bytes = buf.len(),
+                "mid-stream request exceeded {MAX_REQUEST_BYTES}-byte limit; closing read \
+                 side"
+            );
+            break;
+        }
+        let trimmed = buf.trim();
+        if !trimmed.is_empty() {
+            route_mid_stream_line(trimmed, &router);
+        }
+    }
+    router.close();
+}
+
+fn route_mid_stream_line(line: &str, router: &ConfirmRouter) {
+    match serde_json::from_str::<Request>(line) {
+        Ok(Request::ConfirmResponse {
+            confirm_id,
+            allow,
+            always,
+            ..
+        }) => {
+            let approval = Approval::from_answer(allow, always);
+            if let Err(e) = router.route_response(&confirm_id, approval) {
+                warn!(confirm_id = %confirm_id, reason = %e, "unmatched ConfirmResponse");
+            }
+        }
+        Ok(other) => {
+            warn!(
+                kind = other.kind(),
+                "unexpected mid-stream request; only ConfirmResponse is honored after the \
+                 initial request"
+            );
+        }
+        Err(e) => {
+            warn!(error = %e, "invalid mid-stream JSON; ignoring line");
+        }
+    }
+}
+
+async fn write_event(write_half: &mut OwnedWriteHalf, event: &Event) -> Result<(), SocketError> {
     let mut out = serde_json::to_string(event)?;
     out.push('\n');
     let write = async {

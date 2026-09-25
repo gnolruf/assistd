@@ -61,16 +61,25 @@ pub struct ChatMessage<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<&'a str>,
     /// The reasoning that led to an assistant message's `tool_calls`.
-    /// Reasoning-model chat templates render it back inside the think
-    /// block of each step of the tool loop in progress.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<&'a str>,
 }
 
-/// Wire shape of a message's `content` field. Untagged, so `Text`
-/// serializes as a bare string (the classic OpenAI shape) and `Parts` as
-/// an array of content parts; llama.cpp accepts both. Image parts reach
-/// the model only when it is served with a vision projector (mmproj).
+impl<'a> ChatMessage<'a> {
+    /// A message carrying only `role` and `content`.
+    pub fn plain(role: &'a str, content: ContentBody<'a>) -> Self {
+        Self {
+            role,
+            content: Some(content),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+}
+
+/// Wire shape of a message's `content`: a bare string, or an array of
+/// multimodal content parts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum ContentBody<'a> {
@@ -105,8 +114,7 @@ pub struct ToolCallSpec<'a> {
 #[derive(Debug, Clone, Serialize)]
 pub struct FunctionCallSpec<'a> {
     pub name: &'a str,
-    /// OpenAI's spec is explicit: `arguments` is a JSON-encoded **string**,
-    /// not a JSON object. Strict parsers reject the object form.
+    /// JSON-encoded string, never an object; strict parsers reject objects.
     pub arguments: &'a str,
 }
 
@@ -147,9 +155,7 @@ pub struct ChatChunkChoice {
 pub struct ChatChunkDelta {
     #[serde(default)]
     pub content: Option<String>,
-    /// llama.cpp's separated reasoning channel, present when the server
-    /// runs with `--reasoning-format`; otherwise reasoning arrives inline
-    /// in `content` between `<think>...</think>` tags.
+    /// Separate reasoning channel, present only under `--reasoning-format`.
     #[serde(default)]
     pub reasoning_content: Option<String>,
     /// Tool-call fragments streamed across multiple chunks; accumulate by `index`.
@@ -160,8 +166,7 @@ pub struct ChatChunkDelta {
 /// One tool-call slot streamed in a [`ChatChunkDelta`].
 #[derive(Debug, Deserialize, Default)]
 pub struct ToolCallDelta {
-    /// Stable across chunks for the same call. Required to reassemble
-    /// arguments that stream in pieces.
+    /// Stable across chunks for the same call.
     #[serde(default)]
     pub index: u32,
     #[serde(default)]
@@ -175,8 +180,7 @@ pub struct ToolCallDelta {
 pub struct FunctionCallDelta {
     #[serde(default)]
     pub name: Option<String>,
-    /// JSON-encoded arguments string, chunked. Concatenate across deltas
-    /// keyed by the same `index`.
+    /// A fragment of the JSON-encoded arguments string.
     #[serde(default)]
     pub arguments: Option<String>,
 }

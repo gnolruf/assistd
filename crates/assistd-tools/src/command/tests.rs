@@ -1,4 +1,13 @@
+use std::sync::Arc;
+
+use assistd_wm::NoWindowManager;
+
 use super::*;
+use crate::commands::{
+    BashCommand, CatCommand, GrepCommand, HeadCommand, LsCommand, ScreenshotCommand, SeeCommand,
+    SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WmCommand, WriteCommand,
+};
+use crate::policy::{AlwaysAllowGate, BashPolicyCfg, SandboxInfo};
 
 struct Stub(&'static str);
 
@@ -20,7 +29,7 @@ impl Command for Stub {
 
 #[test]
 fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
-    let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+    let e = io::Error::from(ErrorKind::NotFound);
     assert_eq!(
         io_error_nav("ls", "/tmp/*.db-shm", &e),
         "[error] ls: no file matches /tmp/*.db-shm. Try: ls /tmp to see what is there\n"
@@ -33,7 +42,7 @@ fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
 
 #[test]
 fn path_through_a_file_points_at_the_offending_parent() {
-    let e = std::io::Error::from(std::io::ErrorKind::NotADirectory);
+    let e = io::Error::from(ErrorKind::NotADirectory);
     assert_eq!(
         io_error_nav("cat", "notes.txt/sub", &e),
         "[error] cat: notes.txt/sub: a parent component is not a directory. Check: ls notes.txt\n"
@@ -73,123 +82,91 @@ fn registry_resolves_by_name_and_lists_alphabetically() {
     );
 }
 
-/// `echo` has no failure mode and is skipped. Permission-denied cases
-/// live in platform-gated per-command tests because creating an
-/// unreadable file portably is brittle.
-#[test]
-fn every_registered_command_emits_convention_compliant_error() {
-    use crate::commands::{
-        BashCommand, CatCommand, GrepCommand, HeadCommand, LsCommand, ScreenshotCommand,
-        SeeCommand, SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WmCommand,
-        WriteCommand,
-    };
-    use assistd_wm::NoWindowManager;
-    use std::sync::Arc as StdArc;
+async fn run_cmd<C: Command>(cmd: C, args: Vec<String>) -> CommandOutput {
+    cmd.run(CommandInput { args, stdin: None }).await
+}
 
-    fn contains_hint(s: &str) -> bool {
-        s.contains("Use:") || s.contains("Try:") || s.contains("Check:") || s.contains("Available:")
-    }
+fn contains_hint(s: &str) -> bool {
+    s.contains("Use:") || s.contains("Try:") || s.contains("Check:") || s.contains("Available:")
+}
 
-    async fn run_cmd<C: Command>(cmd: C, args: Vec<String>) -> CommandOutput {
-        cmd.run(CommandInput { args, stdin: None }).await
-    }
+fn bash_denying_rm_rf() -> BashCommand {
+    BashCommand::new(
+        Arc::new(BashPolicyCfg {
+            denylist: vec!["rm -rf /".into()],
+            ..Default::default()
+        }),
+        SandboxInfo::none(),
+        Arc::new(AlwaysAllowGate),
+    )
+}
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let cases: Vec<(&str, CommandOutput)> = vec![
-        (
-            "cat",
-            rt.block_on(run_cmd(
-                CatCommand,
-                vec!["/nonexistent/assistd-convention-test".into()],
-            )),
-        ),
-        (
-            "ls",
-            rt.block_on(run_cmd(
-                LsCommand,
-                vec!["/nonexistent/assistd-convention-test".into()],
-            )),
-        ),
+fn wm_without_compositor() -> WmCommand {
+    WmCommand::for_test(Arc::new(NoWindowManager))
+}
+
+/// One failing invocation per command that has a failure mode (`echo` has
+/// none), paired with the command name its error line must carry.
+async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
+    let missing = || vec!["/nonexistent/assistd-convention-test".to_string()];
+    vec![
+        ("cat", run_cmd(CatCommand, missing()).await),
+        ("ls", run_cmd(LsCommand, missing()).await),
         (
             "see",
-            rt.block_on(run_cmd(
+            run_cmd(
                 SeeCommand::default(),
                 vec!["/nonexistent/assistd-convention-test.png".into()],
-            )),
+            )
+            .await,
         ),
         (
             "screenshot",
-            rt.block_on(run_cmd(
-                ScreenshotCommand::default(),
-                vec!["--bogus-flag".into()],
-            )),
+            run_cmd(ScreenshotCommand::default(), vec!["--bogus-flag".into()]).await,
         ),
         (
             "grep",
-            rt.block_on(run_cmd(GrepCommand, vec!["-x".into(), "pat".into()])),
+            run_cmd(GrepCommand, vec!["-x".into(), "pat".into()]).await,
         ),
         (
             "write",
-            rt.block_on(run_cmd(
+            run_cmd(
                 WriteCommand::permissive_for_tests(),
                 vec!["/nonexistent/assistd-convention-test".into(), "x".into()],
-            )),
+            )
+            .await,
         ),
-        ("wc", rt.block_on(run_cmd(WcCommand, vec!["-q".into()]))),
+        ("wc", run_cmd(WcCommand, vec!["-q".into()]).await),
         (
             "head",
-            rt.block_on(run_cmd(HeadCommand, vec!["-n".into(), "lots".into()])),
+            run_cmd(HeadCommand, vec!["-n".into(), "lots".into()]).await,
         ),
-        (
-            "tail",
-            rt.block_on(run_cmd(TailCommand, vec!["notes.md".into()])),
-        ),
-        ("sort", rt.block_on(run_cmd(SortCommand, vec!["-q".into()]))),
-        (
-            "uniq",
-            rt.block_on(run_cmd(UniqCommand, vec!["notes.md".into()])),
-        ),
+        ("tail", run_cmd(TailCommand, vec!["notes.md".into()]).await),
+        ("sort", run_cmd(SortCommand, vec!["-q".into()]).await),
+        ("uniq", run_cmd(UniqCommand, vec!["notes.md".into()]).await),
         (
             "web",
-            rt.block_on(run_cmd(
-                WebCommand::new(),
-                vec!["file:///etc/passwd".into()],
-            )),
+            run_cmd(WebCommand::new(), vec!["file:///etc/passwd".into()]).await,
         ),
-        // The timeout path emits a fixed, hint-free line and is not
-        // covered here.
         (
             "bash",
-            rt.block_on(run_cmd(
-                {
-                    use crate::policy::BashPolicyCfg;
-                    use crate::policy::{AlwaysAllowGate, SandboxInfo};
-                    use std::sync::Arc;
-                    BashCommand::new(
-                        Arc::new(BashPolicyCfg {
-                            denylist: vec!["rm -rf /".into()],
-                            ..Default::default()
-                        }),
-                        SandboxInfo::none(),
-                        Arc::new(AlwaysAllowGate),
-                    )
-                },
-                vec!["rm -rf /".into()],
-            )),
+            run_cmd(bash_denying_rm_rf(), vec!["rm -rf /".into()]).await,
         ),
-        // Against the disconnected NoWindowManager every subcommand
-        // returns `[error] wm: compositor not connected. Check: …`, so
-        // any argv drives the failure.
         (
             "wm",
-            rt.block_on(run_cmd(
-                WmCommand::for_test(StdArc::new(NoWindowManager)),
+            run_cmd(
+                wm_without_compositor(),
                 vec!["focus".into(), "Firefox".into()],
-            )),
+            )
+            .await,
         ),
-    ];
+    ]
+}
 
-    for (name, out) in cases {
+#[test]
+fn every_registered_command_emits_convention_compliant_error() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for (name, out) in rt.block_on(failing_invocations()) {
         assert_ne!(
             out.exit_code, 0,
             "{name}: failure input should exit non-zero"

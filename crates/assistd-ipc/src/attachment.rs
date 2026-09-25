@@ -1,14 +1,15 @@
 //! Reading and validating image files before they are attached to a
 //! [`Request::Query`](crate::Request::Query).
 
+use std::fmt;
+use std::io;
 use std::path::Path;
 
-/// Image MIME types llama.cpp's vision adapters accept. `infer::is_image`
-/// also passes GIF, BMP, TIFF and HEIC, so the list is explicit.
+/// MIME types llama.cpp's vision adapters accept; `infer::is_image` alone also passes GIF, BMP,
+/// TIFF and HEIC.
 const SUPPORTED_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 
-/// Upper bound on an attached image. Generous for a 4K PNG screenshot,
-/// but small enough to catch a video or RAW file before it is read.
+/// Largest accepted image: room for a 4K PNG screenshot, small enough to reject video or RAW.
 pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// A validated image read by [`load_image`].
@@ -24,7 +25,7 @@ pub struct LoadedImage {
 pub enum LoadImageError {
     Io {
         path: String,
-        source: std::io::Error,
+        source: io::Error,
     },
     /// File exceeds [`MAX_IMAGE_BYTES`].
     TooLarge {
@@ -48,13 +49,12 @@ pub enum LoadImageError {
 }
 
 impl LoadImageError {
-    /// One-line, human-readable description of the failure, with no
-    /// prefix.
+    /// One-line, unprefixed, human-readable description of the failure.
     pub fn user_message(&self) -> String {
         match self {
             LoadImageError::Io { path, source } => match source.kind() {
-                std::io::ErrorKind::NotFound => format!("file not found: {path}"),
-                std::io::ErrorKind::PermissionDenied => format!("permission denied: {path}"),
+                io::ErrorKind::NotFound => format!("file not found: {path}"),
+                io::ErrorKind::PermissionDenied => format!("permission denied: {path}"),
                 _ => format!("{path}: {source}"),
             },
             LoadImageError::TooLarge { path, size, max } => format!(
@@ -76,8 +76,8 @@ impl LoadImageError {
     }
 }
 
-impl std::fmt::Display for LoadImageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for LoadImageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.user_message())
     }
 }
@@ -91,53 +91,53 @@ impl std::error::Error for LoadImageError {
     }
 }
 
-/// Read `path` and validate it is a supported image no larger than
-/// [`MAX_IMAGE_BYTES`].
+/// Read `path` and validate it is a supported image no larger than [`MAX_IMAGE_BYTES`]. The size
+/// is checked from metadata, before any read.
 pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
-    // Stat first so a huge file is rejected before a buffer is allocated.
+    let display_path = || path.display().to_string();
     let meta = tokio::fs::metadata(path)
         .await
-        .map_err(|e| LoadImageError::Io {
-            path: path.display().to_string(),
-            source: e,
+        .map_err(|source| LoadImageError::Io {
+            path: display_path(),
+            source,
         })?;
     if !meta.is_file() {
         return Err(LoadImageError::Io {
-            path: path.display().to_string(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            path: display_path(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
                 "not a regular file (device, pipe, or socket)",
             ),
         });
     }
     if meta.len() > MAX_IMAGE_BYTES {
         return Err(LoadImageError::TooLarge {
-            path: path.display().to_string(),
+            path: display_path(),
             size: meta.len(),
             max: MAX_IMAGE_BYTES,
         });
     }
     let bytes = tokio::fs::read(path)
         .await
-        .map_err(|e| LoadImageError::Io {
-            path: path.display().to_string(),
-            source: e,
+        .map_err(|source| LoadImageError::Io {
+            path: display_path(),
+            source,
         })?;
-    let Some(t) = infer::get(&bytes) else {
+    let Some(detected) = infer::get(&bytes) else {
         return Err(LoadImageError::Unrecognized {
-            path: path.display().to_string(),
+            path: display_path(),
         });
     };
+    let mime = detected.mime_type();
     if !infer::is_image(&bytes) {
         return Err(LoadImageError::NotAnImage {
-            path: path.display().to_string(),
-            detected: t.mime_type().to_string(),
+            path: display_path(),
+            detected: mime.to_string(),
         });
     }
-    let mime = t.mime_type();
     if !SUPPORTED_MIMES.contains(&mime) {
         return Err(LoadImageError::UnsupportedFormat {
-            path: path.display().to_string(),
+            path: display_path(),
             mime: mime.to_string(),
         });
     }
@@ -147,18 +147,18 @@ pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
     })
 }
 
-fn human_size(n: u64) -> String {
+fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
-    if n >= GB {
-        format!("{:.1}GB", n as f64 / GB as f64)
-    } else if n >= MB {
-        format!("{:.1}MB", n as f64 / MB as f64)
-    } else if n >= KB {
-        format!("{}KB", n / KB)
+    if bytes >= GB {
+        format!("{:.1}GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{}KB", bytes / KB)
     } else {
-        format!("{n}B")
+        format!("{bytes}B")
     }
 }
 
@@ -167,8 +167,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    // A minimal GIF89a image: `infer::is_image` accepts it, but it is
-    // outside the supported-format allowlist.
+    /// Minimal GIF89a: an image to `infer`, but outside [`SUPPORTED_MIMES`].
     const GIF_BYTES: &[u8] = &[
         0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xFF, 0xFF,
         0xFF, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,
@@ -214,13 +213,11 @@ mod tests {
 
     #[tokio::test]
     async fn oversize_file_is_rejected_before_read() {
-        // A sparse file reports the oversize logical length without
-        // allocating disk, so rejection must come from metadata alone.
         let dir = tempdir().unwrap();
         let path = dir.path().join("huge.png");
-        let f = tokio::fs::File::create(&path).await.unwrap();
-        f.set_len(MAX_IMAGE_BYTES + 1).await.unwrap();
-        drop(f);
+        let sparse = tokio::fs::File::create(&path).await.unwrap();
+        sparse.set_len(MAX_IMAGE_BYTES + 1).await.unwrap();
+        drop(sparse);
         let err = load_image(&path).await.unwrap_err();
         match err {
             LoadImageError::TooLarge { size, max, .. } => {

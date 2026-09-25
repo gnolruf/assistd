@@ -1,6 +1,8 @@
+use tempfile::{TempDir, tempdir};
+
 use super::*;
+use crate::commands::FILE_READ_MAX;
 use crate::fixtures::PNG_BYTES;
-use tempfile::tempdir;
 
 async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
     CatCommand
@@ -11,7 +13,7 @@ async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
         .await
 }
 
-fn write_file(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> String {
+fn write_file(dir: &TempDir, name: &str, bytes: &[u8]) -> String {
     let path = dir.path().join(name);
     std::fs::write(&path, bytes).unwrap();
     path.to_string_lossy().into_owned()
@@ -158,12 +160,12 @@ async fn cat_refuses_a_device_file() {
     );
 }
 
-fn oversized_file() -> (tempfile::TempDir, String) {
+fn oversized_file() -> (TempDir, String) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("huge.log");
     std::fs::File::create(&path)
         .unwrap()
-        .set_len(crate::commands::FILE_READ_MAX + 1)
+        .set_len(FILE_READ_MAX + 1)
         .unwrap();
     let path = path.to_string_lossy().into_owned();
     (dir, path)
@@ -186,6 +188,6 @@ async fn cat_b_reports_the_size_of_a_file_over_the_read_limit() {
     let out = run_cat(&["-b", &path], None).await;
     assert_eq!(out.exit_code, 0);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let expected = format!("{} bytes", crate::commands::FILE_READ_MAX + 1);
+    let expected = format!("{} bytes", FILE_READ_MAX + 1);
     assert!(stdout.contains(&expected), "{stdout}");
 }

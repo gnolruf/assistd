@@ -1,10 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Shared, runtime-mutable vision-capability flag. Commands that need
-/// vision hold the `Arc` and check [`VisionGate::supported`] on every
-/// invocation, so a model swap flips them without rebuilding the
-/// registry.
+/// Shared, runtime-mutable flag for whether the current model accepts
+/// images; checked on every invocation so a model swap takes effect at once.
 pub struct VisionGate {
     supported: AtomicBool,
 }
@@ -22,8 +20,7 @@ impl VisionGate {
         self.supported.load(Ordering::Acquire)
     }
 
-    /// Record whether the current model accepts image inputs; every
-    /// holder sees the change on its next check.
+    /// Record whether the current model accepts image inputs.
     pub fn set(&self, supported: bool) {
         self.supported.store(supported, Ordering::Release);
     }

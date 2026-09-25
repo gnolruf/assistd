@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use thiserror::Error;
 
 /// Errors from the MCP transports and the per-server supervisor.
@@ -15,7 +17,7 @@ pub enum McpError {
     TransportClosed,
 
     #[error("MCP request timed out after {0:?}")]
-    RequestTimeout(std::time::Duration),
+    RequestTimeout(Duration),
 
     #[error("MCP server reported an error (code {code}): {message}")]
     RpcError {
@@ -69,10 +71,10 @@ impl McpError {
     }
 }
 
-/// Render `e` as the `[error] <tool_name>: <what>. <Hint>: <recovery>\n`
+/// Render `err` as the `[error] <tool_name>: <what>. <Hint>: <recovery>\n`
 /// line native tool failures use.
-pub fn mcp_error_line(tool_name: &str, e: &McpError) -> String {
-    match e {
+pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
+    match err {
         McpError::Spawn { path, source } => format!(
             "[error] {tool_name}: failed to spawn MCP server `{path}`: {source}. \
              Check: the server command/args in config.toml\n"
@@ -81,8 +83,8 @@ pub fn mcp_error_line(tool_name: &str, e: &McpError) -> String {
             "[error] {tool_name}: MCP transport closed. \
              Try: another tool while the server reconnects\n"
         ),
-        McpError::RequestTimeout(d) => format!(
-            "[error] {tool_name}: MCP request timed out after {d:?}. \
+        McpError::RequestTimeout(timeout) => format!(
+            "[error] {tool_name}: MCP request timed out after {timeout:?}. \
              Try: the call again or a smaller request\n"
         ),
         McpError::RpcError {
@@ -93,8 +95,8 @@ pub fn mcp_error_line(tool_name: &str, e: &McpError) -> String {
             "[error] {tool_name}: MCP server returned error code {code}: {message}. \
              Check: the arguments and try again\n"
         ),
-        McpError::Protocol(m) => format!(
-            "[error] {tool_name}: MCP protocol error: {m}. \
+        McpError::Protocol(detail) => format!(
+            "[error] {tool_name}: MCP protocol error: {detail}. \
              Check: daemon logs for malformed responses\n"
         ),
         McpError::Config { context, source } => format!(
@@ -109,12 +111,12 @@ pub fn mcp_error_line(tool_name: &str, e: &McpError) -> String {
             "[error] {tool_name}: too many in-flight MCP requests. \
              Try: the call again after pending requests drain\n"
         ),
-        McpError::Json(e) => format!(
-            "[error] {tool_name}: MCP JSON error: {e}. \
+        McpError::Json(source) => format!(
+            "[error] {tool_name}: MCP JSON error: {source}. \
              Check: daemon logs for transport details\n"
         ),
-        McpError::Http(m) => format!(
-            "[error] {tool_name}: MCP HTTP error: {m}. \
+        McpError::Http(source) => format!(
+            "[error] {tool_name}: MCP HTTP error: {source}. \
              Check: daemon logs for transport details\n"
         ),
         McpError::HttpStatus { method, status } => format!(
@@ -156,10 +158,7 @@ mod tests {
                 },
             ),
             ("transport_closed", McpError::TransportClosed),
-            (
-                "timeout",
-                McpError::RequestTimeout(std::time::Duration::from_secs(30)),
-            ),
+            ("timeout", McpError::RequestTimeout(Duration::from_secs(30))),
             (
                 "rpc",
                 McpError::RpcError {
@@ -191,8 +190,8 @@ mod tests {
                 },
             ),
         ];
-        for (label, e) in cases {
-            let line = mcp_error_line("mcp__web__search", &e);
+        for (label, err) in cases {
+            let line = mcp_error_line("mcp__web__search", &err);
             assert!(
                 line.starts_with("[error] mcp__web__search: "),
                 "{label}: missing `[error] <tool>: ` prefix, got {line:?}"
@@ -226,7 +225,7 @@ mod tests {
                  Invalid params: missing `query`. Check: the arguments and try again\n",
             ),
             (
-                McpError::RequestTimeout(std::time::Duration::from_secs(30)),
+                McpError::RequestTimeout(Duration::from_secs(30)),
                 "[error] mcp__web__search: MCP request timed out after 30s. \
                  Try: the call again or a smaller request\n",
             ),
@@ -236,8 +235,8 @@ mod tests {
                  Try: another tool while the server reconnects\n",
             ),
         ];
-        for (e, expected) in cases {
-            assert_eq!(mcp_error_line("mcp__web__search", &e), expected);
+        for (err, expected) in cases {
+            assert_eq!(mcp_error_line("mcp__web__search", &err), expected);
         }
     }
 }

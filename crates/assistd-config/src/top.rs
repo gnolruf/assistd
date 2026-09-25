@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -15,8 +17,8 @@ use crate::presence::PresenceConfig;
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::ToolsConfig;
-use crate::tray::TrayConfig;
-use crate::voice::VoiceConfig;
+use crate::tray::{TrayConfig, TrayPopupConfig};
+use crate::voice::{SynthesisConfig, VoiceConfig};
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -41,166 +43,27 @@ pub struct Config {
 
 impl Config {
     /// Validates the cross-field and format constraints that the field
-    /// types can't express on their own. Returns every problem found,
-    /// not just the first.
+    /// types can't express. Returns every problem found, not just the first.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
-
-        if self.model.name.is_empty() {
-            errors.push("model.name must not be empty".into());
-        }
-        if self.llama_server.binary_path.as_os_str().is_empty() {
-            errors.push("llama_server.binary_path must not be empty".into());
-        }
-
-        if self.chat.max_history_tokens >= self.model.context_length {
-            errors.push(
-                "chat.max_history_tokens must be strictly less than model.context_length".into(),
-            );
-        }
-        if self.chat.summary_target_tokens >= self.chat.max_history_tokens {
-            errors.push(
-                "chat.summary_target_tokens must be strictly less than chat.max_history_tokens"
-                    .into(),
-            );
-        }
-        if self.chat.max_response_tokens >= self.model.context_length {
-            errors.push(
-                "chat.max_response_tokens must be strictly less than model.context_length".into(),
-            );
-        }
-        if !(0.0..=2.0).contains(&self.chat.temperature) || self.chat.temperature.is_nan() {
-            errors.push("chat.temperature must be in the range 0.0..=2.0".into());
-        }
-        if !(0.0..=2.0).contains(&self.chat.summary_temperature)
-            || self.chat.summary_temperature.is_nan()
-        {
-            errors.push("chat.summary_temperature must be in the range 0.0..=2.0".into());
-        }
-        if let Some(tp) = self.chat.top_p
-            && (!(0.0..=1.0).contains(&tp) || tp.is_nan())
-        {
-            errors.push("chat.top_p must be in the range 0.0..=1.0".into());
-        }
-        if let Some(mp) = self.chat.min_p
-            && (!(0.0..=1.0).contains(&mp) || mp.is_nan())
-        {
-            errors.push("chat.min_p must be in the range 0.0..=1.0".into());
-        }
-        if let Some(pp) = self.chat.presence_penalty
-            && (!(-2.0..=2.0).contains(&pp) || pp.is_nan())
-        {
-            errors.push("chat.presence_penalty must be in the range -2.0..=2.0".into());
-        }
-
-        if self.voice.enabled {
-            let t = &self.voice.transcription;
-            require_hf_id(&mut errors, "voice.transcription.model", &t.model);
-            if t.vad_enabled {
-                require_hf_id(&mut errors, "voice.transcription.vad_model", &t.vad_model);
-            }
-        }
-
-        if self.voice.synthesis.enabled {
-            let s = &self.voice.synthesis;
-            if s.binary_path.as_os_str().is_empty() {
-                errors.push(
-                    "voice.synthesis.binary_path must not be empty when synthesis is enabled"
-                        .into(),
-                );
-            }
-            require_hf_id(&mut errors, "voice.synthesis.voice", &s.voice);
-            if !s.length_scale.is_finite() || s.length_scale <= 0.0 {
-                errors
-                    .push("voice.synthesis.length_scale must be a positive, finite number".into());
-            }
-            if s.max_sentence_chars.get() < 50 {
-                errors.push("voice.synthesis.max_sentence_chars must be at least 50".into());
-            }
-        }
-
-        if self.sleep.idle_to_drowsy_mins > 0
-            && self.sleep.idle_to_sleep_mins > 0
-            && self.sleep.idle_to_sleep_mins <= self.sleep.idle_to_drowsy_mins
-        {
-            errors.push(
-                "sleep.idle_to_sleep_mins must be greater than sleep.idle_to_drowsy_mins \
-                 (set either to 0 to disable that transition)"
-                    .into(),
-            );
-        }
-
-        if self.tools.output.overflow_dir.as_os_str().is_empty() {
-            errors.push("tools.output.overflow_dir must not be empty".into());
-        }
-        if self.tools.write.writable_paths.is_empty() {
-            errors.push(
-                "tools.write.writable_paths must not be empty (the write command would be unusable)"
-                    .into(),
-            );
-        }
-
-        if self.memory.enabled && self.memory.db_path.as_os_str().is_empty() {
-            errors.push("memory.db_path must not be empty when memory.enabled".into());
-        }
-
-        if self.embedding.enabled {
-            require_hf_id(&mut errors, "embedding.model", &self.embedding.model);
-            if self.embedding.port == self.llama_server.port {
-                errors.push(
-                    "embedding.port must differ from llama_server.port (the chat server)".into(),
-                );
-            }
-        }
-
-        if self.mcp.enabled {
-            use std::collections::HashSet;
-            let mut seen: HashSet<&str> = HashSet::new();
-            for (i, s) in self.mcp.servers.iter().enumerate() {
-                let name = s.name();
-                if name.is_empty() {
-                    errors.push(format!("mcp.servers[{i}].name must not be empty"));
-                } else if !seen.insert(name) {
-                    errors.push(format!(
-                        "mcp.servers[{i}].name '{name}' is duplicated; names must be unique"
-                    ));
-                }
-                if !name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-                {
-                    errors.push(format!(
-                        "mcp.servers[{i}].name must use only ASCII letters, digits, '_' or '-' \
-                         (becomes part of the LLM-visible tool name `mcp__<name>__<tool>`)"
-                    ));
-                }
-            }
-        }
-
-        if self.tray.popup.enabled {
-            let p = &self.tray.popup;
-            if !(100..=1200).contains(&p.width) {
-                errors.push("tray.popup.width must be in the range 100..=1200".into());
-            }
-            if !(60..=800).contains(&p.height) {
-                errors.push("tray.popup.height must be in the range 60..=800".into());
-            }
-            if !(500..=60_000).contains(&p.auto_hide_ms) {
-                errors.push("tray.popup.auto_hide_ms must be in the range 500..=60000".into());
-            }
-        }
-
+        validate_model_server(&mut errors, &self.model, &self.llama_server);
+        validate_chat(&mut errors, &self.chat, &self.model);
+        validate_voice(&mut errors, &self.voice);
+        validate_sleep(&mut errors, &self.sleep);
+        validate_tools(&mut errors, &self.tools);
+        validate_memory(&mut errors, &self.memory);
+        validate_embedding(&mut errors, &self.embedding, &self.llama_server);
+        validate_mcp(&mut errors, &self.mcp);
+        validate_tray_popup(&mut errors, &self.tray.popup);
         if errors.is_empty() {
             Ok(())
         } else {
             Err(ConfigError::Validation(errors))
         }
     }
-}
 
-impl Config {
-    /// Default config file path, respecting `$XDG_CONFIG_HOME`:
-    /// `$XDG_CONFIG_HOME/assistd/config.toml` or `$HOME/.config/assistd/config.toml`.
+    /// `$XDG_CONFIG_HOME/assistd/config.toml`, or
+    /// `$HOME/.config/assistd/config.toml`. Errors if `$HOME` is needed but unset.
     pub fn default_path() -> Result<PathBuf, ConfigError> {
         let config_dir = match std::env::var_os("XDG_CONFIG_HOME") {
             Some(dir) => PathBuf::from(dir),
@@ -237,7 +100,6 @@ impl Config {
         }
 
         let toml_string = toml::to_string_pretty(&Config::default())?;
-
         let content = format!(
             "# assistd configuration file\n\
              # Generated by `assistd init-config`\n\n\
@@ -252,6 +114,198 @@ impl Config {
     }
 }
 
+fn validate_model_server(
+    errors: &mut Vec<String>,
+    model: &ModelConfig,
+    llama_server: &LlamaServerConfig,
+) {
+    if model.name.is_empty() {
+        errors.push("model.name must not be empty".into());
+    }
+    if llama_server.binary_path.as_os_str().is_empty() {
+        errors.push("llama_server.binary_path must not be empty".into());
+    }
+}
+
+fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfig) {
+    if chat.max_history_tokens >= model.context_length {
+        errors
+            .push("chat.max_history_tokens must be strictly less than model.context_length".into());
+    }
+    if chat.summary_target_tokens >= chat.max_history_tokens {
+        errors.push(
+            "chat.summary_target_tokens must be strictly less than chat.max_history_tokens".into(),
+        );
+    }
+    if chat.max_response_tokens >= model.context_length {
+        errors.push(
+            "chat.max_response_tokens must be strictly less than model.context_length".into(),
+        );
+    }
+    require_in_range(
+        errors,
+        chat.temperature,
+        0.0..=2.0,
+        "chat.temperature must be in the range 0.0..=2.0",
+    );
+    require_in_range(
+        errors,
+        chat.summary_temperature,
+        0.0..=2.0,
+        "chat.summary_temperature must be in the range 0.0..=2.0",
+    );
+    if let Some(top_p) = chat.top_p {
+        require_in_range(
+            errors,
+            top_p,
+            0.0..=1.0,
+            "chat.top_p must be in the range 0.0..=1.0",
+        );
+    }
+    if let Some(min_p) = chat.min_p {
+        require_in_range(
+            errors,
+            min_p,
+            0.0..=1.0,
+            "chat.min_p must be in the range 0.0..=1.0",
+        );
+    }
+    if let Some(presence_penalty) = chat.presence_penalty {
+        require_in_range(
+            errors,
+            presence_penalty,
+            -2.0..=2.0,
+            "chat.presence_penalty must be in the range -2.0..=2.0",
+        );
+    }
+}
+
+fn validate_voice(errors: &mut Vec<String>, voice: &VoiceConfig) {
+    if voice.enabled {
+        let transcription = &voice.transcription;
+        require_hf_id(errors, "voice.transcription.model", &transcription.model);
+        if transcription.vad_enabled {
+            require_hf_id(
+                errors,
+                "voice.transcription.vad_model",
+                &transcription.vad_model,
+            );
+        }
+    }
+    if voice.synthesis.enabled {
+        validate_synthesis(errors, &voice.synthesis);
+    }
+}
+
+fn validate_synthesis(errors: &mut Vec<String>, synthesis: &SynthesisConfig) {
+    if synthesis.binary_path.as_os_str().is_empty() {
+        errors
+            .push("voice.synthesis.binary_path must not be empty when synthesis is enabled".into());
+    }
+    require_hf_id(errors, "voice.synthesis.voice", &synthesis.voice);
+    if !synthesis.length_scale.is_finite() || synthesis.length_scale <= 0.0 {
+        errors.push("voice.synthesis.length_scale must be a positive, finite number".into());
+    }
+    if synthesis.max_sentence_chars.get() < 50 {
+        errors.push("voice.synthesis.max_sentence_chars must be at least 50".into());
+    }
+}
+
+fn validate_sleep(errors: &mut Vec<String>, sleep: &SleepConfig) {
+    if sleep.idle_to_drowsy_mins > 0
+        && sleep.idle_to_sleep_mins > 0
+        && sleep.idle_to_sleep_mins <= sleep.idle_to_drowsy_mins
+    {
+        errors.push(
+            "sleep.idle_to_sleep_mins must be greater than sleep.idle_to_drowsy_mins \
+             (set either to 0 to disable that transition)"
+                .into(),
+        );
+    }
+}
+
+fn validate_tools(errors: &mut Vec<String>, tools: &ToolsConfig) {
+    if tools.output.overflow_dir.as_os_str().is_empty() {
+        errors.push("tools.output.overflow_dir must not be empty".into());
+    }
+    if tools.write.writable_paths.is_empty() {
+        errors.push(
+            "tools.write.writable_paths must not be empty (the write command would be unusable)"
+                .into(),
+        );
+    }
+}
+
+fn validate_memory(errors: &mut Vec<String>, memory: &MemoryConfig) {
+    if memory.enabled && memory.db_path.as_os_str().is_empty() {
+        errors.push("memory.db_path must not be empty when memory.enabled".into());
+    }
+}
+
+fn validate_embedding(
+    errors: &mut Vec<String>,
+    embedding: &EmbeddingConfig,
+    llama_server: &LlamaServerConfig,
+) {
+    if !embedding.enabled {
+        return;
+    }
+    require_hf_id(errors, "embedding.model", &embedding.model);
+    if embedding.port == llama_server.port {
+        errors.push("embedding.port must differ from llama_server.port (the chat server)".into());
+    }
+}
+
+fn validate_mcp(errors: &mut Vec<String>, mcp: &McpConfig) {
+    if !mcp.enabled {
+        return;
+    }
+    let mut seen_names: HashSet<&str> = HashSet::new();
+    for (i, server) in mcp.servers.iter().enumerate() {
+        let name = server.name();
+        if name.is_empty() {
+            errors.push(format!("mcp.servers[{i}].name must not be empty"));
+        } else if !seen_names.insert(name) {
+            errors.push(format!(
+                "mcp.servers[{i}].name '{name}' is duplicated; names must be unique"
+            ));
+        }
+        if !name.chars().all(is_tool_name_char) {
+            errors.push(format!(
+                "mcp.servers[{i}].name must use only ASCII letters, digits, '_' or '-' \
+                 (becomes part of the LLM-visible tool name `mcp__<name>__<tool>`)"
+            ));
+        }
+    }
+}
+
+fn validate_tray_popup(errors: &mut Vec<String>, popup: &TrayPopupConfig) {
+    if !popup.enabled {
+        return;
+    }
+    if !(100..=1200).contains(&popup.width) {
+        errors.push("tray.popup.width must be in the range 100..=1200".into());
+    }
+    if !(60..=800).contains(&popup.height) {
+        errors.push("tray.popup.height must be in the range 60..=800".into());
+    }
+    if !(500..=60_000).contains(&popup.auto_hide_ms) {
+        errors.push("tray.popup.auto_hide_ms must be in the range 500..=60000".into());
+    }
+}
+
+/// Pushes `message` unless `value` lies in `range`; NaN never does.
+fn require_in_range(
+    errors: &mut Vec<String>,
+    value: f32,
+    range: RangeInclusive<f32>,
+    message: &str,
+) {
+    if !range.contains(&value) {
+        errors.push(message.into());
+    }
+}
+
 fn require_hf_id(errors: &mut Vec<String>, field: &str, value: &str) {
     if !is_valid_hf_id(value) {
         errors.push(format!(
@@ -260,8 +314,8 @@ fn require_hf_id(errors: &mut Vec<String>, field: &str, value: &str) {
     }
 }
 
-fn is_valid_hf_id(s: &str) -> bool {
-    let Some((repo, file)) = s.split_once(':') else {
+fn is_valid_hf_id(id: &str) -> bool {
+    let Some((repo, file)) = id.split_once(':') else {
         return false;
     };
     if file.is_empty() || file.contains(':') {
@@ -271,4 +325,8 @@ fn is_valid_hf_id(s: &str) -> bool {
         return false;
     };
     !owner.is_empty() && !name.is_empty()
+}
+
+fn is_tool_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }

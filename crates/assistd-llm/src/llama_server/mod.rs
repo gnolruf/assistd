@@ -1,8 +1,5 @@
-//! Out-of-process `llama-server` lifecycle: spawns the child, polls
-//! `/health` until it reports ready, restarts it with exponential backoff
-//! on unexpected exit, and enters a terminal `Degraded` state after
-//! [`MAX_CONSECUTIVE_FAILURES`] consecutive pre-ready failures rather
-//! than crash-looping forever.
+//! Out-of-process `llama-server` lifecycle: spawn, health-poll, restart with
+//! backoff, and a terminal `Degraded` state once restart limits trip.
 
 pub mod backoff;
 pub mod capabilities;

@@ -1,8 +1,5 @@
-//! Streaming sentence segmenter between the LLM token stream and TTS.
-//! Strips markdown, handles fenced code blocks per [`CodeBlockMode`],
-//! and emits whole sentences at prosody boundaries.
-
-use std::collections::VecDeque;
+//! Streaming sentence segmenter between the LLM token stream and TTS: strips
+//! markdown and handles fenced code blocks per [`CodeBlockMode`].
 
 pub use assistd_config::CodeBlockMode;
 
@@ -13,16 +10,12 @@ const ABBREVIATIONS: &[&str] = &[
     "U.S", "U.K", "approx", "Prof", "Gen", "Capt",
 ];
 
-/// Streaming sentence segmenter. Feed deltas with [`push`](Self::push),
-/// call [`finish`](Self::finish) when the stream ends, and
-/// [`flush_idle`](Self::flush_idle) when it pauses.
+/// Streaming sentence segmenter: [`push`](Self::push) deltas, then
+/// [`finish`](Self::finish) at end of stream or [`flush_idle`](Self::flush_idle) on a pause.
 ///
-/// Boundary priority, highest first: paragraph break `\n\n`; bullet
-/// marker `\n- ` or `\n* `; strong terminator `[.!?]` followed by
-/// whitespace and an uppercase letter, digit, or newline, with
-/// abbreviation and decimal guards; the `max_len` safety net. A
-/// terminator at the end of the buffer is never a boundary, because it
-/// may be an abbreviation awaiting context; `finish` flushes it.
+/// Boundaries, highest priority first: `\n\n`; a `\n- `/`\n* ` bullet; `[.!?]`
+/// plus whitespace and an uppercase letter, digit, or newline (abbreviations and
+/// decimals excluded); the `max_len` cap. A terminator at the buffer's end waits for context.
 pub struct SentenceBuffer {
     buf: String,
     in_code_fence: bool,
@@ -76,11 +69,7 @@ impl SentenceBuffer {
         self.lang_buf.clear();
         let raw = std::mem::take(&mut self.buf);
         let speech = postprocess_for_speech(&raw);
-        if speech.is_empty() {
-            None
-        } else {
-            Some(speech)
-        }
+        (!speech.is_empty()).then_some(speech)
     }
 
     /// Flush up to the last whitespace, leaving a trailing partial
@@ -95,11 +84,7 @@ impl SentenceBuffer {
         let end = cut + self.buf[cut..].chars().next()?.len_utf8();
         let prefix: String = self.buf.drain(..end).collect();
         let speech = postprocess_for_speech(&prefix);
-        if speech.is_empty() {
-            None
-        } else {
-            Some(speech)
-        }
+        (!speech.is_empty()).then_some(speech)
     }
 
     fn feed_char(&mut self, ch: char, out: &mut Vec<String>) {
@@ -359,24 +344,8 @@ fn strip_links(s: &str) -> String {
     out
 }
 
-/// Drops every `*` and `_`.
 fn strip_emphasis(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut buf = VecDeque::<char>::new();
-    for c in s.chars() {
-        if c == '*' || c == '_' {
-            buf.push_back(c);
-            if buf.len() >= 3 {
-                buf.clear();
-            }
-        } else {
-            if !buf.is_empty() {
-                buf.clear();
-            }
-            out.push(c);
-        }
-    }
-    out
+    s.chars().filter(|&c| c != '*' && c != '_').collect()
 }
 
 fn replace_urls(s: &str) -> String {
@@ -434,9 +403,9 @@ fn collapse_whitespace(s: &str) -> String {
 mod tests {
     use super::*;
 
-    fn run(mut b: SentenceBuffer, deltas: &[&str]) -> (Vec<String>, Option<String>) {
-        let emitted = deltas.iter().flat_map(|d| b.push(d)).collect();
-        (emitted, b.finish())
+    fn run(mut buffer: SentenceBuffer, deltas: &[&str]) -> (Vec<String>, Option<String>) {
+        let emitted = deltas.iter().flat_map(|delta| buffer.push(delta)).collect();
+        (emitted, buffer.finish())
     }
 
     /// `(label, deltas, emitted sentences, finish tail)`, each run
@@ -646,9 +615,9 @@ mod tests {
 
     #[test]
     fn summarize_mode_emits_on_close() {
-        let mut b = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
-        assert!(b.push("```python\nprint('hi')\n").is_empty());
-        assert_eq!(b.push("```"), ["Code block in python."]);
+        let mut buffer = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
+        assert!(buffer.push("```python\nprint('hi')\n").is_empty());
+        assert_eq!(buffer.push("```"), ["Code block in python."]);
     }
 
     #[test]
@@ -695,29 +664,29 @@ mod tests {
 
     #[test]
     fn flush_idle_emits_at_last_whitespace() {
-        let mut b = SentenceBuffer::new(400);
-        let _ = b.push("I am writ");
-        assert_eq!(b.flush_idle().as_deref(), Some("I am"));
-        assert_eq!(b.push("ing now. Done."), ["writing now."]);
-        assert_eq!(b.finish().as_deref(), Some("Done."));
+        let mut buffer = SentenceBuffer::new(400);
+        let _ = buffer.push("I am writ");
+        assert_eq!(buffer.flush_idle().as_deref(), Some("I am"));
+        assert_eq!(buffer.push("ing now. Done."), ["writing now."]);
+        assert_eq!(buffer.finish().as_deref(), Some("Done."));
     }
 
     #[test]
     fn flush_idle_returns_none_when_nothing_is_speakable() {
         for input in ["   \t  ", "```rust\nfn main", "writ"] {
-            let mut b = SentenceBuffer::new(400);
-            let _ = b.push(input);
-            assert_eq!(b.flush_idle(), None, "{input:?}");
+            let mut buffer = SentenceBuffer::new(400);
+            let _ = buffer.push(input);
+            assert_eq!(buffer.flush_idle(), None, "{input:?}");
         }
     }
 
     #[test]
     fn flush_idle_can_be_called_repeatedly_without_loss() {
-        let mut b = SentenceBuffer::new(400);
-        let _ = b.push("Hello world ");
-        assert_eq!(b.flush_idle().as_deref(), Some("Hello world"));
-        assert_eq!(b.flush_idle(), None);
-        assert_eq!(b.push("again. End."), ["again."]);
-        assert_eq!(b.finish().as_deref(), Some("End."));
+        let mut buffer = SentenceBuffer::new(400);
+        let _ = buffer.push("Hello world ");
+        assert_eq!(buffer.flush_idle().as_deref(), Some("Hello world"));
+        assert_eq!(buffer.flush_idle(), None);
+        assert_eq!(buffer.push("again. End."), ["again."]);
+        assert_eq!(buffer.finish().as_deref(), Some("End."));
     }
 }

@@ -1,7 +1,7 @@
 //! Audio playback via rodio.
 
 use std::num::NonZero;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -15,16 +15,15 @@ use crate::piper::synth::SynthOutput;
 
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Owns the rodio playback path: a device thread and the player
-/// queued onto it. The device sink is `!Send` on ALSA and must outlive
-/// every utterance, so it lives on a dedicated `std::thread` rather
-/// than the `spawn_blocking` pool, which may retire idle threads. The
-/// `Player` is `Send + Sync`, but its `append` and `clear` can block on
-/// rodio's internal queue mutex, so they run on the blocking pool
-/// rather than a runtime worker.
+/// How long `Drop` waits for the device thread before abandoning the join.
+const DROP_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Owns the rodio playback path. The `!Send` device sink lives on a dedicated
+/// thread for the worker's lifetime; `Player` calls that can block on rodio's
+/// queue mutex run on the blocking pool.
 pub struct RodioPlaybackWorker {
     player: Arc<Player>,
-    shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
+    shutdown_tx: Option<mpsc::Sender<()>>,
     device_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -36,8 +35,8 @@ impl RodioPlaybackWorker {
         let host = cpal::default_host();
         let selected = select_output_device(&host, device_name);
 
-        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<Player, String>>();
-        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+        let (init_tx, init_rx) = mpsc::channel::<Result<Player, String>>();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
         let device_thread = spawn_device_thread(selected, init_tx, shutdown_rx)?;
 
         let player = init_rx
@@ -62,13 +61,13 @@ impl RodioPlaybackWorker {
         let samples_f32: Vec<f32> = output
             .samples
             .iter()
-            .map(|&s| s as f32 / (i16::MAX as f32))
+            .map(|&sample| sample as f32 / (i16::MAX as f32))
             .collect();
         let buffer = SamplesBuffer::new(channels, sample_rate, samples_f32);
         let player = self.player.clone();
         tokio::task::spawn_blocking(move || player.append(buffer))
             .await
-            .map_err(|e| PiperError::Audio(format!("playback append task failed: {e}")))?;
+            .map_err(|err| PiperError::Audio(format!("playback append task failed: {err}")))?;
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "playback_enqueued",
@@ -77,11 +76,8 @@ impl RodioPlaybackWorker {
         Ok(())
     }
 
-    /// Wait until the queue has finished playing.
-    ///
-    /// Polls rather than calling rodio's `sleep_until_end`, which holds
-    /// the player's queue mutex for the whole wait and would block every
-    /// later `append`.
+    /// Wait until the queue has finished playing. Polls because rodio's
+    /// `sleep_until_end` holds the queue mutex and would block every later `append`.
     pub async fn drain(&self) {
         while !self.player.empty() {
             tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
@@ -100,6 +96,17 @@ impl RodioPlaybackWorker {
     }
 }
 
+impl Drop for RodioPlaybackWorker {
+    fn drop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(device_thread) = self.device_thread.take() {
+            join_with_timeout(device_thread);
+        }
+    }
+}
+
 fn describe(device: &cpal::Device) -> String {
     device
         .description()
@@ -112,21 +119,24 @@ fn describe(device: &cpal::Device) -> String {
 fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
     let devices: Vec<(cpal::Device, String)> = match host.output_devices() {
         Ok(devices) => devices
-            .map(|d| {
-                let desc = describe(&d);
-                (d, desc)
+            .map(|device| {
+                let description = describe(&device);
+                (device, description)
             })
             .collect(),
-        Err(e) => {
+        Err(err) => {
             tracing::warn!(
                 target: "assistd::voice::piper",
-                error = %e,
+                error = %err,
                 "could not enumerate cpal output devices; falling back to default"
             );
             return host.default_output_device();
         }
     };
-    let names: Vec<&str> = devices.iter().map(|(_, n)| n.as_str()).collect();
+    let names: Vec<&str> = devices
+        .iter()
+        .map(|(_, description)| description.as_str())
+        .collect();
     tracing::info!(
         target: "assistd::voice::piper",
         available = ?names,
@@ -134,21 +144,12 @@ fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::D
     );
 
     let Some(name) = name else {
-        let device = host.default_output_device();
-        match &device {
-            Some(d) => tracing::info!(
-                target: "assistd::voice::piper",
-                device = %describe(d),
-                "cpal default output device"
-            ),
-            None => tracing::warn!(
-                target: "assistd::voice::piper",
-                "cpal reports no default output device"
-            ),
-        }
-        return device;
+        return default_output_device(host);
     };
-    match devices.into_iter().find(|(_, n)| n == name) {
+    match devices
+        .into_iter()
+        .find(|(_, description)| description == name)
+    {
         Some((device, _)) => {
             tracing::info!(
                 target: "assistd::voice::piper",
@@ -168,83 +169,89 @@ fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::D
     }
 }
 
-/// Spawn the thread that owns the device sink. It reports the
-/// connected player (or the open error) on `init_tx`, then parks until
-/// `shutdown_rx` fires or hangs up.
+fn default_output_device(host: &cpal::Host) -> Option<cpal::Device> {
+    let device = host.default_output_device();
+    match &device {
+        Some(device) => tracing::info!(
+            target: "assistd::voice::piper",
+            device = %describe(device),
+            "cpal default output device"
+        ),
+        None => tracing::warn!(
+            target: "assistd::voice::piper",
+            "cpal reports no default output device"
+        ),
+    }
+    device
+}
+
 fn spawn_device_thread(
     device: Option<cpal::Device>,
-    init_tx: std::sync::mpsc::Sender<Result<Player, String>>,
-    shutdown_rx: std::sync::mpsc::Receiver<()>,
+    init_tx: mpsc::Sender<Result<Player, String>>,
+    shutdown_rx: mpsc::Receiver<()>,
 ) -> Result<thread::JoinHandle<()>, PiperError> {
     thread::Builder::new()
         .name("piper-rodio".into())
-        .spawn(move || {
-            let opened = match device {
-                Some(dev) => DeviceSinkBuilder::from_device(dev)
-                    .and_then(|b| b.open_stream())
-                    .map_err(|e| format!("open configured device: {e}")),
-                None => DeviceSinkBuilder::open_default_sink()
-                    .map_err(|e| format!("open default sink: {e}")),
-            };
-            let mut device_sink = match opened {
-                Ok(d) => d,
-                Err(msg) => {
-                    let _ = init_tx.send(Err(msg));
-                    return;
-                }
-            };
-            device_sink.log_on_drop(false);
-
-            let player = Player::connect_new(device_sink.mixer());
-            if init_tx.send(Ok(player)).is_err() {
-                return;
-            }
-
-            let _ = shutdown_rx.recv();
-            drop(device_sink);
-        })
-        .map_err(|e| PiperError::Audio(format!("spawn audio thread: {e}")))
+        .spawn(move || run_device_thread(device, init_tx, shutdown_rx))
+        .map_err(|err| PiperError::Audio(format!("spawn audio thread: {err}")))
 }
 
-/// How long `Drop` waits for the device thread before abandoning the
-/// join so a wedged audio device cannot hang shutdown.
-const DROP_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
-impl Drop for RodioPlaybackWorker {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
+/// Report the connected player (or the open error) on `init_tx`, then hold
+/// the device sink until `shutdown_rx` fires or hangs up.
+fn run_device_thread(
+    device: Option<cpal::Device>,
+    init_tx: mpsc::Sender<Result<Player, String>>,
+    shutdown_rx: mpsc::Receiver<()>,
+) {
+    let opened = match device {
+        Some(device) => DeviceSinkBuilder::from_device(device)
+            .and_then(|builder| builder.open_stream())
+            .map_err(|err| format!("open configured device: {err}")),
+        None => DeviceSinkBuilder::open_default_sink()
+            .map_err(|err| format!("open default sink: {err}")),
+    };
+    let mut device_sink = match opened {
+        Ok(device_sink) => device_sink,
+        Err(msg) => {
+            let _ = init_tx.send(Err(msg));
+            return;
         }
-        if let Some(handle) = self.device_thread.take() {
-            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-            // The watchdog owns the join; on timeout it is left to
-            // finish on its own.
-            let spawned = thread::Builder::new()
-                .name("piper-rodio-drop-watchdog".into())
-                .spawn(move || {
-                    let _ = handle.join();
-                    let _ = done_tx.send(());
-                });
-            match spawned {
-                Ok(_) => {
-                    if done_rx.recv_timeout(DROP_JOIN_TIMEOUT).is_err() {
-                        tracing::error!(
-                            target: "assistd::voice::piper",
-                            timeout_secs = DROP_JOIN_TIMEOUT.as_secs(),
-                            "rodio device thread did not exit within budget; abandoning join"
-                        );
-                    }
-                }
-                Err(e) => {
-                    // The closure owned `handle`, so the thread is
-                    // detached and reaped at process exit.
-                    tracing::warn!(
-                        target: "assistd::voice::piper",
-                        error = %e,
-                        "could not spawn drop watchdog; device thread detached"
-                    );
-                }
+    };
+    device_sink.log_on_drop(false);
+
+    let player = Player::connect_new(device_sink.mixer());
+    if init_tx.send(Ok(player)).is_err() {
+        return;
+    }
+
+    let _ = shutdown_rx.recv();
+    drop(device_sink);
+}
+
+/// Join `device_thread` from a watchdog thread so a wedged audio device cannot
+/// hang shutdown; on timeout or spawn failure the thread is left detached.
+fn join_with_timeout(device_thread: thread::JoinHandle<()>) {
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let spawned = thread::Builder::new()
+        .name("piper-rodio-drop-watchdog".into())
+        .spawn(move || {
+            let _ = device_thread.join();
+            let _ = done_tx.send(());
+        });
+    match spawned {
+        Ok(_) => {
+            if done_rx.recv_timeout(DROP_JOIN_TIMEOUT).is_err() {
+                tracing::error!(
+                    target: "assistd::voice::piper",
+                    timeout_secs = DROP_JOIN_TIMEOUT.as_secs(),
+                    "rodio device thread did not exit within budget; abandoning join"
+                );
             }
         }
+        Err(err) => tracing::warn!(
+            target: "assistd::voice::piper",
+            error = %err,
+            "could not spawn drop watchdog; device thread detached"
+        ),
     }
 }

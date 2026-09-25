@@ -1,4 +1,4 @@
-//! SQLite-backed [`crate::MemoryStore`] over the `memories` table.
+//! SQLite-backed [`MemoryStore`] over the `memories` table.
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use crate::{MemoryError, MemoryRecord, MemoryStore, Result};
 use super::connection::SqliteHandle;
 use super::writer::{WriteOp, dispatch_write};
 
-/// SQLite-backed [`crate::MemoryStore`] implementation.
+/// SQLite-backed [`MemoryStore`].
 #[derive(Clone)]
 pub struct SqliteMemoryStore {
     handle: Arc<SqliteHandle>,
@@ -22,8 +22,7 @@ impl SqliteMemoryStore {
         Self { handle }
     }
 
-    /// Save a memory linked to the conversation row that produced it.
-    /// Returns the row id.
+    /// Save a memory linked to the conversation row that produced it; returns the row id.
     pub async fn save_with_source(
         &self,
         key: &str,
@@ -81,12 +80,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        // Escape LIKE metacharacters so `pref:%` matches literally.
-        let escaped = prefix
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pattern = format!("{escaped}%");
+        let pattern = like_prefix_pattern(prefix);
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
@@ -103,11 +97,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
-        let escaped = prefix
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pattern = format!("{escaped}%");
+        let pattern = like_prefix_pattern(prefix);
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
@@ -131,13 +121,22 @@ impl MemoryStore for SqliteMemoryStore {
     }
 }
 
+/// A `LIKE` pattern (escape char `\`) matching keys that start with `prefix` literally.
+fn like_prefix_pattern(prefix: &str) -> String {
+    let escaped = prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("{escaped}%")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::sync::watch;
 
-    /// The guard keeps the database directory and the writer's shutdown
-    /// sender alive for the test's duration.
+    use super::*;
+
+    /// The returned guard keeps the temp dir and the writer's shutdown sender alive.
     async fn fresh() -> (SqliteMemoryStore, (tempfile::TempDir, watch::Sender<bool>)) {
         let temp = tempfile::tempdir().unwrap();
         let (tx, rx) = watch::channel(false);

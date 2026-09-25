@@ -1,15 +1,13 @@
-//! Sway backend for [`crate::WindowManager`], over `swayipc-async`,
-//! with one command socket and one event socket. `swayipc-async` runs
-//! on `async-io`, which costs one extra reactor thread alongside tokio.
-//! A view's app is its `app_id` (Wayland-native) or, failing that, its
-//! `window_properties.class` (XWayland).
+//! Sway backend for [`crate::WindowManager`], over `swayipc-async`. A
+//! view's app is its `app_id`, or its XWayland `class` when it has none.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use swayipc_async::{
-    Connection, Event, EventStream, EventType, Node, NodeType, WindowChange, WorkspaceChange,
+    Connection, Event, EventStream, EventType, Node, NodeType, Output, WindowChange,
+    WindowEvent as SwayWindowEvent, WorkspaceChange,
 };
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -22,13 +20,6 @@ use crate::{
     TransportError, Window, WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId,
     WorkspaceInfo,
 };
-
-fn sway_id(raw: i64) -> Option<WindowId> {
-    if raw <= 0 {
-        return None;
-    }
-    WindowId::new(raw as u64)
-}
 
 /// [`WindowManager`] over a single Sway IPC command socket.
 pub struct SwayBackend {
@@ -50,9 +41,8 @@ impl SwayHandle {
 }
 
 impl SwayBackend {
-    /// Connect to the Sway IPC sockets, seed the focus snapshot, and
-    /// spawn the supervisor that drives events and reconnects on
-    /// socket drops. Errors only when the initial connect fails.
+    /// Connect to Sway and spawn the reconnecting supervisor. Errors only
+    /// when the initial connect fails.
     pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<SwayHandle> {
         let (ipc, supervisor_task) = IpcBackend::start(SwayIpc, shutdown).await?;
         Ok(SwayHandle {
@@ -61,9 +51,9 @@ impl SwayBackend {
         })
     }
 
-    async fn outputs(&self, ctx: &'static str) -> WmResult<Vec<swayipc_async::Output>> {
+    async fn outputs(&self, op_label: &'static str) -> WmResult<Vec<Output>> {
         self.ipc
-            .with_conn(ctx, async |conn| conn.get_outputs().await)
+            .with_conn(op_label, async |conn| conn.get_outputs().await)
             .await
     }
 }
@@ -128,19 +118,19 @@ impl WindowManager for SwayBackend {
             .outputs("sway GET_OUTPUTS")
             .await?
             .into_iter()
-            .map(|o| OutputInfo {
-                name: o.name,
-                active: o.active,
-                primary: o.primary,
-                current_mode: o.current_mode.map(|m| {
+            .map(|output| OutputInfo {
+                name: output.name,
+                active: output.active,
+                primary: output.primary,
+                current_mode: output.current_mode.map(|mode| {
                     (
-                        m.width.max(0) as u32,
-                        m.height.max(0) as u32,
-                        m.refresh.max(0) as u32,
+                        mode.width.max(0) as u32,
+                        mode.height.max(0) as u32,
+                        mode.refresh.max(0) as u32,
                     )
                 }),
-                scale: o.scale,
-                focused_workspace: o.current_workspace,
+                scale: output.scale,
+                focused_workspace: output.current_workspace,
             })
             .collect())
     }
@@ -150,9 +140,9 @@ impl WindowManager for SwayBackend {
             .outputs("sway GET_OUTPUTS (focused scale)")
             .await?
             .into_iter()
-            .find(|o| o.focused)
-            .and_then(|o| o.scale)
-            .filter(|s| s.is_finite() && *s > 0.0)
+            .find(|output| output.focused)
+            .and_then(|output| output.scale)
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
             .unwrap_or(1.0))
     }
 
@@ -203,7 +193,7 @@ impl IpcProtocol for SwayIpc {
         Ok(outcomes
             .into_iter()
             .collect::<Result<(), _>>()
-            .map_err(|e| e.to_string()))
+            .map_err(|rejected| rejected.to_string()))
     }
 
     async fn get_tree(cmd: &mut Connection) -> Result<Node, TransportError> {
@@ -215,18 +205,18 @@ impl IpcProtocol for SwayIpc {
             .get_workspaces()
             .await?
             .into_iter()
-            .map(|w| Workspace {
+            .map(|workspace| Workspace {
                 rect: Rect {
-                    x: w.rect.x,
-                    y: w.rect.y,
-                    width: w.rect.width.max(0) as u32,
-                    height: w.rect.height.max(0) as u32,
+                    x: workspace.rect.x,
+                    y: workspace.rect.y,
+                    width: workspace.rect.width.max(0) as u32,
+                    height: workspace.rect.height.max(0) as u32,
                 },
                 info: WorkspaceInfo {
-                    num: w.num,
-                    name: w.name,
-                    focused: w.focused,
-                    output: w.output,
+                    num: workspace.num,
+                    name: workspace.name,
+                    focused: workspace.focused,
+                    output: workspace.output,
                 },
             })
             .collect())
@@ -247,11 +237,11 @@ impl IpcProtocol for SwayIpc {
             class: node
                 .app_id
                 .clone()
-                .or_else(|| props.and_then(|p| p.class.clone())),
+                .or_else(|| props.and_then(|props| props.class.clone())),
             title: node
                 .name
                 .clone()
-                .or_else(|| props.and_then(|p| p.title.clone())),
+                .or_else(|| props.and_then(|props| props.title.clone())),
         }
     }
 
@@ -267,110 +257,116 @@ impl IpcProtocol for SwayIpc {
     }
 
     fn collect_windows(tree: &Node) -> Vec<Window> {
-        let mut out = Vec::new();
-        collect_windows(tree, None, &mut out);
-        out
+        let mut windows = Vec::new();
+        collect_windows(tree, None, &mut windows);
+        windows
     }
 }
 
 fn ipc_event(event: Event) -> IpcEvent {
     match event {
-        Event::Window(w) => IpcEvent::Window {
-            focus: focus_change(&w),
-            event: window_event_from_sway(&w),
+        Event::Window(window) => IpcEvent::Window {
+            focus: focus_change(&window),
+            event: window_event_from_sway(&window),
         },
         Event::Workspace(data) if matches!(data.change, WorkspaceChange::Focus) => {
-            IpcEvent::WorkspaceFocused(data.current.and_then(|n| n.name))
+            IpcEvent::WorkspaceFocused(data.current.and_then(|node| node.name))
         }
         _ => IpcEvent::Ignored,
     }
 }
 
-fn focus_change(w: &swayipc_async::WindowEvent) -> Option<(WindowChangeKind, NodeIdentity)> {
-    let kind = match w.change {
+fn focus_change(window: &SwayWindowEvent) -> Option<(WindowChangeKind, NodeIdentity)> {
+    let kind = match window.change {
         WindowChange::Focus => WindowChangeKind::Focus,
         WindowChange::Title => WindowChangeKind::Title,
         WindowChange::Close => WindowChangeKind::Close,
         _ => return None,
     };
-    Some((kind, SwayIpc::identity(&w.container)))
+    Some((kind, SwayIpc::identity(&window.container)))
 }
 
-fn window_event_from_sway(w: &swayipc_async::WindowEvent) -> Option<WindowEvent> {
-    let id = sway_id(w.container.id)?;
-    match w.change {
+fn window_event_from_sway(window: &SwayWindowEvent) -> Option<WindowEvent> {
+    let container = &window.container;
+    let id = sway_id(container.id)?;
+    match window.change {
         WindowChange::New => {
-            let props = w.container.window_properties.as_ref();
-            let class = props.and_then(|p| p.class.clone());
-            let title = w
-                .container
+            let props = container.window_properties.as_ref();
+            let class = props.and_then(|props| props.class.clone());
+            let title = container
                 .name
                 .clone()
-                .or_else(|| props.and_then(|p| p.title.clone()));
+                .or_else(|| props.and_then(|props| props.title.clone()));
             Some(WindowEvent::Opened {
                 id,
                 title,
                 class,
-                app_id: w.container.app_id.clone(),
+                app_id: container.app_id.clone(),
             })
         }
         WindowChange::Title => Some(WindowEvent::TitleChanged {
             id,
-            new_title: w.container.name.clone(),
+            new_title: container.name.clone(),
         }),
         WindowChange::Close => Some(WindowEvent::Closed { id }),
         _ => None,
     }
 }
 
+/// `ConId` never matches here.
 fn sway_node_matches(node: &Node, criteria: &PlacementCriteria) -> bool {
     let props = node.window_properties.as_ref();
     match criteria {
-        PlacementCriteria::AppId(want) => node.app_id.as_deref().is_some_and(|a| a == want),
+        PlacementCriteria::AppId(want) => {
+            node.app_id.as_deref().is_some_and(|app_id| app_id == want)
+        }
         PlacementCriteria::Class(want) => props
-            .and_then(|p| p.class.as_deref())
-            .is_some_and(|c| c == want),
+            .and_then(|props| props.class.as_deref())
+            .is_some_and(|class| class == want),
         PlacementCriteria::Title(want) => node
             .name
             .as_deref()
-            .or_else(|| props.and_then(|p| p.title.as_deref()))
-            .is_some_and(|t| t == want),
-        // ConId is matched by id elsewhere. No-match so a misuse fails loudly.
+            .or_else(|| props.and_then(|props| props.title.as_deref()))
+            .is_some_and(|title| title == want),
         PlacementCriteria::ConId(_) => false,
     }
 }
 
-fn collect_windows(node: &Node, current_ws: Option<&str>, out: &mut Vec<Window>) {
-    let next_ws = if matches!(node.node_type, NodeType::Workspace) {
+fn collect_windows(node: &Node, parent_workspace: Option<&str>, out: &mut Vec<Window>) {
+    let workspace = if matches!(node.node_type, NodeType::Workspace) {
         node.name.as_deref()
     } else {
-        current_ws
+        parent_workspace
     };
 
     if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
         && let Some(id) = sway_id(node.id)
     {
-        let class = node
-            .window_properties
-            .as_ref()
-            .and_then(|p| p.class.clone());
+        let props = node.window_properties.as_ref();
+        let class = props.and_then(|props| props.class.clone());
         let app = node.app_id.clone().or(class);
-        let title = node.name.clone().or_else(|| {
-            node.window_properties
-                .as_ref()
-                .and_then(|p| p.title.clone())
-        });
+        let title = node
+            .name
+            .clone()
+            .or_else(|| props.and_then(|props| props.title.clone()));
         out.push(Window {
             id,
             app,
             title,
-            workspace: next_ws.map(|s| s.to_string()),
+            workspace: workspace.map(str::to_string),
         });
     }
 
     for child in SwayIpc::children(node) {
-        collect_windows(child, next_ws, out);
+        collect_windows(child, workspace, out);
     }
+}
+
+fn sway_id(raw: i64) -> Option<WindowId> {
+    if raw <= 0 {
+        return None;
+    }
+    WindowId::new(raw as u64)
 }
 
 #[cfg(test)]

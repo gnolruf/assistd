@@ -1,6 +1,8 @@
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::defaults::{
     DEFAULT_LISTEN_ENABLED, DEFAULT_LISTEN_HOTKEY, DEFAULT_LISTEN_MAX_UTTERANCE_SECS,
     DEFAULT_LISTEN_SILENCE_MS, DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_PIPER_BINARY,
@@ -10,30 +12,22 @@ use crate::defaults::{
     DEFAULT_VOICE_MAX_RECORDING_SECS, DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL,
     DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL,
 };
-use serde::{Deserialize, Serialize};
 
-/// Voice input settings.
+/// Voice input and output settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct VoiceConfig {
-    /// Whether voice input is enabled.
+    /// Enables voice input.
     pub enabled: bool,
-    /// ALSA/PulseAudio device name. `None` = system default.
+    /// ALSA/PulseAudio input device. `None` uses the system default.
     pub mic_device: Option<String>,
-    /// Hotkey to hold for push-to-talk recording (e.g. "Super+Space").
-    /// Empty disables the global hotkey; the PTT IPC commands still work.
+    /// Push-to-talk hold hotkey (e.g. `"Super+Space"`). Empty disables it;
+    /// the PTT IPC commands still work.
     pub hotkey: String,
-    /// Upper bound on a single PTT recording, in seconds. A longer hold
-    /// keeps and transcribes only the first `max_recording_secs`.
+    /// Max PTT recording length in seconds; audio past it is dropped.
     pub max_recording_secs: NonZeroU32,
-    /// Speech-to-text transcription settings.
     pub transcription: TranscriptionConfig,
-    /// Hands-free continuous listening. When enabled, the daemon keeps
-    /// the mic open, segments utterances with VAD, and dispatches each
-    /// transcript as a query.
     pub continuous: ContinuousListenConfig,
-    /// Text-to-speech synthesis (Piper). When enabled, the daemon spawns
-    /// piper per utterance and plays responses aloud.
     pub synthesis: SynthesisConfig,
 }
 
@@ -51,30 +45,26 @@ impl Default for VoiceConfig {
     }
 }
 
-/// Whisper transcription settings.
+/// Whisper speech-to-text settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TranscriptionConfig {
-    /// HuggingFace identifier for the Whisper GGML model, formatted as
-    /// `<owner>/<repo>:<file>`. Downloaded on first use and cached under
-    /// `model_cache_dir` (or `$XDG_CACHE_HOME/assistd/whisper/`).
+    /// Whisper GGML model as `<owner>/<repo>:<file>`, downloaded on first
+    /// use. Validated when voice is enabled.
     pub model: String,
-    /// Prefer GPU inference when available. Falls back to CPU with a
-    /// warning log if no CUDA device is detected or whisper-rs was built
-    /// without the `cuda` feature.
+    /// Prefer GPU inference; falls back to CPU when no CUDA device is found
+    /// or the `cuda` feature is off.
     pub prefer_gpu: bool,
-    /// CPU thread count. `None` lets whisper.cpp choose.
+    /// CPU threads. `None` lets whisper.cpp choose.
     pub threads: Option<NonZeroU32>,
-    /// Number of beams for decoding. `1` = greedy; larger values improve
-    /// accuracy at the cost of latency.
+    /// Decoding beams; `1` is greedy.
     pub beams: NonZeroU32,
-    /// Enable Silero VAD to trim silence before decoding.
+    /// Trim silence with Silero VAD before decoding.
     pub vad_enabled: bool,
-    /// HuggingFace identifier for the VAD GGML model. Only used when
-    /// `vad_enabled = true`.
+    /// VAD GGML model as `<owner>/<repo>:<file>`; used only with `vad_enabled`.
     pub vad_model: String,
-    /// Override for the on-disk model cache directory. `None` uses
-    /// `$XDG_CACHE_HOME/assistd/whisper/` (or `~/.cache/assistd/whisper/`).
+    /// Model cache directory. `None` uses `$XDG_CACHE_HOME/assistd/whisper/`
+    /// (or `~/.cache/assistd/whisper/`).
     pub model_cache_dir: Option<PathBuf>,
 }
 
@@ -92,27 +82,20 @@ impl Default for TranscriptionConfig {
     }
 }
 
-/// Continuous (hands-free) listening settings. Runs only when
-/// [`VoiceConfig::enabled`] and [`Self::enabled`] are both true.
+/// Hands-free listening: VAD-segmented utterances are sent as queries.
+/// Runs only when both [`VoiceConfig::enabled`] and [`Self::enabled`] are set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ContinuousListenConfig {
-    /// Master switch. When false, continuous listening is unavailable
-    /// even if `voice.enabled` is true; push-to-talk is unaffected.
+    /// Makes continuous listening available; push-to-talk is unaffected.
     pub enabled: bool,
-    /// Start listening automatically on daemon launch. When false the
-    /// listener is built but idle; flip it on via the hotkey or the
-    /// `assistd listen-start` IPC command.
+    /// Start listening at launch; otherwise the listener idles until toggled.
     pub start_on_launch: bool,
-    /// Optional global hotkey that toggles listening on/off. Empty
-    /// disables the hotkey binding; the IPC commands still work.
+    /// Hotkey that toggles listening. Empty disables it.
     pub hotkey: String,
-    /// Trailing silence required to mark the end of an utterance, in
-    /// milliseconds. Shorter values respond faster; longer values
-    /// tolerate mid-sentence pauses.
+    /// Trailing silence, in ms, that ends an utterance.
     pub silence_ms: NonZeroU32,
-    /// Force-flush a utterance to whisper after this many seconds even
-    /// if the user keeps speaking. Bounds memory use.
+    /// Seconds after which an utterance is transcribed even mid-speech.
     pub max_utterance_secs: NonZeroU32,
 }
 
@@ -132,77 +115,44 @@ impl Default for ContinuousListenConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SynthesisConfig {
-    /// Master switch. When false, piper is never spawned, no voice model
-    /// is downloaded, and responses stay silent.
+    /// Enables TTS. When `false`, piper is never spawned and no voice is
+    /// downloaded.
     pub enabled: bool,
-    /// Path to (or name of) the piper binary. Looked up via `$PATH`
-    /// when the value is a bare command name.
+    /// Piper binary: a path, or a bare name looked up on `$PATH`. Must not
+    /// be empty when enabled.
     pub binary_path: PathBuf,
-    /// HuggingFace identifier for the Piper voice ONNX, formatted as
-    /// `<owner>/<repo>:<file>` where `<file>` is the path of the
-    /// `.onnx` file inside the repo. The matching `.onnx.json` is
-    /// downloaded alongside it. Cached under `model_cache_dir` (or
-    /// `$XDG_CACHE_HOME/assistd/piper/`).
+    /// Voice as `<owner>/<repo>:<file>`, `<file>` being the `.onnx` path in
+    /// the repo; its `.onnx.json` is fetched alongside.
     pub voice: String,
-    /// Override for the on-disk voice cache directory. `None` uses
-    /// `$XDG_CACHE_HOME/assistd/piper/` (or `~/.cache/assistd/piper/`).
+    /// Voice cache directory. `None` uses `$XDG_CACHE_HOME/assistd/piper/`
+    /// (or `~/.cache/assistd/piper/`).
     pub model_cache_dir: Option<PathBuf>,
-    /// Speaking-rate scale. `1.0` is the voice's natural rate; lower
-    /// values speak faster, higher values speak slower.
+    /// Speaking-rate scale: `1.0` is natural, lower is faster. Must be
+    /// positive and finite.
     pub length_scale: f32,
-    /// Optional override for Piper's espeak-ng data directory. Most
-    /// distro packages set this themselves; only set when piper logs
-    /// "Failed to load espeak-ng".
+    /// espeak-ng data directory; set only if piper logs "Failed to load
+    /// espeak-ng".
     pub espeak_data_dir: Option<PathBuf>,
-    /// Per-utterance synthesis deadline in seconds. The piper child is
-    /// killed if it hasn't returned PCM by this point.
+    /// Seconds piper may take per utterance before it is killed.
     pub deadline_secs: NonZeroU32,
-    /// Maximum sentence length fed to Piper. The sentence buffer flushes
-    /// at the last whitespace before this cap when no terminator appears
-    /// within the limit.
+    /// Sentence length cap; longer text flushes at the last whitespace
+    /// before it. At least 50.
     pub max_sentence_chars: NonZeroU32,
-    /// Idle gap (ms) between LLM deltas after which the sentence buffer
-    /// is flushed even without a terminator. `0` disables the timeout
-    /// flush; only the terminal `Done`-based flush is used. Inhibited
-    /// while a tool call is in flight.
+    /// Idle gap, in ms, between LLM deltas after which buffered text is
+    /// spoken unterminated. `0` disables; suspended during tool calls.
     pub partial_flush_ms: u32,
-    /// How fenced code blocks in the LLM response are spoken aloud.
     pub code_block_mode: CodeBlockMode,
-    /// Global hotkey (e.g. `"Super+Shift+M"`) that flips TTS on/off
-    /// mid-session. Empty disables the binding. Turning off cancels
-    /// in-flight playback; turning back on resumes for the next
-    /// sentence delivered by the LLM (sentences arriving while off are
-    /// silently dropped).
+    /// Hotkey that toggles TTS (e.g. `"Super+Shift+M"`). Empty disables it.
+    /// Off cancels playback; sentences arriving while off are dropped.
     pub toggle_hotkey: String,
-    /// Global hotkey (e.g. `"Super+Shift+S"`) that aborts the current
-    /// response: stops playback, drops any queued sentences for the
-    /// in-flight query, but does not start recording. Empty disables.
+    /// Hotkey that stops playback and drops the current response's queued
+    /// sentences. Empty disables it.
     pub skip_hotkey: String,
-    /// Pass `--cuda` to piper, routing ONNX inference through the
-    /// CUDA execution provider. Requires a piper binary linked
-    /// against `onnxruntime-gpu`; CPU-only builds exit with
-    /// "CUDA execution provider not available".
+    /// Pass `--cuda` to piper; needs a piper built against `onnxruntime-gpu`.
     pub use_cuda: bool,
-    /// Audio output device name, as listed by `aplay -L` (e.g.
-    /// `"pipewire"`, `"pulse"`, `"default"`). `None` uses the audio
-    /// host's default device, which on some PipeWire setups is a raw
-    /// ALSA card rather than the user's default sink.
+    /// Output device as listed by `aplay -L` (e.g. `"pipewire"`). `None`
+    /// uses the audio host's default, which may be a raw ALSA card.
     pub output_device: Option<String>,
-}
-
-/// How fenced code blocks in the LLM response are spoken.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CodeBlockMode {
-    /// Drop fenced content silently. The default: code in a chat
-    /// response is rarely useful as speech.
-    #[default]
-    Skip,
-    /// Drop fenced content but emit one short phrase per fence so the
-    /// listener knows code was elided. Captures the fence's language tag
-    /// (e.g. ```` ```rust ````) and speaks "Code block in rust." when
-    /// the fence closes; falls back to "Code block." with no tag.
-    Summarize,
 }
 
 impl Default for SynthesisConfig {
@@ -224,4 +174,15 @@ impl Default for SynthesisConfig {
             output_device: None,
         }
     }
+}
+
+/// How fenced code blocks in a reply are spoken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeBlockMode {
+    /// Drop them silently.
+    #[default]
+    Skip,
+    /// Drop them but say "Code block in <lang>." (or "Code block.") per fence.
+    Summarize,
 }

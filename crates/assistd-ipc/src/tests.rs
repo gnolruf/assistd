@@ -568,9 +568,9 @@ fn event_kind_matches_broadcast_eligibility() {
 
 #[test]
 fn wire_spelling_helpers_agree_with_serde() {
-    fn check<T: Serialize + std::fmt::Display>(v: T, as_str: &str) {
-        assert_eq!(serde_json::to_value(&v).unwrap(), as_str);
-        assert_eq!(v.to_string(), as_str);
+    fn check<T: Serialize + fmt::Display>(value: T, as_str: &str) {
+        assert_eq!(serde_json::to_value(&value).unwrap(), as_str);
+        assert_eq!(value.to_string(), as_str);
     }
     for v in [
         StatusSeverity::Info,
@@ -636,8 +636,8 @@ fn socket_path_prefers_xdg_runtime_dir_then_user() {
 
 #[test]
 fn subscribe_filter_default_matches_all() {
-    let f = SubscribeFilter::default();
-    for k in [
+    let filter = SubscribeFilter::default();
+    for kind in [
         EventKind::Delta,
         EventKind::ReasoningDelta,
         EventKind::ToolCall,
@@ -651,18 +651,18 @@ fn subscribe_filter_default_matches_all() {
         EventKind::Error,
         EventKind::LastDelta,
     ] {
-        assert!(f.matches(k), "default filter should match {k:?}");
+        assert!(filter.matches(kind), "default filter should match {kind:?}");
     }
 }
 
 #[test]
 fn subscribe_filter_matches_listed_only() {
-    let f = SubscribeFilter {
+    let filter = SubscribeFilter {
         kinds: vec![EventKind::Presence, EventKind::LastDelta],
     };
-    assert!(f.matches(EventKind::Presence));
-    assert!(f.matches(EventKind::LastDelta));
-    assert!(!f.matches(EventKind::Delta));
-    assert!(!f.matches(EventKind::ToolCall));
-    assert!(!f.matches(EventKind::Done));
+    assert!(filter.matches(EventKind::Presence));
+    assert!(filter.matches(EventKind::LastDelta));
+    assert!(!filter.matches(EventKind::Delta));
+    assert!(!filter.matches(EventKind::ToolCall));
+    assert!(!filter.matches(EventKind::Done));
 }

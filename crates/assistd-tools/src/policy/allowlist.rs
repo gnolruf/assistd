@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-/// Name of the file, beside the config file, that keeps the programs
-/// approved with "always allow".
+/// File, beside the config file, that keeps "always allow" approvals.
 pub const APPROVALS_FILE: &str = "allowed_programs.toml";
 
 const APPROVALS_HEADER: &str = "\
@@ -18,33 +17,30 @@ const APPROVALS_HEADER: &str = "\
 # entry to be asked again.
 ";
 
-/// Directories bare command names are looked up in, as the command will
-/// see them.
+/// Directories bare command names are looked up in, as the command sees
+/// them.
 #[derive(Debug, Clone)]
 pub struct SearchPath {
     /// Absolute directories, in lookup order.
     pub dirs: Vec<PathBuf>,
-    /// Commands cannot modify anything in `dirs` (they run in a sandbox
-    /// that mounts them read-only), so no ownership checks are needed.
+    /// Commands cannot modify anything in `dirs`, so ownership is not
+    /// checked.
     pub read_only: bool,
 }
 
 /// Why approvals could not be loaded or saved.
 #[derive(Debug, thiserror::Error)]
 pub enum AllowlistError {
-    /// The approvals file exists but could not be read.
     #[error("failed to read {path}: {source}")]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    /// The approvals file is not valid.
     #[error("failed to parse {path}: {source}")]
     Parse {
         path: PathBuf,
         source: toml::de::Error,
     },
-    /// The approvals could not be saved.
     #[error("failed to save {path}: {source}")]
     Write {
         path: PathBuf,
@@ -56,8 +52,7 @@ pub enum AllowlistError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Verdict {
     Allowed,
-    /// Not allowed. `approvable` when "always allow" can add it: a bare
-    /// name that resolves to a program.
+    /// `approvable` when "always allow" can add it.
     Unlisted {
         approvable: bool,
     },
@@ -66,58 +61,31 @@ pub(super) enum Verdict {
 }
 
 /// The programs a command may run without confirmation: the configured
-/// ones, and those approved with "always allow". A configured bare name
-/// counts only when it resolves to a file the user cannot modify, so a
-/// copy planted earlier on the search path does not inherit its trust.
-/// An approval is pinned to the file its name resolved to when given.
+/// ones, which count only where the user cannot modify them, and those
+/// approved with "always allow", each pinned to the file it resolved to.
 #[derive(Debug)]
 pub struct Allowlist {
     configured: BTreeSet<String>,
     approved: RwLock<BTreeMap<String, PathBuf>>,
     search_path: SearchPath,
-    /// Nothing on the search path can be created or replaced by the
-    /// user, so a name that resolves to nothing will still resolve to
-    /// nothing when the command runs.
+    /// The user cannot add programs to the search path.
     search_path_fixed: bool,
     store: Option<PathBuf>,
     saving: tokio::sync::Mutex<()>,
 }
 
 impl Allowlist {
-    /// An allowlist of `configured` names and absolute paths, with the
-    /// approvals kept in `store` (loaded now, and saved on every
-    /// approval).
+    /// An allowlist of `configured` names and absolute paths, with
+    /// approvals loaded from and saved to `store`.
     ///
     /// # Errors
-    ///
-    /// [`AllowlistError`] when `store` exists but cannot be read or
-    /// parsed.
+    /// [`AllowlistError`] when `store` exists but cannot be read or parsed.
     pub fn load(
         configured: impl IntoIterator<Item = String>,
         search_path: SearchPath,
         store: PathBuf,
     ) -> Result<Self, AllowlistError> {
-        let approved = match std::fs::read_to_string(&store) {
-            Ok(text) => {
-                let stored: Stored =
-                    toml::from_str(&text).map_err(|source| AllowlistError::Parse {
-                        path: store.clone(),
-                        source,
-                    })?;
-                stored
-                    .programs
-                    .into_iter()
-                    .map(|p| (p.name, p.path))
-                    .collect()
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(source) => {
-                return Err(AllowlistError::Read {
-                    path: store,
-                    source,
-                });
-            }
-        };
+        let approved = load_approvals(&store)?;
         let mut allowlist = Self::unsaved(configured, search_path);
         allowlist.approved = RwLock::new(approved);
         allowlist.store = Some(store);
@@ -142,13 +110,11 @@ impl Allowlist {
     }
 
     /// Approve `names` for good, pinning each to the file it resolves to
-    /// now, and save the approvals. Names that resolve to nothing are
-    /// skipped.
+    /// now, and save. Names that resolve to nothing are skipped.
     ///
     /// # Errors
-    ///
-    /// [`AllowlistError::Write`] when the approvals cannot be saved; they
-    /// still hold until the daemon exits.
+    /// [`AllowlistError::Write`] when saving fails; the approvals still hold
+    /// until the daemon exits.
     pub async fn approve(&self, names: &[String]) -> Result<(), AllowlistError> {
         let _saving = self.saving.lock().await;
         let approved = {
@@ -174,20 +140,29 @@ impl Allowlist {
 
     pub(super) fn verdict(&self, word: &str) -> Verdict {
         if word.contains('/') {
-            let path = Path::new(word);
-            let allowed = self.configured.contains(word)
-                || (path.is_absolute()
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| self.configured.contains(name))
-                    && self.cannot_be_modified(path));
-            return if allowed {
-                Verdict::Allowed
-            } else {
-                Verdict::Unlisted { approvable: false }
-            };
+            self.path_verdict(word)
+        } else {
+            self.name_verdict(word)
         }
+    }
+
+    fn path_verdict(&self, word: &str) -> Verdict {
+        let path = Path::new(word);
+        let allowed = self.configured.contains(word)
+            || (path.is_absolute()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| self.configured.contains(name))
+                && self.cannot_be_modified(path));
+        if allowed {
+            Verdict::Allowed
+        } else {
+            Verdict::Unlisted { approvable: false }
+        }
+    }
+
+    fn name_verdict(&self, word: &str) -> Verdict {
         let Some(found) = self.resolve(word) else {
             return Verdict::Missing;
         };
@@ -212,9 +187,8 @@ impl Allowlist {
             })
     }
 
-    /// Neither the file nor its directory can be modified by the user,
-    /// following symlinks to the file they point at. Anything directly in
-    /// a read-only search path qualifies.
+    /// Neither the file (after following symlinks) nor its directory can be
+    /// modified by the user, or it sits directly in a read-only search path.
     fn cannot_be_modified(&self, path: &Path) -> bool {
         if self.search_path.read_only
             && path
@@ -233,17 +207,18 @@ impl Allowlist {
     }
 }
 
-/// Whether the daemon's user may write to a file with metadata `m`.
-fn user_can_modify(m: &Metadata) -> bool {
+/// Whether the daemon's user may write to a file with this metadata.
+fn user_can_modify(meta: &Metadata) -> bool {
     let uid = rustix::process::geteuid();
     if uid.is_root() {
         return true;
     }
-    let mode = m.mode();
-    let in_group = m.gid() == rustix::process::getegid().as_raw()
-        || rustix::process::getgroups()
-            .map_or(true, |groups| groups.iter().any(|g| g.as_raw() == m.gid()));
-    (m.uid() == uid.as_raw() && mode & 0o200 != 0)
+    let mode = meta.mode();
+    let in_group = meta.gid() == rustix::process::getegid().as_raw()
+        || rustix::process::getgroups().map_or(true, |groups| {
+            groups.iter().any(|group| group.as_raw() == meta.gid())
+        });
+    (meta.uid() == uid.as_raw() && mode & 0o200 != 0)
         || (in_group && mode & 0o020 != 0)
         || mode & 0o002 != 0
 }
@@ -261,8 +236,31 @@ struct StoredProgram {
     path: PathBuf,
 }
 
-/// Write the approvals to a sibling temporary file, then rename it over
-/// `store`, so a crash never leaves a half-written file.
+/// The approvals saved in `store`; none when it does not exist.
+fn load_approvals(store: &Path) -> Result<BTreeMap<String, PathBuf>, AllowlistError> {
+    let text = match std::fs::read_to_string(store) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(source) => {
+            return Err(AllowlistError::Read {
+                path: store.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let stored: Stored = toml::from_str(&text).map_err(|source| AllowlistError::Parse {
+        path: store.to_path_buf(),
+        source,
+    })?;
+    Ok(stored
+        .programs
+        .into_iter()
+        .map(|program| (program.name, program.path))
+        .collect())
+}
+
+/// Write the approvals to a sibling file, then rename it over `store`, so
+/// a crash never leaves a half-written file.
 async fn save(store: &Path, approved: BTreeMap<String, PathBuf>) -> Result<(), AllowlistError> {
     let write_err = |source| AllowlistError::Write {
         path: store.to_path_buf(),
@@ -279,11 +277,11 @@ async fn save(store: &Path, approved: BTreeMap<String, PathBuf>) -> Result<(), A
     if let Some(dir) = store.parent() {
         tokio::fs::create_dir_all(dir).await.map_err(write_err)?;
     }
-    let tmp = store.with_extension("toml.tmp");
-    tokio::fs::write(&tmp, format!("{APPROVALS_HEADER}\n{body}"))
+    let staged = store.with_extension("toml.tmp");
+    tokio::fs::write(&staged, format!("{APPROVALS_HEADER}\n{body}"))
         .await
         .map_err(write_err)?;
-    tokio::fs::rename(&tmp, store).await.map_err(write_err)
+    tokio::fs::rename(&staged, store).await.map_err(write_err)
 }
 
 #[cfg(test)]

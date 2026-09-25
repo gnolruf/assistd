@@ -64,10 +64,10 @@ impl Tool for HealthRoutedTool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::{McpClient, ToolResult, ToolSchema};
-    use serde_json::json;
-    use std::sync::Arc;
 
     struct FakeClient;
 
@@ -127,12 +127,12 @@ mod tests {
     #[tokio::test]
     async fn flips_back_to_forwarding_when_health_recovers() {
         let (tool, tx) = make_tool(HealthState::Restarting);
-        let r = tool.invoke(json!({})).await.unwrap();
-        assert_eq!(r["type"], "error");
+        let while_down = tool.invoke(json!({})).await.unwrap();
+        assert_eq!(while_down["type"], "error");
 
         tx.send(HealthState::Healthy).unwrap();
-        let r = tool.invoke(json!({})).await.unwrap();
-        assert_eq!(r["type"], "text");
-        assert_eq!(r["exit_code"], 0);
+        let recovered = tool.invoke(json!({})).await.unwrap();
+        assert_eq!(recovered["type"], "text");
+        assert_eq!(recovered["exit_code"], 0);
     }
 }

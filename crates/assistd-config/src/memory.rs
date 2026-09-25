@@ -6,15 +6,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::{DEFAULT_MEMORY_ENABLED, default_memory_db_path};
 
-/// `[memory]` section of `config.toml`.
+/// SQLite-backed memory settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MemoryConfig {
-    /// Master switch. When `false` the SQLite file is never opened.
+    /// When `false`, the database is never opened.
     pub enabled: bool,
-    /// Path to the SQLite database file. Default resolves to
-    /// `$XDG_DATA_HOME/assistd/memory.db` (or
-    /// `$HOME/.local/share/assistd/memory.db`).
+    /// SQLite database file. Must not be empty when enabled.
     pub db_path: PathBuf,
 }
 

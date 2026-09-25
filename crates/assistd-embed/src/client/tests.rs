@@ -1,9 +1,11 @@
-use super::*;
-use serde_json::{Value, json};
 use std::net::SocketAddr;
+
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+
+use super::*;
 
 fn datum(index: usize, embedding: &[f32]) -> EmbedDatum {
     EmbedDatum {
@@ -37,8 +39,8 @@ async fn read_request_body(stream: &mut TcpStream) -> Value {
     serde_json::from_slice(&buf[header_end..header_end + len]).unwrap()
 }
 
-/// Serve one scripted JSON response per connection, in order, and
-/// return the request bodies it received once the script is exhausted.
+/// Serve one scripted JSON response per connection, returning the request bodies
+/// received once the script is exhausted.
 async fn serve(responses: Vec<Value>) -> (SocketAddr, JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

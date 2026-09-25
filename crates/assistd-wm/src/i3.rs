@@ -44,10 +44,8 @@ impl I3Handle {
 }
 
 impl I3Backend {
-    /// Connect to the i3 IPC sockets, seed the focus snapshot, and
-    /// spawn the supervisor that drives events and reconnects on
-    /// socket drops. Errors only when the initial connect fails;
-    /// later socket failures are handled by the supervisor.
+    /// Connect to i3 and spawn the reconnecting supervisor. Errors only
+    /// when the initial connect fails.
     pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<I3Handle> {
         let (ipc, supervisor_task) = IpcBackend::start(I3Ipc, shutdown).await?;
         Ok(I3Handle {
@@ -61,7 +59,7 @@ impl I3Backend {
     /// workspace is focused or `xrandr` doesn't list the output.
     async fn focused_output_randr_scale(&self) -> Option<f64> {
         let output_name = self.focused_output_name().await.ok().flatten()?;
-        let xrandr = run_xrandr_query().await?;
+        let xrandr = query_command_output("xrandr", "--query").await?;
         let (pixels, mm) = parse_xrandr_output_size(&xrandr, &output_name)?;
         Some(calc_randr_scale(pixels, mm))
     }
@@ -73,8 +71,8 @@ impl I3Backend {
             .workspaces("i3 GET_WORKSPACES (focused output name)")
             .await?
             .into_iter()
-            .find(|w| w.info.focused)
-            .map(|w| w.info.output))
+            .find(|workspace| workspace.info.focused)
+            .map(|workspace| workspace.info.output))
     }
 }
 
@@ -125,17 +123,19 @@ impl WindowManager for I3Backend {
         self.ipc.focused_workspace_rect().await
     }
 
+    /// First of `WINIT_X11_SCALE_FACTOR`, `Xft.dpi`, and the `xrandr`
+    /// physical size that yields a scale; otherwise `1.0`.
     async fn focused_output_scale(&self) -> WmResult<f64> {
-        if let Some(s) = env_scale("WINIT_X11_SCALE_FACTOR") {
-            return Ok(s);
+        if let Some(scale) = env_scale("WINIT_X11_SCALE_FACTOR") {
+            return Ok(scale);
         }
-        if let Some(out) = run_xrdb_query().await
-            && let Some(s) = parse_xft_dpi_scale(&out)
+        if let Some(xrdb) = query_command_output("xrdb", "-query").await
+            && let Some(scale) = parse_xft_dpi_scale(&xrdb)
         {
-            return Ok(s);
+            return Ok(scale);
         }
-        if let Some(s) = self.focused_output_randr_scale().await {
-            return Ok(s);
+        if let Some(scale) = self.focused_output_randr_scale().await {
+            return Ok(scale);
         }
         Ok(1.0)
     }
@@ -194,8 +194,8 @@ impl IpcProtocol for I3Ipc {
         payload: &str,
     ) -> Result<Result<(), String>, TransportError> {
         let results = cmd.run_command(payload).await?;
-        Ok(match results.into_iter().find(|r| !r.success) {
-            Some(r) => Err(r.error.unwrap_or_else(|| "unknown error".into())),
+        Ok(match results.into_iter().find(|result| !result.success) {
+            Some(failed) => Err(failed.error.unwrap_or_else(|| "unknown error".into())),
             None => Ok(()),
         })
     }
@@ -209,18 +209,18 @@ impl IpcProtocol for I3Ipc {
             .get_workspaces()
             .await?
             .into_iter()
-            .map(|w| Workspace {
+            .map(|workspace| Workspace {
                 rect: Rect {
-                    x: w.rect.x as i32,
-                    y: w.rect.y as i32,
-                    width: w.rect.width.max(0) as u32,
-                    height: w.rect.height.max(0) as u32,
+                    x: workspace.rect.x as i32,
+                    y: workspace.rect.y as i32,
+                    width: workspace.rect.width.max(0) as u32,
+                    height: workspace.rect.height.max(0) as u32,
                 },
                 info: WorkspaceInfo {
-                    num: w.num,
-                    name: w.name,
-                    focused: w.focused,
-                    output: w.output,
+                    num: workspace.num,
+                    name: workspace.name,
+                    focused: workspace.focused,
+                    output: workspace.output,
                 },
             })
             .collect())
@@ -240,7 +240,7 @@ impl IpcProtocol for I3Ipc {
             class: node
                 .window_properties
                 .as_ref()
-                .and_then(|p| p.class.clone()),
+                .and_then(|props| props.class.clone()),
             title: node.name.clone(),
         }
     }
@@ -255,80 +255,79 @@ impl IpcProtocol for I3Ipc {
     }
 
     fn collect_windows(tree: &reply::Node) -> Vec<Window> {
-        let mut out = Vec::new();
-        collect_windows(tree, None, &mut out);
-        out
+        let mut windows = Vec::new();
+        collect_windows(tree, None, &mut windows);
+        windows
     }
 }
 
 fn ipc_event(event: Event) -> IpcEvent {
     match event {
-        Event::Window(w) => IpcEvent::Window {
-            focus: focus_change(&w),
-            event: window_event_from_i3(&w),
+        Event::Window(window) => IpcEvent::Window {
+            focus: focus_change(&window),
+            event: window_event_from_i3(&window),
         },
         Event::Workspace(data) if matches!(data.change, WorkspaceChange::Focus) => {
-            IpcEvent::WorkspaceFocused(data.current.and_then(|n| n.name))
+            IpcEvent::WorkspaceFocused(data.current.and_then(|node| node.name))
         }
         _ => IpcEvent::Ignored,
     }
 }
 
-fn focus_change(w: &WindowData) -> Option<(WindowChangeKind, NodeIdentity)> {
-    let kind = match w.change {
+fn focus_change(window: &WindowData) -> Option<(WindowChangeKind, NodeIdentity)> {
+    let kind = match window.change {
         WindowChange::Focus => WindowChangeKind::Focus,
         WindowChange::Title => WindowChangeKind::Title,
         WindowChange::Close => WindowChangeKind::Close,
         _ => return None,
     };
-    Some((kind, I3Ipc::identity(&w.container)))
+    Some((kind, I3Ipc::identity(&window.container)))
 }
 
-fn window_event_from_i3(w: &WindowData) -> Option<WindowEvent> {
-    let id = WindowId::new(w.container.id as u64)?;
-    match w.change {
+fn window_event_from_i3(window: &WindowData) -> Option<WindowEvent> {
+    let container = &window.container;
+    let id = WindowId::new(container.id as u64)?;
+    match window.change {
         WindowChange::New => {
-            let props = w.container.window_properties.as_ref();
-            let class = props.and_then(|p| p.class.clone());
+            let props = container.window_properties.as_ref();
+            let class = props.and_then(|props| props.class.clone());
             Some(WindowEvent::Opened {
                 id,
-                title: w.container.name.clone(),
+                title: container.name.clone(),
                 class,
                 app_id: None,
             })
         }
         WindowChange::Title => Some(WindowEvent::TitleChanged {
             id,
-            new_title: w.container.name.clone(),
+            new_title: container.name.clone(),
         }),
         WindowChange::Close => Some(WindowEvent::Closed { id }),
         _ => None,
     }
 }
 
-/// i3 has no `app_id` criterion, and egui-winit 0.34 leaves `WM_CLASS`
-/// empty on X11, so `AppId` maps onto `title`. Callers must set their
-/// window title to the same string they pass as `AppId`.
-fn translate_criteria_for_i3(c: &PlacementCriteria) -> PlacementCriteria {
-    match c {
-        PlacementCriteria::AppId(s) => PlacementCriteria::Title(s.clone()),
+/// i3 has no `app_id` criterion and egui-winit leaves `WM_CLASS` empty
+/// on X11, so `AppId` is matched as a window title.
+fn translate_criteria_for_i3(criteria: &PlacementCriteria) -> PlacementCriteria {
+    match criteria {
+        PlacementCriteria::AppId(app_id) => PlacementCriteria::Title(app_id.clone()),
         other => other.clone(),
     }
 }
 
+/// `AppId` (rewritten to `Title` first) and `ConId` never match here.
 fn node_matches(node: &reply::Node, criteria: &PlacementCriteria) -> bool {
     let props = node.window_properties.as_ref();
     match criteria {
         PlacementCriteria::Title(want) => node
             .name
             .as_deref()
-            .or_else(|| props.and_then(|p| p.title.as_deref()))
-            .is_some_and(|t| t == want),
+            .or_else(|| props.and_then(|props| props.title.as_deref()))
+            .is_some_and(|title| title == want),
         PlacementCriteria::Class(want) => props
-            .and_then(|p| p.class.as_deref())
-            .is_some_and(|c| c == want),
-        // AppId is rewritten to Title before reaching here; ConId is
-        // matched by id elsewhere. No-match so a misuse fails loudly.
+            .and_then(|props| props.class.as_deref())
+            .is_some_and(|class| class == want),
         _ => false,
     }
 }
@@ -336,36 +335,18 @@ fn node_matches(node: &reply::Node, criteria: &PlacementCriteria) -> bool {
 fn env_scale(name: &str) -> Option<f64> {
     std::env::var(name)
         .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|s| s.is_finite() && *s > 0.0)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
 }
 
-async fn run_xrdb_query() -> Option<String> {
-    tokio::task::spawn_blocking(|| {
-        let out = std::process::Command::new("xrdb")
-            .arg("-query")
-            .output()
-            .ok()?;
-        if !out.status.success() {
+/// Stdout of `program arg`, or `None` if it fails to run or exits non-zero.
+async fn query_command_output(program: &'static str, arg: &'static str) -> Option<String> {
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new(program).arg(arg).output().ok()?;
+        if !output.status.success() {
             return None;
         }
-        String::from_utf8(out.stdout).ok()
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-async fn run_xrandr_query() -> Option<String> {
-    tokio::task::spawn_blocking(|| {
-        let out = std::process::Command::new("xrandr")
-            .arg("--query")
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        String::from_utf8(out.stdout).ok()
+        String::from_utf8(output.stdout).ok()
     })
     .await
     .ok()
@@ -389,17 +370,23 @@ fn parse_xrandr_output_size(
     output_name: &str,
 ) -> Option<((u32, u32), (u64, u64))> {
     let prefix = format!("{output_name} connected");
-    let line = xrandr_output.lines().find(|l| l.starts_with(&prefix))?;
+    let line = xrandr_output
+        .lines()
+        .find(|line| line.starts_with(&prefix))?;
 
     let pixels = line.split_whitespace().find_map(parse_geometry_size)?;
 
     let tokens: Vec<&str> = line.split_whitespace().collect();
-    let mm = tokens.windows(3).rev().find_map(|w| {
-        match (w[0].strip_suffix("mm"), w[1], w[2].strip_suffix("mm")) {
-            (Some(wmm), "x", Some(hmm)) => {
-                let w: u64 = wmm.parse().ok()?;
-                let h: u64 = hmm.parse().ok()?;
-                Some((w, h))
+    let mm = tokens.windows(3).rev().find_map(|triple| {
+        match (
+            triple[0].strip_suffix("mm"),
+            triple[1],
+            triple[2].strip_suffix("mm"),
+        ) {
+            (Some(width_mm), "x", Some(height_mm)) => {
+                let width: u64 = width_mm.parse().ok()?;
+                let height: u64 = height_mm.parse().ok()?;
+                Some((width, height))
             }
             _ => None,
         }
@@ -411,13 +398,12 @@ fn parse_xrandr_output_size(
 /// required so a mode-list entry like `2560x1440` doesn't match.
 fn parse_geometry_size(token: &str) -> Option<(u32, u32)> {
     let plus = token.find('+')?;
-    let dims = &token[..plus];
-    let (w, h) = dims.split_once('x')?;
-    Some((w.parse().ok()?, h.parse().ok()?))
+    let (width, height) = token[..plus].split_once('x')?;
+    Some((width.parse().ok()?, height.parse().ok()?))
 }
 
-/// Winit's X11 RandR DPI formula, quantised to 1/12 steps so monitors with minor EDID rounding agree.
-/// `1.0` for zero-sized inputs or absurd results.
+/// Winit's X11 RandR DPI formula, quantised to 1/12 steps. `1.0` for
+/// zero-sized inputs or absurd results.
 fn calc_randr_scale(pixels: (u32, u32), mm: (u64, u64)) -> f64 {
     let (px_w, px_h) = (pixels.0 as f64, pixels.1 as f64);
     let (mm_w, mm_h) = (mm.0 as f64, mm.1 as f64);
@@ -433,11 +419,11 @@ fn calc_randr_scale(pixels: (u32, u32), mm: (u64, u64)) -> f64 {
     }
 }
 
-fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<Window>) {
-    let next_ws = if matches!(node.node_type, reply::NodeType::Workspace) {
+fn collect_windows(node: &reply::Node, parent_workspace: Option<&str>, out: &mut Vec<Window>) {
+    let workspace = if matches!(node.node_type, reply::NodeType::Workspace) {
         node.name.as_deref()
     } else {
-        current_ws
+        parent_workspace
     };
 
     if node.window.is_some()
@@ -451,12 +437,12 @@ fn collect_windows(node: &reply::Node, current_ws: Option<&str>, out: &mut Vec<W
             id,
             app,
             title,
-            workspace: next_ws.map(|s| s.to_string()),
+            workspace: workspace.map(str::to_string),
         });
     }
 
     for child in I3Ipc::children(node) {
-        collect_windows(child, next_ws, out);
+        collect_windows(child, workspace, out);
     }
 }
 
@@ -533,7 +519,6 @@ DP-0 connected 2560x1440+0+0 (normal left inverted right x axis y axis) 587mm x 
     #[test]
     fn randr_scale_matches_winit_quantization() {
         for (pixels, mm, expected) in [
-            // ppmm ≈ 4.32; round(4.32 * 12 * 25.4 / 96) / 12 = 14 / 12.
             ((2560, 1440), (587, 330), 14.0 / 12.0),
             ((1024, 768), (400, 300), 1.0),
             ((1920, 1080), (0, 0), 1.0),

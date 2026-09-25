@@ -1,6 +1,4 @@
-//! `head` and `tail`: take lines from one end of a file or stdin. They
-//! share a flag parser because the only thing that differs between them
-//! is which end of the stream they keep.
+//! `head` and `tail`: take lines from one end of the named files or stdin.
 
 use async_trait::async_trait;
 
@@ -13,67 +11,6 @@ const DEFAULT_LINES: usize = 10;
 /// `head [-n N] [FILE]...`: emit the first `N` lines of the named
 /// files, or of stdin when none are given.
 pub struct HeadCommand;
-
-/// `tail [-n N] [FILE]...`: emit the last `N` lines of the named
-/// files, or of stdin when none are given.
-pub struct TailCommand;
-
-/// Why an argument list could not be read as a line count.
-struct CountError {
-    what: String,
-    recovery: String,
-}
-
-/// Split argv into the line count and the files to read. A bare `-`
-/// means stdin, as in coreutils, so it is not taken for a flag.
-fn parse_flags(cmd: &str, argv: &[String]) -> Result<(usize, Vec<String>), CountError> {
-    let mut count = DEFAULT_LINES;
-    let mut files = Vec::new();
-    let mut i = 0;
-    while i < argv.len() {
-        let arg = &argv[i];
-        let Some(rest) = arg.strip_prefix('-').filter(|r| !r.is_empty()) else {
-            files.push(arg.clone());
-            i += 1;
-            continue;
-        };
-        let digits = match rest.strip_prefix('n') {
-            Some("") => {
-                i += 1;
-                argv.get(i).map(String::as_str).ok_or_else(|| CountError {
-                    what: "-n needs a line count".to_string(),
-                    recovery: format!("{cmd} -n 20"),
-                })?
-            }
-            Some(glued) => glued,
-            None => rest,
-        };
-        count = digits.parse().map_err(|_| CountError {
-            what: format!("not a line count: '-{digits}'"),
-            recovery: format!("{cmd} -n 20"),
-        })?;
-        i += 1;
-    }
-    Ok((count, files))
-}
-
-fn count_error(cmd: &str, e: CountError) -> CommandOutput {
-    CommandOutput::usage_error(cmd, e.what, e.recovery)
-}
-
-fn first_lines(stdin: &[u8], count: usize) -> Vec<u8> {
-    let end: usize = stdin
-        .split_inclusive(|b| *b == b'\n')
-        .take(count)
-        .map(<[u8]>::len)
-        .sum();
-    stdin[..end].to_vec()
-}
-
-fn last_lines(stdin: &[u8], count: usize) -> Vec<u8> {
-    let lines: Vec<&[u8]> = stdin.split_inclusive(|b| *b == b'\n').collect();
-    lines[lines.len().saturating_sub(count)..].concat()
-}
 
 #[async_trait]
 impl Command for HeadCommand {
@@ -113,6 +50,10 @@ impl Command for HeadCommand {
     }
 }
 
+/// `tail [-n N] [FILE]...`: emit the last `N` lines of the named
+/// files, or of stdin when none are given.
+pub struct TailCommand;
+
 #[async_trait]
 impl Command for TailCommand {
     fn name(&self) -> &str {
@@ -151,8 +92,69 @@ impl Command for TailCommand {
     }
 }
 
+/// Why an argument list could not be read as a line count.
+struct CountError {
+    what: String,
+    recovery: String,
+}
+
+/// Split argv into the line count and the files to read. A bare `-` is a
+/// file (stdin, as in coreutils), not a flag.
+fn parse_flags(cmd: &str, argv: &[String]) -> Result<(usize, Vec<String>), CountError> {
+    let mut count = DEFAULT_LINES;
+    let mut files = Vec::new();
+    let mut pos = 0;
+    while pos < argv.len() {
+        let arg = &argv[pos];
+        let Some(rest) = arg.strip_prefix('-').filter(|r| !r.is_empty()) else {
+            files.push(arg.clone());
+            pos += 1;
+            continue;
+        };
+        let digits = match rest.strip_prefix('n') {
+            Some("") => {
+                pos += 1;
+                argv.get(pos)
+                    .map(String::as_str)
+                    .ok_or_else(|| CountError {
+                        what: "-n needs a line count".to_string(),
+                        recovery: format!("{cmd} -n 20"),
+                    })?
+            }
+            Some(glued) => glued,
+            None => rest,
+        };
+        count = digits.parse().map_err(|_| CountError {
+            what: format!("not a line count: '-{digits}'"),
+            recovery: format!("{cmd} -n 20"),
+        })?;
+        pos += 1;
+    }
+    Ok((count, files))
+}
+
+fn count_error(cmd: &str, e: CountError) -> CommandOutput {
+    CommandOutput::usage_error(cmd, e.what, e.recovery)
+}
+
+fn first_lines(text: &[u8], count: usize) -> Vec<u8> {
+    let end: usize = text
+        .split_inclusive(|b| *b == b'\n')
+        .take(count)
+        .map(<[u8]>::len)
+        .sum();
+    text[..end].to_vec()
+}
+
+fn last_lines(text: &[u8], count: usize) -> Vec<u8> {
+    let lines: Vec<&[u8]> = text.split_inclusive(|b| *b == b'\n').collect();
+    lines[lines.len().saturating_sub(count)..].concat()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ops::RangeInclusive;
+
     use super::*;
 
     async fn run(cmd: &dyn Command, args: &[&str], stdin: &[u8]) -> CommandOutput {
@@ -167,7 +169,7 @@ mod tests {
 
     #[tokio::test]
     async fn head_defaults_to_ten_lines() {
-        let lines = |range: std::ops::RangeInclusive<u32>| -> String {
+        let lines = |range: RangeInclusive<u32>| -> String {
             range.map(|i| format!("line{i}\n")).collect()
         };
         let out = run(&HeadCommand, &[], lines(1..=12).as_bytes()).await;
@@ -221,7 +223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn named_files_are_read_and_beat_stdin() {
+    async fn named_files_are_read_beat_stdin_and_concatenate() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.txt");
         let b = dir.path().join("b.txt");
@@ -233,8 +235,6 @@ mod tests {
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"one\ntwo\n");
 
-        // Several files concatenate, so `head -2` of the pair is the
-        // first two lines overall, not two lines per file.
         let both = run(&HeadCommand, &["-2", a, b], b"").await;
         assert_eq!(both.stdout, b"one\ntwo\n");
         let tail = run(&TailCommand, &["-2", a, b], b"").await;

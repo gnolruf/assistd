@@ -10,6 +10,11 @@ use ratatui_image::protocol::StatefulProtocol;
 
 /// Rows an inline thumbnail reserves.
 pub const THUMBNAIL_ROWS: u16 = 8;
+/// Body-line count above which a new tool block starts collapsed.
+const COLLAPSE_THRESHOLD: usize = 20;
+/// Leading body lines kept visible while collapsed; stderr lines stay
+/// visible regardless.
+const COLLAPSED_HEAD_LINES: usize = 10;
 
 /// One tool invocation: command, output as the daemon delivered it
 /// (already truncated, with its banner and footer), exit status, timing.
@@ -668,11 +673,7 @@ fn visible_body_indices(body_lines: &[String], collapsed: bool) -> Vec<usize> {
 
 fn split_body(output: &str) -> Vec<String> {
     let mut lines: Vec<String> = output.lines().map(str::to_string).collect();
-    if lines
-        .last()
-        .map(|l| l.starts_with("[exit:"))
-        .unwrap_or(false)
-    {
+    if lines.last().is_some_and(|l| l.starts_with("[exit:")) {
         lines.pop();
     }
     lines
@@ -758,12 +759,6 @@ fn thinking_text_style() -> Style {
 fn stderr_style() -> Style {
     Style::default().fg(Color::Red)
 }
-
-/// Body-line count above which a new tool block starts collapsed.
-const COLLAPSE_THRESHOLD: usize = 20;
-/// Leading body lines kept visible while collapsed; stderr lines stay
-/// visible regardless.
-const COLLAPSED_HEAD_LINES: usize = 10;
 
 #[cfg(test)]
 mod tests;

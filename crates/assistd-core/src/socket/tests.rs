@@ -1,34 +1,24 @@
+use tokio::sync::oneshot;
+
 use super::*;
 use crate::{Config, PresenceManager, PresenceState};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::oneshot;
 
 #[test]
 fn fd_exhaustion_predicate_matches_only_emfile_and_enfile() {
     let cases = [
-        (
-            "EMFILE",
-            std::io::Error::from_raw_os_error(libc::EMFILE),
-            true,
-        ),
-        (
-            "ENFILE",
-            std::io::Error::from_raw_os_error(libc::ENFILE),
-            true,
-        ),
+        ("EMFILE", io::Error::from_raw_os_error(libc::EMFILE), true),
+        ("ENFILE", io::Error::from_raw_os_error(libc::ENFILE), true),
         (
             "ECONNRESET",
-            std::io::Error::from_raw_os_error(libc::ECONNRESET),
+            io::Error::from_raw_os_error(libc::ECONNRESET),
             false,
         ),
         (
             "ECONNABORTED",
-            std::io::Error::from_raw_os_error(libc::ECONNABORTED),
+            io::Error::from_raw_os_error(libc::ECONNABORTED),
             false,
         ),
-        ("no errno", std::io::Error::other("synthetic"), false),
+        ("no errno", io::Error::other("synthetic"), false),
     ];
     for (label, err, expected) in cases {
         assert_eq!(is_fd_exhaustion(&err), expected, "{label}");
@@ -232,7 +222,6 @@ async fn oversize_request_is_rejected_without_oom() {
         while remaining > 0 {
             let n = remaining.min(chunk.len());
             if write.write_all(&chunk[..n]).await.is_err() {
-                // The daemon may close the read side once the cap is hit.
                 break;
             }
             remaining -= n;

@@ -1,5 +1,9 @@
 //! `MemoryStack`: persistence and embedding handles owned by `AppState`.
 
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+
 use assistd_config::EmbeddingConfig;
 use assistd_embed::{EmbedJob, Embedder, NoEmbedder};
 use assistd_memory::{
@@ -7,8 +11,6 @@ use assistd_memory::{
     SemanticStore, SqliteHandle,
 };
 use assistd_tools::MemoryOps;
-use std::sync::Arc;
-use tokio::sync::mpsc;
 
 /// Persistent stores, embedding pipeline, and the memory tool ops built
 /// over them.
@@ -44,28 +46,28 @@ impl MemoryStack {
     }
 
     /// Replace the fact store, rebuilding `memory_ops` over it.
-    pub fn with_memory(mut self, m: Arc<dyn MemoryStore>) -> Self {
-        self.memory = m.clone();
-        self.memory_ops = Arc::new(MemoryOps::new(m, self.conversations.clone()));
+    pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
+        self.memory = memory.clone();
+        self.memory_ops = Arc::new(MemoryOps::new(memory, self.conversations.clone()));
         self
     }
 
     /// Replace the conversation store, rebuilding `memory_ops` over it.
-    pub fn with_conversations(mut self, c: Arc<dyn ConversationStore>) -> Self {
-        self.conversations = c.clone();
-        self.memory_ops = Arc::new(MemoryOps::new(self.memory.clone(), c));
+    pub fn with_conversations(mut self, conversations: Arc<dyn ConversationStore>) -> Self {
+        self.conversations = conversations.clone();
+        self.memory_ops = Arc::new(MemoryOps::new(self.memory.clone(), conversations));
         self
     }
 
     /// Replace the embedder.
-    pub fn with_embedder(mut self, e: Arc<dyn Embedder>) -> Self {
-        self.embedder = e;
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = embedder;
         self
     }
 
     /// Replace the semantic store.
-    pub fn with_semantic(mut self, s: Arc<dyn SemanticStore>) -> Self {
-        self.semantic = s;
+    pub fn with_semantic(mut self, semantic: Arc<dyn SemanticStore>) -> Self {
+        self.semantic = semantic;
         self
     }
 
@@ -77,8 +79,8 @@ impl MemoryStack {
 
     /// Attach the SQLite handle new messages are chunked into. Without
     /// one, persisted messages are never chunked or embedded.
-    pub fn with_chunks(mut self, h: Arc<SqliteHandle>) -> Self {
-        self.chunks = Some(h);
+    pub fn with_chunks(mut self, chunks: Arc<SqliteHandle>) -> Self {
+        self.chunks = Some(chunks);
         self
     }
 }
@@ -89,38 +91,38 @@ mod tests {
 
     fn assert_wired(
         stack: &MemoryStack,
-        m: &Arc<dyn MemoryStore>,
-        c: &Arc<dyn ConversationStore>,
+        memory: &Arc<dyn MemoryStore>,
+        conversations: &Arc<dyn ConversationStore>,
         order: &str,
     ) {
-        assert!(Arc::ptr_eq(&stack.memory, m), "{order}: memory");
+        assert!(Arc::ptr_eq(&stack.memory, memory), "{order}: memory");
         assert!(
-            Arc::ptr_eq(&stack.conversations, c),
+            Arc::ptr_eq(&stack.conversations, conversations),
             "{order}: conversations"
         );
         assert!(
-            Arc::ptr_eq(&stack.memory_ops.store, m),
+            Arc::ptr_eq(&stack.memory_ops.store, memory),
             "{order}: ops store"
         );
         assert!(
-            Arc::ptr_eq(&stack.memory_ops.conversations, c),
+            Arc::ptr_eq(&stack.memory_ops.conversations, conversations),
             "{order}: ops conversations"
         );
     }
 
     #[test]
     fn memory_ops_tracks_both_stores_in_either_builder_order() {
-        let m: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
-        let c: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
+        let memory: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
+        let conversations: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
 
         let stack = MemoryStack::disabled(EmbeddingConfig::default())
-            .with_memory(m.clone())
-            .with_conversations(c.clone());
-        assert_wired(&stack, &m, &c, "memory first");
+            .with_memory(memory.clone())
+            .with_conversations(conversations.clone());
+        assert_wired(&stack, &memory, &conversations, "memory first");
 
         let stack = MemoryStack::disabled(EmbeddingConfig::default())
-            .with_conversations(c.clone())
-            .with_memory(m.clone());
-        assert_wired(&stack, &m, &c, "conversations first");
+            .with_conversations(conversations.clone())
+            .with_memory(memory.clone());
+        assert_wired(&stack, &memory, &conversations, "conversations first");
     }
 }

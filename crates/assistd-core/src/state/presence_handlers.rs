@@ -1,9 +1,12 @@
 //! Handlers for the presence state-machine variants of `Request`.
 
-use super::{AppState, DispatchError, send_error};
-use assistd_ipc::{Event, PresenceState};
 use std::sync::Arc;
+
 use tokio::sync::mpsc;
+
+use assistd_ipc::{Event, PresenceState};
+
+use super::{AppState, DispatchError, send_error};
 
 impl AppState {
     pub(super) async fn handle_set_presence(

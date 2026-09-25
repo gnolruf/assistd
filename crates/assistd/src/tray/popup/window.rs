@@ -1,14 +1,20 @@
 //! eframe-backed window for the tray popup.
 
+use std::time::Duration;
+
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, ViewportBuilder, ViewportCommand};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
+use winit::platform::wayland::EventLoopBuilderExtWayland;
+use winit::platform::x11::EventLoopBuilderExtX11;
 
 use super::state::{PopupActivity, PopupState};
 use super::visibility::DriverInput;
 
+/// Run the popup's eframe loop on the calling thread until the state
+/// sender drops.
 pub fn run_gui_loop(
     state_rx: watch::Receiver<PopupState>,
     event_tx: UnboundedSender<DriverInput>,
@@ -18,33 +24,17 @@ pub fn run_gui_loop(
     initial_position: Option<(i32, i32)>,
     runtime: Handle,
 ) -> Result<(), eframe::Error> {
-    let mut viewport = ViewportBuilder::default()
-        .with_app_id(app_id)
-        // egui-winit only propagates app_id to Wayland; set the title
-        // explicitly so X11 WM_CLASS gives the i3 backend a stable
-        // `[title="..."]` to match against.
-        .with_title(app_id)
-        .with_decorations(false)
-        .with_resizable(false)
-        .with_inner_size([width as f32, height as f32])
-        .with_visible(false);
-    if let Some((x, y)) = initial_position {
-        viewport = viewport.with_position([x as f32, y as f32]);
-    }
     let options = eframe::NativeOptions {
-        viewport,
+        viewport: hidden_viewport(app_id, width, height, initial_position),
         event_loop_builder: Some(Box::new(|builder| {
-            use winit::platform::wayland::EventLoopBuilderExtWayland;
-            use winit::platform::x11::EventLoopBuilderExtX11;
             EventLoopBuilderExtX11::with_any_thread(builder, true);
             EventLoopBuilderExtWayland::with_any_thread(builder, true);
         })),
         ..Default::default()
     };
-    let app_id_owned = app_id.to_string();
     let waker_rx = state_rx.clone();
     eframe::run_native(
-        &app_id_owned,
+        app_id,
         options,
         Box::new(move |cc| {
             let waker = runtime.spawn(wake_egui_on_state_change(waker_rx, cc.egui_ctx.clone()));
@@ -55,6 +45,27 @@ pub fn run_gui_loop(
             )))
         }),
     )
+}
+
+/// The title mirrors `app_id`: egui-winit only sends app_id on Wayland, so
+/// on X11 the i3 backend matches `[title="..."]` instead.
+fn hidden_viewport(
+    app_id: &str,
+    width: u32,
+    height: u32,
+    initial_position: Option<(i32, i32)>,
+) -> ViewportBuilder {
+    let viewport = ViewportBuilder::default()
+        .with_app_id(app_id)
+        .with_title(app_id)
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_inner_size([width as f32, height as f32])
+        .with_visible(false);
+    match initial_position {
+        Some((x, y)) => viewport.with_position([x as f32, y as f32]),
+        None => viewport,
+    }
 }
 
 /// Forward watch updates to egui as repaint requests; when the sender
@@ -115,7 +126,7 @@ impl eframe::App for PopupApp {
                 let _ = self.event_tx.send(DriverInput::Mapped);
             }
 
-            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+            ctx.request_repaint_after(Duration::from_millis(150));
         }
     }
 
@@ -173,8 +184,8 @@ impl eframe::App for PopupApp {
     }
 }
 
-// U+00D7 MULTIPLICATION SIGN, not U+2715/2717: the default eframe font
-// covers Latin-1 supplement but not Dingbats.
+/// U+00D7 MULTIPLICATION SIGN, not U+2715/2717: the default eframe font
+/// covers Latin-1 supplement but not Dingbats.
 fn close_button(ui: &mut egui::Ui) -> egui::Response {
     let btn = egui::Button::new(
         RichText::new("\u{00D7}")
@@ -185,8 +196,8 @@ fn close_button(ui: &mut egui::Ui) -> egui::Response {
     ui.add(btn).on_hover_text("Close (interrupts the agent)")
 }
 
-// Leading marker is U+00B7 MIDDLE DOT, not U+25CF BLACK CIRCLE: the
-// default eframe font doesn't cover Geometric Shapes.
+/// Leading marker is U+00B7 MIDDLE DOT, not U+25CF BLACK CIRCLE: the
+/// default eframe font doesn't cover Geometric Shapes.
 fn activity_label(activity: &PopupActivity) -> Option<(String, Color32)> {
     match activity {
         PopupActivity::Idle => None,

@@ -1,19 +1,10 @@
 //! Runtime control over a [`VoiceOutput`]: a mute switch and a skip
-//! epoch. Each speech worker captures the epoch when it starts;
-//! [`VoiceOutputController::skip`] advances it so every in-flight
-//! worker drops its remaining sentences while later queries are
-//! unaffected.
+//! epoch that in-flight speech workers compare against to drop stale sentences.
 
-use crate::VoiceOutput;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// Mute switch and skip epoch over an `Arc<dyn VoiceOutput>`.
-pub struct VoiceOutputController {
-    inner: Arc<dyn VoiceOutput>,
-    enabled: AtomicBool,
-    skip_epoch: AtomicU64,
-}
+use crate::VoiceOutput;
 
 /// Per-sentence decision returned by [`VoiceOutputController::should_speak`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +15,13 @@ pub enum SpeakDecision {
     DropSilent,
     /// Skip was triggered since the worker started; drain without speaking.
     DropForSkip,
+}
+
+/// Mute switch and skip epoch over an `Arc<dyn VoiceOutput>`.
+pub struct VoiceOutputController {
+    inner: Arc<dyn VoiceOutput>,
+    enabled: AtomicBool,
+    skip_epoch: AtomicU64,
 }
 
 impl VoiceOutputController {

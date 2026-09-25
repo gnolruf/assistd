@@ -54,8 +54,7 @@ impl MemoryOps {
         self.store.delete_by_id(id).await
     }
 
-    /// Like [`MemoryOps::list`] but returns full `(id, key, value)`
-    /// rows, in whatever order the backend yields.
+    /// Full `(id, key, value)` rows under `prefix`, in backend order.
     pub async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
         self.store.list_full(prefix).await
     }

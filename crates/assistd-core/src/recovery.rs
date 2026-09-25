@@ -7,26 +7,17 @@ use std::sync::Weak;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-
+use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::task::{JoinHandle, JoinSet};
+use tracing::{debug, error, info, warn};
 
 use crate::PresenceManager;
 
 pub use assistd_ipc::{Component, StatusSeverity};
 
-/// Emit a structured recovery event: the `tracing` macro for the
-/// severity, under `target = "assistd::recovery"`, with `severity`,
-/// `component`, and `event` fields ahead of the caller's own.
-///
-/// ```ignore
-/// recovery_event!(
-///     StatusSeverity::Warning,
-///     Component::Llm,
-///     "crash_detected",
-///     pid = old_pid,
-///     "llama-server died mid-response, restarting"
-/// );
-/// ```
+/// Log a recovery event at the level matching `severity`, under
+/// `target = "assistd::recovery"`, with `severity`, `component`, and
+/// `event` fields ahead of the caller's own.
 #[macro_export]
 macro_rules! recovery_event {
     ($severity:expr, $component:expr, $event:literal $(, $($field:tt)*)?) => {{
@@ -81,7 +72,7 @@ where
                 );
             }
             Err(join_err) if join_err.is_cancelled() => {
-                ::tracing::debug!(
+                debug!(
                     target: "assistd::recovery",
                     component = component.as_str(),
                     task = name,
@@ -94,9 +85,8 @@ where
 }
 
 /// Replace the global panic hook with one that logs a recovery event and
-/// best-effort SIGTERMs the llama-server process group before chaining
-/// to the previous hook. `presence` is `Weak` so the hook never keeps the
-/// manager alive past shutdown.
+/// SIGTERMs the llama-server process group before chaining to the
+/// previous hook.
 pub fn install_panic_hook(presence: Weak<PresenceManager>) {
     static PRESENCE: Mutex<Option<Weak<PresenceManager>>> = Mutex::new(None);
     *PRESENCE.lock() = Some(presence);
@@ -105,7 +95,7 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
     std::panic::set_hook(Box::new(move |info| {
         let location = info
             .location()
-            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .map(|loc| format!("{}:{}", loc.file(), loc.line()))
             .unwrap_or_else(|| "<unknown>".to_string());
         let payload_msg = panic_message(info.payload());
 
@@ -118,15 +108,15 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
             "daemon panic; killing llama-server before propagating"
         );
 
-        let pid_opt = PRESENCE
+        let llama_pid = PRESENCE
             .lock()
             .as_ref()
             .and_then(|w| w.upgrade())
             .and_then(|p| p.llama_pid_blocking());
-        if let Some(pid) = pid_opt
-            && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
+        if let Some(pid) = llama_pid
+            && let Some(pgid) = Pid::from_raw(pid as i32)
         {
-            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+            let _ = kill_process_group(pgid, Signal::TERM);
             recovery_event!(
                 StatusSeverity::Warning,
                 Component::Llm,
@@ -147,23 +137,22 @@ pub async fn drain_join_set(tasks: &mut JoinSet<()>, grace: Duration, what: &str
     if in_flight == 0 {
         return;
     }
-    tracing::info!(
+    info!(
         grace_secs = grace.as_secs(),
-        in_flight,
-        "draining in-flight {what} tasks"
+        in_flight, "draining in-flight {what} tasks"
     );
     let drained = tokio::time::timeout(grace, async {
         while let Some(res) = tasks.join_next().await {
             if let Err(e) = res
                 && e.is_panic()
             {
-                tracing::error!("{what} task panicked: {e}");
+                error!("{what} task panicked: {e}");
             }
         }
     })
     .await;
     if drained.is_err() {
-        tracing::warn!(
+        warn!(
             remaining = tasks.len(),
             "shutdown grace expired; aborting remaining {what} tasks"
         );

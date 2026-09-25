@@ -1,14 +1,14 @@
-//! `config/config.sample.toml` is the documentation for the schema, and
-//! documentation drifts. These check it against the code in both
-//! directions, so a key added without the sample — or left in the sample
-//! after being deleted from the code — fails here rather than misleading
-//! someone later.
+//! Checks `config/config.sample.toml` against the schema in both directions:
+//! every defaulted key is documented, and no documented key is stale.
 
 use std::collections::BTreeSet;
 
 use assistd_config::Config;
 
 const SAMPLE: &str = include_str!("../../../config/config.sample.toml");
+
+/// `[[mcp.servers]]` entries are example user data, not schema.
+const USER_DATA_SECTION: &str = "mcp.servers";
 
 /// One `key = value` the sample documents, live or commented out, with
 /// the section it sits under.
@@ -36,37 +36,23 @@ fn is_section_path(s: &str) -> bool {
     !s.is_empty() && s.split('.').all(is_bare_key)
 }
 
-/// Walk the sample, tracking the current section across both live and
-/// commented-out headers, and collect every assignment it documents.
-/// Extracted textually rather than by parsing, because most of the
-/// sample is deliberately commented out.
+/// Every assignment the sample documents, tracking sections across live and
+/// commented-out headers. Textual, because most of the sample is commented out.
 fn documented_keys() -> Vec<DocumentedKey> {
     let mut out = Vec::new();
     let mut section = String::new();
     for line in SAMPLE.lines() {
         let content = line.trim_start().trim_start_matches('#').trim();
-
-        if let Some(inner) = content.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            let header = inner.trim_start_matches('[').trim_end_matches(']');
-            // Guard against prose that happens to be bracketed.
-            if is_section_path(header) {
-                section = header.to_string();
-                continue;
-            }
-        }
-        // `[[mcp.servers]]` entries are user data, not schema.
-        if section.starts_with("mcp.servers") {
+        if let Some(header) = section_header(content) {
+            section = header.to_string();
             continue;
         }
-        let Some((key, value)) = content.split_once('=') else {
+        if section.starts_with(USER_DATA_SECTION) {
+            continue;
+        }
+        let Some((key, value)) = bare_assignment(content) else {
             continue;
         };
-        let (key, value) = (key.trim(), value.trim());
-        // A bare key only; anything else is prose containing an `=`, or a
-        // continuation line of a multi-line array.
-        if !is_bare_key(key) {
-            continue;
-        }
         out.push(DocumentedKey {
             section: section.clone(),
             key: key.to_string(),
@@ -76,39 +62,47 @@ fn documented_keys() -> Vec<DocumentedKey> {
     out
 }
 
-/// Key paths reachable from a serialized `Config::default()`. `Option`
-/// fields default to `None` and `toml` omits them, so this is the set of
-/// keys that must appear in the sample, not the full schema.
-fn keys_with_a_default() -> BTreeSet<String> {
-    fn flatten(value: &toml::Value, prefix: &str, out: &mut BTreeSet<String>) {
-        let toml::Value::Table(t) = value else {
-            out.insert(prefix.to_string());
-            return;
-        };
-        for (k, v) in t {
-            let path = if prefix.is_empty() {
-                k.clone()
-            } else {
-                format!("{prefix}.{k}")
-            };
-            match v {
-                toml::Value::Table(_) => flatten(v, &path, out),
-                _ => {
-                    out.insert(path);
-                }
-            }
-        }
-    }
+/// The path in a `[a.b]` or `[[a.b]]` header; `None` for bracketed prose.
+fn section_header(content: &str) -> Option<&str> {
+    let inner = content.strip_prefix('[')?.strip_suffix(']')?;
+    let header = inner.trim_start_matches('[').trim_end_matches(']');
+    is_section_path(header).then_some(header)
+}
 
+/// A `bare_key = value` line; `None` for prose containing `=` and for
+/// continuation lines of a multi-line array.
+fn bare_assignment(content: &str) -> Option<(&str, &str)> {
+    let (key, value) = content.split_once('=')?;
+    let key = key.trim();
+    is_bare_key(key).then_some((key, value.trim()))
+}
+
+/// Key paths reachable from a serialized `Config::default()`: the keys the
+/// sample must document. `None` fields are omitted by `toml`, and
+/// [`USER_DATA_SECTION`] is documented as example tables instead.
+fn keys_with_a_default() -> BTreeSet<String> {
     let serialized =
         toml::to_string_pretty(&Config::default()).expect("Config::default must serialize");
     let value: toml::Value = toml::from_str(&serialized).expect("re-parse of serialized default");
     let mut out = BTreeSet::new();
-    flatten(&value, "", &mut out);
-    // `servers` is an empty array in the default; the sample documents it
-    // as `[[mcp.servers]]` tables instead.
-    out.remove("mcp.servers");
+    collect_key_paths(&value, "", &mut out);
+    out.remove(USER_DATA_SECTION);
     out
+}
+
+fn collect_key_paths(value: &toml::Value, prefix: &str, out: &mut BTreeSet<String>) {
+    let toml::Value::Table(table) = value else {
+        out.insert(prefix.to_string());
+        return;
+    };
+    for (key, child) in table {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        collect_key_paths(child, &path, out);
+    }
 }
 
 #[test]
@@ -131,10 +125,8 @@ fn every_key_with_a_default_is_documented() {
     );
 }
 
-/// The reverse direction, using `deny_unknown_fields` as the oracle:
-/// replay each documented assignment on its own and see whether the
-/// schema still knows the key. A wrong *value* yields a type error,
-/// which is fine here — only "unknown field" means the key is stale.
+/// Replays each documented assignment alone; only an "unknown field" error
+/// marks it stale, since a mismatched example value is a type error.
 #[test]
 fn sample_documents_no_key_the_schema_has_dropped() {
     let mut stale = Vec::new();
@@ -144,10 +136,10 @@ fn sample_documents_no_key_the_schema_has_dropped() {
         } else {
             format!("[{}]\n{} = {}\n", doc.section, doc.key, doc.value)
         };
-        let Err(e) = toml::from_str::<Config>(&snippet) else {
+        let Err(error) = toml::from_str::<Config>(&snippet) else {
             continue;
         };
-        if e.to_string().contains("unknown field") {
+        if error.to_string().contains("unknown field") {
             stale.push(doc.path());
         }
     }

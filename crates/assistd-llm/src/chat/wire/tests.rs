@@ -1,5 +1,6 @@
-use super::*;
 use serde_json::json;
+
+use super::*;
 
 fn message<'a>(role: &'a str, content: Option<ContentBody<'a>>) -> ChatMessage<'a> {
     ChatMessage {
@@ -106,7 +107,6 @@ fn serializes_assistant_tool_calls_with_content_omitted() {
             arguments: r#"{"command":"ls /tmp"}"#,
         },
     }]);
-    // Absent, not null: strict chat templates reject `"content": null`.
     assert_eq!(
         serde_json::to_value(&msg).unwrap(),
         json!({
@@ -116,7 +116,8 @@ fn serializes_assistant_tool_calls_with_content_omitted() {
                 "type": "function",
                 "function": {"name": "run", "arguments": r#"{"command":"ls /tmp"}"#},
             }],
-        })
+        }),
+        "content must be absent, not null"
     );
 }
 

@@ -1,6 +1,17 @@
 //! LLM backend trait, the llama-server chat client that implements it,
 //! and the child-process supervisor that keeps llama-server alive.
 
+use std::time::Duration;
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use thiserror::Error;
+use tokio::sync::{Mutex, mpsc};
+
+use assistd_ipc::{Component, StatusKind, StatusSeverity};
+use assistd_tools::Attachment;
+
 pub mod chat;
 pub mod llama_server;
 
@@ -10,15 +21,6 @@ pub use llama_server::{
     LlamaServerControl, LlamaServerError, LlamaService, ReadyState, VisionState,
     probe_capabilities_routed,
 };
-
-use assistd_ipc::{Component, StatusKind, StatusSeverity};
-use assistd_tools::Attachment;
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::time::Duration;
-use thiserror::Error;
-use tokio::sync::{Mutex, mpsc};
 
 /// Reason an [`LlmHealthProbe::wait_for_ready`] call ended without
 /// observing `ReadyState::Ready`.
@@ -30,29 +32,24 @@ pub enum HealthWaitError {
     /// longer will not help.
     #[error("LLM supervisor entered Degraded; restart abandoned")]
     Degraded,
-    /// No managed service is attached, typically because the daemon is
-    /// asleep.
+    /// No managed service is attached, typically because presence is asleep.
     #[error("no llama-server is currently managed (presence asleep?)")]
     NoService,
 }
 
-/// Readiness view of a managed llama-server, used to classify an HTTP
-/// failure as crash-induced (worth replaying) or transport-level
-/// (propagated as an error).
+/// Readiness view of a managed llama-server, for telling a crash-induced
+/// HTTP failure (worth replaying) from a transport error.
 #[async_trait]
 pub trait LlmHealthProbe: Send + Sync {
-    /// Current PID of the managed llama-server child, or `None` if
-    /// none is alive (sleeping, or in mid-restart with the child not
-    /// yet spawned).
+    /// Current PID of the managed llama-server child, or `None` if none is alive.
     fn pid(&self) -> Option<u32>;
 
     /// Snapshot of the supervisor's readiness state. Returns `None`
     /// when no service is attached (presence asleep / not yet woken).
     fn state(&self) -> Option<ReadyState>;
 
-    /// Block until the supervisor reports `ReadyState::Ready` or
-    /// `timeout` elapses. Returns [`HealthWaitError::Degraded`] as soon
-    /// as the supervisor gives up, rather than waiting out `timeout`.
+    /// Block until the supervisor reports `ReadyState::Ready` or `timeout`
+    /// elapses; fails fast with [`HealthWaitError::Degraded`].
     async fn wait_for_ready(&self, timeout: Duration) -> Result<(), HealthWaitError>;
 }
 
@@ -80,10 +77,8 @@ pub enum LlmError {
 
 pub type LlmResult<T> = std::result::Result<T, LlmError>;
 
-/// Whether a request lets a reasoning model produce its `<think>`
-/// block. [`Thinking::Disabled`] asks the chat template to skip it, so
-/// a request whose reasoning is discarded cannot spend its whole token
-/// budget thinking and return nothing.
+/// Whether a request lets a reasoning model produce its `<think>` block;
+/// [`Thinking::Disabled`] asks the chat template to skip it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Thinking {
     Enabled,
@@ -95,8 +90,7 @@ pub enum Thinking {
 pub enum LlmEvent {
     /// A streamed chunk of model output.
     Delta { text: String },
-    /// A streamed chunk of the model's reasoning, kept apart from
-    /// `Delta` so it is neither persisted as reply text nor spoken.
+    /// A streamed chunk of the model's reasoning; never persisted or spoken.
     ReasoningDelta { text: String },
     /// Every tool call the model requested in one step, in request
     /// order; emitted once, before the first of them runs.
@@ -149,11 +143,9 @@ pub struct ToolResultPayload {
 /// Outcome of a single [`LlmBackend::step`] call.
 #[derive(Debug)]
 pub enum StepOutcome {
-    /// The model emitted plain text; the turn is complete. Any deltas
-    /// were already streamed via the `tx` channel.
+    /// The model emitted plain text; the turn is complete.
     Final,
-    /// The model requested one or more tool calls. The caller must
-    /// dispatch them and feed the results back via
+    /// The model requested tool calls, whose results must be fed back via
     /// [`LlmBackend::push_tool_results`] before the next `step`.
     ToolCalls(Vec<ToolCall>),
 }
@@ -167,9 +159,8 @@ pub enum HistoryRole {
     Tool,
 }
 
-/// One persisted message reconstructed for replay into a backend's
-/// in-memory conversation. `tool_calls_json` is the stored JSON
-/// verbatim; the backend parses it into its own shape.
+/// One persisted message replayed into a backend's conversation;
+/// `tool_calls_json` is the stored JSON verbatim.
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub role: HistoryRole,
@@ -203,10 +194,8 @@ pub trait LlmBackend: Send + Sync + 'static {
     /// [`StepOutcome::Final`].
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome>;
 
-    /// Stash a context block for the next user turn. It renders inside
-    /// that turn's message, ahead of the user's own text, on every
-    /// [`Self::step`] or [`Self::generate`] until the following user
-    /// turn replaces it, so earlier turns stay cacheable as a prefix.
+    /// Stash a context block rendered ahead of the next user turn's text
+    /// until the following user turn replaces it.
     async fn set_transient_context(&self, _text: String) -> LlmResult<()> {
         Ok(())
     }
@@ -231,10 +220,8 @@ pub trait LlmBackend: Send + Sync + 'static {
         Ok(0)
     }
 
-    /// Answer `prompt` outside the conversation, returning the model's
-    /// final text with reasoning discarded. Answers are budgeted from
-    /// the summary token allowance, so pass [`Thinking::Disabled`] to
-    /// get an answer rather than a train of thought.
+    /// Answer `prompt` outside the conversation within the summary token
+    /// allowance, returning the final text with reasoning discarded.
     async fn complete_oneshot(&self, _prompt: String, _thinking: Thinking) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),

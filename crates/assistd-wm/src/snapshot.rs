@@ -1,6 +1,5 @@
-//! Focus snapshot shared by the i3 and Sway backends. Backends project
-//! their native window events onto `(kind, id, class, title)` and hand
-//! them to [`apply_window_event`]; the update rules live here.
+//! Focus snapshot shared by the i3 and Sway backends, updated from
+//! window events projected onto `(kind, id, class, title)`.
 
 use tokio::sync::RwLock;
 
@@ -23,9 +22,8 @@ pub(crate) enum WindowChangeKind {
     Close,
 }
 
-/// Apply a window event to the snapshot. Events are keyed on con_id,
-/// not class, so two windows of the same app never alias: `Title` and
-/// `Close` only take effect when their id is the focused one.
+/// Apply a window event to the snapshot. `Title` and `Close` only take
+/// effect when their id is the focused one.
 pub(crate) async fn apply_window_event(
     snap: &RwLock<Snapshot>,
     kind: WindowChangeKind,
@@ -35,24 +33,24 @@ pub(crate) async fn apply_window_event(
 ) {
     match kind {
         WindowChangeKind::Focus => {
-            let mut s = snap.write().await;
-            s.focused_id = id;
-            s.focused_class = class;
-            s.focused_title = title;
+            let mut state = snap.write().await;
+            state.focused_id = id;
+            state.focused_class = class;
+            state.focused_title = title;
         }
         WindowChangeKind::Title => {
-            let mut s = snap.write().await;
-            if s.focused_id == id && id.is_some() {
-                s.focused_title = title;
-                s.focused_class = class;
+            let mut state = snap.write().await;
+            if state.focused_id == id && id.is_some() {
+                state.focused_title = title;
+                state.focused_class = class;
             }
         }
         WindowChangeKind::Close => {
-            let mut s = snap.write().await;
-            if s.focused_id == id && id.is_some() {
-                s.focused_id = None;
-                s.focused_class = None;
-                s.focused_title = None;
+            let mut state = snap.write().await;
+            if state.focused_id == id && id.is_some() {
+                state.focused_id = None;
+                state.focused_class = None;
+                state.focused_title = None;
             }
         }
     }
@@ -69,19 +67,19 @@ pub(crate) async fn read_focused_id(snap: &RwLock<Snapshot>) -> Option<WindowId>
 /// `None` only when every field is empty; a partial snapshot still
 /// yields a context.
 pub(crate) async fn read_focused_context(snap: &RwLock<Snapshot>) -> Option<FocusedWindowContext> {
-    let s = snap.read().await;
-    if s.focused_id.is_none()
-        && s.focused_class.is_none()
-        && s.focused_title.is_none()
-        && s.active_workspace.is_none()
+    let state = snap.read().await;
+    if state.focused_id.is_none()
+        && state.focused_class.is_none()
+        && state.focused_title.is_none()
+        && state.active_workspace.is_none()
     {
         return None;
     }
     Some(FocusedWindowContext {
-        id: s.focused_id,
-        class: s.focused_class.clone(),
-        title: s.focused_title.clone(),
-        workspace: s.active_workspace.clone(),
+        id: state.focused_id,
+        class: state.focused_class.clone(),
+        title: state.focused_title.clone(),
+        workspace: state.active_workspace.clone(),
     })
 }
 

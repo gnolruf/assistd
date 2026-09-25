@@ -24,16 +24,16 @@ pub(crate) fn initialize_params() -> Value {
 }
 
 pub(crate) fn warn_on_version_mismatch(label: &str, initialize_result: &Value) {
-    if let Some(server_pv) = initialize_result
+    if let Some(server_version) = initialize_result
         .get("protocolVersion")
         .and_then(Value::as_str)
-        && server_pv != PROTOCOL_VERSION
+        && server_version != PROTOCOL_VERSION
     {
         warn!(
             target: "assistd::mcp",
             server = %label,
             client_version = PROTOCOL_VERSION,
-            server_version = server_pv,
+            server_version,
             "MCP protocol version mismatch (continuing optimistically)",
         );
     }
@@ -90,7 +90,7 @@ pub(crate) fn parse_tool_call(result: Value) -> Result<ToolResult, McpError> {
         Some(entry) => parse_content_entry(entry)?,
     };
     Ok(match parsed {
-        ToolResult::Text(t) if is_error => ToolResult::Text(format!("[mcp tool error] {t}")),
+        ToolResult::Text(text) if is_error => ToolResult::Text(format!("[mcp tool error] {text}")),
         other => other,
     })
 }

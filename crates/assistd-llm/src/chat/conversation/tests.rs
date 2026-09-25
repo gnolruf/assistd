@@ -1,10 +1,12 @@
-use super::*;
-use assistd_config::defaults::{nz32, nz64};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+
+use assistd_config::defaults::{nz32, nz64};
 use tokio::sync::Mutex;
+
+use super::*;
 
 struct FakeSummarizer {
     reply: String,
@@ -73,15 +75,7 @@ fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) 
 }
 
 fn message(role: Role, content: &str) -> Message {
-    Message {
-        role,
-        content: content.into(),
-        attachments: Vec::new(),
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        reasoning: String::new(),
-        context: None,
-    }
+    Message::text(role, content.into())
 }
 
 fn contents(c: &Conversation) -> Vec<&str> {
@@ -203,9 +197,11 @@ fn transient_context_survives_the_tool_loop_and_is_dropped_by_the_next_user_turn
     let mid_loop = serde_json::to_value(c.as_wire_messages()).unwrap();
     let mid_loop = mid_loop.as_array().unwrap();
     assert_eq!(mid_loop.len(), 4);
-    // Everything the previous request sent is still there, unchanged and
-    // in the same order, so the server's prefix cache covers it.
-    assert_eq!(&mid_loop[..2], before_call.as_array().unwrap());
+    assert_eq!(
+        &mid_loop[..2],
+        before_call.as_array().unwrap(),
+        "earlier messages must stay byte-identical for the prefix cache"
+    );
 
     c.push_assistant("done".into());
     c.push_user("thanks".into());
@@ -599,11 +595,13 @@ fn truncate_preserves_last_user_message() {
         c.push_assistant(format!("a{i} with filler"));
     }
     c.push_user("keepme with filler".into());
-    // The latest user turn alone exceeds this budget; truncation must
-    // stop at it rather than drop it.
     let (chat, model) = spec(10, 1, 10_000);
     c.truncate_to_budget(&chat, &model);
-    assert_eq!(contents(&c), ["keepme with filler"]);
+    assert_eq!(
+        contents(&c),
+        ["keepme with filler"],
+        "truncation must stop at the latest user turn even over budget"
+    );
 }
 
 #[test]
@@ -702,11 +700,13 @@ fn dropping_a_tool_call_message_drops_all_of_its_results() {
     c.push_assistant("answer".into());
     c.push_user("second question".into());
 
-    // Sized so that dropping the call with only its first result would
-    // already fit, leaving "two" orphaned.
     let (chat, model) = spec(24, 1, 10_000);
     c.truncate_to_budget(&chat, &model);
-    assert_eq!(contents(&c), ["answer", "second question"]);
+    assert_eq!(
+        contents(&c),
+        ["answer", "second question"],
+        "dropping a call must drop every one of its results"
+    );
 }
 
 #[test]
@@ -723,8 +723,6 @@ fn tool_results_do_not_count_as_preserved_turns() {
     }
     c.push_assistant("done".into());
 
-    // Two preserved pairs must reach past the tool traffic to real
-    // turns rather than stopping at the last two tool results.
     let idx = c.first_preserved_index(2);
     let preserved = &c.messages[idx..];
     assert!(
@@ -770,11 +768,13 @@ fn truncate_drops_image_tool_result_with_its_call() {
     c.push_assistant("old reply".into());
     c.push_user("latest".into());
 
-    // Sized so that dropping only the call would already fit, leaving
-    // its result orphaned at the head.
     let (chat, model) = spec(30, 1, 10_000);
     c.truncate_to_budget(&chat, &model);
-    assert_eq!(contents(&c), ["old reply", "latest"]);
+    assert_eq!(
+        contents(&c),
+        ["old reply", "latest"],
+        "dropping a call must also drop its result"
+    );
 }
 
 #[tokio::test]
@@ -798,8 +798,6 @@ async fn summarize_preserves_tool_call_pair_boundary() {
     let (chat, model) = spec(60, 2, 10_000);
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
-    // The preserve boundary lands on the tool result and must widen to
-    // keep the call it answers.
     assert_eq!(
         contents(&c),
         [
@@ -807,7 +805,8 @@ async fn summarize_preserves_tool_call_pair_boundary() {
             "",
             "[tool:run]\nfoo\nbar\n",
             "latest",
-        ]
+        ],
+        "preserve boundary must widen to keep the call its result answers"
     );
     assert_eq!(
         c.messages[1].tool_calls,

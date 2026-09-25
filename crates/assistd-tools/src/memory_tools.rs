@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use assistd_embed::{EmbedJob, Embedder};
-use assistd_memory::{SemanticStore, SessionId};
+use assistd_memory::{EmbeddingHit, MemoryHit, SemanticStore, SessionId};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
@@ -16,9 +16,8 @@ use crate::{Tool, ToolError};
 
 const RECALL_LIMIT: usize = 50;
 
-/// Re-saving a key overwrites its value, so keys reject whitespace and
-/// uppercase to keep one concept on one spelling. Hyphens are allowed so
-/// ISO dates (`standup.2026-09-11`) can be keys.
+/// Keys reject whitespace and uppercase so one concept keeps one spelling;
+/// hyphens allow ISO dates (`standup.2026-09-11`).
 const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
@@ -27,8 +26,7 @@ static KEY_RE: LazyLock<Regex> =
 /// `recall` can find it by paraphrase.
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
-    /// Closed when embedding is disabled; the memory still saves, only
-    /// the index entry is skipped.
+    /// Closed when embedding is disabled; the memory still saves unindexed.
     embed_tx: mpsc::Sender<EmbedJob>,
 }
 
@@ -36,6 +34,20 @@ impl RememberTool {
     /// A tool saving through `ops` and queueing each value on `embed_tx`.
     pub fn new(ops: Arc<MemoryOps>, embed_tx: mpsc::Sender<EmbedJob>) -> Self {
         Self { ops, embed_tx }
+    }
+
+    fn queue_embedding(&self, memory_id: i64, text: String) {
+        if self
+            .embed_tx
+            .try_send(EmbedJob::Memory { memory_id, text })
+            .is_err()
+        {
+            tracing::debug!(
+                target: "assistd::embed",
+                memory_id,
+                "embed queue full or closed; remembered without semantic index entry"
+            );
+        }
     }
 }
 
@@ -84,16 +96,8 @@ impl Tool for RememberTool {
     #[tracing::instrument(skip(self, args), fields(key = tracing::field::Empty))]
     async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
-        let key = args
-            .get("key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidArgs("`key` (string) is required".into()))?
-            .to_string();
-        let value = args
-            .get("value")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidArgs("`value` (string) is required".into()))?
-            .to_string();
+        let key = required_str(&args, "key")?.to_string();
+        let value = required_str(&args, "value")?.to_string();
         tracing::Span::current().record("key", key.as_str());
 
         if !KEY_RE.is_match(&key) {
@@ -104,20 +108,8 @@ impl Tool for RememberTool {
         }
 
         let memory_id = self.ops.save(&key, value.clone()).await?;
-        if memory_id != 0
-            && self
-                .embed_tx
-                .try_send(EmbedJob::Memory {
-                    memory_id,
-                    text: value,
-                })
-                .is_err()
-        {
-            tracing::debug!(
-                target: "assistd::embed",
-                memory_id,
-                "embed queue full or closed; remembered without semantic index entry"
-            );
+        if memory_id != 0 {
+            self.queue_embedding(memory_id, value);
         }
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
@@ -126,30 +118,22 @@ impl Tool for RememberTool {
             duration_ms = duration_ms,
             "remember saved"
         );
-        Ok(json!({
-            "output":      format!("remembered {key}"),
-            "exit_code":   0,
-            "duration_ms": duration_ms,
-            "truncated":   false,
-        }))
+        Ok(tool_result(&format!("remembered {key}"), duration_ms))
     }
 }
 
 /// Returns saved memories ranked by semantic similarity to a query, as
-/// `<key>: <value>` lines. Reports no memories when embedding is
-/// disabled.
+/// `<key>: <value>` lines.
 pub struct RecallTool {
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
-    /// Filters stored vectors so a query never matches vectors from a
-    /// previous embedding model.
+    /// Only vectors from this model are matched.
     embedding_model: String,
 }
 
 impl RecallTool {
-    /// A tool ranking memories in `semantic` against query vectors from
-    /// `embedder`. An empty `embedding_model` means embedding is
-    /// disabled.
+    /// A tool ranking memories in `semantic` by `embedder` vectors; an empty
+    /// `embedding_model` means embedding is disabled.
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
@@ -159,6 +143,27 @@ impl RecallTool {
             embedder,
             semantic,
             embedding_model,
+        }
+    }
+
+    /// Memories nearest `query`; empty when embedding is disabled or fails.
+    async fn nearest_memories(&self, query: String) -> Result<Vec<MemoryHit>, ToolError> {
+        if self.embedding_model.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self.embedder.embed(query).await {
+            Ok(query_vec) => Ok(self
+                .semantic
+                .nearest_memories(query_vec, RECALL_LIMIT, &self.embedding_model)
+                .await?),
+            Err(e) => {
+                tracing::debug!(
+                    target: "assistd::embed",
+                    error = %e,
+                    "recall embed failed; returning empty"
+                );
+                Ok(Vec::new())
+            }
         }
     }
 }
@@ -199,74 +204,20 @@ impl Tool for RecallTool {
     #[tracing::instrument(skip(self, args))]
     async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidArgs("`query` (string) is required".into()))?
-            .to_string();
+        let query = required_str(&args, "query")?.to_string();
 
-        let (output, returned) = if self.embedding_model.is_empty() {
-            ("(no memories)".to_string(), 0)
-        } else {
-            match self.embedder.embed(query).await {
-                Ok(vec) => {
-                    let hits = self
-                        .semantic
-                        .nearest_memories(vec, RECALL_LIMIT, &self.embedding_model)
-                        .await?;
-                    if hits.is_empty() {
-                        ("(no memories)".to_string(), 0)
-                    } else {
-                        let pairs: Vec<(String, String)> = hits
-                            .iter()
-                            .map(|h| (h.key.clone(), h.value.clone()))
-                            .collect();
-                        let n = pairs.len();
-                        (format_pairs(&pairs), n)
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        target: "assistd::embed",
-                        error = %e,
-                        "recall embed failed; returning empty"
-                    );
-                    ("(no memories)".to_string(), 0)
-                }
-            }
-        };
+        let hits = self.nearest_memories(query).await?;
+        let output = format_memories(&hits);
 
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
             target: "assistd::memory",
-            returned = returned,
+            returned = hits.len(),
             duration_ms = duration_ms,
             "recall returned"
         );
-        Ok(json!({
-            "output":      output,
-            "exit_code":   0,
-            "duration_ms": duration_ms,
-            "truncated":   false,
-        }))
+        Ok(tool_result(&output, duration_ms))
     }
-}
-
-fn format_pairs(pairs: &[(String, String)]) -> String {
-    if pairs.is_empty() {
-        return "(no memories)".to_string();
-    }
-    let mut s = String::with_capacity(pairs.iter().map(|(k, v)| k.len() + v.len() + 2).sum());
-    for (k, v) in pairs {
-        s.push_str(k);
-        s.push_str(": ");
-        s.push_str(v);
-        s.push('\n');
-    }
-    if s.ends_with('\n') {
-        s.pop();
-    }
-    s
 }
 
 /// Semantic search over past conversations, excluding the session in
@@ -279,10 +230,9 @@ pub struct ReminisceTool {
 }
 
 impl ReminisceTool {
-    /// A tool ranking past messages in `semantic` against query vectors
-    /// from `embedder`, leaving out the session `current_session` names
-    /// at call time. An empty `embedding_model` means embedding is
-    /// disabled.
+    /// A tool ranking past messages in `semantic` by `embedder` vectors,
+    /// skipping the session `current_session` names at call time. An empty
+    /// `embedding_model` means embedding is disabled.
     pub fn new(
         embedder: Arc<dyn Embedder>,
         semantic: Arc<dyn SemanticStore>,
@@ -342,70 +292,42 @@ impl Tool for ReminisceTool {
     #[tracing::instrument(skip(self, args), fields(limit = tracing::field::Empty))]
     async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidArgs("`query` (string) is required".into()))?
-            .to_string();
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| ToolError::InvalidArgs("`limit` (integer) is required".into()))?;
-        if !(1..=20).contains(&limit) {
-            return Err(ToolError::InvalidArgs(format!(
-                "`limit` must be in 1..=20 (got {limit})"
-            )));
-        }
+        let query = required_str(&args, "query")?.to_string();
+        let limit = reminisce_limit(&args)?;
         tracing::Span::current().record("limit", limit);
 
         if self.embedding_model.is_empty() {
-            return Ok(json!({
-                "output":      "(no past conversations indexed)",
-                "exit_code":   0,
-                "duration_ms": start.elapsed().as_millis(),
-                "truncated":   false,
-            }));
+            return Ok(tool_result(
+                "(no past conversations indexed)",
+                start.elapsed().as_millis(),
+            ));
         }
-        let vec = match self.embedder.embed(query).await {
-            Ok(v) => v,
+        let query_vec = match self.embedder.embed(query).await {
+            Ok(query_vec) => query_vec,
             Err(e) => {
                 tracing::debug!(
                     target: "assistd::embed",
                     error = %e,
                     "reminisce embed failed; returning empty"
                 );
-                return Ok(json!({
-                    "output":      "(embedding unavailable)",
-                    "exit_code":   0,
-                    "duration_ms": start.elapsed().as_millis(),
-                    "truncated":   false,
-                }));
+                return Ok(tool_result(
+                    "(embedding unavailable)",
+                    start.elapsed().as_millis(),
+                ));
             }
         };
         let current = self.current_session.borrow().clone();
         let hits = self
             .semantic
-            .nearest_chunks(vec, limit as usize, &self.embedding_model, Some(&current))
+            .nearest_chunks(
+                query_vec,
+                limit as usize,
+                &self.embedding_model,
+                Some(&current),
+            )
             .await?;
 
-        let output = if hits.is_empty() {
-            "(no matches)".to_string()
-        } else {
-            let mut s = String::new();
-            for h in &hits {
-                s.push_str(&format!(
-                    "[{} {} sim={:.0}%] {}\n",
-                    h.timestamp,
-                    h.role.as_wire(),
-                    h.similarity * 100.0,
-                    h.content.replace('\n', " ")
-                ));
-            }
-            if s.ends_with('\n') {
-                s.pop();
-            }
-            s
-        };
+        let output = format_chunks(&hits);
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
             target: "assistd::embed",
@@ -413,24 +335,77 @@ impl Tool for ReminisceTool {
             duration_ms = duration_ms,
             "reminisce returned chunks"
         );
-        Ok(json!({
-            "output":      output,
-            "exit_code":   0,
-            "duration_ms": duration_ms,
-            "truncated":   false,
-        }))
+        Ok(tool_result(&output, duration_ms))
     }
+}
+
+fn format_memories(hits: &[MemoryHit]) -> String {
+    if hits.is_empty() {
+        return "(no memories)".to_string();
+    }
+    hits.iter()
+        .map(|hit| format!("{}: {}", hit.key, hit.value))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn reminisce_limit(args: &Value) -> Result<i64, ToolError> {
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| ToolError::InvalidArgs("`limit` (integer) is required".into()))?;
+    if !(1..=20).contains(&limit) {
+        return Err(ToolError::InvalidArgs(format!(
+            "`limit` must be in 1..=20 (got {limit})"
+        )));
+    }
+    Ok(limit)
+}
+
+fn format_chunks(hits: &[EmbeddingHit]) -> String {
+    if hits.is_empty() {
+        return "(no matches)".to_string();
+    }
+    hits.iter()
+        .map(|hit| {
+            format!(
+                "[{} {} sim={:.0}%] {}",
+                hit.timestamp,
+                hit.role.as_wire(),
+                hit.similarity * 100.0,
+                hit.content.replace('\n', " ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
+    args.get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::InvalidArgs(format!("`{name}` (string) is required")))
+}
+
+fn tool_result(output: &str, duration_ms: u128) -> Value {
+    json!({
+        "output":      output,
+        "exit_code":   0,
+        "duration_ms": duration_ms,
+        "truncated":   false,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assistd_embed::NoEmbedder;
+    use assistd_embed::{EmbedError, NoEmbedder};
     use assistd_memory::{
-        NoConversationStore, NoMemoryStore, NoSemanticStore, SqliteConversationStore, SqliteHandle,
-        SqliteMemoryStore,
+        ConversationStore, MemoryError, MemoryStore, NoConversationStore, NoMemoryStore,
+        NoSemanticStore, SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
     };
-    use tokio::sync::watch;
+    use tempfile::TempDir;
+    use tokio::task::JoinHandle;
+
+    use super::*;
 
     /// A sender whose receiver is dropped, so every `try_send` fails.
     fn closed_embed_tx() -> mpsc::Sender<EmbedJob> {
@@ -455,7 +430,7 @@ mod tests {
 
     #[async_trait]
     impl Embedder for FixedEmbedder {
-        async fn embed(&self, _text: String) -> Result<Vec<f32>, assistd_embed::EmbedError> {
+        async fn embed(&self, _text: String) -> Result<Vec<f32>, EmbedError> {
             Ok(vec![1.0])
         }
         fn model(&self) -> &str {
@@ -480,7 +455,7 @@ mod tests {
             _k: usize,
             _model: &str,
             exclude_session: Option<&SessionId>,
-        ) -> Result<Vec<assistd_memory::EmbeddingHit>, assistd_memory::MemoryError> {
+        ) -> Result<Vec<EmbeddingHit>, MemoryError> {
             *self.excluded.lock() = exclude_session.map(|s| s.0.clone());
             Ok(Vec::new())
         }
@@ -489,31 +464,25 @@ mod tests {
             _q: Vec<f32>,
             _k: usize,
             _model: &str,
-        ) -> Result<Vec<assistd_memory::MemoryHit>, assistd_memory::MemoryError> {
+        ) -> Result<Vec<MemoryHit>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn count_for_model(
-            &self,
-            _model: &str,
-        ) -> Result<(i64, i64), assistd_memory::MemoryError> {
+        async fn count_for_model(&self, _model: &str) -> Result<(i64, i64), MemoryError> {
             Ok((0, 0))
         }
-        async fn count_stale(
-            &self,
-            _current: &str,
-        ) -> Result<(i64, Vec<String>), assistd_memory::MemoryError> {
+        async fn count_stale(&self, _current: &str) -> Result<(i64, Vec<String>), MemoryError> {
             Ok((0, Vec::new()))
         }
         async fn memories_missing_embedding(
             &self,
             _c: &str,
-        ) -> Result<Vec<(i64, String)>, assistd_memory::MemoryError> {
+        ) -> Result<Vec<(i64, String)>, MemoryError> {
             Ok(Vec::new())
         }
         async fn chunks_missing_embedding(
             &self,
             _c: &str,
-        ) -> Result<Vec<(i64, String)>, assistd_memory::MemoryError> {
+        ) -> Result<Vec<(i64, String)>, MemoryError> {
             Ok(Vec::new())
         }
         async fn store_chunk_embedding(
@@ -522,7 +491,7 @@ mod tests {
             _model: String,
             _dim: i64,
             _vector: Vec<u8>,
-        ) -> Result<(), assistd_memory::MemoryError> {
+        ) -> Result<(), MemoryError> {
             Ok(())
         }
         async fn store_memory_embedding(
@@ -531,7 +500,7 @@ mod tests {
             _model: String,
             _dim: i64,
             _vector: Vec<u8>,
-        ) -> Result<(), assistd_memory::MemoryError> {
+        ) -> Result<(), MemoryError> {
             Ok(())
         }
     }
@@ -553,33 +522,28 @@ mod tests {
             .unwrap();
         assert_eq!(spy.excluded.lock().as_deref(), Some(first.0.as_str()));
 
-        // `/new` and `/switch` move the daemon to another session; the
-        // tool must follow rather than pin the one it was built with.
         let second = Arc::new(SessionId::new());
         session_tx.send_replace(second.clone());
         tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
             .await
             .unwrap();
-        assert_eq!(spy.excluded.lock().as_deref(), Some(second.0.as_str()));
+        assert_eq!(
+            spy.excluded.lock().as_deref(),
+            Some(second.0.as_str()),
+            "the tool must follow a session switch, not pin its first session"
+        );
     }
 
-    /// A SQLite-backed `MemoryOps` in a fresh tempdir. The writer handle
-    /// and the tempdir must be held for the test's duration.
-    async fn fresh_ops() -> (
-        Arc<MemoryOps>,
-        tokio::task::JoinHandle<()>,
-        tempfile::TempDir,
-    ) {
+    /// A SQLite-backed `MemoryOps`; hold the writer and tempdir for the test.
+    async fn fresh_ops() -> (Arc<MemoryOps>, JoinHandle<()>, TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
             .await
             .unwrap();
         let handle = Arc::new(handle);
-        let mem: Arc<dyn assistd_memory::MemoryStore> =
-            Arc::new(SqliteMemoryStore::new(handle.clone()));
-        let conv: Arc<dyn assistd_memory::ConversationStore> =
-            Arc::new(SqliteConversationStore::new(handle));
+        let mem: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(handle.clone()));
+        let conv: Arc<dyn ConversationStore> = Arc::new(SqliteConversationStore::new(handle));
         (Arc::new(MemoryOps::new(mem, conv)), writer, temp)
     }
 

@@ -1,12 +1,8 @@
-//! Char-window chunker applied to messages before embedding. Chunks
-//! are bounded by character count, never split a multi-byte character,
-//! and overlap so a sentence straddling a window boundary is visible in
-//! both neighbours.
+//! Overlapping character-window chunker applied to messages before embedding.
 
 use serde::{Deserialize, Serialize};
 
-/// Chunking policy. `chunk_chars` is the upper bound; `overlap_chars`
-/// is strictly less than it.
+/// Chunking policy; `overlap_chars` must be less than `chunk_chars`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkingConfig {
     /// Maximum number of Unicode characters per chunk.
@@ -24,16 +20,9 @@ impl Default for ChunkingConfig {
     }
 }
 
-/// Split `content` into one or more chunks bounded by `cfg.chunk_chars`.
-///
-/// - For inputs at or below the limit, returns one chunk (whole input).
-/// - For longer inputs, slides a window of `chunk_chars` characters,
-///   advancing by `chunk_chars - overlap_chars` each step. The last
-///   window is included even when shorter than the limit.
-/// - Pure-whitespace chunks are dropped.
-///
-/// A config with `chunk_chars == 0` or `overlap_chars >= chunk_chars`
-/// returns the input as a single chunk.
+/// Split `content` into windows of `chunk_chars` characters advancing by
+/// `chunk_chars - overlap_chars`, dropping whitespace-only windows. Short inputs and
+/// invalid configs yield the whole input as one chunk.
 pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
     if content.trim().is_empty() {
         return Vec::new();
@@ -53,7 +42,7 @@ pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
     }
 
     let step = cfg.chunk_chars - cfg.overlap_chars;
-    let mut out = Vec::new();
+    let mut chunks = Vec::new();
     let mut start = 0usize;
     while start < total_chars {
         let end = (start + cfg.chunk_chars).min(total_chars);
@@ -61,14 +50,14 @@ pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
         let byte_end = boundaries[end];
         let slice = &content[byte_start..byte_end];
         if !slice.trim().is_empty() {
-            out.push(slice.to_string());
+            chunks.push(slice.to_string());
         }
         if end == total_chars {
             break;
         }
         start += step;
     }
-    out
+    chunks
 }
 
 #[cfg(test)]

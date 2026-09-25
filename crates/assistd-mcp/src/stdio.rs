@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
@@ -56,13 +56,12 @@ pub struct StdioMcpClient {
 }
 
 impl StdioMcpClient {
-    /// Spawn the server in its own process group, run the initialize
-    /// handshake, and return the client plus the child's
-    /// [`ChildLifeline`]. Errors if the spawn or the handshake fails;
-    /// on a failed handshake the child is killed.
+    /// Spawn the server in its own process group and run the initialize
+    /// handshake. Errors if either fails; a failed handshake kills the child.
     pub async fn spawn(cfg: StdioConfig) -> Result<(Arc<Self>, ChildLifeline), McpError> {
-        let mut cmd = Command::new(&cfg.command);
-        cmd.args(&cfg.args)
+        let mut command = Command::new(&cfg.command);
+        command
+            .args(&cfg.args)
             .envs(cfg.env.iter())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -71,10 +70,10 @@ impl StdioMcpClient {
 
         #[cfg(unix)]
         {
-            cmd.process_group(0);
+            command.process_group(0);
         }
 
-        let mut child = cmd.spawn().map_err(|e| McpError::Spawn {
+        let mut child = command.spawn().map_err(|e| McpError::Spawn {
             path: cfg.command.clone(),
             source: e,
         })?;
@@ -129,24 +128,20 @@ impl StdioMcpClient {
     ) -> Result<(Arc<Self>, TransportHandles), McpError>
     where
         R: AsyncRead + Send + Unpin + 'static,
-        W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
     {
         let correlator = Arc::new(Correlator::new());
         let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(128);
 
-        let read_label = label.clone();
-        let read_correlator = correlator.clone();
         let (read_done_tx, read_done_rx) = oneshot::channel::<()>();
         let read_task = AbortOnDropHandle::new(tokio::spawn(read_loop(
             read,
-            read_correlator,
-            read_label,
+            correlator.clone(),
+            label.clone(),
             read_done_tx,
         )));
-
-        let write_label = label.clone();
         let write_task =
-            AbortOnDropHandle::new(tokio::spawn(write_loop(write, write_rx, write_label)));
+            AbortOnDropHandle::new(tokio::spawn(write_loop(write, write_rx, label.clone())));
 
         let client = Arc::new(Self {
             label,
@@ -211,15 +206,14 @@ impl McpClient for StdioMcpClient {
 /// child and aborts the tasks.
 pub struct ChildLifeline {
     label: String,
-    child: tokio::process::Child,
+    child: Child,
     transport: TransportHandles,
     stderr_task: AbortOnDropHandle<()>,
 }
 
 impl ChildLifeline {
-    /// Resolves when the child exits or its stdout read loop ends. A
-    /// live child whose read loop has ended can never answer again, so
-    /// both count as death.
+    /// Resolves when the child exits or its stdout read loop ends; a
+    /// child that can no longer answer counts as dead.
     pub async fn wait_for_death(&mut self) {
         tokio::select! {
             status = self.child.wait() => debug!(
@@ -312,8 +306,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
             .take(MAX_LINE_BYTES as u64 + 1)
             .read_until(b'\n', &mut line)
             .await;
-        let n = match read {
-            Ok(n) => n,
+        let bytes_read = match read {
+            Ok(bytes_read) => bytes_read,
             Err(e) => {
                 warn!(
                     target: "assistd::mcp",
@@ -323,11 +317,11 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 break;
             }
         };
-        if n == 0 {
+        if bytes_read == 0 {
             debug!(target: "assistd::mcp", server = %label, "MCP stdout EOF");
             break;
         }
-        if n > MAX_LINE_BYTES {
+        if bytes_read > MAX_LINE_BYTES {
             warn!(
                 target: "assistd::mcp",
                 server = %label,
@@ -354,12 +348,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let _ = done_tx.send(());
 }
 
-async fn write_loop<W: tokio::io::AsyncWrite + Unpin>(
+async fn write_loop<W: AsyncWrite + Unpin>(
     mut stream: W,
-    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut write_rx: mpsc::Receiver<Vec<u8>>,
     label: String,
 ) {
-    while let Some(bytes) = rx.recv().await {
+    while let Some(bytes) = write_rx.recv().await {
         if let Err(e) = stream.write_all(&bytes).await {
             warn!(
                 target: "assistd::mcp",
@@ -379,7 +373,7 @@ async fn write_loop<W: tokio::io::AsyncWrite + Unpin>(
     }
 }
 
-async fn forward_stderr(stream: tokio::process::ChildStderr, label: String) {
+async fn forward_stderr(stream: ChildStderr, label: String) {
     let mut lines = BufReader::new(stream).lines();
     loop {
         match lines.next_line().await {
@@ -395,21 +389,21 @@ async fn forward_stderr(stream: tokio::process::ChildStderr, label: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex};
+    use tokio::io::{DuplexStream, duplex};
     use tokio::task::JoinHandle;
+
+    use super::*;
 
     /// Pretend MCP server: answers every request read from
     /// `client_to_server` with `handler(request)` on `server_to_client`.
     fn fake_server<F, Fut>(
-        client_to_server: tokio::io::DuplexStream,
-        server_to_client: tokio::io::DuplexStream,
+        client_to_server: DuplexStream,
+        server_to_client: DuplexStream,
         handler: F,
     ) -> JoinHandle<()>
     where
-        F: Fn(serde_json::Value) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = serde_json::Value> + Send,
+        F: Fn(Value) -> Fut + Send + 'static,
+        Fut: Future<Output = Value> + Send,
     {
         tokio::spawn(async move {
             let mut reader = BufReader::new(client_to_server);
@@ -421,9 +415,8 @@ mod tests {
                     Ok(0) | Err(_) => return,
                     Ok(_) => {}
                 }
-                let req: serde_json::Value = match serde_json::from_str(line.trim()) {
-                    Ok(v) => v,
-                    Err(_) => continue,
+                let Ok(req) = serde_json::from_str::<Value>(line.trim()) else {
+                    continue;
                 };
                 if req.get("id").is_none() {
                     continue;
@@ -445,8 +438,8 @@ mod tests {
         handler: F,
     ) -> (Arc<StdioMcpClient>, TransportHandles, JoinHandle<()>)
     where
-        F: Fn(serde_json::Value) -> Fut + Send + Clone + 'static,
-        Fut: std::future::Future<Output = serde_json::Value> + Send,
+        F: Fn(Value) -> Fut + Send + Clone + 'static,
+        Fut: Future<Output = Value> + Send,
     {
         let (client_write, server_read) = duplex(8192);
         let (server_write, client_read) = duplex(8192);
@@ -466,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_tools_round_trip() {
-        let handler = |req: serde_json::Value| async move {
+        let handler = |req: Value| async move {
             assert_eq!(req["method"], "tools/list");
             json!({
                 "jsonrpc": "2.0",
@@ -501,7 +494,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_text_response() {
-        let handler = |req: serde_json::Value| async move {
+        let handler = |req: Value| async move {
             assert_eq!(req["method"], "tools/call");
             assert_eq!(
                 req["params"],
@@ -520,7 +513,7 @@ mod tests {
 
         let result = client.invoke("echo", json!({"x": "hi"})).await.unwrap();
         match result {
-            ToolResult::Text(t) => assert_eq!(t, "hello"),
+            ToolResult::Text(text) => assert_eq!(text, "hello"),
             other => panic!("expected Text, got {other:?}"),
         }
         handles.shutdown_and_join().await;
@@ -529,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_image_response_decodes_base64() {
-        let handler = |req: serde_json::Value| async move {
+        let handler = |req: Value| async move {
             json!({
                 "jsonrpc": "2.0",
                 "id": req["id"],
@@ -558,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn rpc_error_surfaces_as_error() {
-        let handler = |req: serde_json::Value| async move {
+        let handler = |req: Value| async move {
             json!({
                 "jsonrpc": "2.0",
                 "id": req["id"],
@@ -579,8 +572,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_timeout_fires_when_server_silent() {
-        // Both server halves stay alive but nothing ever answers.
+    async fn request_timeout_fires_when_server_never_answers() {
         let (client_write, _server_read) = duplex(8192);
         let (_server_write, client_read) = duplex(8192);
 
@@ -595,7 +587,7 @@ mod tests {
 
         let err = client.list_tools().await.unwrap_err();
         assert!(
-            matches!(err, McpError::RequestTimeout(d) if d == Duration::from_millis(150)),
+            matches!(err, McpError::RequestTimeout(timeout) if timeout == Duration::from_millis(150)),
             "{err:?}"
         );
         assert_eq!(client.correlator.in_flight(), 0);
@@ -643,11 +635,10 @@ mod tests {
         .unwrap();
 
         let call = tokio::spawn({
-            let c = client.clone();
-            async move { c.list_tools().await }
+            let client = client.clone();
+            async move { client.list_tools().await }
         });
-        // The request must be registered before the read loop sees EOF,
-        // or it would miss `fail_all` and wait out the timeout instead.
+        // Register the request before EOF so `fail_all` sees it.
         while client.correlator.in_flight() == 0 {
             tokio::task::yield_now().await;
         }

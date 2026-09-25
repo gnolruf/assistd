@@ -1,8 +1,11 @@
 //! HuggingFace file downloads with an on-disk cache.
 
+use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
+use reqwest::Response;
 use tokio::io::AsyncWriteExt;
 
 /// Errors from resolving or downloading a HuggingFace file.
@@ -25,7 +28,7 @@ pub enum DownloadError {
     Io {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
 }
 
@@ -59,8 +62,8 @@ pub fn default_cache_dir(subdir: &str) -> PathBuf {
 }
 
 fn default_cache_dir_from(
-    xdg_cache_home: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
+    xdg_cache_home: Option<OsString>,
+    home: Option<OsString>,
     subdir: &str,
 ) -> PathBuf {
     let base = xdg_cache_home
@@ -109,59 +112,9 @@ pub async fn ensure_file(repo: &str, file: &str, dest: &Path) -> Result<(), Down
         "downloading"
     );
 
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|source| DownloadError::Request {
-            url: url.clone(),
-            source,
-        })?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(DownloadError::Http {
-            url,
-            status: status.as_u16(),
-        });
-    }
-    let total = response.content_length();
-
-    let part = dest.with_extension(format!(
-        "{}.part",
-        dest.extension().and_then(|e| e.to_str()).unwrap_or("bin")
-    ));
-    let mut out = tokio::fs::File::create(&part)
-        .await
-        .map_err(|source| io_error(&part, source))?;
-
-    let mut stream = response.bytes_stream();
-    let mut downloaded: u64 = 0;
-    let mut next_tick: u64 = 0;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|source| DownloadError::Request {
-            url: url.clone(),
-            source,
-        })?;
-        out.write_all(&chunk)
-            .await
-            .map_err(|source| io_error(&part, source))?;
-        downloaded = downloaded.saturating_add(chunk.len() as u64);
-        if let Some(total) = total
-            && total > 0
-            && downloaded >= next_tick
-        {
-            tracing::info!(
-                target: "assistd::voice::download",
-                pct = downloaded * 100 / total,
-                downloaded_mib = downloaded / (1024 * 1024),
-                total_mib = total / (1024 * 1024),
-                "download progress"
-            );
-            next_tick = downloaded + total / 20;
-        }
-    }
-    out.flush()
-        .await
-        .map_err(|source| io_error(&part, source))?;
-    drop(out);
+    let response = fetch(&url).await?;
+    let part = part_path(dest);
+    stream_to_file(response, &url, &part).await?;
     tokio::fs::rename(&part, dest)
         .await
         .map_err(|source| io_error(dest, source))?;
@@ -173,7 +126,69 @@ pub async fn ensure_file(repo: &str, file: &str, dest: &Path) -> Result<(), Down
     Ok(())
 }
 
-fn io_error(path: &Path, source: std::io::Error) -> DownloadError {
+async fn fetch(url: &str) -> Result<Response, DownloadError> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|source| DownloadError::Request {
+            url: url.to_string(),
+            source,
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(DownloadError::Http {
+            url: url.to_string(),
+            status: status.as_u16(),
+        });
+    }
+    Ok(response)
+}
+
+fn part_path(dest: &Path) -> PathBuf {
+    dest.with_extension(format!(
+        "{}.part",
+        dest.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("bin")
+    ))
+}
+
+/// Write the response body to `part`, logging progress every 5% when the length is known.
+async fn stream_to_file(response: Response, url: &str, part: &Path) -> Result<(), DownloadError> {
+    let total = response.content_length();
+    let mut out = tokio::fs::File::create(part)
+        .await
+        .map_err(|source| io_error(part, source))?;
+
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut next_progress_log: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|source| DownloadError::Request {
+            url: url.to_string(),
+            source,
+        })?;
+        out.write_all(&chunk)
+            .await
+            .map_err(|source| io_error(part, source))?;
+        downloaded = downloaded.saturating_add(chunk.len() as u64);
+        if let Some(total) = total
+            && total > 0
+            && downloaded >= next_progress_log
+        {
+            tracing::info!(
+                target: "assistd::voice::download",
+                pct = downloaded * 100 / total,
+                downloaded_mib = downloaded / (1024 * 1024),
+                total_mib = total / (1024 * 1024),
+                "download progress"
+            );
+            next_progress_log = downloaded + total / 20;
+        }
+    }
+    out.flush().await.map_err(|source| io_error(part, source))
+}
+
+fn io_error(path: &Path, source: io::Error) -> DownloadError {
     DownloadError::Io {
         path: path.to_path_buf(),
         source,
@@ -213,21 +228,21 @@ mod tests {
 
     #[test]
     fn cached_path_sanitizes_slash() {
-        let p = cached_path(
+        let path = cached_path(
             Path::new("/cache"),
             "ggml-org/whisper-vad",
             "ggml-silero-v6.2.0.bin",
         );
         assert_eq!(
-            p,
+            path,
             Path::new("/cache/ggml-org__whisper-vad/ggml-silero-v6.2.0.bin")
         );
     }
 
     #[test]
     fn default_cache_dir_prefers_xdg_then_home_then_tmp() {
-        let xdg = Some(std::ffi::OsString::from("/tmp/xdg-test"));
-        let home = Some(std::ffi::OsString::from("/home/alice"));
+        let xdg = Some(OsString::from("/tmp/xdg-test"));
+        let home = Some(OsString::from("/home/alice"));
         assert_eq!(
             default_cache_dir_from(xdg, home.clone(), "piper"),
             Path::new("/tmp/xdg-test/assistd/piper")

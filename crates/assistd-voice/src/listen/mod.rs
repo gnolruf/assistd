@@ -1,7 +1,5 @@
-//! Hands-free continuous listening: VAD-gated utterance segmentation
-//! that emits completed transcripts without a hotkey press. Separate
-//! from [`crate::VoiceInput`] because the lifecycles differ: a press
-//! is one-shot, listening is a long-running stream.
+//! Hands-free continuous listening: VAD-gated segmentation that emits completed
+//! transcripts as a long-running stream, unlike one-shot [`crate::VoiceInput`] presses.
 
 use async_trait::async_trait;
 use thiserror::Error;

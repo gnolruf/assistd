@@ -1,12 +1,12 @@
-//! The single LLM-facing tool: `run`. Parses a command line, executes
-//! the chain over raw bytes, and hands only the final output to
-//! [`crate::presentation`] for truncation, so `cat bigfile | grep foo`
-//! feeds grep the whole file.
+//! The LLM-facing `run` tool: parses a command line, executes the chain, and
+//! truncates only the final output, so every stage sees its whole input.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
+use assistd_config::ToolsOutputConfig;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -17,17 +17,13 @@ use crate::command::{Attachment, CommandOutput, CommandRegistry, Hint, error_lin
 use crate::commands::cat::human_size;
 use crate::presentation::{PresentResult, PresentSpec, present};
 use crate::{Tool, ToolError};
-use assistd_config::ToolsOutputConfig;
-#[cfg(test)]
-use assistd_config::defaults::nz32;
-use std::path::PathBuf;
 
-/// The single LLM-facing `run` tool. Dispatches a command-line string
-/// through the chain parser and executor, then presents the result.
+/// The LLM-facing `run` tool, dispatching a command line through the chain
+/// parser and executor.
 pub struct RunTool {
     registry: Arc<CommandRegistry>,
     spec: PresentSpec,
-    counter: Arc<AtomicU64>,
+    overflow_counter: Arc<AtomicU64>,
     description: String,
 }
 
@@ -48,15 +44,15 @@ impl RunTool {
         Self {
             registry,
             spec,
-            counter: Arc::new(AtomicU64::new(0)),
+            overflow_counter: Arc::new(AtomicU64::new(0)),
             description,
         }
     }
 }
 
 fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
-    let mut s = String::with_capacity(1024);
-    s.push_str(
+    let mut desc = String::with_capacity(1024);
+    desc.push_str(
         "Execute a shell-style command line in the daemon's working \
          directory. The commands listed below exist only as the first word \
          of this tool's `command` string, e.g. {\"command\": \"wm list\"}; \
@@ -71,7 +67,7 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
          captured in the result, and `bash \"…\"` gives a real shell when \
          needed. ",
     );
-    s.push_str(&format!(
+    desc.push_str(&format!(
         "Output is returned whole unless its stdout exceeds {max_lines} \
          lines or {max_size}; only then is it cut to that head and the \
          full text saved, with the truncation notice giving a \
@@ -85,9 +81,9 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
     let pairs = registry.sorted_summaries();
     let name_width = pairs.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     for (name, summary) in pairs {
-        s.push_str(&format!("  {name:<name_width$}: {summary}\n"));
+        desc.push_str(&format!("  {name:<name_width$}: {summary}\n"));
     }
-    s.push_str(
+    desc.push_str(
         "\nCall a command with no (or insufficient) arguments to see its \
          usage (exit code 2, stdout); `<cmd> --help` prints the same \
          text and works for commands like `ls` and `echo` whose bare \
@@ -98,7 +94,7 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
          `Available:`; the recovery clause is a concrete command or check \
          you can run next.",
     );
-    s
+    desc
 }
 
 #[async_trait]
@@ -140,8 +136,8 @@ impl Tool for RunTool {
             Ok(chain) => execute(&chain, &self.registry, None).await,
             Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
-        let r = present(out, &self.spec, &self.counter, start.elapsed());
-        Ok(build_result(r))
+        let presented = present(out, &self.spec, &self.overflow_counter, start.elapsed());
+        Ok(build_result(presented))
     }
 }
 
@@ -172,27 +168,31 @@ fn parse_error_line(e: &ParseError) -> String {
     error_line("parse", e, hint, recovery)
 }
 
-fn build_result(r: PresentResult) -> Value {
+fn build_result(presented: PresentResult) -> Value {
     let mut result = json!({
-        "output":      r.output,
-        "stdout":      r.stdout_raw,
-        "stderr":      r.stderr_raw,
-        "exit_code":   r.exit_code,
-        "truncated":   r.truncated,
-        "duration_ms": r.duration_ms,
+        "output":      presented.output,
+        "stdout":      presented.stdout_raw,
+        "stderr":      presented.stderr_raw,
+        "exit_code":   presented.exit_code,
+        "truncated":   presented.truncated,
+        "duration_ms": presented.duration_ms,
     });
-    if let Some(p) = &r.overflow_file {
-        result["overflow_file"] = json!(p.to_string_lossy());
+    if let Some(path) = &presented.overflow_file {
+        result["overflow_file"] = json!(path.to_string_lossy());
     }
-    if !r.attachments.is_empty() {
-        let rendered: Vec<Value> = r.attachments.iter().map(render_attachment).collect();
+    if !presented.attachments.is_empty() {
+        let rendered: Vec<Value> = presented
+            .attachments
+            .iter()
+            .map(render_attachment)
+            .collect();
         result["attachments"] = Value::Array(rendered);
     }
     result
 }
 
-fn render_attachment(a: &Attachment) -> Value {
-    match a {
+fn render_attachment(attachment: &Attachment) -> Value {
+    match attachment {
         Attachment::Image { mime, bytes } => json!({
             "type": "image",
             "mime": mime,

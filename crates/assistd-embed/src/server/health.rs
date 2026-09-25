@@ -1,7 +1,9 @@
-use super::error::EmbedServerError;
 use std::time::{Duration, Instant};
+
 use tokio::sync::watch;
 use tracing::debug;
+
+use super::error::EmbedServerError;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -16,8 +18,8 @@ pub struct HealthChecker {
 }
 
 impl HealthChecker {
-    /// Checker for `http://{host}:{port}/health`; `ready_timeout` bounds
-    /// each [`Self::wait_ready`].
+    /// Checker for `http://{host}:{port}/health`; `ready_timeout` bounds each
+    /// [`Self::wait_ready`].
     pub fn new(host: &str, port: u16, ready_timeout: Duration) -> Result<Self, EmbedServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -32,7 +34,7 @@ impl HealthChecker {
         })
     }
 
-    /// Poll until 200, `HealthTimeout` at the deadline, or
+    /// Poll until 200; errors with `HealthTimeout` at the deadline or
     /// `ShutdownDuringHealth` when the watch fires.
     pub async fn wait_ready(
         &self,
@@ -55,8 +57,8 @@ impl HealthChecker {
                 _ = shutdown_rx.changed() => {
                     return Err(EmbedServerError::ShutdownDuringHealth);
                 }
-                res = self.probe() => {
-                    match res {
+                probe = self.probe() => {
+                    match probe {
                         Ok(true) => return Ok(()),
                         Ok(false) => debug!(target: "assistd::embed_server", "health: non-200 response"),
                         Err(e) => debug!(target: "assistd::embed_server", "health: {e}"),
@@ -75,12 +77,12 @@ impl HealthChecker {
     }
 
     async fn probe(&self) -> Result<bool, reqwest::Error> {
-        let resp = self
+        let response = self
             .client
             .get(&self.url)
             .timeout(self.probe_timeout)
             .send()
             .await?;
-        Ok(resp.status() == reqwest::StatusCode::OK)
+        Ok(response.status() == reqwest::StatusCode::OK)
     }
 }

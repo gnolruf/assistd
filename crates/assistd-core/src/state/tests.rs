@@ -1,17 +1,25 @@
-use super::*;
-use crate::state::branches::clean_generated_title;
-use crate::state::context::{combine_context_blocks, format_window_context_block};
-use crate::{Config, PresenceError};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use parking_lot::Mutex as StdMutex;
+use tokio::sync::{Notify, watch};
+
 use assistd_config::ToolsOutputConfig;
 use assistd_ipc::{PresenceState, VoiceCaptureState};
 use assistd_llm::{
     EchoBackend, FailedBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload,
 };
-use assistd_memory::{ConversationStore, PersistedMessage, PersistedRole};
+use assistd_memory::{
+    BranchId, ConversationStore, PersistedMessage, PersistedRole, SessionId,
+    SqliteConversationStore, SqliteHandle,
+};
 use assistd_tools::{CommandRegistry, RunTool, ToolError, commands::EchoCommand};
 use assistd_voice::{ListenError, VoiceInputError, VoiceOutputError};
-use parking_lot::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use assistd_wm::FocusedWindowContext;
+
+use super::*;
+use crate::state::branches::clean_generated_title;
+use crate::state::context::{combine_context_blocks, format_window_context_block};
+use crate::{Config, PresenceError};
 
 #[test]
 fn clean_generated_title_keeps_first_line_without_decoration() {
@@ -315,7 +323,6 @@ async fn dispatch_query_forwards_tool_call_and_result_events() {
     let (res, events) = dispatch(&state, query("req-42", "go")).await;
     res.unwrap();
 
-    // The IPC id is the request id, not the model's call id.
     let tool_call = events
         .iter()
         .find(|e| matches!(e, Event::ToolCall { .. }))
@@ -326,7 +333,8 @@ async fn dispatch_query_forwards_tool_call_and_result_events() {
             id: "req-42".into(),
             name: "run".into(),
             args: serde_json::json!({"command": "echo hi"}),
-        }
+        },
+        "the IPC id must be the request id, not the model's call id"
     );
 
     let output = events
@@ -429,12 +437,12 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
 struct MockVoice {
     start_result: StdMutex<Option<Result<(), VoiceInputError>>>,
     stop_result: StdMutex<Option<Result<String, VoiceInputError>>>,
-    state_tx: tokio::sync::watch::Sender<VoiceCaptureState>,
+    state_tx: watch::Sender<VoiceCaptureState>,
 }
 
 impl MockVoice {
     fn new(start: Result<(), VoiceInputError>, stop: Result<String, VoiceInputError>) -> Arc<Self> {
-        let (state_tx, _) = tokio::sync::watch::channel(VoiceCaptureState::Idle);
+        let (state_tx, _) = watch::channel(VoiceCaptureState::Idle);
         Arc::new(Self {
             start_result: StdMutex::new(Some(start)),
             stop_result: StdMutex::new(Some(stop)),
@@ -454,7 +462,7 @@ impl assistd_voice::VoiceInput for MockVoice {
     fn state(&self) -> VoiceCaptureState {
         *self.state_tx.borrow()
     }
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<VoiceCaptureState> {
+    fn subscribe(&self) -> watch::Receiver<VoiceCaptureState> {
         self.state_tx.subscribe()
     }
 }
@@ -567,13 +575,13 @@ async fn dispatch_ptt_stop_error_emits_error_event() {
 struct MockListener {
     active: AtomicBool,
     start_fails: bool,
-    state_tx: tokio::sync::watch::Sender<bool>,
+    state_tx: watch::Sender<bool>,
     utterances: tokio::sync::broadcast::Sender<String>,
 }
 
 impl MockListener {
     fn new(active: bool, start_fails: bool) -> Arc<Self> {
-        let (state_tx, _) = tokio::sync::watch::channel(active);
+        let (state_tx, _) = watch::channel(active);
         let (utterances, _) = tokio::sync::broadcast::channel(4);
         Arc::new(Self {
             active: AtomicBool::new(active),
@@ -605,7 +613,7 @@ impl assistd_voice::ContinuousListener for MockListener {
     fn subscribe_utterances(&self) -> tokio::sync::broadcast::Receiver<String> {
         self.utterances.subscribe()
     }
-    fn subscribe_state(&self) -> tokio::sync::watch::Receiver<bool> {
+    fn subscribe_state(&self) -> watch::Receiver<bool> {
         self.state_tx.subscribe()
     }
 }
@@ -956,7 +964,7 @@ async fn dispatch_query_tool_call_inhibits_idle_flush() {
 /// Never returns. `dropped` flips when the invocation future is torn
 /// down, proving the agent task stopped rather than being detached.
 struct HangingTool {
-    entered: Arc<tokio::sync::Notify>,
+    entered: Arc<Notify>,
     dropped: Arc<AtomicBool>,
 }
 
@@ -989,7 +997,7 @@ impl assistd_tools::Tool for HangingTool {
 
 fn state_with_hanging_tool(
     config: Config,
-    entered: Arc<tokio::sync::Notify>,
+    entered: Arc<Notify>,
     dropped: Arc<AtomicBool>,
 ) -> Arc<AppState> {
     let backend = ToolCallBackend::new(
@@ -1014,7 +1022,7 @@ fn state_with_hanging_tool(
 
 #[tokio::test]
 async fn interrupt_turn_preempts_hung_tool() {
-    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
     let state = state_with_hanging_tool(Config::default(), entered.clone(), dropped.clone());
 
@@ -1040,7 +1048,7 @@ async fn interrupt_turn_preempts_hung_tool() {
 
 #[tokio::test]
 async fn dispatch_envelope_timeout_tears_down_hung_tool() {
-    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
     let mut config = Config::default();
     config.timeouts.dispatch_envelope_secs = 1;
@@ -1057,8 +1065,6 @@ async fn dispatch_envelope_timeout_tears_down_hung_tool() {
         "{events:?}"
     );
 
-    // The handler is gone; the agent task must not still be holding the
-    // turn open behind it.
     tokio::time::timeout(Duration::from_secs(5), async {
         while !dropped.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
@@ -1068,12 +1074,8 @@ async fn dispatch_envelope_timeout_tears_down_hung_tool() {
     .expect("agent task outlived the dropped dispatch handler");
 }
 
-fn window(
-    class: Option<&str>,
-    title: Option<&str>,
-    ws: Option<&str>,
-) -> assistd_wm::FocusedWindowContext {
-    assistd_wm::FocusedWindowContext {
+fn window(class: Option<&str>, title: Option<&str>, ws: Option<&str>) -> FocusedWindowContext {
+    FocusedWindowContext {
         id: None,
         class: class.map(str::to_string),
         title: title.map(str::to_string),
@@ -1198,11 +1200,9 @@ async fn branch_state_with(
 ) -> (
     Arc<AppState>,
     Arc<dyn ConversationStore>,
-    assistd_memory::SessionId,
-    assistd_memory::BranchId,
+    SessionId,
+    BranchId,
 ) {
-    use assistd_memory::{SqliteConversationStore, SqliteHandle};
-    use tokio::sync::watch;
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory.db");
     std::mem::forget(temp);
@@ -1235,8 +1235,8 @@ async fn branch_state_with(
 async fn fresh_branch_state() -> (
     Arc<AppState>,
     Arc<dyn ConversationStore>,
-    assistd_memory::SessionId,
-    assistd_memory::BranchId,
+    SessionId,
+    BranchId,
 ) {
     branch_state_with(
         Arc::new(EchoBackend::new()),
@@ -1248,8 +1248,8 @@ async fn fresh_branch_state() -> (
 /// Persist one completed turn of `user` then `assistant` on `branch`.
 async fn append_turn(
     conv: &Arc<dyn ConversationStore>,
-    session: &assistd_memory::SessionId,
-    branch: assistd_memory::BranchId,
+    session: &SessionId,
+    branch: BranchId,
     user: &str,
     assistant: &str,
 ) {
@@ -1482,8 +1482,7 @@ async fn step_with_parallel_calls_persists_as_one_assistant_row() {
     state.drain_persistence_inflight().await;
 
     let rows = conv.load_branch_history(branch).await.unwrap();
-    // Tool output carries a timing footer, so compare tool rows by id only.
-    let shape: Vec<_> = rows
+    let shape_ignoring_tool_output: Vec<_> = rows
         .iter()
         .map(|r| {
             let content = (r.role != PersistedRole::Tool).then_some(r.content.as_str());
@@ -1491,7 +1490,7 @@ async fn step_with_parallel_calls_persists_as_one_assistant_row() {
         })
         .collect();
     assert_eq!(
-        shape,
+        shape_ignoring_tool_output,
         [
             (PersistedRole::User, Some("go"), None),
             (PersistedRole::Assistant, Some("Checking both."), None),

@@ -5,12 +5,18 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::error::McpError;
+
+/// Hard cap on outstanding requests; prevents a misbehaving server
+/// from leaking memory by never replying.
+pub const MAX_IN_FLIGHT: usize = 256;
+
+/// Outcome of one JSON-RPC round trip.
+pub type Reply = Result<Value, RpcError>;
 
 /// Outbound JSON-RPC 2.0 request frame.
 #[derive(Debug, Serialize)]
@@ -46,13 +52,6 @@ pub struct RpcError {
     #[serde(default)]
     pub data: Option<Value>,
 }
-
-/// Hard cap on outstanding requests; prevents a misbehaving server
-/// from leaking memory by never replying.
-pub const MAX_IN_FLIGHT: usize = 256;
-
-/// Outcome of one JSON-RPC round trip.
-pub type Reply = Result<Value, RpcError>;
 
 /// Matches outbound JSON-RPC request ids to their waiting [`oneshot`] receivers.
 #[derive(Debug)]
@@ -177,28 +176,29 @@ impl Pending<'_> {
 
 /// Encode a notification as a single newline-terminated line.
 pub fn notification_line(method: &'static str, params: Value) -> Result<Vec<u8>, McpError> {
-    let n = Notification {
+    let notification = Notification {
         jsonrpc: "2.0",
         method,
         params,
     };
-    let mut bytes = serde_json::to_vec(&n)?;
+    let mut bytes = serde_json::to_vec(&notification)?;
     bytes.push(b'\n');
     Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
     use tokio::sync::oneshot::error::TryRecvError;
 
+    use super::*;
+
     #[tokio::test]
     async fn deliver_wakes_the_matching_request() {
-        let c = Correlator::new();
-        let mut pending = c.next_request("ping", json!({})).unwrap();
+        let correlator = Correlator::new();
+        let mut pending = correlator.next_request("ping", json!({})).unwrap();
 
-        c.deliver(Response {
+        correlator.deliver(Response {
             id: Some(pending.id),
             result: Some(json!({"ok": true})),
             error: None,
@@ -206,14 +206,14 @@ mod tests {
 
         let value = (&mut pending.rx).await.unwrap().unwrap();
         assert_eq!(value, json!({"ok": true}));
-        assert_eq!(c.in_flight(), 0);
+        assert_eq!(correlator.in_flight(), 0);
     }
 
     #[tokio::test]
     async fn rpc_error_surfaces() {
-        let c = Correlator::new();
-        let mut pending = c.next_request("bad", json!({})).unwrap();
-        c.deliver(Response {
+        let correlator = Correlator::new();
+        let mut pending = correlator.next_request("bad", json!({})).unwrap();
+        correlator.deliver(Response {
             id: Some(pending.id),
             result: None,
             error: Some(RpcError {
@@ -231,26 +231,26 @@ mod tests {
 
     #[test]
     fn unknown_id_leaves_pending_requests_untouched() {
-        let c = Correlator::new();
-        let mut pending = c.next_request("ping", json!({})).unwrap();
-        c.deliver(Response {
+        let correlator = Correlator::new();
+        let mut pending = correlator.next_request("ping", json!({})).unwrap();
+        correlator.deliver(Response {
             id: Some(pending.id + 1),
             result: Some(Value::Null),
             error: None,
         });
-        assert_eq!(c.in_flight(), 1);
+        assert_eq!(correlator.in_flight(), 1);
         assert!(matches!(pending.rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]
     async fn fail_all_closes_every_pending_reply_channel() {
-        let c = Correlator::new();
-        let mut p1 = c.next_request("a", json!({})).unwrap();
-        let mut p2 = c.next_request("b", json!({})).unwrap();
-        assert_eq!(c.in_flight(), 2);
+        let correlator = Correlator::new();
+        let mut p1 = correlator.next_request("a", json!({})).unwrap();
+        let mut p2 = correlator.next_request("b", json!({})).unwrap();
+        assert_eq!(correlator.in_flight(), 2);
 
-        c.fail_all();
-        assert_eq!(c.in_flight(), 0);
+        correlator.fail_all();
+        assert_eq!(correlator.in_flight(), 0);
 
         (&mut p1.rx).await.expect_err("sender dropped");
         (&mut p2.rx).await.expect_err("sender dropped");
@@ -258,23 +258,23 @@ mod tests {
 
     #[test]
     fn in_flight_cap_rejects_until_a_pending_request_is_dropped() {
-        let c = Correlator::new();
+        let correlator = Correlator::new();
         let held: Vec<_> = (0..MAX_IN_FLIGHT)
-            .map(|_| c.next_request("x", json!({})).unwrap())
+            .map(|_| correlator.next_request("x", json!({})).unwrap())
             .collect();
         assert!(matches!(
-            c.next_request("y", json!({})),
+            correlator.next_request("y", json!({})),
             Err(McpError::TooManyInFlight)
         ));
         drop(held);
-        assert_eq!(c.in_flight(), 0);
-        c.next_request("y", json!({})).unwrap();
+        assert_eq!(correlator.in_flight(), 0);
+        correlator.next_request("y", json!({})).unwrap();
     }
 
     #[test]
     fn frame_line_encodes_newline_terminated_request() {
-        let c = Correlator::new();
-        let pending = c.next_request("ping", json!({"echo": 1})).unwrap();
+        let correlator = Correlator::new();
+        let pending = correlator.next_request("ping", json!({"echo": 1})).unwrap();
         let line = pending.frame_line().unwrap();
         let (json_bytes, newline) = line.split_at(line.len() - 1);
         assert_eq!(newline, b"\n");

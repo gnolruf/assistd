@@ -4,21 +4,15 @@ use std::time::Duration;
 /// up and enters [`crate::llama_server::ReadyState::Degraded`].
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
-/// Rolling-window cap on *any* restart (startup or crash-after-ready). Without
-/// it, a child that stays healthy for `MIN_HEALTHY_SECONDS` before each crash
-/// would reset the consecutive-failure counter and restart forever, paying the
-/// multi-second weight-load cost every cycle. Hitting this cap forces
-/// [`crate::llama_server::ReadyState::Degraded`] regardless of how long any
-/// individual child lived.
+/// Rolling-window cap on any restart, startup or crash-after-ready. Hitting
+/// it forces [`crate::llama_server::ReadyState::Degraded`] even when every
+/// child lived long enough to reset the consecutive-failure counter.
 pub const MAX_RESTARTS_PER_WINDOW: usize = 10;
 
 /// Width of the rolling window used by [`MAX_RESTARTS_PER_WINDOW`].
 pub const RESTART_WINDOW: Duration = Duration::from_secs(600);
 
-/// Exponential backoff schedule: `2^attempt` seconds, capped at 60s.
-///
-/// `attempt` starts at 0, yielding the sequence
-/// `1s, 2s, 4s, 8s, 16s, 32s, 60s, 60s, …`.
+/// Exponential backoff: `2^attempt` seconds from `attempt` 0, capped at 60s.
 pub fn backoff_delay(attempt: u32) -> Duration {
     const CAP_SECS: u64 = 60;
     let secs = 1u64.checked_shl(attempt).unwrap_or(CAP_SECS).min(CAP_SECS);

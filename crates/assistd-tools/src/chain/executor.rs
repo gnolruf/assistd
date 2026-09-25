@@ -1,6 +1,5 @@
-//! Walks a [`super::Chain`] AST, dispatching each stage through a
-//! [`crate::CommandRegistry`] and gluing the results together according to
-//! Unix pipeline semantics.
+//! Walks a [`Chain`], dispatching each stage through a [`CommandRegistry`]
+//! and combining results with Unix pipeline semantics.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -9,19 +8,13 @@ use super::expand::expand_args;
 use super::{Chain, Word};
 use crate::command::{CommandInput, CommandOutput, CommandRegistry, Hint, error_line};
 
-/// Maximum bytes buffered between pipe stages, so a runaway stage can't
-/// exhaust daemon memory. Overflow exits 141, the SIGPIPE code, so `||`
-/// fallbacks still fire.
+/// Maximum bytes buffered between pipe stages. Overflow exits 141, the
+/// SIGPIPE code, so `||` fallbacks still fire.
 pub const PIPE_BUF_MAX: usize = 10 * 1024 * 1024;
 
-/// Execute a parsed command chain.
-///
-/// Pipelining is sequential: the left stage runs to completion and its
-/// stdout, capped at [`PIPE_BUF_MAX`], becomes the right stage's stdin.
-/// The returned `stderr` is the concatenation of every stage's stderr,
-/// each line prefixed `"[name]\t"` with the stage that wrote it.
-/// Short-circuited branches (right side of `&&` on failure, right side
-/// of `||` on success) emit nothing.
+/// Execute a parsed chain. Pipes run sequentially, the left stage's stdout
+/// (capped at [`PIPE_BUF_MAX`]) becoming the right's stdin; every stage's
+/// stderr lines are kept, prefixed `[name]\t`. Short-circuited stages emit nothing.
 pub fn execute<'a>(
     chain: &'a Chain,
     registry: &'a CommandRegistry,
@@ -34,17 +27,7 @@ pub fn execute<'a>(
                 let mut left = execute(l, registry, stdin).await;
                 let piped = std::mem::take(&mut left.stdout);
                 if piped.len() > PIPE_BUF_MAX {
-                    let overflow = CommandOutput::failed(
-                        141,
-                        error_line(
-                            "pipe",
-                            format_args!("stage output exceeded {PIPE_BUF_MAX} bytes"),
-                            Hint::Try,
-                            "pipe through wc -l or head first to shrink the stream",
-                        )
-                        .into_bytes(),
-                    );
-                    return left.then(overflow);
+                    return left.then(pipe_overflow());
                 }
                 let right = execute(r, registry, Some(piped)).await;
                 left.then(right)
@@ -67,6 +50,21 @@ pub fn execute<'a>(
     })
 }
 
+fn pipe_overflow() -> CommandOutput {
+    CommandOutput::failed(
+        141,
+        error_line(
+            "pipe",
+            format_args!("stage output exceeded {PIPE_BUF_MAX} bytes"),
+            Hint::Try,
+            "pipe through wc -l or head first to shrink the stream",
+        )
+        .into_bytes(),
+    )
+}
+
+/// Dispatch one stage. `--help` anywhere in its args prints usage, even for
+/// commands whose bare form does real work.
 async fn run_command(
     words: &[Word],
     registry: &CommandRegistry,
@@ -92,9 +90,6 @@ async fn run_command(
         return CommandOutput::failed(127, msg.into_bytes());
     };
 
-    // Every command answers `--help`, including the ones whose no-arg
-    // form does real work (`ls`, `echo`) and so never reaches their own
-    // usage text.
     let args = expand_args(&words[1..]);
     if args.iter().any(|a| a == "--help") {
         return CommandOutput::usage(cmd.help());

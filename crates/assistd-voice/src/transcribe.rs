@@ -1,6 +1,9 @@
 //! The [`Transcriber`] trait and the GPU-or-CPU [`QueuedTranscriber`].
 
+use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -104,9 +107,9 @@ impl Default for QueueConfig {
 /// Async factory for the CPU fallback transcriber, invoked the first
 /// time a fallback is needed.
 pub type CpuFallbackFactory = Arc<
-    dyn Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<Arc<dyn Transcriber>, TranscriptionError>> + Send>,
-        > + Send
+    dyn Fn()
+            -> Pin<Box<dyn Future<Output = Result<Arc<dyn Transcriber>, TranscriptionError>> + Send>>
+        + Send
         + Sync,
 >;
 
@@ -120,7 +123,7 @@ pub struct QueuedTranscriber {
     cpu_factory: CpuFallbackFactory,
     busy: Arc<dyn BusyProbe>,
     state_tx: watch::Sender<VoiceCaptureState>,
-    cfg: QueueConfig,
+    config: QueueConfig,
 }
 
 impl QueuedTranscriber {
@@ -130,7 +133,7 @@ impl QueuedTranscriber {
         primary: Arc<dyn Transcriber>,
         cpu_factory: CpuFallbackFactory,
         busy: Arc<dyn BusyProbe>,
-        cfg: QueueConfig,
+        config: QueueConfig,
     ) -> Self {
         let (state_tx, _) = watch::channel(VoiceCaptureState::Idle);
         Self {
@@ -139,36 +142,27 @@ impl QueuedTranscriber {
             cpu_factory,
             busy,
             state_tx,
-            cfg,
+            config,
         }
     }
-}
 
-#[async_trait]
-impl Transcriber for QueuedTranscriber {
-    async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
-        if !self.primary.is_gpu() || !self.cfg.cpu_fallback_enabled {
-            let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
-            let result = self.primary.transcribe(pcm_i16_16k_mono).await;
-            let _ = self.state_tx.send(VoiceCaptureState::Idle);
-            return result;
-        }
-
-        let _ = self.state_tx.send(VoiceCaptureState::Queued);
-
-        let use_cpu = if !self.busy.presence_active() {
+    /// Consults the [`BusyProbe`], logging the reason whenever the GPU is ruled out.
+    async fn should_fall_back_to_cpu(&self) -> bool {
+        if !self.busy.presence_active() {
             tracing::info!(
                 target: "assistd::voice::queued",
                 "falling back to CPU: presence is not Active"
             );
-            true
-        } else if self.busy.foreign_gpu_busy() {
+            return true;
+        }
+        if self.busy.foreign_gpu_busy() {
             tracing::info!(
                 target: "assistd::voice::queued",
                 "falling back to CPU: foreign process holds VRAM"
             );
-            true
-        } else if self.cfg.gpu_busy_timeout_ms == 0 {
+            return true;
+        }
+        if self.config.gpu_busy_timeout_ms == 0 {
             let idle_now = self
                 .busy
                 .wait_until_llm_idle(Duration::from_millis(0))
@@ -179,30 +173,49 @@ impl Transcriber for QueuedTranscriber {
                     "falling back to CPU: gpu_busy_timeout_ms = 0 and an LLM stream is in flight"
                 );
             }
-            !idle_now
-        } else {
-            let timeout = Duration::from_millis(self.cfg.gpu_busy_timeout_ms as u64);
-            let idle = self.busy.wait_until_llm_idle(timeout).await;
-            if !idle {
-                tracing::info!(
-                    target: "assistd::voice::queued",
-                    timeout_ms = self.cfg.gpu_busy_timeout_ms,
-                    "falling back to CPU: LLM stream did not drain within timeout"
-                );
-            }
-            !idle
-        };
+            return !idle_now;
+        }
+        let timeout = Duration::from_millis(self.config.gpu_busy_timeout_ms as u64);
+        let idle = self.busy.wait_until_llm_idle(timeout).await;
+        if !idle {
+            tracing::info!(
+                target: "assistd::voice::queued",
+                timeout_ms = self.config.gpu_busy_timeout_ms,
+                "falling back to CPU: LLM stream did not drain within timeout"
+            );
+        }
+        !idle
+    }
 
+    async fn cpu_transcriber(&self) -> Result<Arc<dyn Transcriber>, TranscriptionError> {
+        let factory = self.cpu_factory.clone();
+        let cpu = self
+            .cpu
+            .get_or_try_init(|| async move { factory().await })
+            .await?;
+        Ok(cpu.clone())
+    }
+}
+
+#[async_trait]
+impl Transcriber for QueuedTranscriber {
+    async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
+        if !self.primary.is_gpu() || !self.config.cpu_fallback_enabled {
+            let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
+            let result = self.primary.transcribe(pcm_i16_16k_mono).await;
+            let _ = self.state_tx.send(VoiceCaptureState::Idle);
+            return result;
+        }
+
+        let _ = self.state_tx.send(VoiceCaptureState::Queued);
+        let use_cpu = self.should_fall_back_to_cpu().await;
         let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
 
         let result = if use_cpu {
-            let factory = self.cpu_factory.clone();
-            let cpu_cell = self.cpu.clone();
-            let cpu = cpu_cell
-                .get_or_try_init(|| async move { factory().await })
+            self.cpu_transcriber()
                 .await?
-                .clone();
-            cpu.transcribe(pcm_i16_16k_mono).await
+                .transcribe(pcm_i16_16k_mono)
+                .await
         } else {
             self.primary.transcribe(pcm_i16_16k_mono).await
         };
@@ -221,7 +234,7 @@ impl Transcriber for QueuedTranscriber {
 pub struct StubTranscriber {
     text: String,
     gpu: bool,
-    calls: std::sync::atomic::AtomicUsize,
+    calls: AtomicUsize,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -240,13 +253,13 @@ impl StubTranscriber {
         Arc::new(Self {
             text: text.into(),
             gpu,
-            calls: std::sync::atomic::AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
         })
     }
 
     /// Number of `transcribe` calls so far.
     pub fn calls(&self) -> usize {
-        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        self.calls.load(Ordering::SeqCst)
     }
 }
 
@@ -254,7 +267,7 @@ impl StubTranscriber {
 #[async_trait]
 impl Transcriber for StubTranscriber {
     async fn transcribe(&self, _pcm: &[i16]) -> Result<String, TranscriptionError> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.text.clone())
     }
 
@@ -265,9 +278,11 @@ impl Transcriber for StubTranscriber {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use tokio::sync::Notify;
+
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct ScriptedProbe {
         idle: AtomicBool,
@@ -283,20 +298,20 @@ mod tests {
                 active: AtomicBool::new(true),
             })
         }
-        fn set_idle(&self, v: bool) {
-            self.idle.store(v, Ordering::SeqCst);
+        fn set_idle(&self, idle: bool) {
+            self.idle.store(idle, Ordering::SeqCst);
         }
-        fn set_foreign(&self, v: bool) {
-            self.foreign.store(v, Ordering::SeqCst);
+        fn set_foreign(&self, foreign: bool) {
+            self.foreign.store(foreign, Ordering::SeqCst);
         }
-        fn set_active(&self, v: bool) {
-            self.active.store(v, Ordering::SeqCst);
+        fn set_active(&self, active: bool) {
+            self.active.store(active, Ordering::SeqCst);
         }
     }
 
     #[async_trait]
     impl BusyProbe for ScriptedProbe {
-        async fn wait_until_llm_idle(&self, _t: Duration) -> bool {
+        async fn wait_until_llm_idle(&self, _timeout: Duration) -> bool {
             self.idle.load(Ordering::SeqCst)
         }
         fn foreign_gpu_busy(&self) -> bool {
@@ -307,14 +322,14 @@ mod tests {
         }
     }
 
-    fn cpu_factory_for(stub: Arc<StubTranscriber>) -> CpuFallbackFactory {
+    fn cpu_factory_for<T: Transcriber>(cpu: Arc<T>) -> CpuFallbackFactory {
         Arc::new(move || {
-            let s = stub.clone();
-            Box::pin(async move { Ok(s as Arc<dyn Transcriber>) })
+            let cpu = cpu.clone();
+            Box::pin(async move { Ok(cpu as Arc<dyn Transcriber>) })
         })
     }
 
-    fn default_cfg() -> QueueConfig {
+    fn test_config() -> QueueConfig {
         QueueConfig {
             gpu_busy_timeout_ms: 50,
             cpu_fallback_enabled: true,
@@ -342,7 +357,7 @@ mod tests {
             fallback_enabled: true,
             uses_cpu: false,
         };
-        for c in [
+        for case in [
             base,
             Case {
                 name: "llm busy past timeout",
@@ -375,41 +390,46 @@ mod tests {
                 ..base
             },
         ] {
-            let primary = if c.primary_gpu {
+            let primary = if case.primary_gpu {
                 StubTranscriber::on_gpu("primary")
             } else {
                 StubTranscriber::with_text("primary")
             };
             let cpu = StubTranscriber::with_text("cpu");
             let probe = ScriptedProbe::new();
-            probe.set_idle(c.idle);
-            probe.set_foreign(c.foreign);
-            probe.set_active(c.active);
-            let q = QueuedTranscriber::new(
+            probe.set_idle(case.idle);
+            probe.set_foreign(case.foreign);
+            probe.set_active(case.active);
+            let queued = QueuedTranscriber::new(
                 primary.clone(),
                 cpu_factory_for(cpu.clone()),
                 probe,
                 QueueConfig {
-                    cpu_fallback_enabled: c.fallback_enabled,
-                    ..default_cfg()
+                    cpu_fallback_enabled: case.fallback_enabled,
+                    ..test_config()
                 },
             );
-            let text = q.transcribe(&[0i16; 16]).await.unwrap();
-            let (expected, primary_calls, cpu_calls) = if c.uses_cpu {
+            let text = queued.transcribe(&[0i16; 16]).await.unwrap();
+            let (expected, primary_calls, cpu_calls) = if case.uses_cpu {
                 ("cpu", 0, 1)
             } else {
                 ("primary", 1, 0)
             };
-            assert_eq!(text, expected, "{}", c.name);
-            assert_eq!(primary.calls(), primary_calls, "{}: primary calls", c.name);
-            assert_eq!(cpu.calls(), cpu_calls, "{}: cpu calls", c.name);
+            assert_eq!(text, expected, "{}", case.name);
+            assert_eq!(
+                primary.calls(),
+                primary_calls,
+                "{}: primary calls",
+                case.name
+            );
+            assert_eq!(cpu.calls(), cpu_calls, "{}: cpu calls", case.name);
         }
     }
 
     struct GatedTranscriber {
         label: &'static str,
-        started: Arc<tokio::sync::Notify>,
-        release: Arc<tokio::sync::Notify>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
     }
 
     #[async_trait]
@@ -423,12 +443,9 @@ mod tests {
 
     #[tokio::test]
     async fn queued_publishes_transcribing_while_running_and_idle_when_done() {
-        // A watch channel collapses same-tick updates, so the Queued
-        // edge is not observable; only Transcribing-while-held and the
-        // final Idle are asserted.
         let primary = StubTranscriber::on_gpu("GPU");
-        let started = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
         let cpu: Arc<GatedTranscriber> = Arc::new(GatedTranscriber {
             label: "CPU",
             started: started.clone(),
@@ -437,31 +454,25 @@ mod tests {
         let probe = ScriptedProbe::new();
         probe.set_idle(false);
 
-        let factory: CpuFallbackFactory = {
-            let cpu = cpu.clone();
-            Arc::new(move || {
-                let cpu = cpu.clone();
-                Box::pin(async move { Ok(cpu as Arc<dyn Transcriber>) })
-            })
-        };
-
-        let q = Arc::new(QueuedTranscriber::new(
+        let queued = Arc::new(QueuedTranscriber::new(
             primary as Arc<dyn Transcriber>,
-            factory,
+            cpu_factory_for(cpu),
             probe,
-            default_cfg(),
+            test_config(),
         ));
-        let rx = q.subscribe_state().expect("state is exposed");
+        let rx = queued.subscribe_state().expect("state is exposed");
         assert_eq!(*rx.borrow(), VoiceCaptureState::Idle);
 
-        let q2 = q.clone();
-        let handle = tokio::spawn(async move { q2.transcribe(&[0i16; 16]).await });
+        let transcription = {
+            let queued = queued.clone();
+            tokio::spawn(async move { queued.transcribe(&[0i16; 16]).await })
+        };
 
         started.notified().await;
         assert_eq!(*rx.borrow(), VoiceCaptureState::Transcribing);
 
         release.notify_one();
-        let text = handle.await.unwrap().unwrap();
+        let text = transcription.await.unwrap().unwrap();
         assert_eq!(text, "CPU");
         assert_eq!(*rx.borrow(), VoiceCaptureState::Idle);
     }

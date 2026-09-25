@@ -1,6 +1,13 @@
-use super::*;
+use std::path::PathBuf;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::net::UnixListener;
+use tokio::task::JoinHandle;
+
+use super::attach::longest_common_prefix;
+use super::keys::{MOUSE_WHEEL_STEP, SLASH_COMMANDS};
+use super::*;
 
 fn test_sleep_cfg() -> SleepConfig {
     let mut cfg = assistd_core::Config::default().sleep;
@@ -15,15 +22,12 @@ fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
 
 fn test_app_with(vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
     test_app_at(
-        std::path::PathBuf::from("/tmp/assistd-test-nonexistent.sock"),
+        PathBuf::from("/tmp/assistd-test-nonexistent.sock"),
         vision_enabled,
     )
 }
 
-fn test_app_at(
-    socket: std::path::PathBuf,
-    vision_enabled: bool,
-) -> (App, mpsc::Receiver<ChatEvent>) {
+fn test_app_at(socket: PathBuf, vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
     let (tx, rx) = mpsc::channel::<ChatEvent>(16);
     let ipc = Arc::new(IpcClient::with_path(socket));
     let app = App::new(
@@ -82,7 +86,7 @@ fn line_index(lines: &[String], needle: &str) -> usize {
 }
 
 fn start_typed_turn(app: &mut App, id: &str, prompt: &str) {
-    app.begin_submit(prompt, &[]);
+    app.begin_turn(prompt, &[]);
     app.active_reply = Some(ActiveReply {
         id: id.into(),
         writer: None,
@@ -104,14 +108,10 @@ fn status(event: Event) -> ChatEvent {
 }
 
 /// Accept one dialog connection, read its request line, then stream
-/// `events` back. The delay before the first write gives the query
-/// driver time to observe its closed writer channel while nothing is
-/// readable, so a driver that parks in that state hangs the test.
-async fn mock_daemon(
-    socket: std::path::PathBuf,
-    events: Vec<Event>,
-) -> tokio::task::JoinHandle<()> {
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+/// `events` back after a pause in which the query driver sees its writer
+/// channel close with nothing readable.
+async fn mock_daemon(socket: PathBuf, events: Vec<Event>) -> JoinHandle<()> {
+    let listener = UnixListener::bind(&socket).unwrap();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
@@ -179,9 +179,6 @@ fn voice_turn_spoken_over_a_typed_reply_waits_its_turn() {
     let (mut app, _rx) = test_app();
     start_typed_turn(&mut app, "typed", "typed question");
     app.on_chat_event(reply(delta_for("typed", "typed ")));
-
-    // The user speaks while the typed reply is still streaming; the
-    // daemon transcribes it, then blocks on its agent-turn lock.
     app.on_chat_event(reply(transcription_for("voice", "spoken question")));
     app.on_chat_event(reply(delta_for("typed", "answer")));
     let lines = rendered(&mut app);
@@ -193,10 +190,11 @@ fn voice_turn_spoken_over_a_typed_reply_waits_its_turn() {
     app.on_chat_event(reply(Event::Done { id: "typed".into() }));
     assert!(!app.generating);
 
-    // Only now does the voice turn run, and it opens with its own
-    // transcript rather than appending to the finished reply.
     app.on_chat_event(reply(delta_for("voice", "spoken answer")));
-    assert!(app.generating);
+    assert!(
+        app.generating,
+        "the voice turn runs once the typed one ends"
+    );
     let lines = rendered(&mut app);
     let typed = line_index(&lines, "typed answer");
     let spoken_q = line_index(&lines, "spoken question");
@@ -356,6 +354,12 @@ fn presence_event_updates_state() {
     assert_eq!(app.presence_state, Some(PresenceState::Active));
 }
 
+fn arm_modal(app: &mut App) {
+    if let Some(modal) = app.modal.as_mut() {
+        modal.opened_at = Instant::now() - CONFIRM_ARM_DELAY;
+    }
+}
+
 fn open_test_modal(app: &mut App) {
     open_modal_offering(app, Vec::new());
 }
@@ -407,9 +411,9 @@ async fn confirm_answer_in_full(writer_rx: &mut mpsc::Receiver<Request>) -> (boo
 #[tokio::test]
 async fn modal_approves_on_y_once_armed() {
     let (mut app, _rx, mut writer_rx) = app_with_modal();
-    app.arm_modal();
+    arm_modal(&mut app);
     app.on_key(typed('y'));
-    assert!(!app.has_modal());
+    assert!(app.modal.is_none());
     assert!(confirm_answer(&mut writer_rx).await);
 }
 
@@ -419,19 +423,19 @@ async fn modal_always_allows_on_a_once_armed_when_offered() {
     app.modal = None;
     open_modal_offering(&mut app, vec!["cargo".into()]);
     app.on_key(typed('a'));
-    assert!(app.has_modal(), "keys still in flight must not approve");
-    app.arm_modal();
+    assert!(app.modal.is_some(), "keys still in flight must not approve");
+    arm_modal(&mut app);
     app.on_key(typed('a'));
-    assert!(!app.has_modal());
+    assert!(app.modal.is_none());
     assert_eq!(confirm_answer_in_full(&mut writer_rx).await, (true, true));
 }
 
 #[tokio::test]
 async fn modal_ignores_a_when_nothing_is_offered() {
     let (mut app, _rx, mut writer_rx) = app_with_modal();
-    app.arm_modal();
+    arm_modal(&mut app);
     app.on_key(typed('a'));
-    assert!(app.has_modal());
+    assert!(app.modal.is_some());
     assert!(writer_rx.try_recv().is_err());
     app.on_key(typed('y'));
     assert_eq!(confirm_answer_in_full(&mut writer_rx).await, (true, false));
@@ -442,16 +446,16 @@ async fn modal_ignores_approval_before_armed() {
     let (mut app, _rx, mut writer_rx) = app_with_modal();
     app.on_key(typed('y'));
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.has_modal(), "keys still in flight must not approve");
+    assert!(app.modal.is_some(), "keys still in flight must not approve");
     assert!(writer_rx.try_recv().is_err());
 }
 
 #[tokio::test]
 async fn modal_enter_never_approves() {
     let (mut app, _rx, _writer_rx) = app_with_modal();
-    app.arm_modal();
+    arm_modal(&mut app);
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.has_modal());
+    assert!(app.modal.is_some());
 }
 
 #[tokio::test]
@@ -459,7 +463,7 @@ async fn modal_denies_on_n_or_esc_even_before_armed() {
     for key in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
         let (mut app, _rx, mut writer_rx) = app_with_modal();
         app.on_key(KeyEvent::new(key, KeyModifiers::NONE));
-        assert!(!app.has_modal(), "{key:?}");
+        assert!(app.modal.is_none(), "{key:?}");
         assert!(!confirm_answer(&mut writer_rx).await, "{key:?}");
     }
 }
@@ -470,16 +474,16 @@ fn modal_closes_when_the_turn_ends() {
     app.on_chat_event(reply(delta("hi")));
     open_test_modal(&mut app);
     app.on_chat_event(reply(done()));
-    assert!(!app.has_modal(), "a finished turn cannot be answered");
+    assert!(app.modal.is_none(), "a finished turn cannot be answered");
 }
 
 #[tokio::test]
 async fn modal_swallows_unrelated_keys() {
     let (mut app, _rx, _writer_rx) = app_with_modal();
-    app.arm_modal();
+    arm_modal(&mut app);
     app.on_key(typed('x'));
     app.on_key(typed('z'));
-    assert!(app.has_modal());
+    assert!(app.modal.is_some());
     assert!(app.input.buffer().is_empty());
 }
 

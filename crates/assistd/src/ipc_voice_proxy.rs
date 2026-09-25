@@ -5,13 +5,13 @@
 use std::sync::Arc;
 
 use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
-use assistd_voice::VoiceInputError;
+use assistd_voice::{VoiceInput, VoiceInputError};
 use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
-/// `event_sink`, when `Some`, receives every event the daemon emits on
-/// the PTT connection.
+/// Push-to-talk over the daemon socket. `event_sink`, when `Some`,
+/// receives every event the daemon emits on the PTT connection.
 pub struct IpcVoiceProxy {
     ipc: Arc<IpcClient>,
     event_sink: Option<mpsc::Sender<Event>>,
@@ -30,8 +30,8 @@ impl IpcVoiceProxy {
         }
     }
 
-    fn set_state(&self, s: VoiceCaptureState) {
-        let _ = self.state.send(s);
+    fn set_state(&self, state: VoiceCaptureState) {
+        let _ = self.state.send(state);
     }
 
     async fn forward(&self, ev: Event) {
@@ -42,7 +42,7 @@ impl IpcVoiceProxy {
 }
 
 #[async_trait]
-impl assistd_voice::VoiceInput for IpcVoiceProxy {
+impl VoiceInput for IpcVoiceProxy {
     async fn start_recording(&self) -> Result<(), VoiceInputError> {
         self.set_state(VoiceCaptureState::Recording);
         let req = Request::PttStart {
