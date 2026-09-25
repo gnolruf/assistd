@@ -742,9 +742,11 @@ impl assistd_tools::Tool for GatedTool {
                 tool: "bash".into(),
                 script: "rm -rf /tmp/x".into(),
                 matched_pattern: "rm -rf".into(),
+                always_allow: Vec::new(),
             },
         )
         .await;
+        let approved = approved != assistd_tools::Approval::Deny;
         Ok(serde_json::json!({
             "output": if approved { "approved" } else { "denied" },
             "exit_code": 0,

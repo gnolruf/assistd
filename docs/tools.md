@@ -430,8 +430,8 @@ links to the canonical implementation.
   touches the filesystem outside an allowlist must go through the
   bash sandbox or the writable-paths check. See
   [`policy`](../crates/assistd-tools/src/policy.rs) for
-  `SandboxRequest`, `ConfirmationGate`, and the destructive-pattern
-  matcher.
+  `SandboxRequest`, `ConfirmationGate`, and the allowlist and
+  destructive-pattern review.
 - **Vision dependency.** Tools that produce image attachments must
   consult the [`VisionGate`](../crates/assistd-tools/src/vision.rs)
   and refuse with a navigation hint when the loaded model has no

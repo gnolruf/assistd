@@ -246,7 +246,7 @@ fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &Confirma
     frame.render_widget(Clear, modal_area);
     let block = Block::default()
         .title(Span::styled(
-            " Confirm destructive command ",
+            " Confirm command ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -265,7 +265,7 @@ fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &Confirma
     };
     let mut body = vec![
         Line::from(vec![
-            Span::styled("pattern: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("reason: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 modal.request.matched_pattern.clone(),
                 Style::default().add_modifier(Modifier::BOLD),
@@ -282,10 +282,16 @@ fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &Confirma
     frame.render_widget(para, body_area);
 
     let footer = if modal.armed() {
-        Span::styled(
-            "[y] run it   [n] / Esc cancel",
-            Style::default().fg(Color::Green),
-        )
+        let always = &modal.request.always_allow;
+        let text = if always.is_empty() {
+            "[y] run it   [n] / Esc cancel".to_string()
+        } else {
+            format!(
+                "[y] run once   [a] always allow {}   [n] / Esc cancel",
+                always.join(", ")
+            )
+        };
+        Span::styled(text, Style::default().fg(Color::Green))
     } else {
         Span::styled(
             "read the command…   [n] / Esc cancel",

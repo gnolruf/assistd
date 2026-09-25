@@ -1,8 +1,9 @@
 //! `bash SCRIPT`: spawn a real `bash -c <script>` subprocess behind the
-//! denylist, destructive-pattern confirmation, sandbox, and timeout
-//! policy. Denylist hits exit 126 without prompting; destructive hits
-//! prompt through the gate and exit 126 when refused; a timeout kills
-//! the process group and exits 137.
+//! denylist, allowlist and destructive-pattern confirmation, sandbox, and
+//! timeout policy. Denylist hits exit 126 without prompting; scripts that
+//! run unlisted programs or match a destructive pattern prompt through the
+//! gate and exit 126 when refused; a timeout kills the process group and
+//! exits 137.
 
 use std::sync::Arc;
 
@@ -11,8 +12,7 @@ use async_trait::async_trait;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::{SPAWN_FAILED_EXIT, supervise};
 use crate::policy::{
-    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy,
-    matches_destructive,
+    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy, check_script,
 };
 
 /// `bash SCRIPT`: spawn a real `bash -c <script>` subprocess, policy-gated.
@@ -22,7 +22,7 @@ pub struct BashCommand {
 
 impl BashCommand {
     /// A `bash` command that runs scripts under `cfg`, inside `sandbox`,
-    /// asking `gate` before any destructive match.
+    /// asking `gate` before any script the policy does not let through.
     pub fn new(
         cfg: Arc<BashPolicyCfg>,
         sandbox: Arc<SandboxInfo>,
@@ -77,10 +77,10 @@ impl Command for BashCommand {
             return CommandOutput::usage(self.help());
         }
         let script = input.args.join(" ");
-        let destructive = matches_destructive(&script, &self.policy.cfg.destructive_patterns);
+        let confirmation = check_script(&script, &self.policy.cfg.rules());
         if let Err(denied) = self
             .policy
-            .authorize("bash", "command", &script, destructive)
+            .authorize("bash", "command", &script, confirmation)
             .await
         {
             return denied;

@@ -165,6 +165,18 @@ pub(crate) fn test_registry() -> crate::command::CommandRegistry {
     r
 }
 
+/// Destructive patterns from whitespace-separated strings.
+#[cfg(test)]
+pub(crate) fn test_patterns(patterns: &[&str]) -> Vec<crate::policy::DestructivePattern> {
+    patterns
+        .iter()
+        .map(|p| {
+            crate::policy::DestructivePattern::new(p.split_whitespace())
+                .unwrap_or_else(|| panic!("invalid pattern {p:?}"))
+        })
+        .collect()
+}
+
 /// Confirmation gate that answers every prompt the same way and records
 /// each prompt's `(tool, script, matched_pattern)`.
 #[cfg(test)]
@@ -190,10 +202,14 @@ impl RecordingGate {
 #[cfg(test)]
 #[async_trait::async_trait]
 impl crate::policy::ConfirmationGate for RecordingGate {
-    async fn confirm(&self, req: crate::policy::ConfirmationRequest) -> bool {
+    async fn confirm(&self, req: crate::policy::ConfirmationRequest) -> crate::policy::Approval {
         self.prompts
             .lock()
             .push((req.tool, req.script, req.matched_pattern));
-        self.approve
+        if self.approve {
+            crate::policy::Approval::Once
+        } else {
+            crate::policy::Approval::Deny
+        }
     }
 }

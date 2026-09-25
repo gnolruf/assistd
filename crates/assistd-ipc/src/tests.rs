@@ -136,8 +136,18 @@ fn request_cases() -> Vec<(Request, &'static str)> {
                 id: id(),
                 confirm_id: "c-abc".into(),
                 allow: true,
+                always: false,
             },
             r#"{"type":"confirm_response","id":"r","confirm_id":"c-abc","allow":true}"#,
+        ),
+        (
+            Request::ConfirmResponse {
+                id: id(),
+                confirm_id: "c-abc".into(),
+                allow: true,
+                always: true,
+            },
+            r#"{"type":"confirm_response","id":"r","confirm_id":"c-abc","allow":true,"always":true}"#,
         ),
         (
             Request::GetCapabilities { id: id() },
@@ -418,8 +428,21 @@ fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 tool: "bash".into(),
                 script: "rm -rf /tmp/foo".into(),
                 matched_pattern: "rm -rf".into(),
+                always_allow: Vec::new(),
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"rm -rf /tmp/foo","matched_pattern":"rm -rf"}"#,
+            None,
+        ),
+        (
+            Event::ConfirmRequest {
+                id: id(),
+                confirm_id: "c-abc".into(),
+                tool: "bash".into(),
+                script: "cargo build".into(),
+                matched_pattern: "not on the allowlist: cargo".into(),
+                always_allow: vec!["cargo".into()],
+            },
+            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"cargo build","matched_pattern":"not on the allowlist: cargo","always_allow":["cargo"]}"#,
             None,
         ),
         (

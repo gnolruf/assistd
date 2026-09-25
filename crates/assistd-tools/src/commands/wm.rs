@@ -13,8 +13,7 @@ use assistd_wm::{Layout, ResizeDir, WindowId, WindowManager, WmError, WorkspaceI
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::{DetachedReaders, SPAWN_FAILED_EXIT, spawn_detached};
 use crate::policy::{
-    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy,
-    matches_destructive,
+    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy, check_argv,
 };
 
 /// The `[error] wm: <op> failed: …` line for a backend error, with the
@@ -226,8 +225,8 @@ const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
     Launch an application. <app> is resolved through PATH; remaining \
     arguments are forwarded to the spawned process.\n\
     \n\
-    Runs under the same policy as `bash`: denylist, destructive-pattern \
-    confirmation, and the bubblewrap sandbox (widened only to reach the \
+    Runs under the same policy as `bash`: denylist, allowlist and \
+    destructive-pattern confirmation, and the bubblewrap sandbox (widened only to reach the \
     compositor and D-Bus session sockets).\n\
     \n\
     The application is briefly watched, then left running. If it exits \
@@ -242,10 +241,10 @@ impl WmCommand {
             return CommandOutput::usage(OPEN_HELP.to_string());
         };
         let argv = args.join(" ");
-        let destructive = matches_destructive_argv(args, &self.policy.cfg.destructive_patterns);
+        let confirmation = check_argv(args, &self.policy.cfg.rules());
         if let Err(denied) = self
             .policy
-            .authorize(NAME, "open", &argv, destructive)
+            .authorize(NAME, "open", &argv, confirmation)
             .await
         {
             return denied;
@@ -276,23 +275,6 @@ impl WmCommand {
                 CommandOutput::failed(SPAWN_FAILED_EXIT, line.into_bytes())
             })
     }
-}
-
-/// Destructive-pattern match over `wm open`'s argv.
-///
-/// Two passes, because argv is not a shell script. The joined form
-/// anchors ordinary invocations (`wm open rm -rf ~`); re-checking each
-/// argument alone catches a script smuggled into one word
-/// (`wm open bash -c "rm -rf ~"`), whose tokens sit mid-line with no
-/// command anchor for the first pass to find.
-fn matches_destructive_argv<'a>(
-    argv: &[String],
-    prefixes: &'a [Vec<String>],
-) -> Option<&'a [String]> {
-    matches_destructive(&argv.join(" "), prefixes).or_else(|| {
-        argv.iter()
-            .find_map(|arg| matches_destructive(arg, prefixes))
-    })
 }
 
 async fn active(wm: &dyn WindowManager) -> CommandOutput {

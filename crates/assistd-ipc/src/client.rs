@@ -331,6 +331,7 @@ mod tests {
                 tool: "bash".into(),
                 script: "rm -rf /tmp/x".into(),
                 matched_pattern: "rm -rf".into(),
+                always_allow: Vec::new(),
             };
             let mut out = serde_json::to_string(&cr).unwrap();
             out.push('\n');
@@ -358,6 +359,7 @@ mod tests {
                     id: "r".into(),
                     confirm_id,
                     allow: true,
+                    always: false,
                 })
                 .await
                 .unwrap();

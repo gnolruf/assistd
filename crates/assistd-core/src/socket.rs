@@ -1,6 +1,6 @@
 use crate::AppState;
 use assistd_ipc::{Event, Request};
-use assistd_tools::{CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter};
+use assistd_tools::{Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -312,9 +312,13 @@ async fn handle_connection(
             }
             match serde_json::from_str::<Request>(trimmed) {
                 Ok(Request::ConfirmResponse {
-                    confirm_id, allow, ..
+                    confirm_id,
+                    allow,
+                    always,
+                    ..
                 }) => {
-                    if let Err(e) = router.route_response(&confirm_id, allow) {
+                    let approval = Approval::from_answer(allow, always);
+                    if let Err(e) = router.route_response(&confirm_id, approval) {
                         warn!(confirm_id = %confirm_id, reason = %e, "unmatched ConfirmResponse");
                     }
                 }

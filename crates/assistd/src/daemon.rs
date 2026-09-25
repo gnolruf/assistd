@@ -71,7 +71,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     let started = tokio::select! {
         biased;
         _ = startup_shutdown_rx.wait_for(|v| *v) => None,
-        started = start(config, args.client_mode, &shutdown_tx) => Some(started?),
+        started = start(config, &config_path, args.client_mode, &shutdown_tx) => Some(started?),
     };
     let Some((state, subsystems)) = started else {
         info!("shutdown requested during startup; assistd stopped");
@@ -94,6 +94,7 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
 
 async fn start(
     config: Config,
+    config_path: &std::path::Path,
     client_mode: bool,
     shutdown_tx: &watch::Sender<bool>,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
@@ -162,6 +163,7 @@ async fn start(
 
     let tools = assistd_core::build_tools(assistd_core::BuildToolsDeps {
         config: &config,
+        config_path,
         overflow_dir: overflow_dir.clone(),
         confirmation_gate: Arc::new(IpcConfirmationGate),
         vision_gate: vision_revalidator.gate(),

@@ -2,6 +2,7 @@ use super::*;
 use std::time::Duration;
 
 use crate::commands::RecordingGate;
+use crate::commands::test_patterns as patterns;
 use crate::exec::{OUTPUT_BUF_MAX, OUTPUT_OVERFLOW_EXIT};
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
 
@@ -22,7 +23,7 @@ fn with_timeout(timeout: Duration) -> BashCommand {
 fn rm_rf_is_destructive(gate: Arc<dyn ConfirmationGate>) -> BashCommand {
     bash_with_cfg(
         BashPolicyCfg {
-            destructive_patterns: vec![vec!["rm".into(), "-rf".into()]],
+            destructive_patterns: patterns(&["rm -rf"]),
             ..Default::default()
         },
         gate,
@@ -129,7 +130,7 @@ async fn destructive_pattern_prompts_and_runs_when_approved() {
     let gate = RecordingGate::new(true);
     let cmd = bash_with_cfg(
         BashPolicyCfg {
-            destructive_patterns: vec![vec!["true".into()]],
+            destructive_patterns: patterns(&["true"]),
             ..Default::default()
         },
         gate.clone(),

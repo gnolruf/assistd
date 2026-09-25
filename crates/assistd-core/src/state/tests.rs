@@ -210,6 +210,7 @@ async fn simple_requests_emit_expected_events() {
                 id: "cr".into(),
                 confirm_id: "x".into(),
                 allow: true,
+                always: false,
             },
             vec![error(
                 "cr",

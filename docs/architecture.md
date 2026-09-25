@@ -178,8 +178,11 @@ Built-in commands: `bash`, `cat`, `echo`, `grep`, `head`, `ls`,
 complete worked example of adding your own.
 
 Policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`)
-intercept the dangerous paths: `bash` runs through a sandbox
-(bubblewrap by default) with a destructive-pattern denylist; `wm open`
+intercept the dangerous paths: a `bash` script runs without asking only
+when every program it can run is on `[tools.bash] allowed_programs` and
+nothing in it matches a destructive pattern; otherwise the user confirms,
+and can "always allow" the programs it named. It then runs in a sandbox
+(bubblewrap by default). `wm open`
 spawns model-chosen argv and so shares that same `[tools.bash]` policy,
 widened only by a bind of `$XDG_RUNTIME_DIR` so a launched GUI
 application can reach the compositor, and left running once it survives
@@ -288,9 +291,10 @@ A walk through `assistd query "what files changed this week?"`:
 5. **Tool dispatch.** llama-server emits a `run` call with arguments
    `{"command":"git log --since='1 week ago' --name-only --pretty="}`.
    The agent emits `Event::ToolCall`, hands the args to `RunTool`,
-   which parses the command line and dispatches to `BashCommand`
-   (after the destructive-pattern check passes — `git log` is
-   read-only).
+   which parses the command line and dispatches to `BashCommand`.
+   `git` is not on the default allowlist, so the user confirms the
+   command first unless they have already "always allowed" `git`;
+   `git log` matches no destructive pattern.
 
 6. **Sandbox.** `BashCommand` invokes the configured sandbox
    (bubblewrap by default): a read-only root with writable `$HOME`
