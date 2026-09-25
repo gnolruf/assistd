@@ -1,5 +1,5 @@
 # assistd configuration. Copy to ~/.config/assistd/config.toml.
-# Every key is optional; commented keys show a default or an example. Unknown keys are an error.
+# Every key is optional; commented keys show a default or an example. Unknown keys are ignored with a warning.
 # Units, ranges and validation rules are documented on the assistd-config schema types.
 
 [model]
@@ -78,6 +78,7 @@ enabled = false
 # use_cuda = false
 # toggle_hotkey = ""  # toggles TTS
 # skip_hotkey = ""  # stops the current reply
+# output_device = "pipewire"  # as listed by `aplay -L`; unset uses the audio host default
 
 [compositor]
 type = "auto"  # auto | i3 | sway | hyprland
