@@ -16,6 +16,7 @@ use crate::exec::POLICY_DENIED_EXIT;
 pub struct WritePolicyCfg {
     first: PathBuf,
     rest: Vec<PathBuf>,
+    protected: Vec<PathBuf>,
 }
 
 impl WritePolicyCfg {
@@ -27,7 +28,16 @@ impl WritePolicyCfg {
         Some(Self {
             first,
             rest: prefixes.collect(),
+            protected: Vec::new(),
         })
+    }
+
+    /// Also refuse anything under the canonical `dirs`, even inside a
+    /// writable prefix: assistd's own configuration, which would
+    /// otherwise let a write widen what commands may do.
+    pub fn protecting(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.protected = dirs;
+        self
     }
 
     /// The permitted path prefixes, in configuration order.
@@ -39,7 +49,9 @@ impl WritePolicyCfg {
     /// outside the allowlist.
     fn resolve(&self, raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
         let resolved = resolve_for_allowlist(raw, home)?;
-        if self.prefixes().any(|prefix| resolved.starts_with(prefix)) {
+        if self.protected.iter().any(|dir| resolved.starts_with(dir)) {
+            Err(PathResolveError::Protected)
+        } else if self.prefixes().any(|prefix| resolved.starts_with(prefix)) {
             Ok(resolved)
         } else {
             Err(PathResolveError::NotAllowlisted)
@@ -157,6 +169,7 @@ enum PathResolveError {
     HomeNotSet,
     AnchorMissing(String),
     NotAllowlisted,
+    Protected,
 }
 
 impl PathResolveError {
@@ -181,6 +194,11 @@ impl PathResolveError {
                 format!("{raw_path}: path not in writable allowlist"),
                 Hint::Check,
                 "[tools.write] writable_paths in config",
+            ),
+            Self::Protected => (
+                format!("{raw_path}: assistd's own configuration is not writable"),
+                Hint::Try,
+                "asking the user to make this change themselves",
             ),
         };
         error_line("write", what, hint, recovery)

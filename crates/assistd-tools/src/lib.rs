@@ -19,13 +19,14 @@ pub use attachment::{LoadImageError, load_image_attachment};
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
 pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
 pub use memory_tools::{RecallTool, RememberTool, ReminisceTool};
-#[cfg(any(test, feature = "test-support"))]
-pub use policy::{AlwaysAllowGate, DenyAllGate};
 pub use policy::{
-    CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
-    IpcConfirmationGate, NoPendingConfirm, SandboxError, SandboxInfo, SandboxRequest,
+    APPROVALS_FILE, Allowlist, AllowlistError, Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT,
+    ConfirmRouter, ConfirmationGate, ConfirmationRequest, DestructivePattern, IpcConfirmationGate,
+    NoPendingConfirm, Protected, SandboxError, SandboxInfo, SandboxRequest, SearchPath,
     inherit_confirm_router, probe_sandbox,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use policy::{AlwaysAllowGate, DenyAllGate};
 pub use run::RunTool;
 pub use vision::VisionGate;
 

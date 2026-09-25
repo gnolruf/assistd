@@ -43,8 +43,8 @@ pub use state::{
 use assistd_embed::{EmbedJob, Embedder};
 use assistd_memory::SemanticStore;
 use assistd_tools::{
-    ConfirmationGate, MemoryOps, RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError,
-    SandboxRequest,
+    APPROVALS_FILE, Allowlist, AllowlistError, ConfirmationGate, DestructivePattern, MemoryOps,
+    Protected, RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxRequest,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
@@ -52,7 +52,7 @@ use assistd_tools::{
     },
     probe_sandbox,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -79,6 +79,12 @@ pub enum BuildToolsError {
     #[error(transparent)]
     Sandbox(#[from] SandboxError),
 
+    #[error("config file {} has no directory", path.display())]
+    ConfigDir { path: PathBuf },
+
+    #[error(transparent)]
+    Allowlist(#[from] AllowlistError),
+
     #[error(
         "tools.write.writable_paths contains no resolvable directories; \
          fix ~/.config/assistd/config.toml"
@@ -89,6 +95,9 @@ pub enum BuildToolsError {
 /// Subsystem handles [`build_tools`] wires into the tool registry.
 pub struct BuildToolsDeps<'a> {
     pub config: &'a Config,
+    /// The file `config` was loaded from. Its directory holds the
+    /// allowlist approvals and is protected from commands.
+    pub config_path: &'a Path,
     pub overflow_dir: PathBuf,
     pub confirmation_gate: Arc<dyn ConfirmationGate>,
     pub vision_gate: Arc<assistd_tools::VisionGate>,
@@ -111,6 +120,7 @@ pub struct BuildToolsDeps<'a> {
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildToolsError> {
     let BuildToolsDeps {
         config,
+        config_path,
         overflow_dir,
         confirmation_gate,
         vision_gate,
@@ -144,20 +154,50 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         BashSandboxMode::Bwrap => SandboxRequest::Bwrap,
         BashSandboxMode::None => SandboxRequest::None,
     };
-    let sandbox = probe_sandbox(sandbox_request, config.tools.bash.bwrap_extra_args.clone())?;
+    let config_dir = std::fs::canonicalize(config_path)
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .ok_or_else(|| BuildToolsError::ConfigDir {
+            path: config_path.to_path_buf(),
+        })?;
+    let protected_dirs = vec![config_dir.clone()];
+    let sandbox = probe_sandbox(
+        sandbox_request,
+        config.tools.bash.bwrap_extra_args.clone(),
+        Protected {
+            dirs: protected_dirs.clone(),
+            sockets: vec![assistd_ipc::socket_path()],
+        },
+    )?;
+    let allowlist = Allowlist::load(
+        config.tools.bash.allowed_programs.clone(),
+        sandbox.search_path(),
+        config_dir.join(APPROVALS_FILE),
+    )?;
 
-    let destructive_patterns: Vec<Vec<String>> = config
+    let destructive_patterns: Vec<DestructivePattern> = config
         .tools
         .bash
         .destructive_patterns
         .iter()
-        .filter_map(|p| shlex::split(p))
-        .filter(|toks| !toks.is_empty())
+        .filter_map(|raw| {
+            let pattern = shlex::split(raw).and_then(DestructivePattern::new);
+            if pattern.is_none() {
+                warn!(
+                    target: "assistd::policy",
+                    pattern = %raw,
+                    "tools.bash.destructive_patterns entry is not a command; dropping it"
+                );
+            }
+            pattern
+        })
         .collect();
     let bash_cfg = Arc::new(BashPolicyCfg {
         timeout: Duration::from_secs(config.tools.bash.timeout_secs.get()),
         denylist: config.tools.bash.denylist.clone(),
         destructive_patterns,
+        allowlist: Arc::new(allowlist),
+        protected: protected_dirs.clone(),
     });
 
     let mut writable_paths: Vec<PathBuf> = Vec::new();
@@ -175,8 +215,11 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
             }
         }
     }
-    let write_cfg =
-        Arc::new(WritePolicyCfg::new(writable_paths).ok_or(BuildToolsError::NoWritablePaths)?);
+    let write_cfg = Arc::new(
+        WritePolicyCfg::new(writable_paths)
+            .ok_or(BuildToolsError::NoWritablePaths)?
+            .protecting(protected_dirs),
+    );
 
     let screenshot_cfg = Arc::new(ScreenshotPolicyCfg {
         backend: match config.tools.screenshot.backend {

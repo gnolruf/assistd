@@ -1,15 +1,17 @@
 //! Integration tests for the bash command's policy and sandbox layers,
-//! in the order they fire: the denylist, the destructive-pattern gate,
-//! and the bwrap sandbox. Bwrap-dependent tests return early when
-//! `bwrap` is not on PATH.
+//! in the order they fire: the denylist, the confirmation gate (for
+//! destructive patterns and programs not on the allowlist), and the bwrap
+//! sandbox. Bwrap-dependent tests return early when `bwrap` is not on
+//! PATH.
 
 use std::sync::Arc;
 
 use assistd_tools::commands::{BashCommand, BashPolicyCfg};
 use assistd_tools::policy::{ResolvedSandboxMode, probe_sandbox};
 use assistd_tools::{
-    AlwaysAllowGate, Command, CommandInput, ConfirmationGate, ConfirmationRequest, DenyAllGate,
-    SandboxInfo, SandboxRequest,
+    Allowlist, AlwaysAllowGate, Approval, Command, CommandInput, ConfirmationGate,
+    ConfirmationRequest, DenyAllGate, DestructivePattern, Protected, SandboxInfo, SandboxRequest,
+    SearchPath,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -27,10 +29,37 @@ fn bash_with(
         denylist: denylist.into_iter().map(|s| s.to_string()).collect(),
         destructive_patterns: destructive
             .into_iter()
-            .map(|prefix| prefix.into_iter().map(|s| s.to_string()).collect())
+            .map(|pattern| DestructivePattern::new(pattern).expect("valid pattern"))
             .collect(),
+        ..BashPolicyCfg::default()
     };
     BashCommand::new(Arc::new(cfg), sandbox, gate)
+}
+
+/// Bash whose allowlist holds `allowed`, with approvals kept in `store`,
+/// resolving names on the system directories as a sandbox would: read
+/// only, so their owner does not matter to the test.
+fn bash_allowing(
+    allowed: &[&str],
+    store: &std::path::Path,
+    gate: Arc<dyn ConfirmationGate>,
+) -> BashCommand {
+    let allowlist = Allowlist::load(
+        allowed.iter().map(|s| s.to_string()),
+        SearchPath {
+            dirs: ["/usr/local/bin", "/usr/bin", "/bin"]
+                .map(Into::into)
+                .into(),
+            read_only: true,
+        },
+        store.to_path_buf(),
+    )
+    .expect("approvals load");
+    let cfg = BashPolicyCfg {
+        allowlist: Arc::new(allowlist),
+        ..BashPolicyCfg::default()
+    };
+    BashCommand::new(Arc::new(cfg), no_sandbox(), gate)
 }
 
 fn no_sandbox() -> Arc<SandboxInfo> {
@@ -45,7 +74,7 @@ fn input(script: &str) -> CommandInput {
 }
 
 fn bwrap_or_none() -> Option<Arc<SandboxInfo>> {
-    let info = probe_sandbox(SandboxRequest::Bwrap, Vec::new()).ok()?;
+    let info = probe_sandbox(SandboxRequest::Bwrap, Vec::new(), Protected::default()).ok()?;
     matches!(info.mode, ResolvedSandboxMode::Bwrap { .. }).then_some(info)
 }
 
@@ -54,22 +83,31 @@ struct PanicGate;
 
 #[async_trait]
 impl ConfirmationGate for PanicGate {
-    async fn confirm(&self, req: ConfirmationRequest) -> bool {
+    async fn confirm(&self, req: ConfirmationRequest) -> Approval {
         panic!("gate must not be consulted for {:?}", req.script);
     }
 }
 
-/// Approves every request and records what it was asked.
-#[derive(Default)]
+/// Gives every request the same answer and records what it was asked.
 struct RecordingGate {
+    answer: Approval,
     asked: Mutex<Vec<ConfirmationRequest>>,
+}
+
+impl RecordingGate {
+    fn answering(answer: Approval) -> Arc<Self> {
+        Arc::new(Self {
+            answer,
+            asked: Mutex::default(),
+        })
+    }
 }
 
 #[async_trait]
 impl ConfirmationGate for RecordingGate {
-    async fn confirm(&self, req: ConfirmationRequest) -> bool {
+    async fn confirm(&self, req: ConfirmationRequest) -> Approval {
         self.asked.lock().push(req);
-        true
+        self.answer
     }
 }
 
@@ -121,7 +159,7 @@ async fn destructive_pattern_is_blocked_when_gate_denies() {
 
 #[tokio::test]
 async fn destructive_pattern_asks_the_gate_and_runs_when_approved() {
-    let gate = Arc::new(RecordingGate::default());
+    let gate = RecordingGate::answering(Approval::Once);
     let cmd = bash_with(vec![], vec![vec!["true"]], gate.clone(), no_sandbox());
     let out = cmd.run(input("true && echo ran")).await;
     assert_eq!(out.exit_code, 0);
@@ -148,13 +186,11 @@ async fn quoted_literal_does_not_trigger_destructive_pattern() {
     assert_eq!(out.stdout, b"rm -rf /\n");
 }
 
-/// The destructive matcher is syntactic, so a separator glued to a word
-/// (`hi;rm`) or a command substitution (`$(echo rm)`) hides the command
-/// from it. The denylist and the sandbox are the real defense. Pinned so
-/// a tightening of the matcher is a deliberate change.
+/// A command whose name is only known at run time cannot be checked, so
+/// the gate is asked rather than the script run unseen.
 #[tokio::test]
-async fn syntactic_evasions_slip_past_the_destructive_gate() {
-    for template in ["echo hi;rm -rf {}", "$(echo rm) -rf {}"] {
+async fn run_time_command_names_ask_the_gate() {
+    for template in ["$(echo rm) -rf {}", "r=rm; $r -rf {}"] {
         let scratch = tempfile::tempdir().unwrap();
         let target = scratch.path().join("file");
         std::fs::write(&target, b"x").unwrap();
@@ -163,18 +199,104 @@ async fn syntactic_evasions_slip_past_the_destructive_gate() {
         let cmd = bash_with(
             vec![],
             vec![vec!["rm", "-rf"]],
-            Arc::new(PanicGate),
+            Arc::new(DenyAllGate),
             no_sandbox(),
         );
         let out = cmd.run(input(&script)).await;
-        assert_eq!(
-            out.exit_code,
-            0,
-            "{script}: stderr={}",
-            String::from_utf8_lossy(&out.stderr)
+        assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Could not rule out a destructive command"),
+            "{script}: {stderr}"
         );
-        assert!(!target.exists(), "{script}: the script should have run");
+        assert!(target.exists(), "{script}: the script must not have run");
     }
+}
+
+/// A script file can change before it runs, so running one always asks,
+/// and the prompt cannot be settled for good.
+#[tokio::test]
+async fn running_a_script_file_asks_the_gate() {
+    let scratch = tempfile::tempdir().unwrap();
+    let target = scratch.path().join("file");
+    std::fs::write(&target, b"x").unwrap();
+    let script = format!(
+        "printf 'rm -rf %s\\n' {target} > {dir}/s.sh && bash {dir}/s.sh",
+        target = target.display(),
+        dir = scratch.path().display(),
+    );
+
+    let gate = RecordingGate::answering(Approval::Deny);
+    let cmd = bash_with(vec![], vec![], gate.clone(), no_sandbox());
+    let out = cmd.run(input(&script)).await;
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
+    assert!(target.exists(), "{script}: the script must not have run");
+    let asked = gate.asked.lock();
+    let [req] = asked.as_slice() else {
+        panic!("expected exactly one confirmation, got {asked:?}");
+    };
+    assert!(req.always_allow.is_empty(), "{req:?}");
+}
+
+#[tokio::test]
+async fn allowed_programs_run_without_asking() {
+    let scratch = tempfile::tempdir().unwrap();
+    let cmd = bash_allowing(
+        &["tr"],
+        &scratch.path().join("approvals.toml"),
+        Arc::new(PanicGate),
+    );
+    let out = cmd
+        .run(CommandInput {
+            args: vec!["tr a-z A-Z".into()],
+            stdin: Some(b"hi".to_vec()),
+        })
+        .await;
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout, b"HI");
+}
+
+/// "Always allow" adds exactly the programs the prompt offered, keeps
+/// them in the approvals file, and later commands run them unasked.
+#[tokio::test]
+async fn always_allow_adds_the_offered_programs_for_good() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = scratch.path().join("approvals.toml");
+    let marker = scratch.path().join("made");
+    let script = format!("touch {}", marker.display());
+
+    let gate = RecordingGate::answering(Approval::Always);
+    let out = bash_allowing(&[], &store, gate.clone())
+        .run(input(&script))
+        .await;
+    assert_eq!(
+        out.exit_code,
+        0,
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(marker.exists());
+    {
+        let asked = gate.asked.lock();
+        let [req] = asked.as_slice() else {
+            panic!("expected exactly one confirmation, got {asked:?}");
+        };
+        assert_eq!(req.always_allow, ["touch"]);
+    }
+    let saved = std::fs::read_to_string(&store).expect("approvals saved");
+    assert!(saved.contains("name = \"touch\""), "{saved}");
+
+    std::fs::remove_file(&marker).unwrap();
+    let out = bash_allowing(&[], &store, Arc::new(PanicGate))
+        .run(input(&script))
+        .await;
+    assert_eq!(
+        out.exit_code,
+        0,
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(marker.exists());
 }
 
 #[tokio::test]
@@ -242,6 +364,7 @@ fn probe_sandbox_auto_with_bwrap_present_resolves_to_bwrap() {
     if bwrap_or_none().is_none() {
         return;
     }
-    let info = probe_sandbox(SandboxRequest::Auto, Vec::new()).expect("auto probe");
+    let info =
+        probe_sandbox(SandboxRequest::Auto, Vec::new(), Protected::default()).expect("auto probe");
     assert!(matches!(info.mode, ResolvedSandboxMode::Bwrap { .. }));
 }

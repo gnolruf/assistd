@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::commands::RecordingGate;
+use crate::commands::test_patterns as patterns;
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
 use assistd_wm::{
@@ -332,7 +333,7 @@ fn policed_wm(cfg: BashPolicyCfg, gate: Arc<dyn ConfirmationGate>) -> WmCommand 
 fn rm_rf_is_destructive(gate: Arc<dyn ConfirmationGate>) -> WmCommand {
     policed_wm(
         BashPolicyCfg {
-            destructive_patterns: vec![vec!["rm".into(), "-rf".into()]],
+            destructive_patterns: patterns(&["rm -rf"]),
             ..Default::default()
         },
         gate,
@@ -389,8 +390,8 @@ async fn open_destructive_argv_consults_gate() {
     );
 }
 
-/// A script passed as one argument still has to reach the gate; it
-/// only matches once each argument is checked on its own.
+/// A script handed to `bash -c` as one argument still has to reach the
+/// gate.
 #[tokio::test]
 async fn open_destructive_inside_bash_c_argument_consults_gate() {
     let gate = RecordingGate::new(false);
@@ -415,7 +416,7 @@ async fn open_gate_approval_lets_the_process_run() {
     let gate = RecordingGate::new(true);
     let cmd = policed_wm(
         BashPolicyCfg {
-            destructive_patterns: vec![vec!["true".into()]],
+            destructive_patterns: patterns(&["true"]),
             ..Default::default()
         },
         gate.clone(),
@@ -488,7 +489,7 @@ async fn non_open_subcommands_skip_the_policy() {
     let cmd = policed_wm(
         BashPolicyCfg {
             denylist: vec!["focus".into()],
-            destructive_patterns: vec![vec!["focus".into()]],
+            destructive_patterns: patterns(&["focus"]),
             ..Default::default()
         },
         gate.clone(),

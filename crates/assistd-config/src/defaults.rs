@@ -166,19 +166,109 @@ pub fn default_bash_denylist() -> Vec<String> {
     ]
 }
 
-/// Command prefixes that require confirmation.
-pub fn default_bash_destructive_patterns() -> Vec<String> {
-    vec![
-        "rm -rf".into(),
-        "rm -fr".into(),
-        "git push --force".into(),
-        "git push -f".into(),
-        "git reset --hard".into(),
-        "dd of=".into(),
-        "shutdown".into(),
-        "reboot".into(),
-        "kill -9 -1".into(),
+/// Programs that run without confirmation: tools that read and report
+/// and cannot run another program, plus wrappers whose command is
+/// checked in its own right.
+pub fn default_bash_allowed_programs() -> Vec<String> {
+    [
+        "[",
+        "b2sum",
+        "base64",
+        "basename",
+        "cat",
+        "cksum",
+        "cmp",
+        "column",
+        "comm",
+        "cut",
+        "date",
+        "df",
+        "diff",
+        "dirname",
+        "du",
+        "echo",
+        "egrep",
+        "env",
+        "expand",
+        "false",
+        "fgrep",
+        "file",
+        "find",
+        "fold",
+        "grep",
+        "head",
+        "hexdump",
+        "hostname",
+        "id",
+        "join",
+        "jq",
+        "ls",
+        "md5sum",
+        "nice",
+        "nl",
+        "nohup",
+        "od",
+        "paste",
+        "printenv",
+        "printf",
+        "pwd",
+        "readlink",
+        "realpath",
+        "rev",
+        "rg",
+        "seq",
+        "sha1sum",
+        "sha256sum",
+        "sha512sum",
+        "sleep",
+        "sort",
+        "stat",
+        "stdbuf",
+        "strings",
+        "tac",
+        "tail",
+        "test",
+        "timeout",
+        "tr",
+        "tree",
+        "true",
+        "uname",
+        "unexpand",
+        "uniq",
+        "wc",
+        "which",
+        "whoami",
+        "xargs",
+        "xxd",
     ]
+    .map(String::from)
+    .into()
+}
+
+/// Commands that require confirmation.
+pub fn default_bash_destructive_patterns() -> Vec<String> {
+    [
+        "rm -r|--recursive",
+        "find -delete",
+        "shred",
+        "wipefs",
+        "dd of=",
+        "git push -f|--force|--force-with-lease",
+        "git reset --hard",
+        "git clean -f|--force",
+        "shutdown",
+        "reboot",
+        "poweroff",
+        "halt",
+        "systemctl poweroff|reboot|halt|kexec",
+        "init 0|6",
+        "telinit 0|6",
+        "kill -1",
+        "sort --compress-program",
+        "rg --pre",
+    ]
+    .map(String::from)
+    .into()
 }
 
 /// Path prefixes the `write` command may create files under.

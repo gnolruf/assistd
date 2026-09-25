@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use crate::defaults::{
     DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
-    DEFAULT_TOOLS_OVERFLOW_DIR, default_bash_denylist, default_bash_destructive_patterns,
-    default_writable_paths,
+    DEFAULT_TOOLS_OVERFLOW_DIR, default_bash_allowed_programs, default_bash_denylist,
+    default_bash_destructive_patterns, default_writable_paths,
 };
 use serde::{Deserialize, Serialize};
 
@@ -67,9 +67,10 @@ pub enum BashSandboxMode {
     None,
 }
 
-/// Bash-command policy. The denylist and destructive patterns are
-/// syntactic backstops for the obvious cases; the sandbox is the real
-/// defence.
+/// Bash-command policy. A command runs without confirmation only when
+/// every program it can run is allowed and nothing in it matches a
+/// destructive pattern; the denylist refuses outright. The sandbox limits
+/// what a confirmed command can reach.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsBashConfig {
@@ -78,11 +79,25 @@ pub struct ToolsBashConfig {
     pub timeout_secs: NonZeroU64,
     /// Literal substrings that, if present in a bash script (case-insensitive),
     /// cause immediate rejection before spawn. Use for patterns that should
-    /// never be executed under any circumstances.
+    /// never be executed under any circumstances. An entry ending in
+    /// anything but a letter or digit must also end a shell word, so
+    /// `"rm -rf /"` rejects `rm -rf /` but not `rm -rf /tmp/build`.
     pub denylist: Vec<String>,
-    /// Shell-tokenized word prefixes that require confirmation before
-    /// executing, and are rejected when no one can confirm. Example:
-    /// `"rm -rf"` matches `rm -rf foo` but not `echo "rm -rf"`.
+    /// Programs that run without confirmation: bare names looked up on
+    /// the command's `PATH`, or absolute paths. Any other program asks
+    /// first, and the prompt can add it here for good; those approvals
+    /// are kept in `allowed_programs.toml` beside the config file. A bare
+    /// name only counts when it resolves to a file the user cannot
+    /// modify, or to the file it resolved to when approved.
+    pub allowed_programs: Vec<String>,
+    /// Commands that require confirmation before executing, and are
+    /// rejected when no one can confirm. Each is a command name followed
+    /// by arguments that must all be present, in any order; any word may
+    /// list `|`-separated alternatives. `-rf` matches short options in any
+    /// cluster, `--force` its abbreviations, and an argument ending in `=`
+    /// matches as a prefix. Example: `"rm -r|--recursive"` matches
+    /// `/bin/rm foo -vfr` and `sh -c 'rm --rec foo'` but not
+    /// `echo "rm -rf"`. Commands only known at run time also prompt.
     pub destructive_patterns: Vec<String>,
     /// Sandbox mode. See [`BashSandboxMode`].
     pub sandbox: BashSandboxMode,
@@ -98,6 +113,7 @@ impl Default for ToolsBashConfig {
         Self {
             timeout_secs: DEFAULT_BASH_TIMEOUT_SECS,
             denylist: default_bash_denylist(),
+            allowed_programs: default_bash_allowed_programs(),
             destructive_patterns: default_bash_destructive_patterns(),
             sandbox: BashSandboxMode::default(),
             bwrap_extra_args: Vec::new(),

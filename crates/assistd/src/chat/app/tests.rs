@@ -357,11 +357,18 @@ fn presence_event_updates_state() {
 }
 
 fn open_test_modal(app: &mut App) {
+    open_modal_offering(app, Vec::new());
+}
+
+fn open_modal_offering(app: &mut App, always_allow: Vec<String>) {
     app.open_confirmation_modal(
         "c1".into(),
-        "bash".into(),
-        "rm -rf /tmp/junk".into(),
-        "rm -rf".into(),
+        ConfirmationRequest {
+            tool: "bash".into(),
+            script: "rm -rf /tmp/junk".into(),
+            matched_pattern: "rm -rf".into(),
+            always_allow,
+        },
     );
 }
 
@@ -378,12 +385,20 @@ fn app_with_modal() -> (App, mpsc::Receiver<ChatEvent>, mpsc::Receiver<Request>)
 }
 
 async fn confirm_answer(writer_rx: &mut mpsc::Receiver<Request>) -> bool {
+    confirm_answer_in_full(writer_rx).await.0
+}
+
+/// The `(allow, always)` of the next answer on the writer.
+async fn confirm_answer_in_full(writer_rx: &mut mpsc::Receiver<Request>) -> (bool, bool) {
     match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
         Ok(Some(Request::ConfirmResponse {
-            confirm_id, allow, ..
+            confirm_id,
+            allow,
+            always,
+            ..
         })) => {
             assert_eq!(confirm_id, "c1");
-            allow
+            (allow, always)
         }
         other => panic!("expected a ConfirmResponse, got {other:?}"),
     }
@@ -396,6 +411,30 @@ async fn modal_approves_on_y_once_armed() {
     app.on_key(typed('y'));
     assert!(!app.has_modal());
     assert!(confirm_answer(&mut writer_rx).await);
+}
+
+#[tokio::test]
+async fn modal_always_allows_on_a_once_armed_when_offered() {
+    let (mut app, _rx, mut writer_rx) = app_with_modal();
+    app.modal = None;
+    open_modal_offering(&mut app, vec!["cargo".into()]);
+    app.on_key(typed('a'));
+    assert!(app.has_modal(), "keys still in flight must not approve");
+    app.arm_modal();
+    app.on_key(typed('a'));
+    assert!(!app.has_modal());
+    assert_eq!(confirm_answer_in_full(&mut writer_rx).await, (true, true));
+}
+
+#[tokio::test]
+async fn modal_ignores_a_when_nothing_is_offered() {
+    let (mut app, _rx, mut writer_rx) = app_with_modal();
+    app.arm_modal();
+    app.on_key(typed('a'));
+    assert!(app.has_modal());
+    assert!(writer_rx.try_recv().is_err());
+    app.on_key(typed('y'));
+    assert_eq!(confirm_answer_in_full(&mut writer_rx).await, (true, false));
 }
 
 #[tokio::test]
@@ -481,8 +520,10 @@ fn confirm_request_event_opens_modal() {
         tool: "bash".into(),
         script: "rm -rf /tmp/foo".into(),
         matched_pattern: "rm -rf".into(),
+        always_allow: vec!["foo".into()],
     }));
     let modal = app.modal.as_ref().expect("modal opened");
+    assert_eq!(modal.request.always_allow, ["foo"]);
     assert_eq!(modal.confirm_id, "c-xyz");
     assert_eq!(modal.request.script, "rm -rf /tmp/foo");
 }

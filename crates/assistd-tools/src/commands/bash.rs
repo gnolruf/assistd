@@ -11,8 +11,7 @@ use async_trait::async_trait;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::{SPAWN_FAILED_EXIT, supervise};
 use crate::policy::{
-    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy,
-    matches_destructive,
+    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy, check_script,
 };
 
 /// `bash SCRIPT`: spawn a real `bash -c <script>` subprocess, policy-gated.
@@ -77,10 +76,10 @@ impl Command for BashCommand {
             return CommandOutput::usage(self.help());
         }
         let script = input.args.join(" ");
-        let destructive = matches_destructive(&script, &self.policy.cfg.destructive_patterns);
+        let confirmation = check_script(&script, &self.policy.cfg.rules());
         if let Err(denied) = self
             .policy
-            .authorize("bash", "command", &script, destructive)
+            .authorize("bash", "command", &script, confirmation)
             .await
         {
             return denied;

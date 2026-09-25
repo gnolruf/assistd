@@ -319,6 +319,11 @@ hotkey = "Super+Escape"
 # 126. Use for patterns that should never be executed under any
 # circumstances. The matched pattern is echoed back in the error line
 # so the LLM sees exactly what triggered the rejection.
+# An entry ending in anything but a letter or digit must also end a
+# shell word (whitespace, an operator, a quote, or the end of the script
+# follows it), so `"rm -rf /"` blocks `rm -rf /` but not
+# `rm -rf /tmp/build`. An entry ending in a letter or digit also matches
+# longer words: `"mkfs"` blocks `mkfs.ext4`.
 # denylist = [
 #     "rm -rf /",
 #     "rm -rf /*",
@@ -330,22 +335,92 @@ hotkey = "Super+Escape"
 #     "> /dev/nvme",
 # ]
 
-# Destructive patterns: shell-tokenized word prefixes that trigger an
-# interactive Y/N confirmation prompt in the chat TUI (or are denied by
-# default over IPC, where no confirmation channel exists). More permissive
-# than the denylist: these are "dangerous but sometimes needed" operations.
-# Example: `rm -rf foo` matches `["rm", "-rf"]` and prompts; `echo "rm -rf"`
-# is a quoted literal and does NOT match.
+# Allowed programs: a command runs without confirmation only when every
+# program it can run is listed here and nothing in it matches a
+# destructive pattern below. That covers each command word, the command
+# behind a wrapper (`sudo X`, `xargs X`, `find -exec X`), and everything
+# inside `sh -c '…'`, `eval`, `$(…)` and here-documents fed to a shell.
+# Anything else asks first. Shell builtins that cannot run code (`cd`,
+# `echo`, `test`, …) are always allowed.
+#
+# Entries are bare names, looked up on the command's PATH, or absolute
+# paths. A bare name only counts when it resolves to a file you cannot
+# modify (such as /usr/bin/ls), so a copy planted earlier on PATH does
+# not inherit its trust. A script that changes PATH or LD_* variables
+# asks before running anything. Running a script file (`./x.sh`,
+# `bash x.sh`, `source x`) always asks, since the file can change.
+#
+# The prompt's "always allow" adds the programs it names for good. Those
+# approvals live in allowed_programs.toml beside this file, each pinned
+# to the file its name resolved to; if the name later resolves elsewhere
+# it asks again. Commands cannot modify this directory: `write` refuses
+# it and the sandbox mounts it read-only.
+#
+# The default holds tools that read and report and cannot run another
+# program, plus wrappers whose command is checked in its own right.
+# allowed_programs = [
+#     "[", "b2sum", "base64", "basename", "cat", "cksum", "cmp", "column", "comm", "cut",
+#     "date", "df", "diff", "dirname", "du", "echo", "egrep", "env", "expand", "false", "fgrep",
+#     "file", "find", "fold", "grep", "head", "hexdump", "hostname", "id", "join", "jq", "ls",
+#     "md5sum", "nice", "nl", "nohup", "od", "paste", "printenv", "printf", "pwd", "readlink",
+#     "realpath", "rev", "rg", "seq", "sha1sum", "sha256sum", "sha512sum", "sleep", "sort",
+#     "stat", "stdbuf", "strings", "tac", "tail", "test", "timeout", "tr", "tree", "true",
+#     "uname", "unexpand", "uniq", "wc", "which", "whoami", "xargs", "xxd",
+# ]
+
+# Destructive patterns: commands that trigger an interactive Y/N
+# confirmation prompt in the chat TUI (or are denied by default over IPC,
+# where no confirmation channel exists) even when every program they run
+# is allowed. More permissive than the denylist: these are "dangerous but
+# sometimes needed" operations, or options that make an allowed program
+# run another one (`sort --compress-program`, `rg --pre`).
+#
+# Each pattern is a command name followed by arguments that must all be
+# present, in any order. Any word may list alternatives separated by `|`.
+# The name also matches a path ending in it (`rm` matches `/bin/rm`). An
+# argument matches:
+#   -rf      short options, each of which may sit in any cluster
+#            (`-r -f`, `-vfr`, `-R`: case is ignored)
+#   --force  the long option, an abbreviation (`--forc`), or `--force=…`
+#   of=      any argument starting with it
+#   other    that exact argument
+# An argument whose value is only known at run time (`"$f"`) may stand in
+# for one required argument, and one that can split into several words
+# (`$opts`, `*`) for all of them, so `rm "$f"` prompts for `rm -r`.
+#
+# Commands are found anywhere bash would run them: after `;`, `&&`, `|`
+# or a newline, in `( … )`, `$( … )` and backquotes (also inside double
+# quotes and here-documents), after redirections and assignments, after
+# wrappers (`sudo`, `env`, `xargs`, `ssh`, `timeout`, `find -exec`, …),
+# and in scripts handed to a shell (`sh -c '…'`, `bash <<EOF`), `eval`,
+# `trap` or `alias`. String literals in interpreter code (`python -c`,
+# `perl -e`, `node -e`) are checked too. Quoted text anywhere else stays
+# one word, so `echo "rm -rf"` does NOT match.
+#
+# A command that cannot be checked also prompts: one whose name is only
+# known at run time (`$cmd`, `$(echo rm)`, `/bin/r?`), a shell reading its
+# script from stdin (`curl … | sh`), or a script ending inside a quote.
+# What a program does once running (a script file it executes, a library
+# call like Python's shutil.rmtree) is left to the sandbox.
 # destructive_patterns = [
-#     "rm -rf",
-#     "rm -fr",
-#     "git push --force",
-#     "git push -f",
-#     "git reset --hard",
+#     "rm -r|--recursive",
+#     "find -delete",
+#     "shred",
+#     "wipefs",
 #     "dd of=",
+#     "git push -f|--force|--force-with-lease",
+#     "git reset --hard",
+#     "git clean -f|--force",
 #     "shutdown",
 #     "reboot",
-#     "kill -9 -1",
+#     "poweroff",
+#     "halt",
+#     "systemctl poweroff|reboot|halt|kexec",
+#     "init 0|6",
+#     "telinit 0|6",
+#     "kill -1",
+#     "sort --compress-program",
+#     "rg --pre",
 # ]
 
 # Sandbox mode for bash subprocess execution. One of:

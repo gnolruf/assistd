@@ -232,6 +232,10 @@ pub enum Request {
         id: String,
         confirm_id: String,
         allow: bool,
+        /// With `allow`, also add the prompt's `always_allow` programs to
+        /// the allowlist for good. Ignored when the prompt offered none.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        always: bool,
     },
     /// Probe the daemon's runtime capabilities. Emits a single
     /// [`Event::Capabilities`] then `Done`.
@@ -627,18 +631,24 @@ pub enum Event {
         done: u32,
         total: u32,
     },
-    /// Mid-stream prompt to authorize a destructive tool action. The
-    /// turn is parked until a [`Request::ConfirmResponse`] with the same
-    /// `confirm_id` arrives on this connection. A client that has closed
-    /// its write side never receives the prompt; a dropped connection or
-    /// an unanswered prompt past the daemon's confirmation timeout
-    /// denies.
+    /// Mid-stream prompt to authorize a tool action: a destructive
+    /// command, programs not on the allowlist, or a command that cannot
+    /// be checked. The turn is parked until a [`Request::ConfirmResponse`]
+    /// with the same `confirm_id` arrives on this connection. A client
+    /// that has closed its write side never receives the prompt; a
+    /// dropped connection or an unanswered prompt past the daemon's
+    /// confirmation timeout denies.
     ConfirmRequest {
         id: String,
         confirm_id: String,
         tool: String,
         script: String,
+        /// Why the action needs confirmation, for display.
         matched_pattern: String,
+        /// Programs an "always allow" answer would add to the allowlist.
+        /// Empty when the prompt cannot be settled that way.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        always_allow: Vec<String>,
     },
     /// Response to [`Request::GetCapabilities`]. `vision` is true when
     /// the loaded model accepts images; `model_name` is the basename of

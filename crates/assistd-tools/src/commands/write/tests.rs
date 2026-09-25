@@ -240,3 +240,28 @@ async fn overwrites_and_truncates_existing_file() {
     assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
     assert_eq!(std::fs::read(&path).unwrap(), b"new");
 }
+
+#[tokio::test]
+async fn refuses_a_protected_directory_inside_a_writable_one() {
+    let dir = tempdir().unwrap();
+    let config = dir.path().join("assistd");
+    std::fs::create_dir(&config).unwrap();
+    let canonical = std::fs::canonicalize(&config).unwrap();
+    let cfg = WritePolicyCfg::new(vec![std::fs::canonicalize(dir.path()).unwrap()])
+        .expect("non-empty allowlist")
+        .protecting(vec![canonical]);
+    let target = config.join("config.toml");
+    let out = WriteCommand::new(Arc::new(cfg))
+        .run(CommandInput {
+            args: vec![target.to_string_lossy().into_owned(), "x".into()],
+            stdin: None,
+        })
+        .await;
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("assistd's own configuration"),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!target.exists());
+}

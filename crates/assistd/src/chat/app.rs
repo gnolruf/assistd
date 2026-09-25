@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use assistd_core::{PresenceState, SleepConfig};
 use assistd_ipc::{Event, IpcClient, Request, Role, StatusKind, StatusSeverity, VoiceCaptureState};
-use assistd_tools::{Attachment, ConfirmationRequest, load_image_attachment};
+use assistd_tools::{Approval, Attachment, ConfirmationRequest, load_image_attachment};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -132,7 +132,7 @@ impl std::fmt::Debug for ChatEvent {
 /// user has not yet seen.
 const CONFIRM_ARM_DELAY: Duration = Duration::from_millis(750);
 
-/// Destructive-command prompt shown as an overlay while the daemon's
+/// Command-confirmation prompt shown as an overlay while the daemon's
 /// agent loop blocks on the answer.
 pub struct ConfirmationModal {
     pub request: ConfirmationRequest,
@@ -304,37 +304,27 @@ impl App {
         }
     }
 
-    /// Show a destructive-command prompt. A second prompt arriving while
+    /// Show a command-confirmation prompt. A second prompt arriving while
     /// one is open is denied immediately.
-    pub fn open_confirmation_modal(
-        &mut self,
-        confirm_id: String,
-        tool: String,
-        script: String,
-        matched_pattern: String,
-    ) {
+    pub fn open_confirmation_modal(&mut self, confirm_id: String, request: ConfirmationRequest) {
         if self.modal.is_some() {
-            self.send_confirm_response(&confirm_id, false);
+            self.send_confirm_response(&confirm_id, Approval::Deny);
             return;
         }
         self.modal = Some(ConfirmationModal {
-            request: ConfirmationRequest {
-                tool,
-                script,
-                matched_pattern,
-            },
+            request,
             confirm_id,
             opened_at: Instant::now(),
         });
     }
 
-    fn resolve_modal(&mut self, decision: bool) {
+    fn resolve_modal(&mut self, approval: Approval) {
         if let Some(modal) = self.modal.take() {
-            self.send_confirm_response(&modal.confirm_id, decision);
+            self.send_confirm_response(&modal.confirm_id, approval);
         }
     }
 
-    fn send_confirm_response(&mut self, confirm_id: &str, allow: bool) {
+    fn send_confirm_response(&mut self, confirm_id: &str, approval: Approval) {
         let Some(writer) = self
             .active_reply
             .as_ref()
@@ -349,7 +339,8 @@ impl App {
         let req = Request::ConfirmResponse {
             id: Uuid::new_v4().to_string(),
             confirm_id: confirm_id.to_string(),
-            allow,
+            allow: approval != Approval::Deny,
+            always: approval == Approval::Always,
         };
         self.tasks.spawn(async move {
             if let Err(e) = writer.send(req).await {
@@ -517,7 +508,7 @@ impl App {
                 self.submit_typed(text);
             }
             InputAction::Quit => {
-                self.resolve_modal(false);
+                self.resolve_modal(Approval::Deny);
                 self.quitting = true;
             }
         }
@@ -547,12 +538,19 @@ impl App {
 
     fn handle_modal_key(&mut self, ev: KeyEvent) {
         let armed = self.modal.as_ref().is_some_and(ConfirmationModal::armed);
+        let offers_always = self
+            .modal
+            .as_ref()
+            .is_some_and(|m| !m.request.always_allow.is_empty());
         match ev.code {
             KeyCode::Char('y') | KeyCode::Char('Y') if armed => {
-                self.resolve_modal(true);
+                self.resolve_modal(Approval::Once);
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') if armed && offers_always => {
+                self.resolve_modal(Approval::Always);
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                self.resolve_modal(false);
+                self.resolve_modal(Approval::Deny);
             }
             _ => {}
         }
@@ -726,9 +724,18 @@ impl App {
                 tool,
                 script,
                 matched_pattern,
+                always_allow,
                 ..
             } => {
-                self.open_confirmation_modal(confirm_id, tool, script, matched_pattern);
+                self.open_confirmation_modal(
+                    confirm_id,
+                    ConfirmationRequest {
+                        tool,
+                        script,
+                        matched_pattern,
+                        always_allow,
+                    },
+                );
             }
             Event::Presence { state, .. } => {
                 self.presence_state = Some(state);
