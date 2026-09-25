@@ -12,7 +12,7 @@ use crate::defaults::{
 /// System prompt, history window and sampling. Sampler fields left `None`
 /// are omitted from requests, so llama-server applies its own default.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ChatConfig {
     /// First message of every request; empty disables it. Need not list
     /// tools: requests carry their schemas.

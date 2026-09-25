@@ -11,7 +11,7 @@ use crate::defaults::{
 
 /// Chat llama-server process settings. `None` omits the matching flag.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LlamaServerConfig {
     /// Binary path, or a name on `$PATH`. Must not be empty.
     pub binary_path: PathBuf,

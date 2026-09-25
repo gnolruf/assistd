@@ -112,14 +112,14 @@ impl Drop for TerminalGuard {
 pub async fn run(args: ChatArgs) -> Result<()> {
     let _stderr_redirect = redirect_stderr_to_log()?;
 
+    let _log_guard = init_file_tracing()?;
+
     let config_path = match args.config.clone() {
         Some(p) => p,
         None => Config::default_path()?,
     };
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
-
-    let _log_guard = init_file_tracing()?;
 
     info!("assistd chat v{}", assistd_core::version());
     info!("loaded config from {}", config_path.display());

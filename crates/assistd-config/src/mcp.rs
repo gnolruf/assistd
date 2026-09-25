@@ -11,7 +11,7 @@ use crate::defaults::{DEFAULT_MCP_ENABLED, DEFAULT_MCP_REQUEST_TIMEOUT_SECS};
 
 /// Model Context Protocol client settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct McpConfig {
     /// When `false`, no server in `servers` is connected.
     pub enabled: bool,
@@ -28,9 +28,9 @@ impl Default for McpConfig {
 }
 
 /// One `[[mcp.servers]]` entry, discriminated by `transport`. A key of the
-/// other transport (`url` on stdio, `env` on SSE) is a parse error.
+/// other transport (`url` on stdio, `env` on SSE) is ignored like any unknown key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "transport", rename_all = "lowercase", deny_unknown_fields)]
+#[serde(tag = "transport", rename_all = "lowercase")]
 pub enum McpServerConfig {
     /// Newline-delimited JSON-RPC over a child process's stdin/stdout.
     Stdio {

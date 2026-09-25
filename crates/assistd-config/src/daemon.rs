@@ -4,7 +4,7 @@ use crate::defaults::DEFAULT_DAEMON_SHUTDOWN_GRACE_SECS;
 
 /// Daemon process lifecycle settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct DaemonConfig {
     /// Seconds in-flight IPC requests get to finish on shutdown. `0` aborts
     /// them immediately.

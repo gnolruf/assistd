@@ -110,6 +110,12 @@ fn sample_as_shipped_is_a_valid_config() {
     let cfg: Config = toml::from_str(SAMPLE).expect("config.sample.toml must parse as a Config");
     cfg.validate()
         .expect("config.sample.toml must be a valid configuration");
+    let raw: toml::Table = toml::from_str(SAMPLE).expect("config.sample.toml must be valid TOML");
+    let unknown = cfg.unknown_keys(&raw).expect("config must serialize");
+    assert!(
+        unknown.is_empty(),
+        "config.sample.toml sets unknown keys: {unknown:?}"
+    );
 }
 
 #[test]
@@ -125,8 +131,8 @@ fn every_key_with_a_default_is_documented() {
     );
 }
 
-/// Replays each documented assignment alone; only an "unknown field" error
-/// marks it stale, since a mismatched example value is a type error.
+/// Replays each documented assignment alone; a snippet that fails to parse
+/// has a mismatched example value, which is a different problem.
 #[test]
 fn sample_documents_no_key_the_schema_has_dropped() {
     let mut stale = Vec::new();
@@ -136,10 +142,15 @@ fn sample_documents_no_key_the_schema_has_dropped() {
         } else {
             format!("[{}]\n{} = {}\n", doc.section, doc.key, doc.value)
         };
-        let Err(error) = toml::from_str::<Config>(&snippet) else {
+        let Ok(cfg) = toml::from_str::<Config>(&snippet) else {
             continue;
         };
-        if error.to_string().contains("unknown field") {
+        let raw: toml::Table = toml::from_str(&snippet).expect("snippet parsed as a Config");
+        if !cfg
+            .unknown_keys(&raw)
+            .expect("config must serialize")
+            .is_empty()
+        {
             stale.push(doc.path());
         }
     }

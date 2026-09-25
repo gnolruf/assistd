@@ -6,7 +6,7 @@ use crate::defaults::{DEFAULT_MODEL_CONTEXT_LENGTH, DEFAULT_MODEL_NAME};
 
 /// Local model settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ModelConfig {
     /// HuggingFace model llama-server loads, as `owner/repo:quant`. Must
     /// not be empty.

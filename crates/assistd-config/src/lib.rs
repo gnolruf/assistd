@@ -1,5 +1,6 @@
 //! assistd configuration schema. An omitted key takes its value from
-//! [`defaults`]; an unknown key, or `0` in a `NonZero*` field, is a parse error.
+//! [`defaults`]; an unknown key is ignored with a warning, and `0` in a
+//! `NonZero*` field is a parse error.
 
 pub mod chat;
 pub mod compositor;
