@@ -225,8 +225,8 @@ const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
     Launch an application. <app> is resolved through PATH; remaining \
     arguments are forwarded to the spawned process.\n\
     \n\
-    Runs under the same policy as `bash`: denylist, destructive-pattern \
-    confirmation, and the bubblewrap sandbox (widened only to reach the \
+    Runs under the same policy as `bash`: denylist, allowlist and \
+    destructive-pattern confirmation, and the bubblewrap sandbox (widened only to reach the \
     compositor and D-Bus session sockets).\n\
     \n\
     The application is briefly watched, then left running. If it exits \

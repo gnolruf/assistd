@@ -281,10 +281,10 @@ hotkey = "Super+Escape"
 # ---------------------------------------------------------------------------
 # Tool execution safety
 # ---------------------------------------------------------------------------
-# Honest note: the bash policy (denylist, destructive_patterns) is a
-# backstop for *obvious* dangerous invocations. A sufficiently clever LLM
-# can defeat any syntactic check (variable expansion, command
-# substitution, here-docs). The bubblewrap sandbox is the real
+# The bash policy (allowed_programs, destructive_patterns,
+# denylist) decides which commands run without asking, but it only sees
+# the command line. What an allowed or approved program does once
+# running is out of its reach. The bubblewrap sandbox is the real
 # defense-in-depth; install bubblewrap (package: bubblewrap) and keep
 # tools.bash.sandbox = "auto" to benefit from it.
 
@@ -304,8 +304,8 @@ hotkey = "Super+Escape"
 [tools.bash]
 # This section governs every command that spawns a real subprocess:
 # `bash` itself and `wm open`, which launches argv the model chose. Both
-# run through the same denylist, destructive-pattern confirmation, and
-# sandbox; there is no separate policy for `wm open` to drift out of step
+# run through the same denylist, allowlist and destructive-pattern
+# confirmation, and sandbox; there is no separate policy for `wm open` to drift out of step
 # with. The timeout below is the one setting that does not apply to it:
 # a launched application is meant to outlive the tool call.
 
@@ -371,9 +371,12 @@ hotkey = "Super+Escape"
 # Destructive patterns: commands that trigger an interactive Y/N
 # confirmation prompt in the chat TUI (or are denied by default over IPC,
 # where no confirmation channel exists) even when every program they run
-# is allowed. More permissive than the denylist: these are "dangerous but
-# sometimes needed" operations, or options that make an allowed program
-# run another one (`sort --compress-program`, `rg --pre`).
+# is allowed. The allowlist judges programs; these judge what an allowed
+# program is asked to do: options that make it delete files or run
+# another program (`find -delete`, `sort --compress-program`, `rg --pre`),
+# and dangerous uses of programs you may "always allow" (`rm -r`,
+# `git push --force`). A pattern prompt never offers "always allow".
+# A program with no safe use needs no pattern; leave it off the allowlist.
 #
 # Each pattern is a command name followed by arguments that must all be
 # present, in any order. Any word may list alternatives separated by `|`.
@@ -405,19 +408,11 @@ hotkey = "Super+Escape"
 # destructive_patterns = [
 #     "rm -r|--recursive",
 #     "find -delete",
-#     "shred",
-#     "wipefs",
 #     "dd of=",
 #     "git push -f|--force|--force-with-lease",
 #     "git reset --hard",
 #     "git clean -f|--force",
-#     "shutdown",
-#     "reboot",
-#     "poweroff",
-#     "halt",
 #     "systemctl poweroff|reboot|halt|kexec",
-#     "init 0|6",
-#     "telinit 0|6",
 #     "kill -1",
 #     "sort --compress-program",
 #     "rg --pre",

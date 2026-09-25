@@ -291,9 +291,10 @@ A walk through `assistd query "what files changed this week?"`:
 5. **Tool dispatch.** llama-server emits a `run` call with arguments
    `{"command":"git log --since='1 week ago' --name-only --pretty="}`.
    The agent emits `Event::ToolCall`, hands the args to `RunTool`,
-   which parses the command line and dispatches to `BashCommand`
-   (after the destructive-pattern check passes — `git log` is
-   read-only).
+   which parses the command line and dispatches to `BashCommand`.
+   `git` is not on the default allowlist, so the user confirms the
+   command first unless they have already "always allowed" `git`;
+   `git log` matches no destructive pattern.
 
 6. **Sandbox.** `BashCommand` invokes the configured sandbox
    (bubblewrap by default): a read-only root with writable `$HOME`

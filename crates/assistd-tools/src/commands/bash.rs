@@ -1,8 +1,9 @@
 //! `bash SCRIPT`: spawn a real `bash -c <script>` subprocess behind the
-//! denylist, destructive-pattern confirmation, sandbox, and timeout
-//! policy. Denylist hits exit 126 without prompting; destructive hits
-//! prompt through the gate and exit 126 when refused; a timeout kills
-//! the process group and exits 137.
+//! denylist, allowlist and destructive-pattern confirmation, sandbox, and
+//! timeout policy. Denylist hits exit 126 without prompting; scripts that
+//! run unlisted programs or match a destructive pattern prompt through the
+//! gate and exit 126 when refused; a timeout kills the process group and
+//! exits 137.
 
 use std::sync::Arc;
 
@@ -21,7 +22,7 @@ pub struct BashCommand {
 
 impl BashCommand {
     /// A `bash` command that runs scripts under `cfg`, inside `sandbox`,
-    /// asking `gate` before any destructive match.
+    /// asking `gate` before any script the policy does not let through.
     pub fn new(
         cfg: Arc<BashPolicyCfg>,
         sandbox: Arc<SandboxInfo>,

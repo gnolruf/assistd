@@ -245,24 +245,19 @@ pub fn default_bash_allowed_programs() -> Vec<String> {
     .into()
 }
 
-/// Commands that require confirmation.
+/// Commands that require confirmation even when their program is allowed:
+/// options that make a default-allowed program delete files or run
+/// another program, and dangerous uses of programs likely to be approved
+/// for good. A program with no safe use needs no entry; it is not allowed.
 pub fn default_bash_destructive_patterns() -> Vec<String> {
     [
         "rm -r|--recursive",
         "find -delete",
-        "shred",
-        "wipefs",
         "dd of=",
         "git push -f|--force|--force-with-lease",
         "git reset --hard",
         "git clean -f|--force",
-        "shutdown",
-        "reboot",
-        "poweroff",
-        "halt",
         "systemctl poweroff|reboot|halt|kexec",
-        "init 0|6",
-        "telinit 0|6",
         "kill -1",
         "sort --compress-program",
         "rg --pre",
