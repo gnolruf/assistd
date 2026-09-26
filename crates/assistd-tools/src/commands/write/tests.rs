@@ -202,29 +202,119 @@ async fn dangling_symlink_directory_escaping_allowlist_is_rejected() {
 }
 
 #[tokio::test]
-async fn symlink_to_allowlisted_file_writes_through() {
+async fn symlink_final_component_is_refused() {
     let dir = tempdir().unwrap();
     let real = dir.path().join("real.txt");
     std::fs::write(&real, b"old").unwrap();
     let link = dir.path().join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
 
-    let out = write_under(dir.path(), &[&link.to_string_lossy(), "new"], None).await;
-    assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
-    assert_eq!(std::fs::read(&real).unwrap(), b"new");
+    let link_str = link.to_string_lossy().into_owned();
+    let out = write_under(dir.path(), &[&link_str, "new"], None).await;
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!("[error] write: {link_str}: is a symlink. Try: writing to the file it points at\n")
+    );
+    assert_eq!(std::fs::read(&real).unwrap(), b"old");
 }
 
 #[tokio::test]
-async fn write_no_follow_refuses_final_symlink() {
+async fn symlinked_ancestor_inside_the_allowlist_writes_to_its_target() {
     let dir = tempdir().unwrap();
-    let target = dir.path().join("target.txt");
-    let link = dir.path().join("link");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let real_dir = dir.path().join("real");
+    std::fs::create_dir(&real_dir).unwrap();
+    let dir_link = dir.path().join("dir-link");
+    std::os::unix::fs::symlink(&real_dir, &dir_link).unwrap();
 
-    write_no_follow(&link, b"oops")
-        .await
-        .expect_err("symlink at final component must not be followed");
-    assert!(!target.exists());
+    let target = dir_link.join("out.txt");
+    let out = write_under(dir.path(), &[&target.to_string_lossy(), "hi"], None).await;
+    assert_eq!(
+        out.exit_code,
+        0,
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(real_dir.join("out.txt")).unwrap(), b"hi");
+}
+
+#[test]
+fn open_refuses_any_symlink_in_the_path() {
+    let dir = tempdir().unwrap();
+    let real_dir = dir.path().join("real");
+    std::fs::create_dir(&real_dir).unwrap();
+    let dir_link = dir.path().join("dir-link");
+    std::os::unix::fs::symlink(&real_dir, &dir_link).unwrap();
+    let file_link = dir.path().join("file-link");
+    std::os::unix::fs::symlink(real_dir.join("target.txt"), &file_link).unwrap();
+
+    for path in [dir_link.join("target.txt"), file_link] {
+        open_without_symlinks(&path).expect_err("symlinks must not be followed");
+    }
+    assert!(!real_dir.join("target.txt").exists());
+}
+
+#[tokio::test]
+async fn hidden_entries_directly_inside_a_prefix_are_refused() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".ssh")).unwrap();
+    for target in [
+        dir.path().join(".bashrc"),
+        dir.path().join(".ssh").join("authorized_keys"),
+        dir.path()
+            .join(".config")
+            .join("autostart")
+            .join("x.desktop"),
+    ] {
+        let target_str = target.to_string_lossy().into_owned();
+        let out = write_under(dir.path(), &[&target_str, "oops"], None).await;
+        assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{target_str}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                "[error] write: {target_str}: hidden files and directories are not writable. \
+                 Try: asking the user to make this change themselves\n"
+            )
+        );
+        assert!(!target.exists());
+    }
+}
+
+#[tokio::test]
+async fn hidden_entries_deeper_than_a_prefix_are_writable() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let target = repo.join(".gitignore");
+    let out = write_under(dir.path(), &[&target.to_string_lossy(), "target"], None).await;
+    assert_eq!(
+        out.exit_code,
+        0,
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"target");
+}
+
+#[tokio::test]
+async fn hidden_directory_listed_as_a_prefix_is_writable() {
+    let dir = tempdir().unwrap();
+    let hidden = dir.path().join(".notes");
+    std::fs::create_dir(&hidden).unwrap();
+    let target = hidden.join("todo.txt");
+    let out = WriteCommand::new(cfg_from(&[dir.path(), hidden.as_path()]))
+        .run(CommandInput {
+            args: vec![target.to_string_lossy().into_owned(), "hi".into()],
+            stdin: None,
+        })
+        .await;
+    assert_eq!(
+        out.exit_code,
+        0,
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"hi");
 }
 
 #[tokio::test]

@@ -297,9 +297,10 @@ A walk through `assistd query "what files changed this week?"`:
    `git log` matches no destructive pattern.
 
 6. **Sandbox.** `BashCommand` invokes the configured sandbox
-   (bubblewrap by default): a read-only root with writable `$HOME`
-   and `/tmp`, fresh `/dev` and `/proc`, a tmpfs `/run`, and
-   unshared pid/ipc/uts namespaces. The sandboxed `git` runs, returns
+   (bubblewrap by default): a read-only root with writable `/tmp`
+   and writable entries of `$HOME` other than dotfiles and symlinks,
+   fresh `/dev` and `/proc`, a tmpfs `/run`, and unshared
+   pid/ipc/uts namespaces. The sandboxed `git` runs, returns
    stdout. If stdout exceeds the `[tools.output]` line or byte cap,
    `RunTool::invoke` cuts it to that head and spills the full text to
    `tools.output.overflow_dir` (default `/tmp/assistd-output`,

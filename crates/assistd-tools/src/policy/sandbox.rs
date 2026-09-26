@@ -193,14 +193,15 @@ fn protection_flags(protected: &Protected, writable: &[PathBuf]) -> Vec<PathBuf>
     dirs.chain(sockets).collect()
 }
 
-/// Read-only root, writable `/tmp` and (when bindable) `$HOME`, fresh
-/// `/dev`, `/proc` and `/run`, isolated pid/ipc/uts namespaces. The network
-/// is shared; isolating it is opt-in via `bwrap_extra_args`.
+/// Read-only root, writable `/tmp` and (when bindable) the visible entries
+/// of `$HOME`, fresh `/dev`, `/proc` and `/run`, isolated pid/ipc/uts
+/// namespaces. The network is shared; isolating it is opt-in via
+/// `bwrap_extra_args`.
 fn default_bwrap_flags_for(home: Option<String>) -> Vec<String> {
     let mut flags: Vec<String> = vec!["--ro-bind".into(), "/".into(), "/".into()];
     let home = home.filter(|h| is_bindable_home(h));
     match &home {
-        Some(home) => flags.extend(["--bind".into(), home.clone(), home.clone()]),
+        Some(home) => flags.extend(home_bind_flags(home)),
         None => warn!(
             target: "assistd::policy",
             "HOME is unset or not a non-root absolute directory; sandboxed commands \
@@ -228,6 +229,28 @@ fn default_bwrap_flags_for(home: Option<String>) -> Vec<String> {
     }
     flags.extend(["--setenv".into(), "PATH".into(), SANDBOX_PATH.into()]);
     flags
+}
+
+fn home_bind_flags(home: &str) -> Vec<String> {
+    let mut flags: Vec<String> = vec!["--ro-bind".into(), home.into(), home.into()];
+    for entry in writable_home_entries(Path::new(home)) {
+        flags.extend(["--bind".into(), entry.clone(), entry]);
+    }
+    flags
+}
+
+fn writable_home_entries(home: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(home) else {
+        return Vec::new();
+    };
+    let mut writable: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| !entry.file_name().as_encoded_bytes().starts_with(b"."))
+        .filter(|entry| entry.file_type().is_ok_and(|kind| !kind.is_symlink()))
+        .filter_map(|entry| entry.path().into_os_string().into_string().ok())
+        .collect();
+    writable.sort();
+    writable
 }
 
 fn is_bindable_home(home: &str) -> bool {
@@ -465,11 +488,27 @@ mod tests {
     }
 
     #[test]
-    fn home_is_bound_writable_when_usable() {
-        let dir = std::env::temp_dir();
-        let dir_str = dir.to_string_lossy().into_owned();
+    fn home_is_read_only_with_visible_entries_writable() {
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(home.path().join(".config")).expect(".config");
+        std::fs::write(home.path().join(".bashrc"), b"").expect(".bashrc");
+        std::fs::create_dir(home.path().join("docs")).expect("docs");
+        std::fs::write(home.path().join("notes.txt"), b"").expect("notes.txt");
+        std::os::unix::fs::symlink(home.path().join(".config"), home.path().join("config"))
+            .expect("symlink");
+        let dir_str = home.path().to_string_lossy().into_owned();
+        let entry = |name: &str| home.path().join(name).to_string_lossy().into_owned();
+
         let flags = default_bwrap_flags_for(Some(dir_str.clone()));
-        assert!(writable_binds(&flags).contains(&dir_str.as_str()));
+        assert!(
+            flags
+                .windows(3)
+                .any(|w| w == ["--ro-bind", dir_str.as_str(), dir_str.as_str()])
+        );
+        assert_eq!(
+            writable_binds(&flags),
+            [entry("docs").as_str(), entry("notes.txt").as_str(), "/tmp"]
+        );
         let setenv = flags
             .windows(3)
             .find(|w| w[0] == "--setenv" && w[1] == "HOME")
