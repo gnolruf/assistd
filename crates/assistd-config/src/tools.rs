@@ -92,8 +92,9 @@ pub struct ToolsBashConfig {
     /// `echo "rm -rf"`.
     pub destructive_patterns: Vec<String>,
     pub sandbox: BashSandboxMode,
-    /// Extra bubblewrap arguments, inserted before the trailing `--`
-    /// (e.g. `["--unshare-net"]`; the network is shared by default).
+    /// Extra bubblewrap arguments, inserted before the trailing `--`: e.g.
+    /// `["--unshare-net"]` (the network is shared by default), or a `--bind`
+    /// making a dot entry of `$HOME` writable (they are read-only).
     pub bwrap_extra_args: Vec<String>,
 }
 
@@ -114,9 +115,9 @@ impl Default for ToolsBashConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsWriteConfig {
-    /// Path prefixes `write` may create or overwrite files under (exit 126
-    /// elsewhere). `~` / `~user` expand; relative entries are rejected and
-    /// missing ones dropped at startup. Must not be empty.
+    /// Non-empty path prefixes `write` may create files under; symlinks and dot
+    /// entries directly inside a prefix are refused (list one to allow it).
+    /// `~` / `~user` expand; relative entries error, missing ones are dropped.
     pub writable_paths: Vec<String>,
 }
 
