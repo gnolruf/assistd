@@ -10,7 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::redirect;
 use serde_json::{Value, json};
+use thiserror::Error;
 use tokio::sync::{RwLock, oneshot, watch};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
@@ -23,6 +25,8 @@ use crate::{McpClient, ToolResult, ToolSchema, protocol};
 /// The reader drops the connection rather than buffer an event past
 /// this, so a misbehaving server cannot exhaust memory.
 pub const MAX_EVENT_BYTES: usize = 1024 * 1024;
+
+const MAX_REDIRECTS: usize = 10;
 
 /// Per-server SSE configuration.
 #[derive(Debug, Clone)]
@@ -69,14 +73,11 @@ impl SseMcpClient {
             .map_err(|e| McpError::config(format!("invalid SSE url `{}`", cfg.url), e))?;
         let headers = build_headers(&cfg.headers)?;
 
-        let http = reqwest::Client::builder()
-            .read_timeout(cfg.read_timeout)
+        let http = http_client_builder(cfg.read_timeout)
             .timeout(cfg.request_timeout)
             .build()?;
 
-        let stream_http = reqwest::Client::builder()
-            .read_timeout(cfg.read_timeout)
-            .build()?;
+        let stream_http = http_client_builder(cfg.read_timeout).build()?;
 
         let correlator = Arc::new(Correlator::new());
         let post_url = Arc::new(RwLock::new(None));
@@ -393,6 +394,14 @@ pub struct SseEvent {
 #[derive(Debug, PartialEq, Eq)]
 pub struct EventTooLarge;
 
+#[derive(Debug, Error)]
+enum EndpointError {
+    #[error(transparent)]
+    Parse(#[from] url::ParseError),
+    #[error("`{0}` is not on the server's origin")]
+    CrossOrigin(Url),
+}
+
 /// Incremental SSE parser: feed body chunks, pull complete events.
 #[derive(Default)]
 pub struct EventParser {
@@ -489,6 +498,30 @@ fn build_headers(raw: &HashMap<String, String>) -> Result<HeaderMap, McpError> {
     Ok(headers)
 }
 
+/// A client builder that follows at most [`MAX_REDIRECTS`] redirects and
+/// never one onto another origin, so configured headers stay with the server.
+fn http_client_builder(read_timeout: Duration) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .read_timeout(read_timeout)
+        .redirect(same_origin_redirects())
+}
+
+fn same_origin_redirects() -> redirect::Policy {
+    redirect::Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous()
+            .first()
+            .is_some_and(|original| original.origin() == attempt.url().origin());
+        if !same_origin {
+            attempt.stop()
+        } else if attempt.previous().len() > MAX_REDIRECTS {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 /// Wait up to 5s for the `endpoint` event, then fall back to POSTing
 /// to `base_url` if none arrived.
 async fn await_endpoint(
@@ -508,8 +541,12 @@ async fn await_endpoint(
     }
 }
 
-fn resolve_endpoint(base_url: &Url, data: &str) -> Result<Url, url::ParseError> {
-    base_url.join(data.trim())
+fn resolve_endpoint(base_url: &Url, data: &str) -> Result<Url, EndpointError> {
+    let url = base_url.join(data.trim())?;
+    if url.origin() != base_url.origin() {
+        return Err(EndpointError::CrossOrigin(url));
+    }
+    Ok(url)
 }
 
 async fn ping_loop(
@@ -559,7 +596,89 @@ async fn ping_loop(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
+
+    struct RedirectServer {
+        url: Url,
+        hits: Arc<AtomicUsize>,
+        _task: AbortOnDropHandle<()>,
+    }
+
+    /// Answers `GET /start` with a 307 to `location` and anything else
+    /// with an empty 200, counting every request.
+    async fn serve_redirect(location: String) -> RedirectServer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let head = read_request_head(&mut socket).await;
+                let response = if head.starts_with("GET /start ") {
+                    format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\n\
+                         Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        RedirectServer {
+            url,
+            hits,
+            _task: AbortOnDropHandle::new(task),
+        }
+    }
+
+    async fn read_request_head(socket: &mut tokio::net::TcpStream) -> String {
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !head.ends_with(b"\r\n\r\n") {
+            match socket.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => head.extend_from_slice(&chunk[..read]),
+            }
+        }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    fn test_client() -> reqwest::Client {
+        http_client_builder(Duration::from_secs(5)).build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn redirect_to_another_origin_is_not_followed() {
+        let target = serve_redirect(String::new()).await;
+        let origin = serve_redirect(target.url.join("stolen").unwrap().to_string()).await;
+        let resp = test_client()
+            .get(origin.url.join("start").unwrap())
+            .header("x-api-key", "secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(target.hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn redirect_within_the_origin_is_followed() {
+        let server = serve_redirect("/done".into()).await;
+        let resp = test_client()
+            .get(server.url.join("start").unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(server.hits.load(Ordering::SeqCst), 2);
+    }
 
     fn drive(parser: &mut EventParser, chunks: &[&[u8]]) -> Vec<SseEvent> {
         let mut events = Vec::new();
@@ -694,8 +813,8 @@ mod tests {
             ),
             (
                 "http://127.0.0.1:8931/sse",
-                "https://other.example/post",
-                "https://other.example/post",
+                "http://127.0.0.1:8931/post",
+                "http://127.0.0.1:8931/post",
             ),
             (
                 "http://127.0.0.1:8931/sse",
@@ -707,6 +826,28 @@ mod tests {
             let base = Url::parse(base).unwrap();
             let url = resolve_endpoint(&base, data).unwrap();
             assert_eq!(url.as_str(), expected, "{data:?} against {base}");
+        }
+    }
+
+    #[test]
+    fn endpoint_on_another_origin_is_rejected() {
+        let base = Url::parse("https://mcp.example/sse").unwrap();
+        let cases = [
+            "https://attacker.example/post",
+            "//attacker.example/post",
+            "http://mcp.example/post",
+            "https://mcp.example:8443/post",
+            "https://mcp.example@attacker.example/post",
+            "data:text/plain,x",
+        ];
+        for data in cases {
+            assert!(
+                matches!(
+                    resolve_endpoint(&base, data),
+                    Err(EndpointError::CrossOrigin(_))
+                ),
+                "{data:?} should be rejected",
+            );
         }
     }
 }
