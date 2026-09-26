@@ -310,8 +310,8 @@ A walk through `assistd query "what files changed this week?"`:
    an environment cleared down to locale and terminal variables. The sandboxed `git` runs, returns
    stdout. If stdout exceeds the `[tools.output]` line or byte cap,
    `RunTool::invoke` cuts it to that head and spills the full text to
-   `tools.output.overflow_dir` (default `/tmp/assistd-output`,
-   emptied at every daemon start); it then base64-encodes any image
+   `tools.output.overflow_dir` (default `$XDG_RUNTIME_DIR/assistd/output`,
+   owner-only and emptied at every daemon start); it then base64-encodes any image
    attachments and returns the JSON result.
 
 7. **Loop back.** Result emitted as `Event::ToolResult`, pushed back

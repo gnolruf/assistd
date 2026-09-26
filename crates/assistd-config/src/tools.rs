@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
     DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
-    DEFAULT_TOOLS_OVERFLOW_DIR, default_bash_allowed_programs, default_bash_denylist,
-    default_bash_destructive_patterns, default_writable_paths,
+    default_bash_allowed_programs, default_bash_denylist, default_bash_destructive_patterns,
+    default_tools_overflow_dir, default_writable_paths,
 };
 
 /// Tools subsystem configuration.
@@ -28,8 +28,9 @@ pub struct ToolsOutputConfig {
     pub max_lines: NonZeroU32,
     /// Max size of the shown head, in KB.
     pub max_kb: NonZeroU32,
-    /// Spill directory for overflow (`cmd-<n>.txt`); recreated empty on
-    /// daemon startup. Must not be empty.
+    /// Spill directory for overflow (`cmd-<n>.txt`); recreated empty and
+    /// owner-only on daemon startup. Must not be empty. Defaults to
+    /// `$XDG_RUNTIME_DIR/assistd/output`, else under the user cache dir.
     pub overflow_dir: PathBuf,
 }
 
@@ -38,7 +39,7 @@ impl Default for ToolsOutputConfig {
         Self {
             max_lines: DEFAULT_TOOLS_MAX_LINES,
             max_kb: DEFAULT_TOOLS_MAX_KB,
-            overflow_dir: DEFAULT_TOOLS_OVERFLOW_DIR.into(),
+            overflow_dir: default_tools_overflow_dir(),
         }
     }
 }

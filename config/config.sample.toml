@@ -102,7 +102,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 [tools.output]
 # max_lines = 200
 # max_kb = 50
-# overflow_dir = "/tmp/assistd-output"
+# overflow_dir = "/run/user/1000/assistd/output"
 
 [tools.bash]
 # Policy for every command `bash` or `wm open` spawns.

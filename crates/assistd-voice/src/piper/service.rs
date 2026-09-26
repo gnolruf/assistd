@@ -122,7 +122,7 @@ impl PiperVoiceOutput {
         let cache_dir = config
             .model_cache_dir
             .clone()
-            .unwrap_or_else(default_cache_dir);
+            .map_or_else(default_cache_dir, Ok)?;
         let voice_files = ensure_voice(&config.voice, &cache_dir).await?;
         tracing::info!(
             target: "assistd::voice::piper",

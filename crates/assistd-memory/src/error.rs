@@ -12,6 +12,13 @@ pub enum MemoryError {
         source: std::io::Error,
     },
 
+    #[error("restrict {} to owner-only access: {source}", path.display())]
+    Restrict {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("open SQLite at {}: {source}", path.display())]
     Open {
         path: PathBuf,

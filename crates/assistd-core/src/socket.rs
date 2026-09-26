@@ -1,12 +1,15 @@
 //! Unix-socket IPC server: one newline-delimited JSON request per
 //! connection, answered by a stream of events.
 
+use std::fs::{DirBuilder, Permissions};
 use std::future::Future;
 use std::io;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustix::process::geteuid;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -38,6 +41,12 @@ const FD_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(100);
 /// treated as stale; one that hangs past this is treated as live.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Mode for a socket directory the daemon has to create itself.
+const SOCKET_DIR_MODE: u32 = 0o700;
+
+/// Mode for the socket itself: only the daemon's user may connect.
+const SOCKET_MODE: u32 = 0o600;
+
 /// Errors produced by the socket listener and per-connection handlers.
 #[derive(Debug, Error)]
 pub enum SocketError {
@@ -52,6 +61,19 @@ pub enum SocketError {
         path: PathBuf,
         #[source]
         source: io::Error,
+    },
+
+    #[error("failed to prepare socket directory {path}: {source}")]
+    SocketDir {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("socket directory {path} is {problem}; refusing to listen there")]
+    UnsafeSocketDir {
+        path: PathBuf,
+        problem: &'static str,
     },
 
     #[error("failed to bind unix socket at {path}: {source}")]
@@ -81,18 +103,25 @@ where
 }
 
 /// Serve the IPC socket at `path` until `shutdown` resolves, then drain
-/// in-flight connections for up to `daemon.shutdown_grace_secs`. A stale
-/// socket file at `path` is removed first; a live one is an error.
+/// in-flight connections for up to `daemon.shutdown_grace_secs`. The
+/// socket's directory must belong to this user and not be writable by
+/// others, and the socket is owner-only. A stale socket file at `path` is
+/// removed first; a live one is an error.
 pub async fn serve_at<F>(path: &Path, state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
 where
     F: Future<Output = ()>,
 {
+    if let Some(dir) = path.parent() {
+        ensure_private_socket_dir(dir)?;
+    }
     prepare_socket_path(path).await?;
 
-    let listener = UnixListener::bind(path).map_err(|source| SocketError::Bind {
+    let bind_error = |source| SocketError::Bind {
         path: path.to_path_buf(),
         source,
-    })?;
+    };
+    let listener = UnixListener::bind(path).map_err(bind_error)?;
+    std::fs::set_permissions(path, Permissions::from_mode(SOCKET_MODE)).map_err(bind_error)?;
     info!("listening on {}", path.display());
 
     let result = accept_loop(listener, state, shutdown).await;
@@ -102,6 +131,34 @@ where
     }
 
     result
+}
+
+fn ensure_private_socket_dir(dir: &Path) -> Result<(), SocketError> {
+    let dir_error = |source| SocketError::SocketDir {
+        path: dir.to_path_buf(),
+        source,
+    };
+    DirBuilder::new()
+        .recursive(true)
+        .mode(SOCKET_DIR_MODE)
+        .create(dir)
+        .map_err(dir_error)?;
+    let metadata = std::fs::symlink_metadata(dir).map_err(dir_error)?;
+    let problem = if !metadata.is_dir() {
+        Some("not a directory")
+    } else if metadata.uid() != geteuid().as_raw() {
+        Some("owned by another user")
+    } else if metadata.mode() & 0o022 != 0 {
+        Some("writable by other users")
+    } else {
+        None
+    };
+    problem.map_or(Ok(()), |problem| {
+        Err(SocketError::UnsafeSocketDir {
+            path: dir.to_path_buf(),
+            problem,
+        })
+    })
 }
 
 async fn prepare_socket_path(path: &Path) -> Result<(), SocketError> {
@@ -163,7 +220,14 @@ where
                             );
                             fd_exhausted = false;
                         }
-                        spawn_connection(&mut connections, stream, state.clone(), drain_rx.clone());
+                        if peer_is_daemon_user(&stream) {
+                            spawn_connection(
+                                &mut connections,
+                                stream,
+                                state.clone(),
+                                drain_rx.clone(),
+                            );
+                        }
                     }
                     Err(e) if is_fd_exhaustion(&e) => {
                         back_off_from_fd_exhaustion(&e, &mut fd_exhausted).await;
@@ -187,6 +251,23 @@ where
     let _ = drain_tx.send(true);
     drain_join_set(&mut connections, grace, "connection").await;
     Ok(())
+}
+
+fn peer_is_daemon_user(stream: &UnixStream) -> bool {
+    match stream.peer_cred() {
+        Ok(cred) if cred.uid() == geteuid().as_raw() => true,
+        Ok(cred) => {
+            warn!(
+                peer_uid = cred.uid(),
+                "rejecting IPC connection from another user"
+            );
+            false
+        }
+        Err(e) => {
+            warn!("rejecting IPC connection with unreadable peer credentials: {e}");
+            false
+        }
+    }
 }
 
 fn spawn_connection(

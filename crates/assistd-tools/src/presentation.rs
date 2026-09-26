@@ -2,12 +2,20 @@
 //! binary, truncates long output (spilling it to a file), always shows
 //! stderr, and ends with an `[exit:N | Mms]` footer.
 
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use assistd_config::defaults::default_tools_overflow_dir;
+
 use crate::command::{Attachment, CommandOutput};
 use crate::commands::cat::{human_size, sniff_binary};
+
+/// Spill files hold raw tool output, so only the daemon's user may read them.
+const OVERFLOW_FILE_MODE: u32 = 0o600;
 
 /// Limits and destinations for output rendering.
 #[derive(Debug, Clone)]
@@ -25,7 +33,7 @@ impl Default for PresentSpec {
         Self {
             max_lines: 200,
             max_bytes: 50 * 1024,
-            overflow_dir: PathBuf::from("/tmp/assistd-output"),
+            overflow_dir: default_tools_overflow_dir(),
         }
     }
 }
@@ -250,7 +258,13 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
 
 fn write_overflow_file(raw: &[u8], dir: &Path, n: u64) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("cmd-{n}.txt"));
-    std::fs::write(&path, raw)?;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(OVERFLOW_FILE_MODE)
+        .open(&path)?
+        .write_all(raw)?;
     Ok(path)
 }
 
