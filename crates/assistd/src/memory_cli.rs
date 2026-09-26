@@ -10,6 +10,7 @@ use clap::{Args, Subcommand};
 use uuid::Uuid;
 
 use crate::ipc_helper::run_one_shot;
+use crate::terminal_text::{escape_controls, escape_controls_single_line};
 
 #[derive(Args)]
 pub struct MemoryArgs {
@@ -101,13 +102,18 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 ..
             } => {
                 let session_short = session_id.chars().take(8).collect::<String>();
-                let single_line = content.replace('\n', " ");
+                let flattened = content.replace('\n', " ");
+                let single_line = escape_controls_single_line(&flattened);
                 println!(
                     "{timestamp}  {role:9}  conv={conversation_id:<6}  sess={session_short}  sim={similarity:.2}  {single_line}"
                 );
             }
             Event::MemoryValue { key, value, .. } => match value {
-                Some(v) => println!("{key}\t{v}"),
+                Some(v) => println!(
+                    "{}\t{}",
+                    escape_controls_single_line(key),
+                    escape_controls(v)
+                ),
                 None => {
                     eprintln!("(no value for key {key:?})");
                     std::process::exit(2);
@@ -115,7 +121,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
             },
             Event::MemoryKeys { keys, .. } => {
                 for k in keys {
-                    println!("{k}");
+                    println!("{}", escape_controls_single_line(k));
                 }
             }
             Event::MemoryRow {
@@ -124,13 +130,15 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                 value,
                 ..
             } => {
-                let single_line = value.replace('\n', " ");
+                let key = escape_controls_single_line(key);
+                let flattened = value.replace('\n', " ");
+                let single_line = escape_controls_single_line(&flattened);
                 println!("{memory_id}\t{key}\t{single_line}");
             }
             Event::MemoryForgetResult { deleted: true, key, .. } => {
                 let id = forget_target.unwrap_or(0);
                 match key {
-                    Some(k) => println!("forgot id={id} key={k}"),
+                    Some(k) => println!("forgot id={id} key={}", escape_controls_single_line(k)),
                     None => println!("forgot id={id}"),
                 }
             }

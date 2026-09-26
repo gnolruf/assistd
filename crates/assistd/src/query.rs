@@ -10,6 +10,7 @@ use clap::Args;
 use uuid::Uuid;
 
 use crate::ipc_helper::run_one_shot;
+use crate::terminal_text::{escape_controls, escape_controls_single_line};
 
 const PREVIEW_MAX_CHARS: usize = 80;
 
@@ -66,15 +67,16 @@ async fn load_attachments(paths: &[PathBuf]) -> Result<Vec<ImageAttachment>> {
 fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -> Result<()> {
     match event {
         Event::Delta { text, .. } => {
-            out.write_all(text.as_bytes())?;
+            out.write_all(escape_controls(text).as_bytes())?;
             out.flush()?;
             *wrote_anything = *wrote_anything || !text.is_empty();
         }
         Event::ToolCall { name, args, .. } => {
+            let name = escape_controls_single_line(name);
             let preview = args
                 .get("command")
                 .and_then(|v| v.as_str())
-                .map(truncate_preview)
+                .map(|command| truncate_preview(&escape_controls_single_line(command)))
                 .unwrap_or_default();
             if preview.is_empty() {
                 writeln!(out, "\n[tool call: {name}]")?;
@@ -83,6 +85,7 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
             }
         }
         Event::ToolResult { name, result, .. } => {
+            let name = escape_controls_single_line(name);
             let exit = result
                 .get("exit_code")
                 .and_then(|v| v.as_i64())
@@ -97,7 +100,11 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
         }
         Event::Transcription { text, .. } => {
             if !text.is_empty() {
-                writeln!(out, "[transcription: {text}]")?;
+                writeln!(
+                    out,
+                    "[transcription: {}]",
+                    escape_controls_single_line(text)
+                )?;
             }
         }
         Event::ListenState { active, .. } => {
@@ -116,7 +123,10 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
             message,
             ..
         } => {
-            eprintln!("[{severity} {component}: {message}]");
+            eprintln!(
+                "[{severity} {component}: {}]",
+                escape_controls_single_line(message)
+            );
         }
         Event::ConfirmRequest { .. } => {
             eprintln!(

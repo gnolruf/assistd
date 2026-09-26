@@ -37,6 +37,8 @@ mod presence;
 mod ptt;
 #[cfg(feature = "client")]
 mod query;
+#[cfg(feature = "client")]
+mod terminal_text;
 #[cfg(feature = "tray")]
 mod tray;
 #[cfg(feature = "client")]
