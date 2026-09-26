@@ -204,7 +204,6 @@ async fn write_without_symlinks(path: PathBuf, content: Vec<u8>) -> std::io::Res
     file.flush().await
 }
 
-#[cfg(target_os = "linux")]
 fn open_without_symlinks(path: &Path) -> std::io::Result<std::fs::File> {
     let fd = rustix::fs::openat2(
         rustix::fs::CWD,
@@ -212,16 +211,6 @@ fn open_without_symlinks(path: &Path) -> std::io::Result<std::fs::File> {
         OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
         Mode::from_raw_mode(0o666),
         rustix::fs::ResolveFlags::NO_SYMLINKS,
-    )?;
-    Ok(std::fs::File::from(fd))
-}
-
-#[cfg(target_os = "macos")]
-fn open_without_symlinks(path: &Path) -> std::io::Result<std::fs::File> {
-    let fd = rustix::fs::open(
-        path,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC | OFlags::NOFOLLOW_ANY,
-        Mode::from_raw_mode(0o666),
     )?;
     Ok(std::fs::File::from(fd))
 }
