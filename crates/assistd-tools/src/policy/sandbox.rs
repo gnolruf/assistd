@@ -523,7 +523,7 @@ mod tests {
             Some(""),
             Some("/"),
             Some("//"),
-            Some("/tmp/.."),
+            Some("/usr/.."),
             Some("relative"),
         ] {
             let flags = default_bwrap_flags_for(home.map(str::to_string));
