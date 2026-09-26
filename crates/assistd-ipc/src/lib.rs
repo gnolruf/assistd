@@ -686,25 +686,21 @@ impl Event {
     }
 }
 
-/// The per-user daemon socket: `$XDG_RUNTIME_DIR/assistd.sock`, else `/tmp/assistd-$USER.sock`
-/// (`nobody` when `$USER` is unset).
+/// The per-user daemon socket: `$XDG_RUNTIME_DIR/assistd.sock`, else
+/// `/tmp/assistd-<euid>/assistd.sock`, whose directory the daemon creates owner-only.
 pub fn socket_path() -> PathBuf {
     socket_path_for(
         std::env::var_os("XDG_RUNTIME_DIR"),
-        std::env::var_os("USER"),
+        rustix::process::geteuid().as_raw(),
     )
 }
 
-fn socket_path_for(xdg_runtime_dir: Option<OsString>, user: Option<OsString>) -> PathBuf {
-    if let Some(dir) = xdg_runtime_dir {
-        let mut path = PathBuf::from(dir);
-        path.push("assistd.sock");
-        return path;
-    }
-    let user = user
-        .and_then(|u| u.into_string().ok())
-        .unwrap_or_else(|| "nobody".into());
-    PathBuf::from(format!("/tmp/assistd-{user}.sock"))
+fn socket_path_for(xdg_runtime_dir: Option<OsString>, euid: u32) -> PathBuf {
+    let dir = xdg_runtime_dir.filter(|dir| !dir.is_empty()).map_or_else(
+        || PathBuf::from(format!("/tmp/assistd-{euid}")),
+        PathBuf::from,
+    );
+    dir.join("assistd.sock")
 }
 
 #[cfg(test)]

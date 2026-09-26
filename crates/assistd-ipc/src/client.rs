@@ -23,6 +23,9 @@ pub enum IpcClientError {
         #[source]
         source: io::Error,
     },
+    /// The socket is served by another user's process, so it may be squatted.
+    #[error("socket at {path} is served by uid {peer_uid}, not this user; refusing to talk to it")]
+    ForeignDaemon { path: PathBuf, peer_uid: u32 },
     #[error("ipc i/o error: {0}")]
     Io(#[from] io::Error),
     #[error("ipc json error: {0}")]
@@ -83,12 +86,20 @@ impl IpcClient {
     }
 
     async fn connect(&self) -> Result<UnixStream> {
-        UnixStream::connect(&self.socket_path)
+        let stream = UnixStream::connect(&self.socket_path)
             .await
             .map_err(|source| IpcClientError::NotReachable {
                 path: self.socket_path.clone(),
                 source,
-            })
+            })?;
+        let peer_uid = stream.peer_cred()?.uid();
+        if peer_uid != rustix::process::geteuid().as_raw() {
+            return Err(IpcClientError::ForeignDaemon {
+                path: self.socket_path.clone(),
+                peer_uid,
+            });
+        }
+        Ok(stream)
     }
 }
 

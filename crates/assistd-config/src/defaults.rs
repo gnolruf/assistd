@@ -93,7 +93,6 @@ pub const DEFAULT_GPU_VRAM_THRESHOLD_MB: NonZeroU64 = nz64(2048);
 
 pub const DEFAULT_TOOLS_MAX_LINES: NonZeroU32 = nz32(200);
 pub const DEFAULT_TOOLS_MAX_KB: NonZeroU32 = nz32(50);
-pub const DEFAULT_TOOLS_OVERFLOW_DIR: &str = "/tmp/assistd-output";
 pub const DEFAULT_BASH_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 
 pub const DEFAULT_MEMORY_ENABLED: bool = true;
@@ -133,6 +132,21 @@ pub fn default_memory_db_path() -> PathBuf {
         }
     };
     data_dir.join("assistd").join("memory.db")
+}
+
+/// `$XDG_RUNTIME_DIR/assistd/output`, or `$XDG_CACHE_HOME/assistd/output`, or
+/// `$HOME/.cache/assistd/output`.
+pub fn default_tools_overflow_dir() -> PathBuf {
+    let base = ["XDG_RUNTIME_DIR", "XDG_CACHE_HOME"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .find(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            PathBuf::from(home).join(".cache")
+        });
+    base.join("assistd").join("output")
 }
 
 /// Process basenames whose GPU use never triggers sleep.

@@ -2,6 +2,8 @@
 //! socket server, and the `AppState` request dispatcher. Re-exports the
 //! subsystem crates so dependents need only this one.
 
+use std::fs::DirBuilder;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +63,9 @@ pub use state::{
     AppState, ConversationContext, DispatchError, McpStartupFailure, MemoryStack, RuntimeState,
     Subsystems, history_entries,
 };
+
+/// Mode for the spill directory and any parents created for it.
+const OVERFLOW_DIR_MODE: u32 = 0o700;
 
 /// Why [`build_tools`] could not assemble the tool registry.
 #[derive(Debug, Error)]
@@ -322,6 +327,10 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
 }
 
 fn reset_overflow_dir(overflow_dir: &Path) -> Result<(), BuildToolsError> {
+    let create_error = |source| BuildToolsError::CreateOverflowDir {
+        path: overflow_dir.to_path_buf(),
+        source,
+    };
     if overflow_dir.exists() {
         std::fs::remove_dir_all(overflow_dir).map_err(|source| {
             BuildToolsError::ClearOverflowDir {
@@ -330,10 +339,17 @@ fn reset_overflow_dir(overflow_dir: &Path) -> Result<(), BuildToolsError> {
             }
         })?;
     }
-    std::fs::create_dir_all(overflow_dir).map_err(|source| BuildToolsError::CreateOverflowDir {
-        path: overflow_dir.to_path_buf(),
-        source,
-    })
+    if let Some(parent) = overflow_dir.parent() {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(OVERFLOW_DIR_MODE)
+            .create(parent)
+            .map_err(create_error)?;
+    }
+    DirBuilder::new()
+        .mode(OVERFLOW_DIR_MODE)
+        .create(overflow_dir)
+        .map_err(create_error)
 }
 
 fn canonical_config_dir(config_path: &Path) -> Result<PathBuf, BuildToolsError> {
@@ -443,6 +459,8 @@ pub fn version() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     #[test]
@@ -496,5 +514,20 @@ mod tests {
 
         seen.probed = false;
         assert!(seen.take_stale(Some(2)), "last probe failed");
+    }
+
+    #[test]
+    fn reset_overflow_dir_recreates_empty_owner_only_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("assistd/output");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cmd-1.txt"), b"stale").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        reset_overflow_dir(&dir).unwrap();
+
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, OVERFLOW_DIR_MODE);
     }
 }

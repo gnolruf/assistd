@@ -1,3 +1,5 @@
+use std::os::unix::fs::PermissionsExt;
+
 use tempfile::tempdir;
 
 use super::*;
@@ -154,6 +156,8 @@ fn present_overflow_writes_temp_file_and_exposes_path() {
     let path = r.overflow_file.as_ref().expect("overflow path");
     assert_eq!(path, &dir.path().join("cmd-1.txt"));
     assert_eq!(std::fs::read(path).unwrap(), big);
+    let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, OVERFLOW_FILE_MODE);
 
     let head: String = (1..=200).map(|i| format!("line {i}\n")).collect();
     let p = path.display();

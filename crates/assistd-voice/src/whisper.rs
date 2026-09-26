@@ -211,7 +211,7 @@ impl WhisperTranscriberBuilder {
         })?;
         let cache_dir = self
             .cache_dir
-            .unwrap_or_else(|| hf_download::default_cache_dir("whisper"));
+            .map_or_else(|| hf_download::default_cache_dir("whisper"), Ok)?;
 
         let model_path = hf_download::ensure_cached(&model, &cache_dir).await?;
         let vad = if self.vad_enabled {

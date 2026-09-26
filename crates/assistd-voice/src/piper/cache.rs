@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::hf_download::{self, cached_path, ensure_file, parse_hf_id};
+use crate::hf_download::{self, DownloadError, cached_path, ensure_file, parse_hf_id};
 use crate::piper::error::PiperError;
 
 /// Resolved on-disk paths for a voice, plus the sample rate read from
@@ -28,7 +28,7 @@ struct VoiceConfigJson {
 }
 
 /// The `piper` subdirectory of the shared model cache.
-pub fn default_cache_dir() -> PathBuf {
+pub fn default_cache_dir() -> Result<PathBuf, DownloadError> {
     hf_download::default_cache_dir("piper")
 }
 

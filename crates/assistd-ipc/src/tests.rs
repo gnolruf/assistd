@@ -618,19 +618,15 @@ fn presence_state_next_cycles() {
 }
 
 #[test]
-fn socket_path_prefers_xdg_runtime_dir_then_user() {
+fn socket_path_prefers_xdg_runtime_dir_then_uid_dir() {
     let cases = [
-        (
-            Some("/run/user/1234"),
-            Some("alice"),
-            "/run/user/1234/assistd.sock",
-        ),
-        (None, Some("alice"), "/tmp/assistd-alice.sock"),
-        (None, None, "/tmp/assistd-nobody.sock"),
+        (Some("/run/user/1234"), "/run/user/1234/assistd.sock"),
+        (Some(""), "/tmp/assistd-1234/assistd.sock"),
+        (None, "/tmp/assistd-1234/assistd.sock"),
     ];
-    for (xdg, user, expected) in cases {
-        let path = socket_path_for(xdg.map(OsString::from), user.map(OsString::from));
-        assert_eq!(path, PathBuf::from(expected), "xdg={xdg:?} user={user:?}");
+    for (xdg, expected) in cases {
+        let path = socket_path_for(xdg.map(OsString::from), 1234);
+        assert_eq!(path, PathBuf::from(expected), "xdg={xdg:?}");
     }
 }
 

@@ -30,6 +30,9 @@ pub enum DownloadError {
         #[source]
         source: io::Error,
     },
+
+    #[error("no model cache directory: neither XDG_CACHE_HOME nor HOME is set")]
+    NoCacheDir,
 }
 
 /// Parse `"<owner>/<repo>:<file>"` into `(repo, file)`.
@@ -52,8 +55,8 @@ pub fn parse_hf_id(id: &str) -> Result<(String, String), DownloadError> {
 }
 
 /// `$XDG_CACHE_HOME/assistd/<subdir>/`, falling back to
-/// `$HOME/.cache/assistd/<subdir>/`, then `/tmp/assistd/<subdir>/`.
-pub fn default_cache_dir(subdir: &str) -> PathBuf {
+/// `$HOME/.cache/assistd/<subdir>/`. Errors when neither variable is set.
+pub fn default_cache_dir(subdir: &str) -> Result<PathBuf, DownloadError> {
     default_cache_dir_from(
         std::env::var_os("XDG_CACHE_HOME"),
         std::env::var_os("HOME"),
@@ -65,12 +68,12 @@ fn default_cache_dir_from(
     xdg_cache_home: Option<OsString>,
     home: Option<OsString>,
     subdir: &str,
-) -> PathBuf {
+) -> Result<PathBuf, DownloadError> {
     let base = xdg_cache_home
         .map(PathBuf::from)
         .or_else(|| home.map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("assistd").join(subdir)
+        .ok_or(DownloadError::NoCacheDir)?;
+    Ok(base.join("assistd").join(subdir))
 }
 
 /// Where `file` from `repo` lives under `cache_dir`.
@@ -240,20 +243,24 @@ mod tests {
     }
 
     #[test]
-    fn default_cache_dir_prefers_xdg_then_home_then_tmp() {
+    fn default_cache_dir_prefers_xdg_then_home() {
         let xdg = Some(OsString::from("/tmp/xdg-test"));
         let home = Some(OsString::from("/home/alice"));
         assert_eq!(
-            default_cache_dir_from(xdg, home.clone(), "piper"),
+            default_cache_dir_from(xdg, home.clone(), "piper").unwrap(),
             Path::new("/tmp/xdg-test/assistd/piper")
         );
         assert_eq!(
-            default_cache_dir_from(None, home, "piper"),
+            default_cache_dir_from(None, home, "piper").unwrap(),
             Path::new("/home/alice/.cache/assistd/piper")
         );
-        assert_eq!(
+    }
+
+    #[test]
+    fn default_cache_dir_refuses_shared_fallback() {
+        assert!(matches!(
             default_cache_dir_from(None, None, "whisper"),
-            Path::new("/tmp/assistd/whisper")
-        );
+            Err(DownloadError::NoCacheDir)
+        ));
     }
 }

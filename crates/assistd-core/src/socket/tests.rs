@@ -298,6 +298,78 @@ async fn removes_stale_socket_file_on_bind() {
     server.stop().await;
 }
 
+fn mode_of(path: &Path) -> u32 {
+    std::fs::symlink_metadata(path).unwrap().mode() & 0o777
+}
+
+#[tokio::test]
+async fn socket_is_owner_only() {
+    let server = TestServer::start(test_state()).await;
+    assert_eq!(mode_of(&server.path), SOCKET_MODE);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn creates_missing_socket_dir_owner_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("assistd-1000");
+    let path = dir.join("assistd.sock");
+    let server_path = path.clone();
+    let (shutdown, rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        serve_at(&server_path, test_state(), async {
+            let _ = rx.await;
+        })
+        .await
+        .unwrap();
+    });
+    wait_for_listener(&path).await;
+
+    assert_eq!(mode_of(&dir), SOCKET_DIR_MODE);
+
+    shutdown.send(()).unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn refuses_socket_dir_writable_by_others() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), Permissions::from_mode(0o777)).unwrap();
+
+    let err = serve_at(
+        &dir.path().join("assistd.sock"),
+        test_state(),
+        std::future::pending::<()>(),
+    )
+    .await
+    .expect_err("a world-writable socket dir must be refused");
+    assert!(
+        matches!(err, SocketError::UnsafeSocketDir { problem, .. } if problem == "writable by other users"),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn refuses_socket_dir_that_is_a_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let err = serve_at(
+        &link.join("assistd.sock"),
+        test_state(),
+        std::future::pending::<()>(),
+    )
+    .await
+    .expect_err("a symlinked socket dir must be refused");
+    assert!(
+        matches!(err, SocketError::UnsafeSocketDir { problem, .. } if problem == "not a directory"),
+        "{err:?}"
+    );
+}
+
 /// Backend that emits N deltas with a fixed pause between each, then
 /// Done.
 struct SlowBackend {
