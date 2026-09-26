@@ -1,6 +1,8 @@
+use std::io;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
+use rustix::process::Pid;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
@@ -16,6 +18,7 @@ const OUTPUT_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 /// its output to tracing.
 pub struct ChildProcess {
     child: Child,
+    process_group: Pid,
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
 }
@@ -54,6 +57,13 @@ impl ChildProcess {
             path: "llama-server".to_string(),
             source,
         })?;
+        let process_group = child
+            .id()
+            .and_then(|pid| Pid::from_raw(pid as i32))
+            .ok_or_else(|| EmbedServerError::Spawn {
+                path: "llama-server".to_string(),
+                source: io::Error::other("spawned child reported no pid"),
+            })?;
 
         let stdout = child.stdout.take().expect("stdout piped but not captured");
         let stderr = child.stderr.take().expect("stderr piped but not captured");
@@ -73,9 +83,15 @@ impl ChildProcess {
 
         Ok(Self {
             child,
+            process_group,
             stdout_task: Some(stdout_task),
             stderr_task: Some(stderr_task),
         })
+    }
+
+    /// Process group the child leads, fixed at spawn.
+    pub fn process_group(&self) -> Pid {
+        self.process_group
     }
 
     /// Wait for the child to exit.

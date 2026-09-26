@@ -15,7 +15,7 @@ use crate::defaults::{
 pub struct LlamaServerConfig {
     /// Binary path, or a name on `$PATH`. Must not be empty.
     pub binary_path: PathBuf,
-    /// Bind host. Should be loopback.
+    /// Bind host. Must be loopback: the server has no authentication.
     pub host: IpAddr,
     /// Bind port.
     pub port: NonZeroU16,
