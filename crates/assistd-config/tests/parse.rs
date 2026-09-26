@@ -122,6 +122,28 @@ fn minimal_fixture_parses_and_validates() {
         .expect("minimal fixture must validate");
 }
 
+#[test]
+fn non_loopback_server_hosts_are_rejected() {
+    let cfg: Config = toml::from_str(
+        "[llama_server]\nhost = \"0.0.0.0\"\n[embedding]\nenabled = true\nhost = \"::\"\n",
+    )
+    .expect("config must parse");
+    let err = cfg
+        .validate()
+        .expect_err("wildcard hosts must not validate");
+    let message = err.to_string();
+    assert!(message.contains("llama_server.host"), "{message}");
+    assert!(message.contains("embedding.host"), "{message}");
+}
+
+#[test]
+fn ipv6_loopback_server_hosts_validate() {
+    let cfg: Config =
+        toml::from_str("[llama_server]\nhost = \"::1\"\n[embedding]\nhost = \"::1\"\n")
+            .expect("config must parse");
+    cfg.validate().expect("::1 is loopback");
+}
+
 fn parse_reporting_unknown_keys(toml_src: &str) -> (Config, Vec<String>) {
     let cfg: Config = toml::from_str(toml_src).expect("config must parse");
     let raw: toml::Table = toml::from_str(toml_src).expect("config must be valid TOML");

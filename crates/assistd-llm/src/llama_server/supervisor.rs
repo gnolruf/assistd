@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::ops::ControlFlow;
 use std::process::ExitStatus;
 use std::sync::Arc;
@@ -115,11 +116,8 @@ impl Supervisor {
         let mut child = ChildProcess::spawn(&self.cfg, &self.model)?;
         *self.pid.lock() = child.pid();
         let ready_timeout = Duration::from_secs(self.cfg.ready_timeout_secs.get());
-        let health = HealthChecker::new(
-            &self.cfg.host.to_string(),
-            self.cfg.port.get(),
-            ready_timeout,
-        )?;
+        let listen_addr = SocketAddr::new(self.cfg.host, self.cfg.port.get());
+        let health = HealthChecker::new(listen_addr, child.process_group(), ready_timeout)?;
 
         match wait_for_startup(&mut child, &health, &mut self.shutdown_rx).await {
             StartupOutcome::Ready => {}

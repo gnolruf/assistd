@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
@@ -186,6 +187,7 @@ fn validate_model_server(
     if llama_server.binary_path.as_os_str().is_empty() {
         errors.push("llama_server.binary_path must not be empty".into());
     }
+    require_loopback(errors, "llama_server.host", llama_server.host);
 }
 
 fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfig) {
@@ -312,8 +314,17 @@ fn validate_embedding(
         return;
     }
     require_hf_id(errors, "embedding.model", &embedding.model);
+    require_loopback(errors, "embedding.host", embedding.host);
     if embedding.port == llama_server.port {
         errors.push("embedding.port must differ from llama_server.port (the chat server)".into());
+    }
+}
+
+fn require_loopback(errors: &mut Vec<String>, key: &str, host: IpAddr) {
+    if !host.is_loopback() {
+        errors.push(format!(
+            "{key} must be a loopback address (127.0.0.0/8 or ::1), got {host}"
+        ));
     }
 }
 

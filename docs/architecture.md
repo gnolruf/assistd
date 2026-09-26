@@ -109,7 +109,9 @@ TUI starts one by re-executing its own binary as `assistd daemon`.
 The daemon spawns `llama-server` as a child process at startup, with
 GPU layer count, KV-cache quantization, and other knobs taken from
 `[llama_server]` in the config. `LlamaService` health-probes
-`GET /health` until the server reports ready, then `LlamaChatClient`
+`GET /health` until the server reports ready (a 200 counts only when
+`/proc` shows the listener belongs to the child's process group, so a
+stale server or squatter on the port is never trusted), then `LlamaChatClient`
 streams chat completions over `POST /v1/chat/completions`.
 
 If the child crashes mid-stream (CUDA OOM, OOM-killer, segfault), the

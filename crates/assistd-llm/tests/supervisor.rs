@@ -10,6 +10,7 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -68,6 +69,17 @@ fn model_spec() -> ModelConfig {
     ModelConfig {
         name: "test/fake-model-GGUF:Q4_K_M".to_string(),
         context_length: nz32(2048),
+    }
+}
+
+/// Answer every connection on `listener` with an empty 200.
+async fn answer_every_request_with_ok(listener: TcpListener) {
+    while let Ok((mut stream, _)) = listener.accept().await {
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request).await;
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
     }
 }
 
@@ -174,6 +186,32 @@ async fn respects_shutdown_during_backoff() {
         "start did not respect shutdown: {elapsed:?}"
     );
     let _ = shutdown_tx.send(true);
+}
+
+#[tokio::test]
+async fn health_from_a_squatter_on_the_port_is_not_ready() {
+    let squatter = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = squatter.local_addr().unwrap().port();
+    let squatter_task = tokio::spawn(answer_every_request_with_ok(squatter));
+    let fake = FakeLlama::new("normal");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let flip_tx = shutdown_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ = flip_tx.send(true);
+    });
+
+    let result = LlamaService::start(server_spec(&fake, port), model_spec(), shutdown_rx).await;
+    squatter_task.abort();
+
+    let err = result
+        .err()
+        .expect("a 200 from a foreign listener must not count as ready");
+    assert!(
+        matches!(err, LlamaServerError::ShutdownDuringHealth),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

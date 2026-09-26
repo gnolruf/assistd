@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
@@ -99,12 +100,8 @@ impl Supervisor {
 
     async fn supervise_once(&mut self) -> Result<CycleResult, EmbedServerError> {
         let mut child = ChildProcess::spawn(&self.cfg)?;
-        let ready_timeout = self.ready_timeout;
-        let health = HealthChecker::new(
-            &self.cfg.host.to_string(),
-            self.cfg.port.get(),
-            ready_timeout,
-        )?;
+        let listen_addr = SocketAddr::new(self.cfg.host, self.cfg.port.get());
+        let health = HealthChecker::new(listen_addr, child.process_group(), self.ready_timeout)?;
 
         let startup = tokio::select! {
             res = health.wait_ready(&mut self.shutdown_rx) => match res {

@@ -20,7 +20,7 @@ pub struct EmbeddingConfig {
     /// `--hf-repo` value, `<owner>/<repo>:<quant>`. The suffix must be a
     /// quant tag; a `.gguf` filename fails with "no GGUF files found".
     pub model: String,
-    /// Bind host. Should be loopback.
+    /// Bind host. Must be loopback: the server has no authentication.
     pub host: IpAddr,
     /// Bind port. Must differ from `llama_server.port`.
     pub port: NonZeroU16,
