@@ -9,9 +9,9 @@ use assistd_wm::{Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
-use crate::exec::{DetachedReaders, SPAWN_FAILED_EXIT, spawn_detached};
+use crate::exec::{DetachedReaders, POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT, detach, watch_detached};
 use crate::policy::{
-    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy, check_argv,
+    BashPolicyCfg, ConfirmationGate, LaunchError, SandboxInfo, SubprocessPolicy, check_argv,
 };
 
 const NAME: &str = "wm";
@@ -35,8 +35,9 @@ const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
     arguments are forwarded to the spawned process.\n\
     \n\
     Runs under the same policy as `bash`: denylist, allowlist and \
-    destructive-pattern confirmation, and the bubblewrap sandbox (widened only to reach the \
-    compositor and D-Bus session sockets).\n\
+    destructive-pattern confirmation, and the bubblewrap sandbox, widened only to share the \
+    network and reach the compositor through a restricted Wayland socket. X11, D-Bus and \
+    other session sockets stay unreachable, so launching needs a Wayland session.\n\
     \n\
     The application is briefly watched, then left running. If it exits \
     during that window its exit code and output are returned, which is \
@@ -93,13 +94,16 @@ impl WmCommand {
             return denied;
         }
 
-        let cmd = self
+        match self
             .policy
             .sandbox
-            .command(SandboxAccess::Session, app, extra);
-        spawn_detached(NAME, cmd, &self.launched)
+            .spawn_graphical(app, extra, detach)
             .await
-            .unwrap_or_else(|e| spawn_failed(app, &e))
+        {
+            Ok(child) => watch_detached(NAME, child, &self.launched).await,
+            Err(LaunchError::Spawn(e)) => spawn_failed(app, &e),
+            Err(refusal) => launch_refused(&refusal),
+        }
     }
 }
 
@@ -254,6 +258,19 @@ fn spawn_failed(app: &str, err: &io::Error) -> CommandOutput {
         )
     };
     CommandOutput::failed(SPAWN_FAILED_EXIT, line.into_bytes())
+}
+
+fn launch_refused(err: &LaunchError) -> CommandOutput {
+    CommandOutput::failed(
+        POLICY_DENIED_EXIT,
+        error_line(
+            NAME,
+            format_args!("open refused: {err}"),
+            Hint::Note,
+            "the user must fix the session or kernel; retrying will not help",
+        )
+        .into_bytes(),
+    )
 }
 
 async fn active(wm: &dyn WindowManager) -> CommandOutput {

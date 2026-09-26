@@ -79,7 +79,7 @@ the vocabulary established here.
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `ConversationStore`, `SemanticStore`.                | none                                                                             |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`                                         |
 | `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`                                                                  |
-| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | none                                                                             |
+| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; restricted Wayland sockets. | none                                                                             |
 
 `config` and `ipc` sit at the bottom: they have no internal
 dependencies, and most other crates build on them. `core` sits at the top because it's where every subsystem is
@@ -184,8 +184,11 @@ nothing in it matches a destructive pattern; otherwise the user confirms,
 and can "always allow" the programs it named. It then runs in a sandbox
 (bubblewrap by default). `wm open`
 spawns model-chosen argv and so shares that same `[tools.bash]` policy,
-widened only by a bind of `$XDG_RUNTIME_DIR` so a launched GUI
-application can reach the compositor, and left running once it survives
+widened only to share the network and reach the compositor through a
+restricted Wayland socket (`wp-security-context-v1`, which withholds
+virtual input, screen capture and similar protocols), with Landlock
+barring abstract sockets such as the X server's; the launch is refused
+when either protection is unavailable, and left running once it survives
 a startup probe; `write` restricts targets to a
 configured allowlist; `see` and `screenshot` refuse with an error
 when the loaded model has no vision projector.
@@ -248,6 +251,10 @@ running an unsupported one like Hyprland today), `NoWindowManager`
 returns convention-compliant errors so commands fail gracefully
 instead of panicking.
 
+The `wayland` feature adds `RestrictedWaylandSocket`: a socket the
+compositor serves with its privileged protocols hidden, which the
+sandbox binds in place of the real one for `wm open`.
+
 ### MCP (`assistd-mcp`)
 
 External tool servers configured under `[[mcp.servers]]`. Each entry
@@ -297,10 +304,10 @@ A walk through `assistd query "what files changed this week?"`:
    `git log` matches no destructive pattern.
 
 6. **Sandbox.** `BashCommand` invokes the configured sandbox
-   (bubblewrap by default): a read-only root with writable `/tmp`
-   and writable entries of `$HOME` other than dotfiles and symlinks,
-   fresh `/dev` and `/proc`, a tmpfs `/run`, and unshared
-   pid/ipc/uts namespaces. The sandboxed `git` runs, returns
+   (bubblewrap by default): a read-only root with writable entries
+   of `$HOME` other than dotfiles and symlinks, fresh `/tmp`, `/dev`,
+   `/proc` and `/run`, unshared pid/ipc/uts/network namespaces, and
+   an environment cleared down to locale and terminal variables. The sandboxed `git` runs, returns
    stdout. If stdout exceeds the `[tools.output]` line or byte cap,
    `RunTool::invoke` cuts it to that head and spills the full text to
    `tools.output.overflow_dir` (default `/tmp/assistd-output`,

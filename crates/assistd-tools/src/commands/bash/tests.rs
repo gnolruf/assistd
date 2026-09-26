@@ -3,6 +3,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use super::*;
+use crate::chain::{execute, parse_chain};
+use crate::command::CommandRegistry;
 use crate::commands::RecordingGate;
 use crate::commands::test_patterns as patterns;
 use crate::exec::{OUTPUT_BUF_MAX, OUTPUT_OVERFLOW_EXIT};
@@ -45,6 +47,24 @@ async fn bash_runs_echo() {
     let out = run(&BashCommand::default(), "echo hi", None).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"hi\n");
+}
+
+#[tokio::test]
+async fn glob_matches_reach_bash_as_file_names_not_code() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let planted = dir.path().join("a$(echo injected).txt");
+    std::fs::write(&planted, b"").expect("planted file");
+    let mut registry = CommandRegistry::new();
+    registry.register(BashCommand::default());
+    let line = format!("bash echo {}/*.txt", dir.path().display());
+
+    let out = execute(&parse_chain(&line).expect("parses"), &registry, None).await;
+
+    assert_eq!(out.exit_code, 0, "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}\n", planted.display())
+    );
 }
 
 #[tokio::test]

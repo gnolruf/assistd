@@ -203,6 +203,11 @@ pub trait Command: Send + Sync + 'static {
     /// Full usage block, written verbatim to stdout; its first line begins
     /// `usage: <name>`.
     fn help(&self) -> String;
+    /// Whether `~` and globs in the arguments expand before [`Command::run`];
+    /// `false` passes every word as written.
+    fn expands_args(&self) -> bool {
+        true
+    }
     /// Execute the command; failures are reported through exit code and stderr.
     async fn run(&self, input: CommandInput) -> CommandOutput;
 }

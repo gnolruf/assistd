@@ -1,5 +1,5 @@
 //! Subprocess spawning: [`supervise`] runs a child to completion under a
-//! timeout, while [`spawn_detached`] only watches a launch for early failure.
+//! timeout, while [`watch_detached`] only watches a launch for early failure.
 
 use std::io;
 #[cfg(unix)]
@@ -37,7 +37,7 @@ pub(crate) const OUTPUT_BUF_MAX: usize = PIPE_BUF_MAX;
 /// executor's pipe-overflow exit.
 pub(crate) const OUTPUT_OVERFLOW_EXIT: i32 = 141;
 
-/// How long [`spawn_detached`] watches a child before declaring it launched.
+/// How long [`watch_detached`] watches a child before declaring it launched.
 /// Launch failures worth catching are fast; a slow one reads as success.
 const STARTUP_PROBE: Duration = Duration::from_millis(300);
 
@@ -68,7 +68,7 @@ pub(crate) struct Captured {
 /// A stream passed its byte cap.
 struct Overflow;
 
-/// Owns the output readers of applications started by [`spawn_detached`];
+/// Owns the output readers of applications watched by [`watch_detached`];
 /// dropping it aborts any reader still running.
 #[derive(Default)]
 pub(crate) struct DetachedReaders(Mutex<JoinSet<()>>);
@@ -270,37 +270,40 @@ pub(crate) async fn supervise(
     })
 }
 
-/// Spawn `cmd` and watch it for [`STARTUP_PROBE`]. A child that exits in
-/// that window is reported with its exit code and output; one still alive
-/// is reported as exit 0 and left running, its readers handed to `readers`.
-///
-/// Nothing kills it on drop; bubblewrap's `--die-with-parent` bounds it.
-/// `Err` means the spawn failed.
-pub(crate) async fn spawn_detached(
-    tool: &str,
-    mut cmd: ProcCommand,
-    readers: &DetachedReaders,
-) -> io::Result<CommandOutput> {
+/// Configure `cmd` for [`watch_detached`]: no stdin, piped output, and a
+/// process group of its own.
+pub(crate) fn detach(cmd: &mut ProcCommand) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
     cmd.process_group(0);
+}
 
-    let mut child = cmd.spawn()?;
+/// Watch `child`, spawned from a command [`detach`] configured, for
+/// [`STARTUP_PROBE`]. A child that exits in that window is reported with
+/// its exit code and output; one still alive is reported as exit 0 and left
+/// running, its readers handed to `readers`.
+///
+/// Nothing kills it on drop; bubblewrap's `--die-with-parent` bounds it.
+pub(crate) async fn watch_detached(
+    tool: &str,
+    mut child: Child,
+    readers: &DetachedReaders,
+) -> CommandOutput {
     let output = StartupOutput::start(&mut child, readers);
 
     let Ok(waited) = timeout(STARTUP_PROBE, child.wait()).await else {
         // Neither kills nor orphans it: tokio's reaper collects it on exit.
         drop(child);
-        return Ok(CommandOutput::ok(Vec::new()));
+        return CommandOutput::ok(Vec::new());
     };
 
     let (stdout, stderr) = output.take_after_exit().await;
-    Ok(match waited {
+    match waited {
         Ok(status) => exited(stdout, stderr, &status),
         Err(e) => wait_failed(tool, &e),
-    })
+    }
 }
 
 fn exited(stdout: Vec<u8>, stderr: Vec<u8>, status: &ExitStatus) -> CommandOutput {

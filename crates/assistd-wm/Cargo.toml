@@ -6,9 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["i3", "sway"]
+default = ["i3", "sway", "wayland"]
 i3 = ["dep:tokio-i3ipc"]
 sway = ["dep:swayipc-async"]
+wayland = ["dep:wayland-client", "dep:wayland-protocols"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -18,6 +19,8 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-i3ipc = { workspace = true, optional = true }
 swayipc-async = { workspace = true, optional = true }
 tracing = { workspace = true }
+wayland-client = { workspace = true, optional = true }
+wayland-protocols = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

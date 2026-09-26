@@ -1,5 +1,6 @@
-//! Window manager integration: the [`WindowManager`] trait plus the i3
-//! and Sway backends that implement it over their IPC sockets.
+//! Window manager integration: the [`WindowManager`] trait, the i3 and Sway
+//! backends that implement it over their IPC sockets, and restricted
+//! Wayland sockets for sandboxed clients.
 
 use std::convert::Infallible;
 use std::fmt;
@@ -16,6 +17,7 @@ pub mod error;
 pub mod i3;
 #[cfg(any(feature = "i3", feature = "sway"))]
 mod ipc_backend;
+pub mod security_context;
 #[cfg(any(feature = "i3", feature = "sway"))]
 pub(crate) mod snapshot;
 #[cfg(feature = "sway")]
@@ -24,6 +26,7 @@ pub mod sway;
 pub use error::{TransportError, WmError, WmResult};
 #[cfg(feature = "i3")]
 pub use i3::{I3Backend, I3Handle};
+pub use security_context::{RestrictedWaylandSocket, SecurityContextError};
 #[cfg(feature = "sway")]
 pub use sway::{SwayBackend, SwayHandle};
 

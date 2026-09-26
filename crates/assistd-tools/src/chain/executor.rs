@@ -90,7 +90,11 @@ async fn run_command(
         return CommandOutput::failed(127, msg.into_bytes());
     };
 
-    let args = expand_args(&words[1..]);
+    let args = if cmd.expands_args() {
+        expand_args(&words[1..])
+    } else {
+        words[1..].iter().map(|word| word.text.clone()).collect()
+    };
     if args.iter().any(|a| a == "--help") {
         return CommandOutput::usage(cmd.help());
     }
