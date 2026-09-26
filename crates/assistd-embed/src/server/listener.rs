@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 
-use rustix::process::{Pid, getpgid};
+use rustix::process::Pid;
 
 const TCP_LISTEN_STATE: &str = "0A";
 
@@ -16,11 +16,11 @@ pub fn is_listening_in_group(addr: SocketAddr, group: Pid) -> io::Result<bool> {
     if inodes.is_empty() {
         return Ok(false);
     }
+    let group = group.as_raw_nonzero().get();
     let owned = fs::read_dir("/proc")?
         .flatten()
         .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-        .filter_map(Pid::from_raw)
-        .filter(|&pid| getpgid(Some(pid)).is_ok_and(|pgid| pgid == group))
+        .filter(|&pid| process_group_of(pid) == Some(group))
         .any(|pid| holds_any_socket(pid, &inodes));
     Ok(owned)
 }
@@ -70,8 +70,22 @@ fn proc_net_address(addr: SocketAddr) -> String {
     format!("{ip_hex}:{:04X}", addr.port())
 }
 
-fn holds_any_socket(pid: Pid, inodes: &HashSet<u64>) -> bool {
-    let Ok(fds) = fs::read_dir(format!("/proc/{}/fd", pid.as_raw_nonzero())) else {
+/// Process group of `pid`, read from `/proc` because kernel threads report
+/// group 0, which `getpgid` wrappers reject.
+fn process_group_of(pid: i32) -> Option<i32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_stat_process_group(&stat)
+}
+
+/// The `pgrp` field of a `/proc/<pid>/stat` line. The command name may hold
+/// spaces and parentheses, so fields are counted from its last `)`.
+fn parse_stat_process_group(stat: &str) -> Option<i32> {
+    let (_, after_command) = stat.rsplit_once(')')?;
+    after_command.split_whitespace().nth(2)?.parse().ok()
+}
+
+fn holds_any_socket(pid: i32, inodes: &HashSet<u64>) -> bool {
+    let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
         return false;
     };
     fds.flatten()
@@ -94,6 +108,8 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
+    use rustix::process::getpgid;
+
     use super::*;
 
     const TCP_TABLE: &str = "\
@@ -111,6 +127,14 @@ mod tests {
     fn parse_keeps_only_listen_rows_on_the_exact_address() {
         let inodes = parse_listening_inodes(TCP_TABLE, "0100007F:20C1");
         assert_eq!(inodes, HashSet::from([4242]));
+    }
+
+    #[test]
+    fn stat_process_group_counts_fields_after_the_command_name() {
+        let user = "4242 (llama) server) S 1 4240 4240 0 -1 4194560";
+        assert_eq!(parse_stat_process_group(user), Some(4240));
+        let kernel_thread = "2 (kthreadd) S 0 0 0 0 -1 2129984";
+        assert_eq!(parse_stat_process_group(kernel_thread), Some(0));
     }
 
     #[test]
