@@ -7,6 +7,7 @@ use assistd_ipc::{Event, Request, VoiceCaptureState};
 use uuid::Uuid;
 
 use crate::ipc_helper::run_one_shot;
+use crate::terminal_text::{escape_controls, escape_controls_single_line};
 
 #[derive(Debug, Clone, Copy)]
 pub enum PttAction {
@@ -36,16 +37,19 @@ pub async fn run(action: PttAction) -> Result<()> {
                 if text.trim().is_empty() {
                     eprintln!("[transcription: (no speech detected)]");
                 } else {
-                    eprintln!("[transcription: {text}]");
+                    eprintln!("[transcription: {}]", escape_controls_single_line(text));
                 }
             }
             Event::Delta { text, .. } => {
-                stdout.write_all(text.as_bytes())?;
+                stdout.write_all(escape_controls(text).as_bytes())?;
                 stdout.flush()?;
                 wrote_delta = wrote_delta || !text.is_empty();
             }
             Event::ToolCall { name, args, .. } => {
-                let preview = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let name = escape_controls_single_line(name);
+                let preview = escape_controls_single_line(
+                    args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+                );
                 if preview.is_empty() {
                     eprintln!("\n[tool call: {name}]");
                 } else {
@@ -53,6 +57,7 @@ pub async fn run(action: PttAction) -> Result<()> {
                 }
             }
             Event::ToolResult { name, result, .. } => {
+                let name = escape_controls_single_line(name);
                 let exit = result
                     .get("exit_code")
                     .and_then(|v| v.as_i64())
@@ -65,7 +70,10 @@ pub async fn run(action: PttAction) -> Result<()> {
                 message,
                 ..
             } => {
-                eprintln!("[{severity} {component}: {message}]");
+                eprintln!(
+                    "[{severity} {component}: {}]",
+                    escape_controls_single_line(message)
+                );
             }
             Event::ConfirmRequest { .. } => {
                 eprintln!(

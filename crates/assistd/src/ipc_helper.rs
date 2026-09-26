@@ -3,6 +3,8 @@
 use anyhow::{Error, Result};
 use assistd_ipc::{Event, IpcClient, IpcClientError, Request};
 
+use crate::terminal_text::escape_controls;
+
 /// Send `req` and hand every event, terminal ones included, to
 /// `on_event`. Returns after `Done`; on `Error` prints the daemon's
 /// message and exits 1 after `on_event` has seen it. A connection that
@@ -23,7 +25,7 @@ pub async fn run_one_shot(
         match event {
             Event::Done { .. } => return Ok(()),
             Event::Error { message, .. } => {
-                eprintln!("daemon error: {message}");
+                eprintln!("daemon error: {}", escape_controls(&message));
                 std::process::exit(1);
             }
             _ => {}
