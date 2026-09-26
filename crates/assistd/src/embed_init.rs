@@ -35,10 +35,18 @@ impl EmbeddingSubsystem {
         }
     }
 
-    pub async fn shutdown(self) {
+    /// Drain queued jobs while the embed server is still up, then stop the
+    /// server. The memory writer must still be running.
+    pub async fn shutdown(
+        self,
+        worker_shutdown: &watch::Sender<bool>,
+        server_shutdown: &watch::Sender<bool>,
+    ) {
+        worker_shutdown.send_replace(true);
         if let Some(h) = self.task_handle {
             let _ = h.await;
         }
+        server_shutdown.send_replace(true);
         if let Some(service) = self.service_handle
             && let Err(e) = service.shutdown().await
         {
@@ -52,7 +60,8 @@ impl EmbeddingSubsystem {
 pub async fn init(
     config: &Config,
     sqlite_handle: Option<&Arc<SqliteHandle>>,
-    shutdown_tx: &watch::Sender<bool>,
+    worker_shutdown: &watch::Sender<bool>,
+    server_shutdown: &watch::Sender<bool>,
 ) -> EmbeddingSubsystem {
     if !config.embedding.enabled {
         info!("embedding: disabled in config (embedding.enabled = false)");
@@ -62,7 +71,7 @@ pub async fn init(
     let service = match EmbedService::start(
         config.embedding.clone(),
         Duration::from_secs(config.llama_server.ready_timeout_secs.get()),
-        shutdown_tx.subscribe(),
+        server_shutdown.subscribe(),
     )
     .await
     {
@@ -106,7 +115,7 @@ pub async fn init(
         embedder.clone(),
         writer_tx,
         embed_rx,
-        shutdown_tx.subscribe(),
+        worker_shutdown.subscribe(),
     );
 
     info!(

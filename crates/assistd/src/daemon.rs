@@ -49,6 +49,44 @@ pub struct DaemonArgs {
     pub client_mode: bool,
 }
 
+/// One watch per teardown stage. A signal flips only `intake`; the rest
+/// flip in dependency order once in-flight work has drained.
+struct ShutdownStages {
+    intake: watch::Sender<bool>,
+    llm: watch::Sender<bool>,
+    tools: watch::Sender<bool>,
+    embed_worker: watch::Sender<bool>,
+    embed_server: watch::Sender<bool>,
+    memory_writer: watch::Sender<bool>,
+}
+
+impl ShutdownStages {
+    fn new() -> Self {
+        Self {
+            intake: watch::channel(false).0,
+            llm: watch::channel(false).0,
+            tools: watch::channel(false).0,
+            embed_worker: watch::channel(false).0,
+            embed_server: watch::channel(false).0,
+            memory_writer: watch::channel(false).0,
+        }
+    }
+
+    /// Flip every stage at once, for a startup abandoned mid-way.
+    fn cancel_all(&self) {
+        for stage in [
+            &self.intake,
+            &self.llm,
+            &self.tools,
+            &self.embed_worker,
+            &self.embed_server,
+            &self.memory_writer,
+        ] {
+            stage.send_replace(true);
+        }
+    }
+}
+
 struct DaemonShutdown {
     persistence_tracker: TaskTracker,
     presence: Arc<PresenceManager>,
@@ -56,49 +94,38 @@ struct DaemonShutdown {
     embed: EmbeddingSubsystem,
     window: WindowSubsystem,
     mcp: McpSubsystem,
-    hotkey_handle: Option<JoinHandle<()>>,
-    gpu_monitor_handle: Option<JoinHandle<()>>,
-    idle_monitor_handle: Option<JoinHandle<()>>,
-    listen_handles: Option<ListenDispatcherHandles>,
+    intake_tasks: IntakeTasks,
 }
 
 impl DaemonShutdown {
-    async fn shutdown(self) {
-        self.persistence_tracker.close();
-        if tokio::time::timeout(PERSISTENCE_DRAIN_BUDGET, self.persistence_tracker.wait())
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                target: "assistd::memory",
-                in_flight = self.persistence_tracker.len(),
-                "persistence task drain timed out at shutdown; abandoning remaining tasks"
-            );
-        }
+    /// Tear down after the socket has drained: finish intake tasks and
+    /// persistence, then stop each subsystem before the ones it depends on.
+    async fn shutdown(self, stages: &ShutdownStages) {
+        join_intake_tasks(self.intake_tasks).await;
+        drain_persistence(&self.persistence_tracker).await;
 
+        stages.llm.send_replace(true);
         if let Err(e) = self.presence.sleep().await {
             tracing::error!("presence shutdown error: {e:#}");
         }
 
-        self.memory.shutdown().await;
-
-        if let Some(h) = self.hotkey_handle {
-            let _ = h.await;
-        }
-        if let Some(h) = self.gpu_monitor_handle {
-            let _ = h.await;
-        }
-        if let Some(h) = self.idle_monitor_handle {
-            let _ = h.await;
-        }
-        if let Some(handles) = self.listen_handles {
-            let _ = handles.forwarder.await;
-            let _ = handles.presence_gate.await;
-        }
+        stages.tools.send_replace(true);
         self.window.shutdown().await;
         self.mcp.shutdown().await;
-        self.embed.shutdown().await;
+
+        self.embed
+            .shutdown(&stages.embed_worker, &stages.embed_server)
+            .await;
+        self.memory.shutdown(&stages.memory_writer).await;
     }
+}
+
+/// Tasks that start new work and stop on the `intake` stage.
+struct IntakeTasks {
+    hotkey: Option<JoinHandle<()>>,
+    gpu_monitor: Option<JoinHandle<()>>,
+    idle_monitor: Option<JoinHandle<()>>,
+    listen: Option<ListenDispatcherHandles>,
 }
 
 /// Run the daemon until shutdown.
@@ -133,28 +160,29 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     info!("  wm    v{}", assistd_wm::version());
     info!("loaded config from {}", config_path.display());
 
-    let (shutdown_tx, _) = watch::channel(false);
-    spawn_signal_handler(&shutdown_tx);
+    let stages = ShutdownStages::new();
+    spawn_signal_handler(&stages.intake);
 
-    let mut startup_shutdown_rx = shutdown_tx.subscribe();
+    let mut startup_shutdown_rx = stages.intake.subscribe();
     let started = tokio::select! {
         biased;
         _ = startup_shutdown_rx.wait_for(|v| *v) => None,
-        started = start(config, &config_path, args.client_mode, &shutdown_tx) => Some(started?),
+        started = start(config, &config_path, args.client_mode, &stages) => Some(started?),
     };
     let Some((state, subsystems)) = started else {
+        stages.cancel_all();
         info!("shutdown requested during startup; assistd stopped");
         return Ok(());
     };
 
-    let mut socket_shutdown_rx = shutdown_tx.subscribe();
+    let mut socket_shutdown_rx = stages.intake.subscribe();
     let socket_shutdown = async move {
         let _ = socket_shutdown_rx.wait_for(|v| *v).await;
     };
 
     let serve_result = assistd_core::socket::serve(state, socket_shutdown).await;
 
-    subsystems.shutdown().await;
+    subsystems.shutdown(&stages).await;
 
     serve_result?;
     info!("assistd stopped");
@@ -165,9 +193,9 @@ async fn start(
     config: Config,
     config_path: &Path,
     client_mode: bool,
-    shutdown_tx: &watch::Sender<bool>,
+    stages: &ShutdownStages,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
-    let presence = start_presence(&config, shutdown_tx).await?;
+    let presence = start_presence(&config, &stages.llm).await?;
     let vision_revalidator = probe_vision(&config, &presence).await?;
     let health_probe: Arc<dyn LlmHealthProbe> =
         Arc::new(PresenceLlmHealthProbe::new(presence.clone()));
@@ -178,17 +206,23 @@ async fn start(
         info!("hotkey: deferred to client (--client-mode)");
         None
     } else {
-        spawn_hotkeys(&config, &presence, &voice, shutdown_tx.subscribe())
+        spawn_hotkeys(&config, &presence, &voice, stages.intake.subscribe())
     };
     let gpu_monitor_handle =
-        gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
+        gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
     let idle_monitor_handle =
-        idle_monitor::spawn_monitor(&config.sleep, presence.clone(), shutdown_tx.subscribe());
+        idle_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
 
-    let mut memory = memory_init::init(&config, shutdown_tx).await;
-    let embed = embed_init::init(&config, memory.sqlite_handle.as_ref(), shutdown_tx).await;
-    let window = wm_init::init(&config, shutdown_tx).await;
-    let mut mcp = mcp_init::init(&config, shutdown_tx).await;
+    let mut memory = memory_init::init(&config, &stages.memory_writer).await;
+    let embed = embed_init::init(
+        &config,
+        memory.sqlite_handle.as_ref(),
+        &stages.embed_worker,
+        &stages.embed_server,
+    )
+    .await;
+    let window = wm_init::init(&config, &stages.tools).await;
+    let mut mcp = mcp_init::init(&config, &stages.tools).await;
 
     let conversation_ctx = Arc::new(ConversationContext::from_arc(
         memory.session_id.clone(),
@@ -244,7 +278,8 @@ async fn start(
         runtime: RuntimeState::new().with_conversation_ctx(conversation_ctx),
     });
     let persistence_tracker = state.runtime.persistence_tracker_handle();
-    let listen_handles = spawn_listen_dispatcher(&state, &voice.listener, &presence, shutdown_tx);
+    let listen_handles =
+        spawn_listen_dispatcher(&state, &voice.listener, &presence, &stages.intake);
 
     Ok((
         state,
@@ -255,10 +290,12 @@ async fn start(
             embed,
             window,
             mcp,
-            hotkey_handle,
-            gpu_monitor_handle,
-            idle_monitor_handle,
-            listen_handles,
+            intake_tasks: IntakeTasks {
+                hotkey: hotkey_handle,
+                gpu_monitor: gpu_monitor_handle,
+                idle_monitor: idle_monitor_handle,
+                listen: listen_handles,
+            },
         },
     ))
 }
@@ -274,13 +311,13 @@ pub fn init_config() -> Result<()> {
 
 async fn start_presence(
     config: &Config,
-    shutdown_tx: &watch::Sender<bool>,
+    llm_shutdown: &watch::Sender<bool>,
 ) -> Result<Arc<PresenceManager>> {
     let presence = PresenceManager::new_active(
         config.llama_server.clone(),
         config.model.clone(),
         config.timeouts.clone(),
-        shutdown_tx.subscribe(),
+        llm_shutdown.subscribe(),
     )
     .await?;
     info!(
@@ -369,7 +406,7 @@ fn spawn_listen_dispatcher(
     state: &Arc<AppState>,
     listener: &Arc<dyn ContinuousListener>,
     presence: &Arc<PresenceManager>,
-    shutdown_tx: &watch::Sender<bool>,
+    intake_shutdown: &watch::Sender<bool>,
 ) -> Option<ListenDispatcherHandles> {
     let voice = &state.config.voice;
     (voice.enabled && voice.continuous.enabled).then(|| {
@@ -378,7 +415,7 @@ fn spawn_listen_dispatcher(
             listener.clone(),
             presence.clone(),
             voice.continuous.start_on_launch,
-            shutdown_tx.subscribe(),
+            intake_shutdown.subscribe(),
         )
     })
 }
@@ -414,6 +451,35 @@ async fn forward_signals(shutdown_tx: watch::Sender<bool>) {
             std::process::exit(exit_code);
         }
         info!("received {name}; shutting down (send again to force exit)");
+    }
+}
+
+async fn join_intake_tasks(tasks: IntakeTasks) {
+    for handle in [tasks.hotkey, tasks.gpu_monitor, tasks.idle_monitor]
+        .into_iter()
+        .flatten()
+    {
+        let _ = handle.await;
+    }
+    if let Some(listen) = tasks.listen {
+        let _ = listen.forwarder.await;
+        let _ = listen.presence_gate.await;
+    }
+}
+
+/// Wait for fire-and-forget persistence tasks, abandoning them after
+/// [`PERSISTENCE_DRAIN_BUDGET`].
+async fn drain_persistence(tracker: &TaskTracker) {
+    tracker.close();
+    if tokio::time::timeout(PERSISTENCE_DRAIN_BUDGET, tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            target: "assistd::memory",
+            in_flight = tracker.len(),
+            "persistence task drain timed out at shutdown; abandoning remaining tasks"
+        );
     }
 }
 

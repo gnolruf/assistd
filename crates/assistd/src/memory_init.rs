@@ -39,12 +39,13 @@ impl MemorySubsystem {
         }
     }
 
-    /// End the session row and drain the writer task. Must run before
-    /// presence shutdown so writes accepted earlier still land.
-    pub async fn shutdown(self) {
+    /// End the session row, then flip `writer_shutdown` and drain the
+    /// writer task. Must run after every other writer client has stopped.
+    pub async fn shutdown(self, writer_shutdown: &watch::Sender<bool>) {
         if let Err(e) = self.conversation_store.end_session(&self.session_id).await {
             tracing::warn!("memory: end_session failed at shutdown: {e:#}");
         }
+        writer_shutdown.send_replace(true);
         if let Some(h) = self.writer_handle {
             let _ = h.await;
         }
