@@ -26,8 +26,8 @@ pub use confirm::{
 };
 pub use review::{Confirmation, DestructivePattern, Rules, check_argv, check_script};
 pub use sandbox::{
-    Protected, ResolvedSandboxMode, SandboxAccess, SandboxError, SandboxInfo, SandboxRequest,
-    probe_sandbox,
+    LaunchError, Protected, ResolvedSandboxMode, SandboxAccess, SandboxError, SandboxInfo,
+    SandboxRequest, probe_sandbox,
 };
 
 /// Policy for the commands that spawn subprocesses. A command runs

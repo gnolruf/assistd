@@ -68,6 +68,12 @@ impl Command for BashCommand {
         )
     }
 
+    /// The words become shell source, so bash expands them itself: a file
+    /// name matched by a glob must never be parsed as code.
+    fn expands_args(&self) -> bool {
+        false
+    }
+
     async fn run(&self, input: CommandInput) -> CommandOutput {
         if input.args.is_empty() {
             return CommandOutput::usage(self.help());

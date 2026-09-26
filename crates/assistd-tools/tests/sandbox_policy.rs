@@ -307,6 +307,52 @@ async fn bwrap_allows_writes_to_tmp() {
 }
 
 #[tokio::test]
+async fn bwrap_hides_the_host_tmp() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let host_file = tempfile::NamedTempFile::new_in("/tmp").expect("host /tmp file");
+    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let out = cmd
+        .run(input(&format!("test -e {}", host_file.path().display())))
+        .await;
+    assert_eq!(out.exit_code, 1, "host /tmp is visible inside the sandbox");
+}
+
+#[tokio::test]
+async fn bwrap_unshares_network_namespace() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let host = std::fs::read_link("/proc/self/ns/net").expect("host net namespace");
+    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let out = cmd.run(input("readlink /proc/self/ns/net")).await;
+    assert_eq!(out.exit_code, 0);
+    let inside = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        inside.starts_with("net:["),
+        "unexpected namespace link {inside:?}"
+    );
+    assert_ne!(Path::new(&inside), host);
+}
+
+#[tokio::test]
+async fn bwrap_clears_the_environment() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let out = cmd.run(input("printenv CARGO_MANIFEST_DIR")).await;
+    assert_eq!(
+        out.exit_code,
+        1,
+        "leaked: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[tokio::test]
 async fn bwrap_blocks_writes_to_read_only_root() {
     let Some(sandbox) = bwrap_or_none() else {
         return;

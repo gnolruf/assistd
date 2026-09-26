@@ -8,6 +8,7 @@ rust-version.workspace = true
 [features]
 i3 = ["assistd-wm/i3"]
 sway = ["assistd-wm/sway"]
+wayland = ["assistd-wm/wayland"]
 test-support = []
 
 [dependencies]
@@ -28,6 +29,7 @@ glob = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 infer = { workspace = true }
+landlock = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
 rustix = { workspace = true }

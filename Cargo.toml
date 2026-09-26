@@ -82,6 +82,9 @@ rubato = "5.0"
 webrtc-vad = "0.4"
 hound = "3.5"
 winit = { version = "0.30", default-features = false, features = ["x11", "wayland"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+landlock = "0.4.7"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

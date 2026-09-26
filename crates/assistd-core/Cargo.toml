@@ -8,6 +8,7 @@ rust-version.workspace = true
 [features]
 i3 = ["assistd-wm/i3"]
 sway = ["assistd-wm/sway"]
+wayland = ["assistd-wm/wayland"]
 
 [dependencies]
 assistd-config = { workspace = true }

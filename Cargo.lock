@@ -383,6 +383,7 @@ dependencies = [
  "base64 0.23.1",
  "glob",
  "infer",
+ "landlock",
  "parking_lot",
  "regex",
  "reqwest",
@@ -434,11 +435,14 @@ version = "1.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "rustix 1.1.5",
  "swayipc-async",
  "thiserror 2.0.20",
  "tokio",
  "tokio-i3ipc",
  "tracing",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]
@@ -2619,6 +2623,17 @@ dependencies = [
  "euclid",
  "polycool",
  "smallvec",
+]
+
+[[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
