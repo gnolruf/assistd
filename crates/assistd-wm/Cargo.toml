@@ -16,6 +16,7 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+rustix = { workspace = true, features = ["event"] }
 tokio-i3ipc = { workspace = true, optional = true }
 swayipc-async = { workspace = true, optional = true }
 tracing = { workspace = true }

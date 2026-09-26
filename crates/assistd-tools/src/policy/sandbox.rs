@@ -400,6 +400,17 @@ fn resolve_mode(
             None => return Err(SandboxError::BwrapNotFound),
         },
     };
+    if let ResolvedSandboxMode::Bwrap { path } = &mode
+        && is_setuid(path)
+    {
+        warn!(
+            target: "assistd::policy",
+            path = %path.display(),
+            "bwrap is setuid, but `wm open` runs it with no_new_privs (Landlock requires it), \
+             so it gets no root privileges: launches fail unless unprivileged user namespaces \
+             are enabled"
+        );
+    }
     Ok(mode)
 }
 
@@ -432,6 +443,16 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
+}
+
+#[cfg(unix)]
+fn is_setuid(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|md| md.permissions().mode() & 0o4000 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_setuid(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -661,6 +682,19 @@ mod tests {
                 "{request:?}"
             );
         }
+    }
+
+    #[test]
+    fn setuid_is_read_from_the_mode_bits() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let set_mode = |mode| {
+            std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(mode))
+                .expect("chmod");
+        };
+        set_mode(0o755);
+        assert!(!is_setuid(file.path()));
+        set_mode(0o4755);
+        assert!(is_setuid(file.path()));
     }
 
     #[test]

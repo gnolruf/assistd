@@ -10,6 +10,7 @@ use assistd_wm::{RestrictedWaylandSocket, SecurityContextError};
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetError, Scope};
 use tokio::process::{Child, Command as ProcCommand};
 use tokio::sync::Mutex;
+use tracing::info;
 
 use super::SandboxAccess;
 
@@ -52,13 +53,21 @@ impl SessionDisplay {
     }
 }
 
-/// The [`SessionDisplay`] every launch shares, created on first use.
+/// The [`SessionDisplay`] every launch shares, created on first use and
+/// again whenever the compositor stops listening on it, as on a restart.
 #[derive(Debug, Default)]
 pub(super) struct SharedDisplay(Mutex<Option<Arc<SessionDisplay>>>);
 
 impl SharedDisplay {
     pub(super) async fn get(&self) -> Result<Arc<SessionDisplay>, LaunchError> {
         let mut slot = self.0.lock().await;
+        if let Some(stale) = slot.take_if(|display| !display.socket.is_listening()) {
+            info!(
+                target: "assistd::policy",
+                socket = %stale.socket.path().display(),
+                "compositor stopped listening on the restricted Wayland socket; recreating it"
+            );
+        }
         if let Some(display) = slot.as_ref() {
             return Ok(display.clone());
         }
