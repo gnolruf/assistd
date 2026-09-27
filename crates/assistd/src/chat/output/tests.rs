@@ -11,6 +11,7 @@ fn line_text(line: &Line<'static>) -> String {
 fn item_text(it: &OutputItem) -> String {
     match it {
         OutputItem::Text(l) => line_text(l),
+        OutputItem::Assistant(text) => text.clone(),
         OutputItem::Tool(b) => format!("[tool:{}]", b.command),
         OutputItem::Thumbnail(t) => format!("[thumb:{}]", t.name),
         OutputItem::Thinking(t) => format!(
@@ -80,21 +81,40 @@ fn append_without_begin_auto_starts() {
 }
 
 #[test]
-fn append_splits_on_embedded_newlines() {
+fn append_keeps_one_reply_in_one_item_across_newlines() {
     let mut p = OutputPane::new();
-    p.append_assistant("line1\nline2\nline3");
-    assert_eq!(item_texts(&p), ["line1", "line2", "line3"]);
-    assert_eq!(p.open_assistant, Some(2));
+    p.append_assistant("line1\nline2\n");
+    p.append_assistant("line3");
+    assert_eq!(item_texts(&p), ["line1\nline2\nline3"]);
+    assert_eq!(p.open_assistant, Some(0));
+    assert_eq!(rendered_lines(&mut p, 40, 5), ["line1 line2 line3"]);
 }
 
 #[test]
-fn append_trailing_newline_opens_blank_tail() {
+fn reply_renders_markdown_blocks_and_inline_styles() {
     let mut p = OutputPane::new();
-    p.append_assistant("hello\n");
-    assert_eq!(item_texts(&p), ["hello", ""]);
-    assert_eq!(p.open_assistant, Some(1));
-    p.append_assistant("more");
-    assert_eq!(item_texts(&p), ["hello", "more"]);
+    p.append_assistant("Some **bold** text.\n\n- one\n- two\n");
+    p.finish_assistant();
+    assert_eq!(
+        rendered_lines(&mut p, 40, 10),
+        ["Some bold text.", "", "• one", "• two", ""]
+    );
+    let (lines, _) = p.render_view(40, 10);
+    let bold = lines[0]
+        .spans
+        .iter()
+        .find(|s| s.content == "bold")
+        .expect("bold span");
+    assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn streamed_delimiters_restyle_the_open_reply() {
+    let mut p = OutputPane::new();
+    p.append_assistant("a **b");
+    assert_eq!(rendered_lines(&mut p, 40, 5), ["a **b"]);
+    p.append_assistant("old** c");
+    assert_eq!(rendered_lines(&mut p, 40, 5), ["a bold c"]);
 }
 
 #[test]
@@ -428,21 +448,22 @@ fn wrapping_splits_long_line_at_word_boundaries() {
 #[test]
 fn render_view_clamps_scroll_offset() {
     let mut p = OutputPane::new();
-    for _ in 0..15 {
-        p.append_assistant("line\n");
+    for i in 0..15 {
+        p.push_info(&format!("line {i}"));
     }
     p.scroll_offset = 99;
     let (lines, start) = p.render_view(80, 10);
     assert_eq!(lines.len(), 10);
     assert_eq!(start, 0);
-    assert_eq!(p.scroll_offset, 6);
+    assert_eq!(p.scroll_offset, 5);
 }
 
 #[test]
 fn render_view_zero_width_falls_back_to_raw_lines() {
     let mut p = OutputPane::new();
     p.push_user("hi");
-    assert_eq!(rendered_lines(&mut p, 0, 5), ["> hi", ""]);
+    p.append_assistant("**one**\ntwo");
+    assert_eq!(rendered_lines(&mut p, 0, 5), ["> hi", "", "**one**", "two"]);
 }
 
 fn thumbnail_protocol() -> StatefulProtocol {
@@ -510,7 +531,7 @@ fn incremental_rewrap_matches_full_rewrap() {
 }
 
 #[test]
-fn streaming_delta_rewraps_only_the_open_line() {
+fn streaming_delta_rewraps_only_the_open_reply() {
     let mut p = OutputPane::new();
     push_seq_30(&mut p);
     p.append_assistant("hello");
