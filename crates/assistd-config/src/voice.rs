@@ -5,12 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
     DEFAULT_LISTEN_ENABLED, DEFAULT_LISTEN_HOTKEY, DEFAULT_LISTEN_MAX_UTTERANCE_SECS,
-    DEFAULT_LISTEN_SILENCE_MS, DEFAULT_LISTEN_START_ON_LAUNCH, DEFAULT_PIPER_BINARY,
-    DEFAULT_PIPER_DEADLINE_SECS, DEFAULT_PIPER_ENABLED, DEFAULT_PIPER_LENGTH_SCALE,
-    DEFAULT_PIPER_MAX_SENTENCE_CHARS, DEFAULT_PIPER_PARTIAL_FLUSH_MS, DEFAULT_PIPER_SKIP_HOTKEY,
-    DEFAULT_PIPER_TOGGLE_HOTKEY, DEFAULT_PIPER_VOICE, DEFAULT_VOICE_HOTKEY,
-    DEFAULT_VOICE_MAX_RECORDING_SECS, DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL,
-    DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL,
+    DEFAULT_LISTEN_PLAYBACK_GATE, DEFAULT_LISTEN_SILENCE_MS, DEFAULT_LISTEN_START_ON_LAUNCH,
+    DEFAULT_PIPER_BINARY, DEFAULT_PIPER_DEADLINE_SECS, DEFAULT_PIPER_ENABLED,
+    DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS, DEFAULT_PIPER_PARTIAL_FLUSH_MS,
+    DEFAULT_PIPER_SKIP_HOTKEY, DEFAULT_PIPER_TOGGLE_HOTKEY, DEFAULT_PIPER_VOICE,
+    DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS, DEFAULT_WHISPER_BEAMS,
+    DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED,
+    DEFAULT_WHISPER_VAD_MODEL,
 };
 
 /// Voice input and output settings.
@@ -97,6 +98,10 @@ pub struct ContinuousListenConfig {
     pub silence_ms: NonZeroU32,
     /// Seconds after which an utterance is transcribed even mid-speech.
     pub max_utterance_secs: NonZeroU32,
+    /// Discard mic audio while a reply is being spoken, so the daemon never
+    /// transcribes its own speech. `false` allows barge-in but requires an
+    /// echo-cancelled mic source; without one, replies trigger new queries.
+    pub playback_gate: bool,
 }
 
 impl Default for ContinuousListenConfig {
@@ -107,6 +112,7 @@ impl Default for ContinuousListenConfig {
             hotkey: DEFAULT_LISTEN_HOTKEY.to_string(),
             silence_ms: DEFAULT_LISTEN_SILENCE_MS,
             max_utterance_secs: DEFAULT_LISTEN_MAX_UTTERANCE_SECS,
+            playback_gate: DEFAULT_LISTEN_PLAYBACK_GATE,
         }
     }
 }

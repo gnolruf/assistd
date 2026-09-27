@@ -29,7 +29,7 @@ pub mod controller;
 pub mod error;
 pub mod sentence;
 
-pub use controller::{SpeakDecision, VoiceOutputController};
+pub use controller::{SpeakDecision, SpeakingGuard, VoiceOutputController};
 pub use error::{VoiceInputError, VoiceOutputError};
 #[cfg(feature = "listen")]
 pub use listen::{ContinuousListener, ListenError, MicContinuousListener, NoContinuousListener};

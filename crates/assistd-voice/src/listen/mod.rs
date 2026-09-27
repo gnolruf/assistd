@@ -8,6 +8,7 @@ use tokio::sync::{broadcast, watch};
 pub mod capture;
 pub mod consumer;
 pub mod mic;
+pub mod playback_gate;
 pub mod vad;
 
 pub use mic::MicContinuousListener;

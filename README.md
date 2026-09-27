@@ -185,6 +185,9 @@ optional ones with sensible defaults the daemon falls back to).
 - [i3 setup](docs/wm/i3.md) and [Sway setup](docs/wm/sway.md) —
   copy-paste keybinds for push-to-talk, presence, and the TUI
   scratchpad.
+- [Echo cancellation](docs/voice/echo-cancellation.md) — let
+  PipeWire or PulseAudio cancel TTS echo so continuous listening can
+  be interrupted mid-reply.
 
 ## License
 

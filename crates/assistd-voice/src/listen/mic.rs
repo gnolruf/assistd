@@ -1,5 +1,5 @@
 //! cpal + webrtc-vad + whisper hands-free listener: ring buffer →
-//! resampler → VAD frames → transcriber → broadcast.
+//! resampler → playback gate → VAD frames → transcriber → broadcast.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::capture::{self, ListenCaptureSession};
+use super::playback_gate::{PLAYBACK_HANGOVER_FRAMES, PlaybackGate};
 use super::vad::{FRAME_SAMPLES, UtteranceVad, VadEvent, VadTuning};
 use super::{ContinuousListener, ListenError};
 use crate::mic::capture::AudioCaptureError;
@@ -33,6 +34,7 @@ pub struct MicContinuousListener {
     transcriber: Arc<dyn Transcriber>,
     mic_device: Option<String>,
     tuning: VadTuning,
+    output_speaking: Option<watch::Receiver<bool>>,
     active: AtomicBool,
     state_tx: watch::Sender<bool>,
     utterances: broadcast::Sender<String>,
@@ -69,15 +71,23 @@ impl ListenSession {
 }
 
 impl MicContinuousListener {
-    /// The audio device is opened on [`Self::start`], not here.
-    pub fn new(transcriber: Arc<dyn Transcriber>, config: &VoiceConfig) -> Self {
+    /// The audio device is opened on [`Self::start`], not here. When the
+    /// playback gate is configured on, frames captured while
+    /// `output_speaking` is true are discarded.
+    pub fn new(
+        transcriber: Arc<dyn Transcriber>,
+        config: &VoiceConfig,
+        output_speaking: watch::Receiver<bool>,
+    ) -> Self {
         let tuning = tuning_from_config(&config.continuous);
+        let output_speaking = config.continuous.playback_gate.then_some(output_speaking);
         let (state_tx, _) = watch::channel(false);
         let (utterances, _) = broadcast::channel(UTTERANCE_CHANNEL_DEPTH);
         Self {
             transcriber,
             mic_device: config.mic_device.clone(),
             tuning,
+            output_speaking,
             active: AtomicBool::new(false),
             state_tx,
             utterances,
@@ -110,7 +120,12 @@ impl ContinuousListener for MicContinuousListener {
             pcm_rx,
         ));
         let tuning = self.tuning;
-        let vad_handle = tokio::task::spawn_blocking(move || vad_loop(tuning, frame_rx, pcm_tx));
+        let playback_gate = self
+            .output_speaking
+            .clone()
+            .map(|speaking| PlaybackGate::new(speaking, PLAYBACK_HANGOVER_FRAMES));
+        let vad_handle =
+            tokio::task::spawn_blocking(move || vad_loop(tuning, playback_gate, frame_rx, pcm_tx));
 
         listen_state.session = Some(ListenSession {
             capture_stop,
@@ -155,16 +170,26 @@ fn tuning_from_config(config: &ContinuousListenConfig) -> VadTuning {
     VadTuning::from_ms(config.silence_ms.get(), config.max_utterance_secs.get())
 }
 
-/// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer. Never
-/// waits on `pcm_tx`: stalling here would back up the frame channel and
-/// silently truncate live audio, so a full queue drops the utterance.
+/// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer. Frames
+/// blocked by the playback gate also reset the VAD, since a half-captured
+/// utterance is about to be contaminated by the daemon's own speech.
+/// Never waits on `pcm_tx`: stalling here would back up the frame channel
+/// and silently truncate live audio, so a full queue drops the utterance.
 fn vad_loop(
     tuning: VadTuning,
+    mut playback_gate: Option<PlaybackGate>,
     mut frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
     pcm_tx: mpsc::Sender<Vec<i16>>,
 ) {
     let mut vad = UtteranceVad::new(tuning);
     while let Some(frame) = frame_rx.blocking_recv() {
+        if playback_gate
+            .as_mut()
+            .is_some_and(PlaybackGate::blocks_frame)
+        {
+            vad.reset();
+            continue;
+        }
         let Some(event) = vad.feed(&frame) else {
             continue;
         };

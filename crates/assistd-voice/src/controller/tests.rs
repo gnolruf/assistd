@@ -111,3 +111,25 @@ async fn toggle_off_then_on_resumes_speak_decision() {
     assert_eq!(ctrl.should_speak(start), SpeakDecision::Speak);
     assert_eq!(ctrl.current_epoch(), start);
 }
+
+#[tokio::test]
+async fn speaking_is_raised_while_any_guard_is_alive() {
+    let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), true);
+    let mut speaking = ctrl.subscribe_speaking();
+    assert!(!ctrl.is_speaking());
+    assert!(!*speaking.borrow_and_update());
+
+    let first = ctrl.begin_speaking();
+    assert!(ctrl.is_speaking());
+    assert!(speaking.has_changed().unwrap());
+    assert!(*speaking.borrow_and_update());
+
+    let second = ctrl.begin_speaking();
+    drop(first);
+    assert!(ctrl.is_speaking(), "one worker still speaking");
+    assert!(!speaking.has_changed().unwrap());
+
+    drop(second);
+    assert!(!ctrl.is_speaking());
+    assert!(!*speaking.borrow_and_update());
+}

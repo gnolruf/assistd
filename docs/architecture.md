@@ -223,7 +223,12 @@ as if the user had typed them.
 
 Continuous mode (`MicContinuousListener`) keeps the mic open and uses
 WebRTC VAD plus a Whisper-resident silence detector to decide when
-to chop the stream into utterances. To avoid GPU thrashing during
+to chop the stream into utterances. While `VoiceOutputController`
+reports that a reply is being spoken (plus a short hangover), a
+`PlaybackGate` discards mic frames and resets the VAD so the daemon
+never transcribes its own TTS; `voice.continuous.playback_gate = false`
+removes the gate for setups whose sound server already cancels echo.
+To avoid GPU thrashing during
 chat generation, the `QueuedTranscriber` defers Whisper inference
 when the LLM is mid-stream.
 
