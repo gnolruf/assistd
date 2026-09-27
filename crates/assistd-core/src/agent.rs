@@ -178,9 +178,10 @@ impl Agent {
         }
     }
 
-    /// Announce the step's calls, then dispatch each in order. Stops early
-    /// with cancelled payloads when the client leaves or the turn is
-    /// cancelled. The flag is `true` when a call hit [`DUPLICATE_CALL_LIMIT`].
+    /// Announce the step's calls, then dispatch each in order. Once the
+    /// client leaves or the turn is cancelled, every call not yet run is
+    /// answered with a cancelled payload so the batch stays complete. The
+    /// flag is `true` when a call hit [`DUPLICATE_CALL_LIMIT`].
     async fn dispatch_tool_calls(
         &self,
         turn: &mut Turn,
@@ -194,7 +195,8 @@ impl Agent {
                 calls: calls.clone(),
             })
             .await;
-        for call in calls {
+        let mut pending = calls.into_iter();
+        for call in pending.by_ref() {
             stuck |= turn.streak.record(&call) >= DUPLICATE_CALL_LIMIT;
             if turn.stop_requested() {
                 debug!(
@@ -204,50 +206,51 @@ impl Agent {
                     cancelled = turn.cancel.is_cancelled(),
                     "stopping mid-call (client gone or explicit cancel) without dispatch"
                 );
-                results.push(cancelled_tool_result(&call, "cancelled before dispatch").0);
+                results.push(skip_tool_call(turn, &call).await);
                 break;
             }
 
-            let _ = turn
-                .tx
-                .send(LlmEvent::ToolCall {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                })
-                .await;
-
-            let dispatched = tokio::select! {
-                biased;
-                () = turn.cancel.cancelled() => None,
-                r = dispatch_tool_call(&self.tools, &call, turn.iteration, self.tool_deadline) => Some(r),
-            };
-            let (payload, raw_result) = dispatched.unwrap_or_else(|| {
-                warn!(
-                    target: "assistd::agent",
-                    iteration = turn.iteration,
-                    tool = %call.name,
-                    "cancellation fired during tool dispatch; abandoning tool"
-                );
-                cancelled_tool_result(&call, "cancelled during dispatch")
-            });
-            let cancelled_mid_dispatch = turn.cancel.is_cancelled();
-
-            let _ = turn
-                .tx
-                .send(LlmEvent::ToolResult {
-                    id: payload.call_id.clone(),
-                    name: payload.name.clone(),
-                    result: raw_result,
-                })
-                .await;
+            let (payload, cancelled_mid_dispatch) = self.run_tool_call(turn, &call).await;
             results.push(payload);
-
             if cancelled_mid_dispatch {
                 break;
             }
         }
+        for call in pending {
+            results.push(skip_tool_call(turn, &call).await);
+        }
         (results, stuck)
+    }
+
+    /// Announce and run one call, or abandon it when the turn is cancelled
+    /// meanwhile. The flag is `true` when cancellation fired.
+    async fn run_tool_call(&self, turn: &Turn, call: &ToolCall) -> (ToolResultPayload, bool) {
+        let _ = turn
+            .tx
+            .send(LlmEvent::ToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            })
+            .await;
+
+        let dispatched = tokio::select! {
+            biased;
+            () = turn.cancel.cancelled() => None,
+            r = dispatch_tool_call(&self.tools, call, turn.iteration, self.tool_deadline) => Some(r),
+        };
+        let (payload, raw_result) = dispatched.unwrap_or_else(|| {
+            warn!(
+                target: "assistd::agent",
+                iteration = turn.iteration,
+                tool = %call.name,
+                "cancellation fired during tool dispatch; abandoning tool"
+            );
+            cancelled_tool_result(call, "cancelled during dispatch")
+        });
+        let cancelled_mid_dispatch = turn.cancel.is_cancelled();
+        send_tool_result(turn, &payload, raw_result).await;
+        (payload, cancelled_mid_dispatch)
     }
 
     async fn withdraw_tools(&self, turn: &mut Turn, why: ToolBudgetExhausted) {
@@ -492,6 +495,25 @@ fn status_event(
         event,
         message,
     }
+}
+
+/// Answer a call that will never run, reporting the result like any other
+/// so the client and the transcript see the batch completed.
+async fn skip_tool_call(turn: &Turn, call: &ToolCall) -> ToolResultPayload {
+    let (payload, raw_result) = cancelled_tool_result(call, "cancelled before dispatch");
+    send_tool_result(turn, &payload, raw_result).await;
+    payload
+}
+
+async fn send_tool_result(turn: &Turn, payload: &ToolResultPayload, raw_result: Value) {
+    let _ = turn
+        .tx
+        .send(LlmEvent::ToolResult {
+            id: payload.call_id.clone(),
+            name: payload.name.clone(),
+            result: raw_result,
+        })
+        .await;
 }
 
 fn cancelled_tool_result(call: &ToolCall, reason: &str) -> (ToolResultPayload, Value) {

@@ -568,6 +568,70 @@ async fn cancellation_during_hung_tool_preempts_dispatch() {
     );
 }
 
+#[tokio::test]
+async fn cancellation_mid_batch_answers_every_remaining_call() {
+    let entered = Arc::new(Notify::new());
+    let mut tools = ToolRegistry::new();
+    tools.register(HangingTool {
+        entered: entered.clone(),
+    });
+    let backend = MockBackend::with(vec![StepOutcome::ToolCalls(vec![
+        call("c-1", "hang"),
+        call("c-2", "echo b"),
+        call("c-3", "echo c"),
+    ])]);
+    let (tx, mut rx) = mpsc::channel::<LlmEvent>(16);
+    let token = CancellationToken::new();
+    let kicker = token.clone();
+    tokio::spawn(async move {
+        entered.notified().await;
+        kicker.cancel();
+    });
+
+    let agent = Agent::new(backend.clone(), Arc::new(tools), None, TOOL_DEADLINE);
+    let turn = agent.run_turn("go".into(), Vec::new(), tx, token);
+    tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("cancellation did not preempt hung tool")
+        .unwrap();
+
+    let events = collect(&mut rx).await;
+    let answered: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            LlmEvent::ToolResult { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answered, ["c-1", "c-2", "c-3"], "{events:?}");
+
+    let pushed = backend.pushed_results.lock();
+    let [step] = pushed.as_slice() else {
+        panic!("batch was not answered exactly once: {pushed:?}");
+    };
+    let contents: Vec<(&str, &str)> = step
+        .iter()
+        .map(|payload| (payload.call_id.as_str(), payload.content.as_str()))
+        .collect();
+    assert_eq!(
+        contents,
+        [
+            (
+                "c-1",
+                "[error] run: agent turn cancelled during dispatch.\n[exit:-1 | 0ms]"
+            ),
+            (
+                "c-2",
+                "[error] run: agent turn cancelled before dispatch.\n[exit:-1 | 0ms]"
+            ),
+            (
+                "c-3",
+                "[error] run: agent turn cancelled before dispatch.\n[exit:-1 | 0ms]"
+            ),
+        ]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn hung_tool_past_deadline_becomes_error_result_and_turn_continues() {
     let mut tools = ToolRegistry::new();

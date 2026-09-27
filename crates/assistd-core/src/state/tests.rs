@@ -1046,32 +1046,112 @@ async fn interrupt_turn_preempts_hung_tool() {
     assert_eq!(events.last(), Some(&done("q")), "{events:?}");
 }
 
-#[tokio::test]
-async fn dispatch_envelope_timeout_tears_down_hung_tool() {
-    let entered = Arc::new(Notify::new());
-    let dropped = Arc::new(AtomicBool::new(false));
+#[tokio::test(start_paused = true)]
+async fn query_turn_outlives_the_dispatch_envelope() {
+    let backend = ToolCallBackend::new(
+        "",
+        "done.",
+        vec![StepOutcome::ToolCalls(vec![ToolCall {
+            id: "c1".into(),
+            name: "sleep".into(),
+            arguments: serde_json::json!({}),
+        }])],
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(SleepTool { ms: 3_000 });
     let mut config = Config::default();
     config.timeouts.dispatch_envelope_secs = 1;
-    let state = state_with_hanging_tool(config, entered, dropped.clone());
+    let state = StateParts {
+        config,
+        backend,
+        tools: Arc::new(tools),
+        ..StateParts::default()
+    }
+    .build();
 
-    let (res, events) =
-        tokio::time::timeout(Duration::from_secs(10), dispatch(&state, query("q", "go")))
-            .await
-            .expect("dispatch envelope did not fire");
+    let (res, events) = dispatch(&state, query("q", "go")).await;
     res.unwrap();
-    assert_eq!(
-        events.last(),
-        Some(&error("q", "request exceeded 1s envelope timeout")),
-        "{events:?}"
-    );
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !dropped.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("agent task outlived the dropped dispatch handler");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ToolResult { id, .. } if id == "q")),
+        "tool result never reached the client: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Error { .. })),
+        "envelope cut the turn short: {events:?}"
+    );
+    assert_eq!(events.last(), Some(&done("q")), "{events:?}");
+}
+
+#[tokio::test]
+async fn client_departure_cancels_the_turn_and_completes_the_batch() {
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let backend = ToolCallBackend::new(
+        "Working.",
+        "done.",
+        vec![StepOutcome::ToolCalls(vec![
+            ToolCall {
+                id: "c1".into(),
+                name: "hang".into(),
+                arguments: serde_json::json!({}),
+            },
+            ToolCall {
+                id: "c2".into(),
+                name: "hang".into(),
+                arguments: serde_json::json!({}),
+            },
+        ])],
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(HangingTool {
+        entered: entered.clone(),
+        dropped: dropped.clone(),
+    });
+    let (state, conv, _session, branch) = branch_state_with(backend, Arc::new(tools)).await;
+
+    let (tx, rx) = mpsc::channel::<Event>(16);
+    let turn = tokio::spawn(state.clone().dispatch(query("q", "go"), tx));
+    entered.notified().await;
+    drop(rx);
+
+    tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("turn did not end after its client left")
+        .unwrap()
+        .unwrap();
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "hung tool kept running after the client left"
+    );
+    state.drain_persistence_inflight().await;
+
+    let rows = conv.load_branch_history(branch).await.unwrap();
+    let shape: Vec<_> = rows
+        .iter()
+        .map(|r| (r.role, r.tool_call_id.as_deref()))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            (PersistedRole::User, None),
+            (PersistedRole::Assistant, None),
+            (PersistedRole::Tool, Some("c1")),
+            (PersistedRole::Tool, Some("c2")),
+        ]
+    );
+    assert!(
+        rows[2].content.contains("cancelled during dispatch"),
+        "{}",
+        rows[2].content
+    );
+    assert!(
+        rows[3].content.contains("cancelled before dispatch"),
+        "{}",
+        rows[3].content
+    );
 }
 
 fn window(class: Option<&str>, title: Option<&str>, ws: Option<&str>) -> FocusedWindowContext {

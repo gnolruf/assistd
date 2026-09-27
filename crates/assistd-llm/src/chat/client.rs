@@ -748,12 +748,20 @@ fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<ToolCallRecord>> {
     Ok(out)
 }
 
+/// Record the step in `conv`. Tool calls from a stream that ended before
+/// the model's finish chunk are discarded rather than run half-built.
 fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<StepOutcome> {
     if accum.tool_calls.is_empty() {
         conv.push_assistant(accum.text);
         return Ok(StepOutcome::Final);
     }
-    if !matches!(accum.finish_reason.as_deref(), None | Some("tool_calls")) {
+    if accum.finish_reason.is_none() {
+        return Err(LlmError::ToolCallParse(format!(
+            "stream ended before its {} tool call(s) were complete; discarded",
+            accum.tool_calls.len()
+        )));
+    }
+    if accum.finish_reason.as_deref() != Some("tool_calls") {
         warn!(
             target: "assistd::chat",
             finish_reason = accum.finish_reason.as_deref().unwrap_or("<none>"),
