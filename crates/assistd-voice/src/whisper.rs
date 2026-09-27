@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
-    WhisperVadParams, convert_integer_to_float_audio,
+    WhisperVadContext, WhisperVadContextParams, WhisperVadParams, WhisperVadSegment,
+    convert_integer_to_float_audio,
 };
 
 use crate::gpu;
@@ -20,17 +21,62 @@ use crate::transcribe::{Transcriber, TranscriptionError};
 /// segment. Maps to whisper.cpp's `min_silence_duration_ms`.
 pub const VAD_SILENCE_SECS: f32 = 0.5;
 
+const SAMPLE_RATE_HZ: usize = 16_000;
+const SAMPLES_PER_CENTISECOND: f32 = SAMPLE_RATE_HZ as f32 / 100.0;
+/// Trailing audio kept after each non-final speech segment, matching
+/// whisper.cpp's `samples_overlap` default.
+const SEGMENT_OVERLAP_SECS: f32 = 0.1;
+/// Silence inserted between stitched speech segments.
+const SEGMENT_GAP_SECS: f32 = 0.1;
+
 #[derive(Debug, Clone)]
 struct InferenceConfig {
     threads: Option<u32>,
     beams: u32,
-    vad: Option<SileroVadParams>,
 }
 
 #[derive(Debug, Clone)]
 struct SileroVadParams {
     model_path: String,
     silence_secs: f32,
+}
+
+/// Silero VAD run ahead of decoding, keeping only the speech segments.
+/// whisper.cpp only applies its built-in VAD in `whisper_full`, which
+/// whisper-rs never calls, so trimming happens here instead.
+#[derive(Debug)]
+struct SpeechTrimmer {
+    context: Mutex<WhisperVadContext>,
+    silence_secs: f32,
+}
+
+impl SpeechTrimmer {
+    fn load(params: &SileroVadParams, use_gpu: bool) -> Result<Self, TranscriptionError> {
+        let mut context_params = WhisperVadContextParams::new();
+        context_params.set_use_gpu(use_gpu);
+        let context = WhisperVadContext::new(&params.model_path, context_params)
+            .map_err(|err| TranscriptionError::WhisperInit(err.to_string()))?;
+        Ok(Self {
+            context: Mutex::new(context),
+            silence_secs: params.silence_secs,
+        })
+    }
+
+    /// Returns only the speech in `audio`, or an empty buffer when none was detected.
+    fn trim(&self, audio: &[f32]) -> Result<Vec<f32>, TranscriptionError> {
+        let segments = self
+            .context
+            .lock()
+            .segments_from_samples(silero_vad_params(self.silence_secs), audio)
+            .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))?
+            .collect::<Vec<_>>();
+        tracing::debug!(
+            target: "assistd::voice::whisper",
+            segments = segments.len(),
+            "silero vad detected speech segments"
+        );
+        Ok(stitch_speech_segments(audio, &segments))
+    }
 }
 
 /// Idle whisper states (KV cache and compute buffers) reused across calls.
@@ -69,6 +115,7 @@ pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
     states: Arc<StatePool<WhisperState>>,
     inference: InferenceConfig,
+    trimmer: Option<Arc<SpeechTrimmer>>,
     is_gpu: bool,
 }
 
@@ -100,13 +147,21 @@ impl Transcriber for WhisperTranscriber {
         let ctx = self.ctx.clone();
         let states = self.states.clone();
         let inference = self.inference.clone();
+        let trimmer = self.trimmer.clone();
         let result = tokio::task::spawn_blocking(move || {
+            let speech = match &trimmer {
+                Some(trimmer) => trimmer.trim(&audio_f32)?,
+                None => audio_f32,
+            };
+            if speech.is_empty() {
+                return Ok(String::new());
+            }
             states.with_state(
                 || {
                     ctx.create_state()
                         .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))
                 },
-                |state| run_inference(state, &inference, &audio_f32),
+                |state| run_inference(state, &inference, &speech),
             )
         })
         .await?;
@@ -165,7 +220,7 @@ impl WhisperTranscriberBuilder {
         self
     }
 
-    /// Enable whisper.cpp's built-in Silero VAD for silence trimming.
+    /// Trim non-speech audio with Silero VAD before decoding.
     pub fn vad_enabled(mut self, enabled: bool) -> Self {
         self.vad_enabled = enabled;
         self
@@ -222,6 +277,10 @@ impl WhisperTranscriberBuilder {
 
         let use_gpu = should_use_gpu(self.prefer_gpu);
         let ctx = load_context(&model_path, use_gpu).await?;
+        let trimmer = match vad {
+            Some(vad) => Some(Arc::new(load_trimmer(vad, use_gpu).await?)),
+            None => None,
+        };
 
         Ok(WhisperTranscriber {
             ctx: Arc::new(ctx),
@@ -229,8 +288,8 @@ impl WhisperTranscriberBuilder {
             inference: InferenceConfig {
                 threads: self.threads,
                 beams: self.beams.max(1),
-                vad,
             },
+            trimmer,
             is_gpu: use_gpu,
         })
     }
@@ -266,11 +325,6 @@ fn run_inference(
     params.set_suppress_blank(true);
     if let Some(threads) = inference.threads {
         params.set_n_threads(threads as i32);
-    }
-    if let Some(vad) = &inference.vad {
-        params.set_vad_model_path(Some(vad.model_path.as_str()));
-        params.enable_vad(true);
-        params.set_vad_params(silero_vad_params(vad.silence_secs));
     }
 
     state
@@ -308,6 +362,37 @@ fn silero_vad_params(silence_secs: f32) -> WhisperVadParams {
     vad_params
 }
 
+/// Concatenates the audio covered by `segments`, extending every non-final
+/// segment by the overlap whisper.cpp uses and separating segments with a
+/// short silence, so the decoder sees natural pauses instead of hard cuts.
+fn stitch_speech_segments(audio: &[f32], segments: &[WhisperVadSegment]) -> Vec<f32> {
+    let overlap_samples = secs_to_samples(SEGMENT_OVERLAP_SECS);
+    let gap = vec![0.0f32; secs_to_samples(SEGMENT_GAP_SECS)];
+    let last_index = segments.len().saturating_sub(1);
+    let mut stitched = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let start = centiseconds_to_samples(segment.start).min(audio.len());
+        let mut end = centiseconds_to_samples(segment.end);
+        if index < last_index {
+            end += overlap_samples;
+        }
+        let end = end.min(audio.len()).max(start);
+        if index > 0 && end > start {
+            stitched.extend_from_slice(&gap);
+        }
+        stitched.extend_from_slice(&audio[start..end]);
+    }
+    stitched
+}
+
+fn centiseconds_to_samples(centiseconds: f32) -> usize {
+    (centiseconds * SAMPLES_PER_CENTISECOND).round().max(0.0) as usize
+}
+
+fn secs_to_samples(secs: f32) -> usize {
+    (secs * SAMPLE_RATE_HZ as f32).round().max(0.0) as usize
+}
+
 async fn fetch_vad(
     vad_model: Option<String>,
     silence_secs: f32,
@@ -322,6 +407,13 @@ async fn fetch_vad(
         model_path: vad_path.to_string_lossy().into_owned(),
         silence_secs: silence_secs.max(0.0),
     })
+}
+
+async fn load_trimmer(
+    params: SileroVadParams,
+    use_gpu: bool,
+) -> Result<SpeechTrimmer, TranscriptionError> {
+    tokio::task::spawn_blocking(move || SpeechTrimmer::load(&params, use_gpu)).await?
 }
 
 async fn load_context(
@@ -372,7 +464,9 @@ fn should_use_gpu(prefer: bool) -> bool {
 mod tests {
     use std::cell::Cell;
 
-    use super::StatePool;
+    use whisper_rs::WhisperVadSegment;
+
+    use super::{StatePool, stitch_speech_segments};
 
     fn counting_create(created: &Cell<u32>) -> impl FnOnce() -> Result<u32, &'static str> + '_ {
         move || {
@@ -431,5 +525,52 @@ mod tests {
         let pool: StatePool<u32> = StatePool::default();
         let err = pool.with_state(|| Err("no state"), |_| Ok(())).unwrap_err();
         assert_eq!(err, "no state");
+    }
+
+    fn ramp(len: usize) -> Vec<f32> {
+        (0..len).map(|i| i as f32).collect()
+    }
+
+    fn segment(start_cs: f32, end_cs: f32) -> WhisperVadSegment {
+        WhisperVadSegment {
+            start: start_cs,
+            end: end_cs,
+        }
+    }
+
+    #[test]
+    fn no_segments_yields_empty_audio() {
+        assert!(stitch_speech_segments(&ramp(16_000), &[]).is_empty());
+    }
+
+    #[test]
+    fn single_segment_is_sliced_without_overlap() {
+        let audio = ramp(16_000);
+        let stitched = stitch_speech_segments(&audio, &[segment(10.0, 30.0)]);
+        assert_eq!(stitched, audio[1_600..4_800]);
+    }
+
+    #[test]
+    fn segments_are_joined_with_overlap_and_a_silence_gap() {
+        let audio = ramp(16_000);
+        let stitched = stitch_speech_segments(&audio, &[segment(0.0, 20.0), segment(50.0, 60.0)]);
+        let first_len = 3_200 + 1_600;
+        let gap_len = 1_600;
+        assert_eq!(stitched.len(), first_len + gap_len + 1_600);
+        assert_eq!(stitched[..first_len], audio[..first_len]);
+        assert!(
+            stitched[first_len..first_len + gap_len]
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+        assert_eq!(stitched[first_len + gap_len..], audio[8_000..9_600]);
+    }
+
+    #[test]
+    fn segment_bounds_are_clamped_to_the_audio() {
+        let audio = ramp(8_000);
+        let stitched =
+            stitch_speech_segments(&audio, &[segment(40.0, 90.0), segment(100.0, 120.0)]);
+        assert_eq!(stitched, audio[6_400..]);
     }
 }
