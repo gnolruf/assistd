@@ -1,6 +1,5 @@
 //! HuggingFace file downloads with an on-disk cache.
 
-use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -57,22 +56,7 @@ pub fn parse_hf_id(id: &str) -> Result<(String, String), DownloadError> {
 /// `$XDG_CACHE_HOME/assistd/<subdir>/`, falling back to
 /// `$HOME/.cache/assistd/<subdir>/`. Errors when neither variable is set.
 pub fn default_cache_dir(subdir: &str) -> Result<PathBuf, DownloadError> {
-    default_cache_dir_from(
-        std::env::var_os("XDG_CACHE_HOME"),
-        std::env::var_os("HOME"),
-        subdir,
-    )
-}
-
-fn default_cache_dir_from(
-    xdg_cache_home: Option<OsString>,
-    home: Option<OsString>,
-    subdir: &str,
-) -> Result<PathBuf, DownloadError> {
-    let base = xdg_cache_home
-        .map(PathBuf::from)
-        .or_else(|| home.map(|h| PathBuf::from(h).join(".cache")))
-        .ok_or(DownloadError::NoCacheDir)?;
+    let base = assistd_utils::xdg::cache_home().ok_or(DownloadError::NoCacheDir)?;
     Ok(base.join("assistd").join(subdir))
 }
 
@@ -240,27 +224,5 @@ mod tests {
             path,
             Path::new("/cache/ggml-org__whisper-vad/ggml-silero-v6.2.0.bin")
         );
-    }
-
-    #[test]
-    fn default_cache_dir_prefers_xdg_then_home() {
-        let xdg = Some(OsString::from("/tmp/xdg-test"));
-        let home = Some(OsString::from("/home/alice"));
-        assert_eq!(
-            default_cache_dir_from(xdg, home.clone(), "piper").unwrap(),
-            Path::new("/tmp/xdg-test/assistd/piper")
-        );
-        assert_eq!(
-            default_cache_dir_from(None, home, "piper").unwrap(),
-            Path::new("/home/alice/.cache/assistd/piper")
-        );
-    }
-
-    #[test]
-    fn default_cache_dir_refuses_shared_fallback() {
-        assert!(matches!(
-            default_cache_dir_from(None, None, "whisper"),
-            Err(DownloadError::NoCacheDir)
-        ));
     }
 }

@@ -11,9 +11,10 @@ use std::time::Duration;
 
 use assistd_config::ToolsOutputConfig;
 use assistd_config::defaults::default_tools_overflow_dir;
+use assistd_utils::text::human_size;
 
 use crate::command::{Attachment, CommandOutput};
-use crate::commands::cat::{human_size, sniff_binary};
+use crate::commands::cat::sniff_binary;
 
 /// Spill files hold raw tool output, so only the daemon's user may read them.
 const OVERFLOW_FILE_MODE: u32 = 0o600;
@@ -185,7 +186,7 @@ fn present_binary(
     let mut body = format!(
         "[error] binary output ({}, {}). Use: cat -b <path>\n",
         label,
-        human_size(out.stdout.len()),
+        human_size(out.stdout.len() as u64),
     );
     push_stderr(&mut body, &stderr);
     body.push_str(footer);
@@ -261,7 +262,7 @@ fn truncation_notice(
     let mut notice = format!(
         "--- {label} truncated ({} lines, {}) ---\n",
         line_count,
-        human_size(byte_count),
+        human_size(byte_count as u64),
     );
     if let Some(path) = overflow_file {
         let display = path.display();
@@ -360,10 +361,7 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
     }
 
     if cut > max_bytes {
-        cut = max_bytes;
-        while cut > 0 && !s.is_char_boundary(cut) {
-            cut -= 1;
-        }
+        cut = s.floor_char_boundary(max_bytes);
     }
 
     s[..cut].to_string()

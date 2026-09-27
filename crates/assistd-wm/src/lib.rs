@@ -9,8 +9,6 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 
-#[cfg(any(feature = "i3", feature = "sway"))]
-pub(crate) mod backoff;
 pub mod criteria;
 pub mod error;
 #[cfg(feature = "i3")]

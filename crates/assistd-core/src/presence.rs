@@ -17,8 +17,10 @@ use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::{Component, Event, PresenceState, StatusKind, StatusSeverity};
 use assistd_llm::{
-    HealthWaitError, LlamaServerControl, LlamaServerError, LlamaService, LlmHealthProbe, ReadyState,
+    HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec, LlmHealthProbe,
+    ReadyState,
 };
+use assistd_utils::child_server::{ChildServer, ChildServerError};
 
 use crate::recovery::spawn_supervised;
 
@@ -41,7 +43,7 @@ pub enum PresenceError {
     DrowseFromSleeping,
 
     #[error("llama-server cold-start failed during wake: {0}")]
-    ColdStart(#[source] LlamaServerError),
+    ColdStart(#[source] ChildServerError),
 
     #[error("llama-server /models/load failed for {model}: {source}")]
     Load {
@@ -76,7 +78,7 @@ pub enum PresenceError {
     UnloadTimeout { secs: u64 },
 
     #[error("llama-server shutdown failed: {0}")]
-    Shutdown(#[source] LlamaServerError),
+    Shutdown(#[source] ChildServerError),
 
     /// The child may outlive the daemon.
     #[error("llama-server shutdown timed out after {secs}s")]
@@ -98,7 +100,7 @@ pub struct PresenceManager {
     timeouts: TimeoutsConfig,
     control: LlamaServerControl,
     /// `Some` iff state is `Active` or `Drowsy`.
-    llama: AsyncMutex<Option<LlamaService>>,
+    llama: AsyncMutex<Option<ChildServer>>,
     /// Flipped by `sleep()` to stop the current supervisor only.
     current_inner_shutdown: InnerShutdownSlot,
     state_tx: watch::Sender<PresenceState>,
@@ -363,7 +365,7 @@ impl PresenceManager {
         outcome
     }
 
-    async fn detach_llama_as_sleeping(&self) -> Option<LlamaService> {
+    async fn detach_llama_as_sleeping(&self) -> Option<ChildServer> {
         let mut slot = self.llama.lock().await;
         let service = slot.take();
         self.signal_inner_shutdown();
@@ -378,10 +380,7 @@ impl PresenceManager {
         }
     }
 
-    async fn join_llama_shutdown(
-        &self,
-        service: Option<LlamaService>,
-    ) -> Result<(), PresenceError> {
+    async fn join_llama_shutdown(&self, service: Option<ChildServer>) -> Result<(), PresenceError> {
         let Some(service) = service else {
             return Ok(());
         };
@@ -481,7 +480,7 @@ impl PresenceManager {
             .lock()
             .await
             .as_ref()
-            .map(LlamaService::subscribe_ready)
+            .map(ChildServer::subscribe_ready)
             .ok_or(PresenceError::ServiceMissing)?;
         self.load_model_and_wait(ready_rx).await
     }
@@ -491,9 +490,8 @@ impl PresenceManager {
         let (inner_tx, inner_rx) = watch::channel(false);
         *self.current_inner_shutdown.lock() = Some(inner_tx);
 
-        let service = match LlamaService::start(
-            self.llama_server.clone(),
-            self.model.clone(),
+        let service = match ChildServer::start(
+            LlamaServerSpec::new(self.llama_server.clone(), self.model.clone()),
             inner_rx,
         )
         .await

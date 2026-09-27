@@ -11,12 +11,10 @@ use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
 
-pub mod backoff;
 pub mod error;
 pub mod handle;
 pub mod health_route;
 pub mod jsonrpc;
-mod log_lines;
 mod protocol;
 pub mod sse;
 pub mod stdio;

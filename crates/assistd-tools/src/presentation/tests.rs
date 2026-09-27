@@ -169,7 +169,7 @@ fn present_overflow_writes_temp_file_and_exposes_path() {
              Explore: cat {p} | grep\n\
              cat {p} | tail -n 100\n\
              [exit:0 | 9ms]",
-            human_size(big.len()),
+            human_size(big.len() as u64),
         )
     );
     assert_eq!(r.stdout_raw, head);
@@ -242,7 +242,7 @@ fn present_binary_guard_suppresses_stdout_preserves_attachments() {
         r.output,
         format!(
             "[error] binary output (image/png, {}). Use: cat -b <path>\n[exit:0 | 2ms]",
-            human_size(PNG_BYTES.len())
+            human_size(PNG_BYTES.len() as u64)
         )
     );
     assert_eq!(r.stdout_raw, "");
@@ -264,7 +264,7 @@ fn present_binary_guard_keeps_stderr() {
         format!(
             "[error] binary output (image/png, {}). Use: cat -b <path>\n\
              [stderr] something went wrong\n[exit:1 | 4ms]",
-            human_size(PNG_BYTES.len())
+            human_size(PNG_BYTES.len() as u64)
         )
     );
 }
@@ -354,7 +354,7 @@ fn present_overflow_truncates_stderr_and_spills_it() {
              cat {p} | tail -n 100\n\
              [exit:1 | 3ms]",
             head.trim_end_matches('\n'),
-            human_size(big.len()),
+            human_size(big.len() as u64),
         )
     );
     assert_eq!(r.stdout_raw, "ok\n");
@@ -397,7 +397,7 @@ fn present_binary_guard_still_truncates_stderr() {
              [stderr] first\n--- stderr truncated (2 lines, 13B) ---\n\
              Full stderr: {}\nExplore: cat {} | grep\ncat {} | tail -n 100\n\
              [exit:1 | 4ms]",
-            human_size(PNG_BYTES.len()),
+            human_size(PNG_BYTES.len() as u64),
             dir.path().join("cmd-1.txt").display(),
             dir.path().join("cmd-1.txt").display(),
             dir.path().join("cmd-1.txt").display(),

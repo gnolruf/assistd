@@ -4,10 +4,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
 use crate::command::{Attachment, Command, CommandInput, CommandOutput, Hint, error_line};
-use crate::commands::cat::human_size;
 use crate::vision::VisionGate;
 
 use capture::capture_target;
@@ -197,7 +197,7 @@ impl Command for ScreenshotCommand {
 fn attach_png(png: Vec<u8>, target: &Target, backend: Backend) -> CommandOutput {
     let stdout = format!(
         "captured PNG ({}, {}, backend={}); attached to next turn\n",
-        human_size(png.len()),
+        human_size(png.len() as u64),
         target.label(),
         backend.label(),
     );

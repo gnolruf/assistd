@@ -1,71 +1,64 @@
 use std::sync::Arc;
 
-use assistd_config::{LlamaServerConfig, ModelConfig};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use super::backoff::MAX_CONSECUTIVE_FAILURES;
-use super::error::LlamaServerError;
+use super::ChildServerSpec;
+use super::error::ChildServerError;
 use super::supervisor::Supervisor;
+use crate::backoff::MAX_CONSECUTIVE_FAILURES;
 
 /// State broadcast by the supervisor as the child moves through its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadyState {
-    /// A spawn attempt is in progress but the child has not yet reported ready.
+    /// A spawn attempt is in progress but the child has not yet passed `/health`.
     Starting,
     /// The child has reported 200 OK on `/health`.
     Ready,
     /// The last spawn attempt failed; a restart is scheduled after `attempt`
     /// consecutive failures.
     BackingOff { attempt: u32 },
-    /// A restart limit was hit ([`MAX_CONSECUTIVE_FAILURES`] or the
-    /// rolling-window cap); the supervisor stopped restarting.
+    /// A restart limit was hit; the supervisor stopped restarting.
     Degraded,
 }
 
-/// Handle to the managed llama-server, constructed via
-/// [`LlamaService::start`]. Dropping it aborts the supervisor task;
-/// [`LlamaService::shutdown`] joins it instead.
-pub struct LlamaService {
+/// Handle to a supervised child server, constructed via [`ChildServer::start`].
+/// Dropping it aborts the supervisor task; [`ChildServer::shutdown`] joins it.
+pub struct ChildServer {
+    server: &'static str,
     task: Option<JoinHandle<()>>,
     ready_rx: watch::Receiver<ReadyState>,
     pid: Arc<Mutex<Option<u32>>>,
 }
 
-impl LlamaService {
-    /// Spawns the supervisor and waits until the child reports Ready.
-    /// Errors with [`LlamaServerError::ShutdownDuringHealth`] if the supervisor
-    /// exits first, or [`LlamaServerError::StartupFailed`] on Degraded.
-    #[tracing::instrument(skip(cfg, model, shutdown_rx), fields(host = %cfg.host, port = cfg.port))]
-    pub async fn start(
-        cfg: LlamaServerConfig,
-        model: ModelConfig,
+impl ChildServer {
+    /// Spawn the supervisor and wait until the child reports `Ready`. Errors
+    /// with [`ChildServerError::ShutdownDuringHealth`] if the supervisor exits
+    /// first, or [`ChildServerError::StartupFailed`] once it goes `Degraded`.
+    #[tracing::instrument(skip(spec, shutdown_rx), fields(server = spec.name(), addr = %spec.listen_addr()))]
+    pub async fn start<S: ChildServerSpec>(
+        spec: S,
         shutdown_rx: watch::Receiver<bool>,
-    ) -> Result<Self, LlamaServerError> {
+    ) -> Result<Self, ChildServerError> {
+        let server = spec.name();
         let (ready_tx, mut ready_rx) = watch::channel(ReadyState::Starting);
         let pid = Arc::new(Mutex::new(None));
-
-        let supervisor = Supervisor {
-            cfg,
-            model,
-            shutdown_rx,
-            ready_tx,
-            pid: pid.clone(),
-        };
-        let task = tokio::spawn(async move { supervisor.run().await });
+        let supervisor = Supervisor::new(spec, shutdown_rx, ready_tx, pid.clone());
+        let task = tokio::spawn(supervisor.run());
 
         loop {
             match ready_rx.changed().await {
                 Err(_) => {
                     let _ = task.await;
-                    return Err(LlamaServerError::ShutdownDuringHealth);
+                    return Err(ChildServerError::ShutdownDuringHealth);
                 }
                 Ok(()) => {
                     let state = *ready_rx.borrow();
                     match state {
                         ReadyState::Ready => {
                             return Ok(Self {
+                                server,
                                 task: Some(task),
                                 ready_rx,
                                 pid,
@@ -73,7 +66,8 @@ impl LlamaService {
                         }
                         ReadyState::Degraded => {
                             task.abort();
-                            return Err(LlamaServerError::StartupFailed {
+                            return Err(ChildServerError::StartupFailed {
+                                server,
                                 attempts: MAX_CONSECUTIVE_FAILURES,
                             });
                         }
@@ -84,7 +78,12 @@ impl LlamaService {
         }
     }
 
-    /// Returns `true` iff the supervisor is currently in [`ReadyState::Ready`].
+    /// The name given by the spec this server was started from.
+    pub fn name(&self) -> &'static str {
+        self.server
+    }
+
+    /// Whether the supervisor is currently in [`ReadyState::Ready`].
     pub fn is_ready(&self) -> bool {
         matches!(*self.ready_rx.borrow(), ReadyState::Ready)
     }
@@ -99,23 +98,23 @@ impl LlamaService {
         self.ready_rx.clone()
     }
 
-    /// PID of the currently-running child, or `None` if no child is alive.
+    /// PID of the currently running child, or `None` if no child is alive.
     pub fn pid(&self) -> Option<u32> {
         *self.pid.lock()
     }
 
-    /// Joins the supervisor task. The shutdown watch passed to
-    /// [`Self::start`] must already be flipped; this does not signal it.
-    /// Errors with [`LlamaServerError::SupervisorPanic`] if the task panicked.
-    pub async fn shutdown(mut self) -> Result<(), LlamaServerError> {
+    /// Join the supervisor task. The shutdown watch passed to [`Self::start`]
+    /// must already be flipped; this does not signal it. Errors with
+    /// [`ChildServerError::SupervisorPanic`] if the task panicked.
+    pub async fn shutdown(mut self) -> Result<(), ChildServerError> {
         if let Some(task) = self.task.take() {
-            task.await.map_err(|_| LlamaServerError::SupervisorPanic)?;
+            task.await.map_err(|_| ChildServerError::SupervisorPanic)?;
         }
         Ok(())
     }
 }
 
-impl Drop for LlamaService {
+impl Drop for ChildServer {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();

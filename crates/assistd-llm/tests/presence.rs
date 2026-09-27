@@ -6,7 +6,7 @@
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -35,16 +35,7 @@ use common::FakeLlama;
 mod common;
 
 fn init_tracing() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .with_test_writer()
-            .try_init();
-    });
+    assistd_utils::tracing_init::init_test_tracing("info");
 }
 
 async fn grab_port() -> u16 {

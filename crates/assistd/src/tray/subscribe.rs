@@ -1,19 +1,16 @@
 //! Long-lived passive subscription to the daemon's broadcast bus.
 
-use std::time::Duration;
-
 use assistd_ipc::{
     Event, EventKind, IpcClient, IpcClientError, Request, SubscribeFilter,
     client::EventStream as IpcEventStream,
 };
+use assistd_utils::backoff::backoff_delay;
 use ksni::Handle;
 use uuid::Uuid;
 
 use super::menu::TrayItem;
 #[cfg(feature = "tray-popup")]
 use super::popup::PopupSink;
-
-const BACKOFF_CAP_SECS: u64 = 60;
 
 #[cfg(feature = "tray-popup")]
 pub type OptionalPopup = Option<PopupSink>;
@@ -181,14 +178,6 @@ fn disconnect_popup(popup: Option<&PopupSink>) {
 #[cfg(not(feature = "tray-popup"))]
 fn disconnect_popup(_popup: Option<&()>) {}
 
-fn backoff_delay(attempt: u32) -> Duration {
-    let secs = 1u64
-        .checked_shl(attempt)
-        .unwrap_or(BACKOFF_CAP_SECS)
-        .min(BACKOFF_CAP_SECS);
-    Duration::from_secs(secs)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,28 +198,6 @@ mod tests {
             EventKind::SpeakingState,
         ] {
             assert!(f.kinds.contains(&k), "filter missing {k:?}");
-        }
-    }
-
-    #[test]
-    fn backoff_doubles_then_caps_at_a_minute() {
-        for (attempt, want) in [
-            (0, 1),
-            (1, 2),
-            (2, 4),
-            (3, 8),
-            (4, 16),
-            (5, 32),
-            (6, 60),
-            (8, 60),
-            (64, 60),
-            (u32::MAX, 60),
-        ] {
-            assert_eq!(
-                backoff_delay(attempt),
-                Duration::from_secs(want),
-                "attempt {attempt}"
-            );
         }
     }
 }

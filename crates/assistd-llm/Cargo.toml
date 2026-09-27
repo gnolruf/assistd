@@ -17,15 +17,15 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
-rustix = { workspace = true }
 assistd-config = { workspace = true }
 assistd-ipc = { workspace = true }
 assistd-tools = { workspace = true }
+assistd-utils = { workspace = true, features = ["child-server"] }
 base64 = { workspace = true }
-parking_lot = { workspace = true }
 
 [dev-dependencies]
-tracing-subscriber = { workspace = true }
+assistd-utils = { workspace = true, features = ["tracing-init"] }
+rustix = { workspace = true }
 assistd-config = { workspace = true }
 assistd-core = { workspace = true }
 assistd-ipc = { workspace = true }

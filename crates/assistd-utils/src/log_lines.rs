@@ -11,7 +11,7 @@ const MAX_LINE_BYTES: usize = 8 * 1024;
 /// Read `stream` to EOF, calling `emit` once per line without its line
 /// ending. Invalid UTF-8 is replaced, a line past [`MAX_LINE_BYTES`] is
 /// cut with a marker, and only a read error ends the loop early.
-pub(crate) async fn forward_lines<R, F>(stream: R, mut emit: F) -> io::Result<()>
+pub async fn forward_lines<R, F>(stream: R, mut emit: F) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
     F: FnMut(&str),

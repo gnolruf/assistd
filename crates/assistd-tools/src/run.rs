@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 use assistd_config::ToolsOutputConfig;
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -14,7 +15,6 @@ use serde_json::{Value, json};
 
 use crate::chain::{ParseError, Redirection, execute, parse_chain};
 use crate::command::{Attachment, CommandOutput, CommandRegistry, Hint, error_line};
-use crate::commands::cat::human_size;
 use crate::presentation::{PresentResult, PresentSpec, present};
 use crate::{Tool, ToolError};
 
@@ -72,7 +72,7 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
          such file exists for a stream under those limits.\n\nCommands \
          (first word of `command`):\n",
         max_lines = spec.max_lines,
-        max_size = human_size(spec.max_bytes),
+        max_size = human_size(spec.max_bytes as u64),
         dir = spec.overflow_dir.display(),
     ));
     let pairs = registry.sorted_summaries();

@@ -16,6 +16,7 @@ use assistd_ipc::IpcClient;
 use assistd_llm::{LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
 use assistd_memory::HistoryRow;
 use assistd_tools::{IpcConfirmationGate, MemoryOps};
+use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
@@ -503,9 +504,6 @@ async fn replay_history(chat: &dyn LlmBackend, rows: &[HistoryRow]) {
 
 fn init_tracing() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(env_filter_or("info"))
         .init();
 }

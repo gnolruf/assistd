@@ -211,6 +211,7 @@ dependencies = [
  "assistd-mcp",
  "assistd-memory",
  "assistd-tools",
+ "assistd-utils",
  "assistd-voice",
  "assistd-wm",
  "async-trait",
@@ -244,6 +245,7 @@ dependencies = [
 name = "assistd-config"
 version = "1.1.0"
 dependencies = [
+ "assistd-utils",
  "serde",
  "thiserror 2.0.20",
  "toml",
@@ -261,6 +263,7 @@ dependencies = [
  "assistd-llm",
  "assistd-memory",
  "assistd-tools",
+ "assistd-utils",
  "assistd-voice",
  "assistd-wm",
  "async-trait",
@@ -286,9 +289,9 @@ version = "1.1.0"
 dependencies = [
  "assistd-config",
  "assistd-memory",
+ "assistd-utils",
  "async-trait",
  "reqwest",
- "rustix 1.1.5",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -300,6 +303,7 @@ dependencies = [
 name = "assistd-ipc"
 version = "1.1.0"
 dependencies = [
+ "assistd-utils",
  "base64 0.23.1",
  "infer",
  "rustix 1.1.5",
@@ -319,9 +323,9 @@ dependencies = [
  "assistd-core",
  "assistd-ipc",
  "assistd-tools",
+ "assistd-utils",
  "async-trait",
  "base64 0.23.1",
- "parking_lot",
  "reqwest",
  "rustix 1.1.5",
  "serde",
@@ -330,7 +334,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -338,6 +341,7 @@ name = "assistd-mcp"
 version = "1.1.0"
 dependencies = [
  "assistd-tools",
+ "assistd-utils",
  "async-trait",
  "base64 0.23.1",
  "futures-util",
@@ -381,6 +385,7 @@ dependencies = [
  "assistd-ipc",
  "assistd-memory",
  "assistd-tools",
+ "assistd-utils",
  "assistd-wm",
  "async-trait",
  "base64 0.23.1",
@@ -402,6 +407,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "assistd-utils"
+version = "1.1.0"
+dependencies = [
+ "parking_lot",
+ "reqwest",
+ "rustix 1.1.5",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "assistd-voice"
 version = "1.1.0"
 dependencies = [
@@ -409,6 +427,7 @@ dependencies = [
  "assistd-config",
  "assistd-ipc",
  "assistd-llm",
+ "assistd-utils",
  "async-trait",
  "clap",
  "cpal 0.18.2",
@@ -436,6 +455,7 @@ dependencies = [
 name = "assistd-wm"
 version = "1.1.0"
 dependencies = [
+ "assistd-utils",
  "async-trait",
  "futures-util",
  "rustix 1.1.5",

@@ -16,9 +16,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
+use assistd_utils::log_lines::forward_lines;
+
 use crate::error::McpError;
 use crate::jsonrpc::{Correlator, Incoming, notification_line, reply_line};
-use crate::log_lines::forward_lines;
 use crate::{McpClient, ToolResult, ToolSchema, protocol};
 
 /// The reader drops the connection rather than buffer a line past

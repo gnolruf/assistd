@@ -3,6 +3,7 @@
 use std::io;
 use std::time::Duration;
 
+use assistd_utils::text::human_size;
 use serde_json::Value;
 use tokio::process::Command as ProcCommand;
 
@@ -11,7 +12,6 @@ use super::geometry::{find_focused_sway_rect, parse_hyprland_geom, parse_xrandr_
 use super::{Backend, Target};
 use crate::attachment::MAX_IMAGE_BYTES;
 use crate::command::{CommandOutput, Hint, error_line};
-use crate::commands::cat::human_size;
 use crate::exec::{SPAWN_FAILED_EXIT, TIMEOUT_EXIT, WaitOutcome, capture, exit_code};
 
 const STDERR_TAIL_LINES: usize = 20;
@@ -101,8 +101,8 @@ impl CaptureError {
             Self::TooLarge { size } => (
                 format!(
                     "captured PNG too large ({} > {} max)",
-                    human_size(*size),
-                    human_size(MAX_IMAGE_BYTES as usize),
+                    human_size(*size as u64),
+                    human_size(MAX_IMAGE_BYTES),
                 ),
                 Hint::Try,
                 "--focused, or capture a single monitor".into(),

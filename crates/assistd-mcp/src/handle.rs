@@ -12,11 +12,15 @@ use tokio::sync::{RwLock, watch};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, info, warn};
 
-use crate::backoff::{RESTART_WINDOW, RestartDecision, RestartPolicy, UNHEALTHY_RETRY_INTERVAL};
+use assistd_utils::backoff::{RESTART_WINDOW, RestartDecision, RestartPolicy};
+
 use crate::error::McpError;
 use crate::sse::{SseConfig, SseLifeline, SseMcpClient};
 use crate::stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
 use crate::{McpClient, ToolResult, ToolSchema};
+
+/// Spawn cadence once either restart cap is hit.
+const UNHEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Health published by the supervisor on every state change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

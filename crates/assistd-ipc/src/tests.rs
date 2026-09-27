@@ -621,11 +621,10 @@ fn presence_state_next_cycles() {
 fn socket_path_prefers_xdg_runtime_dir_then_uid_dir() {
     let cases = [
         (Some("/run/user/1234"), "/run/user/1234/assistd.sock"),
-        (Some(""), "/tmp/assistd-1234/assistd.sock"),
         (None, "/tmp/assistd-1234/assistd.sock"),
     ];
     for (xdg, expected) in cases {
-        let path = socket_path_for(xdg.map(OsString::from), 1234);
+        let path = socket_path_for(xdg.map(PathBuf::from), 1234);
         assert_eq!(path, PathBuf::from(expected), "xdg={xdg:?}");
     }
 }

@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use assistd_utils::backoff::backoff_delay;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 
-use crate::backoff::backoff_delay;
 use crate::criteria::format_place_floating_pixels;
 use crate::snapshot::{self, Snapshot, WindowChangeKind};
 use crate::{

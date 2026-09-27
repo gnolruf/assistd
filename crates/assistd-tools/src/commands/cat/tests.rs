@@ -142,14 +142,6 @@ async fn cat_b_works_on_text_file() {
     );
 }
 
-#[test]
-fn human_size_formats_expected_ranges() {
-    assert_eq!(human_size(0), "0B");
-    assert_eq!(human_size(500), "500B");
-    assert_eq!(human_size(2048), "2KB");
-    assert_eq!(human_size(1024 * 1024 * 3), "3.0MB");
-}
-
 #[tokio::test]
 async fn cat_refuses_a_device_file() {
     let out = run_cat(&["/dev/null"], None).await;

@@ -1,19 +1,12 @@
-//! Out-of-process `llama-server` lifecycle: spawn, health-poll, restart with
-//! backoff, and a terminal `Degraded` state once restart limits trip.
+//! Out-of-process `llama-server`: the launch spec run by the shared child-server
+//! supervisor, plus the HTTP control plane and capability probes.
 
-pub mod backoff;
 pub mod capabilities;
 pub mod control;
 pub mod error;
-pub mod health;
-mod listener;
-mod log_lines;
-pub mod process;
-pub mod service;
-pub mod supervisor;
+pub mod spec;
 
-pub use backoff::MAX_CONSECUTIVE_FAILURES;
 pub use capabilities::{VisionState, probe_capabilities_routed};
 pub use control::LlamaServerControl;
 pub use error::LlamaServerError;
-pub use service::{LlamaService, ReadyState};
+pub use spec::LlamaServerSpec;

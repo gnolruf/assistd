@@ -26,6 +26,7 @@ use assistd_tools::{
     },
     probe_sandbox,
 };
+use assistd_utils::path::expand_tilde_from_env;
 
 pub mod agent;
 pub mod presence;
@@ -392,7 +393,7 @@ fn resolve_writable_paths(raw_paths: &[String]) -> Vec<PathBuf> {
     raw_paths
         .iter()
         .filter_map(|raw| {
-            let expanded = expand_config_tilde(raw);
+            let expanded = expand_tilde_from_env(raw);
             std::fs::canonicalize(&expanded)
                 .inspect_err(|e| {
                     warn!(
@@ -434,22 +435,6 @@ fn apply_probe(gate: &VisionGate, probe: VisionState) -> bool {
     }
     gate.set(probe.vision_supported);
     true
-}
-
-fn expand_config_tilde(raw: &str) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(home).join(rest),
-            Err(_) => PathBuf::from(raw),
-        }
-    } else if raw == "~" {
-        match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(home),
-            Err(_) => PathBuf::from(raw),
-        }
-    } else {
-        PathBuf::from(raw)
-    }
 }
 
 /// This crate's version string.

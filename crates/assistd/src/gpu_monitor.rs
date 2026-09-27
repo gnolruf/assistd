@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use assistd_core::{Component, PresenceManager, PresenceState, SleepConfig, spawn_supervised};
+use assistd_utils::procfs::proc_stat_field;
 use nvml_wrapper::{Nvml, enums::device::UsedGpuMemory};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -266,8 +267,7 @@ fn descends_from(pid: u32, root: u32, parent_of: impl Fn(u32) -> Option<u32>) ->
 /// Parent PID from `/proc/<pid>/stat`, parsed after the parenthesised comm.
 fn read_parent_pid(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, after_comm) = stat.rsplit_once(')')?;
-    after_comm.split_whitespace().nth(1)?.parse().ok()
+    proc_stat_field(&stat, 1)?.parse().ok()
 }
 
 fn read_comm(pid: u32) -> String {

@@ -11,6 +11,7 @@ members = [
     "crates/assistd-memory",
     "crates/assistd-voice",
     "crates/assistd-tools",
+    "crates/assistd-utils",
     "crates/assistd-wm",
 ]
 default-members = ["crates/assistd"]
@@ -31,6 +32,7 @@ assistd-mcp    = { version = "1.1", path = "crates/assistd-mcp" }
 assistd-memory = { version = "1.1", path = "crates/assistd-memory" }
 assistd-voice  = { version = "1.1", path = "crates/assistd-voice" }
 assistd-tools  = { version = "1.1", path = "crates/assistd-tools" }
+assistd-utils  = { version = "1.1", path = "crates/assistd-utils", default-features = false }
 assistd-wm     = { version = "1.1", path = "crates/assistd-wm", default-features = false }
 
 serde = { version = "1", features = ["derive"] }

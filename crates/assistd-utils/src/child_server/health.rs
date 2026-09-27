@@ -6,61 +6,62 @@ use rustix::process::Pid;
 use tokio::sync::watch;
 use tracing::{debug, warn};
 
-use super::error::EmbedServerError;
-use super::listener::is_listening_in_group;
+use super::error::ChildServerError;
+use crate::procfs::is_listening_in_group;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Polls `/health` until it returns 200 or the deadline elapses. A 200
-/// only counts when the listener belongs to the child's process group.
-pub struct HealthChecker {
+/// Polls `/health` until the child reports ready or a timeout elapses.
+/// A 200 only counts when the listener belongs to the child's process group.
+pub(super) struct HealthChecker {
+    server: &'static str,
     client: reqwest::Client,
     addr: SocketAddr,
     owner: Pid,
     url: String,
-    poll_interval: Duration,
-    probe_timeout: Duration,
     ready_timeout: Duration,
 }
 
 impl HealthChecker {
     /// Checker for `http://{addr}/health` served by process group `owner`;
     /// `ready_timeout` bounds each [`Self::wait_ready`].
-    pub fn new(
+    pub(super) fn new(
+        server: &'static str,
         addr: SocketAddr,
         owner: Pid,
         ready_timeout: Duration,
-    ) -> Result<Self, EmbedServerError> {
+    ) -> Result<Self, ChildServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(PROBE_TIMEOUT)
             .build()?;
         Ok(Self {
+            server,
             client,
             addr,
             owner,
             url: format!("http://{addr}/health"),
-            poll_interval: POLL_INTERVAL,
-            probe_timeout: PROBE_TIMEOUT,
             ready_timeout,
         })
     }
 
-    /// Poll until the child's listener returns 200; errors with `HealthTimeout` at the deadline or
-    /// `ShutdownDuringHealth` when the watch fires.
-    pub async fn wait_ready(
+    /// Poll until the child's listener returns 200 OK, the deadline elapses,
+    /// or shutdown is requested. Non-200 responses, foreign listeners, and
+    /// transport errors keep polling.
+    pub(super) async fn wait_ready(
         &self,
         shutdown_rx: &mut watch::Receiver<bool>,
-    ) -> Result<(), EmbedServerError> {
+    ) -> Result<(), ChildServerError> {
         if *shutdown_rx.borrow() {
-            return Err(EmbedServerError::ShutdownDuringHealth);
+            return Err(ChildServerError::ShutdownDuringHealth);
         }
 
         let deadline = Instant::now() + self.ready_timeout;
         loop {
             if Instant::now() >= deadline {
-                return Err(EmbedServerError::HealthTimeout {
+                return Err(ChildServerError::HealthTimeout {
+                    server: self.server,
                     timeout: self.ready_timeout,
                 });
             }
@@ -68,18 +69,28 @@ impl HealthChecker {
             tokio::select! {
                 biased;
                 _ = shutdown_rx.changed() => {
-                    return Err(EmbedServerError::ShutdownDuringHealth);
+                    return Err(ChildServerError::ShutdownDuringHealth);
                 }
                 probe = self.probe() => {
                     match probe {
                         Ok(true) if self.served_by_child().await => return Ok(()),
                         Ok(true) => warn!(
-                            target: "assistd::embed_server",
-                            "health: ignoring 200 from {}, which embed-server does not own",
-                            self.addr
+                            target: "assistd::child_server",
+                            server = self.server,
+                            "health: ignoring 200 from {}, which {} does not own",
+                            self.addr,
+                            self.server,
                         ),
-                        Ok(false) => debug!(target: "assistd::embed_server", "health: non-200 response"),
-                        Err(e) => debug!(target: "assistd::embed_server", "health: {e}"),
+                        Ok(false) => debug!(
+                            target: "assistd::child_server",
+                            server = self.server,
+                            "health: non-200 response"
+                        ),
+                        Err(e) => debug!(
+                            target: "assistd::child_server",
+                            server = self.server,
+                            "health: {e}"
+                        ),
                     }
                 }
             }
@@ -87,9 +98,9 @@ impl HealthChecker {
             tokio::select! {
                 biased;
                 _ = shutdown_rx.changed() => {
-                    return Err(EmbedServerError::ShutdownDuringHealth);
+                    return Err(ChildServerError::ShutdownDuringHealth);
                 }
-                _ = tokio::time::sleep(self.poll_interval) => {}
+                _ = tokio::time::sleep(POLL_INTERVAL) => {}
             }
         }
     }
@@ -101,7 +112,11 @@ impl HealthChecker {
             .map_err(io::Error::other)
             .and_then(|owned| owned)
             .unwrap_or_else(|e| {
-                debug!(target: "assistd::embed_server", "health: listener ownership: {e}");
+                debug!(
+                    target: "assistd::child_server",
+                    server = self.server,
+                    "health: listener ownership: {e}"
+                );
                 false
             })
     }
@@ -110,7 +125,7 @@ impl HealthChecker {
         let response = self
             .client
             .get(&self.url)
-            .timeout(self.probe_timeout)
+            .timeout(PROBE_TIMEOUT)
             .send()
             .await?;
         Ok(response.status() == reqwest::StatusCode::OK)

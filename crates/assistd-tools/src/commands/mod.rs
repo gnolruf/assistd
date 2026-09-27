@@ -3,6 +3,7 @@
 use std::io::{self, ErrorKind};
 use std::path::Path;
 
+use assistd_utils::text::human_size;
 use tokio::io::AsyncReadExt;
 
 use crate::chain::PIPE_BUF_MAX;
@@ -57,7 +58,7 @@ pub(crate) async fn read_regular_file(path: impl AsRef<Path>) -> io::Result<Vec<
             ErrorKind::FileTooLarge,
             format!(
                 "file exceeds the {} read limit",
-                cat::human_size(PIPE_BUF_MAX)
+                human_size(PIPE_BUF_MAX as u64)
             ),
         )
     };
@@ -114,7 +115,7 @@ pub(crate) async fn collect_input(
             .await
             .map_err(|e| CommandOutput::failed(1, io_error_nav(cmd, path, &e).into_bytes()))?;
         if let Some(mime) = cat::sniff_binary(&bytes) {
-            let size = cat::human_size(bytes.len());
+            let size = human_size(bytes.len() as u64);
             return Err(CommandOutput::failed(
                 1,
                 error_line(

@@ -1,32 +1,32 @@
+//! Exponential backoff and rolling-window restart accounting for supervisors.
+
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// Consecutive failed restarts before the supervisor drops to the
-/// slow [`UNHEALTHY_RETRY_INTERVAL`] cadence.
+/// Consecutive failed restarts before a supervisor stops retrying at the
+/// normal cadence.
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 /// A session at least this long resets the consecutive-failure counter.
 pub const MIN_HEALTHY_SECONDS: u64 = 30;
 
-/// Rolling-window cap on restarts; catches a server that crashes just
-/// after each [`MIN_HEALTHY_SECONDS`] reset.
+/// Rolling-window cap on restarts; catches a child that dies just after
+/// each [`MIN_HEALTHY_SECONDS`] reset.
 pub const MAX_RESTARTS_PER_WINDOW: usize = 10;
 
 /// Width of the rolling window used by [`MAX_RESTARTS_PER_WINDOW`].
 pub const RESTART_WINDOW: Duration = Duration::from_secs(600);
 
 /// Upper bound on [`backoff_delay`], in seconds.
-pub const RECONNECT_MAX_SECS: u64 = 60;
+pub const BACKOFF_CAP_SECS: u64 = 60;
 
-/// Spawn cadence once either cap is hit.
-pub const UNHEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
-
-/// Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (capped).
+/// Exponential backoff: `2^attempt` seconds from `attempt` 0, capped at
+/// [`BACKOFF_CAP_SECS`].
 pub fn backoff_delay(attempt: u32) -> Duration {
     let secs = 1u64
         .checked_shl(attempt)
-        .unwrap_or(RECONNECT_MAX_SECS)
-        .min(RECONNECT_MAX_SECS);
+        .unwrap_or(BACKOFF_CAP_SECS)
+        .min(BACKOFF_CAP_SECS);
     Duration::from_secs(secs)
 }
 
@@ -43,8 +43,8 @@ pub enum RestartDecision {
     WindowCapReached { restarts: usize },
 }
 
-/// Restart accounting for a single server's supervisor: consecutive
-/// failed attempts plus a rolling window of every restart made.
+/// Restart accounting for one supervised child: consecutive failed
+/// attempts plus a rolling window of every restart made.
 #[derive(Debug, Default)]
 pub struct RestartPolicy {
     consecutive_failures: u32,
@@ -63,7 +63,7 @@ impl RestartPolicy {
         }
     }
 
-    /// Account for a transport that never came up at all.
+    /// Account for a child that never came up at all.
     pub fn record_spawn_failure(&mut self) {
         self.consecutive_failures += 1;
     }
@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backoff_doubles_then_caps_at_sixty_seconds() {
+    fn backoff_doubles_from_one_second_and_caps_at_sixty() {
         let cases = [
             (0, 1),
             (1, 2),
@@ -111,13 +111,14 @@ mod tests {
             (5, 32),
             (6, 60),
             (9, 60),
+            (63, 60),
             (64, 60),
             (u32::MAX, 60),
         ];
-        for (attempt, want) in cases {
+        for (attempt, secs) in cases {
             assert_eq!(
                 backoff_delay(attempt),
-                Duration::from_secs(want),
+                Duration::from_secs(secs),
                 "attempt {attempt}"
             );
         }
@@ -179,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn rolling_window_parks_a_server_that_crashes_after_each_healthy_session() {
+    fn rolling_window_parks_a_child_that_crashes_after_each_healthy_session() {
         let t0 = Instant::now();
         let mut policy = RestartPolicy::default();
         let healthy = Duration::from_secs(MIN_HEALTHY_SECONDS + 5);

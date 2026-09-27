@@ -238,21 +238,13 @@ fn length_cutoff(buf: &str, max_len: usize) -> Option<usize> {
     if buf.len() < max_len {
         return None;
     }
-    let window = floor_char_boundary(buf, max_len);
+    let window = buf.floor_char_boundary(max_len);
     let cut = buf[..window]
         .char_indices()
         .rev()
         .find(|(_, c)| c.is_whitespace())
         .map_or(window, |(i, c)| i + c.len_utf8());
     Some(cut)
-}
-
-fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
-    idx = idx.min(s.len());
-    while !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
 }
 
 fn find_bullet_marker(buf: &str) -> Option<usize> {

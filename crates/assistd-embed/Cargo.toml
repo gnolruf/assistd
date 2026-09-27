@@ -13,9 +13,9 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util
 thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
-rustix = { workspace = true }
 assistd-config = { workspace = true }
 assistd-memory = { workspace = true }
+assistd-utils = { workspace = true, features = ["child-server"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

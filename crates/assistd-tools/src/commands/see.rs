@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
 use crate::attachment::{LoadImageError, load_image_attachment};
 use crate::command::{
     Attachment, Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav,
 };
-use crate::commands::cat::human_size;
 use crate::vision::VisionGate;
 
 /// `see PATH`: read an image file and attach it as a vision input.
@@ -91,7 +91,10 @@ fn attached(attachment: Attachment, size: usize, path: &str) -> CommandOutput {
     let mime = match &attachment {
         Attachment::Image { mime, .. } => mime.clone(),
     };
-    let stdout = format!("attached {mime} ({}) from {path}\n", human_size(size));
+    let stdout = format!(
+        "attached {mime} ({}) from {path}\n",
+        human_size(size as u64)
+    );
     CommandOutput {
         stdout: stdout.into_bytes(),
         stderr: Vec::new(),

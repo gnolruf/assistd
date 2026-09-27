@@ -1,4 +1,5 @@
-//! Identifies which process group owns a TCP listening socket, via `/proc`.
+//! Reads `/proc` to learn about processes: fields of a `stat` line and
+//! which process group owns a TCP listening socket.
 
 use std::collections::HashSet;
 use std::fs;
@@ -77,11 +78,16 @@ fn process_group_of(pid: i32) -> Option<i32> {
     parse_stat_process_group(&stat)
 }
 
-/// The `pgrp` field of a `/proc/<pid>/stat` line. The command name may hold
-/// spaces and parentheses, so fields are counted from its last `)`.
-fn parse_stat_process_group(stat: &str) -> Option<i32> {
+/// Field `index` of a `/proc/<pid>/stat` line, counted from the first field
+/// after the parenthesised command name: 0 is the state, 1 the parent pid,
+/// 2 the process group. The command name may hold spaces and parentheses.
+pub fn proc_stat_field(stat: &str, index: usize) -> Option<&str> {
     let (_, after_command) = stat.rsplit_once(')')?;
-    after_command.split_whitespace().nth(2)?.parse().ok()
+    after_command.split_whitespace().nth(index)
+}
+
+fn parse_stat_process_group(stat: &str) -> Option<i32> {
+    proc_stat_field(stat, 2)?.parse().ok()
 }
 
 fn holds_any_socket(pid: i32, inodes: &HashSet<u64>) -> bool {

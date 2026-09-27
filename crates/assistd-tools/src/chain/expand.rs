@@ -1,6 +1,7 @@
 //! Word expansion between parsing and dispatch: `~` to `$HOME` and globs
 //! to the files they name.
 
+use assistd_utils::path::expand_tilde_from_env;
 use glob::{MatchOptions, glob_with};
 
 use super::Word;
@@ -23,21 +24,10 @@ fn expand_word(word: &Word) -> Vec<String> {
     if word.quoted {
         return vec![word.text.clone()];
     }
-    let tilde = expand_tilde(&word.text);
+    let tilde = expand_tilde_from_env(&word.text)
+        .to_string_lossy()
+        .into_owned();
     expand_glob(&tilde).unwrap_or_else(|| vec![tilde])
-}
-
-fn expand_tilde(text: &str) -> String {
-    let Some(rest) = text.strip_prefix('~') else {
-        return text.to_string();
-    };
-    if !(rest.is_empty() || rest.starts_with('/')) {
-        return text.to_string();
-    }
-    match std::env::var("HOME") {
-        Ok(home) => format!("{home}{rest}"),
-        Err(_) => text.to_string(),
-    }
 }
 
 fn expand_glob(pattern: &str) -> Option<Vec<String>> {

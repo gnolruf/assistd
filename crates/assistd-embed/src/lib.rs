@@ -1,4 +1,4 @@
-//! Embedding subsystem: the [`Embedder`] trait, an HTTP client and supervisor for a
+//! Embedding subsystem: the [`Embedder`] trait, an HTTP client and launch spec for a
 //! dedicated embedding llama-server, and the background task that embeds queued rows.
 
 use std::time::Duration;
@@ -13,7 +13,7 @@ pub mod server;
 pub use client::LlamaEmbedder;
 pub use embedder_task::{EmbedJob, spawn_embedder_task};
 pub use error::EmbedError;
-pub use server::{EmbedServerError, EmbedService, ReadyState};
+pub use server::EmbedServerSpec;
 
 /// Per-request HTTP deadline against `/v1/embeddings`.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

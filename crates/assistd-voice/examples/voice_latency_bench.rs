@@ -606,9 +606,7 @@ fn load_wav_16k_mono(path: &Path) -> Result<Vec<i16>> {
 /// Download the WAV at `url` to a stable cache path and return that
 /// path. Reuses the cached file on subsequent runs.
 async fn ensure_wav_cached(url: &str) -> Result<PathBuf> {
-    let cache_dir = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+    let cache_dir = assistd_utils::xdg::cache_home()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("assistd")
         .join("bench");

@@ -1,3 +1,4 @@
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
@@ -88,7 +89,7 @@ async fn read_text(path: &str) -> Result<Vec<u8>, CommandOutput> {
     let Some(mime) = sniff_binary(&bytes) else {
         return Ok(bytes);
     };
-    let size = human_size(bytes.len());
+    let size = human_size(bytes.len() as u64);
     let msg = if mime.starts_with("image/") {
         error_line(
             "cat",
@@ -169,21 +170,6 @@ fn describe(head: &[u8], size: u64, path: Option<&str>) -> Vec<u8> {
         });
     let prefix = path.map(|p| format!("{p}: ")).unwrap_or_default();
     format!("{prefix}{mime}\n{prefix}{size} bytes\n").into_bytes()
-}
-
-pub(crate) fn human_size(n: usize) -> String {
-    const KB: usize = 1024;
-    const MB: usize = KB * 1024;
-    const GB: usize = MB * 1024;
-    if n >= GB {
-        format!("{:.1}GB", n as f64 / GB as f64)
-    } else if n >= MB {
-        format!("{:.1}MB", n as f64 / MB as f64)
-    } else if n >= KB {
-        format!("{}KB", n / KB)
-    } else {
-        format!("{n}B")
-    }
 }
 
 #[cfg(test)]

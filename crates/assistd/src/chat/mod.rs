@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use assistd_core::{Config, SleepConfig};
 use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
+use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream};
 use crossterm::{cursor, execute, terminal};
@@ -27,7 +28,7 @@ use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::info;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::fmt;
 use uuid::Uuid;
 
 use self::app::{App, ChatEvent, WireStream};
@@ -530,10 +531,8 @@ fn install_signal_handler(shutdown_tx: watch::Sender<bool>) -> JoinHandle<()> {
 }
 
 fn log_dir() -> Result<PathBuf> {
-    let dir = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .map(|p| p.join("assistd"))
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state/assistd")))
+    let dir = assistd_utils::xdg::state_home()
+        .map(|state| state.join("assistd"))
         .unwrap_or_else(std::env::temp_dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
     Ok(dir)
@@ -546,9 +545,7 @@ fn init_file_tracing() -> Result<WorkerGuard> {
     fmt()
         .with_writer(writer)
         .with_ansi(false)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_env_filter(env_filter_or("info"))
         .init();
 
     Ok(guard)

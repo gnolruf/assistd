@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use assistd_core::Config;
 use assistd_embed::{
-    EmbedJob, EmbedService, Embedder, LlamaEmbedder, NoEmbedder, spawn_embedder_task,
+    EmbedJob, EmbedServerSpec, Embedder, LlamaEmbedder, NoEmbedder, spawn_embedder_task,
 };
 use assistd_memory::{NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore};
+use assistd_utils::child_server::ChildServer;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -16,13 +17,13 @@ pub struct EmbeddingSubsystem {
     pub embedder: Arc<dyn Embedder>,
     pub semantic_store: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
-    pub service_handle: Option<EmbedService>,
+    pub service_handle: Option<ChildServer>,
     pub task_handle: Option<JoinHandle<()>>,
     pub model_name: String,
 }
 
 impl EmbeddingSubsystem {
-    fn disabled(service_handle: Option<EmbedService>) -> Self {
+    fn disabled(service_handle: Option<ChildServer>) -> Self {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         Self {
@@ -68,9 +69,11 @@ pub async fn init(
         return EmbeddingSubsystem::disabled(None);
     }
 
-    let service = match EmbedService::start(
-        config.embedding.clone(),
-        Duration::from_secs(config.llama_server.ready_timeout_secs.get()),
+    let service = match ChildServer::start(
+        EmbedServerSpec::new(
+            config.embedding.clone(),
+            Duration::from_secs(config.llama_server.ready_timeout_secs.get()),
+        ),
         server_shutdown.subscribe(),
     )
     .await

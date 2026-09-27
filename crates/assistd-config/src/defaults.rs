@@ -4,6 +4,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
+use assistd_utils::xdg;
+
 /// Builds a `NonZero` from a literal; a zero fails at compile time.
 pub const fn nz16(v: u16) -> NonZeroU16 {
     match NonZeroU16::new(v) {
@@ -125,28 +127,16 @@ pub const DEFAULT_TRAY_POPUP_WAKE_ERROR: bool = true;
 /// `$XDG_DATA_HOME/assistd/memory.db`, or
 /// `$HOME/.local/share/assistd/memory.db`.
 pub fn default_memory_db_path() -> PathBuf {
-    let data_dir = match std::env::var_os("XDG_DATA_HOME") {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => {
-            let home = std::env::var_os("HOME").unwrap_or_default();
-            PathBuf::from(home).join(".local/share")
-        }
-    };
+    let data_dir = xdg::data_home().unwrap_or_else(|| PathBuf::from(".local/share"));
     data_dir.join("assistd").join("memory.db")
 }
 
 /// `$XDG_RUNTIME_DIR/assistd/output`, or `$XDG_CACHE_HOME/assistd/output`, or
 /// `$HOME/.cache/assistd/output`.
 pub fn default_tools_overflow_dir() -> PathBuf {
-    let base = ["XDG_RUNTIME_DIR", "XDG_CACHE_HOME"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .find(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").unwrap_or_default();
-            PathBuf::from(home).join(".cache")
-        });
+    let base = xdg::runtime_dir()
+        .or_else(xdg::cache_home)
+        .unwrap_or_else(|| PathBuf::from(".cache"));
     base.join("assistd").join("output")
 }
 
