@@ -268,3 +268,63 @@ fn present_binary_guard_keeps_stderr() {
         )
     );
 }
+
+#[test]
+fn text_truncator_passes_a_fitting_body_through() {
+    let dir = tempdir().unwrap();
+    let truncator = TextTruncator::new(spec_in(dir.path()), "mcp__web");
+    let cut = truncator.truncate("short answer\n".into());
+    assert_eq!(
+        cut,
+        TruncatedText {
+            text: "short answer\n".into(),
+            truncated: false,
+            overflow_file: None,
+        }
+    );
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn text_truncator_cuts_and_spills_under_its_own_stem() {
+    let dir = tempdir().unwrap();
+    let spec = PresentSpec {
+        max_lines: 2,
+        max_bytes: 1024,
+        overflow_dir: dir.path().to_path_buf(),
+    };
+    let truncator = TextTruncator::new(spec, "mcp__web");
+
+    for expected_file in ["mcp__web-1.txt", "mcp__web-2.txt"] {
+        let body = "line 1\nline 2\nline 3\nline 4";
+        let cut = truncator.truncate(body.into());
+        let spilled = dir.path().join(expected_file);
+        assert_eq!(cut.overflow_file.as_deref(), Some(spilled.as_path()));
+        assert!(cut.truncated);
+        assert_eq!(std::fs::read_to_string(&spilled).unwrap(), body);
+        assert!(
+            cut.text
+                .starts_with("line 1\nline 2\n--- output truncated (4 lines, ")
+        );
+        assert!(
+            cut.text
+                .contains(&format!("Full output: {}\n", spilled.display())),
+            "{}",
+            cut.text
+        );
+        assert!(!cut.text.contains("line 3"));
+    }
+}
+
+#[test]
+fn text_truncator_byte_cap_never_splits_a_char() {
+    let dir = tempdir().unwrap();
+    let spec = PresentSpec {
+        max_lines: 10,
+        max_bytes: 5,
+        overflow_dir: dir.path().to_path_buf(),
+    };
+    let cut = TextTruncator::new(spec, "mcp__web").truncate("ééé".into());
+    assert!(cut.truncated);
+    assert!(cut.text.starts_with("éé\n--- output truncated (1 lines, "));
+}

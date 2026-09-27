@@ -14,6 +14,7 @@ use crate::{ToolResult, ToolSchema};
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const CLIENT_NAME: &str = "assistd";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const METHOD_NOT_FOUND: i64 = -32601;
 
 pub(crate) fn initialize_params() -> Value {
     json!({
@@ -36,6 +37,19 @@ pub(crate) fn warn_on_version_mismatch(label: &str, initialize_result: &Value) {
             server_version,
             "MCP protocol version mismatch (continuing optimistically)",
         );
+    }
+}
+
+/// Our answer to a request the server sent us: `ping` gets an empty
+/// result, anything else "method not found".
+pub(crate) fn answer_server_request(method: &str) -> Reply {
+    match method {
+        "ping" => Ok(json!({})),
+        other => Err(RpcError {
+            code: METHOD_NOT_FOUND,
+            message: format!("method not found: {other}"),
+            data: None,
+        }),
     }
 }
 

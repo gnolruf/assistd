@@ -6,13 +6,13 @@ use assistd_config::{LlamaServerConfig, ModelConfig};
 use rustix::process::Pid;
 #[cfg(unix)]
 use rustix::process::{Signal, kill_process_group};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
 use super::error::LlamaServerError;
+use super::log_lines::forward_lines;
 
 /// A running llama-server child plus the tasks forwarding its output to
 /// tracing. On unix the child leads its own process group (pgid == pid).
@@ -209,29 +209,21 @@ fn set_parent_death_signal(cmd: &mut Command) {
 }
 
 async fn forward_stdout(stream: ChildStdout) {
-    let mut lines = BufReader::new(stream).lines();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => info!(target: "assistd::llama_server", "{line}"),
-            Ok(None) => return,
-            Err(e) => {
-                warn!(target: "assistd::llama_server", "stdout read error: {e}");
-                return;
-            }
-        }
+    let forwarded = forward_lines(stream, |line| {
+        info!(target: "assistd::llama_server", "{line}");
+    })
+    .await;
+    if let Err(e) = forwarded {
+        warn!(target: "assistd::llama_server", "stdout read error: {e}");
     }
 }
 
 async fn forward_stderr(stream: ChildStderr) {
-    let mut lines = BufReader::new(stream).lines();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => warn!(target: "assistd::llama_server", "{line}"),
-            Ok(None) => return,
-            Err(e) => {
-                warn!(target: "assistd::llama_server", "stderr read error: {e}");
-                return;
-            }
-        }
+    let forwarded = forward_lines(stream, |line| {
+        warn!(target: "assistd::llama_server", "{line}");
+    })
+    .await;
+    if let Err(e) = forwarded {
+        warn!(target: "assistd::llama_server", "stderr read error: {e}");
     }
 }

@@ -2,11 +2,13 @@
 //! stderr is forwarded to tracing.
 
 use std::collections::HashMap;
+use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rustix::process::{Pid, Signal, kill_process_group};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, Command};
@@ -15,7 +17,8 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
 use crate::error::McpError;
-use crate::jsonrpc::{Correlator, Response, notification_line};
+use crate::jsonrpc::{Correlator, Incoming, notification_line, reply_line};
+use crate::log_lines::forward_lines;
 use crate::{McpClient, ToolResult, ToolSchema, protocol};
 
 /// The reader drops the connection rather than buffer a line past
@@ -77,8 +80,11 @@ impl StdioMcpClient {
             path: cfg.command.clone(),
             source: e,
         })?;
+        let group = ProcessGroup::led_by(&child).ok_or_else(|| McpError::Spawn {
+            path: cfg.command.clone(),
+            source: io::Error::other("spawned child reported no pid"),
+        })?;
 
-        let pid = child.id();
         let stdout = child.stdout.take().expect("stdout piped");
         let stdin = child.stdin.take().expect("stdin piped");
         let stderr = child.stderr.take().expect("stderr piped");
@@ -88,6 +94,13 @@ impl StdioMcpClient {
 
         let (client, transport_handles) =
             Self::from_streams(stdout, stdin, cfg.label.clone(), cfg.request_timeout).await?;
+        let lifeline = ChildLifeline {
+            label: cfg.label.clone(),
+            child,
+            group,
+            transport: transport_handles,
+            stderr_task,
+        };
 
         if let Err(e) = client.initialize().await {
             warn!(
@@ -96,25 +109,16 @@ impl StdioMcpClient {
                 error = %e,
                 "MCP initialize failed; tearing down transport",
             );
-            let _ = child.kill().await;
-            transport_handles.shutdown_and_join().await;
-            let _ = stderr_task.await;
+            lifeline.kill().await;
             return Err(e);
         }
 
         info!(
             target: "assistd::mcp",
             server = %cfg.label,
-            pid = pid,
+            pid = lifeline.group.0.as_raw_nonzero(),
             "MCP stdio server initialized",
         );
-
-        let lifeline = ChildLifeline {
-            label: cfg.label,
-            child,
-            transport: transport_handles,
-            stderr_task,
-        };
         Ok((client, lifeline))
     }
 
@@ -137,6 +141,7 @@ impl StdioMcpClient {
         let read_task = AbortOnDropHandle::new(tokio::spawn(read_loop(
             read,
             correlator.clone(),
+            write_tx.clone(),
             label.clone(),
             read_done_tx,
         )));
@@ -203,10 +208,11 @@ impl McpClient for StdioMcpClient {
 }
 
 /// The spawned child plus its I/O tasks. Dropping it SIGKILLs the
-/// child and aborts the tasks.
+/// child's whole process group and aborts the tasks.
 pub struct ChildLifeline {
     label: String,
     child: Child,
+    group: ProcessGroup,
     transport: TransportHandles,
     stderr_task: AbortOnDropHandle<()>,
 }
@@ -229,20 +235,17 @@ impl ChildLifeline {
         }
     }
 
-    /// SIGTERM the process group, wait `term_timeout`, then SIGKILL.
+    /// SIGTERM the process group, wait `term_timeout` for the child,
+    /// then SIGKILL whatever is left of the group.
     pub async fn shutdown(self, term_timeout: Duration) {
         let Self {
             label,
             mut child,
+            group,
             transport,
             stderr_task,
         } = self;
-        #[cfg(unix)]
-        if let Some(pid) = child.id()
-            && let Some(pgid) = rustix::process::Pid::from_raw(pid as i32)
-        {
-            let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
-        }
+        group.signal(Signal::TERM);
         match tokio::time::timeout(term_timeout, child.wait()).await {
             Ok(Ok(status)) => {
                 info!(
@@ -264,14 +267,54 @@ impl ChildLifeline {
                     server = %label,
                     "MCP server did not exit within {term_timeout:?}; sending SIGKILL",
                 );
-                let _ = child.start_kill();
+                group.signal(Signal::KILL);
                 let _ = child.wait().await;
             }
         }
-
-        transport.shutdown_and_join().await;
-        let _ = tokio::time::timeout(Duration::from_millis(500), stderr_task).await;
+        drop(group);
+        join_io_tasks(transport, stderr_task).await;
     }
+
+    /// SIGKILL the process group and reap the child at once.
+    async fn kill(self) {
+        let Self {
+            mut child,
+            group,
+            transport,
+            stderr_task,
+            ..
+        } = self;
+        drop(group);
+        let _ = child.wait().await;
+        join_io_tasks(transport, stderr_task).await;
+    }
+}
+
+/// The process group a spawned server leads; the id is fixed at spawn
+/// and outlives the child's own exit. Dropping it SIGKILLs every
+/// process still in the group.
+struct ProcessGroup(Pid);
+
+impl ProcessGroup {
+    fn led_by(child: &Child) -> Option<Self> {
+        let pid = child.id().and_then(|pid| Pid::from_raw(pid as i32))?;
+        Some(Self(pid))
+    }
+
+    fn signal(&self, signal: Signal) {
+        let _ = kill_process_group(self.0, signal);
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.signal(Signal::KILL);
+    }
+}
+
+async fn join_io_tasks(transport: TransportHandles, stderr_task: AbortOnDropHandle<()>) {
+    transport.shutdown_and_join().await;
+    let _ = tokio::time::timeout(Duration::from_millis(500), stderr_task).await;
 }
 
 /// The read and write tasks of one transport. Dropping it aborts both.
@@ -295,6 +338,7 @@ impl TransportHandles {
 async fn read_loop<R: AsyncRead + Unpin>(
     stream: R,
     correlator: Arc<Correlator>,
+    write_tx: mpsc::Sender<Vec<u8>>,
     label: String,
     done_tx: oneshot::Sender<()>,
 ) {
@@ -332,8 +376,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_slice::<Response>(&line) {
-            Ok(resp) => correlator.deliver(resp),
+        match Incoming::parse(&line) {
+            Ok(Incoming::Response(response)) => correlator.deliver(response),
+            Ok(Incoming::Request { id, method }) => {
+                answer_server_request(&write_tx, &label, id, &method).await;
+            }
+            Ok(Incoming::Notification { method }) => {
+                debug!(target: "assistd::mcp", server = %label, method, "ignoring server notification");
+            }
             Err(e) => {
                 warn!(
                     target: "assistd::mcp",
@@ -346,6 +396,25 @@ async fn read_loop<R: AsyncRead + Unpin>(
     }
     correlator.fail_all();
     let _ = done_tx.send(());
+}
+
+async fn answer_server_request(
+    write_tx: &mpsc::Sender<Vec<u8>>,
+    label: &str,
+    id: Value,
+    method: &str,
+) {
+    debug!(target: "assistd::mcp", server = %label, method, "answering server request");
+    let line = match reply_line(&id, &protocol::answer_server_request(method)) {
+        Ok(line) => line,
+        Err(e) => {
+            warn!(target: "assistd::mcp", server = %label, "failed to encode reply to `{method}`: {e}");
+            return;
+        }
+    };
+    if write_tx.send(line).await.is_err() {
+        debug!(target: "assistd::mcp", server = %label, "write loop gone; reply to `{method}` dropped");
+    }
 }
 
 async fn write_loop<W: AsyncWrite + Unpin>(
@@ -374,16 +443,13 @@ async fn write_loop<W: AsyncWrite + Unpin>(
 }
 
 async fn forward_stderr(stream: ChildStderr, label: String) {
-    let mut lines = BufReader::new(stream).lines();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => warn!(target: "assistd::mcp", server = %label, "{line}"),
-            Ok(None) => return,
-            Err(e) => {
-                warn!(target: "assistd::mcp", server = %label, "stderr read error: {e}");
-                return;
-            }
-        }
+    let forwarded = forward_lines(
+        stream,
+        |line| warn!(target: "assistd::mcp", server = %label, "{line}"),
+    )
+    .await;
+    if let Err(e) = forwarded {
+        warn!(target: "assistd::mcp", server = %label, "stderr read error: {e}");
     }
 }
 
@@ -618,6 +684,56 @@ mod tests {
             .expect("read loop signals termination");
 
         flood.abort();
+        handles.shutdown_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn server_ping_is_answered_and_leaves_the_pending_call_waiting() {
+        let (client_write, server_read) = duplex(8192);
+        let (mut server_write, client_read) = duplex(8192);
+        let (client, handles) = StdioMcpClient::from_streams(
+            client_read,
+            client_write,
+            "pinger".into(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        let call = tokio::spawn({
+            let client = client.clone();
+            async move { client.list_tools().await }
+        });
+
+        let mut from_client = BufReader::new(server_read);
+        let mut request = String::new();
+        from_client.read_line(&mut request).await.unwrap();
+        let request: Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(request["method"], "tools/list");
+        let id = request["id"].clone();
+
+        let ping = format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": id, "method": "ping"})
+        );
+        server_write.write_all(ping.as_bytes()).await.unwrap();
+
+        let mut reply = String::new();
+        from_client.read_line(&mut reply).await.unwrap();
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply, json!({"jsonrpc": "2.0", "id": id, "result": {}}));
+        assert!(
+            !call.is_finished(),
+            "a server request must not complete our call"
+        );
+
+        let response = format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": id, "result": {"tools": []}})
+        );
+        server_write.write_all(response.as_bytes()).await.unwrap();
+        let tools = call.await.unwrap().unwrap();
+        assert!(tools.is_empty());
         handles.shutdown_and_join().await;
     }
 

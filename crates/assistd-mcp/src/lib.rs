@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use assistd_tools::presentation::{PresentSpec, TextTruncator, TruncatedText};
 use assistd_tools::{Tool, ToolError};
 use async_trait::async_trait;
 use base64::Engine;
@@ -15,6 +16,7 @@ pub mod error;
 pub mod handle;
 pub mod health_route;
 pub mod jsonrpc;
+mod log_lines;
 mod protocol;
 pub mod sse;
 pub mod stdio;
@@ -59,15 +61,23 @@ pub struct McpToolAdapter {
     client: Arc<dyn McpClient>,
     schema: ToolSchema,
     registry_name: String,
+    truncator: Arc<TextTruncator>,
 }
 
 impl McpToolAdapter {
-    /// Adapter that invokes `schema.name` on `client`.
-    pub fn new(client: Arc<dyn McpClient>, schema: ToolSchema, registry_name: String) -> Self {
+    /// Adapter that invokes `schema.name` on `client`, cutting text and
+    /// JSON results with `truncator` before they reach the model.
+    pub fn new(
+        client: Arc<dyn McpClient>,
+        schema: ToolSchema,
+        registry_name: String,
+        truncator: Arc<TextTruncator>,
+    ) -> Self {
         Self {
             client,
             schema,
             registry_name,
+            truncator,
         }
     }
 }
@@ -93,7 +103,7 @@ impl Tool for McpToolAdapter {
         let outcome = self.client.invoke(&self.schema.name, args).await;
         let duration_ms = start.elapsed().as_millis();
         match outcome {
-            Ok(result) => Ok(tool_result_to_json(result, duration_ms)),
+            Ok(result) => Ok(tool_result_to_json(result, duration_ms, &self.truncator)),
             Err(err) => Ok(error_envelope(&self.registry_name, &err, duration_ms)),
         }
     }
@@ -111,25 +121,18 @@ fn error_envelope(tool_name: &str, err: &McpError, duration_ms: u128) -> Value {
     })
 }
 
-/// Render a [`ToolResult`] as the tool-result envelope; an image goes
-/// into `attachments[].data` as base64.
-fn tool_result_to_json(result: ToolResult, duration_ms: u128) -> Value {
+/// Render a [`ToolResult`] as the tool-result envelope; text and JSON
+/// bodies are cut by `truncator`, an image goes into
+/// `attachments[].data` as base64.
+fn tool_result_to_json(result: ToolResult, duration_ms: u128, truncator: &TextTruncator) -> Value {
     match result {
-        ToolResult::Text(text) => json!({
-            "type": "text",
-            "output": text,
-            "exit_code": 0,
-            "duration_ms": duration_ms,
-            "truncated": false,
-        }),
-        ToolResult::Json(value) => json!({
-            "type": "json",
-            "output": value.to_string(),
-            "value": value,
-            "exit_code": 0,
-            "duration_ms": duration_ms,
-            "truncated": false,
-        }),
+        ToolResult::Text(text) => text_envelope("text", truncator.truncate(text), duration_ms),
+        ToolResult::Json(value) => {
+            let mut envelope =
+                text_envelope("json", truncator.truncate(value.to_string()), duration_ms);
+            envelope["value"] = value;
+            envelope
+        }
         ToolResult::Image { mime, bytes } => {
             let len = bytes.len();
             let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -147,21 +150,39 @@ fn tool_result_to_json(result: ToolResult, duration_ms: u128) -> Value {
     }
 }
 
+fn text_envelope(kind: &str, cut: TruncatedText, duration_ms: u128) -> Value {
+    let mut envelope = json!({
+        "type": kind,
+        "output": cut.text,
+        "exit_code": 0,
+        "duration_ms": duration_ms,
+        "truncated": cut.truncated,
+    });
+    if let Some(path) = cut.overflow_file {
+        envelope["overflow_file"] = json!(path.to_string_lossy());
+    }
+    envelope
+}
+
 /// [`Tool`] entries for every tool the server exposes, named
-/// `<name_prefix>__<tool>` and gated on the supervisor's health.
+/// `<name_prefix>__<tool>` and gated on the supervisor's health. Results
+/// past `output`'s caps are cut, with the overflow spilled as
+/// `mcp-<server>-<n>.txt`.
 pub async fn adapt_handle_as_tools(
     handle: &McpServerHandle,
     name_prefix: &str,
+    output: PresentSpec,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let client = handle.client();
     let schemas = client.list_tools().await?;
     let health_rx = handle.watch_health();
     let server_name = handle.name.clone();
+    let truncator = Arc::new(TextTruncator::new(output, format!("mcp-{server_name}")));
 
     let mut tools: Vec<Box<dyn Tool>> = Vec::with_capacity(schemas.len());
     for schema in schemas {
         let registry_name = registry_name(name_prefix, &schema.name);
-        let adapter = McpToolAdapter::new(client.clone(), schema, registry_name);
+        let adapter = McpToolAdapter::new(client.clone(), schema, registry_name, truncator.clone());
         let routed = HealthRoutedTool::new(adapter, server_name.clone(), health_rx.clone());
         tools.push(Box::new(routed));
     }
@@ -172,13 +193,16 @@ pub async fn adapt_handle_as_tools(
 async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
     name_prefix: &str,
+    output: PresentSpec,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let schemas = client.list_tools().await?;
+    let truncator = Arc::new(TextTruncator::new(output, "mcp-test"));
     Ok(schemas
         .into_iter()
         .map(|schema| {
             let name = registry_name(name_prefix, &schema.name);
-            Box::new(McpToolAdapter::new(client.clone(), schema, name)) as Box<dyn Tool>
+            let adapter = McpToolAdapter::new(client.clone(), schema, name, truncator.clone());
+            Box::new(adapter) as Box<dyn Tool>
         })
         .collect())
 }
@@ -250,14 +274,20 @@ mod tests {
             err: parking_lot::Mutex::new(Some(err)),
             sleep,
         });
-        let mut tools = adapt_client_as_tools(client, "mcp__web").await.unwrap();
+        let mut tools = adapt_client_as_tools(client, "mcp__web", PresentSpec::default())
+            .await
+            .unwrap();
         tools.pop().unwrap()
+    }
+
+    fn unlimited() -> TextTruncator {
+        TextTruncator::new(PresentSpec::default(), "mcp-test")
     }
 
     #[tokio::test]
     async fn adapter_forwards_tool_metadata_under_registry_name() {
         for (prefix, expected_name) in [("mcp__web", "mcp__web__search"), ("", "search")] {
-            let tools = adapt_client_as_tools(one_tool_client(), prefix)
+            let tools = adapt_client_as_tools(one_tool_client(), prefix, PresentSpec::default())
                 .await
                 .unwrap();
             let [tool] = tools.as_slice() else {
@@ -274,12 +304,39 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_invokes_the_server_native_name() {
-        let tools = adapt_client_as_tools(one_tool_client(), "mcp__web")
+        let tools = adapt_client_as_tools(one_tool_client(), "mcp__web", PresentSpec::default())
             .await
             .unwrap();
         let out = tools[0].invoke(json!({"q": "rust"})).await.unwrap();
         assert_eq!(out["type"], "text");
         assert_eq!(out["output"], r#"called search with {"q":"rust"}"#);
+        assert_eq!(out["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn adapter_cuts_long_results_and_spills_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PresentSpec {
+            max_lines: 200,
+            max_bytes: 16,
+            overflow_dir: dir.path().to_path_buf(),
+        };
+        let tools = adapt_client_as_tools(one_tool_client(), "mcp__web", spec)
+            .await
+            .unwrap();
+        let out = tools[0].invoke(json!({"q": "rust"})).await.unwrap();
+        let spilled = dir.path().join("mcp-test-1.txt");
+        assert_eq!(out["truncated"], true);
+        assert_eq!(out["overflow_file"], json!(spilled.to_string_lossy()));
+        let output = out["output"].as_str().unwrap();
+        assert!(
+            output.starts_with("called search wi\n--- output truncated"),
+            "{output}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(spilled).unwrap(),
+            r#"called search with {"q":"rust"}"#
+        );
     }
 
     #[test]
@@ -324,7 +381,7 @@ mod tests {
             ),
         ];
         for (result, expected) in cases {
-            assert_eq!(tool_result_to_json(result, 42), expected);
+            assert_eq!(tool_result_to_json(result, 42, &unlimited()), expected);
         }
     }
 

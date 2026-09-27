@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
 use crate::error::McpError;
@@ -36,12 +36,50 @@ pub struct Notification<'a> {
 }
 
 /// Inbound JSON-RPC 2.0 response. Either `result` or `error` is set;
-/// notifications from the server have no `id`.
-#[derive(Debug, Deserialize)]
+/// `id` is `None` when it is missing, null, or not one of our numeric ids.
+#[derive(Debug)]
 pub struct Response {
     pub id: Option<u64>,
     pub result: Option<Value>,
     pub error: Option<RpcError>,
+}
+
+/// One frame received from the server, classified by what it asks of us.
+#[derive(Debug)]
+pub enum Incoming {
+    /// A reply to one of our requests.
+    Response(Response),
+    /// A request the server expects us to answer under its `id`.
+    Request { id: Value, method: String },
+    /// A notification, which needs no reply.
+    Notification { method: String },
+}
+
+/// The union of every inbound frame shape, split apart by [`Incoming::parse`].
+#[derive(Deserialize)]
+struct Frame {
+    id: Option<Value>,
+    method: Option<String>,
+    result: Option<Value>,
+    error: Option<RpcError>,
+}
+
+impl Incoming {
+    /// Parse one JSON-RPC 2.0 frame. A frame with a `method` is a request
+    /// when it carries a non-null `id` and a notification otherwise.
+    pub fn parse(bytes: &[u8]) -> serde_json::Result<Self> {
+        let frame: Frame = serde_json::from_slice(bytes)?;
+        let incoming = match (frame.method, frame.id) {
+            (Some(method), Some(id)) if !id.is_null() => Incoming::Request { id, method },
+            (Some(method), _) => Incoming::Notification { method },
+            (None, id) => Incoming::Response(Response {
+                id: id.as_ref().and_then(Value::as_u64),
+                result: frame.result,
+                error: frame.error,
+            }),
+        };
+        Ok(incoming)
+    }
 }
 
 /// JSON-RPC 2.0 error object carried in a [`Response`] when the server reports failure.
@@ -174,6 +212,18 @@ impl Pending<'_> {
     }
 }
 
+/// Encode a reply to a server-initiated request as a single
+/// newline-terminated line.
+pub fn reply_line(id: &Value, reply: &Reply) -> Result<Vec<u8>, McpError> {
+    let frame = match reply {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
+    };
+    let mut bytes = serde_json::to_vec(&frame)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 /// Encode a notification as a single newline-terminated line.
 pub fn notification_line(method: &'static str, params: Value) -> Result<Vec<u8>, McpError> {
     let notification = Notification {
@@ -188,10 +238,92 @@ pub fn notification_line(method: &'static str, params: Value) -> Result<Vec<u8>,
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use tokio::sync::oneshot::error::TryRecvError;
 
     use super::*;
+
+    #[test]
+    fn parse_classifies_responses_requests_and_notifications() {
+        let response =
+            Incoming::parse(br#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#).unwrap();
+        let Incoming::Response(response) = response else {
+            panic!("expected a response, got {response:?}");
+        };
+        assert_eq!(response.id, Some(7));
+        assert_eq!(response.result, Some(json!({"ok": true})));
+
+        let request = Incoming::parse(br#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#).unwrap();
+        assert!(
+            matches!(&request, Incoming::Request { id, method } if *id == json!(7) && method == "ping"),
+            "{request:?}"
+        );
+
+        let string_id =
+            Incoming::parse(br#"{"jsonrpc":"2.0","id":"abc","method":"ping"}"#).unwrap();
+        assert!(
+            matches!(&string_id, Incoming::Request { id, .. } if *id == json!("abc")),
+            "{string_id:?}"
+        );
+
+        for frame in [
+            &br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{}}"#[..],
+            &br#"{"jsonrpc":"2.0","id":null,"method":"notifications/progress"}"#[..],
+        ] {
+            let notification = Incoming::parse(frame).unwrap();
+            assert!(
+                matches!(&notification, Incoming::Notification { method } if method == "notifications/progress"),
+                "{notification:?}"
+            );
+        }
+
+        let unmatched = Incoming::parse(br#"{"jsonrpc":"2.0","id":"abc","result":{}}"#).unwrap();
+        assert!(
+            matches!(&unmatched, Incoming::Response(Response { id: None, .. })),
+            "{unmatched:?}"
+        );
+    }
+
+    #[test]
+    fn a_server_request_never_completes_a_pending_call() {
+        let correlator = Correlator::new();
+        let mut pending = correlator.next_request("tools/list", json!({})).unwrap();
+        let ping = Incoming::parse(
+            format!(r#"{{"jsonrpc":"2.0","id":{},"method":"ping"}}"#, pending.id).as_bytes(),
+        )
+        .unwrap();
+        if let Incoming::Response(response) = ping {
+            correlator.deliver(response);
+        }
+        assert_eq!(correlator.in_flight(), 1);
+        assert!(matches!(pending.rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn reply_line_encodes_result_and_error_frames() {
+        let ok = reply_line(&json!(3), &Ok(json!({}))).unwrap();
+        assert_eq!(ok.last(), Some(&b'\n'));
+        let parsed: Value = serde_json::from_slice(&ok[..ok.len() - 1]).unwrap();
+        assert_eq!(parsed, json!({"jsonrpc": "2.0", "id": 3, "result": {}}));
+
+        let err = reply_line(
+            &json!("abc"),
+            &Err(RpcError {
+                code: -32601,
+                message: "method not found".into(),
+                data: None,
+            }),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_slice(&err[..err.len() - 1]).unwrap();
+        assert_eq!(
+            parsed,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "abc",
+                "error": {"code": -32601, "message": "method not found", "data": null}
+            })
+        );
+    }
 
     #[tokio::test]
     async fn deliver_wakes_the_matching_request() {
