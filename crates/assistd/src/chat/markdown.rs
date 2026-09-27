@@ -8,11 +8,12 @@ use textwrap::core::display_width;
 
 const BULLET: &str = "• ";
 const QUOTE_BAR: &str = "▎ ";
-const CODE_BAR: &str = "▎ ";
 const COLUMN_SEPARATOR: &str = " │ ";
 const COLUMN_RULE_JOINT: &str = "─┼─";
 /// Narrowest a table column shrinks to before the table overflows.
 const MIN_COLUMN_WIDTH: usize = 3;
+/// Blue-gray shared by heading text and list markers.
+const BLEY: Color = Color::Rgb(100, 116, 140);
 
 /// Leading columns every physical line inside a block carries: a list
 /// marker or quote bar on the first line, matching padding afterwards.
@@ -84,7 +85,7 @@ impl TableBuilder {
                 &self.header,
                 &widths,
                 &self.alignments,
-                header_cell_style(),
+                strong_style(),
             ));
             out.push(vec![Span::styled(
                 widths
@@ -128,6 +129,7 @@ struct Renderer {
     code_block: Option<String>,
     table: Option<TableBuilder>,
     trailing_gap: bool,
+    in_heading: bool,
 }
 
 impl Renderer {
@@ -143,6 +145,7 @@ impl Renderer {
             code_block: None,
             table: None,
             trailing_gap: false,
+            in_heading: false,
         }
     }
 
@@ -159,7 +162,7 @@ impl Renderer {
             Event::Start(tag) => self.on_start(tag),
             Event::End(tag) => self.on_end(tag),
             Event::Text(text) => self.on_text(&text),
-            Event::Code(code) => self.push_inline(code.to_string(), inline_code_style()),
+            Event::Code(code) => self.push_inline(code.to_string(), self.inline_code_style()),
             Event::SoftBreak => self.push_inline(" ".to_string(), self.current_style()),
             Event::HardBreak => self.flush_inline(),
             Event::Rule => self.push_rule(),
@@ -180,6 +183,7 @@ impl Renderer {
             Tag::Heading { level, .. } => {
                 self.flush_inline();
                 self.push_style(heading_style(level));
+                self.in_heading = true;
             }
             Tag::BlockQuote(_) => {
                 self.flush_inline();
@@ -197,7 +201,7 @@ impl Renderer {
             }
             Tag::Item => self.start_item(),
             Tag::Emphasis => self.push_modifier(Modifier::ITALIC),
-            Tag::Strong => self.push_modifier(Modifier::BOLD),
+            Tag::Strong => self.push_style(strong_style()),
             Tag::Strikethrough => self.push_modifier(Modifier::CROSSED_OUT),
             Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
                 self.link_starts
@@ -234,6 +238,7 @@ impl Renderer {
             TagEnd::Heading(_) => {
                 self.flush_inline();
                 self.pop_style();
+                self.in_heading = false;
                 self.push_gap();
             }
             TagEnd::BlockQuote(_) => {
@@ -323,7 +328,7 @@ impl Renderer {
         let Some(code) = self.code_block.take() else {
             return;
         };
-        self.prefixes.push(Prefix::bar(CODE_BAR, code_bar_style()));
+        let width = self.inner_width();
         for line in code.lines() {
             if line.is_empty() {
                 self.push_line(Vec::new());
@@ -331,13 +336,12 @@ impl Renderer {
             }
             let word = Word {
                 width: display_width(line),
-                fragments: vec![Span::styled(line.to_string(), code_block_style())],
+                fragments: vec![Span::styled(line.to_string(), code_style())],
             };
-            for piece in break_long_word(word, self.inner_width()) {
+            for piece in break_long_word(word, width) {
                 self.push_line(piece.fragments);
             }
         }
-        self.prefixes.pop();
         self.push_gap();
     }
 
@@ -414,6 +418,15 @@ impl Renderer {
             .map(|prefix| display_width(&prefix.rest.content))
             .sum();
         self.width.saturating_sub(prefix_width).max(1)
+    }
+
+    /// Code inside a heading turns white rather than fading to gray.
+    fn inline_code_style(&self) -> Style {
+        if self.in_heading {
+            code_style().fg(Color::White)
+        } else {
+            code_style()
+        }
     }
 
     fn current_style(&self) -> Style {
@@ -626,22 +639,23 @@ fn push_fragment(piece: &mut Word, text: &mut String, style: Style) {
 }
 
 fn heading_style(level: HeadingLevel) -> Style {
-    let style = Style::default().add_modifier(Modifier::BOLD);
+    let style = Style::default().fg(BLEY).add_modifier(Modifier::BOLD);
     match level {
         HeadingLevel::H1 | HeadingLevel::H2 => style.add_modifier(Modifier::UNDERLINED),
         _ => style,
     }
 }
 
-fn inline_code_style() -> Style {
-    Style::default().fg(Color::Yellow)
-}
-
-fn code_block_style() -> Style {
+/// Bold plus a brighter foreground, since many terminal fonts barely
+/// distinguish bold weight from regular.
+fn strong_style() -> Style {
     Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD)
 }
 
-fn code_bar_style() -> Style {
+/// Matches the gray of tool output in the transcript.
+fn code_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
@@ -654,7 +668,7 @@ fn quote_text_style() -> Style {
 }
 
 fn list_marker_style() -> Style {
-    Style::default().fg(Color::Cyan)
+    Style::default().fg(BLEY)
 }
 
 fn link_style() -> Style {
@@ -669,10 +683,6 @@ fn link_url_style() -> Style {
 
 fn rule_style() -> Style {
     Style::default().fg(Color::DarkGray)
-}
-
-fn header_cell_style() -> Style {
-    Style::default().add_modifier(Modifier::BOLD)
 }
 
 #[cfg(test)]

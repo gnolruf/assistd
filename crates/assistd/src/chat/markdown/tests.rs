@@ -47,7 +47,9 @@ fn inline_styles_map_to_modifiers() {
             .add_modifier
             .contains(Modifier::CROSSED_OUT)
     );
-    assert_eq!(span_style(&lines, "code").fg, Some(Color::Yellow));
+    assert_eq!(span_style(&lines, "bold").fg, Some(Color::White));
+    assert_eq!(span_style(&lines, "code").fg, Some(Color::DarkGray));
+    assert_eq!(span_style(&lines, "code").bg, None);
 }
 
 #[test]
@@ -90,17 +92,36 @@ fn headings_are_bold_and_separated_from_body() {
             .add_modifier
             .contains(Modifier::BOLD | Modifier::UNDERLINED)
     );
+    assert_eq!(title.fg, Some(BLEY));
     let sub = span_style(&lines, "Sub");
     assert!(sub.add_modifier.contains(Modifier::BOLD));
     assert!(!sub.add_modifier.contains(Modifier::UNDERLINED));
+    assert_eq!(sub.fg, Some(BLEY));
+}
+
+#[test]
+fn code_inside_a_heading_is_white() {
+    let lines = render_markdown("## The `run` tool\n\nUse `run` here.", 80);
+    assert_eq!(texts(&lines), ["The run tool", "", "Use run here."]);
+    let styles: Vec<Style> = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .filter(|span| span.content == "run")
+        .map(|span| span.style)
+        .collect();
+    assert_eq!(styles.len(), 2);
+    assert_eq!(styles[0].fg, Some(Color::White));
+    assert_eq!(styles[1].fg, Some(Color::DarkGray));
 }
 
 #[test]
 fn bullet_list_marks_items_and_indents_wrapped_continuations() {
+    let lines = render_markdown("- short\n- a longer item that wraps", 14);
     assert_eq!(
-        rendered("- short\n- a longer item that wraps", 14),
+        texts(&lines),
         ["• short", "• a longer", "  item that", "  wraps"]
     );
+    assert_eq!(span_style(&lines, "• ").fg, Some(BLEY));
 }
 
 #[test]
@@ -146,24 +167,37 @@ fn blockquote_bars_every_line_including_wraps() {
 #[test]
 fn fenced_code_keeps_indentation_and_breaks_long_lines_hard() {
     let text = "```rust\nfn main() {\n    let x = 1;\n\n}\n```\ntail";
+    let lines = render_markdown(text, 12);
     assert_eq!(
-        rendered(text, 12),
-        [
-            "▎ fn main() ",
-            "▎ {",
-            "▎     let x ",
-            "▎ = 1;",
-            "▎ ",
-            "▎ }",
-            "",
-            "tail",
-        ]
+        texts(&lines),
+        ["fn main() {", "    let x = ", "1;", "", "}", "", "tail",]
+    );
+    for line in [&lines[0], &lines[4]] {
+        assert!(
+            line.spans
+                .iter()
+                .all(|s| s.style.fg == Some(Color::DarkGray))
+        );
+    }
+}
+
+#[test]
+fn fenced_code_inside_a_list_sits_under_the_item() {
+    assert_eq!(
+        rendered(
+            "- item
+  ```
+  x
+  ```",
+            8
+        ),
+        ["• item", "  x"]
     );
 }
 
 #[test]
 fn unterminated_fence_renders_as_code_while_streaming() {
-    assert_eq!(rendered("```\nls -la", 40), ["▎ ls -la"]);
+    assert_eq!(rendered("```\nls -la", 10), ["ls -la"]);
 }
 
 #[test]
