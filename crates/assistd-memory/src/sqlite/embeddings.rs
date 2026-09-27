@@ -467,8 +467,8 @@ impl SemanticStore for SqliteSemanticStore {
     }
 }
 
-/// Ordered in reverse by similarity so `BinaryHeap` acts as a min-heap; NaN compares
-/// equal to everything.
+/// Ordered in reverse by similarity so `BinaryHeap` acts as a min-heap. Only finite
+/// similarities are ever pushed, so `total_cmp` agrees with `>` on every entry.
 struct HeapEntry {
     similarity: f32,
     rowid: i64,
@@ -476,7 +476,7 @@ struct HeapEntry {
 
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.similarity == other.similarity
+        self.cmp(other) == Ordering::Equal
     }
 }
 impl Eq for HeapEntry {}
@@ -487,10 +487,7 @@ impl PartialOrd for HeapEntry {
 }
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .similarity
-            .partial_cmp(&self.similarity)
-            .unwrap_or(Ordering::Equal)
+        other.similarity.total_cmp(&self.similarity)
     }
 }
 
@@ -534,12 +531,12 @@ fn heap_to_sorted(heap: BinaryHeap<HeapEntry>) -> Vec<(i64, f32)> {
         .into_iter()
         .map(|entry| (entry.rowid, entry.similarity))
         .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
     ranked
 }
 
-/// Dot product of `query` against the LE-packed f32 BLOB `bytes`, or
-/// `None` when the BLOB is malformed or its dimension differs.
+/// Dot product of `query` against the LE-packed f32 BLOB `bytes`, or `None` when
+/// the BLOB is malformed, its dimension differs, or the product is not finite.
 fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
     if !bytes.len().is_multiple_of(4) {
         return None;
@@ -549,13 +546,12 @@ fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
         return None;
     }
     let (words, _) = bytes.as_chunks::<4>();
-    Some(
-        words
-            .iter()
-            .zip(query)
-            .map(|(word, q)| f32::from_le_bytes(*word) * q)
-            .sum(),
-    )
+    let similarity: f32 = words
+        .iter()
+        .zip(query)
+        .map(|(word, q)| f32::from_le_bytes(*word) * q)
+        .sum();
+    similarity.is_finite().then_some(similarity)
 }
 
 /// Encode `vector` as the little-endian `f32` BLOB the embedding tables store. It must

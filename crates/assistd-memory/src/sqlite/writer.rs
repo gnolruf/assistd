@@ -307,6 +307,8 @@ async fn end_turn(conn: &Connection, turn: TurnId) -> Result<()> {
     .map_err(MemoryError::sqlite("end_turn"))
 }
 
+/// Upserts by key; a changed value also drops the row's embedding so the
+/// backfill re-indexes it instead of serving the old value's vector.
 async fn save_memory(
     conn: &Connection,
     key: String,
@@ -316,7 +318,15 @@ async fn save_memory(
     let now = Utc::now().to_rfc3339();
     let id = conn
         .call(move |c| -> rusqlite::Result<_> {
-            let id: i64 = c.query_row(
+            let tx = c.transaction()?;
+            let previous_value: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM memories WHERE key = ?1",
+                    rusqlite::params![key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let id: i64 = tx.query_row(
                 "INSERT INTO memories (key, value, source_conversation_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?4)
                  ON CONFLICT(key) DO UPDATE SET
@@ -327,6 +337,13 @@ async fn save_memory(
                 rusqlite::params![key, value, source, now],
                 |r| r.get(0),
             )?;
+            if previous_value.is_some_and(|previous| previous != value) {
+                tx.execute(
+                    "DELETE FROM memory_embeddings WHERE memory_id = ?1",
+                    rusqlite::params![id],
+                )?;
+            }
+            tx.commit()?;
             Ok(id)
         })
         .await
