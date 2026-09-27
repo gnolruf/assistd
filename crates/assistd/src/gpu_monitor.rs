@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
+const MAX_ANCESTOR_DEPTH: usize = 64;
 
 /// Whether the monitor caused the current `Sleeping` state; only its own
 /// sleeps are auto-woken.
@@ -208,7 +209,8 @@ fn decide(
     }
 }
 
-/// Every process holding VRAM except `self_pid` and `llama_pid`.
+/// Every process holding VRAM except the daemon itself, the llama-server
+/// router, and the router's model children.
 pub(crate) fn collect_foreign_usage(
     nvml: &Nvml,
     self_pid: u32,
@@ -222,7 +224,7 @@ pub(crate) fn collect_foreign_usage(
         let compute = device.running_compute_processes().unwrap_or_default();
         let graphics = device.running_graphics_processes().unwrap_or_default();
         for p in compute.into_iter().chain(graphics) {
-            if p.pid == self_pid || Some(p.pid) == llama_pid {
+            if is_own_process(p.pid, self_pid, llama_pid) {
                 continue;
             }
             let bytes = match p.used_gpu_memory {
@@ -245,6 +247,27 @@ pub(crate) fn collect_foreign_usage(
             name: read_comm(pid),
         })
         .collect())
+}
+
+fn is_own_process(pid: u32, self_pid: u32, llama_pid: Option<u32>) -> bool {
+    pid == self_pid || llama_pid.is_some_and(|root| descends_from(pid, root, read_parent_pid))
+}
+
+/// `true` when `pid` is `root` or has `root` among its ancestors. The walk
+/// ends where `parent_of` stops answering, at init, or after a bounded depth.
+fn descends_from(pid: u32, root: u32, parent_of: impl Fn(u32) -> Option<u32>) -> bool {
+    std::iter::successors(Some(pid), |&current| {
+        parent_of(current).filter(|&parent| parent != 0 && parent != current)
+    })
+    .take(MAX_ANCESTOR_DEPTH)
+    .any(|ancestor| ancestor == root)
+}
+
+/// Parent PID from `/proc/<pid>/stat`, parsed after the parenthesised comm.
+fn read_parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, after_comm) = stat.rsplit_once(')')?;
+    after_comm.split_whitespace().nth(1)?.parse().ok()
 }
 
 fn read_comm(pid: u32) -> String {
@@ -394,6 +417,51 @@ mod tests {
             c.gpu_auto_wake = auto_wake;
             assert_eq!(decide(&samples, state, &c, cause), expected, "{label}");
         }
+    }
+
+    #[test]
+    fn descends_from_follows_the_parent_chain_to_the_router() {
+        let parents: HashMap<u32, u32> = [
+            (100, 1),
+            (200, 100),
+            (300, 200),
+            (400, 1),
+            (500, 501),
+            (501, 500),
+        ]
+        .into_iter()
+        .collect();
+        let parent_of = |pid: u32| parents.get(&pid).copied();
+        let cases = [
+            ("router itself", 100, true),
+            ("model child", 200, true),
+            ("grandchild", 300, true),
+            ("sibling of router", 400, false),
+            ("unknown pid", 999, false),
+            ("parent cycle", 500, false),
+        ];
+        for (label, pid, expected) in cases {
+            assert_eq!(descends_from(pid, 100, parent_of), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn is_own_process_matches_self_and_router_tree() {
+        let self_pid = std::process::id();
+        let parent = std::os::unix::process::parent_id();
+        assert!(is_own_process(self_pid, self_pid, None));
+        assert!(is_own_process(self_pid, u32::MAX, Some(parent)));
+        assert!(!is_own_process(self_pid, u32::MAX, Some(u32::MAX - 1)));
+        assert!(!is_own_process(self_pid, u32::MAX, None));
+    }
+
+    #[test]
+    fn read_parent_pid_parses_proc_stat() {
+        assert_eq!(
+            read_parent_pid(std::process::id()),
+            Some(std::os::unix::process::parent_id())
+        );
+        assert_eq!(read_parent_pid(u32::MAX), None);
     }
 
     #[test]
