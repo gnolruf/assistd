@@ -11,6 +11,7 @@ use assistd_voice::{
     QueuedTranscriber, Transcriber, VoiceOutputController, WhisperTranscriberBuilder,
     build_cpu_fallback,
 };
+use tokio::sync::watch;
 use tracing::info;
 
 use crate::voice_probe::PresenceGpuProbe;
@@ -24,9 +25,9 @@ pub struct VoiceSubsystem {
 /// Every handle degrades to a no-op when its feature is disabled or
 /// fails to initialise.
 pub async fn init(config: &Config, presence: &Arc<PresenceManager>) -> VoiceSubsystem {
-    let (input, listener) = init_input(config, presence).await;
     let output_inner = init_output(config).await;
     let output = VoiceOutputController::new(output_inner, config.voice.synthesis.enabled);
+    let (input, listener) = init_input(config, presence, output.subscribe_speaking()).await;
     VoiceSubsystem {
         input,
         listener,
@@ -37,6 +38,7 @@ pub async fn init(config: &Config, presence: &Arc<PresenceManager>) -> VoiceSubs
 async fn init_input(
     config: &Config,
     presence: &Arc<PresenceManager>,
+    output_speaking: watch::Receiver<bool>,
 ) -> (Arc<dyn VoiceInput>, Arc<dyn ContinuousListener>) {
     if !config.voice.enabled {
         info!("voice: disabled in config (voice.enabled = false)");
@@ -70,12 +72,31 @@ async fn init_input(
             "voice.continuous: enabled (hotkey={:?}, start_on_launch={})",
             config.voice.continuous.hotkey, config.voice.continuous.start_on_launch
         );
-        Arc::new(MicContinuousListener::new(transcriber, &config.voice))
+        warn_if_ungated_playback(config);
+        Arc::new(MicContinuousListener::new(
+            transcriber,
+            &config.voice,
+            output_speaking,
+        ))
     } else {
         info!("voice.continuous: disabled in config");
         Arc::new(NoContinuousListener::new())
     };
     (Arc::new(mic), listener)
+}
+
+/// With the gate off and no echo cancellation, spoken replies come back
+/// through the mic as new queries.
+fn warn_if_ungated_playback(config: &Config) {
+    if config.voice.continuous.playback_gate || !config.voice.synthesis.enabled {
+        return;
+    }
+    tracing::warn!(
+        "voice.continuous.playback_gate = false with synthesis enabled: \
+         the mic stays open while replies are spoken; without an \
+         echo-cancelled mic source the daemon will answer its own speech \
+         (see docs/voice/echo-cancellation.md)"
+    );
 }
 
 fn disabled_input() -> (Arc<dyn VoiceInput>, Arc<dyn ContinuousListener>) {

@@ -193,6 +193,14 @@ impl UtteranceVad {
         }
     }
 
+    /// Discard any in-progress utterance and pre-roll and return to silence.
+    pub fn reset(&mut self) {
+        self.phase = Phase::Silent;
+        self.preroll.clear();
+        self.utterance.clear();
+        self.utterance_frames = 0;
+    }
+
     fn push_preroll(&mut self, frame: &[i16; FRAME_SAMPLES]) {
         if self.tuning.preroll_frames == 0 {
             return;
@@ -328,6 +336,28 @@ mod tests {
         feed(&mut vad, false, 5);
         feed(&mut vad, true, 2);
         assert_eq!(feed(&mut vad, false, 10), NO_EVENTS);
+    }
+
+    #[test]
+    fn reset_discards_in_progress_utterance_and_preroll() {
+        let mut vad = UtteranceVad::new(tight_tuning());
+        feed(&mut vad, false, 5);
+        feed(&mut vad, true, 10);
+        vad.reset();
+
+        assert_eq!(
+            feed(&mut vad, false, 5),
+            NO_EVENTS,
+            "no utterance survives reset"
+        );
+        feed(&mut vad, true, 4);
+        let events = feed(&mut vad, false, 5);
+        let expected = [frames(SILENT, 2), frames(VOICED, 4), frames(SILENT, 2)].concat();
+        assert_eq!(
+            events,
+            [VadEvent::UtteranceComplete(expected)],
+            "pre-roll after reset holds only post-reset silence"
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
 use assistd_llm::{LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{PersistedMessage, SessionId, TurnId};
 use assistd_tools::{Attachment, inherit_confirm_router};
-use assistd_voice::{SentenceBuffer, SpeakDecision, VoiceOutputController};
+use assistd_voice::{SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutputController};
 
 use super::context::combine_context_blocks;
 use super::wire::decode_wire_attachments;
@@ -547,16 +547,16 @@ async fn run_speech_worker(
     start_epoch: u64,
     mut speech_rx: mpsc::Receiver<String>,
 ) {
-    let mut emitted_start = false;
+    let mut speaking: Option<SpeakingGuard> = None;
     while let Some(sentence) = speech_rx.recv().await {
         match voice_output.should_speak(start_epoch) {
             SpeakDecision::Speak => {
-                if !emitted_start {
+                if speaking.is_none() {
                     let _ = events_bus.send(Event::SpeakingState {
                         id: id.clone(),
                         speaking: true,
                     });
-                    emitted_start = true;
+                    speaking = Some(voice_output.begin_speaking());
                 }
                 speak_sentence(&voice_output, sentence, start_epoch).await;
             }
@@ -570,7 +570,7 @@ async fn run_speech_worker(
             "voice_output.wait_idle failed (non-fatal)"
         );
     }
-    if emitted_start {
+    if speaking.take().is_some() {
         let _ = events_bus.send(Event::SpeakingState {
             id,
             speaking: false,

@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use parking_lot::Mutex as StdMutex;
@@ -698,10 +699,13 @@ async fn dispatch_listen_start_error_propagates() {
     );
 }
 
-/// Records every `speak()` in arrival order and counts `wait_idle()`.
+/// Records every `speak()` in arrival order, counts `wait_idle()`, and
+/// counts sentences spoken while the controller's speaking signal was low.
 struct MockSpeechRecorder {
     calls: StdMutex<Vec<String>>,
     wait_idle_calls: AtomicUsize,
+    speaking: OnceLock<watch::Receiver<bool>>,
+    unguarded_speaks: AtomicUsize,
 }
 
 impl MockSpeechRecorder {
@@ -709,17 +713,32 @@ impl MockSpeechRecorder {
         Arc::new(Self {
             calls: StdMutex::new(Vec::new()),
             wait_idle_calls: AtomicUsize::new(0),
+            speaking: OnceLock::new(),
+            unguarded_speaks: AtomicUsize::new(0),
         })
     }
 
     fn calls(&self) -> Vec<String> {
         self.calls.lock().clone()
     }
+
+    fn watch_speaking(&self, controller: &VoiceOutputController) {
+        self.speaking
+            .set(controller.subscribe_speaking())
+            .expect("watch_speaking is called once");
+    }
 }
 
 #[async_trait::async_trait]
 impl assistd_voice::VoiceOutput for MockSpeechRecorder {
     async fn speak(&self, text: String) -> Result<(), VoiceOutputError> {
+        let guarded = self
+            .speaking
+            .get()
+            .is_none_or(|speaking| *speaking.borrow());
+        if !guarded {
+            self.unguarded_speaks.fetch_add(1, Ordering::SeqCst);
+        }
         self.calls.lock().push(text);
         Ok(())
     }
@@ -737,6 +756,7 @@ async fn dispatch_query_speaks_sentences_in_order_and_drains() {
         ..StateParts::default()
     }
     .build();
+    recorder.watch_speaking(&state.subsystems.voice_output);
     let (res, _) = dispatch(&state, query("ord", "First. Second. Third. End.")).await;
     res.unwrap();
 
@@ -745,6 +765,15 @@ async fn dispatch_query_speaks_sentences_in_order_and_drains() {
         recorder.wait_idle_calls.load(Ordering::SeqCst),
         1,
         "speech worker must drain before the query returns"
+    );
+    assert_eq!(
+        recorder.unguarded_speaks.load(Ordering::SeqCst),
+        0,
+        "every sentence is spoken with the speaking signal raised"
+    );
+    assert!(
+        !state.subsystems.voice_output.is_speaking(),
+        "speaking signal drops once playback drains"
     );
 }
 

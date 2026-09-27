@@ -74,6 +74,7 @@ pub const DEFAULT_LISTEN_START_ON_LAUNCH: bool = false;
 pub const DEFAULT_LISTEN_HOTKEY: &str = "";
 pub const DEFAULT_LISTEN_SILENCE_MS: NonZeroU32 = nz32(800);
 pub const DEFAULT_LISTEN_MAX_UTTERANCE_SECS: NonZeroU32 = nz32(30);
+pub const DEFAULT_LISTEN_PLAYBACK_GATE: bool = true;
 
 pub const DEFAULT_PRESENCE_HOTKEY: &str = "Super+Escape";
 
