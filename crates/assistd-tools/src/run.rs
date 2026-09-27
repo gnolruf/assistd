@@ -64,12 +64,13 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
          needed. ",
     );
     desc.push_str(&format!(
-        "Output is returned whole unless its stdout exceeds {max_lines} \
-         lines or {max_size}; only then is it cut to that head and the \
-         full text saved, with the truncation notice giving a \
-         `Full output: {dir}/cmd-N.txt` path that subsequent `run` calls \
-         can grep/cat. No such file exists for output under those \
-         limits.\n\nCommands (first word of `command`):\n",
+        "Output is returned whole unless its stdout or stderr exceeds \
+         {max_lines} lines or {max_size}; only then is that stream cut to \
+         its head and the full text saved, with the truncation notice \
+         giving a `Full output:` or `Full stderr:` path under \
+         `{dir}/cmd-N.txt` that subsequent `run` calls can grep/cat. No \
+         such file exists for a stream under those limits.\n\nCommands \
+         (first word of `command`):\n",
         max_lines = spec.max_lines,
         max_size = human_size(spec.max_bytes),
         dir = spec.overflow_dir.display(),
@@ -175,6 +176,9 @@ fn build_result(presented: PresentResult) -> Value {
     });
     if let Some(path) = &presented.overflow_file {
         result["overflow_file"] = json!(path.to_string_lossy());
+    }
+    if let Some(path) = &presented.stderr_overflow_file {
+        result["stderr_overflow_file"] = json!(path.to_string_lossy());
     }
     if !presented.attachments.is_empty() {
         let rendered: Vec<Value> = presented
