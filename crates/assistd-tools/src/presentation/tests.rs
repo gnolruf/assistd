@@ -328,3 +328,79 @@ fn text_truncator_byte_cap_never_splits_a_char() {
     assert!(cut.truncated);
     assert!(cut.text.starts_with("éé\n--- output truncated (1 lines, "));
 }
+
+#[test]
+fn present_overflow_truncates_stderr_and_spills_it() {
+    let dir = tempdir().unwrap();
+    let big: Vec<u8> = (1..=5000)
+        .flat_map(|i| format!("[find]\terr {i}\n").into_bytes())
+        .collect();
+    let r = present_ms(output(b"ok\n", &big, 1), &spec_in(dir.path()), 3);
+
+    assert!(r.truncated);
+    assert!(r.overflow_file.is_none());
+    let path = r.stderr_overflow_file.as_ref().expect("stderr spill path");
+    assert_eq!(path, &dir.path().join("cmd-1.txt"));
+    assert_eq!(std::fs::read(path).unwrap(), big);
+
+    let head: String = (1..=200).map(|i| format!("[find]\terr {i}\n")).collect();
+    let p = path.display();
+    assert_eq!(
+        r.output,
+        format!(
+            "ok\n[stderr] {}\n--- stderr truncated (5000 lines, {}) ---\n\
+             Full stderr: {p}\n\
+             Explore: cat {p} | grep\n\
+             cat {p} | tail -n 100\n\
+             [exit:1 | 3ms]",
+            head.trim_end_matches('\n'),
+            human_size(big.len()),
+        )
+    );
+    assert_eq!(r.stdout_raw, "ok\n");
+    assert_eq!(r.stderr_raw, head);
+}
+
+#[test]
+fn present_overflow_spills_stdout_then_stderr_to_separate_files() {
+    let dir = tempdir().unwrap();
+    let spec = PresentSpec {
+        max_lines: 2,
+        ..spec_in(dir.path())
+    };
+    let r = present_ms(output(b"a\nb\nc\n", b"x\ny\nz\n", 0), &spec, 1);
+    assert!(r.truncated);
+    assert_eq!(r.overflow_file, Some(dir.path().join("cmd-1.txt")));
+    assert_eq!(r.stderr_overflow_file, Some(dir.path().join("cmd-2.txt")));
+    assert_eq!(r.stdout_raw, "a\nb\n");
+    assert_eq!(r.stderr_raw, "x\ny\n");
+    let stderr_notice_at = r.output.find("--- stderr truncated").unwrap();
+    let stdout_notice_at = r.output.find("--- output truncated").unwrap();
+    assert!(stdout_notice_at < stderr_notice_at, "{}", r.output);
+}
+
+#[test]
+fn present_binary_guard_still_truncates_stderr() {
+    let dir = tempdir().unwrap();
+    let spec = PresentSpec {
+        max_lines: 1,
+        ..spec_in(dir.path())
+    };
+    let r = present_ms(output(PNG_BYTES, b"first\nsecond\n", 1), &spec, 4);
+    assert!(r.truncated);
+    assert_eq!(r.stderr_raw, "first\n");
+    assert_eq!(r.stderr_overflow_file, Some(dir.path().join("cmd-1.txt")));
+    assert_eq!(
+        r.output,
+        format!(
+            "[error] binary output (image/png, {}). Use: cat -b <path>\n\
+             [stderr] first\n--- stderr truncated (2 lines, 13B) ---\n\
+             Full stderr: {}\nExplore: cat {} | grep\ncat {} | tail -n 100\n\
+             [exit:1 | 4ms]",
+            human_size(PNG_BYTES.len()),
+            dir.path().join("cmd-1.txt").display(),
+            dir.path().join("cmd-1.txt").display(),
+            dir.path().join("cmd-1.txt").display(),
+        )
+    );
+}

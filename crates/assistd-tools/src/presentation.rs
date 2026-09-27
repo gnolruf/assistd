@@ -1,6 +1,6 @@
 //! Renders a completed chain's [`CommandOutput`] for the model: refuses
-//! binary, truncates long output (spilling it to a file), always shows
-//! stderr, and ends with an `[exit:N | Mms]` footer.
+//! binary, truncates long stdout and stderr (spilling each to a file),
+//! and ends with an `[exit:N | Mms]` footer.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -21,7 +21,7 @@ const OVERFLOW_FILE_MODE: u32 = 0o600;
 /// Limits and destinations for output rendering.
 #[derive(Debug, Clone)]
 pub struct PresentSpec {
-    /// Max lines of stdout surfaced before truncation.
+    /// Max lines of a stream surfaced before truncation.
     pub max_lines: usize,
     /// Max bytes of the truncated head, bounding a single huge line too.
     pub max_bytes: usize,
@@ -82,26 +82,33 @@ impl TextTruncator {
     /// Return `text` unchanged when it fits, else its head plus the
     /// truncation notice, with the whole body spilled to a file.
     pub fn truncate(&self, text: String) -> TruncatedText {
-        let line_count = count_lines(&text);
-        let byte_count = text.len();
-        if line_count <= self.spec.max_lines && byte_count <= self.spec.max_bytes {
-            return TruncatedText {
-                text,
-                truncated: false,
-                overflow_file: None,
-            };
+        let cut = cut_stream(text, "output", &self.spec, &self.stem, &self.counter);
+        let truncated = cut.truncated();
+        let mut text = cut.head;
+        if let Some(notice) = &cut.notice {
+            terminate_line(&mut text);
+            text.push_str(notice);
         }
-        let overflow_file = spill_overflow(text.as_bytes(), &self.spec, &self.stem, &self.counter);
-        let mut head = truncate_lines_bytes(&text, self.spec.max_lines, self.spec.max_bytes);
-        if !head.is_empty() && !head.ends_with('\n') {
-            head.push('\n');
-        }
-        push_truncation_notice(&mut head, line_count, byte_count, overflow_file.as_deref());
         TruncatedText {
-            text: head,
-            truncated: true,
-            overflow_file,
+            text,
+            truncated,
+            overflow_file: cut.overflow_file,
         }
+    }
+}
+
+/// One stream cut to a [`PresentSpec`]: its visible head and, when cut,
+/// the notice pointing at the spill file.
+#[derive(Debug)]
+struct StreamCut {
+    head: String,
+    notice: Option<String>,
+    overflow_file: Option<PathBuf>,
+}
+
+impl StreamCut {
+    fn truncated(&self) -> bool {
+        self.notice.is_some()
     }
 }
 
@@ -112,13 +119,16 @@ pub struct PresentResult {
     pub output: String,
     /// Lossy-decoded stdout head; empty when the binary guard fired.
     pub stdout_raw: String,
-    /// Lossy-decoded full stderr with per-stage `[name]\t` prefixes.
+    /// Lossy-decoded stderr head with per-stage `[name]\t` prefixes.
     pub stderr_raw: String,
     pub exit_code: i32,
     pub duration_ms: u128,
+    /// Whether either stream was cut.
     pub truncated: bool,
-    /// Set when output overflowed and the spill file was written.
+    /// Set when stdout overflowed and its spill file was written.
     pub overflow_file: Option<PathBuf>,
+    /// Set when stderr overflowed and its spill file was written.
+    pub stderr_overflow_file: Option<PathBuf>,
     pub attachments: Vec<Attachment>,
 }
 
@@ -132,46 +142,35 @@ pub fn present(
 ) -> PresentResult {
     let duration_ms = duration.as_millis();
     let footer = format!("[exit:{} | {}ms]", out.exit_code, duration_ms);
-    let stderr_raw = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stderr_text = String::from_utf8_lossy(&out.stderr).into_owned();
 
     if let Some(label) = binary_label(&out.stdout) {
-        return present_binary(out, &label, &footer, stderr_raw, duration_ms);
+        let stderr = cut_stream(stderr_text, "stderr", spec, "cmd", counter);
+        return present_binary(out, &label, &footer, stderr, duration_ms);
     }
 
-    let stdout_str = String::from_utf8_lossy(&out.stdout).into_owned();
-    let line_count = count_lines(&stdout_str);
-    let byte_count = stdout_str.len();
-
-    let overflow = line_count > spec.max_lines || byte_count > spec.max_bytes;
-    let (visible_head, overflow_file) = if overflow {
-        let spilled = spill_overflow(&out.stdout, spec, "cmd", counter);
-        let head = truncate_lines_bytes(&stdout_str, spec.max_lines, spec.max_bytes);
-        (head, spilled)
-    } else {
-        (stdout_str, None)
-    };
+    let stdout_text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stdout = cut_stream(stdout_text, "output", spec, "cmd", counter);
+    let stderr = cut_stream(stderr_text, "stderr", spec, "cmd", counter);
 
     let mut body = String::new();
-    if !visible_head.is_empty() {
-        body.push_str(&visible_head);
-        if !body.ends_with('\n') {
-            body.push('\n');
-        }
+    body.push_str(&stdout.head);
+    terminate_line(&mut body);
+    if let Some(notice) = &stdout.notice {
+        body.push_str(notice);
     }
-    if overflow {
-        push_truncation_notice(&mut body, line_count, byte_count, overflow_file.as_deref());
-    }
-    push_stderr(&mut body, &stderr_raw);
+    push_stderr(&mut body, &stderr);
     body.push_str(&footer);
 
     PresentResult {
         output: body,
-        stdout_raw: visible_head,
-        stderr_raw,
+        truncated: stdout.truncated() || stderr.truncated(),
+        stdout_raw: stdout.head,
+        stderr_raw: stderr.head,
         exit_code: out.exit_code,
         duration_ms,
-        truncated: overflow,
-        overflow_file,
+        overflow_file: stdout.overflow_file,
+        stderr_overflow_file: stderr.overflow_file,
         attachments: out.attachments,
     }
 }
@@ -180,7 +179,7 @@ fn present_binary(
     out: CommandOutput,
     label: &str,
     footer: &str,
-    stderr_raw: String,
+    stderr: StreamCut,
     duration_ms: u128,
 ) -> PresentResult {
     let mut body = format!(
@@ -188,17 +187,46 @@ fn present_binary(
         label,
         human_size(out.stdout.len()),
     );
-    push_stderr(&mut body, &stderr_raw);
+    push_stderr(&mut body, &stderr);
     body.push_str(footer);
     PresentResult {
         output: body,
         stdout_raw: String::new(),
-        stderr_raw,
+        truncated: stderr.truncated(),
+        stderr_raw: stderr.head,
         exit_code: out.exit_code,
         duration_ms,
-        truncated: false,
         overflow_file: None,
+        stderr_overflow_file: stderr.overflow_file,
         attachments: out.attachments,
+    }
+}
+
+/// Cut `text` to `spec`, spilling it in full as `<stem>-<n>.txt` and
+/// building a notice that names the stream `label` when it overflows.
+fn cut_stream(
+    text: String,
+    label: &str,
+    spec: &PresentSpec,
+    stem: &str,
+    counter: &AtomicU64,
+) -> StreamCut {
+    let line_count = count_lines(&text);
+    let byte_count = text.len();
+    if line_count <= spec.max_lines && byte_count <= spec.max_bytes {
+        return StreamCut {
+            head: text,
+            notice: None,
+            overflow_file: None,
+        };
+    }
+    let overflow_file = spill_overflow(text.as_bytes(), spec, stem, counter);
+    let head = truncate_lines_bytes(&text, spec.max_lines, spec.max_bytes);
+    let notice = truncation_notice(label, line_count, byte_count, overflow_file.as_deref());
+    StreamCut {
+        head,
+        notice: Some(notice),
+        overflow_file,
     }
 }
 
@@ -224,30 +252,42 @@ fn spill_overflow(
     }
 }
 
-fn push_truncation_notice(
-    body: &mut String,
+fn truncation_notice(
+    label: &str,
     line_count: usize,
     byte_count: usize,
     overflow_file: Option<&Path>,
-) {
-    body.push_str(&format!(
-        "--- output truncated ({} lines, {}) ---\n",
+) -> String {
+    let mut notice = format!(
+        "--- {label} truncated ({} lines, {}) ---\n",
         line_count,
         human_size(byte_count),
-    ));
+    );
     if let Some(path) = overflow_file {
         let display = path.display();
-        body.push_str(&format!("Full output: {display}\n"));
-        body.push_str(&format!("Explore: cat {display} | grep\n"));
-        body.push_str(&format!("cat {display} | tail -n 100\n"));
+        notice.push_str(&format!("Full {label}: {display}\n"));
+        notice.push_str(&format!("Explore: cat {display} | grep\n"));
+        notice.push_str(&format!("cat {display} | tail -n 100\n"));
+    }
+    notice
+}
+
+fn push_stderr(body: &mut String, stderr: &StreamCut) {
+    if stderr.head.is_empty() && stderr.notice.is_none() {
+        return;
+    }
+    body.push_str("[stderr] ");
+    body.push_str(stderr.head.trim_end_matches('\n'));
+    body.push('\n');
+    if let Some(notice) = &stderr.notice {
+        body.push_str(notice);
     }
 }
 
-fn push_stderr(body: &mut String, stderr_raw: &str) {
-    if !stderr_raw.is_empty() {
-        body.push_str("[stderr] ");
-        body.push_str(stderr_raw.trim_end_matches('\n'));
-        body.push('\n');
+/// End `text` with a newline unless it is empty or already does.
+fn terminate_line(text: &mut String) {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
     }
 }
 
