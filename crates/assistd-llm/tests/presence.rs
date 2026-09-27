@@ -350,6 +350,49 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
     );
 }
 
+#[tokio::test]
+async fn sleep_cancelled_mid_teardown_can_still_wake() {
+    init_tracing();
+    let port = grab_port().await;
+    let fake = FakeLlama::new("slow-term=3");
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let pid = manager.llama_pid().await.expect("child running");
+    let mut states = manager.subscribe();
+
+    let sleeper = Arc::clone(&manager);
+    let sleep_task = tokio::spawn(async move { sleeper.sleep().await });
+    states
+        .wait_for(|s| *s == PresenceState::Sleeping)
+        .await
+        .expect("state channel open");
+    sleep_task.abort();
+    assert!(
+        sleep_task
+            .await
+            .expect_err("abort must cancel")
+            .is_cancelled(),
+        "sleep should still have been joining the child"
+    );
+
+    assert_eq!(manager.state(), PresenceState::Sleeping);
+    assert!(manager.llama_pid().await.is_none(), "slot must be empty");
+    assert!(
+        wait_for_pid_gone(pid, Duration::from_secs(5)).await,
+        "the signalled supervisor should still wind the child down"
+    );
+
+    manager
+        .wake()
+        .await
+        .expect("wake after a cancelled sleep should cold-start");
+    assert_eq!(manager.state(), PresenceState::Active);
+    let new_pid = manager.llama_pid().await.expect("child running after wake");
+    assert_ne!(new_pid, pid);
+    assert!(pid_alive(new_pid));
+
+    manager.sleep().await.unwrap();
+}
+
 /// A daemon socket served over `AppState` for the duration of a test.
 struct Daemon {
     sock_path: PathBuf,
