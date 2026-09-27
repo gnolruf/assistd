@@ -208,6 +208,61 @@ async fn upsert_replaces_memory_embedding_in_place() {
 }
 
 #[tokio::test]
+async fn overwriting_a_memory_value_drops_its_stale_embedding() {
+    let (handle, store, _guard) = fresh().await;
+    let mem_id = save_memory(&handle, "editor", "vim").await;
+    embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
+
+    assert_eq!(save_memory(&handle, "editor", "emacs").await, mem_id);
+    assert_eq!(store.count_for_model("m").await.unwrap(), (0, 0));
+    assert_eq!(
+        store.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap(),
+        Vec::<MemoryHit>::new()
+    );
+    assert_eq!(
+        store.memories_missing_embedding("m").await.unwrap(),
+        [(mem_id, "emacs".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn resaving_an_unchanged_memory_value_keeps_its_embedding() {
+    let (handle, store, _guard) = fresh().await;
+    let mem_id = save_memory(&handle, "editor", "vim").await;
+    embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
+
+    assert_eq!(save_memory(&handle, "editor", "vim").await, mem_id);
+    assert_eq!(store.count_for_model("m").await.unwrap(), (0, 1));
+    assert_eq!(
+        store.memories_missing_embedding("m").await.unwrap(),
+        Vec::<(i64, String)>::new()
+    );
+}
+
+#[tokio::test]
+async fn non_finite_vectors_never_enter_top_k() {
+    let (handle, store, _guard) = fresh().await;
+    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
+    insert_chunk_with_vec(&handle, &store, conv_id, 0, &[f32::NAN, 0.0], "m").await;
+    insert_chunk_with_vec(&handle, &store, conv_id, 1, &[f32::INFINITY, 0.0], "m").await;
+    let far = insert_chunk_with_vec(&handle, &store, conv_id, 2, &unit_vec(1.5), "m").await;
+    let near = insert_chunk_with_vec(&handle, &store, conv_id, 3, &unit_vec(0.1), "m").await;
+
+    let hits = store
+        .nearest_chunks(unit_vec(0.0), 2, "m", None)
+        .await
+        .unwrap();
+    let got: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
+    assert_eq!(got, [near, far]);
+    assert!(hits.iter().all(|h| h.similarity.is_finite()));
+    assert!(
+        serde_json::to_string(&hits)
+            .unwrap()
+            .contains("\"similarity\":0.9")
+    );
+}
+
+#[tokio::test]
 async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
     let (handle, store, _guard) = fresh().await;
     let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
@@ -281,4 +336,22 @@ fn score_against_rejects_malformed_blobs() {
     assert_eq!(score_against(&q, &vector_to_blob(&[3.0, 4.0])), Some(11.0));
     assert_eq!(score_against(&q, &vector_to_blob(&[1.0, 0.0, 0.0])), None);
     assert_eq!(score_against(&q, &[0u8; 7]), None);
+}
+
+#[test]
+fn score_against_rejects_non_finite_products() {
+    let q = [1.0f32, 2.0];
+    assert_eq!(score_against(&q, &vector_to_blob(&[f32::NAN, 0.0])), None);
+    assert_eq!(
+        score_against(&q, &vector_to_blob(&[f32::INFINITY, 0.0])),
+        None
+    );
+    assert_eq!(
+        score_against(&q, &vector_to_blob(&[f32::MAX, f32::MAX])),
+        None
+    );
+    assert_eq!(
+        score_against(&[f32::NAN, 0.0], &vector_to_blob(&[1.0, 0.0])),
+        None
+    );
 }
