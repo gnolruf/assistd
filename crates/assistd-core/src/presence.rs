@@ -168,7 +168,7 @@ impl PresenceManager {
 
     fn publish_state(&self, state: PresenceState) {
         *self.state.lock() = state;
-        let _ = self.state_tx.send(state);
+        self.state_tx.send_replace(state);
     }
 
     /// Time since the last user-initiated interaction.
@@ -350,10 +350,9 @@ impl PresenceManager {
         let _inflight = self.inflight.write().await;
 
         let started = Instant::now();
-        let service = self.llama.lock().await.take();
-        let outcome = self.teardown_llama(service).await;
+        let service = self.detach_llama_as_sleeping().await;
+        let outcome = self.join_llama_shutdown(service).await;
 
-        self.publish_state(PresenceState::Sleeping);
         info!(
             target: "assistd::presence",
             prior = ?prior,
@@ -364,12 +363,25 @@ impl PresenceManager {
         outcome
     }
 
-    async fn teardown_llama(&self, service: Option<LlamaService>) -> Result<(), PresenceError> {
+    async fn detach_llama_as_sleeping(&self) -> Option<LlamaService> {
+        let mut slot = self.llama.lock().await;
+        let service = slot.take();
+        self.signal_inner_shutdown();
+        self.publish_state(PresenceState::Sleeping);
+        service
+    }
+
+    fn signal_inner_shutdown(&self) {
         let tx = self.current_inner_shutdown.lock().take();
         if let Some(tx) = tx {
             let _ = tx.send(true);
         }
+    }
 
+    async fn join_llama_shutdown(
+        &self,
+        service: Option<LlamaService>,
+    ) -> Result<(), PresenceError> {
         let Some(service) = service else {
             return Ok(());
         };
@@ -447,7 +459,7 @@ impl PresenceManager {
 
         let started = Instant::now();
         match prior {
-            PresenceState::Drowsy => self.load_model_and_wait().await?,
+            PresenceState::Drowsy => self.reload_model().await?,
             PresenceState::Sleeping => self.cold_start().await?,
             PresenceState::Active => unreachable!("short-circuited above"),
         }
@@ -463,7 +475,19 @@ impl PresenceManager {
         Ok(())
     }
 
+    async fn reload_model(&self) -> Result<(), PresenceError> {
+        let ready_rx = self
+            .llama
+            .lock()
+            .await
+            .as_ref()
+            .map(LlamaService::subscribe_ready)
+            .ok_or(PresenceError::ServiceMissing)?;
+        self.load_model_and_wait(ready_rx).await
+    }
+
     async fn cold_start(&self) -> Result<(), PresenceError> {
+        self.signal_inner_shutdown();
         let (inner_tx, inner_rx) = watch::channel(false);
         *self.current_inner_shutdown.lock() = Some(inner_tx);
 
@@ -482,23 +506,29 @@ impl PresenceManager {
             }
         };
 
-        *self.llama.lock().await = Some(service);
-
-        let loaded = self.load_model_and_wait().await;
-        if loaded.is_err() {
-            let service = self.llama.lock().await.take();
-            if let Err(e) = self.teardown_llama(service).await {
-                warn!(
-                    target: "assistd::presence",
-                    error = %e,
-                    "teardown after a failed cold start was unclean"
-                );
+        match self.load_model_and_wait(service.subscribe_ready()).await {
+            Ok(()) => {
+                *self.llama.lock().await = Some(service);
+                Ok(())
+            }
+            Err(e) => {
+                self.signal_inner_shutdown();
+                if let Err(teardown) = self.join_llama_shutdown(Some(service)).await {
+                    warn!(
+                        target: "assistd::presence",
+                        error = %teardown,
+                        "teardown after a failed cold start was unclean"
+                    );
+                }
+                Err(e)
             }
         }
-        loaded
     }
 
-    async fn load_model_and_wait(&self) -> Result<(), PresenceError> {
+    async fn load_model_and_wait(
+        &self,
+        ready_rx: watch::Receiver<ReadyState>,
+    ) -> Result<(), PresenceError> {
         self.control
             .load_model(&self.model.name)
             .await
@@ -507,18 +537,13 @@ impl PresenceManager {
                 source,
             })?;
 
-        self.await_model_loaded().await
+        self.await_model_loaded(ready_rx).await
     }
 
-    async fn await_model_loaded(&self) -> Result<(), PresenceError> {
-        let mut ready_rx = {
-            let guard = self.llama.lock().await;
-            guard
-                .as_ref()
-                .map(LlamaService::subscribe_ready)
-                .ok_or(PresenceError::ServiceMissing)?
-        };
-
+    async fn await_model_loaded(
+        &self,
+        mut ready_rx: watch::Receiver<ReadyState>,
+    ) -> Result<(), PresenceError> {
         let secs = self.llama_server.ready_timeout_secs.get();
         let backstop = Duration::from_secs(secs);
         tokio::select! {
