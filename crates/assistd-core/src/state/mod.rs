@@ -109,7 +109,7 @@ impl AppState {
         req: Request,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
-        if matches!(req, Request::Subscribe { .. }) {
+        if Self::outlives_dispatch_envelope(&req) {
             return self.dispatch_inner(req, tx).await;
         }
         let envelope = Duration::from_secs(self.config.timeouts.dispatch_envelope_secs);
@@ -139,6 +139,15 @@ impl AppState {
                 Ok(())
             }
         }
+    }
+
+    /// Requests the envelope timeout leaves alone: a subscription lives as
+    /// long as its client, and an agent turn is bounded per step instead.
+    fn outlives_dispatch_envelope(req: &Request) -> bool {
+        matches!(
+            req,
+            Request::Subscribe { .. } | Request::Query { .. } | Request::PttStop { .. }
+        )
     }
 
     async fn dispatch_inner(

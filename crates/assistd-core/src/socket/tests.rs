@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tokio::sync::oneshot;
 
 use super::*;
@@ -33,13 +35,25 @@ fn state_with_backend_and_grace(
     backend: Arc<dyn assistd_llm::LlmBackend>,
     grace_secs: u64,
 ) -> Arc<AppState> {
+    state_with(
+        backend,
+        Arc::new(assistd_tools::ToolRegistry::default()),
+        grace_secs,
+    )
+}
+
+fn state_with(
+    backend: Arc<dyn assistd_llm::LlmBackend>,
+    tools: Arc<assistd_tools::ToolRegistry>,
+    grace_secs: u64,
+) -> Arc<AppState> {
     let mut config = Config::default();
     config.daemon.shutdown_grace_secs = grace_secs;
     Arc::new(AppState::new(
         config,
         backend,
         PresenceManager::stub(PresenceState::Active),
-        Arc::new(assistd_tools::ToolRegistry::default()),
+        tools,
         Arc::new(assistd_voice::NoVoiceInput::new()),
         Arc::new(assistd_voice::NoContinuousListener::new()),
         assistd_voice::VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
@@ -990,4 +1004,143 @@ async fn write_event_times_out_when_the_client_stops_reading() {
     .await
     .expect("write to a stalled client never failed");
     assert!(matches!(err, SocketError::WriteTimeout(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn peer_hung_up_distinguishes_a_half_close_from_a_full_close() {
+    let (server, client) = UnixStream::pair().unwrap();
+    assert!(!peer_hung_up(&server), "fresh pair reported as hung up");
+
+    let (client_read, mut client_write) = client.into_split();
+    client_write.shutdown().await.unwrap();
+    assert!(
+        !peer_hung_up(&server),
+        "a peer that only closed its write side still reads events"
+    );
+
+    drop(client_write);
+    drop(client_read);
+    assert!(peer_hung_up(&server), "closed peer not reported as hung up");
+}
+
+/// Calls `hang` on its first step and answers on the next.
+#[derive(Default)]
+struct HangingCallBackend {
+    called: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl assistd_llm::LlmBackend for HangingCallBackend {
+    async fn generate(
+        &self,
+        _prompt: String,
+        _tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+    ) -> assistd_llm::LlmResult<()> {
+        unimplemented!("uses step path")
+    }
+
+    async fn push_user(
+        &self,
+        _text: String,
+        _attachments: Vec<assistd_tools::Attachment>,
+    ) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn push_tool_results(
+        &self,
+        _results: Vec<assistd_llm::ToolResultPayload>,
+    ) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn step(
+        &self,
+        _tools: Vec<serde_json::Value>,
+        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+    ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
+        if !self.called.swap(true, Ordering::SeqCst) {
+            return Ok(assistd_llm::StepOutcome::ToolCalls(vec![
+                assistd_llm::ToolCall {
+                    id: "c1".into(),
+                    name: "hang".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ]));
+        }
+        let _ = tx
+            .send(assistd_llm::LlmEvent::Delta {
+                text: "done".into(),
+            })
+            .await;
+        Ok(assistd_llm::StepOutcome::Final)
+    }
+}
+
+/// Never returns and emits nothing; `dropped` flips when the invocation
+/// future is torn down.
+struct SilentHangingTool {
+    dropped: Arc<AtomicBool>,
+}
+
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl assistd_tools::Tool for SilentHangingTool {
+    fn name(&self) -> &str {
+        "hang"
+    }
+    fn description(&self) -> &str {
+        "never returns"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn invoke(
+        &self,
+        _args: serde_json::Value,
+    ) -> Result<serde_json::Value, assistd_tools::ToolError> {
+        let _flag = DropFlag(self.dropped.clone());
+        std::future::pending::<()>().await;
+        unreachable!("hanging tool must never resolve")
+    }
+}
+
+#[tokio::test]
+async fn client_hangup_during_a_silent_tool_call_cancels_the_turn() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let mut tools = assistd_tools::ToolRegistry::new();
+    tools.register(SilentHangingTool {
+        dropped: dropped.clone(),
+    });
+    let state = state_with(Arc::new(HangingCallBackend::default()), Arc::new(tools), 5);
+    with_server(state, |path| async move {
+        let (write, mut reader) =
+            open_connection(&path, &[r#"{"type":"query","id":"h1","text":"go"}"#], true).await;
+        loop {
+            let event = read_event(&mut reader)
+                .await
+                .expect("connection closed before the tool call started");
+            if matches!(event, Event::ToolCall { .. }) {
+                break;
+            }
+        }
+        drop(reader);
+        drop(write);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("turn kept running its tool after the client hung up");
+    })
+    .await;
 }

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::process::geteuid;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -29,6 +30,10 @@ const EVENT_CHANNEL_CAPACITY: usize = 32;
 /// Longest one event write may block on a client that stopped reading,
 /// since a stalled reader holds the agent turn lock for later queries.
 const EVENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often a connection checks whether its peer closed the socket, so
+/// a client that leaves is noticed even while no event is being written.
+const PEER_HANGUP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Cap on one request frame: a 32 MiB image base64-encoded plus JSON
 /// overhead, so a runaway client cannot OOM the daemon.
@@ -91,6 +96,14 @@ pub enum SocketError {
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// Why a connection stopped forwarding events to its client.
+enum ForwardEnd {
+    /// Every event was written; the client still holds the socket open.
+    Drained(OwnedWriteHalf),
+    /// The client closed its socket before the stream ended.
+    PeerHungUp,
 }
 
 /// [`serve_at`] on the default path from [`assistd_ipc::socket_path`].
@@ -357,8 +370,10 @@ async fn handle_connection(
     if let Err(e) = dispatch_res {
         error!("dispatch error: {e}");
     }
-    let mut write_half = forward_res?;
-    write_half.shutdown().await?;
+    match forward_res? {
+        ForwardEnd::Drained(mut write_half) => write_half.shutdown().await?,
+        ForwardEnd::PeerHungUp => debug!("client closed its socket before the stream ended"),
+    }
     Ok(())
 }
 
@@ -392,20 +407,46 @@ async fn read_initial_request(
 }
 
 /// Write every dispatched event to the client, teeing it onto the bus
-/// unless this connection is itself a bus subscriber.
+/// unless this connection is itself a bus subscriber. Returns early,
+/// dropping the event receiver, once the client hangs up.
 async fn forward_events(
     mut rx: mpsc::Receiver<Event>,
     mut write_half: OwnedWriteHalf,
     state: Arc<AppState>,
     is_subscribe: bool,
-) -> Result<OwnedWriteHalf, SocketError> {
-    while let Some(event) = rx.recv().await {
-        if !is_subscribe {
-            state.runtime.publish(&event);
+) -> Result<ForwardEnd, SocketError> {
+    let mut hangup_poll = tokio::time::interval(PEER_HANGUP_POLL_INTERVAL);
+    loop {
+        tokio::select! {
+            received = rx.recv() => {
+                let Some(event) = received else {
+                    return Ok(ForwardEnd::Drained(write_half));
+                };
+                if !is_subscribe {
+                    state.runtime.publish(&event);
+                }
+                write_event(&mut write_half, &event).await?;
+            }
+            _ = hangup_poll.tick() => {
+                if peer_hung_up(write_half.as_ref()) {
+                    return Ok(ForwardEnd::PeerHungUp);
+                }
+            }
         }
-        write_event(&mut write_half, &event).await?;
     }
-    Ok(write_half)
+}
+
+/// Whether the peer closed its end of `stream`. A client that only shut
+/// its write side, as one-shot clients do, does not count.
+fn peer_hung_up(stream: &UnixStream) -> bool {
+    let mut fds = [PollFd::new(stream, PollFlags::empty())];
+    match poll(&mut fds, Some(&Timespec::default())) {
+        Ok(_) => fds[0].revents().contains(PollFlags::HUP),
+        Err(e) => {
+            debug!("peer hangup poll failed: {e}");
+            false
+        }
+    }
 }
 
 /// Route mid-stream `ConfirmResponse` frames to `router` until the client

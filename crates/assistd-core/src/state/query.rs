@@ -247,7 +247,7 @@ impl AppState {
         let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
         let done_emitted = self
-            .drive_event_loop(id.clone(), llm_rx, &tx, speech, turn_id)
+            .drive_event_loop(id.clone(), llm_rx, &tx, speech, turn_id, &cancel)
             .await;
 
         let agent_result = agent_task.await;
@@ -422,7 +422,8 @@ impl AppState {
     }
 
     /// Forward the turn's events to `tx` and the speech worker until the
-    /// agent finishes or the client leaves. Returns whether `Done` was sent.
+    /// agent finishes. A client that leaves cancels the turn; the events it
+    /// winds down with are still persisted. Returns whether `Done` was sent.
     async fn drive_event_loop(
         &self,
         id: String,
@@ -430,13 +431,24 @@ impl AppState {
         tx: &mpsc::Sender<Event>,
         mut speech: SpeechPipeline,
         turn_id: Option<TurnId>,
+        cancel: &CancellationToken,
     ) -> bool {
         let mut translator = TurnTranslator::new(id, turn_id);
+        let mut client_connected = true;
         loop {
             let idle_timeout = speech
                 .partial_flush
                 .filter(|_| !translator.awaiting_tool_result);
-            let llm_event = match next_llm_event(&mut llm_rx, idle_timeout).await {
+            let next = tokio::select! {
+                biased;
+                () = tx.closed(), if client_connected => {
+                    client_connected = false;
+                    cancel_for_departed_client(cancel, &translator.id);
+                    continue;
+                }
+                next = next_llm_event(&mut llm_rx, idle_timeout) => next,
+            };
+            let llm_event = match next {
                 NextLlmEvent::Event(event) => event,
                 NextLlmEvent::Closed => break,
                 NextLlmEvent::Idle => {
@@ -449,11 +461,11 @@ impl AppState {
             else {
                 continue;
             };
-            let client_alive = tx.send(wire_event).await.is_ok();
-            speech.speak(sentences).await;
-            if !client_alive {
-                break;
+            if client_connected && tx.send(wire_event).await.is_err() {
+                client_connected = false;
+                cancel_for_departed_client(cancel, &translator.id);
             }
+            speech.speak(sentences).await;
         }
         translator.done_emitted
     }
@@ -503,6 +515,15 @@ impl AppState {
             }
         }
     }
+}
+
+fn cancel_for_departed_client(cancel: &CancellationToken, id: &str) {
+    debug!(
+        target: "assistd::state",
+        id = %id,
+        "client left mid-turn; cancelling the agent turn"
+    );
+    cancel.cancel();
 }
 
 async fn next_llm_event(

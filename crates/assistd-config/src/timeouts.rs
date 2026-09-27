@@ -12,7 +12,9 @@ pub struct TimeoutsConfig {
     pub presence_sleep_secs: u64,
     /// The model-unload HTTP call on entering `Drowsy`.
     pub presence_drowse_secs: u64,
-    /// Handling one IPC request end to end.
+    /// Handling one IPC request end to end. Agent turns (`query`,
+    /// `ptt_stop`) are exempt: each of their steps is bounded by
+    /// `tool_call_secs` and `stream_inactivity_secs` instead.
     pub dispatch_envelope_secs: u64,
     /// Gap between SSE chunks once a chat stream has started; the first
     /// byte is bounded by `chat.request_timeout_secs` instead.

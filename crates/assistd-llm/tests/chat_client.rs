@@ -911,6 +911,47 @@ async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
 }
 
 #[tokio::test]
+async fn step_discards_tool_calls_from_a_stream_cut_off_before_its_finish_chunk() {
+    let script = Script::new();
+    let mut frames = tool_call_frames("call-9", "run", &[]);
+    frames.truncate(2);
+    script.push_stream(StreamResponse::RawFrames(frames)).await;
+    script
+        .push_stream(StreamResponse::Deltas(vec!["fine".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client
+        .push_user("list /tmp".into(), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let err = client
+        .step(Vec::new(), tx.clone())
+        .await
+        .expect_err("a half-received tool call must not run");
+    assert!(
+        matches!(err, LlmError::ToolCallParse(_)),
+        "expected a tool-call parse error, got {err:?}"
+    );
+
+    let outcome = client.step(Vec::new(), tx).await.unwrap();
+    assert!(matches!(outcome, StepOutcome::Final), "{outcome:?}");
+    let captured = script.captured().await;
+    let roles: Vec<&str> = captured[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert!(
+        !roles.contains(&"assistant"),
+        "discarded step leaked into history: {roles:?}"
+    );
+}
+
+#[tokio::test]
 async fn step_parses_tool_call_across_argument_chunks() {
     let script = Script::new();
     script
