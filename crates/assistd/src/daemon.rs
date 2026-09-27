@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::presence::PresenceLlmHealthProbe;
+use assistd_core::socket::StartupLock;
 use assistd_core::{
     AppState, BuildToolsDeps, Component, Config, ContinuousListener, ConversationContext,
     MemoryStack, PresenceManager, RuntimeState, Subsystems, VisionRevalidator, spawn_supervised,
@@ -160,6 +161,8 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
     info!("  tools v{}", assistd_tools::version());
     info!("  wm    v{}", assistd_wm::version());
     info!("loaded config from {}", config_path.display());
+
+    let _startup_lock = StartupLock::acquire()?;
 
     let stages = ShutdownStages::new();
     spawn_signal_handler(&stages.intake);

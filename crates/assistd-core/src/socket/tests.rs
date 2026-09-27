@@ -312,6 +312,35 @@ async fn removes_stale_socket_file_on_bind() {
     server.stop().await;
 }
 
+#[test]
+fn startup_lock_refuses_second_holder_until_first_drops() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket_path = temp.path().join("assistd.sock");
+    let lock_path = socket_path.with_extension("lock");
+
+    let first = StartupLock::acquire_at(&socket_path).unwrap();
+    let err = StartupLock::acquire_at(&socket_path).expect_err("second acquire must fail");
+    assert!(
+        matches!(&err, SocketError::AlreadyStarting { path } if *path == lock_path),
+        "{err:?}"
+    );
+
+    drop(first);
+    StartupLock::acquire_at(&socket_path).expect("lock must be free once the guard drops");
+}
+
+#[test]
+fn startup_lock_creates_owner_only_dir_and_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("assistd-1000");
+    let socket_path = dir.join("assistd.sock");
+
+    let _lock = StartupLock::acquire_at(&socket_path).unwrap();
+
+    assert_eq!(mode_of(&dir), SOCKET_DIR_MODE);
+    assert_eq!(mode_of(&socket_path.with_extension("lock")), LOCK_FILE_MODE);
+}
+
 fn mode_of(path: &Path) -> u32 {
     std::fs::symlink_metadata(path).unwrap().mode() & 0o777
 }

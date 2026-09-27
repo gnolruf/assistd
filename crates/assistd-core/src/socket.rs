@@ -1,10 +1,10 @@
 //! Unix-socket IPC server: one newline-delimited JSON request per
 //! connection, answered by a stream of events.
 
-use std::fs::{DirBuilder, Permissions};
+use std::fs::{DirBuilder, File, OpenOptions, Permissions, TryLockError};
 use std::future::Future;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +52,9 @@ const SOCKET_DIR_MODE: u32 = 0o700;
 /// Mode for the socket itself: only the daemon's user may connect.
 const SOCKET_MODE: u32 = 0o600;
 
+/// Mode for the startup lock file beside the socket.
+const LOCK_FILE_MODE: u32 = 0o600;
+
 /// Errors produced by the socket listener and per-connection handlers.
 #[derive(Debug, Error)]
 pub enum SocketError {
@@ -60,6 +63,19 @@ pub enum SocketError {
          its socket"
     )]
     AlreadyRunning { path: PathBuf },
+
+    #[error(
+        "another assistd daemon holds the startup lock at {path}; it is still starting or already \
+         running"
+    )]
+    AlreadyStarting { path: PathBuf },
+
+    #[error("failed to take the startup lock at {path}: {source}")]
+    StartupLock {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 
     #[error("failed to remove stale socket file at {path}: {source}")]
     StaleCleanup {
@@ -96,6 +112,49 @@ pub enum SocketError {
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// Exclusive `flock` on `assistd.lock` beside the socket, held for the
+/// daemon's lifetime so a second daemon is refused while this one is
+/// still initialising and has not yet bound the socket.
+#[derive(Debug)]
+pub struct StartupLock {
+    _file: File,
+}
+
+impl StartupLock {
+    /// Take the lock beside the default [`assistd_ipc::socket_path`].
+    pub fn acquire() -> Result<Self, SocketError> {
+        Self::acquire_at(&assistd_ipc::socket_path())
+    }
+
+    /// Take the lock beside `socket_path`, creating the socket directory
+    /// owner-only if needed. Fails with `AlreadyStarting` when another
+    /// process holds it; the lock is released when the guard drops or the
+    /// process exits.
+    pub fn acquire_at(socket_path: &Path) -> Result<Self, SocketError> {
+        let lock_path = socket_path.with_extension("lock");
+        if let Some(dir) = lock_path.parent() {
+            ensure_private_socket_dir(dir)?;
+        }
+        let lock_error = |source| SocketError::StartupLock {
+            path: lock_path.clone(),
+            source,
+        };
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(LOCK_FILE_MODE)
+            .open(&lock_path)
+            .map_err(lock_error)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => Err(SocketError::AlreadyStarting { path: lock_path }),
+            Err(TryLockError::Error(source)) => Err(lock_error(source)),
+        }
+    }
 }
 
 /// Why a connection stopped forwarding events to its client.
