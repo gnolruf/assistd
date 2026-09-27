@@ -487,7 +487,7 @@ fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
         (
             Event::BranchSwitched {
                 id: id(),
-                branch_id: 9,
+                branch_id: Some(9),
                 session_id: "s".into(),
                 session_title: None,
                 name: "experiment".into(),

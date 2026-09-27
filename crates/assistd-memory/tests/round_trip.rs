@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use assistd_memory::{
-    BranchId, ConversationStore, MemoryStore, PersistedMessage, PersistedRole,
+    BranchId, ConversationStore, MemoryStore, PersistedMessage, PersistedRole, SessionId,
     SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
 };
 use tokio::sync::watch;
@@ -22,8 +22,9 @@ async fn turn_persists_across_store_reopen() {
         let convs = SqliteConversationStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle);
 
-        let (session, main) = convs
-            .begin_session_with_main_branch(std::process::id())
+        let session = SessionId::new();
+        let main = convs
+            .begin_session_with_main_branch(&session, std::process::id())
             .await
             .unwrap();
         branch = main;
@@ -118,8 +119,9 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
         let handle = Arc::new(handle);
         let convs = SqliteConversationStore::new(handle.clone());
 
-        let (session, main) = convs
-            .begin_session_with_main_branch(std::process::id())
+        let session = SessionId::new();
+        let main = convs
+            .begin_session_with_main_branch(&session, std::process::id())
             .await
             .unwrap();
         branch = main;

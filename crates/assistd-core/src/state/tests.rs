@@ -1319,8 +1319,12 @@ async fn branch_state_with(
     let (handle, _writer_handle) = SqliteHandle::open(&path, rx).await.unwrap();
     let handle = Arc::new(handle);
     let conv: Arc<dyn ConversationStore> = Arc::new(SqliteConversationStore::new(handle.clone()));
-    let (session, branch) = conv.begin_session_with_main_branch(123).await.unwrap();
-    let ctx = Arc::new(ConversationContext::new(session.clone(), branch));
+    let session = SessionId::new();
+    let branch = conv
+        .begin_session_with_main_branch(&session, 123)
+        .await
+        .unwrap();
+    let ctx = Arc::new(ConversationContext::new(session.clone(), Some(branch)));
     let config = Config::default();
     let subsystems = Subsystems::new(
         backend,
@@ -1400,6 +1404,7 @@ async fn fork_creates_branch_and_switches() {
 
     let (active_session, active_branch) = state.runtime.conversation_ctx.current().await;
     assert_eq!(active_session.0, session.0);
+    let active_branch = active_branch.expect("fork lands on a saved branch");
     assert_ne!(active_branch, main_branch);
     assert_eq!(
         conv.get_current_branch(&session).await.unwrap(),
@@ -1409,7 +1414,7 @@ async fn fork_creates_branch_and_switches() {
         events.iter().any(|e| matches!(
             e,
             Event::BranchSwitched { branch_id, name, parent_branch_name, .. }
-                if *branch_id == active_branch.0
+                if *branch_id == Some(active_branch.0)
                     && name == "experiment"
                     && parent_branch_name.as_deref() == Some("main")
         )),
@@ -1436,7 +1441,9 @@ async fn fork_with_empty_name_emits_error() {
 async fn branches_lists_active_session_first() {
     let (state, conv, _session, main_branch) = fresh_branch_state().await;
     conv.fork_branch(main_branch, "alt").await.unwrap();
-    conv.begin_session_with_main_branch(456).await.unwrap();
+    conv.begin_session_with_main_branch(&SessionId::new(), 456)
+        .await
+        .unwrap();
 
     let (res, events) = dispatch(&state, Request::Branches { id: "rq".into() }).await;
     res.unwrap();
@@ -1573,6 +1580,101 @@ async fn undo_on_empty_branch_returns_zero() {
         })
         .expect("expected UndoApplied even on empty branch");
     assert_eq!(removed, 0);
+}
+
+#[tokio::test]
+async fn new_session_writes_no_rows_until_the_first_message() {
+    let (state, conv, session, _branch) = fresh_branch_state().await;
+    let (res, events) = dispatch(&state, Request::NewSession { id: "rq".into() }).await;
+    res.unwrap();
+
+    let (unsaved_session, unsaved_branch) = state.runtime.conversation_ctx.current().await;
+    assert_ne!(unsaved_session.0, session.0);
+    assert_eq!(unsaved_branch, None);
+    assert_eq!(
+        events,
+        [
+            Event::BranchSwitched {
+                id: "rq".into(),
+                branch_id: None,
+                session_id: unsaved_session.0.clone(),
+                session_title: None,
+                name: "main".into(),
+                parent_branch_name: None,
+                fork_point_seq: None,
+            },
+            done("rq"),
+        ]
+    );
+    assert_eq!(conv.list_branches().await.unwrap().len(), 1);
+
+    let (res, _) = dispatch(&state, query("q", "hello")).await;
+    res.unwrap();
+    state.drain_persistence_inflight().await;
+
+    let (saved_session, saved_branch) = state.runtime.conversation_ctx.current().await;
+    assert_eq!(saved_session.0, unsaved_session.0);
+    let saved_branch = saved_branch.expect("the first message saves the session");
+    assert_eq!(
+        conv.get_current_branch(&saved_session).await.unwrap(),
+        Some(saved_branch)
+    );
+    assert_eq!(conv.list_branches().await.unwrap().len(), 2);
+    let rows = conv.load_branch_history(saved_branch).await.unwrap();
+    assert_eq!(rows.first().map(|row| row.content.as_str()), Some("hello"));
+}
+
+#[tokio::test]
+async fn resume_or_new_keeps_an_unsaved_session() {
+    let (state, conv, _session, _branch) = fresh_branch_state().await;
+    let (res, _) = dispatch(&state, Request::NewSession { id: "new".into() }).await;
+    res.unwrap();
+    let (unsaved_session, _) = state.runtime.conversation_ctx.current().await;
+
+    let (res, events) = dispatch(
+        &state,
+        Request::ResumeOrNew {
+            id: "rq".into(),
+            recency_secs: 0,
+        },
+    )
+    .await;
+    res.unwrap();
+
+    let (session, branch) = state.runtime.conversation_ctx.current().await;
+    assert_eq!(session.0, unsaved_session.0);
+    assert_eq!(branch, None);
+    assert!(
+        matches!(
+            events.first(),
+            Some(Event::BranchSwitched { branch_id: None, session_id, .. })
+                if *session_id == unsaved_session.0
+        ),
+        "{events:?}"
+    );
+    assert_eq!(events.last(), Some(&done("rq")));
+    assert_eq!(conv.list_branches().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn undo_on_unsaved_session_returns_zero() {
+    let (state, _conv, _session, _branch) = fresh_branch_state().await;
+    let (res, _) = dispatch(&state, Request::NewSession { id: "new".into() }).await;
+    res.unwrap();
+
+    let (res, events) = dispatch(&state, Request::Undo { id: "rq".into() }).await;
+    res.unwrap();
+    assert_eq!(
+        events,
+        [
+            Event::UndoApplied {
+                id: "rq".into(),
+                removed_messages: 0,
+                last_user_text: None,
+            },
+            done("rq"),
+        ]
+    );
 }
 
 #[tokio::test]

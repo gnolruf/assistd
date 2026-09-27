@@ -1,5 +1,5 @@
-//! Scrollable output pane: prose lines, tool blocks, thinking blocks and
-//! thumbnails, wrapped to the viewport width on render.
+//! Scrollable output pane: prose lines, markdown replies, tool blocks,
+//! thinking blocks and thumbnails, wrapped to the viewport width on render.
 
 use std::ops::Range;
 use std::time::Instant;
@@ -7,6 +7,8 @@ use std::time::Instant;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui_image::protocol::StatefulProtocol;
+
+use super::markdown::render_markdown;
 
 /// Rows an inline thumbnail reserves.
 pub const THUMBNAIL_ROWS: u16 = 8;
@@ -45,6 +47,8 @@ pub struct ThinkingBlock {
 
 enum OutputItem {
     Text(Line<'static>),
+    /// One assistant reply as raw markdown, rendered on wrap.
+    Assistant(String),
     Tool(ToolBlock),
     Thumbnail(Box<ThumbnailItem>),
     Thinking(ThinkingBlock),
@@ -117,37 +121,24 @@ impl OutputPane {
     /// Open a streaming assistant block for [`Self::append_assistant`].
     pub fn begin_assistant(&mut self) {
         self.close_open_assistant();
-        self.items.push(OutputItem::Text(single_span_line(
-            String::new(),
-            assistant_style(),
-        )));
+        self.items.push(OutputItem::Assistant(String::new()));
         self.open_assistant = Some(self.items.len() - 1);
     }
 
+    /// Extend the open reply's markdown; the block re-renders on the next
+    /// wrap so formatting settles as the closing delimiters arrive.
     pub fn append_assistant(&mut self, delta: &str) {
-        let mut idx = match self.open_assistant {
-            Some(i) => i,
+        let idx = match self.open_assistant {
+            Some(idx) => idx,
             None => {
                 self.begin_assistant();
                 self.items.len() - 1
             }
         };
-        let mut fragments = delta.split('\n');
-        if let Some(first) = fragments.next()
-            && !first.is_empty()
-            && let Some(line) = self.text_at_mut(idx)
-        {
-            append_to_line(line, first);
+        if let Some(OutputItem::Assistant(text)) = self.items.get_mut(idx) {
+            text.push_str(delta);
             self.wrap.invalidate(idx);
         }
-        for frag in fragments {
-            self.items.push(OutputItem::Text(single_span_line(
-                frag.to_string(),
-                assistant_style(),
-            )));
-            idx = self.items.len() - 1;
-        }
-        self.open_assistant = Some(idx);
     }
 
     pub fn finish_assistant(&mut self) {
@@ -192,7 +183,9 @@ impl OutputPane {
             let expanded = match item {
                 OutputItem::Tool(b) => &mut b.expanded,
                 OutputItem::Thinking(t) => &mut t.expanded,
-                OutputItem::Text(_) | OutputItem::Thumbnail(_) => continue,
+                OutputItem::Text(_) | OutputItem::Assistant(_) | OutputItem::Thumbnail(_) => {
+                    continue;
+                }
             };
             *expanded = !*expanded;
             self.wrap.invalidate(idx);
@@ -343,7 +336,7 @@ impl OutputPane {
         if let Some(idx) = self.open_assistant.take() {
             let empty = matches!(
                 self.items.get(idx),
-                Some(OutputItem::Text(l)) if l.spans.iter().all(|s| s.content.is_empty())
+                Some(OutputItem::Assistant(text)) if text.is_empty()
             );
             if empty && idx + 1 == self.items.len() {
                 self.items.pop();
@@ -351,13 +344,6 @@ impl OutputPane {
             } else {
                 self.items.push(OutputItem::Text(Line::from("")));
             }
-        }
-    }
-
-    fn text_at_mut(&mut self, idx: usize) -> Option<&mut Line<'static>> {
-        match self.items.get_mut(idx)? {
-            OutputItem::Text(line) => Some(line),
-            OutputItem::Tool(_) | OutputItem::Thumbnail(_) | OutputItem::Thinking(_) => None,
         }
     }
 
@@ -476,11 +462,15 @@ impl WrapCache {
     }
 }
 
-/// A zero width renders one unwrapped line per item.
+/// A zero width renders every item unwrapped, one line per source line.
 fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verbose: bool) {
     if width == 0 {
         out.push(match item {
             OutputItem::Text(l) => l.clone(),
+            OutputItem::Assistant(text) => {
+                out.extend(text.lines().map(|line| Line::from(line.to_string())));
+                return;
+            }
             OutputItem::Tool(b) => single_span_line(format!("$ {}", b.command), tool_call_style()),
             OutputItem::Thumbnail(t) => single_span_line(format!("📎 {}", t.name), info_style()),
             OutputItem::Thinking(t) => {
@@ -491,6 +481,7 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
     }
     match item {
         OutputItem::Text(line) => wrap_line_into(out, line, width),
+        OutputItem::Assistant(text) => out.extend(render_markdown(text, usize::from(width))),
         OutputItem::Tool(b) => render_tool_block(out, b, width, verbose),
         OutputItem::Thumbnail(t) => render_thumbnail_placeholder(out, t),
         OutputItem::Thinking(t) => render_thinking_block(out, t, width, verbose),
@@ -692,26 +683,8 @@ fn single_span_line(text: String, style: Style) -> Line<'static> {
     Line::from(Span::styled(text, style))
 }
 
-fn append_to_line(line: &mut Line<'static>, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    if let Some(span) = line.spans.last_mut() {
-        let mut owned = std::mem::take(&mut span.content).into_owned();
-        owned.push_str(text);
-        span.content = owned.into();
-    } else {
-        line.spans
-            .push(Span::styled(text.to_string(), assistant_style()));
-    }
-}
-
 fn user_style() -> Style {
     Style::default().bg(Color::DarkGray)
-}
-
-fn assistant_style() -> Style {
-    Style::default()
 }
 
 fn error_style() -> Style {

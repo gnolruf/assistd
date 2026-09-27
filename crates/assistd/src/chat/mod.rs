@@ -34,6 +34,7 @@ use self::app::{App, ChatEvent, WireStream};
 
 mod app;
 mod input;
+mod markdown;
 mod output;
 mod throughput;
 mod ui;

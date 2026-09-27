@@ -304,13 +304,27 @@ impl AppState {
     }
 
     async fn open_persistence_turn(&self, text: &str) -> (Arc<SessionId>, Option<TurnId>) {
-        let (current_session, _current_branch) = self.runtime.conversation_ctx.current().await;
-        let turn_id: Option<TurnId> = match self
-            .memory
-            .conversations
-            .begin_turn(&current_session, text)
-            .await
-        {
+        let (current_session, turn_id) = match self.saved_conversation().await {
+            Ok((session, _branch)) => {
+                let turn_id = self.begin_persisted_turn(&session, text).await;
+                (session, turn_id)
+            }
+            Err(e) => {
+                warn!(
+                    target: "assistd::memory",
+                    error = %e,
+                    "saving the session failed; turn will not be persisted"
+                );
+                let (session, _branch) = self.runtime.conversation_ctx.current().await;
+                (session, None)
+            }
+        };
+        self.persist_message_fire_and_forget(turn_id, PersistedMessage::user(text.to_string()));
+        (current_session, turn_id)
+    }
+
+    async fn begin_persisted_turn(&self, session: &SessionId, text: &str) -> Option<TurnId> {
+        match self.memory.conversations.begin_turn(session, text).await {
             Ok(turn) if turn.0 != 0 => Some(turn),
             Ok(_) => None,
             Err(e) => {
@@ -321,9 +335,7 @@ impl AppState {
                 );
                 None
             }
-        };
-        self.persist_message_fire_and_forget(turn_id, PersistedMessage::user(text.to_string()));
-        (current_session, turn_id)
+        }
     }
 
     async fn assemble_transient_context(&self, text: &str) {

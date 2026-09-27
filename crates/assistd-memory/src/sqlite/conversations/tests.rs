@@ -24,7 +24,11 @@ fn contents(history: &[HistoryRow]) -> Vec<(PersistedRole, &str)> {
 #[tokio::test]
 async fn round_trip_user_and_assistant_messages() {
     let (store, _guard) = fresh_store().await;
-    let (session, branch) = store.begin_session_with_main_branch(42).await.unwrap();
+    let session = SessionId::new();
+    let branch = store
+        .begin_session_with_main_branch(&session, 42)
+        .await
+        .unwrap();
     let turn = store.begin_turn(&session, "what is 2+2?").await.unwrap();
 
     store
@@ -71,7 +75,11 @@ async fn round_trip_user_and_assistant_messages() {
 #[tokio::test]
 async fn tool_calls_and_tool_results_round_trip() {
     let (store, _guard) = fresh_store().await;
-    let (session, branch) = store.begin_session_with_main_branch(1).await.unwrap();
+    let session = SessionId::new();
+    let branch = store
+        .begin_session_with_main_branch(&session, 1)
+        .await
+        .unwrap();
     let turn = store.begin_turn(&session, "list files").await.unwrap();
 
     let calls = serde_json::json!([{"id": "c-1", "name": "run", "arguments": {"command": "ls"}}]);
@@ -123,7 +131,11 @@ async fn tool_calls_and_tool_results_round_trip() {
 #[tokio::test]
 async fn begin_session_with_main_branch_inserts_session_and_main_branch() {
     let (store, _guard) = fresh_store().await;
-    let (session, branch) = store.begin_session_with_main_branch(123).await.unwrap();
+    let session = SessionId::new();
+    let branch = store
+        .begin_session_with_main_branch(&session, 123)
+        .await
+        .unwrap();
     assert_eq!(
         store.get_current_branch(&session).await.unwrap(),
         Some(branch)
@@ -143,7 +155,11 @@ async fn begin_session_with_main_branch_inserts_session_and_main_branch() {
 #[tokio::test]
 async fn fork_creates_independent_branch_sharing_history() {
     let (store, _guard) = fresh_store().await;
-    let (session, main) = store.begin_session_with_main_branch(1).await.unwrap();
+    let session = SessionId::new();
+    let main = store
+        .begin_session_with_main_branch(&session, 1)
+        .await
+        .unwrap();
     let turn = store.begin_turn(&session, "hello").await.unwrap();
     store
         .append_message_to_branch(&session, main, Some(turn), PersistedMessage::user("hello"))
@@ -180,7 +196,11 @@ async fn fork_creates_independent_branch_sharing_history() {
 #[tokio::test]
 async fn append_to_one_branch_does_not_show_on_the_other() {
     let (store, _guard) = fresh_store().await;
-    let (session, main) = store.begin_session_with_main_branch(1).await.unwrap();
+    let session = SessionId::new();
+    let main = store
+        .begin_session_with_main_branch(&session, 1)
+        .await
+        .unwrap();
     let turn = store.begin_turn(&session, "q").await.unwrap();
     store
         .append_message_to_branch(&session, main, Some(turn), PersistedMessage::user("q"))
@@ -209,7 +229,11 @@ async fn append_to_one_branch_does_not_show_on_the_other() {
 #[tokio::test]
 async fn undo_removes_only_the_last_turn() {
     let (store, _guard) = fresh_store().await;
-    let (session, main) = store.begin_session_with_main_branch(1).await.unwrap();
+    let session = SessionId::new();
+    let main = store
+        .begin_session_with_main_branch(&session, 1)
+        .await
+        .unwrap();
     let t1 = store.begin_turn(&session, "first").await.unwrap();
     store
         .append_message_to_branch(&session, main, Some(t1), PersistedMessage::user("first"))
@@ -265,8 +289,10 @@ async fn undo_removes_only_the_last_turn() {
 #[tokio::test]
 async fn resolve_branch_prefers_given_session_or_qualified_prefix() {
     let (store, _guard) = fresh_store().await;
-    let (s1, b1) = store.begin_session_with_main_branch(1).await.unwrap();
-    let (s2, b2) = store.begin_session_with_main_branch(2).await.unwrap();
+    let s1 = SessionId::new();
+    let b1 = store.begin_session_with_main_branch(&s1, 1).await.unwrap();
+    let s2 = SessionId::new();
+    let b2 = store.begin_session_with_main_branch(&s2, 2).await.unwrap();
     let bare = store.resolve_branch("main", Some(&s1)).await.unwrap();
     assert_eq!(bare, Some((s1, b1)));
     let prefix = &s2.0[..8];
@@ -280,7 +306,8 @@ async fn resolve_branch_prefers_given_session_or_qualified_prefix() {
 #[tokio::test]
 async fn find_resumable_session_returns_unended() {
     let (store, _guard) = fresh_store().await;
-    let (s, branch) = store.begin_session_with_main_branch(99).await.unwrap();
+    let s = SessionId::new();
+    let branch = store.begin_session_with_main_branch(&s, 99).await.unwrap();
     let cand = store
         .find_resumable_session()
         .await

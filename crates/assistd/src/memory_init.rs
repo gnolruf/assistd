@@ -1,5 +1,5 @@
 //! Memory subsystem wiring for the daemon: open SQLite, then resume a
-//! session whose daemon has died or begin a fresh one.
+//! session whose daemon has died or start an unsaved one.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,7 +20,8 @@ pub struct MemorySubsystem {
     pub conversation_store: Arc<dyn ConversationStore>,
     pub writer_handle: Option<JoinHandle<()>>,
     pub session_id: Arc<SessionId>,
-    pub branch_id: BranchId,
+    /// `None` for an unsaved session, inserted with its first message.
+    pub branch_id: Option<BranchId>,
     /// History of the resumed branch, to replay into the LLM.
     pub resumed_history: Vec<HistoryRow>,
     pub sqlite_handle: Option<Arc<SqliteHandle>>,
@@ -33,7 +34,7 @@ impl MemorySubsystem {
             conversation_store: Arc::new(NoConversationStore),
             writer_handle: None,
             session_id: Arc::new(SessionId::new()),
-            branch_id: BranchId(0),
+            branch_id: None,
             resumed_history: Vec::new(),
             sqlite_handle: None,
         }
@@ -77,7 +78,7 @@ pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> MemoryS
     let conv_store = Arc::new(SqliteConversationStore::new(handle.clone()));
     let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
     let (session_id, branch_id, resumed_history) =
-        resume_or_begin_session(conv_store.as_ref(), &db_path).await;
+        resume_or_start_unsaved_session(conv_store.as_ref(), &db_path).await;
 
     MemorySubsystem {
         memory_store: mem_store,
@@ -90,12 +91,12 @@ pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> MemoryS
     }
 }
 
-/// Resume the most recent session whose daemon is dead, else begin a
-/// fresh one. A failed begin yields an unpersisted placeholder session.
-async fn resume_or_begin_session(
+/// Resume the most recent session whose daemon is dead, else start an
+/// unsaved session that is inserted with its first message.
+async fn resume_or_start_unsaved_session(
     conv_store: &SqliteConversationStore,
     db_path: &Path,
-) -> (Arc<SessionId>, BranchId, Vec<HistoryRow>) {
+) -> (Arc<SessionId>, Option<BranchId>, Vec<HistoryRow>) {
     match conv_store.find_resumable_session().await {
         Ok(Some(cand)) if !pid_is_alive(cand.daemon_pid) => {
             info!(
@@ -109,41 +110,22 @@ async fn resume_or_begin_session(
                     Vec::new()
                 }
             };
-            (Arc::new(cand.session_id), cand.current_branch_id, history)
+            (
+                Arc::new(cand.session_id),
+                Some(cand.current_branch_id),
+                history,
+            )
         }
-        Ok(_) => match conv_store
-            .begin_session_with_main_branch(std::process::id())
-            .await
-        {
-            Ok((s, b)) => {
-                info!(
-                    "memory: SQLite ready at {} (session={}, branch={})",
-                    db_path.display(),
-                    s,
-                    b.0
-                );
-                (Arc::new(s), b, Vec::new())
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "memory: begin_session_with_main_branch failed: {e:#}; \
-                     continuing without session row"
-                );
-                (Arc::new(SessionId::new()), BranchId(0), Vec::new())
-            }
-        },
+        Ok(_) => {
+            info!(
+                "memory: SQLite ready at {} (new session)",
+                db_path.display()
+            );
+            (Arc::new(SessionId::new()), None, Vec::new())
+        }
         Err(e) => {
             tracing::warn!("memory: find_resumable_session failed: {e:#}; starting fresh");
-            match conv_store
-                .begin_session_with_main_branch(std::process::id())
-                .await
-            {
-                Ok((s, b)) => (Arc::new(s), b, Vec::new()),
-                Err(e) => {
-                    tracing::warn!("memory: begin_session_with_main_branch failed: {e:#}");
-                    (Arc::new(SessionId::new()), BranchId(0), Vec::new())
-                }
-            }
+            (Arc::new(SessionId::new()), None, Vec::new())
         }
     }
 }
