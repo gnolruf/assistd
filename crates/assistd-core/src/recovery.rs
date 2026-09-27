@@ -3,15 +3,10 @@
 
 use std::any::Any;
 use std::future::Future;
-use std::sync::Weak;
 use std::time::Duration;
 
-use parking_lot::Mutex;
-use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
-
-use crate::PresenceManager;
 
 pub use assistd_ipc::{Component, StatusSeverity};
 
@@ -84,13 +79,9 @@ where
     })
 }
 
-/// Replace the global panic hook with one that logs a recovery event and
-/// SIGTERMs the llama-server process group before chaining to the
-/// previous hook.
-pub fn install_panic_hook(presence: Weak<PresenceManager>) {
-    static PRESENCE: Mutex<Option<Weak<PresenceManager>>> = Mutex::new(None);
-    *PRESENCE.lock() = Some(presence);
-
+/// Replace the global panic hook with one that logs a recovery event
+/// with the panic's location before chaining to the previous hook.
+pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let location = info
@@ -105,26 +96,8 @@ pub fn install_panic_hook(presence: Weak<PresenceManager>) {
             "panic",
             location = %location,
             message = %payload_msg,
-            "daemon panic; killing llama-server before propagating"
+            "panic"
         );
-
-        let llama_pid = PRESENCE
-            .lock()
-            .as_ref()
-            .and_then(|w| w.upgrade())
-            .and_then(|p| p.llama_pid_blocking());
-        if let Some(pid) = llama_pid
-            && let Some(pgid) = Pid::from_raw(pid as i32)
-        {
-            let _ = kill_process_group(pgid, Signal::TERM);
-            recovery_event!(
-                StatusSeverity::Warning,
-                Component::Llm,
-                "panic_kill",
-                pid = pid,
-                "sent SIGTERM to llama-server process group from panic hook"
-            );
-        }
 
         previous(info);
     }));

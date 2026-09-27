@@ -131,6 +131,7 @@ struct IntakeTasks {
 /// Run the daemon until shutdown.
 pub async fn run(args: DaemonArgs) -> Result<()> {
     init_tracing();
+    assistd_core::install_panic_hook();
 
     if args.client_mode {
         match rustix::process::setsid() {
@@ -324,7 +325,6 @@ async fn start_presence(
         "presence: Active (llama-server ready on {}:{})",
         config.llama_server.host, config.llama_server.port
     );
-    assistd_core::install_panic_hook(Arc::downgrade(&presence));
     Ok(presence)
 }
 
