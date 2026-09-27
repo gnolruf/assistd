@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::error::McpError;
-use crate::jsonrpc::{Correlator, Response, notification_line};
+use crate::jsonrpc::{Correlator, Incoming, notification_line, reply_line};
 use crate::{McpClient, ToolResult, ToolSchema, protocol};
 
 /// The reader drops the connection rather than buffer an event past
@@ -80,28 +80,24 @@ impl SseMcpClient {
         let stream_http = http_client_builder(cfg.read_timeout).build()?;
 
         let correlator = Arc::new(Correlator::new());
-        let post_url = Arc::new(RwLock::new(None));
+        let post_url: Arc<RwLock<Option<Url>>> = Arc::new(RwLock::new(None));
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (endpoint_ready_tx, endpoint_ready_rx) = oneshot::channel::<()>();
         let (done_tx, done_rx) = oneshot::channel::<()>();
 
         let client = Arc::new(Self {
             label: cfg.label.clone(),
-            correlator: correlator.clone(),
-            http: http.clone(),
+            correlator,
+            http,
             base_url: base_url.clone(),
             post_url: post_url.clone(),
-            headers: headers.clone(),
+            headers,
             request_timeout: cfg.request_timeout,
         });
 
         let reader = ReadLoop {
-            http: stream_http,
-            base_url: base_url.clone(),
-            headers: headers.clone(),
-            correlator: correlator.clone(),
-            post_url: post_url.clone(),
-            label: cfg.label.clone(),
+            stream_http,
+            client: client.clone(),
             cancel_rx: cancel_rx.clone(),
             endpoint_ready_tx: Some(endpoint_ready_tx),
             done_tx,
@@ -161,6 +157,30 @@ impl SseMcpClient {
         let body = pending.frame_json()?;
         self.post_json(method, body).await?;
         protocol::await_reply(&mut pending.rx, self.request_timeout).await
+    }
+
+    /// Answer a request the server sent on the event stream.
+    async fn answer_server_request(&self, id: Value, method: &str) {
+        debug!(target: "assistd::mcp", server = %self.label, method, "answering server request");
+        let line = match reply_line(&id, &protocol::answer_server_request(method)) {
+            Ok(line) => line,
+            Err(e) => {
+                warn!(
+                    target: "assistd::mcp",
+                    server = %self.label,
+                    "failed to encode reply to `{method}`: {e}",
+                );
+                return;
+            }
+        };
+        let body = line[..line.len().saturating_sub(1)].to_vec();
+        if let Err(e) = self.post_json("reply", body).await {
+            warn!(
+                target: "assistd::mcp",
+                server = %self.label,
+                "failed to post reply to `{method}`: {e}",
+            );
+        }
     }
 
     /// POST `body` to the current endpoint; a non-success status is an
@@ -231,13 +251,11 @@ impl SseLifeline {
     }
 }
 
+/// Reads the event stream; `stream_http` has no request timeout, so
+/// the long-lived `GET` is bounded only by the read timeout.
 struct ReadLoop {
-    http: reqwest::Client,
-    base_url: Url,
-    headers: HeaderMap,
-    correlator: Arc<Correlator>,
-    post_url: Arc<RwLock<Option<Url>>>,
-    label: String,
+    stream_http: reqwest::Client,
+    client: Arc<SseMcpClient>,
     cancel_rx: watch::Receiver<bool>,
     endpoint_ready_tx: Option<oneshot::Sender<()>>,
     done_tx: oneshot::Sender<()>,
@@ -248,15 +266,19 @@ impl ReadLoop {
         if let Some(resp) = self.open_stream().await {
             self.read_events(resp).await;
         }
-        self.correlator.fail_all();
+        self.client.correlator.fail_all();
         let _ = self.done_tx.send(());
+    }
+
+    fn label(&self) -> &str {
+        &self.client.label
     }
 
     async fn open_stream(&self) -> Option<reqwest::Response> {
         let resp = match self
-            .http
-            .get(self.base_url.clone())
-            .headers(self.headers.clone())
+            .stream_http
+            .get(self.client.base_url.clone())
+            .headers(self.client.headers.clone())
             .header("Accept", "text/event-stream")
             .send()
             .await
@@ -265,7 +287,7 @@ impl ReadLoop {
             Err(e) => {
                 warn!(
                     target: "assistd::mcp",
-                    server = %self.label,
+                    server = %self.label(),
                     "SSE connect failed: {e}",
                 );
                 return None;
@@ -274,7 +296,7 @@ impl ReadLoop {
         if !resp.status().is_success() {
             warn!(
                 target: "assistd::mcp",
-                server = %self.label,
+                server = %self.label(),
                 status = %resp.status(),
                 "SSE GET returned non-success status",
             );
@@ -291,7 +313,7 @@ impl ReadLoop {
             let chunk = tokio::select! {
                 _ = self.cancel_rx.changed() => {
                     if *self.cancel_rx.borrow() {
-                        debug!(target: "assistd::mcp", server = %self.label, "SSE read cancelled");
+                        debug!(target: "assistd::mcp", server = %self.label(), "SSE read cancelled");
                         break;
                     }
                     continue;
@@ -305,7 +327,7 @@ impl ReadLoop {
                     if self.dispatch_buffered(&mut parser).await.is_err() {
                         warn!(
                             target: "assistd::mcp",
-                            server = %self.label,
+                            server = %self.label(),
                             "SSE event over {MAX_EVENT_BYTES} bytes; dropping connection",
                         );
                         break;
@@ -314,13 +336,13 @@ impl ReadLoop {
                 Some(Err(e)) => {
                     warn!(
                         target: "assistd::mcp",
-                        server = %self.label,
+                        server = %self.label(),
                         "SSE stream error: {e}",
                     );
                     break;
                 }
                 None => {
-                    debug!(target: "assistd::mcp", server = %self.label, "SSE stream ended");
+                    debug!(target: "assistd::mcp", server = %self.label(), "SSE stream ended");
                     break;
                 }
             }
@@ -335,9 +357,9 @@ impl ReadLoop {
     }
 
     async fn dispatch_event(&mut self, event: SseEvent) {
-        let label = &self.label;
+        let label = self.label();
         match event.event_type.as_str() {
-            "endpoint" => match resolve_endpoint(&self.base_url, &event.data) {
+            "endpoint" => match resolve_endpoint(&self.client.base_url, &event.data) {
                 Ok(url) => {
                     debug!(
                         target: "assistd::mcp",
@@ -345,7 +367,7 @@ impl ReadLoop {
                         endpoint = %url,
                         "received SSE endpoint event",
                     );
-                    *self.post_url.write().await = Some(url);
+                    *self.client.post_url.write().await = Some(url);
                     if let Some(tx) = self.endpoint_ready_tx.take() {
                         let _ = tx.send(());
                     }
@@ -359,8 +381,14 @@ impl ReadLoop {
                     );
                 }
             },
-            "message" | "" => match serde_json::from_str::<Response>(&event.data) {
-                Ok(resp) => self.correlator.deliver(resp),
+            "message" | "" => match Incoming::parse(event.data.as_bytes()) {
+                Ok(Incoming::Response(response)) => self.client.correlator.deliver(response),
+                Ok(Incoming::Request { id, method }) => {
+                    self.client.answer_server_request(id, &method).await;
+                }
+                Ok(Incoming::Notification { method }) => {
+                    debug!(target: "assistd::mcp", server = %label, method, "ignoring server notification");
+                }
                 Err(e) => {
                     warn!(
                         target: "assistd::mcp",

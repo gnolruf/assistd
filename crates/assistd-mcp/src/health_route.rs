@@ -67,6 +67,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use assistd_tools::presentation::{PresentSpec, TextTruncator};
+
     use crate::{McpClient, ToolResult, ToolSchema};
 
     struct FakeClient;
@@ -91,6 +93,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
             },
             "mcp__web__search".into(),
+            Arc::new(TextTruncator::new(PresentSpec::default(), "mcp-web")),
         );
         (HealthRoutedTool::new(inner, "web".into(), rx), tx)
     }

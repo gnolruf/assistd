@@ -1,11 +1,13 @@
 //! MCP subsystem wiring for the daemon.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use assistd_core::{Config, McpServerConfig, McpStartupFailure};
 use assistd_mcp::{
     McpServerHandle, SseConfig, StdioConfig, TransportConfig, adapt_handle_as_tools,
 };
+use assistd_tools::presentation::PresentSpec;
 use assistd_tools::{MCP_TOOL_NAME_PREFIX, Tool};
 use tokio::sync::watch;
 use tracing::info;
@@ -37,8 +39,10 @@ pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubs
         return subsystem;
     }
 
+    let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
+    let output = PresentSpec::from_config(&config.tools.output, overflow_dir);
     for server in &config.mcp.servers {
-        match start_server(server, shutdown_tx.subscribe()).await {
+        match start_server(server, output.clone(), shutdown_tx.subscribe()).await {
             Ok((handle, tools)) => {
                 subsystem.tools.extend(tools);
                 subsystem.handles.push(handle);
@@ -53,6 +57,7 @@ pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubs
 /// when discovery fails.
 async fn start_server(
     server: &McpServerConfig,
+    output: PresentSpec,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(McpServerHandle, Vec<Box<dyn Tool>>), McpStartupFailure> {
     let transport = build_transport_config(server);
@@ -70,7 +75,7 @@ async fn start_server(
     };
 
     let prefix = format!("{MCP_TOOL_NAME_PREFIX}{}", handle.name);
-    match adapt_handle_as_tools(&handle, &prefix).await {
+    match adapt_handle_as_tools(&handle, &prefix, output).await {
         Ok(tools) => {
             info!(
                 "mcp: {} ready ({} tools, transport={})",

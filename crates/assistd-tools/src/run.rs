@@ -35,11 +35,7 @@ impl RunTool {
         output: &ToolsOutputConfig,
         overflow_dir: PathBuf,
     ) -> Self {
-        let spec = PresentSpec {
-            max_lines: output.max_lines.get() as usize,
-            max_bytes: output.max_bytes(),
-            overflow_dir,
-        };
+        let spec = PresentSpec::from_config(output, overflow_dir);
         let description = build_description(&registry, &spec);
         Self {
             registry,

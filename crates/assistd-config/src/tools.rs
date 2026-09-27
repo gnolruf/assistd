@@ -19,8 +19,8 @@ pub struct ToolsConfig {
     pub screenshot: ToolsScreenshotConfig,
 }
 
-/// Limits on a `run` result before it reaches the LLM; the excess spills
-/// to a file whose path the model is given.
+/// Limits on a `run` or MCP tool result before it reaches the LLM; the
+/// excess spills to a file whose path the model is given.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsOutputConfig {
@@ -28,7 +28,8 @@ pub struct ToolsOutputConfig {
     pub max_lines: NonZeroU32,
     /// Max size of the shown head, in KB.
     pub max_kb: NonZeroU32,
-    /// Spill directory for overflow (`cmd-<n>.txt`); recreated empty and
+    /// Spill directory for overflow (`cmd-<n>.txt` for `run`,
+    /// `mcp-<server>-<n>.txt` for MCP tools); recreated empty and
     /// owner-only on daemon startup. Must not be empty. Defaults to
     /// `$XDG_RUNTIME_DIR/assistd/output`, else under the user cache dir.
     pub overflow_dir: PathBuf,

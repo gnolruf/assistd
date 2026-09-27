@@ -270,7 +270,9 @@ HTTP+SSE connection for remote ones) and runs the MCP handshake.
 Discovered tools are wrapped by `McpToolAdapter`, which implements
 `Tool` over the discovered schema, and registered into the same
 `ToolRegistry` the LLM sees, under the name
-`mcp__<server-name>__<tool-name>`.
+`mcp__<server-name>__<tool-name>`. Text and JSON results obey the same
+`[tools.output]` caps as `run`, spilling overflow to
+`mcp-<server-name>-<n>.txt`.
 
 The supervisor restarts crashed stdio servers with exponential
 backoff and re-runs discovery on each restart. SSE servers

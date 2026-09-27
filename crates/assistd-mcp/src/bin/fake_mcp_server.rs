@@ -1,10 +1,16 @@
 //! Minimal MCP server fixture: newline-delimited JSON-RPC on
 //! stdin/stdout, answering `initialize`, `ping`, `tools/list` and
-//! `tools/call` for the `echo`, `crash_me` and `flood_stdout` tools.
+//! `tools/call` for the `echo`, `crash_me`, `flood_stdout` and
+//! `spawn_orphan_and_crash` tools.
 
 use std::io::{BufRead, BufReader, Write};
+use std::process::Stdio;
 
 use serde_json::{Value, json};
+
+/// When set, `initialize` spawns a long-lived grandchild, writes its pid
+/// to the named file, and then fails the handshake.
+const FAIL_INIT_WITH_ORPHAN_ENV: &str = "FAKE_MCP_FAIL_INIT_WITH_ORPHAN_PID_FILE";
 
 fn main() {
     let stdin = std::io::stdin();
@@ -51,15 +57,7 @@ fn main() {
 fn respond(req: &Value, id: Value, out: &mut impl Write) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let response = match method {
-        "initialize" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "fake-mcp", "version": "0.0.0"}
-            }
-        }),
+        "initialize" => initialize(id),
         "tools/list" => tools_list(id),
         "tools/call" => return call_tool(req, id, out),
         "ping" => json!({
@@ -77,6 +75,39 @@ fn respond(req: &Value, id: Value, out: &mut impl Write) -> Option<Value> {
         }),
     };
     Some(response)
+}
+
+fn initialize(id: Value) -> Value {
+    if let Some(pid_file) = std::env::var_os(FAIL_INIT_WITH_ORPHAN_ENV) {
+        let orphan = spawn_orphan();
+        std::fs::write(pid_file, orphan.to_string()).expect("write orphan pid file");
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32000, "message": "initialize refused by fixture"}
+        });
+    }
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "fake-mcp", "version": "0.0.0"}
+        }
+    })
+}
+
+/// A `sleep` that inherits this process group and outlives this process.
+fn spawn_orphan() -> u32 {
+    std::process::Command::new("sleep")
+        .arg("300")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sleep")
+        .id()
 }
 
 fn tools_list(id: Value) -> Value {
@@ -103,6 +134,11 @@ fn tools_list(id: Value) -> Value {
                 {
                     "name": "flood_stdout",
                     "description": "writes one oversized line and stays alive",
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "spawn_orphan_and_crash",
+                    "description": "spawns a grandchild, answers with its pid, then exits",
                     "inputSchema": {"type": "object", "properties": {}}
                 }
             ]
@@ -136,6 +172,19 @@ fn call_tool(req: &Value, id: Value, out: &mut impl Write) -> Option<Value> {
         "flood_stdout" => {
             flood_stdout(out);
             None
+        }
+        "spawn_orphan_and_crash" => {
+            let orphan = spawn_orphan();
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": orphan.to_string()}],
+                    "isError": false
+                }
+            });
+            let _ = write_line(out, &response);
+            std::process::exit(0)
         }
         other => Some(json!({
             "jsonrpc": "2.0",

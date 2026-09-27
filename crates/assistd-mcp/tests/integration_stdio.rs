@@ -1,12 +1,14 @@
 //! End-to-end stdio-transport tests against the in-tree
 //! `fake_mcp_server` binary.
 
+use std::path::Path;
 use std::time::Duration;
 
 use assistd_mcp::{
     HealthState, McpError, McpServerHandle, StdioConfig, TransportConfig, adapt_handle_as_tools,
     mcp_error_line,
 };
+use assistd_tools::presentation::PresentSpec;
 use serde_json::json;
 use tokio::sync::watch;
 
@@ -25,6 +27,35 @@ async fn supervisor_exited(health_rx: &mut watch::Receiver<HealthState>) {
     while health_rx.changed().await.is_ok() {}
 }
 
+/// True once `pid` no longer exists or is a zombie awaiting its reaper.
+fn process_is_gone(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Err(_) => true,
+        Ok(stat) => stat
+            .rsplit(')')
+            .next()
+            .is_none_or(|fields| fields.trim_start().starts_with('Z')),
+    }
+}
+
+async fn wait_until_process_is_gone(pid: u32) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !process_is_gone(pid) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn read_pid_file(path: &Path) -> u32 {
+    std::fs::read_to_string(path)
+        .expect("fixture wrote its orphan's pid")
+        .trim()
+        .parse()
+        .expect("pid file holds a pid")
+}
+
 #[tokio::test]
 async fn discovers_and_invokes_a_tool_end_to_end() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -32,7 +63,7 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
         .await
         .expect("server should start");
 
-    let tools = adapt_handle_as_tools(&handle, "mcp__fake")
+    let tools = adapt_handle_as_tools(&handle, "mcp__fake", PresentSpec::default())
         .await
         .expect("discovery should succeed");
     let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
@@ -41,7 +72,8 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
         [
             "mcp__fake__echo",
             "mcp__fake__crash_me",
-            "mcp__fake__flood_stdout"
+            "mcp__fake__flood_stdout",
+            "mcp__fake__spawn_orphan_and_crash",
         ]
     );
 
@@ -100,7 +132,7 @@ async fn server_crash_short_circuits_subsequent_calls() {
         .await
         .expect("server should start");
 
-    let tools = adapt_handle_as_tools(&handle, "mcp__fake")
+    let tools = adapt_handle_as_tools(&handle, "mcp__fake", PresentSpec::default())
         .await
         .expect("discovery should succeed");
     let echo = tools
@@ -155,7 +187,7 @@ async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
         .await
         .expect("server should start");
 
-    let tools = adapt_handle_as_tools(&handle, "mcp__fake")
+    let tools = adapt_handle_as_tools(&handle, "mcp__fake", PresentSpec::default())
         .await
         .expect("discovery should succeed");
     let echo = tools
@@ -207,4 +239,59 @@ async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
     assert_eq!(post["output"], "echo:after");
 
     handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn crashed_server_takes_its_process_group_with_it() {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
+        .await
+        .expect("server should start");
+    let tools = adapt_handle_as_tools(&handle, "mcp__fake", PresentSpec::default())
+        .await
+        .expect("discovery should succeed");
+    let spawner = tools
+        .iter()
+        .find(|tool| tool.name() == "mcp__fake__spawn_orphan_and_crash")
+        .expect("spawn_orphan_and_crash present");
+
+    let result = spawner.invoke(json!({})).await.unwrap();
+    let orphan: u32 = result["output"]
+        .as_str()
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("fixture should answer with its orphan's pid: {result}"));
+
+    assert!(
+        wait_until_process_is_gone(orphan).await,
+        "grandchild {orphan} must be killed with the crashed server's process group"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_initialize_kills_the_process_group() {
+    let pid_dir = tempfile::tempdir().unwrap();
+    let pid_file = pid_dir.path().join("orphan.pid");
+    let mut cfg = StdioConfig::new("fake", fake_server_path());
+    cfg.request_timeout = Duration::from_secs(5);
+    cfg.env.insert(
+        "FAKE_MCP_FAIL_INIT_WITH_ORPHAN_PID_FILE".into(),
+        pid_file.to_string_lossy().into_owned(),
+    );
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let err = McpServerHandle::start("fake".into(), TransportConfig::Stdio(cfg), shutdown_rx)
+        .await
+        .err()
+        .expect("fixture refuses initialize");
+    assert!(
+        matches!(err, McpError::RpcError { code: -32000, .. }),
+        "{err}"
+    );
+
+    let orphan = read_pid_file(&pid_file);
+    assert!(
+        wait_until_process_is_gone(orphan).await,
+        "grandchild {orphan} must be killed when the handshake fails"
+    );
 }

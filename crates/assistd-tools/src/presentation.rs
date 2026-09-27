@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use assistd_config::ToolsOutputConfig;
 use assistd_config::defaults::default_tools_overflow_dir;
 
 use crate::command::{Attachment, CommandOutput};
@@ -28,12 +29,78 @@ pub struct PresentSpec {
     pub overflow_dir: PathBuf,
 }
 
+impl PresentSpec {
+    /// The caps from `output`, spilling into `overflow_dir`.
+    pub fn from_config(output: &ToolsOutputConfig, overflow_dir: PathBuf) -> Self {
+        Self {
+            max_lines: output.max_lines.get() as usize,
+            max_bytes: output.max_bytes(),
+            overflow_dir,
+        }
+    }
+}
+
 impl Default for PresentSpec {
     fn default() -> Self {
         Self {
             max_lines: 200,
             max_bytes: 50 * 1024,
             overflow_dir: default_tools_overflow_dir(),
+        }
+    }
+}
+
+/// Cuts text bodies to one [`PresentSpec`], spilling each overflow in
+/// full as `<stem>-<n>.txt` in the spec's overflow directory.
+#[derive(Debug)]
+pub struct TextTruncator {
+    spec: PresentSpec,
+    stem: String,
+    counter: AtomicU64,
+}
+
+/// A text body after [`TextTruncator::truncate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncatedText {
+    /// The visible head, followed by the truncation notice when cut.
+    pub text: String,
+    pub truncated: bool,
+    /// Set when the body overflowed and the spill file was written.
+    pub overflow_file: Option<PathBuf>,
+}
+
+impl TextTruncator {
+    /// A truncator whose spill files are named after `stem`.
+    pub fn new(spec: PresentSpec, stem: impl Into<String>) -> Self {
+        Self {
+            spec,
+            stem: stem.into(),
+            counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Return `text` unchanged when it fits, else its head plus the
+    /// truncation notice, with the whole body spilled to a file.
+    pub fn truncate(&self, text: String) -> TruncatedText {
+        let line_count = count_lines(&text);
+        let byte_count = text.len();
+        if line_count <= self.spec.max_lines && byte_count <= self.spec.max_bytes {
+            return TruncatedText {
+                text,
+                truncated: false,
+                overflow_file: None,
+            };
+        }
+        let overflow_file = spill_overflow(text.as_bytes(), &self.spec, &self.stem, &self.counter);
+        let mut head = truncate_lines_bytes(&text, self.spec.max_lines, self.spec.max_bytes);
+        if !head.is_empty() && !head.ends_with('\n') {
+            head.push('\n');
+        }
+        push_truncation_notice(&mut head, line_count, byte_count, overflow_file.as_deref());
+        TruncatedText {
+            text: head,
+            truncated: true,
+            overflow_file,
         }
     }
 }
@@ -77,7 +144,7 @@ pub fn present(
 
     let overflow = line_count > spec.max_lines || byte_count > spec.max_bytes;
     let (visible_head, overflow_file) = if overflow {
-        let spilled = spill_overflow(&out.stdout, spec, counter);
+        let spilled = spill_overflow(&out.stdout, spec, "cmd", counter);
         let head = truncate_lines_bytes(&stdout_str, spec.max_lines, spec.max_bytes);
         (head, spilled)
     } else {
@@ -135,15 +202,21 @@ fn present_binary(
     }
 }
 
-/// Write the full stdout to the next numbered spill file, logging and
-/// returning `None` when that fails.
-fn spill_overflow(raw: &[u8], spec: &PresentSpec, counter: &AtomicU64) -> Option<PathBuf> {
+/// Write the full body to the next numbered `<stem>-<n>.txt` spill
+/// file, logging and returning `None` when that fails.
+fn spill_overflow(
+    raw: &[u8],
+    spec: &PresentSpec,
+    stem: &str,
+    counter: &AtomicU64,
+) -> Option<PathBuf> {
     let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-    match write_overflow_file(raw, &spec.overflow_dir, n) {
+    let file_name = format!("{stem}-{n}.txt");
+    match write_overflow_file(raw, &spec.overflow_dir.join(&file_name)) {
         Ok(path) => Some(path),
         Err(e) => {
             tracing::warn!(
-                "failed to write overflow file cmd-{n}.txt to {}: {e}",
+                "failed to write overflow file {file_name} to {}: {e}",
                 spec.overflow_dir.display()
             );
             None
@@ -256,16 +329,15 @@ pub(crate) fn truncate_lines_bytes(s: &str, max_lines: usize, max_bytes: usize) 
     s[..cut].to_string()
 }
 
-fn write_overflow_file(raw: &[u8], dir: &Path, n: u64) -> std::io::Result<PathBuf> {
-    let path = dir.join(format!("cmd-{n}.txt"));
+fn write_overflow_file(raw: &[u8], path: &Path) -> std::io::Result<PathBuf> {
     OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(OVERFLOW_FILE_MODE)
-        .open(&path)?
+        .open(path)?
         .write_all(raw)?;
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 #[cfg(test)]

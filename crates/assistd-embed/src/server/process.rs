@@ -3,7 +3,6 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use rustix::process::Pid;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -11,6 +10,7 @@ use tracing::{info, warn};
 use assistd_config::EmbeddingConfig;
 
 use super::error::EmbedServerError;
+use super::log_lines::forward_lines;
 
 const OUTPUT_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -138,29 +138,21 @@ impl ChildProcess {
 }
 
 async fn forward_stdout(stream: ChildStdout) {
-    let mut lines = BufReader::new(stream).lines();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => info!(target: "assistd::embed_server", "{line}"),
-            Ok(None) => return,
-            Err(e) => {
-                warn!(target: "assistd::embed_server", "stdout read error: {e}");
-                return;
-            }
-        }
+    let forwarded = forward_lines(stream, |line| {
+        info!(target: "assistd::embed_server", "{line}");
+    })
+    .await;
+    if let Err(e) = forwarded {
+        warn!(target: "assistd::embed_server", "stdout read error: {e}");
     }
 }
 
 async fn forward_stderr(stream: ChildStderr) {
-    let mut lines = BufReader::new(stream).lines();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => warn!(target: "assistd::embed_server", "{line}"),
-            Ok(None) => return,
-            Err(e) => {
-                warn!(target: "assistd::embed_server", "stderr read error: {e}");
-                return;
-            }
-        }
+    let forwarded = forward_lines(stream, |line| {
+        warn!(target: "assistd::embed_server", "{line}");
+    })
+    .await;
+    if let Err(e) = forwarded {
+        warn!(target: "assistd::embed_server", "stderr read error: {e}");
     }
 }
