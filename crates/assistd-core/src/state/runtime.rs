@@ -15,7 +15,8 @@ use assistd_memory::{BranchId, SessionId};
 
 const EVENTS_BUS_CAPACITY: usize = 256;
 
-/// The active (session, branch) pair, always read and replaced together.
+/// The active session and, once its first message is saved, the branch
+/// it lives on; always read and replaced together.
 pub struct ConversationContext {
     inner: RwLock<ConversationContextInner>,
     /// Lets holders that cannot await the lock read the session
@@ -24,13 +25,14 @@ pub struct ConversationContext {
 }
 
 impl ConversationContext {
-    /// Point at `branch_id` of `session_id`.
-    pub fn new(session_id: SessionId, branch_id: BranchId) -> Self {
+    /// Point at `branch_id` of `session_id`; `None` means the session has
+    /// no rows yet and is saved with its first message.
+    pub fn new(session_id: SessionId, branch_id: Option<BranchId>) -> Self {
         Self::from_arc(Arc::new(session_id), branch_id)
     }
 
     /// [`Self::new`] for an already shared session id.
-    pub fn from_arc(session_id: Arc<SessionId>, branch_id: BranchId) -> Self {
+    pub fn from_arc(session_id: Arc<SessionId>, branch_id: Option<BranchId>) -> Self {
         let (session, _) = watch::channel(session_id.clone());
         Self {
             inner: RwLock::new(ConversationContextInner {
@@ -46,15 +48,15 @@ impl ConversationContext {
         self.session.subscribe()
     }
 
-    /// The active session and branch.
-    pub async fn current(&self) -> (Arc<SessionId>, BranchId) {
+    /// The active session and its branch, `None` while the session is unsaved.
+    pub async fn current(&self) -> (Arc<SessionId>, Option<BranchId>) {
         let active = self.inner.read().await;
         (active.session_id.clone(), active.branch_id)
     }
 
     /// Make `branch_id` of `session_id` active and notify
     /// [`Self::session_updates`] watchers.
-    pub async fn replace(&self, session_id: Arc<SessionId>, branch_id: BranchId) {
+    pub async fn replace(&self, session_id: Arc<SessionId>, branch_id: Option<BranchId>) {
         let mut active = self.inner.write().await;
         active.session_id = session_id.clone();
         active.branch_id = branch_id;
@@ -65,7 +67,7 @@ impl ConversationContext {
 #[derive(Clone)]
 struct ConversationContextInner {
     session_id: Arc<SessionId>,
-    branch_id: BranchId,
+    branch_id: Option<BranchId>,
 }
 
 /// Per-process request bookkeeping: the active conversation, turn
@@ -90,11 +92,11 @@ pub struct RuntimeState {
 }
 
 impl RuntimeState {
-    /// Fresh state pointing at branch 0 of a new session.
+    /// Fresh state pointing at a new, unsaved session.
     pub fn new() -> Self {
         let (events_bus, _) = broadcast::channel(EVENTS_BUS_CAPACITY);
         Self {
-            conversation_ctx: Arc::new(ConversationContext::new(SessionId::new(), BranchId(0))),
+            conversation_ctx: Arc::new(ConversationContext::new(SessionId::new(), None)),
             agent_turn_lock: Arc::new(Mutex::new(())),
             persistence_tracker: TaskTracker::new(),
             warmup_handle: Arc::new(Mutex::new(None)),

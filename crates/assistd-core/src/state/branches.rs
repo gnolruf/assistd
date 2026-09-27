@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 
 use assistd_ipc::Event;
 use assistd_llm::{HistoryEntry, HistoryRole, Thinking};
-use assistd_memory::{BranchId, HistoryRow, PersistedRole, SessionId};
+use assistd_memory::{BranchId, HistoryRow, PersistedRole, SessionId, UndoOutcome};
 
 use super::{AppState, send_error, wire_role};
 
@@ -33,7 +33,13 @@ impl AppState {
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
 
-        let (session, current_branch) = self.runtime.conversation_ctx.current().await;
+        let (session, current_branch) = match self.saved_conversation().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                send_error(&tx, id, format!("/fork: {e}")).await;
+                return;
+            }
+        };
         let new_branch = match self
             .memory
             .conversations
@@ -62,7 +68,7 @@ impl AppState {
         }
         self.runtime
             .conversation_ctx
-            .replace(session.clone(), new_branch)
+            .replace(session.clone(), Some(new_branch))
             .await;
 
         let (parent_name, _, _) = self.lookup_branch_meta(current_branch).await;
@@ -77,7 +83,7 @@ impl AppState {
         let _ = tx
             .send(Event::BranchSwitched {
                 id: id.clone(),
-                branch_id: new_branch.0,
+                branch_id: Some(new_branch.0),
                 session_id: session.0.clone(),
                 session_title,
                 name,
@@ -259,7 +265,7 @@ impl AppState {
         let target_session = Arc::new(target_session);
         self.runtime
             .conversation_ctx
-            .replace(target_session.clone(), target_branch)
+            .replace(target_session.clone(), Some(target_branch))
             .await;
 
         self.replay_branch(id, &target_session, target_branch, &tx, "/switch")
@@ -273,12 +279,15 @@ impl AppState {
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
         let (_, branch) = self.runtime.conversation_ctx.current().await;
-        let outcome = match self.memory.conversations.undo_last_turn(branch).await {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                send_error(&tx, id, format!("/undo: {e}")).await;
-                return;
-            }
+        let outcome = match branch {
+            None => UndoOutcome::default(),
+            Some(branch) => match self.memory.conversations.undo_last_turn(branch).await {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    send_error(&tx, id, format!("/undo: {e}")).await;
+                    return;
+                }
+            },
         };
         if outcome.removed_messages > 0
             && let Err(e) = self.subsystems.llm.truncate_to_last_real_user().await
@@ -301,7 +310,7 @@ impl AppState {
 
     /// Keep the current branch and stream its history if its latest
     /// message landed within `recency_secs`; otherwise begin a fresh
-    /// session.
+    /// session. An unsaved session is kept as is.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, recency_secs = recency_secs))]
     pub(super) async fn handle_resume_or_new(
         self: Arc<Self>,
@@ -313,6 +322,10 @@ impl AppState {
         self.drain_persistence_inflight().await;
 
         let (session, branch) = self.runtime.conversation_ctx.current().await;
+        let Some(branch) = branch else {
+            announce_unsaved_session(id, &session, &tx).await;
+            return;
+        };
         let latest = self
             .memory
             .conversations
@@ -324,16 +337,16 @@ impl AppState {
             self.replay_branch(id, &session, branch, &tx, "/resume")
                 .await;
         } else {
-            self.begin_fresh_session(id, &tx, "/resume").await;
+            self.begin_unsaved_session(id, &tx, "/resume").await;
         }
     }
 
-    /// `/new`: begin a fresh session with an empty `main` branch.
+    /// `/new`: begin a fresh session, saved with its first message.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_new_session(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
-        self.begin_fresh_session(id, &tx, "/new").await;
+        self.begin_unsaved_session(id, &tx, "/new").await;
     }
 
     /// Load `branch`, replace the LLM history with it, and stream it to
@@ -377,7 +390,7 @@ impl AppState {
         let _ = tx
             .send(Event::BranchSwitched {
                 id: id.clone(),
-                branch_id: branch.0,
+                branch_id: Some(branch.0),
                 session_id: session.0.clone(),
                 session_title,
                 name: branch_name.unwrap_or_default(),
@@ -399,29 +412,14 @@ impl AppState {
         let _ = tx.send(Event::Done { id }).await;
     }
 
-    /// Start a new session with an empty `main` branch, make it active,
-    /// clear the LLM history, and report `BranchSwitched` then `Done`.
-    async fn begin_fresh_session(&self, id: String, tx: &mpsc::Sender<Event>, label: &str) {
-        let (new_session, new_branch) = match self
-            .memory
-            .conversations
-            .begin_session_with_main_branch(std::process::id())
-            .await
-        {
-            Ok(pair) => pair,
-            Err(e) => {
-                send_error(
-                    tx,
-                    id,
-                    format!("{label}: begin_session_with_main_branch: {e}"),
-                )
-                .await;
-                return;
-            }
-        };
+    /// Make a new, unsaved session active, clear the LLM history, and
+    /// report `BranchSwitched` then `Done`. The session and its `main`
+    /// branch are inserted with its first message.
+    async fn begin_unsaved_session(&self, id: String, tx: &mpsc::Sender<Event>, label: &str) {
+        let new_session = Arc::new(SessionId::new());
         self.runtime
             .conversation_ctx
-            .replace(Arc::new(new_session.clone()), new_branch)
+            .replace(new_session.clone(), None)
             .await;
         if let Err(e) = self.subsystems.llm.replace_history(Vec::new()).await {
             warn!(
@@ -430,18 +428,7 @@ impl AppState {
                 "replace_history(empty) failed during {label} (non-fatal)"
             );
         }
-        let _ = tx
-            .send(Event::BranchSwitched {
-                id: id.clone(),
-                branch_id: new_branch.0,
-                session_id: new_session.0.clone(),
-                session_title: None,
-                name: "main".to_string(),
-                parent_branch_name: None,
-                fork_point_seq: None,
-            })
-            .await;
-        let _ = tx.send(Event::Done { id }).await;
+        announce_unsaved_session(id, &new_session, tx).await;
     }
 
     pub(super) async fn lookup_branch_tail_seq(&self, branch: BranchId) -> Option<i64> {
@@ -475,6 +462,23 @@ impl AppState {
             })
             .unwrap_or((None, None, None))
     }
+}
+
+/// Report the unsaved `session` as active on its future `main` branch:
+/// `BranchSwitched` without a branch id, then `Done`.
+async fn announce_unsaved_session(id: String, session: &SessionId, tx: &mpsc::Sender<Event>) {
+    let _ = tx
+        .send(Event::BranchSwitched {
+            id: id.clone(),
+            branch_id: None,
+            session_id: session.0.clone(),
+            session_title: None,
+            name: "main".to_string(),
+            parent_branch_name: None,
+            fork_point_seq: None,
+        })
+        .await;
+    let _ = tx.send(Event::Done { id }).await;
 }
 
 /// Rows of a branch, as the LLM backend's history type.

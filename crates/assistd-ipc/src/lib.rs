@@ -208,7 +208,7 @@ pub enum Request {
     /// Resume the current branch if written within `recency_secs` (emits `HistoryEntry`s), else
     /// start a new session (emits `BranchSwitched`); then `Done`.
     ResumeOrNew { id: String, recency_secs: u64 },
-    /// Start a new session with an empty `main` branch. Emits `BranchSwitched`, then `Done`.
+    /// Start a new session, saved with its first message. Emits `BranchSwitched`, then `Done`.
     NewSession { id: String },
     /// Forward broadcast events matching `filter`, tagged with their turn's `id`, until the
     /// client disconnects; no `Done`, and `ToolResult` attachments are stripped.
@@ -582,9 +582,10 @@ pub enum Event {
         is_active_session: bool,
     },
     /// The active branch changed; `session_id` is the now-active session.
+    /// `branch_id` is `None` until the session's first message is saved.
     BranchSwitched {
         id: String,
-        branch_id: i64,
+        branch_id: Option<i64>,
         session_id: String,
         session_title: Option<String>,
         name: String,

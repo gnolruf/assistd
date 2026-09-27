@@ -207,11 +207,12 @@ pub trait ConversationStore: Send + Sync + 'static {
     /// Return the `limit` most-recent turns ordered by turn id descending.
     async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>>;
 
-    /// Atomically begin a session and create its `main` branch.
+    /// Atomically insert `session` and create its `main` branch.
     async fn begin_session_with_main_branch(
         &self,
+        session: &SessionId,
         daemon_pid: u32,
-    ) -> Result<(SessionId, BranchId)>;
+    ) -> Result<BranchId>;
 
     /// Update `sessions.current_branch_id` to point at `branch`.
     async fn set_current_branch(&self, session: &SessionId, branch: BranchId) -> Result<()>;
@@ -291,8 +292,12 @@ impl ConversationStore for NoConversationStore {
         Ok(Vec::new())
     }
 
-    async fn begin_session_with_main_branch(&self, _pid: u32) -> Result<(SessionId, BranchId)> {
-        Ok((SessionId::new(), BranchId(0)))
+    async fn begin_session_with_main_branch(
+        &self,
+        _session: &SessionId,
+        _pid: u32,
+    ) -> Result<BranchId> {
+        Ok(BranchId(0))
     }
 
     async fn set_current_branch(&self, _session: &SessionId, _branch: BranchId) -> Result<()> {
@@ -425,19 +430,18 @@ impl ConversationStore for SqliteConversationStore {
 
     async fn begin_session_with_main_branch(
         &self,
+        session: &SessionId,
         daemon_pid: u32,
-    ) -> Result<(SessionId, BranchId)> {
-        let id = SessionId::new();
-        let session_id = id.0.clone();
-        let branch = dispatch_write(self.handle.writer(), |ack| {
+    ) -> Result<BranchId> {
+        let session_id = session.0.clone();
+        dispatch_write(self.handle.writer(), |ack| {
             WriteOp::BeginSessionWithMainBranch {
                 session_id,
                 daemon_pid,
                 ack,
             }
         })
-        .await?;
-        Ok((id, branch))
+        .await
     }
 
     async fn set_current_branch(&self, session: &SessionId, branch: BranchId) -> Result<()> {

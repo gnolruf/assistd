@@ -13,7 +13,7 @@ use super::*;
 use crate::VoiceOutputController;
 use crate::presence::PresenceManager;
 use crate::state::memory_stack::MemoryStack;
-use crate::state::runtime::RuntimeState;
+use crate::state::runtime::{ConversationContext, RuntimeState};
 use crate::state::subsystems::Subsystems;
 
 /// Records the order writes arrive in, and makes each write finish
@@ -67,9 +67,10 @@ impl ConversationStore for SlowingStore {
     }
     async fn begin_session_with_main_branch(
         &self,
+        _s: &SessionId,
         _pid: u32,
-    ) -> assistd_memory::Result<(SessionId, BranchId)> {
-        Ok((SessionId::new(), BranchId(0)))
+    ) -> assistd_memory::Result<BranchId> {
+        Ok(BranchId(0))
     }
     async fn set_current_branch(&self, _s: &SessionId, _b: BranchId) -> assistd_memory::Result<()> {
         Ok(())
@@ -123,7 +124,10 @@ fn state_with_store(store: Arc<dyn ConversationStore>) -> Arc<AppState> {
             VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
         ),
         memory,
-        runtime: RuntimeState::new(),
+        runtime: RuntimeState::new().with_conversation_ctx(Arc::new(ConversationContext::new(
+            SessionId::new(),
+            Some(BranchId(1)),
+        ))),
         config,
     })
 }

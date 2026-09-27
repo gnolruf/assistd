@@ -8,7 +8,8 @@ use tracing::{debug, warn};
 
 use assistd_embed::EmbedJob;
 use assistd_memory::{
-    ChunkingConfig, PersistedMessage, PersistedRole, SqliteHandle, TurnId, chunk_message,
+    BranchId, ChunkingConfig, PersistedMessage, PersistedRole, SessionId, SqliteHandle, TurnId,
+    chunk_message,
 };
 
 use super::AppState;
@@ -21,6 +22,27 @@ const PERSISTENCE_DRAIN_POLL: Duration = Duration::from_millis(5);
 const UNSTORED_ROW_ID: i64 = 0;
 
 impl AppState {
+    /// The active session and branch, inserting the session and its `main`
+    /// branch first when the session is still unsaved.
+    pub(super) async fn saved_conversation(
+        &self,
+    ) -> assistd_memory::Result<(Arc<SessionId>, BranchId)> {
+        let (session, branch) = self.runtime.conversation_ctx.current().await;
+        if let Some(branch) = branch {
+            return Ok((session, branch));
+        }
+        let branch = self
+            .memory
+            .conversations
+            .begin_session_with_main_branch(&session, std::process::id())
+            .await?;
+        self.runtime
+            .conversation_ctx
+            .replace(session.clone(), Some(branch))
+            .await;
+        Ok((session, branch))
+    }
+
     /// Persist one message on a background task, then chunk and queue
     /// user or assistant text for embedding (dropped if the queue is full).
     ///
@@ -43,6 +65,13 @@ impl AppState {
                 let _ = previous.await;
             }
             let (session, branch) = conversation_ctx.current().await;
+            let Some(branch) = branch else {
+                warn!(
+                    target: "assistd::memory",
+                    "session is unsaved; dropping message"
+                );
+                return;
+            };
             let append = conversations
                 .append_message_to_branch(&session, branch, turn, msg)
                 .await;

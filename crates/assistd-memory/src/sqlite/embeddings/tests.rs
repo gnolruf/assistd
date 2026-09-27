@@ -24,7 +24,11 @@ async fn fresh() -> (
 
 async fn seed_conversation(handle: &Arc<SqliteHandle>, msg: PersistedMessage) -> (SessionId, i64) {
     let store = SqliteConversationStore::new(handle.clone());
-    let (session, branch) = store.begin_session_with_main_branch(0).await.unwrap();
+    let session = SessionId::new();
+    let branch = store
+        .begin_session_with_main_branch(&session, 0)
+        .await
+        .unwrap();
     let conv_id = store
         .append_message_to_branch(&session, branch, None, msg)
         .await
