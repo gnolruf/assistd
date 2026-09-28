@@ -9,8 +9,8 @@ use assistd_ipc::{Event, ImageAttachment, Request};
 use clap::Args;
 use uuid::Uuid;
 
-use crate::ipc_helper::run_one_shot;
-use crate::terminal_text::{escape_controls, escape_controls_single_line};
+use super::run_one_shot;
+use super::terminal_text::{escape_controls, escape_controls_single_line};
 
 const PREVIEW_MAX_CHARS: usize = 80;
 

@@ -8,7 +8,7 @@ use assistd_voice::BusyProbe;
 use async_trait::async_trait;
 use nvml_wrapper::Nvml;
 
-use crate::gpu_monitor;
+use super::gpu_monitor;
 
 /// Minimum per-process VRAM (MiB) for a foreign PID to count as GPU
 /// contention. Above a desktop compositor's noise floor, below a second

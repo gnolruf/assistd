@@ -6,8 +6,8 @@ use anyhow::Result;
 use assistd_ipc::{Event, Request, VoiceCaptureState};
 use uuid::Uuid;
 
-use crate::ipc_helper::run_one_shot;
-use crate::terminal_text::{escape_controls, escape_controls_single_line};
+use super::run_one_shot;
+use super::terminal_text::{escape_controls, escape_controls_single_line};
 
 #[derive(Debug, Clone, Copy)]
 pub enum PttAction {

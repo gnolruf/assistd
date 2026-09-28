@@ -1,18 +1,24 @@
-//! Shared IPC plumbing for the CLI subcommands.
+//! One-shot CLI subcommands: each sends one request to the running daemon
+//! and prints the events it streams back.
 
 use anyhow::{Error, Result};
 use assistd_ipc::{Event, IpcClient, IpcClientError, Request};
 
-use crate::terminal_text::escape_controls;
+use terminal_text::escape_controls;
+
+pub mod listen;
+pub mod memory;
+pub mod presence;
+pub mod ptt;
+pub mod query;
+mod terminal_text;
+pub mod voice_ctl;
 
 /// Send `req` and hand every event, terminal ones included, to
 /// `on_event`. Returns after `Done`; on `Error` prints the daemon's
 /// message and exits 1 after `on_event` has seen it. A connection that
 /// closes without a terminal event is an error.
-pub async fn run_one_shot(
-    req: Request,
-    mut on_event: impl FnMut(&Event) -> Result<()>,
-) -> Result<()> {
+async fn run_one_shot(req: Request, mut on_event: impl FnMut(&Event) -> Result<()>) -> Result<()> {
     let mut stream = IpcClient::new()
         .one_shot(req)
         .await

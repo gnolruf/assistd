@@ -14,7 +14,7 @@ use assistd_voice::{
 use tokio::sync::watch;
 use tracing::info;
 
-use crate::voice_probe::PresenceGpuProbe;
+use super::voice_probe::PresenceGpuProbe;
 
 pub struct VoiceSubsystem {
     pub input: Arc<dyn VoiceInput>,

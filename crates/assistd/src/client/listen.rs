@@ -4,7 +4,7 @@ use anyhow::Result;
 use assistd_ipc::{Event, Request};
 use uuid::Uuid;
 
-use crate::ipc_helper::run_one_shot;
+use super::run_one_shot;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ListenAction {

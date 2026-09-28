@@ -12,10 +12,10 @@ use tokio_util::task::TaskTracker;
 use tracing::info;
 
 use super::embed_init::EmbeddingSubsystem;
+use super::listen_dispatcher::ListenDispatcherHandles;
 use super::mcp_init::McpSubsystem;
 use super::memory_init::MemorySubsystem;
 use super::wm_init::WindowSubsystem;
-use crate::listen_dispatcher::ListenDispatcherHandles;
 
 const PERSISTENCE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
