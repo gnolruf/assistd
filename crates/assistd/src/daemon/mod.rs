@@ -3,14 +3,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
-    AppState, BuildToolsDeps, Component, Config, ContinuousListener, ConversationContext,
-    MemoryStack, PresenceManager, RuntimeState, Subsystems, VisionRevalidator, spawn_supervised,
+    AppState, BuildToolsDeps, Config, ContinuousListener, ConversationContext, MemoryStack,
+    PresenceManager, RuntimeState, Subsystems, VisionRevalidator,
 };
 use assistd_ipc::IpcClient;
 use assistd_llm::{LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
@@ -18,25 +17,22 @@ use assistd_memory::HistoryRow;
 use assistd_tools::{IpcConfirmationGate, MemoryOps};
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio_util::task::TaskTracker;
 use tracing::info;
 
 use crate::embed_init::EmbeddingSubsystem;
 use crate::ipc_voice_proxy::IpcVoiceProxy;
 use crate::listen_dispatcher::ListenDispatcherHandles;
-use crate::mcp_init::McpSubsystem;
 use crate::memory_init::MemorySubsystem;
 use crate::voice_init::VoiceSubsystem;
-use crate::wm_init::WindowSubsystem;
 use crate::{
     embed_init, gpu_monitor, hotkey, idle_monitor, listen_dispatcher, mcp_init, memory_init,
     voice_init, wm_init,
 };
+use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
 
-const PERSISTENCE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
+mod shutdown;
 
 /// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
@@ -49,85 +45,6 @@ pub struct DaemonArgs {
     /// `assistd chat`.
     #[arg(long, default_value_t = false)]
     pub client_mode: bool,
-}
-
-/// One watch per teardown stage. A signal flips only `intake`; the rest
-/// flip in dependency order once in-flight work has drained.
-struct ShutdownStages {
-    intake: watch::Sender<bool>,
-    llm: watch::Sender<bool>,
-    tools: watch::Sender<bool>,
-    embed_worker: watch::Sender<bool>,
-    embed_server: watch::Sender<bool>,
-    memory_writer: watch::Sender<bool>,
-}
-
-impl ShutdownStages {
-    fn new() -> Self {
-        Self {
-            intake: watch::channel(false).0,
-            llm: watch::channel(false).0,
-            tools: watch::channel(false).0,
-            embed_worker: watch::channel(false).0,
-            embed_server: watch::channel(false).0,
-            memory_writer: watch::channel(false).0,
-        }
-    }
-
-    /// Flip every stage at once, for a startup abandoned mid-way.
-    fn cancel_all(&self) {
-        for stage in [
-            &self.intake,
-            &self.llm,
-            &self.tools,
-            &self.embed_worker,
-            &self.embed_server,
-            &self.memory_writer,
-        ] {
-            stage.send_replace(true);
-        }
-    }
-}
-
-struct DaemonShutdown {
-    persistence_tracker: TaskTracker,
-    presence: Arc<PresenceManager>,
-    memory: MemorySubsystem,
-    embed: EmbeddingSubsystem,
-    window: WindowSubsystem,
-    mcp: McpSubsystem,
-    intake_tasks: IntakeTasks,
-}
-
-impl DaemonShutdown {
-    /// Tear down after the socket has drained: finish intake tasks and
-    /// persistence, then stop each subsystem before the ones it depends on.
-    async fn shutdown(self, stages: &ShutdownStages) {
-        join_intake_tasks(self.intake_tasks).await;
-        drain_persistence(&self.persistence_tracker).await;
-
-        stages.llm.send_replace(true);
-        if let Err(e) = self.presence.sleep().await {
-            tracing::error!("presence shutdown error: {e:#}");
-        }
-
-        stages.tools.send_replace(true);
-        self.window.shutdown().await;
-        self.mcp.shutdown().await;
-
-        self.embed
-            .shutdown(&stages.embed_worker, &stages.embed_server)
-            .await;
-        self.memory.shutdown(&stages.memory_writer).await;
-    }
-}
-
-/// Tasks that start new work and stop on the `intake` stage.
-struct IntakeTasks {
-    hotkey: Option<JoinHandle<()>>,
-    gpu_monitor: Option<JoinHandle<()>>,
-    idle_monitor: Option<JoinHandle<()>>,
-    listen: Option<ListenDispatcherHandles>,
 }
 
 /// Run the daemon until shutdown.
@@ -422,69 +339,6 @@ fn spawn_listen_dispatcher(
             intake_shutdown.subscribe(),
         )
     })
-}
-
-fn spawn_signal_handler(shutdown_tx: &watch::Sender<bool>) {
-    spawn_supervised(
-        "signal_handler",
-        Component::Daemon,
-        forward_signals(shutdown_tx.clone()),
-    );
-}
-
-/// Flag shutdown on the first SIGINT/SIGTERM; a second signal exits
-/// immediately without cleanup.
-async fn forward_signals(shutdown_tx: watch::Sender<bool>) {
-    let (mut int, mut term) = match (
-        signal(SignalKind::interrupt()),
-        signal(SignalKind::terminate()),
-    ) {
-        (Ok(int), Ok(term)) => (int, term),
-        (Err(e), _) | (_, Err(e)) => {
-            tracing::error!("failed to install signal handlers: {e}");
-            return;
-        }
-    };
-    loop {
-        let (name, exit_code) = tokio::select! {
-            _ = int.recv() => ("SIGINT", 130),
-            _ = term.recv() => ("SIGTERM", 143),
-        };
-        if shutdown_tx.send_replace(true) {
-            tracing::warn!("received {name} again; exiting without cleanup");
-            std::process::exit(exit_code);
-        }
-        info!("received {name}; shutting down (send again to force exit)");
-    }
-}
-
-async fn join_intake_tasks(tasks: IntakeTasks) {
-    for handle in [tasks.hotkey, tasks.gpu_monitor, tasks.idle_monitor]
-        .into_iter()
-        .flatten()
-    {
-        let _ = handle.await;
-    }
-    if let Some(listen) = tasks.listen {
-        let _ = listen.forwarder.await;
-        let _ = listen.presence_gate.await;
-    }
-}
-
-/// Wait for fire-and-forget persistence tasks, abandoning them after
-/// [`PERSISTENCE_DRAIN_BUDGET`].
-async fn drain_persistence(tracker: &TaskTracker) {
-    tracker.close();
-    if tokio::time::timeout(PERSISTENCE_DRAIN_BUDGET, tracker.wait())
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            target: "assistd::memory",
-            in_flight = tracker.len(),
-            "persistence task drain timed out at shutdown; abandoning remaining tasks"
-        );
-    }
 }
 
 async fn replay_history(chat: &dyn LlmBackend, rows: &[HistoryRow]) {
