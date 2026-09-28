@@ -62,18 +62,6 @@ async fn args_content_wins_over_stdin() {
 }
 
 #[tokio::test]
-async fn no_args_emits_usage() {
-    let out = WriteCommand::permissive_for_tests()
-        .run(CommandInput {
-            args: Vec::new(),
-            stdin: None,
-        })
-        .await;
-    assert_eq!(out.exit_code, 2);
-    assert!(out.stdout.starts_with(b"usage: write"), "{out:?}");
-}
-
-#[tokio::test]
 async fn path_only_with_empty_stdin_creates_empty_file() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("out.txt");

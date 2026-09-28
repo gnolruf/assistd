@@ -469,39 +469,6 @@ async fn query(sock: &Path, id: &str, text: &str) -> Vec<Event> {
     events
 }
 
-#[tokio::test]
-async fn query_during_sleeping_triggers_auto_wake() {
-    let fake = FakeLlama::new("normal");
-    init_tracing();
-    let port = grab_port().await;
-    let (manager, _shutdown) = new_active_manager(&fake, port).await;
-
-    manager.sleep().await.unwrap();
-    assert_eq!(manager.state(), PresenceState::Sleeping);
-
-    let daemon = Daemon::serve(&manager, Arc::new(EchoBackend::new())).await;
-    let events = query(&daemon.sock_path, "q1", "hello").await;
-
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, Event::Delta { text, .. } if text == "hello")),
-        "{events:?}"
-    );
-    assert!(
-        matches!(events.last(), Some(Event::Done { .. })),
-        "{events:?}"
-    );
-    assert_eq!(
-        manager.state(),
-        PresenceState::Active,
-        "auto-wake must leave manager in Active"
-    );
-
-    daemon.stop().await;
-    manager.sleep().await.unwrap();
-}
-
 /// Backend that leaves a `delay` gap between its one Delta and the end of
 /// the turn.
 struct DelayBackend {

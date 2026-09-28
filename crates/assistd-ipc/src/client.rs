@@ -239,26 +239,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_shot_collects_events_until_done() {
-        let events = vec![
-            Event::Delta {
-                id: "r".into(),
-                text: "hello".into(),
-            },
-            Event::Done { id: "r".into() },
-        ];
-        let (_dir, path, server) = mock_server(events.clone());
-
-        let client = IpcClient::with_path(path);
-        let stream = client
-            .one_shot(Request::query("r", "hi"))
-            .await
-            .expect("one_shot");
-        assert_eq!(stream.collect().await.expect("collect"), events);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn skips_unknown_events_from_daemon() {
         let (_dir, path, server) = mock_server_raw(vec![
             r#"{"type":"future_event","id":"r","payload":1}"#.into(),

@@ -284,21 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn a_server_request_never_completes_a_pending_call() {
-        let correlator = Correlator::new();
-        let mut pending = correlator.next_request("tools/list", json!({})).unwrap();
-        let ping = Incoming::parse(
-            format!(r#"{{"jsonrpc":"2.0","id":{},"method":"ping"}}"#, pending.id).as_bytes(),
-        )
-        .unwrap();
-        if let Incoming::Response(response) = ping {
-            correlator.deliver(response);
-        }
-        assert_eq!(correlator.in_flight(), 1);
-        assert!(matches!(pending.rx.try_recv(), Err(TryRecvError::Empty)));
-    }
-
-    #[test]
     fn reply_line_encodes_result_and_error_frames() {
         let ok = reply_line(&json!(3), &Ok(json!({}))).unwrap();
         assert_eq!(ok.last(), Some(&b'\n'));

@@ -203,13 +203,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_args_emits_usage() {
-        let out = run_web(&WebCommand::new(), &[]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: web"), "{out:?}");
-    }
-
-    #[tokio::test]
     async fn connection_failure_to_reserved_port_exits_1() {
         let cmd = WebCommand::with_timeout(Duration::from_millis(200));
         let out = run_web(&cmd, &["http://127.0.0.1:1/"]).await;

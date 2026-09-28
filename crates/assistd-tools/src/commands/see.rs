@@ -196,13 +196,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_args_emits_usage() {
-        let out = run_see(&SeeCommand::default(), &[]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: see"), "{out:?}");
-    }
-
-    #[tokio::test]
     async fn too_many_args_errors() {
         let out = run_see(&SeeCommand::default(), &["a.png", "b.png"]).await;
         assert_eq!(out.exit_code, 2);

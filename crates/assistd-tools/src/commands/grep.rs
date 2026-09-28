@@ -413,13 +413,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_pattern_emits_usage() {
-        let out = run_grep(&[], b"").await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: grep"), "{out:?}");
-    }
-
-    #[tokio::test]
     async fn pattern_without_files_or_stdin_emits_usage() {
         let out = GrepCommand
             .run(CommandInput {

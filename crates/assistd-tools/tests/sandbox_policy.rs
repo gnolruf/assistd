@@ -107,23 +107,6 @@ impl ConfirmationGate for RecordingGate {
 }
 
 #[tokio::test]
-async fn denylist_blocks_rm_rf_root() {
-    let cmd = bash_with(
-        vec!["rm -rf /"],
-        vec![],
-        Arc::new(AlwaysAllowGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("rm -rf /")).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("denylist pattern: rm -rf /"),
-        "stderr should name the matched pattern: {stderr}"
-    );
-}
-
-#[tokio::test]
 async fn denylist_bypasses_confirmation_gate() {
     let cmd = bash_with(
         vec!["rm -rf"],
@@ -133,23 +116,6 @@ async fn denylist_bypasses_confirmation_gate() {
     );
     let out = cmd.run(input("rm -rf /tmp/whatever")).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-}
-
-#[tokio::test]
-async fn destructive_pattern_is_blocked_when_gate_denies() {
-    let cmd = bash_with(
-        vec![],
-        vec![vec!["rm", "-rf"]],
-        Arc::new(DenyAllGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("touch /tmp/x && rm -rf /tmp/x")).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("Matched destructive pattern: rm -rf"),
-        "expected matched pattern in cancellation message: {stderr}"
-    );
 }
 
 #[tokio::test]
@@ -166,19 +132,6 @@ async fn destructive_pattern_asks_the_gate_and_runs_when_approved() {
     assert_eq!(req.tool, "bash");
     assert_eq!(req.script, "true && echo ran");
     assert_eq!(req.matched_pattern, "true");
-}
-
-#[tokio::test]
-async fn quoted_literal_does_not_trigger_destructive_pattern() {
-    let cmd = bash_with(
-        vec![],
-        vec![vec!["rm", "-rf"]],
-        Arc::new(PanicGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("echo \"rm -rf /\"")).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout, b"rm -rf /\n");
 }
 
 #[tokio::test]

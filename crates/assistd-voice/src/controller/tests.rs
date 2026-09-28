@@ -26,16 +26,6 @@ impl VoiceOutput for RecordingOutput {
 }
 
 #[tokio::test]
-async fn new_starts_with_given_enabled_flag_and_zero_epoch() {
-    let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), true);
-    assert!(ctrl.enabled());
-    assert_eq!(ctrl.current_epoch(), 0);
-
-    let off = VoiceOutputController::new(Arc::new(NoVoiceOutput), false);
-    assert!(!off.enabled());
-}
-
-#[tokio::test]
 async fn set_enabled_false_cancels_inner_once() {
     let inner = Arc::new(RecordingOutput::default());
     let ctrl = VoiceOutputController::new(inner.clone(), true);

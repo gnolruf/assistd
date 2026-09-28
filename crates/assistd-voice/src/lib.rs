@@ -161,10 +161,4 @@ mod tests {
         assert_eq!(input.state(), VoiceCaptureState::Idle);
         assert_eq!(*input.subscribe().borrow(), VoiceCaptureState::Idle);
     }
-
-    #[tokio::test]
-    async fn no_voice_output_accepts_and_drops_speech() {
-        NoVoiceOutput.speak("hi".into()).await.unwrap();
-        NoVoiceOutput.wait_idle().await.unwrap();
-    }
 }

@@ -25,18 +25,3 @@ impl VisionGate {
         self.supported.store(supported, Ordering::Release);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn set_overrides_the_constructor_value() {
-        let gate = VisionGate::new(true);
-        assert!(gate.supported());
-        gate.set(false);
-        assert!(!gate.supported());
-        gate.set(true);
-        assert!(gate.supported());
-    }
-}

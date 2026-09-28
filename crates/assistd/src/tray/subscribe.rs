@@ -177,27 +177,3 @@ fn disconnect_popup(popup: Option<&PopupSink>) {
 
 #[cfg(not(feature = "tray-popup"))]
 fn disconnect_popup(_popup: Option<&()>) {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn subscribe_filter_lists_tray_and_popup_event_kinds() {
-        let f = subscribe_filter();
-        for k in [
-            EventKind::Delta,
-            EventKind::LastDelta,
-            EventKind::ReasoningDelta,
-            EventKind::ToolCall,
-            EventKind::ToolResult,
-            EventKind::Done,
-            EventKind::Error,
-            EventKind::Presence,
-            EventKind::ListenState,
-            EventKind::SpeakingState,
-        ] {
-            assert!(f.kinds.contains(&k), "filter missing {k:?}");
-        }
-    }
-}

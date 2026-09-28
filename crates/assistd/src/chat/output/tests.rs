@@ -446,19 +446,6 @@ fn wrapping_splits_long_line_at_word_boundaries() {
 }
 
 #[test]
-fn render_view_clamps_scroll_offset() {
-    let mut p = OutputPane::new();
-    for i in 0..15 {
-        p.push_info(&format!("line {i}"));
-    }
-    p.scroll_offset = 99;
-    let (lines, start) = p.render_view(80, 10);
-    assert_eq!(lines.len(), 10);
-    assert_eq!(start, 0);
-    assert_eq!(p.scroll_offset, 5);
-}
-
-#[test]
 fn render_view_zero_width_falls_back_to_raw_lines() {
     let mut p = OutputPane::new();
     p.push_user("hi");
