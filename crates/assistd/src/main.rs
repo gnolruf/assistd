@@ -10,8 +10,6 @@ mod chat;
 #[cfg(feature = "daemon")]
 mod daemon;
 #[cfg(feature = "daemon")]
-mod embed_init;
-#[cfg(feature = "daemon")]
 mod gpu_monitor;
 #[cfg(any(feature = "daemon", feature = "chat"))]
 mod hotkey;
@@ -25,12 +23,8 @@ mod ipc_voice_proxy;
 mod listen;
 #[cfg(feature = "daemon")]
 mod listen_dispatcher;
-#[cfg(feature = "daemon")]
-mod mcp_init;
 #[cfg(feature = "client")]
 mod memory_cli;
-#[cfg(feature = "daemon")]
-mod memory_init;
 #[cfg(feature = "client")]
 mod presence;
 #[cfg(feature = "client")]
@@ -44,13 +38,9 @@ mod tray;
 #[cfg(feature = "client")]
 mod voice_ctl;
 #[cfg(feature = "daemon")]
-mod voice_init;
-#[cfg(feature = "daemon")]
 mod voice_probe;
 #[cfg(any(feature = "daemon", feature = "tray-popup"))]
 mod wm_backend;
-#[cfg(feature = "daemon")]
-mod wm_init;
 
 /// How long exit waits on `spawn_blocking` work (e.g. a Whisper model
 /// load abandoned by a shutdown during startup) before leaving it behind.

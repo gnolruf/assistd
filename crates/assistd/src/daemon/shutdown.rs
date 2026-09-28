@@ -11,11 +11,11 @@ use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
 use tracing::info;
 
-use crate::embed_init::EmbeddingSubsystem;
+use super::embed_init::EmbeddingSubsystem;
+use super::mcp_init::McpSubsystem;
+use super::memory_init::MemorySubsystem;
+use super::wm_init::WindowSubsystem;
 use crate::listen_dispatcher::ListenDispatcherHandles;
-use crate::mcp_init::McpSubsystem;
-use crate::memory_init::MemorySubsystem;
-use crate::wm_init::WindowSubsystem;
 
 const PERSISTENCE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 

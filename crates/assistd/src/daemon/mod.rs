@@ -21,18 +21,20 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
 
-use crate::embed_init::EmbeddingSubsystem;
 use crate::ipc_voice_proxy::IpcVoiceProxy;
 use crate::listen_dispatcher::ListenDispatcherHandles;
-use crate::memory_init::MemorySubsystem;
-use crate::voice_init::VoiceSubsystem;
-use crate::{
-    embed_init, gpu_monitor, hotkey, idle_monitor, listen_dispatcher, mcp_init, memory_init,
-    voice_init, wm_init,
-};
+use crate::{gpu_monitor, hotkey, idle_monitor, listen_dispatcher};
+use embed_init::EmbeddingSubsystem;
+use memory_init::MemorySubsystem;
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
+use voice_init::VoiceSubsystem;
 
+mod embed_init;
+mod mcp_init;
+mod memory_init;
 mod shutdown;
+mod voice_init;
+mod wm_init;
 
 /// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
