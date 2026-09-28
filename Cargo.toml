@@ -96,6 +96,7 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 dbg_macro = "deny"
+mod_module_files = "warn"
 
 [profile.release]
 lto = "thin"

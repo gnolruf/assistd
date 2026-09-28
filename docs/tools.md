@@ -42,7 +42,7 @@ run "cat README.md | grep -i 'license' | uppercase"
 We'll touch four files:
 
 1. New: `crates/assistd-tools/src/commands/uppercase.rs`.
-2. Edit: `crates/assistd-tools/src/commands/mod.rs` (re-export, plus
+2. Edit: `crates/assistd-tools/src/commands.rs` (re-export, plus
    the test-only `test_registry()`).
 3. Edit: `crates/assistd-core/src/lib.rs` (registration in `build_tools`).
 4. Edit: `crates/assistd-tools/src/command/tests.rs` (extend the
@@ -173,7 +173,7 @@ Four things to notice:
 
 ### Step 2 — Re-export from the commands module
 
-Edit [crates/assistd-tools/src/commands/mod.rs](../crates/assistd-tools/src/commands/mod.rs)
+Edit [crates/assistd-tools/src/commands.rs](../crates/assistd-tools/src/commands.rs)
 to declare and re-export the new module:
 
 ```rust
