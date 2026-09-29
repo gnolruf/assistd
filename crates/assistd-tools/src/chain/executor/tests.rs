@@ -113,7 +113,7 @@ impl Command for StdinKind {
     }
 }
 
-/// Emits bytes of configurable length; exercises PIPE_BUF_MAX.
+/// Emits bytes of configurable length; exercises `PIPE_BUF_MAX`.
 #[derive(Debug)]
 struct Flood(usize);
 #[async_trait]

@@ -1,4 +1,4 @@
-//! JSON-RPC over the MCP HTTP+SSE binding: requests are POSTed to the
+//! JSON-RPC over the MCP HTTP+SSE binding: requests go by `POST` to the
 //! server's `endpoint` URL and replies arrive on a long-lived `GET`
 //! event stream, with a ping task to detect a silent server.
 
@@ -562,8 +562,8 @@ fn same_origin_redirects() -> redirect::Policy {
     })
 }
 
-/// Wait up to 5s for the `endpoint` event, then fall back to POSTing
-/// to `base_url` if none arrived.
+/// Wait up to 5s for the `endpoint` event, then fall back to sending
+/// `POST`s to `base_url` if none arrived.
 async fn await_endpoint(
     endpoint_ready_rx: oneshot::Receiver<()>,
     post_url: &RwLock<Option<Url>>,

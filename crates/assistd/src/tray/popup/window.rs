@@ -47,7 +47,7 @@ pub(super) fn run_gui_loop(
     )
 }
 
-/// The title mirrors `app_id`: egui-winit only sends app_id on Wayland, so
+/// The title mirrors `app_id`: egui-winit only sends `app_id` on Wayland, so
 /// on X11 the i3 backend matches `[title="..."]` instead.
 fn hidden_viewport(
     app_id: &str,
