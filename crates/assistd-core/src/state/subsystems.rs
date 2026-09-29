@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use assistd_llm::LlmBackend;
-use assistd_tools::ToolRegistry;
+use assistd_tools::{ToolRegistry, ToolsDisabled};
 use assistd_voice::{ContinuousListener, VoiceInput, VoiceOutputController};
 use assistd_wm::{NoWindowManager, WindowManager};
 
@@ -29,6 +29,7 @@ pub struct Subsystems {
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub mcp_startup_failures: Vec<McpStartupFailure>,
+    pub tools_disabled: Option<ToolsDisabled>,
 }
 
 impl Subsystems {
@@ -52,6 +53,7 @@ impl Subsystems {
             window_manager: Arc::new(NoWindowManager),
             vision_revalidator: None,
             mcp_startup_failures: Vec::new(),
+            tools_disabled: None,
         }
     }
 
@@ -70,6 +72,12 @@ impl Subsystems {
     /// Record the MCP servers that failed to start.
     pub fn with_mcp_startup_failures(mut self, failures: Vec<McpStartupFailure>) -> Self {
         self.mcp_startup_failures = failures;
+        self
+    }
+
+    /// Record why the model is offered no tools, if it is not.
+    pub fn with_tools_disabled(mut self, disabled: Option<ToolsDisabled>) -> Self {
+        self.tools_disabled = disabled;
         self
     }
 }

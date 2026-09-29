@@ -10,14 +10,25 @@ use assistd_llm::VisionState;
 use super::AppState;
 
 impl AppState {
-    /// Report MCP startup failures, then the model name and whether
-    /// llama-server supports vision, probed live rather than read from the
-    /// vision gate.
+    /// Report disabled tools and MCP startup failures, then the model name
+    /// and whether llama-server supports vision, probed live rather than
+    /// read from the vision gate.
     pub(super) async fn handle_get_capabilities(
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
     ) {
+        if let Some(disabled) = self.subsystems.tools_disabled {
+            let _ = tx
+                .send(Event::Status {
+                    id: id.clone(),
+                    severity: StatusSeverity::Error,
+                    component: Component::Agent,
+                    event: StatusKind::StartupFailed,
+                    message: disabled.to_string(),
+                })
+                .await;
+        }
         for failure in &self.subsystems.mcp_startup_failures {
             let _ = tx
                 .send(Event::Status {

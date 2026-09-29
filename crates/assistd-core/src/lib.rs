@@ -2,8 +2,8 @@
 //! socket server, and the `AppState` request dispatcher. Re-exports the
 //! subsystem crates so dependents need only this one.
 
-use std::fs::DirBuilder;
-use std::os::unix::fs::DirBuilderExt;
+use std::fs::{DirBuilder, DirEntry, Permissions};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,9 +16,10 @@ use assistd_embed::{EmbedJob, Embedder};
 use assistd_llm::{LlamaServerControl, VisionState, probe_capabilities_routed};
 use assistd_memory::{SemanticStore, SessionId};
 use assistd_tools::{
-    APPROVALS_FILE, Allowlist, AllowlistError, ConfirmationGate, DestructivePattern, MemoryOps,
-    Protected, RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo,
-    SandboxRequest, Tool, VisionGate,
+    APPROVALS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist, AllowlistError,
+    Approvals, ConfirmationGate, DestructivePattern, MemoryOps, Protected, RecallTool,
+    RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo, SandboxRequest, Tool,
+    ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
@@ -109,6 +110,8 @@ pub struct BuildToolsDeps<'a> {
     /// allowlist approvals and is protected from commands.
     pub config_path: &'a Path,
     pub overflow_dir: PathBuf,
+    /// The sandbox from [`probe_tool_sandbox`] that subprocesses run in.
+    pub sandbox: Arc<SandboxInfo>,
     pub confirmation_gate: Arc<dyn ConfirmationGate>,
     pub vision_gate: Arc<VisionGate>,
     pub memory_ops: Arc<MemoryOps>,
@@ -198,14 +201,46 @@ impl SeenLoad {
     }
 }
 
+/// The sandbox the model's tools run in under `config`, keeping the
+/// directory of `config_path` read-only, or why the model gets no tools.
+///
+/// # Errors
+/// [`BuildToolsError`] when the config directory cannot be resolved or a
+/// required `bwrap` is missing.
+pub fn probe_tool_sandbox(
+    config: &Config,
+    config_path: &Path,
+) -> Result<ToolSandbox, BuildToolsError> {
+    let config_dir = canonical_config_dir(config_path)?;
+    Ok(probe_sandbox(
+        sandbox_request(config.tools.bash.sandbox),
+        config.tools.bash.bwrap_extra_args.clone(),
+        Protected {
+            dirs: vec![config_dir],
+            sockets: vec![assistd_ipc::socket_path()],
+        },
+    )?)
+}
+
+/// The MCP tools approved with "always allow", kept beside the config file.
+///
+/// # Errors
+/// [`BuildToolsError`] when the config directory cannot be resolved or the
+/// approvals file cannot be read.
+pub fn mcp_tool_approvals(config_path: &Path) -> Result<Approvals, BuildToolsError> {
+    let config_dir = canonical_config_dir(config_path)?;
+    Ok(Approvals::load(config_dir.join(APPROVED_MCP_TOOLS_FILE))?)
+}
+
 /// Assemble the tool registry: the built-in commands behind `run`, the
-/// memory tools, and `mcp_tools`. Clears and recreates
-/// [`BuildToolsDeps::overflow_dir`] so spill files start from empty.
+/// memory tools, and `mcp_tools`. Removes earlier spill files from
+/// [`BuildToolsDeps::overflow_dir`].
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildToolsError> {
     let BuildToolsDeps {
         config,
         config_path,
         overflow_dir,
+        sandbox,
         confirmation_gate,
         vision_gate,
         memory_ops,
@@ -218,17 +253,9 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         mcp_tools,
     } = deps;
 
-    reset_overflow_dir(&overflow_dir)?;
+    clear_overflow_dir(&overflow_dir)?;
     let config_dir = canonical_config_dir(config_path)?;
     let protected_dirs = vec![config_dir.clone()];
-    let sandbox = probe_sandbox(
-        sandbox_request(config.tools.bash.sandbox),
-        config.tools.bash.bwrap_extra_args.clone(),
-        Protected {
-            dirs: protected_dirs.clone(),
-            sockets: vec![assistd_ipc::socket_path()],
-        },
-    )?;
     let allowlist = Allowlist::load(
         config.tools.bash.allowed_programs.clone(),
         sandbox.search_path(),
@@ -250,6 +277,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
     let commands = builtin_commands(BuiltinCommandDeps {
         bash_cfg,
         write_cfg,
+        approved_hosts: Arc::new(Approvals::load(config_dir.join(APPROVED_HOSTS_FILE))?),
         screenshot_cfg: Arc::new(screenshot_policy(config.tools.screenshot.backend)),
         sandbox,
         confirmation_gate,
@@ -284,6 +312,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
 struct BuiltinCommandDeps {
     bash_cfg: Arc<BashPolicyCfg>,
     write_cfg: Arc<WritePolicyCfg>,
+    approved_hosts: Arc<Approvals>,
     screenshot_cfg: Arc<ScreenshotPolicyCfg>,
     sandbox: Arc<SandboxInfo>,
     confirmation_gate: Arc<dyn ConfirmationGate>,
@@ -295,6 +324,7 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     let BuiltinCommandDeps {
         bash_cfg,
         write_cfg,
+        approved_hosts,
         screenshot_cfg,
         sandbox,
         confirmation_gate,
@@ -312,10 +342,10 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     commands.register(SortCommand);
     commands.register(UniqCommand);
     commands.register(EchoCommand);
-    commands.register(WriteCommand::new(write_cfg));
+    commands.register(WriteCommand::new(write_cfg, confirmation_gate.clone()));
     commands.register(SeeCommand::new(vision_gate.clone()));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
-    commands.register(WebCommand::new());
+    commands.register(WebCommand::new(confirmation_gate.clone(), approved_hosts));
     commands.register(BashCommand::new(
         bash_cfg.clone(),
         sandbox.clone(),
@@ -330,30 +360,40 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     commands
 }
 
-fn reset_overflow_dir(overflow_dir: &Path) -> Result<(), BuildToolsError> {
+fn clear_overflow_dir(overflow_dir: &Path) -> Result<(), BuildToolsError> {
     let create_error = |source| BuildToolsError::CreateOverflowDir {
         path: overflow_dir.to_path_buf(),
         source,
     };
-    if overflow_dir.exists() {
-        std::fs::remove_dir_all(overflow_dir).map_err(|source| {
-            BuildToolsError::ClearOverflowDir {
-                path: overflow_dir.to_path_buf(),
-                source,
-            }
-        })?;
-    }
-    if let Some(parent) = overflow_dir.parent() {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(OVERFLOW_DIR_MODE)
-            .create(parent)
-            .map_err(create_error)?;
-    }
+    let clear_error = |source| BuildToolsError::ClearOverflowDir {
+        path: overflow_dir.to_path_buf(),
+        source,
+    };
     DirBuilder::new()
+        .recursive(true)
         .mode(OVERFLOW_DIR_MODE)
         .create(overflow_dir)
-        .map_err(create_error)
+        .map_err(create_error)?;
+    std::fs::set_permissions(overflow_dir, Permissions::from_mode(OVERFLOW_DIR_MODE))
+        .map_err(create_error)?;
+    for entry in std::fs::read_dir(overflow_dir).map_err(clear_error)? {
+        let entry = entry.map_err(clear_error)?;
+        if is_spill_entry(&entry) {
+            std::fs::remove_file(entry.path()).map_err(clear_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_spill_entry(entry: &DirEntry) -> bool {
+    let named_like_spill = entry.file_name().to_str().is_some_and(|name| {
+        name.strip_suffix(".txt")
+            .and_then(|stem| stem.rsplit_once('-'))
+            .is_some_and(|(prefix, n)| {
+                !prefix.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+            })
+    });
+    named_like_spill && entry.file_type().is_ok_and(|kind| !kind.is_dir())
 }
 
 fn canonical_config_dir(config_path: &Path) -> Result<PathBuf, BuildToolsError> {
@@ -447,8 +487,6 @@ pub fn version() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
 
     #[test]
@@ -505,16 +543,48 @@ mod tests {
     }
 
     #[test]
-    fn reset_overflow_dir_recreates_empty_owner_only_dir() {
+    fn clear_overflow_dir_removes_only_spill_files_and_restricts_the_dir() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("assistd/output");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("cmd-1.txt"), b"stale").unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(dir.join("keep-1.txt")).unwrap();
+        for spill in ["cmd-1.txt", "mcp-files-12.txt"] {
+            std::fs::write(dir.join(spill), b"stale").unwrap();
+        }
+        for kept in ["notes.txt", "cmd-.txt", "-3.txt", "cmd-1.md", "cmd-x.txt"] {
+            std::fs::write(dir.join(kept), b"user data").unwrap();
+        }
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("cmd-2.txt")).unwrap();
+        std::fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap();
 
-        reset_overflow_dir(&dir).unwrap();
+        clear_overflow_dir(&dir).unwrap();
 
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "-3.txt",
+                "cmd-.txt",
+                "cmd-1.md",
+                "cmd-x.txt",
+                "keep-1.txt",
+                "notes.txt"
+            ]
+        );
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, OVERFLOW_DIR_MODE);
+    }
+
+    #[test]
+    fn clear_overflow_dir_creates_a_missing_dir_owner_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("assistd/output");
+
+        clear_overflow_dir(&dir).unwrap();
+
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, OVERFLOW_DIR_MODE);
     }

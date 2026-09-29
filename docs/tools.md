@@ -237,10 +237,13 @@ commands.register(SortCommand);
 commands.register(UniqCommand);
 commands.register(EchoCommand);
 commands.register(UppercaseCommand);   // <-- new
-commands.register(WriteCommand::new(write_cfg));
+commands.register(WriteCommand::new(write_cfg, confirmation_gate.clone()));
 commands.register(SeeCommand::new(vision_gate.clone()));
 commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
-commands.register(WebCommand::new());
+commands.register(WebCommand::new(
+    confirmation_gate.clone(),
+    approved_hosts,
+));
 commands.register(BashCommand::new(
     bash_cfg.clone(),
     sandbox.clone(),

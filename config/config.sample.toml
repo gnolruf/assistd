@@ -127,12 +127,17 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 #     "md5sum", "nice", "nl", "nohup", "od", "paste", "printenv", "printf", "pwd", "readlink",
 #     "realpath", "rev", "rg", "seq", "sha1sum", "sha256sum", "sha512sum", "sleep", "sort",
 #     "stat", "stdbuf", "strings", "tac", "tail", "test", "timeout", "tr", "tree", "true",
-#     "uname", "unexpand", "uniq", "wc", "which", "whoami", "xargs", "xxd",
+#     "uname", "unexpand", "wc", "which", "whoami", "xargs",
 # ]
 # Commands that always need confirmation.
 # destructive_patterns = [
 #     "rm -r|--recursive",
 #     "find -delete",
+#     "find -fprint|-fprint0|-fprintf|-fls",
+#     "sort -o|--output",
+#     "tree -o",
+#     "tree -R",
+#     "file -C|--compile",
 #     "dd of=",
 #     "git push -f|--force|--force-with-lease",
 #     "git reset --hard",

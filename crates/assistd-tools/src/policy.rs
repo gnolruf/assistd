@@ -11,12 +11,14 @@ use crate::command::{CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 
 mod allowlist;
+mod approvals;
 mod confirm;
 mod review;
 mod sandbox;
 mod shell;
 
 pub use allowlist::{APPROVALS_FILE, Allowlist, AllowlistError, SearchPath};
+pub use approvals::{APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Approvals};
 #[cfg(any(test, feature = "test-support"))]
 pub use confirm::{AlwaysAllowGate, DenyAllGate};
 pub use confirm::{
@@ -27,7 +29,7 @@ pub use confirm::{
 pub use review::{Confirmation, DestructivePattern, Rules, check_argv, check_script};
 pub use sandbox::{
     LaunchError, Protected, ResolvedSandboxMode, SandboxAccess, SandboxError, SandboxInfo,
-    SandboxRequest, probe_sandbox,
+    SandboxRequest, ToolSandbox, ToolsDisabled, probe_sandbox,
 };
 
 /// Policy for the commands that spawn subprocesses. A command runs
@@ -45,6 +47,7 @@ pub struct BashPolicyCfg {
     pub protected: Vec<PathBuf>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for BashPolicyCfg {
     fn default() -> Self {
         Self {

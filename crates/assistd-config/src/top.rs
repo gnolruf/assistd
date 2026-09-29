@@ -283,8 +283,8 @@ fn validate_sleep(errors: &mut Vec<String>, sleep: &SleepConfig) {
 }
 
 fn validate_tools(errors: &mut Vec<String>, tools: &ToolsConfig) {
-    if tools.output.overflow_dir.as_os_str().is_empty() {
-        errors.push("tools.output.overflow_dir must not be empty".into());
+    if !tools.output.overflow_dir.is_absolute() {
+        errors.push("tools.output.overflow_dir must be an absolute path".into());
     }
     if tools.write.writable_paths.is_empty() {
         errors.push(

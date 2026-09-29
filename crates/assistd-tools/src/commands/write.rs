@@ -8,6 +8,13 @@ use tokio::io::AsyncWriteExt;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::exec::POLICY_DENIED_EXIT;
+use crate::policy::{Approval, ConfirmationGate, ConfirmationRequest};
+
+/// Writes below this directory run without the user's confirmation.
+const SCRATCH_DIR: &str = "/tmp";
+
+/// Characters of the content shown when asking to confirm a write.
+const PREVIEW_MAX_CHARS: usize = 4096;
 
 /// Writable-path allowlist of canonical prefixes, non-empty by construction.
 #[derive(Debug, Clone)]
@@ -43,7 +50,7 @@ impl WritePolicyCfg {
     }
 
     /// Resolve `raw` to the path that will be written, refusing anything
-    /// outside the allowlist, a symlink, or inside a hidden entry of a prefix.
+    /// outside the allowlist, a symlink, or hidden at any depth below a prefix.
     fn resolve(&self, raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
         let resolved = resolve_for_allowlist(raw, home)?;
         if self.protected.iter().any(|dir| resolved.starts_with(dir)) {
@@ -58,7 +65,7 @@ impl WritePolicyCfg {
             .peekable();
         if covering.peek().is_none() {
             Err(PathResolveError::NotAllowlisted)
-        } else if covering.any(|below| !starts_with_hidden_entry(below)) {
+        } else if covering.any(|below| !has_hidden_component(below)) {
             Ok(resolved)
         } else {
             Err(PathResolveError::Hidden)
@@ -67,26 +74,45 @@ impl WritePolicyCfg {
 }
 
 /// `write PATH [CONTENT...]`: write the joined args (or else stdin) to an
-/// absolute, allowlisted PATH. Policy refusals exit 126.
+/// absolute, allowlisted PATH, asking first unless it is under `/tmp`.
+/// Policy refusals exit 126.
 #[derive(Debug)]
 pub struct WriteCommand {
     cfg: Arc<WritePolicyCfg>,
+    gate: Arc<dyn ConfirmationGate>,
 }
 
 impl WriteCommand {
-    /// A `write` command confined to `cfg`'s allowlist.
-    pub fn new(cfg: Arc<WritePolicyCfg>) -> Self {
-        Self { cfg }
+    /// A `write` command confined to `cfg`'s allowlist, asking `gate`
+    /// before writing outside `/tmp`.
+    pub fn new(cfg: Arc<WritePolicyCfg>, gate: Arc<dyn ConfirmationGate>) -> Self {
+        Self { cfg, gate }
     }
 
-    /// A command whose allowlist is `/`, permitting any absolute path.
+    /// A command whose allowlist is `/`, permitting any absolute path
+    /// without asking.
     #[cfg(test)]
     pub fn permissive_for_tests() -> Self {
-        Self {
-            cfg: Arc::new(
-                WritePolicyCfg::new(vec![PathBuf::from("/")]).expect("non-empty allowlist"),
-            ),
+        Self::new(
+            Arc::new(WritePolicyCfg::new(vec![PathBuf::from("/")]).expect("non-empty allowlist")),
+            Arc::new(crate::policy::AlwaysAllowGate),
+        )
+    }
+
+    async fn confirmed(&self, target: &Path, content: &[u8]) -> bool {
+        if target.starts_with(SCRATCH_DIR) {
+            return true;
         }
+        let approval = self
+            .gate
+            .confirm(ConfirmationRequest {
+                tool: "write".to_string(),
+                script: confirmation_script(target, content),
+                matched_pattern: format!("writes a file outside {SCRATCH_DIR}"),
+                always_allow: Vec::new(),
+            })
+            .await;
+        approval != Approval::Deny
     }
 }
 
@@ -109,10 +135,11 @@ impl Command for WriteCommand {
          \n\
          PATH must be absolute (relative paths are rejected) and must fall \
          under one of the prefixes in `[tools.write] writable_paths`. \
-         Symlinks, and hidden (dot) entries directly inside a prefix, are \
-         refused. \
-         Tilde expansion is supported. Exit 126 on policy denial, 1 on \
-         write failure (permissions, no-such-dir, etc.).\n"
+         Symlinks, and hidden (dot) entries at any depth below a prefix, are \
+         refused. Writes outside /tmp ask the user first. \
+         Tilde expansion is supported. Exit 126 on policy denial or a \
+         declined confirmation, 1 on write failure (permissions, \
+         no-such-dir, etc.).\n"
             .to_string()
     }
 
@@ -137,6 +164,19 @@ impl Command for WriteCommand {
                 );
             }
         };
+
+        if !self.confirmed(&write_target, &content).await {
+            return CommandOutput::failed(
+                POLICY_DENIED_EXIT,
+                error_line(
+                    "write",
+                    format_args!("{raw_path}: write cancelled by user"),
+                    Hint::Try,
+                    "a path under /tmp, or ask the user to make this change",
+                )
+                .into_bytes(),
+            );
+        }
 
         match write_without_symlinks(write_target, content).await {
             Ok(()) => CommandOutput::ok(Vec::new()),
@@ -252,10 +292,19 @@ fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveErr
     Ok(assistd_utils::path::expand_tilde(raw, Path::new(home)))
 }
 
-fn starts_with_hidden_entry(path: &Path) -> bool {
+fn has_hidden_component(path: &Path) -> bool {
     path.components()
-        .next()
-        .is_some_and(|first| first.as_os_str().as_encoded_bytes().starts_with(b"."))
+        .any(|component| component.as_os_str().as_encoded_bytes().starts_with(b"."))
+}
+
+fn confirmation_script(target: &Path, content: &[u8]) -> String {
+    let text = String::from_utf8_lossy(content);
+    let mut script = format!("write {}\n", target.display());
+    script.extend(text.chars().take(PREVIEW_MAX_CHARS));
+    if text.chars().nth(PREVIEW_MAX_CHARS).is_some() {
+        script.push_str("\n…");
+    }
+    script
 }
 
 /// Collapse `.` and `..` components without touching disk. A leading

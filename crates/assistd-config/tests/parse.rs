@@ -137,6 +137,22 @@ fn non_loopback_server_hosts_are_rejected() {
 }
 
 #[test]
+fn relative_overflow_dir_is_rejected() {
+    for dir in ["~/.cache/assistd/output", "output", "."] {
+        let cfg: Config = toml::from_str(&format!("[tools.output]\noverflow_dir = \"{dir}\"\n"))
+            .expect("config must parse");
+        let err = cfg
+            .validate()
+            .expect_err("a relative overflow_dir must not validate");
+        let message = err.to_string();
+        assert!(
+            message.contains("tools.output.overflow_dir"),
+            "{dir}: {message}"
+        );
+    }
+}
+
+#[test]
 fn ipv6_loopback_server_hosts_validate() {
     let cfg: Config =
         toml::from_str("[llama_server]\nhost = \"::1\"\n[embedding]\nhost = \"::1\"\n")

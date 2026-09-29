@@ -51,7 +51,7 @@ guides after this.
 
 Optional but recommended for the full feature set: a GPU with enough
 VRAM to hold the model (CUDA, ROCm, or Metal builds of llama.cpp
-work), `bubblewrap` for the bash sandbox, `piper` for TTS, and
+work), `bubblewrap` (without it the model gets no tools), `piper` for TTS, and
 `grim` (Wayland) or `maim` (X11) for screenshots.
 
 ### 1. Build

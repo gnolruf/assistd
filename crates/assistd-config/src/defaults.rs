@@ -168,8 +168,9 @@ pub fn default_bash_denylist() -> Vec<String> {
     ]
 }
 
-/// Programs that run without confirmation: read-only tools that cannot
-/// run another program, plus wrappers whose command is checked itself.
+/// Programs that run without confirmation: tools that neither run another
+/// program nor write files except through options the destructive patterns
+/// catch, plus wrappers whose command is checked itself.
 pub fn default_bash_allowed_programs() -> Vec<String> {
     [
         "[",
@@ -235,24 +236,27 @@ pub fn default_bash_allowed_programs() -> Vec<String> {
         "true",
         "uname",
         "unexpand",
-        "uniq",
         "wc",
         "which",
         "whoami",
         "xargs",
-        "xxd",
     ]
     .map(String::from)
     .into()
 }
 
 /// Commands that need confirmation even when their program is allowed:
-/// options that delete files or run another program, and risky uses of
-/// commonly approved programs.
+/// options that delete or write files or run another program, and risky
+/// uses of commonly approved programs.
 pub fn default_bash_destructive_patterns() -> Vec<String> {
     [
         "rm -r|--recursive",
         "find -delete",
+        "find -fprint|-fprint0|-fprintf|-fls",
+        "sort -o|--output",
+        "tree -o",
+        "tree -R",
+        "file -C|--compile",
         "dd of=",
         "git push -f|--force|--force-with-lease",
         "git reset --hard",

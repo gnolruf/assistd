@@ -3,9 +3,13 @@
 //! commands that are not there, never toward hiding ones that are.
 
 use std::mem;
+use std::ops::Range;
 
 /// How deeply constructs may nest before [`parse`] gives up.
 const MAX_DEPTH: usize = 64;
+
+/// Redirection operators other than here-documents, longest first.
+const REDIRECT_OPERATORS: &[&str] = &["&>>", "&>", ">>", ">|", ">&", "<&", "<>", ">", "<"];
 
 /// A shell word after quote removal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -32,14 +36,33 @@ impl Word {
     }
 }
 
+/// A redirection other than a here-document or here-string.
+#[derive(Debug)]
+pub(super) struct Redirect {
+    /// One of [`REDIRECT_OPERATORS`], without any file-descriptor prefix.
+    pub operator: &'static str,
+    pub target: Word,
+}
+
+impl Redirect {
+    /// Whether it opens its target for writing, rather than reading it or
+    /// duplicating or closing a file descriptor (`2>&1`, `>&-`).
+    pub(super) fn writes(&self) -> bool {
+        match self.operator {
+            "<" | "<&" => false,
+            ">&" => !names_fd(&self.target),
+            _ => true,
+        }
+    }
+}
+
 /// One simple command and the input the script spells out for it.
 #[derive(Debug, Default)]
 pub(super) struct SimpleCommand {
     pub words: Vec<Word>,
     /// Indexes into [`Script::inputs`] of what is fed to its stdin.
     pub inputs: Vec<usize>,
-    /// Redirection targets.
-    pub redirects: Vec<Word>,
+    pub redirects: Vec<Redirect>,
 }
 
 /// Every simple command in a script, in source order, with those inside
@@ -84,6 +107,7 @@ struct Lexer<'s, 'o> {
     depth: usize,
     heredocs: Vec<Heredoc>,
     incomplete: bool,
+    arithmetic: bool,
 }
 
 impl<'s, 'o> Lexer<'s, 'o> {
@@ -95,6 +119,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
             depth,
             heredocs: Vec::new(),
             incomplete: false,
+            arithmetic: false,
         }
     }
 
@@ -169,7 +194,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 '(' if self.peek_at(1) == Some('(') => {
                     self.end_command(&mut cmd);
                     self.skip(2);
-                    self.balanced('(', ')', 2)?;
+                    self.double_parens()?;
                 }
                 '(' => {
                     self.skip(1);
@@ -277,22 +302,18 @@ impl<'s, 'o> Lexer<'s, 'o> {
             });
             return Ok(());
         }
-        for op in ["&>>", "&>", ">>", ">|", ">&", "<&", "<>", ">", "<"] {
-            if self.eat(op) {
-                break;
-            }
-        }
+        let Some(operator) = REDIRECT_OPERATORS.iter().copied().find(|op| self.eat(op)) else {
+            return Ok(());
+        };
         self.skip_blanks();
-        if let Some(target) = self.word()? {
-            cmd.redirects.push(target);
+        if let Some(target) = self.word()?
+            && !self.arithmetic
+        {
+            cmd.redirects.push(Redirect { operator, target });
         }
         Ok(())
     }
 
-    /// Read the bodies of the here-documents opened on the line just
-    /// ended, lexing the substitutions of those with an unquoted delimiter.
-    /// An unclosed body marks the script incomplete, as a `<<` misread as a
-    /// here-document would look.
     fn heredoc_bodies(&mut self) -> Result<(), TooDeep> {
         for doc in mem::take(&mut self.heredocs) {
             let (body, closed) = self.heredoc_body(&doc);
@@ -330,29 +351,51 @@ impl<'s, 'o> Lexer<'s, 'o> {
         (body, false)
     }
 
-    /// Lex `src` as a script of its own, adding its commands to ours.
-    fn nested(&mut self, src: &str) -> Result<(), TooDeep> {
+    /// Lex `src` as a script of its own, or as an `arithmetic` expression,
+    /// adding its commands to ours.
+    fn nested(&mut self, src: &str, arithmetic: bool) -> Result<(), TooDeep> {
         let mut lexer = Lexer::new(src, &mut *self.out, self.depth);
+        lexer.arithmetic = arithmetic;
         lexer.commands(false)?;
         self.incomplete |= lexer.incomplete;
         Ok(())
     }
 
     /// Consume up to the `close` that balances `depth` consumed `open`s and
-    /// lex what lies between as commands. Used for arithmetic, subscripts
-    /// and extglobs, so a `<<` shift inside is never read as a here-document.
-    fn balanced(&mut self, open: char, close: char, mut depth: usize) -> Result<(), TooDeep> {
+    /// lex what lies between as commands. Used for subscripts, extglobs and
+    /// `${ …; }`, so a `<<` shift inside is never read as a here-document.
+    fn balanced(&mut self, open: char, close: char, depth: usize) -> Result<(), TooDeep> {
         let src = self.src;
+        let span = self.balanced_span(open, close, depth);
+        self.nested(&src[span.text], false)
+    }
+
+    /// After `((` or `$((`: an arithmetic expression or, as bash reads it
+    /// when the second `(` does not close right before the first, a subshell.
+    fn double_parens(&mut self) -> Result<(), TooDeep> {
+        let src = self.src;
+        let span = self.balanced_span('(', ')', 2);
+        self.nested(&src[span.text], span.closes_together)
+    }
+
+    /// Consume up to the `close` that balances `depth` consumed `open`s.
+    fn balanced_span(&mut self, open: char, close: char, mut depth: usize) -> Span {
         let start = self.pos;
-        let mut end = None;
+        let mut second_closed_at = None;
         while let Some(c) = self.next() {
             match c {
                 c if c == open => depth += 1,
                 c if c == close => {
                     depth -= 1;
+                    let close_start = self.pos - close.len_utf8();
                     if depth == 0 {
-                        end = Some(self.pos - close.len_utf8());
-                        break;
+                        return Span {
+                            text: start..close_start,
+                            closes_together: second_closed_at == Some(close_start),
+                        };
+                    }
+                    if depth == 1 && second_closed_at.is_none() {
+                        second_closed_at = Some(self.pos);
                     }
                 }
                 '\\' => {
@@ -362,11 +405,11 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 _ => {}
             }
         }
-        let end = end.unwrap_or_else(|| {
-            self.incomplete = true;
-            src.len()
-        });
-        self.nested(&src[start..end])
+        self.incomplete = true;
+        Span {
+            text: start..self.src.len(),
+            closes_together: false,
+        }
     }
 
     /// Consume the `( … )` of an array assignment, whose elements are
@@ -470,9 +513,16 @@ impl<'s, 'o> Lexer<'s, 'o> {
         let src = self.src;
         let start = self.pos;
         self.skip(2);
-        self.commands(true)?;
+        self.substitution()?;
         buf.expansion(&src[start..self.pos], true);
         Ok(())
+    }
+
+    fn substitution(&mut self) -> Result<(), TooDeep> {
+        let arithmetic = mem::take(&mut self.arithmetic);
+        let lexed = self.commands(true);
+        self.arithmetic = arithmetic;
+        lexed
     }
 
     fn single_quoted(&mut self, buf: &mut WordBuf) {
@@ -550,7 +600,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
         match self.peek() {
             Some('(') if self.peek_at(1) == Some('(') => {
                 self.skip(2);
-                self.balanced('(', ')', 2)?;
+                self.double_parens()?;
             }
             Some('[') => {
                 self.skip(1);
@@ -562,7 +612,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
             }
             Some('(') => {
                 self.skip(1);
-                self.commands(true)?;
+                self.substitution()?;
             }
             Some('{') => {
                 self.skip(1);
@@ -659,10 +709,18 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 Some(c) => body.push(c),
             }
         }
-        self.nested(&body)?;
+        self.nested(&body, false)?;
         buf.expansion(&src[start..self.pos], !quoted);
         Ok(())
     }
+}
+
+/// Where [`Lexer::balanced_span`] found text between brackets.
+struct Span {
+    text: Range<usize>,
+    /// The bracket closing the second opening one came right before the
+    /// last.
+    closes_together: bool,
 }
 
 #[derive(Default)]
@@ -780,6 +838,19 @@ pub(super) fn parse(src: &str) -> Result<Script, TooDeep> {
 pub(super) fn is_name(text: &str) -> bool {
     text.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A `>&` or `<&` target that names a file descriptor to duplicate or
+/// close (`1`, `3-`, `-`) rather than a file.
+fn names_fd(target: &Word) -> bool {
+    let text = target.text.as_str();
+    !target.dynamic
+        && !text.is_empty()
+        && text
+            .strip_suffix('-')
+            .unwrap_or(text)
+            .bytes()
+            .all(|b| b.is_ascii_digit())
 }
 
 /// A redirection's file-descriptor prefix: `2` of `2>&1`, `{fd}` of

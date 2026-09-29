@@ -1,43 +1,107 @@
 use std::fmt::Display;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use reqwest::redirect::{Attempt, Policy};
+use reqwest::{Response, Url};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
+use crate::exec::POLICY_DENIED_EXIT;
+use crate::policy::{Approvals, ConfirmationGate, ConfirmationRequest};
 
 /// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
 
+/// Redirects followed before a fetch fails.
+const MAX_REDIRECTS: usize = 10;
+
 const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
 
-/// `web URL`: HTTP GET a URL and return the response body as stdout.
+/// `web URL`: HTTP GET a URL and return the response body as stdout. Hosts
+/// not yet approved for good are fetched only once the user confirms.
 #[derive(Debug)]
 pub struct WebCommand {
     client: reqwest::Client,
+    gate: Arc<dyn ConfirmationGate>,
+    hosts: Arc<Approvals>,
 }
 
 impl WebCommand {
-    /// A command with a 30-second request timeout.
-    pub fn new() -> Self {
-        Self::with_timeout(Duration::from_secs(30))
+    /// A command with a 30-second request timeout that asks `gate` before
+    /// fetching from a host missing from `hosts`.
+    pub fn new(gate: Arc<dyn ConfirmationGate>, hosts: Arc<Approvals>) -> Self {
+        Self::with_timeout(gate, hosts, Duration::from_secs(30))
     }
 
-    /// A command whose requests time out after `timeout`, with connecting
-    /// capped at 10 seconds.
-    pub fn with_timeout(timeout: Duration) -> Self {
+    /// [`WebCommand::new`] with requests timing out after `timeout`, and
+    /// connecting capped at 10 seconds.
+    pub fn with_timeout(
+        gate: Arc<dyn ConfirmationGate>,
+        hosts: Arc<Approvals>,
+        timeout: Duration,
+    ) -> Self {
+        let redirect_hosts = Arc::clone(&hosts);
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
             .timeout(timeout)
+            .redirect(Policy::custom(move |attempt| {
+                follow_redirect(attempt, &redirect_hosts)
+            }))
             .build()
             .expect("reqwest client builds with valid config");
-        Self { client }
+        Self {
+            client,
+            gate,
+            hosts,
+        }
     }
-}
 
-impl Default for WebCommand {
-    fn default() -> Self {
-        Self::new()
+    async fn confirmed(&self, url: &Url) -> bool {
+        let host = url.host_str().unwrap_or_default();
+        self.hosts
+            .confirm(host, self.gate.as_ref(), || ConfirmationRequest {
+                tool: "web".to_string(),
+                script: format!("web {url}"),
+                matched_pattern: format!("fetches from {host}, which is not yet approved"),
+                always_allow: vec![host.to_string()],
+            })
+            .await
+    }
+
+    async fn fetch(&self, url: Url) -> CommandOutput {
+        let response = match self.client.get(url.clone()).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return fetch_failed(
+                    format_args!("transport error: {url}: {}", error_chain(&e)),
+                    UNREACHABLE,
+                );
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            return fetch_failed(
+                format_args!(
+                    "HTTP {} {}: {url}",
+                    status.as_u16(),
+                    status.canonical_reason().unwrap_or("")
+                ),
+                UNREACHABLE,
+            );
+        }
+        match read_capped(response).await {
+            Ok(body) => CommandOutput::ok(body),
+            Err(BodyError::TooLarge) => fetch_failed(
+                format_args!("response body exceeded {BODY_MAX} bytes: {url}"),
+                "a URL path that returns less content",
+            ),
+            Err(BodyError::Read(e)) => fetch_failed(
+                format_args!("body read failed: {url}: {e}"),
+                "re-running or a different URL",
+            ),
+        }
     }
 }
 
@@ -55,10 +119,13 @@ impl Command for WebCommand {
         "usage: web URL\n\
          \n\
          HTTP GET the URL (http or https only) and return the response body \
-         as stdout. 30-second timeout; response body capped at 10 MiB.\n\
+         as stdout. 30-second timeout; response body capped at 10 MiB. The \
+         user is asked before fetching from a host they have not approved, \
+         and redirects are followed only to the same or an approved host.\n\
          \n\
          Non-2xx statuses exit 1 so `||` fallbacks fire; transport errors \
-         also exit 1. Exit 2 on usage errors (wrong arg count, non-http scheme).\n"
+         also exit 1. Exit 2 on usage errors (wrong arg count, non-http scheme), \
+         126 when the user declines.\n"
             .to_string()
     }
 
@@ -73,53 +140,80 @@ impl Command for WebCommand {
                 "web <URL>",
             );
         }
-        let url = &input.args[0];
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return CommandOutput::usage_error(
-                "web",
-                format_args!("only http(s):// URLs are allowed: {url}"),
-                "web https://... or web http://...",
-            );
-        }
-
-        let response = match self.client.get(url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                return fetch_failed(format_args!("transport error: {url}: {e}"), UNREACHABLE);
-            }
-        };
-        let status = response.status();
-        if !status.is_success() {
-            return fetch_failed(
-                format_args!(
-                    "HTTP {} {}: {url}",
-                    status.as_u16(),
-                    status.canonical_reason().unwrap_or("")
-                ),
-                UNREACHABLE,
-            );
-        }
-
-        let body = match response.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                return fetch_failed(
-                    format_args!("body read failed: {url}: {e}"),
-                    "re-running or a different URL",
+        let raw = &input.args[0];
+        let url = match Url::parse(raw) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") && url.has_host() => url,
+            _ => {
+                return CommandOutput::usage_error(
+                    "web",
+                    format_args!("only http(s):// URLs are allowed: {raw}"),
+                    "web https://... or web http://...",
                 );
             }
         };
-        if body.len() > BODY_MAX {
-            return fetch_failed(
-                format_args!(
-                    "response body exceeded {BODY_MAX} bytes (got {}): {url}",
-                    body.len()
-                ),
-                "a URL path that returns less content",
+        if !self.confirmed(&url).await {
+            return CommandOutput::failed(
+                POLICY_DENIED_EXIT,
+                error_line(
+                    "web",
+                    format_args!("fetch cancelled by user: {url}"),
+                    Hint::Try,
+                    "answering without this page",
+                )
+                .into_bytes(),
             );
         }
-        CommandOutput::ok(body.to_vec())
+        self.fetch(url).await
     }
+}
+
+/// Why a response body was not read in full.
+#[derive(Debug)]
+enum BodyError {
+    TooLarge,
+    Read(reqwest::Error),
+}
+
+/// A redirect was refused because it leaves for an unapproved host.
+#[derive(Debug, thiserror::Error)]
+#[error("redirect to unapproved host {0}; fetch it directly to be asked")]
+struct UnapprovedRedirect(String);
+
+fn follow_redirect(attempt: Attempt<'_>, hosts: &Approvals) -> reqwest::redirect::Action {
+    if attempt.previous().len() > MAX_REDIRECTS {
+        return attempt.error("too many redirects");
+    }
+    let target = attempt.url().host_str().unwrap_or_default().to_string();
+    let original = attempt.previous().first().and_then(Url::host_str);
+    if original == Some(target.as_str()) || hosts.contains(&target) {
+        attempt.follow()
+    } else {
+        attempt.error(UnapprovedRedirect(target))
+    }
+}
+
+async fn read_capped(mut response: Response) -> Result<Vec<u8>, BodyError> {
+    if response
+        .content_length()
+        .is_some_and(|len| usize::try_from(len).map_or(true, |len| len > BODY_MAX))
+    {
+        return Err(BodyError::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(BodyError::Read)? {
+        if body.len() + chunk.len() > BODY_MAX {
+            return Err(BodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn error_chain(err: &dyn std::error::Error) -> String {
+    std::iter::successors(Some(err), |e| e.source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 fn fetch_failed(what: impl Display, recovery: &str) -> CommandOutput {
@@ -127,91 +221,4 @@ fn fetch_failed(what: impl Display, recovery: &str) -> CommandOutput {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::net::SocketAddr;
-
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    use tokio::task::JoinHandle;
-
-    use super::*;
-
-    /// A one-shot HTTP server answering a single request with `body`.
-    async fn serve_once(
-        status_line: &'static str,
-        body: &'static [u8],
-    ) -> (SocketAddr, JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf).await;
-                let response = format!(
-                    "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.write_all(body).await;
-            }
-        });
-        (addr, server)
-    }
-
-    async fn run_web(cmd: &WebCommand, args: &[&str]) -> CommandOutput {
-        cmd.run(CommandInput {
-            args: args.iter().map(ToString::to_string).collect(),
-            stdin: None,
-        })
-        .await
-    }
-
-    #[tokio::test]
-    async fn fetches_response_body() {
-        let (addr, server) = serve_once("HTTP/1.1 200 OK", b"hello from server").await;
-        let out = run_web(&WebCommand::new(), &[&format!("http://{addr}/")]).await;
-        server.await.unwrap();
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"hello from server");
-    }
-
-    #[tokio::test]
-    async fn non_2xx_exits_1_with_status_in_stderr() {
-        let (addr, server) = serve_once("HTTP/1.1 404 Not Found", b"missing").await;
-        let url = format!("http://{addr}/");
-        let out = run_web(&WebCommand::new(), &[&url]).await;
-        server.await.unwrap();
-        assert_eq!(out.exit_code, 1);
-        assert!(out.stdout.is_empty());
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            format!(
-                "[error] web: HTTP 404 Not Found: {url}. \
-                 Try: a different URL or check the endpoint is reachable\n"
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_non_http_scheme() {
-        let out = run_web(&WebCommand::new(), &["file:///etc/hostname"]).await;
-        assert_eq!(out.exit_code, 2);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] web: only http(s):// URLs are allowed: file:///etc/hostname. \
-             Use: web https://... or web http://...\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn connection_failure_to_reserved_port_exits_1() {
-        let cmd = WebCommand::with_timeout(Duration::from_millis(200));
-        let out = run_web(&cmd, &["http://127.0.0.1:1/"]).await;
-        assert_eq!(out.exit_code, 1);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.starts_with("[error] web: transport error: http://127.0.0.1:1/: "),
-            "{stderr}"
-        );
-    }
-}
+mod tests;

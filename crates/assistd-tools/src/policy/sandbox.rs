@@ -35,12 +35,31 @@ const SESSION_ENV: &[&str] = &[
 /// How sandboxing was requested for subprocess-spawning commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxRequest {
-    /// Use bwrap if found on `PATH`; fall back to unsandboxed with a warn.
+    /// Use bwrap if found on `PATH`; without it the model gets no tools.
     Auto,
     /// Require bwrap; fail startup if missing.
     Bwrap,
-    /// Never wrap.
+    /// Never sandbox, so the model gets no tools.
     None,
+}
+
+/// The sandbox the model's tools run in, as resolved by [`probe_sandbox`].
+#[derive(Debug)]
+pub enum ToolSandbox {
+    Bwrap(Arc<SandboxInfo>),
+    /// No sandbox is available, so no tool may be offered to the model.
+    Disabled(ToolsDisabled),
+}
+
+/// Why the model gets no tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ToolsDisabled {
+    #[error("tools are disabled: tools.bash.sandbox = \"none\" leaves them unsandboxed")]
+    ByConfig,
+    #[error(
+        "tools are disabled: bubblewrap (`bwrap`) was not found on PATH; install it to enable them"
+    )]
+    BwrapMissing,
 }
 
 /// How subprocesses are wrapped, as resolved once by [`probe_sandbox`].
@@ -94,6 +113,7 @@ pub enum SandboxAccess<'a> {
 
 impl SandboxInfo {
     /// A configuration that never wraps.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn none() -> Arc<Self> {
         Arc::new(Self {
             mode: ResolvedSandboxMode::None,
@@ -215,7 +235,7 @@ impl SandboxInfo {
 pub enum SandboxError {
     #[error(
         "tools.bash.sandbox = \"bwrap\" but `bwrap` was not found on PATH. \
-         Install bubblewrap or change sandbox to \"auto\" / \"none\"."
+         Install bubblewrap, or set sandbox to \"auto\" to start with tools disabled."
     )]
     BwrapNotFound,
 }
@@ -331,8 +351,8 @@ fn kept_env(
         .collect()
 }
 
-/// Resolve `request` against the environment, once per process. `Auto`
-/// falls back to unsandboxed with a warning when `bwrap` is missing.
+/// Resolve `request` against the environment, once per process. Without
+/// `bwrap`, `Auto` disables tools, as `None` always does.
 ///
 /// # Errors
 /// [`SandboxError::BwrapNotFound`] when `request` is `Bwrap` and no `bwrap`
@@ -341,7 +361,7 @@ pub fn probe_sandbox(
     request: SandboxRequest,
     extra_args: Vec<String>,
     protected: Protected,
-) -> Result<Arc<SandboxInfo>, SandboxError> {
+) -> Result<ToolSandbox, SandboxError> {
     let path_env = std::env::var_os("PATH").unwrap_or_default();
     probe_sandbox_with_path(request, extra_args, protected, &path_env)
 }
@@ -351,67 +371,41 @@ fn probe_sandbox_with_path(
     extra_args: Vec<String>,
     protected: Protected,
     path_env: &OsStr,
-) -> Result<Arc<SandboxInfo>, SandboxError> {
-    Ok(Arc::new(SandboxInfo {
-        mode: resolve_mode(request, path_env)?,
-        extra_args,
-        protected,
-        host_path: host_path(path_env),
-        display: SharedDisplay::default(),
-    }))
+) -> Result<ToolSandbox, SandboxError> {
+    let disabled = match (request, find_executable("bwrap", path_env)) {
+        (SandboxRequest::Bwrap, None) => return Err(SandboxError::BwrapNotFound),
+        (SandboxRequest::None, _) => ToolsDisabled::ByConfig,
+        (SandboxRequest::Auto, None) => ToolsDisabled::BwrapMissing,
+        (SandboxRequest::Auto | SandboxRequest::Bwrap, Some(bwrap)) => {
+            announce_bwrap(&bwrap);
+            return Ok(ToolSandbox::Bwrap(Arc::new(SandboxInfo {
+                mode: ResolvedSandboxMode::Bwrap { path: bwrap },
+                extra_args,
+                protected,
+                host_path: host_path(path_env),
+                display: SharedDisplay::default(),
+            })));
+        }
+    };
+    warn!(target: "assistd::policy", "{disabled}");
+    Ok(ToolSandbox::Disabled(disabled))
 }
 
-fn resolve_mode(
-    request: SandboxRequest,
-    path_env: &OsStr,
-) -> Result<ResolvedSandboxMode, SandboxError> {
-    let mode = match request {
-        SandboxRequest::None => {
-            info!(target: "assistd::policy", "bash sandbox: disabled by config");
-            ResolvedSandboxMode::None
-        }
-        SandboxRequest::Auto => match find_executable("bwrap", path_env) {
-            Some(path) => {
-                info!(
-                    target: "assistd::policy",
-                    path = %path.display(),
-                    "bash sandbox: bubblewrap enabled (auto-detected)"
-                );
-                ResolvedSandboxMode::Bwrap { path }
-            }
-            None => {
-                warn!(
-                    target: "assistd::policy",
-                    "bubblewrap not found on PATH; bash commands will run unsandboxed under the current user. \
-                     Install bubblewrap (package: bubblewrap) for defence-in-depth."
-                );
-                ResolvedSandboxMode::None
-            }
-        },
-        SandboxRequest::Bwrap => match find_executable("bwrap", path_env) {
-            Some(path) => {
-                info!(
-                    target: "assistd::policy",
-                    path = %path.display(),
-                    "bash sandbox: bubblewrap enabled (required by config)"
-                );
-                ResolvedSandboxMode::Bwrap { path }
-            }
-            None => return Err(SandboxError::BwrapNotFound),
-        },
-    };
-    if let ResolvedSandboxMode::Bwrap { path } = &mode
-        && is_setuid(path)
-    {
+fn announce_bwrap(bwrap: &Path) {
+    info!(
+        target: "assistd::policy",
+        path = %bwrap.display(),
+        "bash sandbox: bubblewrap enabled"
+    );
+    if is_setuid(bwrap) {
         warn!(
             target: "assistd::policy",
-            path = %path.display(),
+            path = %bwrap.display(),
             "bwrap is setuid, but `wm open` runs it with no_new_privs (Landlock requires it), \
              so it gets no root privileges: launches fail unless unprivileged user namespaces \
              are enabled"
         );
     }
-    Ok(mode)
 }
 
 /// The absolute directories of `path_env`, or [`SANDBOX_PATH`]'s when it
@@ -672,16 +666,38 @@ mod tests {
     }
 
     #[test]
-    fn probe_sandbox_runs_unwrapped_when_disabled_or_bwrap_is_absent() {
-        for request in [SandboxRequest::None, SandboxRequest::Auto] {
-            let info =
+    fn probe_sandbox_disables_tools_when_disabled_or_bwrap_is_absent() {
+        for (request, expected) in [
+            (SandboxRequest::None, ToolsDisabled::ByConfig),
+            (SandboxRequest::Auto, ToolsDisabled::BwrapMissing),
+        ] {
+            let probed =
                 probe_sandbox_with_path(request, Vec::new(), Protected::default(), OsStr::new(""))
                     .unwrap_or_else(|e| panic!("{request:?}: {e}"));
             assert!(
-                matches!(info.mode, ResolvedSandboxMode::None),
-                "{request:?}"
+                matches!(probed, ToolSandbox::Disabled(reason) if reason == expected),
+                "{request:?}: {probed:?}"
             );
         }
+    }
+
+    #[test]
+    fn probe_sandbox_disables_tools_when_none_even_with_bwrap_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bwrap = dir.path().join("bwrap");
+        std::fs::write(&bwrap, "").expect("write");
+        std::fs::set_permissions(&bwrap, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let probed = probe_sandbox_with_path(
+            SandboxRequest::None,
+            Vec::new(),
+            Protected::default(),
+            dir.path().as_os_str(),
+        )
+        .expect("none never fails");
+        assert!(matches!(
+            probed,
+            ToolSandbox::Disabled(ToolsDisabled::ByConfig)
+        ));
     }
 
     #[test]

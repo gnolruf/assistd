@@ -83,7 +83,7 @@ pub(crate) async fn run(action: PttAction) -> Result<()> {
             Event::ConfirmRequest { .. } => {
                 writeln!(
                     io::stderr(),
-                    "[daemon asked for destructive-command confirmation; denying \
+                    "[daemon asked for confirmation; denying \
                      (non-interactive ptt)]"
                 )?;
             }
