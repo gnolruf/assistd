@@ -157,16 +157,30 @@ impl App {
                 ..
             } => {
                 self.set_notice(&message);
-                if event == StatusKind::Restarting {
-                    self.output.finish_thinking();
-                    self.output.finish_assistant();
-                    self.output.push_info(&format!("[{component} restarting…]"));
-                } else if severity == StatusSeverity::Error {
-                    self.output.push_info(&format!("[{component}: {message}]"));
+                match event {
+                    StatusKind::Restarting => {
+                        self.close_discarded_step(&format!("[{component} restarting…]"));
+                    }
+                    StatusKind::OutputTruncated => {
+                        self.close_discarded_step(&format!(
+                            "[{component} response hit the token limit; retrying…]"
+                        ));
+                    }
+                    _ if severity == StatusSeverity::Error => {
+                        self.output.push_info(&format!("[{component}: {message}]"));
+                    }
+                    _ => {}
                 }
             }
             _ => {}
         }
+    }
+
+    /// Close the streamed blocks of a step the daemon discarded, then say why.
+    fn close_discarded_step(&mut self, info: &str) {
+        self.output.finish_thinking();
+        self.output.finish_assistant();
+        self.output.push_info(info);
     }
 
     /// Branch and session responses.

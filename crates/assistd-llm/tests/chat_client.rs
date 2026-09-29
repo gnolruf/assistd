@@ -879,7 +879,7 @@ async fn step_runs_tool_calls_reported_with_stop_finish_reason() {
 }
 
 #[tokio::test]
-async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
+async fn step_cut_off_at_the_token_limit_is_truncated_and_left_out_of_history() {
     let script = Script::new();
     script
         .push_stream(StreamResponse::RawFrames(tool_call_frames_finishing(
@@ -889,6 +889,9 @@ async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
             "length",
         )))
         .await;
+    script
+        .push_stream(StreamResponse::Deltas(vec!["fine".into()]))
+        .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let client = build_client(&chat_spec(port));
@@ -897,13 +900,20 @@ async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
         .await
         .unwrap();
     let (tx, _rx) = mpsc::channel(32);
-    let err = client
-        .step(Vec::new(), tx)
-        .await
-        .expect_err("truncated arguments must not be swallowed");
+    let outcome = client.step(Vec::new(), tx.clone()).await.unwrap();
+    assert!(matches!(outcome, StepOutcome::Truncated), "{outcome:?}");
+
+    client.step(Vec::new(), tx).await.unwrap();
+    let captured = script.captured().await;
+    let roles: Vec<&str> = captured[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
     assert!(
-        matches!(err, LlmError::ToolCallParse(_)),
-        "expected a tool-call parse error, got {err:?}"
+        !roles.contains(&"assistant"),
+        "truncated step leaked into history: {roles:?}"
     );
 }
 

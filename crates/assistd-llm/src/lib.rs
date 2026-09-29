@@ -74,6 +74,11 @@ pub enum LlmError {
     /// restarting it. Callers may wait for readiness and replay once.
     #[error("llama-server is restarting: {0}")]
     ServerRestarting(String),
+
+    /// The model's response hit the output-token limit on this many
+    /// consecutive steps, so the turn gave up.
+    #[error("the model's response hit chat.max_response_tokens {0} times in a row")]
+    OutputLimit(u32),
 }
 
 pub type LlmResult<T> = Result<T, LlmError>;
@@ -149,6 +154,9 @@ pub enum StepOutcome {
     /// The model requested tool calls, whose results must be fed back via
     /// [`LlmBackend::push_tool_results`] before the next `step`.
     ToolCalls(Vec<ToolCall>),
+    /// The response hit the output-token limit before finishing. Nothing
+    /// was recorded and no tool call runs; the step may be retried.
+    Truncated,
 }
 
 /// Role of a persisted message being replayed into a backend.

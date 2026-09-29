@@ -750,8 +750,19 @@ fn parse_tool_calls(json: Option<&Value>) -> LlmResult<Vec<ToolCallRecord>> {
 }
 
 /// Record the step in `conv`. Tool calls from a stream that ended before
-/// the model's finish chunk are discarded rather than run half-built.
+/// the model's finish chunk are discarded rather than run half-built, and a
+/// response cut off at the token limit is not recorded at all.
 fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<StepOutcome> {
+    if accum.finish_reason.as_deref() == Some("length") {
+        warn!(
+            target: "assistd::chat",
+            text_bytes = accum.text.len(),
+            reasoning_bytes = accum.reasoning.len(),
+            tool_calls = accum.tool_calls.len(),
+            "response hit max_tokens; discarding it"
+        );
+        return Ok(StepOutcome::Truncated);
+    }
     if accum.tool_calls.is_empty() {
         conv.push_assistant(accum.text);
         return Ok(StepOutcome::Final);

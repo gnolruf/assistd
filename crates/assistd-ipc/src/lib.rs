@@ -398,6 +398,9 @@ pub enum StatusKind {
     Degraded,
     /// The tool schema was withdrawn so the model answers from what it has.
     ToolsWithdrawn,
+    /// The model's response hit the output-token limit and was discarded;
+    /// the step is being retried.
+    OutputTruncated,
     /// The model is still loading after a wake.
     ModelLoading,
     /// A subsystem failed to start and is unavailable this run.

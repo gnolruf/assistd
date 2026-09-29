@@ -898,8 +898,8 @@ async fn partial_flush_speaks_a_stalled_fragment_only_when_enabled() {
     }
 }
 
-/// Scripted backend: a step that returns tool calls first emits
-/// `pre_delta`; a `Final` step emits `post_delta`.
+/// Scripted backend: a step that returns tool calls or is truncated first
+/// emits `pre_delta`; a `Final` step emits `post_delta`.
 #[derive(Debug)]
 struct ToolCallBackend {
     pre_delta: &'static str,
@@ -953,7 +953,7 @@ impl LlmBackend for ToolCallBackend {
             }
         };
         let text = match &outcome {
-            StepOutcome::ToolCalls(_) => self.pre_delta,
+            StepOutcome::ToolCalls(_) | StepOutcome::Truncated => self.pre_delta,
             StepOutcome::Final => self.post_delta,
         };
         tx.send(LlmEvent::Delta { text: text.into() }).await.ok();
@@ -1701,6 +1701,29 @@ async fn undo_on_unsaved_session_returns_zero() {
                 last_user_text: None,
             },
             done("rq"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn narration_from_a_truncated_step_is_not_persisted() {
+    let backend = ToolCallBackend::new(
+        "Cut off mid-",
+        "All done.",
+        vec![StepOutcome::Truncated, StepOutcome::Final],
+    );
+    let (state, conv, _session, branch) = branch_state_with(backend, echo_tools()).await;
+    let (res, _) = dispatch(&state, query("rq", "go")).await;
+    res.unwrap();
+    state.drain_persistence_inflight().await;
+
+    let rows = conv.load_branch_history(branch).await.unwrap();
+    let shape: Vec<_> = rows.iter().map(|r| (r.role, r.content.as_str())).collect();
+    assert_eq!(
+        shape,
+        [
+            (PersistedRole::User, "go"),
+            (PersistedRole::Assistant, "All done.")
         ]
     );
 }

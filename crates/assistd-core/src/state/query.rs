@@ -149,7 +149,7 @@ impl TurnTranslator {
                 event,
                 message,
             } => {
-                if matches!(event, StatusKind::Restarting) {
+                if matches!(event, StatusKind::Restarting | StatusKind::OutputTruncated) {
                     self.assistant_accum.clear();
                     let _ = sentence_buf.finish();
                 }

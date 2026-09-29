@@ -153,6 +153,23 @@ fn relative_overflow_dir_is_rejected() {
 }
 
 #[test]
+fn history_and_response_must_fit_the_context_together() {
+    let parse = |response: u32| -> Config {
+        toml::from_str(&format!(
+            "[model]\ncontext_length = 65536\n\
+             [chat]\nmax_history_tokens = 32768\nmax_response_tokens = {response}\n"
+        ))
+        .expect("config must parse")
+    };
+    parse(24576).validate().expect("57344 fits in 58982");
+    let err = parse(32768)
+        .validate()
+        .expect_err("65536 must not fit in 58982");
+    let message = err.to_string();
+    assert!(message.contains("chat.max_response_tokens"), "{message}");
+}
+
+#[test]
 fn ipv6_loopback_server_hosts_validate() {
     let cfg: Config =
         toml::from_str("[llama_server]\nhost = \"::1\"\n[embedding]\nhost = \"::1\"\n")

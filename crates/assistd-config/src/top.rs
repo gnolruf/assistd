@@ -186,18 +186,18 @@ fn validate_model_server(
 }
 
 fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfig) {
-    if chat.max_history_tokens >= model.context_length {
-        errors
-            .push("chat.max_history_tokens must be strictly less than model.context_length".into());
+    let history_and_response =
+        u64::from(chat.max_history_tokens.get()) + u64::from(chat.max_response_tokens.get());
+    if history_and_response > u64::from(model.context_budget()) {
+        errors.push(format!(
+            "chat.max_history_tokens + chat.max_response_tokens ({history_and_response}) must \
+             not exceed 90% of model.context_length ({})",
+            model.context_budget()
+        ));
     }
     if chat.summary_target_tokens >= chat.max_history_tokens {
         errors.push(
             "chat.summary_target_tokens must be strictly less than chat.max_history_tokens".into(),
-        );
-    }
-    if chat.max_response_tokens >= model.context_length {
-        errors.push(
-            "chat.max_response_tokens must be strictly less than model.context_length".into(),
         );
     }
     require_in_range(
