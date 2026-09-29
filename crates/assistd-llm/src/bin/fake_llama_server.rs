@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::env;
 use std::io::{self, Write};
 use std::path::Path;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,9 +34,13 @@ enum Mode {
     LoadFailure,
     /// `slow-term=<secs>`: serve normally, then exit that long after SIGTERM.
     SlowTerm(u64),
+    /// `with-orphan`: first spawn a grandchild that ignores SIGTERM and write
+    /// its pid to `orphan.pid` beside the binary, then serve normally.
+    WithOrphan,
 }
 
 struct Args {
+    program: String,
     host: String,
     port: u16,
     mode: Mode,
@@ -72,6 +76,7 @@ fn parse_mode(s: &str) -> Option<Mode> {
         "never-ready" => Some(Mode::NeverReady),
         "bind-fail" => Some(Mode::BindFail),
         "load-failure" => Some(Mode::LoadFailure),
+        "with-orphan" => Some(Mode::WithOrphan),
         _ => None,
     }
 }
@@ -89,10 +94,8 @@ fn parse_args() -> Args {
     let mut host = "127.0.0.1".to_string();
     let mut port: u16 = 0;
     let argv: Vec<String> = env::args().collect();
-    let mut mode = argv
-        .first()
-        .and_then(|program| mode_beside(program))
-        .unwrap_or(Mode::Normal);
+    let program = argv.first().cloned().unwrap_or_default();
+    let mut mode = mode_beside(&program).unwrap_or(Mode::Normal);
 
     let mut i = 1;
     while i < argv.len() {
@@ -114,7 +117,30 @@ fn parse_args() -> Args {
             _ => i += 1,
         }
     }
-    Args { host, port, mode }
+    Args {
+        program,
+        host,
+        port,
+        mode,
+    }
+}
+
+/// Spawn a `sleep` that ignores SIGTERM and record its pid in `orphan.pid`
+/// beside `program`.
+fn spawn_orphan_beside(program: &str) {
+    let orphan = Command::new("sh")
+        .args(["-c", "trap '' TERM; exec sleep 300"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn orphan")
+        .id();
+    std::fs::write(
+        Path::new(program).with_file_name("orphan.pid"),
+        orphan.to_string(),
+    )
+    .expect("write orphan pid file");
 }
 
 #[tokio::main]
@@ -124,6 +150,9 @@ async fn main() -> ExitCode {
     if matches!(args.mode, Mode::BindFail) {
         let _ = writeln!(io::stderr(), "fake_llama_server: bind-fail mode; exiting");
         return ExitCode::from(1);
+    }
+    if matches!(args.mode, Mode::WithOrphan) {
+        spawn_orphan_beside(&args.program);
     }
 
     let listener = match TcpListener::bind((args.host.as_str(), args.port)).await {
