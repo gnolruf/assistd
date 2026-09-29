@@ -5,7 +5,7 @@ use parking_lot::Mutex as StdMutex;
 use tokio::sync::{Notify, watch};
 
 use assistd_config::ToolsOutputConfig;
-use assistd_ipc::{PresenceState, VoiceCaptureState};
+use assistd_ipc::{Component, PresenceState, StatusKind, StatusSeverity, VoiceCaptureState};
 use assistd_llm::{
     EchoBackend, FailedBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload,
 };
@@ -13,7 +13,7 @@ use assistd_memory::{
     BranchId, ConversationStore, PersistedMessage, PersistedRole, SessionId,
     SqliteConversationStore, SqliteHandle,
 };
-use assistd_tools::{CommandRegistry, RunTool, ToolError, commands::EchoCommand};
+use assistd_tools::{CommandRegistry, RunTool, ToolError, ToolsDisabled, commands::EchoCommand};
 use assistd_voice::{ListenError, VoiceInputError, VoiceOutputError};
 use assistd_wm::FocusedWindowContext;
 
@@ -241,6 +241,31 @@ async fn simple_requests_emit_expected_events() {
         assert_eq!(events, expected, "{kind}");
         assert_eq!(state.subsystems.presence.state(), presence_after, "{kind}");
     }
+}
+
+#[tokio::test]
+async fn capabilities_report_disabled_tools_before_the_model() {
+    let mut state = Arc::into_inner(default_state()).expect("sole owner");
+    state.subsystems.tools_disabled = Some(ToolsDisabled::BwrapMissing);
+    let (result, events) = dispatch(
+        &Arc::new(state),
+        Request::GetCapabilities { id: "c".into() },
+    )
+    .await;
+    result.expect("dispatch");
+    let [status, Event::Capabilities { .. }, Event::Done { .. }] = events.as_slice() else {
+        panic!("expected status, capabilities, done; got {events:?}");
+    };
+    assert_eq!(
+        *status,
+        Event::Status {
+            id: "c".into(),
+            severity: StatusSeverity::Error,
+            component: Component::Agent,
+            event: StatusKind::StartupFailed,
+            message: ToolsDisabled::BwrapMissing.to_string(),
+        }
+    );
 }
 
 #[tokio::test]

@@ -132,7 +132,7 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
         Event::ConfirmRequest { .. } => {
             writeln!(
                 io::stderr(),
-                "[daemon asked for destructive-command confirmation; denying \
+                "[daemon asked for confirmation; denying \
                  (non-interactive query)]"
             )?;
         }

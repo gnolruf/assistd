@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 
 use assistd_tools::commands::{BashCommand, BashPolicyCfg};
-use assistd_tools::policy::{ResolvedSandboxMode, probe_sandbox};
+use assistd_tools::policy::{ToolSandbox, probe_sandbox};
 use assistd_tools::{
     Allowlist, AlwaysAllowGate, Approval, Command, CommandInput, ConfirmationGate,
     ConfirmationRequest, DenyAllGate, DestructivePattern, Protected, SandboxInfo, SandboxRequest,
@@ -69,8 +69,10 @@ fn input(script: &str) -> CommandInput {
 }
 
 fn bwrap_or_none() -> Option<Arc<SandboxInfo>> {
-    let info = probe_sandbox(SandboxRequest::Bwrap, Vec::new(), Protected::default()).ok()?;
-    matches!(info.mode, ResolvedSandboxMode::Bwrap { .. }).then_some(info)
+    match probe_sandbox(SandboxRequest::Bwrap, Vec::new(), Protected::default()).ok()? {
+        ToolSandbox::Bwrap(info) => Some(info),
+        ToolSandbox::Disabled(_) => None,
+    }
 }
 
 /// Fails the test if the policy ever consults it.
@@ -350,7 +352,7 @@ fn probe_sandbox_auto_with_bwrap_present_resolves_to_bwrap() {
     if bwrap_or_none().is_none() {
         return;
     }
-    let info =
+    let probed =
         probe_sandbox(SandboxRequest::Auto, Vec::new(), Protected::default()).expect("auto probe");
-    assert!(matches!(info.mode, ResolvedSandboxMode::Bwrap { .. }));
+    assert!(matches!(probed, ToolSandbox::Bwrap(_)));
 }

@@ -32,13 +32,23 @@ fn no_programs() -> Allowlist {
     )
 }
 
+fn default_patterns() -> Vec<DestructivePattern> {
+    assistd_config::defaults::default_bash_destructive_patterns()
+        .iter()
+        .map(|p| DestructivePattern::new(p.split_whitespace()).expect("valid pattern"))
+        .collect()
+}
+
 /// The matched pattern, `Some("?")` when unverifiable, or `None`, ignoring
 /// the allowlist.
 fn check(script: &str) -> Option<String> {
-    let patterns = patterns();
+    check_against(script, &patterns())
+}
+
+fn check_against(script: &str, patterns: &[DestructivePattern]) -> Option<String> {
     let allowlist = no_programs();
     let rules = Rules {
-        patterns: &patterns,
+        patterns,
         allowlist: &allowlist,
         protected: &[],
     };
@@ -357,6 +367,138 @@ fn broken_or_deeply_nested_scripts_are_unverifiable() {
     assert_eq!(check(&eval_chain(10_000)).as_deref(), UNVERIFIABLE);
     let substitutions = format!("{}rm -rf ~{}", "$(".repeat(10_000), ")".repeat(10_000));
     assert_eq!(check(&substitutions).as_deref(), UNVERIFIABLE);
+}
+
+#[test]
+fn redirections_that_write_outside_tmp_are_unverifiable() {
+    assert_all(&[
+        ("echo x > ~/f", UNVERIFIABLE),
+        ("echo x >> /home/u/p/.git/config", UNVERIFIABLE),
+        ("printf x > relative", UNVERIFIABLE),
+        ("echo x > \"$f\"", UNVERIFIABLE),
+        ("echo x > /tmp/$f", UNVERIFIABLE),
+        ("echo x > /tmp/*.log", UNVERIFIABLE),
+        ("cmd > /tmp/../home/u/x", UNVERIFIABLE),
+        ("cmd > /tmp", UNVERIFIABLE),
+        ("cmd 2> file", UNVERIFIABLE),
+        ("cmd &> file", UNVERIFIABLE),
+        ("cmd &>> file", UNVERIFIABLE),
+        ("cmd >| file", UNVERIFIABLE),
+        ("cmd <> file", UNVERIFIABLE),
+        ("cmd >&file", UNVERIFIABLE),
+        ("exec 3> file", UNVERIFIABLE),
+        ("{fd}>file cmd", UNVERIFIABLE),
+    ]);
+    assert_eq!(
+        check_script(
+            "echo x > ~/f",
+            &Rules {
+                patterns: &[],
+                allowlist: &no_programs(),
+                protected: &[],
+            }
+        ),
+        Some(Confirmation::Unverifiable(
+            "`>` writes to `~/f`, outside /tmp".into()
+        ))
+    );
+}
+
+#[test]
+fn redirections_to_streams_and_tmp_need_no_confirmation() {
+    assert_all(&[
+        ("cmd 2>&1", None),
+        ("cmd >/dev/null 2>&1", None),
+        ("cmd &>/dev/null", None),
+        ("cmd >& /dev/null", None),
+        ("cmd >&-", None),
+        ("cmd >&2", None),
+        ("exec 3>&1-", None),
+        ("cmd <&0", None),
+        ("cmd > /dev/stderr", None),
+        ("cmd 2> /dev/fd/1", None),
+        ("cmd > /tmp/out", None),
+        ("cmd >> /tmp/a/b", None),
+        ("cmd > \"/tmp/a b\"", None),
+        ("cmd > /tmp/./a", None),
+        ("cat < file", None),
+        ("cat < ~/.bashrc", None),
+        ("cat <<< text", None),
+    ]);
+}
+
+#[test]
+fn redirections_that_write_are_found_in_nested_scripts() {
+    assert_all(&[
+        ("eval 'echo x > ~/f'", UNVERIFIABLE),
+        ("echo $(echo x > ~/f)", UNVERIFIABLE),
+        ("echo `echo x > ~/f`", UNVERIFIABLE),
+        ("diff <(echo x > ~/f) b", UNVERIFIABLE),
+        ("(echo x) > ~/f", UNVERIFIABLE),
+        ("{ echo x; } >> ~/f", UNVERIFIABLE),
+        ("while true; do echo x; done > ~/f", UNVERIFIABLE),
+        ("f() { echo x > ~/f; }", UNVERIFIABLE),
+        ("trap 'echo x > ~/f' EXIT", UNVERIFIABLE),
+        ("env 'echo x > ~/f'", UNVERIFIABLE),
+        ("x=${ echo x > ~/f; }", UNVERIFIABLE),
+        ("cat <<EOF\n$(echo x > ~/f)\nEOF", UNVERIFIABLE),
+        ("echo $(( $(echo x > ~/f) + 1 ))", UNVERIFIABLE),
+    ]);
+}
+
+#[test]
+fn comparisons_in_arithmetic_are_not_redirections() {
+    assert_all(&[
+        ("(( x > 3 ))", None),
+        ("if (( n >= 1 )); then echo y; fi", None),
+        ("echo $(( a > b ))", None),
+        ("echo $(( (a > b) + 1 ))", None),
+        ("for (( i = 0; i < n; i++ )); do :; done", None),
+    ]);
+}
+
+#[test]
+fn double_parens_bash_reads_as_subshells_are_scripts() {
+    assert_all(&[
+        ("echo $((echo x) > ~/f)", UNVERIFIABLE),
+        ("echo $((echo x) ; (echo y > ~/f))", UNVERIFIABLE),
+        ("((echo x) > ~/f)", UNVERIFIABLE),
+        ("echo $(( a > b )", UNVERIFIABLE),
+    ]);
+}
+
+#[test]
+fn default_patterns_catch_options_that_write_files() {
+    let patterns = default_patterns();
+    for script in [
+        "sort -o out in",
+        "sort -uo out in",
+        "sort --output=out in",
+        "sort --out out in",
+        "find . -fprint out",
+        "find . -name x -fprint0 out",
+        "find . -fprintf out %p",
+        "find . -fls out",
+        "tree -o out",
+        "tree -a -o out",
+    ] {
+        assert!(
+            matches!(
+                check_against(script, &patterns).as_deref(),
+                Some(pattern) if pattern != "?"
+            ),
+            "{script:?}"
+        );
+    }
+    for script in [
+        "sort in",
+        "sort -u -k2 in",
+        "find . -name x",
+        "tree",
+        "tree -a",
+    ] {
+        assert_eq!(check_against(script, &patterns), None, "{script:?}");
+    }
 }
 
 #[test]

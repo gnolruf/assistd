@@ -2,6 +2,7 @@
 //! `fake_mcp_server` binary.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_mcp::{
@@ -9,6 +10,7 @@ use assistd_mcp::{
     mcp_error_line,
 };
 use assistd_tools::presentation::PresentSpec;
+use assistd_tools::{AlwaysAllowGate, ApprovalGate, Approvals, Tool};
 use serde_json::json;
 use tokio::sync::watch;
 
@@ -20,6 +22,12 @@ fn make_stdio_config(label: &str) -> TransportConfig {
     let mut cfg = StdioConfig::new(label, fake_server_path());
     cfg.request_timeout = Duration::from_secs(5);
     TransportConfig::Stdio(cfg)
+}
+
+/// [`adapt_handle_as_tools`] with every call allowed.
+async fn adapt_allowing(handle: &McpServerHandle) -> Result<Vec<Box<dyn Tool>>, McpError> {
+    let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
+    adapt_handle_as_tools(handle, "mcp__fake", PresentSpec::default(), &approvals).await
 }
 
 /// Resolves once the supervisor exits and drops its health sender.
@@ -63,7 +71,7 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
         .await
         .expect("server should start");
 
-    let tools = adapt_handle_as_tools(&handle, "mcp__fake", PresentSpec::default())
+    let tools = adapt_allowing(&handle)
         .await
         .expect("discovery should succeed");
     let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
@@ -132,7 +140,7 @@ async fn server_crash_short_circuits_subsequent_calls() {
         .await
         .expect("server should start");
 
-    let tools = adapt_handle_as_tools(&handle, "mcp__fake", PresentSpec::default())
+    let tools = adapt_allowing(&handle)
         .await
         .expect("discovery should succeed");
     let echo = tools
@@ -187,7 +195,7 @@ async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
         .await
         .expect("server should start");
 
-    let tools = adapt_handle_as_tools(&handle, "mcp__fake", PresentSpec::default())
+    let tools = adapt_allowing(&handle)
         .await
         .expect("discovery should succeed");
     let echo = tools
@@ -247,7 +255,7 @@ async fn crashed_server_takes_its_process_group_with_it() {
     let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
         .await
         .expect("server should start");
-    let tools = adapt_handle_as_tools(&handle, "mcp__fake", PresentSpec::default())
+    let tools = adapt_allowing(&handle)
         .await
         .expect("discovery should succeed");
     let spawner = tools

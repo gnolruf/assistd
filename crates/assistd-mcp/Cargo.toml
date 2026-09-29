@@ -23,6 +23,7 @@ url = { workspace = true }
 parking_lot = { workspace = true }
 
 [dev-dependencies]
+assistd-tools = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-util", "net", "time"] }
 

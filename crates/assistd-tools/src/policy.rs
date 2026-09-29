@@ -11,12 +11,14 @@ use crate::command::{CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 
 mod allowlist;
+mod approvals;
 mod confirm;
 mod review;
 mod sandbox;
 mod shell;
 
 pub use allowlist::{APPROVALS_FILE, Allowlist, AllowlistError, SearchPath};
+pub use approvals::{APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, Approvals};
 #[cfg(any(test, feature = "test-support"))]
 pub use confirm::{AlwaysAllowGate, DenyAllGate};
 pub use confirm::{
@@ -27,7 +29,7 @@ pub use confirm::{
 pub use review::{Confirmation, DestructivePattern, Rules, check_argv, check_script};
 pub use sandbox::{
     LaunchError, Protected, ResolvedSandboxMode, SandboxAccess, SandboxError, SandboxInfo,
-    SandboxRequest, probe_sandbox,
+    SandboxRequest, ToolSandbox, ToolsDisabled, probe_sandbox,
 };
 
 /// Policy for the commands that spawn subprocesses. A command runs
@@ -45,6 +47,7 @@ pub struct BashPolicyCfg {
     pub protected: Vec<PathBuf>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for BashPolicyCfg {
     fn default() -> Self {
         Self {
@@ -127,30 +130,19 @@ impl SubprocessPolicy {
     /// Ask the gate; an "always" answer also adds the offered programs to
     /// the allowlist.
     async fn confirmed(&self, tool: &str, script: &str, confirmation: &Confirmation) -> bool {
-        let offered = confirmation.always_allow().to_vec();
-        let approval = self
-            .gate
-            .confirm(ConfirmationRequest {
-                tool: tool.to_string(),
-                script: script.to_string(),
-                matched_pattern: confirmation.to_string(),
-                always_allow: offered.clone(),
-            })
-            .await;
-        match approval {
-            Approval::Always if !offered.is_empty() => {
-                if let Err(e) = self.cfg.allowlist.approve(&offered).await {
-                    warn!(
-                        target: "assistd::policy",
-                        error = %e,
-                        "approval holds until the daemon exits but was not saved"
-                    );
-                }
-                true
-            }
-            Approval::Once | Approval::Always => true,
-            Approval::Deny => false,
-        }
+        let offered = confirmation.always_allow();
+        let request = ConfirmationRequest {
+            tool: tool.to_string(),
+            script: script.to_string(),
+            matched_pattern: confirmation.to_string(),
+            always_allow: offered.to_vec(),
+        };
+        approvals::confirm_remembering(
+            self.gate.as_ref(),
+            request,
+            self.cfg.allowlist.approve(offered),
+        )
+        .await
     }
 }
 

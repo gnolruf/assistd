@@ -8,13 +8,12 @@ use anyhow::{Context, Result};
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
-    AppState, BuildToolsDeps, Config, ContinuousListener, ConversationContext, MemoryStack,
-    PresenceManager, RuntimeState, Subsystems, VisionRevalidator,
+    AppState, Config, ContinuousListener, ConversationContext, MemoryStack, PresenceManager,
+    RuntimeState, Subsystems, VisionRevalidator,
 };
 use assistd_ipc::IpcClient;
 use assistd_llm::{LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
 use assistd_memory::HistoryRow;
-use assistd_tools::{IpcConfirmationGate, MemoryOps};
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use tokio::sync::watch;
@@ -27,6 +26,7 @@ use embed_init::EmbeddingSubsystem;
 use listen_dispatcher::ListenDispatcherHandles;
 use memory_init::MemorySubsystem;
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
+use tools_init::ToolDeps;
 use voice_init::VoiceSubsystem;
 
 mod embed_init;
@@ -36,6 +36,7 @@ mod listen_dispatcher;
 mod mcp_init;
 mod memory_init;
 mod shutdown;
+mod tools_init;
 mod voice_init;
 mod voice_probe;
 mod wm_init;
@@ -150,37 +151,25 @@ async fn start(
     )
     .await;
     let window = wm_init::init(&config, &stages.tools).await;
-    let mut mcp = mcp_init::init(&config, &stages.tools).await;
 
     let conversation_ctx = Arc::new(ConversationContext::from_arc(
         memory.session_id.clone(),
         memory.branch_id,
     ));
 
-    let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
-    let tools = assistd_core::build_tools(BuildToolsDeps {
-        config: &config,
+    let tools = tools_init::init(
+        &config,
         config_path,
-        overflow_dir: overflow_dir.clone(),
-        confirmation_gate: Arc::new(IpcConfirmationGate),
-        vision_gate: vision_revalidator.gate(),
-        memory_ops: Arc::new(MemoryOps::new(
-            memory.memory_store.clone(),
-            memory.conversation_store.clone(),
-        )),
-        embedder: embed.embedder.clone(),
-        semantic: embed.semantic_store.clone(),
-        embed_tx: embed.embed_tx.clone(),
-        embedding_model: embed.model_name.clone(),
-        current_session: conversation_ctx.session_updates(),
-        window_manager: window.manager.clone(),
-        mcp_tools: std::mem::take(&mut mcp.tools),
-    })?;
-    info!(
-        "tools: registered {} (overflow dir {})",
-        tools.len(),
-        overflow_dir.display()
-    );
+        &stages.tools,
+        ToolDeps {
+            vision_gate: vision_revalidator.gate(),
+            memory: &memory,
+            embed: &embed,
+            current_session: conversation_ctx.session_updates(),
+            window_manager: window.manager.clone(),
+        },
+    )
+    .await?;
 
     let chat = build_chat_backend(&config, health_probe)?;
     let resumed_history = std::mem::take(&mut memory.resumed_history);
@@ -189,14 +178,15 @@ async fn start(
     let subsystems = Subsystems::new(
         chat,
         presence.clone(),
-        tools,
+        tools.registry,
         voice.input.clone(),
         voice.listener.clone(),
         voice.output,
     )
     .with_window_manager(window.manager.clone())
     .with_vision_revalidator(vision_revalidator)
-    .with_mcp_startup_failures(mcp.startup_failures.clone());
+    .with_mcp_startup_failures(tools.mcp.startup_failures.clone())
+    .with_tools_disabled(tools.disabled);
     let memory_stack = build_memory_stack(&config, &memory, &embed);
 
     let state = Arc::new(AppState {
@@ -217,7 +207,7 @@ async fn start(
             memory,
             embed,
             window,
-            mcp,
+            mcp: tools.mcp,
             intake_tasks: IntakeTasks {
                 hotkey: hotkey_handle,
                 gpu_monitor: gpu_monitor_handle,

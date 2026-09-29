@@ -69,6 +69,7 @@ mod tests {
 
     use super::*;
     use assistd_tools::presentation::{PresentSpec, TextTruncator};
+    use assistd_tools::{AlwaysAllowGate, ApprovalGate, Approvals};
 
     use crate::{McpClient, ToolResult, ToolSchema};
 
@@ -96,6 +97,7 @@ mod tests {
             },
             "mcp__web__search".into(),
             Arc::new(TextTruncator::new(PresentSpec::default(), "mcp-web")),
+            ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
         );
         (HealthRoutedTool::new(inner, "web".into(), rx), tx)
     }

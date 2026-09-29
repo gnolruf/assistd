@@ -29,9 +29,10 @@ pub struct ToolsOutputConfig {
     /// Max size of the shown head, in KB.
     pub max_kb: NonZeroU32,
     /// Spill directory for overflow (`cmd-<n>.txt` for `run`,
-    /// `mcp-<server>-<n>.txt` for MCP tools); recreated empty and
-    /// owner-only on daemon startup. Must not be empty. Defaults to
-    /// `$XDG_RUNTIME_DIR/assistd/output`, else under the user cache dir.
+    /// `mcp-<server>-<n>.txt` for MCP tools); made owner-only on daemon
+    /// startup, when earlier spill files are removed and nothing else is.
+    /// Must be absolute. Defaults to `$XDG_RUNTIME_DIR/assistd/output`,
+    /// else under the user cache dir.
     pub overflow_dir: PathBuf,
 }
 
@@ -52,17 +53,18 @@ impl ToolsOutputConfig {
     }
 }
 
-/// Sandbox mode for spawned commands.
+/// Sandbox mode for spawned commands. Tools never run unsandboxed: without
+/// bubblewrap the model is offered no tools at all.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BashSandboxMode {
-    /// Use bubblewrap if `bwrap` is on `PATH` at startup; otherwise warn
-    /// and run unsandboxed.
+    /// Use bubblewrap if `bwrap` is on `PATH` at startup; otherwise disable
+    /// every tool.
     #[default]
     Auto,
     /// Require bubblewrap; startup fails without `bwrap`.
     Bwrap,
-    /// Never sandbox.
+    /// Never sandbox, so every tool is disabled.
     None,
 }
 
@@ -118,8 +120,9 @@ impl Default for ToolsBashConfig {
 #[serde(default)]
 pub struct ToolsWriteConfig {
     /// Non-empty path prefixes `write` may create files under; symlinks and dot
-    /// entries directly inside a prefix are refused (list one to allow it).
-    /// `~` / `~user` expand; relative entries error, missing ones are dropped.
+    /// entries at any depth below a prefix are refused (list one to allow it).
+    /// Writes outside `/tmp` ask the user first. `~` / `~user` expand;
+    /// relative entries error, missing ones are dropped.
     pub writable_paths: Vec<String>,
 }
 

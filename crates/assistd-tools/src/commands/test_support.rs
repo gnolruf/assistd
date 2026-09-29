@@ -12,7 +12,10 @@ use super::{
     WriteCommand,
 };
 use crate::command::CommandRegistry;
-use crate::policy::{Approval, ConfirmationGate, ConfirmationRequest, DestructivePattern};
+use crate::policy::{
+    AlwaysAllowGate, Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest,
+    DestructivePattern,
+};
 
 pub(crate) fn test_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
@@ -28,7 +31,10 @@ pub(crate) fn test_registry() -> CommandRegistry {
     registry.register(WriteCommand::permissive_for_tests());
     registry.register(SeeCommand::default());
     registry.register(ScreenshotCommand::default());
-    registry.register(WebCommand::new());
+    registry.register(WebCommand::new(ApprovalGate::new(
+        Arc::new(AlwaysAllowGate),
+        Arc::new(Approvals::unsaved()),
+    )));
     registry.register(BashCommand::default());
     registry.register(WmCommand::for_test(Arc::new(NoWindowManager)));
     registry
@@ -46,36 +52,53 @@ pub(crate) fn test_patterns(patterns: &[&str]) -> Vec<DestructivePattern> {
 }
 
 /// Confirmation gate that answers every prompt the same way and records
-/// each prompt's `(tool, script, matched_pattern)`.
+/// each prompt.
 #[derive(Debug)]
 pub(crate) struct RecordingGate {
-    approve: bool,
-    prompts: Mutex<Vec<(String, String, String)>>,
+    answer: Approval,
+    requests: Mutex<Vec<ConfirmationRequest>>,
 }
 
 impl RecordingGate {
     pub(crate) fn new(approve: bool) -> Arc<Self> {
-        Arc::new(Self {
-            approve,
-            prompts: Mutex::default(),
+        Self::answering(if approve {
+            Approval::Once
+        } else {
+            Approval::Deny
         })
     }
 
+    pub(crate) fn answering(answer: Approval) -> Arc<Self> {
+        Arc::new(Self {
+            answer,
+            requests: Mutex::default(),
+        })
+    }
+
+    /// Each prompt's `(tool, script, matched_pattern)`.
     pub(crate) fn prompts(&self) -> Vec<(String, String, String)> {
-        self.prompts.lock().clone()
+        self.requests
+            .lock()
+            .iter()
+            .map(|req| {
+                (
+                    req.tool.clone(),
+                    req.script.clone(),
+                    req.matched_pattern.clone(),
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn requests(&self) -> Vec<ConfirmationRequest> {
+        self.requests.lock().clone()
     }
 }
 
 #[async_trait]
 impl ConfirmationGate for RecordingGate {
     async fn confirm(&self, req: ConfirmationRequest) -> Approval {
-        self.prompts
-            .lock()
-            .push((req.tool, req.script, req.matched_pattern));
-        if self.approve {
-            Approval::Once
-        } else {
-            Approval::Deny
-        }
+        self.requests.lock().push(req);
+        self.answer
     }
 }

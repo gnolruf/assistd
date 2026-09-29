@@ -186,8 +186,11 @@ Policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`)
 intercept the dangerous paths: a `bash` script runs without asking only
 when every program it can run is on `[tools.bash] allowed_programs` and
 nothing in it matches a destructive pattern; otherwise the user confirms,
-and can "always allow" the programs it named. It then runs in a sandbox
-(bubblewrap by default). `wm open`
+and can "always allow" the programs it named. A redirection that writes
+outside `/tmp` also needs confirmation. It then runs in the bubblewrap
+sandbox; tools never run unsandboxed, so when `bwrap` is missing (or
+`tools.bash.sandbox = "none"`) the model is offered no tools at all and
+clients are told why. `wm open`
 spawns model-chosen argv and so shares that same `[tools.bash]` policy,
 widened only to share the network and reach the compositor through a
 restricted Wayland socket (`wp-security-context-v1`, which withholds
@@ -195,8 +198,14 @@ virtual input, screen capture and similar protocols), with Landlock
 barring abstract sockets such as the X server's; the launch is refused
 when either protection is unavailable, and left running once it survives
 a startup probe; `write` restricts targets to a
-configured allowlist; `see` and `screenshot` refuse with an error
-when the loaded model has no vision projector.
+configured allowlist, refuses dot entries at any depth below it, and asks
+before writing outside `/tmp`; `web` asks before fetching from a host not
+yet approved and follows redirects only to the same or an approved host;
+`see` and `screenshot` refuse with an error when the loaded model has no
+vision projector. "Always allow" for a web host or an MCP tool is saved
+beside the config in `approved_hosts.toml` or `approved_mcp_tools.toml`.
+Clients that cannot answer prompts (`assistd query`, push-to-talk) deny
+them, so there only approved hosts, tools and programs run.
 
 ### Memory (`assistd-memory` + `assistd-embed`)
 
@@ -273,7 +282,8 @@ HTTP+SSE connection for remote ones) and runs the MCP handshake.
 Discovered tools are wrapped by `McpToolAdapter`, which implements
 `Tool` over the discovered schema, and registered into the same
 `ToolRegistry` the LLM sees, under the name
-`mcp__<server-name>__<tool-name>`. Text and JSON results obey the same
+`mcp__<server-name>__<tool-name>`. Each call asks the user first until
+that tool is "always allowed". Text and JSON results obey the same
 `[tools.output]` caps as `run`, spilling overflow to
 `mcp-<server-name>-<n>.txt`.
 
@@ -315,15 +325,15 @@ A walk through `assistd query "what files changed this week?"`:
    command first unless they have already "always allowed" `git`;
    `git log` matches no destructive pattern.
 
-6. **Sandbox.** `BashCommand` invokes the configured sandbox
-   (bubblewrap by default): a read-only root with writable entries
+6. **Sandbox.** `BashCommand` invokes the bubblewrap sandbox: a
+   read-only root with writable entries
    of `$HOME` other than dotfiles and symlinks, fresh `/tmp`, `/dev`,
    `/proc` and `/run`, unshared pid/ipc/uts/network namespaces, and
    an environment cleared down to locale and terminal variables. The sandboxed `git` runs, returns
    stdout. If stdout exceeds the `[tools.output]` line or byte cap,
    `RunTool::invoke` cuts it to that head and spills the full text to
    `tools.output.overflow_dir` (default `$XDG_RUNTIME_DIR/assistd/output`,
-   owner-only and emptied at every daemon start); it then base64-encodes any image
+   owner-only, with earlier spill files removed at every daemon start); it then base64-encodes any image
    attachments and returns the JSON result.
 
 7. **Loop back.** Result emitted as `Event::ToolResult`, pushed back

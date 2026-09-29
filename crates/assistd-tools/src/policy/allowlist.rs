@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use super::approvals::{read_store, write_store};
+
 /// File, beside the config file, that keeps "always allow" approvals.
 pub const APPROVALS_FILE: &str = "allowed_programs.toml";
 
@@ -110,12 +112,16 @@ impl Allowlist {
     }
 
     /// Approve `names` for good, pinning each to the file it resolves to
-    /// now, and save. Names that resolve to nothing are skipped.
+    /// now, and save. Names that resolve to nothing are skipped, and no
+    /// names saves nothing.
     ///
     /// # Errors
     /// [`AllowlistError::Write`] when saving fails; the approvals still hold
     /// until the daemon exits.
     pub async fn approve(&self, names: &[String]) -> Result<(), AllowlistError> {
+        if names.is_empty() {
+            return Ok(());
+        }
         let _saving = self.saving.lock().await;
         let approved = {
             let mut approved = self.approved.write();
@@ -238,15 +244,8 @@ struct StoredProgram {
 
 /// The approvals saved in `store`; none when it does not exist.
 fn load_approvals(store: &Path) -> Result<BTreeMap<String, PathBuf>, AllowlistError> {
-    let text = match std::fs::read_to_string(store) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(source) => {
-            return Err(AllowlistError::Read {
-                path: store.to_path_buf(),
-                source,
-            });
-        }
+    let Some(text) = read_store(store)? else {
+        return Ok(BTreeMap::new());
     };
     let stored: Stored = toml::from_str(&text).map_err(|source| AllowlistError::Parse {
         path: store.to_path_buf(),
@@ -259,29 +258,18 @@ fn load_approvals(store: &Path) -> Result<BTreeMap<String, PathBuf>, AllowlistEr
         .collect())
 }
 
-/// Write the approvals to a sibling file, then rename it over `store`, so
-/// a crash never leaves a half-written file.
 async fn save(store: &Path, approved: BTreeMap<String, PathBuf>) -> Result<(), AllowlistError> {
-    let write_err = |source| AllowlistError::Write {
-        path: store.to_path_buf(),
-        source,
-    };
     let stored = Stored {
         programs: approved
             .into_iter()
             .map(|(name, path)| StoredProgram { name, path })
             .collect(),
     };
-    let body = toml::to_string(&stored)
-        .map_err(|e| write_err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-    if let Some(dir) = store.parent() {
-        tokio::fs::create_dir_all(dir).await.map_err(write_err)?;
-    }
-    let staged = store.with_extension("toml.tmp");
-    tokio::fs::write(&staged, format!("{APPROVALS_HEADER}\n{body}"))
-        .await
-        .map_err(write_err)?;
-    tokio::fs::rename(&staged, store).await.map_err(write_err)
+    let body = toml::to_string(&stored).map_err(|e| AllowlistError::Write {
+        path: store.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+    })?;
+    write_store(store, APPROVALS_HEADER, &body).await
 }
 
 #[cfg(test)]

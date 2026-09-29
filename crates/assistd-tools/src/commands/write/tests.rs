@@ -1,6 +1,8 @@
 use tempfile::tempdir;
 
 use super::*;
+use crate::commands::test_support::RecordingGate;
+use crate::policy::{AlwaysAllowGate, DenyAllGate};
 
 fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
     let abs: Vec<PathBuf> = paths
@@ -11,7 +13,7 @@ fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
 }
 
 async fn write_under(allowed: &Path, args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
-    WriteCommand::new(cfg_from(&[allowed]))
+    WriteCommand::new(cfg_from(&[allowed]), Arc::new(AlwaysAllowGate))
         .run(CommandInput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: stdin.map(<[u8]>::to_vec),
@@ -243,9 +245,10 @@ fn open_refuses_any_symlink_in_the_path() {
 }
 
 #[tokio::test]
-async fn hidden_entries_directly_inside_a_prefix_are_refused() {
+async fn hidden_entries_at_any_depth_below_a_prefix_are_refused() {
     let dir = tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".ssh")).unwrap();
+    std::fs::create_dir_all(dir.path().join("repo").join(".git")).unwrap();
     for target in [
         dir.path().join(".bashrc"),
         dir.path().join(".ssh").join("authorized_keys"),
@@ -253,6 +256,8 @@ async fn hidden_entries_directly_inside_a_prefix_are_refused() {
             .join(".config")
             .join("autostart")
             .join("x.desktop"),
+        dir.path().join("repo").join(".git").join("config"),
+        dir.path().join("repo").join(".envrc"),
     ] {
         let target_str = target.to_string_lossy().into_owned();
         let out = write_under(dir.path(), &[&target_str, "oops"], None).await;
@@ -269,33 +274,20 @@ async fn hidden_entries_directly_inside_a_prefix_are_refused() {
 }
 
 #[tokio::test]
-async fn hidden_entries_deeper_than_a_prefix_are_writable() {
-    let dir = tempdir().unwrap();
-    let repo = dir.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
-    let target = repo.join(".gitignore");
-    let out = write_under(dir.path(), &[&target.to_string_lossy(), "target"], None).await;
-    assert_eq!(
-        out.exit_code,
-        0,
-        "{:?}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(std::fs::read(&target).unwrap(), b"target");
-}
-
-#[tokio::test]
 async fn hidden_directory_listed_as_a_prefix_is_writable() {
     let dir = tempdir().unwrap();
     let hidden = dir.path().join(".notes");
     std::fs::create_dir(&hidden).unwrap();
     let target = hidden.join("todo.txt");
-    let out = WriteCommand::new(cfg_from(&[dir.path(), hidden.as_path()]))
-        .run(CommandInput {
-            args: vec![target.to_string_lossy().into_owned(), "hi".into()],
-            stdin: None,
-        })
-        .await;
+    let out = WriteCommand::new(
+        cfg_from(&[dir.path(), hidden.as_path()]),
+        Arc::new(AlwaysAllowGate),
+    )
+    .run(CommandInput {
+        args: vec![target.to_string_lossy().into_owned(), "hi".into()],
+        stdin: None,
+    })
+    .await;
     assert_eq!(
         out.exit_code,
         0,
@@ -326,7 +318,7 @@ async fn refuses_a_protected_directory_inside_a_writable_one() {
         .expect("non-empty allowlist")
         .protecting(vec![canonical]);
     let target = config.join("config.toml");
-    let out = WriteCommand::new(Arc::new(cfg))
+    let out = WriteCommand::new(Arc::new(cfg), Arc::new(AlwaysAllowGate))
         .run(CommandInput {
             args: vec![target.to_string_lossy().into_owned(), "x".into()],
             stdin: None,
@@ -339,4 +331,62 @@ async fn refuses_a_protected_directory_inside_a_writable_one() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!target.exists());
+}
+
+#[tokio::test]
+async fn writes_under_tmp_are_not_confirmed() {
+    let gate = RecordingGate::answering(Approval::Deny);
+    let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone());
+    assert!(cmd.confirmed(Path::new("/tmp/notes/x.txt"), b"hi").await);
+    assert!(gate.requests().is_empty());
+}
+
+#[tokio::test]
+async fn writes_outside_tmp_ask_with_the_path_and_content() {
+    let gate = RecordingGate::answering(Approval::Once);
+    let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone());
+    assert!(
+        cmd.confirmed(Path::new("/home/u/bin/tool"), b"#!/bin/sh\n")
+            .await
+    );
+    let asked = gate.requests();
+    let [request] = asked.as_slice() else {
+        panic!("expected one prompt, got {asked:?}");
+    };
+    assert_eq!(request.tool, "write");
+    assert_eq!(request.script, "write /home/u/bin/tool\n#!/bin/sh\n");
+    assert_eq!(request.matched_pattern, "writes a file outside /tmp");
+    assert!(request.always_allow.is_empty());
+}
+
+#[tokio::test]
+async fn declined_write_outside_tmp_exits_126_without_writing() {
+    let prefix = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let target = prefix.join(format!("declined-{}.txt", uuid::Uuid::new_v4()));
+    let target_str = target.to_string_lossy().into_owned();
+    let out = WriteCommand::new(cfg_from(&[prefix]), Arc::new(DenyAllGate))
+        .run(CommandInput {
+            args: vec![target_str.clone(), "x".into()],
+            stdin: None,
+        })
+        .await;
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "[error] write: {target_str}: write cancelled by user. \
+             Try: a path under /tmp, or ask the user to make this change\n"
+        )
+    );
+    assert!(!target.exists());
+}
+
+#[test]
+fn confirmation_script_cuts_long_content() {
+    let content = "x".repeat(PREVIEW_MAX_CHARS + 1);
+    let script = confirmation_script(Path::new("/srv/a"), content.as_bytes());
+    assert_eq!(
+        script,
+        format!("write /srv/a\n{}\n…", "x".repeat(PREVIEW_MAX_CHARS))
+    );
 }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::{fmt, iter, mem};
 
 use super::allowlist::{Allowlist, Verdict};
-use super::shell::{self, Script, SimpleCommand, Word};
+use super::shell::{self, Redirect, Script, SimpleCommand, Word};
 
 /// How many scripts deep (`eval`, `trap`, …) the matcher looks before
 /// calling a script unverifiable.
@@ -106,6 +106,10 @@ const INPUT_PLACEHOLDER: &str = "{}";
 
 /// `find` flags after which it runs a command.
 const FIND_EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
+
+/// Files a redirection may write without confirmation, besides `/dev/fd/N`
+/// and files under `/tmp`.
+const HARMLESS_TARGETS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr"];
 
 /// A destructive command: a name followed by arguments that must all be
 /// present, in any order, each word listing `|`-separated alternatives.
@@ -414,6 +418,7 @@ impl<'a> Matcher<'a> {
                 return;
             }
             self.protected_words(cmd, out);
+            writes_outside_tmp(cmd, out);
             self.command(cmd, index, &script, depth, out);
         }
     }
@@ -429,7 +434,7 @@ impl<'a> Matcher<'a> {
         if let Some(word) = cmd
             .words
             .iter()
-            .chain(&cmd.redirects)
+            .chain(cmd.redirects.iter().map(|redirect| &redirect.target))
             .find(|w| self.protected.iter().any(|p| w.text.contains(p.as_str())))
         {
             out.unverifiable(|| format!("`{}` touches assistd's own configuration", word.text));
@@ -706,6 +711,41 @@ fn spellings(dir: &str, home: Option<&str>) -> impl Iterator<Item = String> {
             .into_iter()
             .flat_map(|rest| ["~", "$HOME", "${HOME}"].map(|home| format!("{home}{rest}"))),
     )
+}
+
+/// Record a redirection in `cmd` that writes a file other than
+/// [`HARMLESS_TARGETS`], `/dev/fd/N`, or one under `/tmp`.
+fn writes_outside_tmp(cmd: &SimpleCommand, out: &mut Findings<'_>) {
+    if let Some(Redirect { operator, target }) = cmd
+        .redirects
+        .iter()
+        .find(|redirect| redirect.writes() && !is_harmless_target(&redirect.target))
+    {
+        out.unverifiable(|| format!("`{operator}` writes to `{}`, outside /tmp", target.text));
+    }
+}
+
+/// A literal redirection target that is a standard stream, `/dev/null`, or
+/// a path under `/tmp` with no `..` a symlink could lead out through.
+fn is_harmless_target(target: &Word) -> bool {
+    let path = target.text.as_str();
+    !target.dynamic
+        && (HARMLESS_TARGETS.contains(&path)
+            || path
+                .strip_prefix("/dev/fd/")
+                .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
+            || stays_in_tmp(path))
+}
+
+fn stays_in_tmp(path: &str) -> bool {
+    let Some(relative) = path.strip_prefix('/') else {
+        return false;
+    };
+    let components: Vec<&str> = relative
+        .split('/')
+        .filter(|component| !matches!(*component, "" | "."))
+        .collect();
+    matches!(components.as_slice(), ["tmp", _, ..]) && !components.contains(&"..")
 }
 
 /// Keywords, builtins, and functions defined before command `index`,
