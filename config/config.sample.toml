@@ -36,6 +36,7 @@ temperature = 0.7
 # top_k = 20
 # min_p = 0.0
 # presence_penalty = 1.5
+# reasoning_effort = "low"  # thinking level; values depend on the model's chat template
 max_response_tokens = 1024  # includes reasoning; history + this must fit 90% of context_length
 request_timeout_secs = 120  # wait for the first token
 # summary_temperature = 0.3

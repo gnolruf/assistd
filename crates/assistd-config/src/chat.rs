@@ -43,6 +43,10 @@ pub struct ChatConfig {
     pub min_p: Option<f32>,
     /// `-2.0..=2.0`.
     pub presence_penalty: Option<f32>,
+    /// `reasoning_effort` chat-template variable sent with every request, e.g.
+    /// `low`. Valid values depend on the model's template; `None` keeps the
+    /// template's default. Must not be empty.
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for ChatConfig {
@@ -60,6 +64,7 @@ impl Default for ChatConfig {
             top_k: None,
             min_p: None,
             presence_penalty: None,
+            reasoning_effort: None,
         }
     }
 }

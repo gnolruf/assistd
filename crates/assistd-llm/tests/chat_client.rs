@@ -339,6 +339,7 @@ fn chat_spec(port: u16) -> ClientCfg {
             top_k: None,
             min_p: None,
             presence_penalty: None,
+            reasoning_effort: None,
         },
         server: LlamaServerConfig {
             binary_path: "llama-server".into(),
@@ -1216,6 +1217,38 @@ async fn complete_oneshot_sends_a_lone_prompt_on_the_summary_budget() {
     assert!(
         captured[1].body.get("chat_template_kwargs").is_none(),
         "Thinking::Enabled must leave the request untouched"
+    );
+}
+
+#[tokio::test]
+async fn configured_reasoning_effort_rides_every_request() {
+    let script = Script::new();
+    for reply in ["answer", "title"] {
+        script
+            .push_stream(StreamResponse::Deltas(vec![reply.into()]))
+            .await;
+    }
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let mut cfg = chat_spec(port);
+    cfg.chat.reasoning_effort = Some("low".into());
+    let client = build_client(&cfg);
+    client.push_user("hi".into(), Vec::new()).await.unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    client.step(Vec::new(), tx).await.unwrap();
+    client
+        .complete_oneshot("title?".into(), Thinking::Disabled)
+        .await
+        .unwrap();
+
+    let captured = script.captured().await;
+    assert_eq!(
+        captured[0].body["chat_template_kwargs"],
+        json!({"reasoning_effort": "low"})
+    );
+    assert_eq!(
+        captured[1].body["chat_template_kwargs"],
+        json!({"enable_thinking": false, "reasoning_effort": "low"})
     );
 }
 

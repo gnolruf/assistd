@@ -236,6 +236,9 @@ fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfi
             "chat.presence_penalty must be in the range -2.0..=2.0",
         );
     }
+    if chat.reasoning_effort.as_deref() == Some("") {
+        errors.push("chat.reasoning_effort must not be empty".into());
+    }
 }
 
 fn validate_voice(errors: &mut Vec<String>, voice: &VoiceConfig) {

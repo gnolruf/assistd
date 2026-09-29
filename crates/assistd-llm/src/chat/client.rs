@@ -89,8 +89,21 @@ impl LlamaChatClient {
             presence_penalty: self.chat.presence_penalty,
             tools: None,
             tool_choice: None,
-            chat_template_kwargs: None,
+            chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
         }
+    }
+
+    /// The configured chat-template variables, or `None` when the template
+    /// defaults apply to all of them.
+    fn template_kwargs(&self, thinking: Thinking) -> Option<wire::ChatTemplateKwargs<'_>> {
+        let enable_thinking = (thinking == Thinking::Disabled).then_some(false);
+        let reasoning_effort = self.chat.reasoning_effort.as_deref();
+        (enable_thinking.is_some() || reasoning_effort.is_some()).then_some(
+            wire::ChatTemplateKwargs {
+                enable_thinking,
+                reasoning_effort,
+            },
+        )
     }
 
     /// Classify a failed request: a restart-coincident failure becomes
@@ -487,12 +500,7 @@ impl LlmBackend for LlamaChatClient {
                 wire::ContentBody::Text(prompt.as_str().into()),
             )]);
             payload.max_tokens = self.chat.max_summary_tokens();
-            payload.chat_template_kwargs = match thinking {
-                Thinking::Enabled => None,
-                Thinking::Disabled => Some(wire::ChatTemplateKwargs {
-                    enable_thinking: false,
-                }),
-            };
+            payload.chat_template_kwargs = self.template_kwargs(thinking);
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
 
@@ -543,7 +551,7 @@ impl Summarizer for LlamaChatClient {
             presence_penalty: None,
             tools: None,
             tool_choice: None,
-            chat_template_kwargs: None,
+            chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
         };
 
         let mut response = self
