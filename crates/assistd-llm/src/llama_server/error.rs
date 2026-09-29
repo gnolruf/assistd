@@ -1,26 +1,13 @@
-use std::path::PathBuf;
 use std::time::Duration;
 
+use assistd_utils::child_server::ChildServerError;
 use thiserror::Error;
 
 /// Errors produced by the llama-server lifecycle manager and HTTP control plane.
 #[derive(Debug, Error)]
 pub enum LlamaServerError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("failed to spawn llama-server binary {path}: {source}")]
-    Spawn {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("llama-server did not become ready within {timeout:?}")]
-    HealthTimeout { timeout: Duration },
-
-    #[error("health check aborted due to shutdown")]
-    ShutdownDuringHealth,
+    #[error(transparent)]
+    Server(#[from] ChildServerError),
 
     #[error("HTTP client error: {0}")]
     Http(#[from] reqwest::Error),
@@ -32,9 +19,6 @@ pub enum LlamaServerError {
         status: u16,
     },
 
-    #[error("llama-server startup failed after {attempts} attempts")]
-    StartupFailed { attempts: u32 },
-
-    #[error("supervisor task panicked")]
-    SupervisorPanic,
+    #[error("llama-server did not report {model} loaded within {timeout:?}")]
+    LoadTimeout { model: String, timeout: Duration },
 }

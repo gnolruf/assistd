@@ -133,7 +133,12 @@ async fn store_and_queue_chunks(
         .enumerate()
     {
         match chunks
-            .store_chunk(row_id, idx as i64, chunk.clone(), None)
+            .store_chunk(
+                row_id,
+                i64::try_from(idx).unwrap_or(i64::MAX),
+                chunk.clone(),
+                None,
+            )
             .await
         {
             Ok(chunk_id) => {

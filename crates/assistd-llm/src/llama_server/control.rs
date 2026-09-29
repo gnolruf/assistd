@@ -14,6 +14,7 @@ const PROPS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// HTTP client for the model-management endpoints on llama-server.
 /// Stateless apart from the connection pool, so it survives server restarts.
+#[derive(Debug)]
 pub struct LlamaServerControl {
     client: reqwest::Client,
     host: String,
@@ -74,7 +75,7 @@ impl LlamaServerControl {
     }
 
     /// Poll `/models` until `model` reports loaded, erroring with
-    /// [`LlamaServerError::HealthTimeout`] once `deadline` elapses.
+    /// [`LlamaServerError::LoadTimeout`] once `deadline` elapses.
     pub async fn wait_for_loaded(
         &self,
         model: &str,
@@ -87,7 +88,10 @@ impl LlamaServerControl {
                 return Ok(());
             }
             if start.elapsed() >= deadline {
-                return Err(LlamaServerError::HealthTimeout { timeout: deadline });
+                return Err(LlamaServerError::LoadTimeout {
+                    model: model.to_string(),
+                    timeout: deadline,
+                });
             }
             tokio::time::sleep(poll_interval).await;
         }

@@ -84,8 +84,9 @@ pub fn format_place_floating_pixels(
 /// Top-left corner of the window in output-relative pixels. Negative
 /// results are allowed.
 pub fn compute_target_position(anchor: PlacementAnchor, workspace: Rect) -> (i32, i32) {
-    let free_width = workspace.width as i32 - anchor.width as i32;
-    let free_height = workspace.height as i32 - anchor.height as i32;
+    let free_width = saturating_i32(workspace.width).saturating_sub(saturating_i32(anchor.width));
+    let free_height =
+        saturating_i32(workspace.height).saturating_sub(saturating_i32(anchor.height));
     match anchor.corner {
         AnchorCorner::TopLeft => (anchor.offset_x, anchor.offset_y),
         AnchorCorner::TopRight => (free_width + anchor.offset_x, anchor.offset_y),
@@ -96,6 +97,10 @@ pub fn compute_target_position(anchor: PlacementAnchor, workspace: Rect) -> (i32
             free_height / 2 + anchor.offset_y,
         ),
     }
+}
+
+fn saturating_i32(value: u32) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 #[cfg(test)]

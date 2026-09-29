@@ -15,6 +15,7 @@ use crate::{MemoryError, Result};
 const DRAIN_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Mutations the writer task executes, each with a `oneshot` ack.
+#[derive(Debug)]
 pub enum WriteOp {
     EndSession {
         session_id: String,
@@ -240,7 +241,7 @@ async fn execute(conn: &Connection, op: WriteOp) {
             ack,
         } => reply(ack, fork_branch(conn, src_branch_id, new_name).await),
         WriteOp::UndoLastTurn { branch_id, ack } => {
-            reply(ack, undo_last_turn(conn, branch_id).await)
+            reply(ack, undo_last_turn(conn, branch_id).await);
         }
         WriteOp::SetSessionTitle {
             session_id,
@@ -618,7 +619,7 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
         delete_turn_if_unreferenced(&tx, turn_id)?;
         tx.commit()?;
         Ok(UndoOutcome {
-            removed_messages: removed as u32,
+            removed_messages: u32::try_from(removed).unwrap_or(u32::MAX),
             last_user_text,
             removed_turn_id: Some(turn_id),
         })

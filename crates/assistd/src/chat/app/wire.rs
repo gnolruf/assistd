@@ -12,7 +12,7 @@ use super::{
 };
 
 impl App {
-    pub fn on_chat_event(&mut self, ev: ChatEvent) {
+    pub(crate) fn on_chat_event(&mut self, ev: ChatEvent) {
         match ev {
             ChatEvent::Wire { stream, event } => self.on_wire_event(stream, event),
             ChatEvent::WireError { stream, message } => {
@@ -116,7 +116,11 @@ impl App {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let exit_code = result.get("exit_code").and_then(Value::as_i64).unwrap_or(0) as i32;
+        let exit_code = result
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok())
+            .unwrap_or(0);
         let duration_ms = result
             .get("duration_ms")
             .and_then(Value::as_u64)
@@ -125,8 +129,7 @@ impl App {
             .pending_tool_call
             .take()
             .filter(|(call_id, _)| call_id == id)
-            .map(|(_, command)| command)
-            .unwrap_or_else(|| "<?>".to_string());
+            .map_or_else(|| "<?>".to_string(), |(_, command)| command);
         self.output
             .push_tool_block(command, output, exit_code, duration_ms);
     }
@@ -195,7 +198,12 @@ impl App {
                 fork_point_seq,
                 session_title,
                 ..
-            } => self.on_branch_switched(name, parent_branch_name, fork_point_seq, session_title),
+            } => self.on_branch_switched(
+                &name,
+                parent_branch_name.as_deref(),
+                fork_point_seq,
+                session_title.as_deref(),
+            ),
             Event::SessionTitle { title, .. } => self.session_title = Some(title),
             Event::HistoryEntry {
                 role,
@@ -207,7 +215,7 @@ impl App {
                 removed_messages,
                 last_user_text,
                 ..
-            } => self.on_undo_applied(removed_messages, last_user_text),
+            } => self.on_undo_applied(removed_messages, last_user_text.as_deref()),
             _ => {}
         }
     }
@@ -216,15 +224,12 @@ impl App {
     /// a missing one clears it.
     fn on_branch_switched(
         &mut self,
-        name: String,
-        parent_branch_name: Option<String>,
+        name: &str,
+        parent_branch_name: Option<&str>,
         fork_point_seq: Option<i64>,
-        session_title: Option<String>,
+        session_title: Option<&str>,
     ) {
-        let title = session_title
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty());
+        let title = session_title.map(str::trim).filter(|t| !t.is_empty());
         self.session_title = title.map(str::to_string);
         match self.in_flight_branch_op {
             Some(BranchOp::Switch) => {
@@ -235,11 +240,11 @@ impl App {
                 };
                 self.output.push_info(&msg);
             }
-            Some(BranchOp::Resume) | Some(BranchOp::New) => {
+            Some(BranchOp::Resume | BranchOp::New) => {
                 self.output.clear();
             }
             _ => {
-                let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
+                let detail = match (parent_branch_name, fork_point_seq) {
                     (Some(p), Some(seq)) => {
                         format!("[forked from '{p}'@seq{seq} into '{name}']")
                     }
@@ -268,14 +273,13 @@ impl App {
         }
     }
 
-    fn on_undo_applied(&mut self, removed_messages: u32, last_user_text: Option<String>) {
+    fn on_undo_applied(&mut self, removed_messages: u32, last_user_text: Option<&str>) {
         if removed_messages == 0 {
             self.set_notice("nothing to undo");
             return;
         }
         self.output.pop_last_user_exchange();
         let preview = last_user_text
-            .as_deref()
             .map(|t| t.chars().take(48).collect::<String>())
             .unwrap_or_default();
         if preview.is_empty() {

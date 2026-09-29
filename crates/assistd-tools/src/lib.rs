@@ -1,6 +1,8 @@
 //! Tool-use subsystem: [`Tool`]s the model calls with JSON, chiefly
 //! [`RunTool`], which runs shell-style chains of byte-oriented [`Command`]s.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -49,7 +51,7 @@ pub enum ToolError {
 
 /// A single tool the LLM can invoke.
 #[async_trait]
-pub trait Tool: Send + Sync + 'static {
+pub trait Tool: fmt::Debug + Send + Sync + 'static {
     /// Identifier the model calls this tool by.
     fn name(&self) -> &str;
 
@@ -64,7 +66,7 @@ pub trait Tool: Send + Sync + 'static {
 }
 
 /// Lookup table of registered tools.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
@@ -90,7 +92,7 @@ impl ToolRegistry {
         self.tools
             .iter()
             .find(|t| t.name() == name)
-            .map(|t| t.as_ref())
+            .map(AsRef::as_ref)
     }
 
     /// Number of registered tools.
@@ -150,14 +152,15 @@ pub(crate) mod fixtures {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
     struct Noop;
 
     #[async_trait]
     impl Tool for Noop {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "noop"
         }
-        fn description(&self) -> &str {
+        fn description(&self) -> &'static str {
             "does nothing"
         }
         fn parameters_schema(&self) -> Value {
@@ -172,7 +175,7 @@ mod tests {
     fn registry_finds_tools_by_name() {
         let mut reg = ToolRegistry::new();
         reg.register(Noop);
-        assert_eq!(reg.get("noop").map(|t| t.name()), Some("noop"));
+        assert_eq!(reg.get("noop").map(Tool::name), Some("noop"));
         assert!(reg.get("missing").is_none());
     }
 

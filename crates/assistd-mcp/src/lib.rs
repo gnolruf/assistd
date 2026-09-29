@@ -2,6 +2,7 @@
 //! or HTTP+SSE, supervised by [`McpServerHandle`], and each tool it
 //! exposes becomes a [`Tool`] via [`adapt_handle_as_tools`].
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,12 +12,10 @@ use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
 
-pub mod backoff;
 pub mod error;
 pub mod handle;
 pub mod health_route;
 pub mod jsonrpc;
-mod log_lines;
 mod protocol;
 pub mod sse;
 pub mod stdio;
@@ -47,7 +46,7 @@ pub enum ToolResult {
 
 /// A connection to a single MCP server.
 #[async_trait]
-pub trait McpClient: Send + Sync + 'static {
+pub trait McpClient: fmt::Debug + Send + Sync + 'static {
     /// Every tool the server currently exposes. Safe to call concurrently.
     async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError>;
 
@@ -57,6 +56,7 @@ pub trait McpClient: Send + Sync + 'static {
 
 /// Exposes one MCP tool as a [`Tool`] under `registry_name`; the
 /// server-native name stays in `schema.name`.
+#[derive(Debug)]
 pub struct McpToolAdapter {
     client: Arc<dyn McpClient>,
     schema: ToolSchema,
@@ -222,6 +222,7 @@ mod tests {
     use super::*;
 
     /// Returns a static tool list and echoes arguments back as text.
+    #[derive(Debug)]
     struct FakeMcpClient {
         schemas: Vec<ToolSchema>,
     }
@@ -238,6 +239,7 @@ mod tests {
     }
 
     /// Fails its one `invoke` with a pre-armed error after `sleep`.
+    #[derive(Debug)]
     struct ErrFakeClient {
         err: parking_lot::Mutex<Option<McpError>>,
         sleep: Duration,

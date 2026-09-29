@@ -6,7 +6,7 @@
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -31,16 +31,7 @@ use common::FakeLlama;
 mod common;
 
 fn init_tracing() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .with_test_writer()
-            .try_init();
-    });
+    assistd_utils::tracing_init::init_test_tracing("info");
 }
 
 async fn grab_port() -> u16 {
@@ -104,11 +95,16 @@ async fn get_counters(port: u16) -> (u32, u32, u32, Option<String>) {
         .await
         .expect("counters body");
     let counters: Value = serde_json::from_str(&body).expect("counters json");
-    let load = counters["load_count"].as_u64().expect("load_count") as u32;
-    let unload = counters["unload_count"].as_u64().expect("unload_count") as u32;
-    let chat = counters["chat_completions_count"]
-        .as_u64()
-        .expect("chat_completions_count") as u32;
+    let load = u32::try_from(counters["load_count"].as_u64().expect("load_count"))
+        .expect("load_count fits u32");
+    let unload = u32::try_from(counters["unload_count"].as_u64().expect("unload_count"))
+        .expect("unload_count fits u32");
+    let chat = u32::try_from(
+        counters["chat_completions_count"]
+            .as_u64()
+            .expect("chat_completions_count"),
+    )
+    .expect("chat_completions_count fits u32");
     let pid = counters["pid"].as_u64().map(|n| n.to_string());
     (load, unload, chat, pid)
 }

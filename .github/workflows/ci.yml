@@ -52,6 +52,14 @@ jobs:
       - name: Rustfmt (check)
         run: cargo fmt --all -- --check
 
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+
+      - name: Unused dependencies (cargo-machete)
+        run: cargo machete
+
       # --all-features can't be used here: assistd-voice exposes a `cuda`
       # feature that links against cuBLAS/cudart, which aren't installed
       # on ubuntu-latest. Enable the test-support features explicitly so
@@ -61,6 +69,13 @@ jobs:
           cargo clippy --workspace --all-targets --locked \
             --features assistd-llm/test-support,assistd-voice/test-support \
             -- -D warnings
+
+      - name: Rustdoc (deny warnings)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc --workspace --no-deps --locked \
+            --features assistd-llm/test-support,assistd-voice/test-support
 
       - name: Test
         run: |

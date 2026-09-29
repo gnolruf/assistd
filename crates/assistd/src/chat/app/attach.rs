@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assistd_tools::{Attachment, load_image_attachment};
+use assistd_utils::path::expand_tilde_from_env;
+use assistd_utils::text::human_size;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 
@@ -33,8 +35,7 @@ impl App {
         };
         let name = Path::new(&path)
             .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
+            .map_or_else(|| path.clone(), |f| f.to_string_lossy().into_owned());
         self.set_notice(&format!("📎 reading {name}…"));
         let chat_tx = self.chat_tx.clone();
         let picker = self.picker.clone();
@@ -52,7 +53,7 @@ impl App {
             bytes,
             protocol,
         } = payload;
-        let label = format!("📎 attached: {name} ({mime}, {})", human_size_short(size));
+        let label = format!("📎 attached: {name} ({mime}, {})", human_size(size as u64));
         self.output.push_info(&label);
         self.set_notice(&format!("📎 {name} attached"));
         self.pending_attachments.push(PendingAttachment {
@@ -119,7 +120,7 @@ fn complete_path(partial: &str) -> Option<String> {
             let search_dir = if dir.is_empty() {
                 PathBuf::from("/")
             } else {
-                expand_tilde(dir)
+                expand_tilde_from_env(dir)
             };
             (search_dir, format!("{dir}/"), file)
         }
@@ -141,7 +142,7 @@ fn matching_entries(dir: &Path, prefix: &str) -> Vec<(String, bool)> {
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
             name.starts_with(prefix).then(|| {
-                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
                 (name, is_dir)
             })
         })
@@ -163,20 +164,6 @@ fn completed_name(entries: &[(String, bool)], prefix: &str) -> Option<String> {
     (common.len() > prefix.len()).then(|| common.to_string())
 }
 
-fn expand_tilde(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    if p == "~"
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return PathBuf::from(home);
-    }
-    PathBuf::from(p)
-}
-
 pub(super) fn longest_common_prefix<'a>(xs: &[&'a str]) -> &'a str {
     let Some((first, rest)) = xs.split_first() else {
         return "";
@@ -189,19 +176,4 @@ pub(super) fn longest_common_prefix<'a>(xs: &[&'a str]) -> &'a str {
             .map_or(end.min(s.len()), |((i, _), _)| i)
     });
     &first[..end]
-}
-
-fn human_size_short(n: usize) -> String {
-    const KB: usize = 1024;
-    const MB: usize = KB * 1024;
-    const GB: usize = MB * 1024;
-    if n >= GB {
-        format!("{:.1}GB", n as f64 / GB as f64)
-    } else if n >= MB {
-        format!("{:.1}MB", n as f64 / MB as f64)
-    } else if n >= KB {
-        format!("{}KB", n / KB)
-    } else {
-        format!("{n}B")
-    }
 }

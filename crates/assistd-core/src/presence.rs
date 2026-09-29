@@ -17,8 +17,10 @@ use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::{Component, Event, PresenceState, StatusKind, StatusSeverity};
 use assistd_llm::{
-    HealthWaitError, LlamaServerControl, LlamaServerError, LlamaService, LlmHealthProbe, ReadyState,
+    HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec, LlmHealthProbe,
+    ReadyState,
 };
+use assistd_utils::child_server::{ChildServer, ChildServerError};
 
 use crate::recovery::spawn_supervised;
 
@@ -41,7 +43,7 @@ pub enum PresenceError {
     DrowseFromSleeping,
 
     #[error("llama-server cold-start failed during wake: {0}")]
-    ColdStart(#[source] LlamaServerError),
+    ColdStart(#[source] ChildServerError),
 
     #[error("llama-server /models/load failed for {model}: {source}")]
     Load {
@@ -76,7 +78,7 @@ pub enum PresenceError {
     UnloadTimeout { secs: u64 },
 
     #[error("llama-server shutdown failed: {0}")]
-    Shutdown(#[source] LlamaServerError),
+    Shutdown(#[source] ChildServerError),
 
     /// The child may outlive the daemon.
     #[error("llama-server shutdown timed out after {secs}s")]
@@ -90,6 +92,7 @@ pub enum PresenceError {
 /// Owner of the llama-server handle and the daemon-wide presence state.
 /// Transitions are serialised, so an auto-wake cannot race an explicit
 /// `sleep`.
+#[derive(Debug)]
 pub struct PresenceManager {
     state: StdMutex<PresenceState>,
     transition: AsyncMutex<()>,
@@ -98,7 +101,7 @@ pub struct PresenceManager {
     timeouts: TimeoutsConfig,
     control: LlamaServerControl,
     /// `Some` iff state is `Active` or `Drowsy`.
-    llama: AsyncMutex<Option<LlamaService>>,
+    llama: AsyncMutex<Option<ChildServer>>,
     /// Flipped by `sleep()` to stop the current supervisor only.
     current_inner_shutdown: InnerShutdownSlot,
     state_tx: watch::Sender<PresenceState>,
@@ -184,7 +187,7 @@ impl PresenceManager {
     /// PID of the managed llama-server child, or `None` if `Sleeping` or
     /// not yet spawned.
     pub async fn llama_pid(&self) -> Option<u32> {
-        self.llama.lock().await.as_ref().and_then(|s| s.pid())
+        self.llama.lock().await.as_ref().and_then(ChildServer::pid)
     }
 
     /// Non-blocking [`Self::llama_pid`]. Also `None` while a transition
@@ -193,7 +196,7 @@ impl PresenceManager {
         self.llama
             .try_lock()
             .ok()
-            .and_then(|svc| svc.as_ref().and_then(|s| s.pid()))
+            .and_then(|svc| svc.as_ref().and_then(ChildServer::pid))
     }
 
     /// Non-blocking snapshot of the supervisor's [`ReadyState`]. `None`
@@ -202,7 +205,7 @@ impl PresenceManager {
         self.llama
             .try_lock()
             .ok()
-            .and_then(|svc| svc.as_ref().map(|s| s.state()))
+            .and_then(|svc| svc.as_ref().map(ChildServer::state))
     }
 
     /// Wait until llama-server reports `ReadyState::Ready` or `budget`
@@ -357,13 +360,13 @@ impl PresenceManager {
             target: "assistd::presence",
             prior = ?prior,
             new = ?PresenceState::Sleeping,
-            duration_ms = started.elapsed().as_millis() as u64,
+            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "transitioned {prior:?} → Sleeping"
         );
         outcome
     }
 
-    async fn detach_llama_as_sleeping(&self) -> Option<LlamaService> {
+    async fn detach_llama_as_sleeping(&self) -> Option<ChildServer> {
         let mut slot = self.llama.lock().await;
         let service = slot.take();
         self.signal_inner_shutdown();
@@ -378,10 +381,7 @@ impl PresenceManager {
         }
     }
 
-    async fn join_llama_shutdown(
-        &self,
-        service: Option<LlamaService>,
-    ) -> Result<(), PresenceError> {
+    async fn join_llama_shutdown(&self, service: Option<ChildServer>) -> Result<(), PresenceError> {
         let Some(service) = service else {
             return Ok(());
         };
@@ -421,7 +421,7 @@ impl PresenceManager {
             target: "assistd::presence",
             prior = ?prior,
             new = ?PresenceState::Drowsy,
-            duration_ms = started.elapsed().as_millis() as u64,
+            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "transitioned Active → Drowsy"
         );
         Ok(())
@@ -469,7 +469,7 @@ impl PresenceManager {
             target: "assistd::presence",
             prior = ?prior,
             new = ?PresenceState::Active,
-            duration_ms = started.elapsed().as_millis() as u64,
+            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "transitioned {prior:?} → Active"
         );
         Ok(())
@@ -481,7 +481,7 @@ impl PresenceManager {
             .lock()
             .await
             .as_ref()
-            .map(LlamaService::subscribe_ready)
+            .map(ChildServer::subscribe_ready)
             .ok_or(PresenceError::ServiceMissing)?;
         self.load_model_and_wait(ready_rx).await
     }
@@ -491,9 +491,8 @@ impl PresenceManager {
         let (inner_tx, inner_rx) = watch::channel(false);
         *self.current_inner_shutdown.lock() = Some(inner_tx);
 
-        let service = match LlamaService::start(
-            self.llama_server.clone(),
-            self.model.clone(),
+        let service = match ChildServer::start(
+            LlamaServerSpec::new(self.llama_server.clone(), self.model.clone()),
             inner_rx,
         )
         .await
@@ -622,12 +621,14 @@ impl PresenceManager {
 
 /// Holds the daemon `Active` for a query: [`PresenceManager::sleep`] and
 /// [`PresenceManager::drowse`] wait until every guard drops.
+#[derive(Debug)]
 pub struct RequestGuard {
     _guard: OwnedRwLockReadGuard<()>,
 }
 
 /// Counts one in-flight LLM stream for as long as it is held. Unlike
 /// [`RequestGuard`], does not block sleep/drowse.
+#[derive(Debug)]
 pub struct LlmStreamGuard {
     tx: watch::Sender<usize>,
 }
@@ -639,6 +640,7 @@ impl Drop for LlmStreamGuard {
 }
 
 /// Exposes a [`PresenceManager`] through the [`LlmHealthProbe`] trait.
+#[derive(Debug)]
 pub struct PresenceLlmHealthProbe {
     presence: Arc<PresenceManager>,
 }

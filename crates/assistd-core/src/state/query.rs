@@ -223,7 +223,7 @@ impl AppState {
             .prepare_attachments(&id, &wire_attachments, &tx)
             .await?;
         let _session_guards = self.acquire_query_guards(&id, &tx).await?;
-        let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        let agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         if let Some(revalidator) = &self.subsystems.vision_revalidator {
             revalidator
                 .revalidate_if_stale(&self.subsystems.presence)
@@ -252,13 +252,13 @@ impl AppState {
 
         let agent_result = agent_task.await;
         *self.runtime.current_cancel.lock().await = None;
-        drop(_agent_guard);
+        drop(agent_guard);
 
         if done_emitted && matches!(&agent_result, Ok(Ok(()))) {
             self.clone().spawn_session_title_generation(
                 id.clone(),
                 current_session,
-                title_user_text,
+                &title_user_text,
             );
         }
 
@@ -374,7 +374,7 @@ impl AppState {
             synthesis.code_block_mode,
         );
         let partial_flush = (synthesis.partial_flush_ms > 0)
-            .then(|| Duration::from_millis(synthesis.partial_flush_ms as u64));
+            .then(|| Duration::from_millis(u64::from(synthesis.partial_flush_ms)));
         let (tx, rx) = mpsc::channel::<String>(32);
         (
             SpeechPipeline {
@@ -627,8 +627,7 @@ fn tool_result_body(result: &Value) -> String {
     result
         .get("output")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| result.to_string())
+        .map_or_else(|| result.to_string(), ToString::to_string)
 }
 
 /// `LastDelta` carries the whole reply so far, so building one costs a

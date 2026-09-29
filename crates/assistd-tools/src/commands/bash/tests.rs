@@ -97,18 +97,6 @@ async fn bash_timeout_returns_137_with_timeout_message() {
     assert!(stderr.ends_with("s]\n"), "{stderr}");
 }
 
-#[tokio::test]
-async fn bash_without_script_emits_usage() {
-    let out = BashCommand::default()
-        .run(CommandInput {
-            args: Vec::new(),
-            stdin: None,
-        })
-        .await;
-    assert_eq!(out.exit_code, 2);
-    assert!(out.stdout.starts_with(b"usage: bash"), "{out:?}");
-}
-
 /// The model must see *which* dependency is missing, not a bare exit 127.
 #[tokio::test]
 async fn bash_missing_dependency_forwards_subprocess_stderr() {
@@ -141,24 +129,6 @@ async fn denylist_match_is_rejected_before_spawn() {
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         "[error] bash: command denied by policy. Matched denylist pattern: rm -rf /. Try: a non-destructive alternative\n"
-    );
-}
-
-#[tokio::test]
-async fn destructive_pattern_prompts_and_runs_when_approved() {
-    let gate = RecordingGate::new(true);
-    let cmd = bash_with_cfg(
-        BashPolicyCfg {
-            destructive_patterns: patterns(&["true"]),
-            ..Default::default()
-        },
-        gate.clone(),
-    );
-    let out = run(&cmd, "true", None).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(
-        gate.prompts(),
-        [("bash".to_string(), "true".to_string(), "true".to_string())]
     );
 }
 

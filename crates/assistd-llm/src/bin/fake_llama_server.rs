@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::env;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -98,7 +98,7 @@ fn parse_args() -> Args {
     while i < argv.len() {
         match argv[i].as_str() {
             "--host" => {
-                host = argv[i + 1].clone();
+                host.clone_from(&argv[i + 1]);
                 i += 2;
             }
             "--port" => {
@@ -122,20 +122,23 @@ async fn main() -> ExitCode {
     let args = parse_args();
 
     if matches!(args.mode, Mode::BindFail) {
-        eprintln!("fake_llama_server: bind-fail mode; exiting");
+        let _ = writeln!(io::stderr(), "fake_llama_server: bind-fail mode; exiting");
         return ExitCode::from(1);
     }
 
     let listener = match TcpListener::bind((args.host.as_str(), args.port)).await {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("fake_llama_server: bind failed: {e}");
+            let _ = writeln!(io::stderr(), "fake_llama_server: bind failed: {e}");
             return ExitCode::from(2);
         }
     };
-    eprintln!(
+    let _ = writeln!(
+        io::stderr(),
         "fake_llama_server: listening on {}:{} mode={:?}",
-        args.host, args.port, args.mode
+        args.host,
+        args.port,
+        args.mode
     );
 
     let state = Arc::new(Mutex::new(ServerState::default()));
@@ -146,7 +149,10 @@ async fn main() -> ExitCode {
             serve_loop(listener, Mode::Normal, state).await;
         });
         tokio::time::sleep(Duration::from_secs(secs)).await;
-        eprintln!("fake_llama_server: crash-after elapsed; exiting 0");
+        let _ = writeln!(
+            io::stderr(),
+            "fake_llama_server: crash-after elapsed; exiting 0"
+        );
         return ExitCode::SUCCESS;
     }
 
@@ -157,7 +163,10 @@ async fn main() -> ExitCode {
             serve_loop(listener, Mode::Normal, state).await;
         });
         term.recv().await;
-        eprintln!("fake_llama_server: SIGTERM received; exiting in {secs}s");
+        let _ = writeln!(
+            io::stderr(),
+            "fake_llama_server: SIGTERM received; exiting in {secs}s"
+        );
         tokio::time::sleep(Duration::from_secs(secs)).await;
         return ExitCode::SUCCESS;
     }
@@ -171,7 +180,7 @@ async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerSt
         let (sock, _) = match listener.accept().await {
             Ok(accepted) => accepted,
             Err(e) => {
-                eprintln!("fake_llama_server: accept error: {e}");
+                let _ = writeln!(io::stderr(), "fake_llama_server: accept error: {e}");
                 continue;
             }
         };
@@ -205,7 +214,7 @@ async fn serve_connection(
             serve_chat_completion(&mut sock, &state, &body).await?;
             return Ok(());
         }
-        ("POST", "/test/script") | ("POST", "/test/reset") => {
+        ("POST", "/test/script" | "/test/reset") => {
             let resp = if has_test_control_header(&head) {
                 if path == "/test/script" {
                     queue_script_response(&state, &body).await
@@ -455,13 +464,13 @@ async fn queue_script_response(
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter_map(|v| v.as_str().map(ToString::to_string))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     let delay_ms_between = parsed
         .get("delay_ms_between")
-        .and_then(|v| v.as_u64())
+        .and_then(Value::as_u64)
         .unwrap_or(0);
     let mut server = state.lock().await;
     server.chat_scripts.push_back(ChatScript {
@@ -497,7 +506,7 @@ async fn serve_chat_completion(
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let stream = parsed
         .get("stream")
-        .and_then(|v| v.as_bool())
+        .and_then(Value::as_bool)
         .unwrap_or(false);
     let last_user = parsed
         .get("messages")
@@ -507,7 +516,7 @@ async fn serve_chat_completion(
                 if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
                     msg.get("content")
                         .and_then(|c| c.as_str())
-                        .map(|s| s.to_string())
+                        .map(ToString::to_string)
                 } else {
                     None
                 }

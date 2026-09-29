@@ -17,6 +17,7 @@ assistd-embed = { workspace = true }
 assistd-memory = { workspace = true }
 assistd-ipc = { workspace = true, features = ["client"] }
 assistd-wm = { workspace = true }
+assistd-utils = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

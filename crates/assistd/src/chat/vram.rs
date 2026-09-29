@@ -12,21 +12,21 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Live VRAM usage for all NVIDIA GPUs, summed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VramInfo {
+pub(super) struct VramInfo {
     pub used_mb: u64,
     pub total_mb: u64,
 }
 
 /// Live RAM usage read from `/proc/meminfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RamInfo {
+pub(super) struct RamInfo {
     pub used_mb: u64,
     pub total_mb: u64,
 }
 
 /// Current state of the VRAM probe.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum VramState {
+pub(super) enum VramState {
     /// Not yet probed.
     #[default]
     Unknown,
@@ -39,7 +39,7 @@ pub enum VramState {
 
 /// Current state of the RAM probe.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum RamState {
+pub(super) enum RamState {
     /// Not yet probed.
     #[default]
     Unknown,
@@ -48,14 +48,14 @@ pub enum RamState {
 
 /// Combined VRAM and RAM snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ResourceState {
+pub(super) struct ResourceState {
     pub vram: VramState,
     pub ram: RamState,
 }
 
 /// Poll VRAM and RAM until `shutdown` flips, publishing each snapshot
 /// on the returned receiver.
-pub fn spawn_probe(
+pub(super) fn spawn_probe(
     mut shutdown: watch::Receiver<bool>,
 ) -> (watch::Receiver<ResourceState>, JoinHandle<()>) {
     let (tx, rx) = watch::channel(ResourceState::default());
@@ -90,7 +90,7 @@ pub fn spawn_probe(
             let _ = tx.send(ResourceState { vram, ram });
 
             tokio::select! {
-                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = tokio::time::sleep(POLL_INTERVAL) => {}
                 _ = shutdown.changed() => return,
             }
             if *shutdown.borrow() {

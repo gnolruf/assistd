@@ -17,6 +17,7 @@ assistd-ipc = { workspace = true }
 assistd-llm = { workspace = true }
 assistd-memory = { workspace = true }
 assistd-tools = { workspace = true }
+assistd-utils = { workspace = true, features = ["child-server"] }
 assistd-voice = { workspace = true }
 assistd-wm    = { workspace = true }
 async-trait = { workspace = true }
@@ -24,13 +25,11 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
 rustix = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 shlex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "net", "signal"] }
 tokio-util = { workspace = true }
-toml = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 

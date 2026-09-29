@@ -7,6 +7,7 @@ use super::*;
 
 /// Returns `embedding` for every input, but fails any call that includes `"bad"`.
 /// Records the inputs of every call.
+#[derive(Debug)]
 struct MockEmbedder {
     calls: Mutex<Vec<Vec<String>>>,
     embedding: Vec<f32>,
@@ -30,7 +31,7 @@ impl Embedder for MockEmbedder {
         }
         Ok(vec![self.embedding.clone(); texts.len()])
     }
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "mock"
     }
     fn dim(&self) -> usize {

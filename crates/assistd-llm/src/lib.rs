@@ -1,6 +1,7 @@
 //! LLM backend trait, the llama-server chat client that implements it,
 //! and the child-process supervisor that keeps llama-server alive.
 
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,11 +16,11 @@ use assistd_tools::Attachment;
 pub mod chat;
 pub mod llama_server;
 
+pub use assistd_utils::child_server::ReadyState;
 pub use chat::conversation::ToolCallRecord;
 pub use chat::{ChatClientError, LlamaChatClient};
 pub use llama_server::{
-    LlamaServerControl, LlamaServerError, LlamaService, ReadyState, VisionState,
-    probe_capabilities_routed,
+    LlamaServerControl, LlamaServerError, LlamaServerSpec, VisionState, probe_capabilities_routed,
 };
 
 /// Reason an [`LlmHealthProbe::wait_for_ready`] call ended without
@@ -40,7 +41,7 @@ pub enum HealthWaitError {
 /// Readiness view of a managed llama-server, for telling a crash-induced
 /// HTTP failure (worth replaying) from a transport error.
 #[async_trait]
-pub trait LlmHealthProbe: Send + Sync {
+pub trait LlmHealthProbe: fmt::Debug + Send + Sync {
     /// Current PID of the managed llama-server child, or `None` if none is alive.
     fn pid(&self) -> Option<u32>;
 
@@ -75,7 +76,7 @@ pub enum LlmError {
     ServerRestarting(String),
 }
 
-pub type LlmResult<T> = std::result::Result<T, LlmError>;
+pub type LlmResult<T> = Result<T, LlmError>;
 
 /// Whether a request lets a reasoning model produce its `<think>` block;
 /// [`Thinking::Disabled`] asks the chat template to skip it.
@@ -174,7 +175,7 @@ pub struct HistoryEntry {
 /// capabilities have default implementations that do nothing, or that
 /// fail with [`LlmError::Unavailable`] where a result is required.
 #[async_trait]
-pub trait LlmBackend: Send + Sync + 'static {
+pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
     /// Generate a single-turn response to `prompt`, streaming tokens
     /// through `tx` and ending with [`LlmEvent::Done`]. A failed `send`
     /// means the consumer is gone; stop generating and return `Ok(())`.
@@ -231,6 +232,7 @@ pub trait LlmBackend: Send + Sync + 'static {
 
 /// Trivial backend that echoes the user's most recent push as a single
 /// delta on the next `step`. Tool calls are never emitted.
+#[derive(Debug)]
 pub struct EchoBackend {
     last_user: Mutex<String>,
 }
@@ -278,6 +280,7 @@ impl LlmBackend for EchoBackend {
 
 /// Backend whose every call fails with [`LlmError::Unavailable`] and a
 /// fixed reason.
+#[derive(Debug)]
 pub struct FailedBackend {
     reason: String,
 }

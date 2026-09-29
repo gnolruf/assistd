@@ -5,6 +5,8 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
+use assistd_utils::text::human_size;
+
 /// MIME types llama.cpp's vision adapters accept; `infer::is_image` alone also passes GIF, BMP,
 /// TIFF and HEIC.
 const SUPPORTED_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
@@ -145,21 +147,6 @@ pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
         mime: mime.to_string(),
         bytes,
     })
-}
-
-fn human_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    if bytes >= GB {
-        format!("{:.1}GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1}MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{}KB", bytes / KB)
-    } else {
-        format!("{bytes}B")
-    }
 }
 
 #[cfg(test)]

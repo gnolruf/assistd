@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 use assistd_config::ToolsOutputConfig;
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -14,12 +15,12 @@ use serde_json::{Value, json};
 
 use crate::chain::{ParseError, Redirection, execute, parse_chain};
 use crate::command::{Attachment, CommandOutput, CommandRegistry, Hint, error_line};
-use crate::commands::cat::human_size;
 use crate::presentation::{PresentResult, PresentSpec, present};
 use crate::{Tool, ToolError};
 
 /// The LLM-facing `run` tool, dispatching a command line through the chain
 /// parser and executor.
+#[derive(Debug)]
 pub struct RunTool {
     registry: Arc<CommandRegistry>,
     spec: PresentSpec,
@@ -72,7 +73,7 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
          such file exists for a stream under those limits.\n\nCommands \
          (first word of `command`):\n",
         max_lines = spec.max_lines,
-        max_size = human_size(spec.max_bytes),
+        max_size = human_size(spec.max_bytes as u64),
         dir = spec.overflow_dir.display(),
     ));
     let pairs = registry.sorted_summaries();
@@ -96,7 +97,7 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
 
 #[async_trait]
 impl Tool for RunTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "run"
     }
 
@@ -134,7 +135,7 @@ impl Tool for RunTool {
             Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
         let presented = present(out, &self.spec, &self.overflow_counter, start.elapsed());
-        Ok(build_result(presented))
+        Ok(build_result(&presented))
     }
 }
 
@@ -165,7 +166,7 @@ fn parse_error_line(e: &ParseError) -> String {
     error_line("parse", e, hint, recovery)
 }
 
-fn build_result(presented: PresentResult) -> Value {
+fn build_result(presented: &PresentResult) -> Value {
     let mut result = json!({
         "output":      presented.output,
         "stdout":      presented.stdout_raw,

@@ -29,8 +29,7 @@ async fn read_request_body(stream: &mut TcpStream) -> Value {
     let len: usize = headers
         .lines()
         .find_map(|l| l.strip_prefix("content-length:"))
-        .map(|v| v.trim().parse().unwrap())
-        .unwrap_or(0);
+        .map_or(0, |v| v.trim().parse().unwrap());
     while buf.len() < header_end + len {
         let n = stream.read(&mut chunk).await.unwrap();
         assert!(n > 0, "client closed mid-body");
@@ -201,7 +200,7 @@ fn l2_normalize_scales_to_unit_length_and_passes_degenerate_input_through() {
         assert_eq!(got.len(), expected.len(), "{label}");
         for (g, e) in got.iter().zip(&expected) {
             assert!(
-                g == e || (g - e).abs() < 1e-6,
+                g.to_bits() == e.to_bits() || (g - e).abs() < 1e-6,
                 "{label}: got {got:?}, expected {expected:?}"
             );
         }

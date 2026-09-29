@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -36,7 +37,7 @@ pub struct MemoryHit {
 
 /// Top-K vector retrieval over embedded chunks and memories.
 #[async_trait]
-pub trait SemanticStore: Send + Sync + 'static {
+pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// Top-K conversation chunks by cosine to the L2-normalised `query_vector`.
     /// `exclude_session`'s chunks are dropped before ranking, so never count toward `top_k`.
     async fn nearest_chunks(
@@ -87,6 +88,7 @@ pub trait SemanticStore: Send + Sync + 'static {
 }
 
 /// No-op store: writes are discarded and searches find nothing.
+#[derive(Debug)]
 pub struct NoSemanticStore;
 
 #[async_trait]
@@ -142,7 +144,7 @@ impl SemanticStore for NoSemanticStore {
 
 /// SQLite-backed [`SemanticStore`]: a linear scan into a bounded min-heap, then one
 /// batched lookup of the winners.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SqliteSemanticStore {
     handle: Arc<SqliteHandle>,
 }

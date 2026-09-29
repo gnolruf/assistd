@@ -14,6 +14,7 @@ use assistd_tools::MemoryOps;
 
 /// Persistent stores, embedding pipeline, and the memory tool ops built
 /// over them.
+#[derive(Debug)]
 pub struct MemoryStack {
     pub memory: Arc<dyn MemoryStore>,
     pub conversations: Arc<dyn ConversationStore>,

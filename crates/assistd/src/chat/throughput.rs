@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 
 /// How long the final rate stays visible in the status bar after a generation
 /// completes.
-pub const FINAL_RATE_HOLD: Duration = Duration::from_secs(3);
+pub(super) const FINAL_RATE_HOLD: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct ThroughputMeter {
+pub(super) struct ThroughputMeter {
     first_delta_at: Option<Instant>,
     chunk_count: u64,
     finished_at: Option<Instant>,
@@ -17,13 +17,13 @@ pub struct ThroughputMeter {
 
 /// Point-in-time rate snapshot produced by [`ThroughputMeter::snapshot`].
 #[derive(Debug, Default, Clone, Copy)]
-pub struct ThroughputSnapshot {
+pub(super) struct ThroughputSnapshot {
     /// Chunks per second, or `None` when no data is available.
     pub rate: Option<f64>,
 }
 
 impl ThroughputMeter {
-    pub const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             first_delta_at: None,
             chunk_count: 0,
@@ -32,7 +32,7 @@ impl ThroughputMeter {
         }
     }
 
-    pub fn on_delta(&mut self, now: Instant) {
+    pub(super) fn on_delta(&mut self, now: Instant) {
         if self.first_delta_at.is_none() {
             self.first_delta_at = Some(now);
         }
@@ -40,16 +40,16 @@ impl ThroughputMeter {
     }
 
     /// Mark generation complete, freezing the final rate for [`FINAL_RATE_HOLD`].
-    pub fn on_done(&mut self, now: Instant) {
+    pub(super) fn on_done(&mut self, now: Instant) {
         self.finished_at = Some(now);
         self.final_rate = self.instant_rate(now);
     }
 
-    pub fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         *self = Self::new();
     }
 
-    pub fn snapshot(&self, now: Instant) -> ThroughputSnapshot {
+    pub(super) fn snapshot(&self, now: Instant) -> ThroughputSnapshot {
         ThroughputSnapshot {
             rate: self.rate_at(now),
         }

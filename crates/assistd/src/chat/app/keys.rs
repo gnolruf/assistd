@@ -23,7 +23,7 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
 ];
 
 impl App {
-    pub fn on_mouse(&mut self, ev: MouseEvent) {
+    pub(crate) fn on_mouse(&mut self, ev: MouseEvent) {
         match ev.kind {
             MouseEventKind::ScrollUp => {
                 self.touch_activity();
@@ -37,7 +37,7 @@ impl App {
         }
     }
 
-    pub fn on_key(&mut self, ev: KeyEvent) {
+    pub(crate) fn on_key(&mut self, ev: KeyEvent) {
         self.touch_activity();
         if self.modal.is_some() {
             self.on_confirmation_key(ev);
@@ -109,8 +109,7 @@ impl App {
     fn on_cycle_key(&mut self) {
         let target = self
             .presence_state
-            .map(|s| s.next())
-            .unwrap_or(PresenceState::Active);
+            .map_or(PresenceState::Active, PresenceState::next);
         self.set_notice(&format!("cycling → {}", presence_label(target)));
         let req = Request::Cycle {
             id: Uuid::new_v4().to_string(),
@@ -119,7 +118,7 @@ impl App {
     }
 
     /// Empty when the popup should be hidden.
-    pub fn slash_suggestions(&self) -> Vec<&'static (&'static str, &'static str)> {
+    pub(crate) fn slash_suggestions(&self) -> Vec<&'static (&'static str, &'static str)> {
         if self.slash_dismissed {
             return Vec::new();
         }
@@ -133,7 +132,7 @@ impl App {
             .collect()
     }
 
-    pub fn slash_selected(&self) -> usize {
+    pub(crate) fn slash_selected(&self) -> usize {
         self.slash_selected
     }
 

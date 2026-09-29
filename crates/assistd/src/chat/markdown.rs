@@ -448,7 +448,7 @@ impl Renderer {
 
 /// Styled lines for `text`, each no wider than `width` columns except
 /// where a table cannot shrink far enough to fit.
-pub fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
+pub(super) fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
     let mut renderer = Renderer::new(width.max(1));
     for event in Parser::new_ext(text, parser_options()) {
         renderer.on_event(event);

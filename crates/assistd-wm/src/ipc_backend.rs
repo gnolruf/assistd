@@ -2,15 +2,16 @@
 //! command socket, an event socket feeding the focus snapshot, and a
 //! reconnecting supervisor. [`IpcProtocol`] abstracts the client crates.
 
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use assistd_utils::backoff::backoff_delay;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 
-use crate::backoff::backoff_delay;
 use crate::criteria::format_place_floating_pixels;
 use crate::snapshot::{self, Snapshot, WindowChangeKind};
 use crate::{
@@ -118,6 +119,14 @@ pub(crate) struct IpcBackend<P: IpcProtocol> {
     snapshot: RwLock<Snapshot>,
     reconnect: Notify,
     window_events: broadcast::Sender<WindowEvent>,
+}
+
+impl<P: IpcProtocol> fmt::Debug for IpcBackend<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IpcBackend")
+            .field("connected", &self.connected)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<P: IpcProtocol> IpcBackend<P> {
@@ -317,7 +326,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { return false; }
                 }
-                _ = self.reconnect.notified() => {
+                () = self.reconnect.notified() => {
                     return true;
                 }
                 next = P::next_event(&mut events) => {
@@ -379,7 +388,7 @@ async fn supervise<P: IpcProtocol>(
                     return;
                 }
             }
-            _ = tokio::time::sleep(delay) => {}
+            () = tokio::time::sleep(delay) => {}
         }
 
         match backend.protocol.connect().await {

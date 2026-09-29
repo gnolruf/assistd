@@ -197,7 +197,7 @@ impl Conversation {
     pub fn push_tool_result_with_attachments(
         &mut self,
         name: &str,
-        content: String,
+        content: &str,
         attachments: Vec<Attachment>,
     ) {
         self.messages.push(Message {
@@ -433,13 +433,7 @@ impl Conversation {
             Some(m) if m.role == Role::Assistant && !m.tool_calls.is_empty()
         );
         self.messages.remove(idx);
-        while drop_trailing_result
-            && self
-                .messages
-                .get(idx)
-                .map(Self::is_tool_result)
-                .unwrap_or(false)
-        {
+        while drop_trailing_result && self.messages.get(idx).is_some_and(Self::is_tool_result) {
             self.messages.remove(idx);
         }
     }
@@ -450,16 +444,11 @@ impl Conversation {
     }
 
     fn summary_insertion_index(&self) -> usize {
-        if self
-            .messages
-            .first()
-            .map(|m| m.role == Role::System && m.content.starts_with(SUMMARY_PREFIX))
-            .unwrap_or(false)
-        {
-            1
-        } else {
-            0
-        }
+        usize::from(
+            self.messages
+                .first()
+                .is_some_and(|m| m.role == Role::System && m.content.starts_with(SUMMARY_PREFIX)),
+        )
     }
 
     /// Start of the newest `preserve_pairs` user/assistant pairs, widened so
@@ -485,13 +474,7 @@ impl Conversation {
                 }
             }
         }
-        while idx > start
-            && self
-                .messages
-                .get(idx)
-                .map(Self::is_tool_result)
-                .unwrap_or(false)
-        {
+        while idx > start && self.messages.get(idx).is_some_and(Self::is_tool_result) {
             idx -= 1;
         }
         idx.max(start)
@@ -516,22 +499,22 @@ impl Conversation {
 }
 
 fn approx_tokens(text: &str) -> u32 {
-    (text.len() as u32).div_ceil(4)
+    u32::try_from(text.len()).unwrap_or(u32::MAX).div_ceil(4)
 }
 
 fn approx_message_tokens(m: &Message) -> u32 {
-    let image_cost = (m.attachments.len() as u32).saturating_mul(TOKENS_PER_IMAGE);
+    let image_cost = u32::try_from(m.attachments.len())
+        .unwrap_or(u32::MAX)
+        .saturating_mul(TOKENS_PER_IMAGE);
     let tool_call_bytes: usize = m
         .tool_calls
         .iter()
         .map(|c| c.id.len() + c.name.len() + c.arguments.len() + 32)
         .sum();
     let tool_call_cost = approx_tokens_bytes(tool_call_bytes);
-    let context_cost = m
-        .context
-        .as_deref()
-        .map(|ctx| approx_tokens_bytes(CONTEXT_OPEN.len() + ctx.len() + CONTEXT_CLOSE.len()))
-        .unwrap_or(0);
+    let context_cost = m.context.as_deref().map_or(0, |ctx| {
+        approx_tokens_bytes(CONTEXT_OPEN.len() + ctx.len() + CONTEXT_CLOSE.len())
+    });
     TOKENS_PER_MESSAGE_OVERHEAD
         .saturating_add(approx_tokens(&m.content))
         .saturating_add(approx_tokens(&m.reasoning))
@@ -541,7 +524,7 @@ fn approx_message_tokens(m: &Message) -> u32 {
 }
 
 fn approx_tokens_bytes(n: usize) -> u32 {
-    ((n as u32).saturating_add(3)) / 4
+    u32::try_from(n).unwrap_or(u32::MAX).saturating_add(3) / 4
 }
 
 fn wire_message(message: &Message) -> wire::ChatMessage<'_> {
@@ -648,10 +631,7 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = s.floor_char_boundary(max_bytes);
     let mut out = String::with_capacity(end + 1);
     out.push_str(&s[..end]);
     out.push('…');

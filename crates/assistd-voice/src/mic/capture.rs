@@ -1,5 +1,6 @@
 //! cpal stream construction and the audio-thread callback.
 
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -61,6 +62,7 @@ pub enum DeviceValidationError {
 }
 
 /// Handles to a running push-to-talk capture.
+#[derive(Debug)]
 pub struct CaptureSession {
     pub stop_flag: Arc<AtomicBool>,
     pub overrun: Arc<AtomicU64>,
@@ -73,6 +75,14 @@ pub struct ProducerStream {
     pub consumer: HeapCons<f32>,
     pub native_rate: u32,
     pub stream: Stream,
+}
+
+impl fmt::Debug for ProducerStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProducerStream")
+            .field("native_rate", &self.native_rate)
+            .finish_non_exhaustive()
+    }
 }
 
 type RingProducer = HeapProd<f32>;
@@ -179,7 +189,7 @@ pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSessi
         capture_ptt(
             device_hint_owned.as_deref(),
             max_recording_secs,
-            worker_stop,
+            &worker_stop,
             worker_overrun,
         )
     });
@@ -194,7 +204,7 @@ pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSessi
 fn capture_ptt(
     device_hint: Option<&str>,
     max_recording_secs: u32,
-    stop_flag: Arc<AtomicBool>,
+    stop_flag: &AtomicBool,
     overrun: Arc<AtomicU64>,
 ) -> Result<Vec<i16>, AudioCaptureError> {
     let ring_capacity = ASSUMED_NATIVE_RATE
@@ -273,8 +283,7 @@ fn device_name(device: &Device) -> Result<String, CpalError> {
     device.description().map(|description| {
         description
             .driver()
-            .map(str::to_string)
-            .unwrap_or_else(|| description.name().to_string())
+            .map_or_else(|| description.name().to_string(), str::to_string)
     })
 }
 

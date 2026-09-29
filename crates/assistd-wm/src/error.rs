@@ -52,4 +52,4 @@ impl WmError {
     }
 }
 
-pub type WmResult<T> = std::result::Result<T, WmError>;
+pub type WmResult<T> = Result<T, WmError>;

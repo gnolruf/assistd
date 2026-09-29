@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
+use assistd_utils::xdg;
 use serde::{Deserialize, Serialize};
 
 use crate::chat::ChatConfig;
@@ -66,13 +67,7 @@ impl Config {
     /// `$XDG_CONFIG_HOME/assistd/config.toml`, or
     /// `$HOME/.config/assistd/config.toml`. Errors if `$HOME` is needed but unset.
     pub fn default_path() -> Result<PathBuf, ConfigError> {
-        let config_dir = match std::env::var_os("XDG_CONFIG_HOME") {
-            Some(dir) => PathBuf::from(dir),
-            None => {
-                let home = std::env::var("HOME").map_err(|_| ConfigError::HomeNotSet)?;
-                PathBuf::from(home).join(".config")
-            }
-        };
+        let config_dir = xdg::config_home().ok_or(ConfigError::HomeNotSet)?;
         Ok(config_dir.join("assistd/config.toml"))
     }
 

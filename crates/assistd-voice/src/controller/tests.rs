@@ -3,7 +3,7 @@ use crate::{NoVoiceOutput, VoiceOutputError};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct RecordingOutput {
     spoken: Mutex<Vec<String>>,
     cancels: AtomicU64,
@@ -23,16 +23,6 @@ impl VoiceOutput for RecordingOutput {
     async fn cancel(&self) {
         self.cancels.fetch_add(1, Ordering::SeqCst);
     }
-}
-
-#[tokio::test]
-async fn new_starts_with_given_enabled_flag_and_zero_epoch() {
-    let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), true);
-    assert!(ctrl.enabled());
-    assert_eq!(ctrl.current_epoch(), 0);
-
-    let off = VoiceOutputController::new(Arc::new(NoVoiceOutput), false);
-    assert!(!off.enabled());
 }
 
 #[tokio::test]

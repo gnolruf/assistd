@@ -37,13 +37,10 @@ impl AppState {
             Some(revalidator) => revalidator.probe().await,
             None => VisionState::default(),
         };
-        let model_name = self
-            .config
-            .model
-            .name
-            .rsplit_once('/')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_else(|| self.config.model.name.clone());
+        let model_name = self.config.model.name.rsplit_once('/').map_or_else(
+            || self.config.model.name.clone(),
+            |(_, rest)| rest.to_string(),
+        );
         let _ = tx
             .send(Event::Capabilities {
                 id: id.clone(),

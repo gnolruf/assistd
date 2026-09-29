@@ -16,7 +16,7 @@ const TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Messages consumed by [`drive_visibility`].
 #[derive(Debug)]
-pub enum DriverInput {
+pub(crate) enum DriverInput {
     Event(Box<Event>),
     Disconnected,
     Show,
@@ -29,11 +29,11 @@ pub enum DriverInput {
 
 /// Ask the window manager to place the popup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaceRequest;
+pub(super) struct PlaceRequest;
 
 /// Own the popup's visibility: show on request, hide on dismiss (also
 /// interrupting the turn) or once idle past the auto-hide window.
-pub async fn drive_visibility(
+pub(super) async fn drive_visibility(
     state_tx: watch::Sender<PopupState>,
     mut rx: UnboundedReceiver<DriverInput>,
     place_tx: UnboundedSender<PlaceRequest>,

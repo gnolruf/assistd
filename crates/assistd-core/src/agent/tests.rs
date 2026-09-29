@@ -13,6 +13,7 @@ use super::*;
 
 /// Scripted mock backend: returns queued step outcomes in order, then
 /// `Final`. Records what the loop pushed back.
+#[derive(Debug)]
 struct MockBackend {
     outcomes: StdMutex<Vec<StepOutcome>>,
     pushed_users: StdMutex<Vec<String>>,
@@ -90,16 +91,17 @@ impl LlmBackend for MockBackend {
 const TOOL_DEADLINE: Duration = Duration::from_secs(300);
 
 /// A `run` tool whose invocation never completes.
+#[derive(Debug)]
 struct HangingTool {
     entered: Arc<Notify>,
 }
 
 #[async_trait]
 impl Tool for HangingTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "run"
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "never returns"
     }
     fn parameters_schema(&self) -> Value {
@@ -352,13 +354,14 @@ async fn unknown_tool_passes_error_to_next_step() {
 
 #[tokio::test]
 async fn tool_invoke_err_becomes_synthetic_error_result() {
+    #[derive(Debug)]
     struct ErrTool;
     #[async_trait]
     impl Tool for ErrTool {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "run"
         }
-        fn description(&self) -> &str {
+        fn description(&self) -> &'static str {
             "errors on invoke"
         }
         fn parameters_schema(&self) -> Value {
@@ -419,6 +422,7 @@ async fn explicit_cancel_before_first_step_stops_loop_immediately() {
     assert_eq!(backend.step_calls.load(Ordering::SeqCst), 0);
 }
 
+#[derive(Debug)]
 struct FakeMcpTool {
     name: String,
     result: Value,
@@ -429,7 +433,7 @@ impl Tool for FakeMcpTool {
     fn name(&self) -> &str {
         &self.name
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "fake mcp tool"
     }
     fn parameters_schema(&self) -> Value {
@@ -670,6 +674,7 @@ async fn hung_tool_past_deadline_becomes_error_result_and_turn_continues() {
     );
 }
 
+#[derive(Debug)]
 struct MockProbe {
     wait_result: Result<(), HealthWaitError>,
     wait_calls: AtomicUsize,
@@ -701,6 +706,7 @@ impl LlmHealthProbe for MockProbe {
 }
 
 /// Fails each `step` with the next queued error, then answers `Final`.
+#[derive(Debug)]
 struct ErrorInjectingBackend {
     errors: StdMutex<Vec<LlmError>>,
     step_calls: AtomicUsize,

@@ -197,7 +197,7 @@ pub struct UndoOutcome {
 
 /// Conversation persistence.
 #[async_trait]
-pub trait ConversationStore: Send + Sync + 'static {
+pub trait ConversationStore: fmt::Debug + Send + Sync + 'static {
     /// Mark `id` as ended by stamping `ended_at`.
     async fn end_session(&self, id: &SessionId) -> Result<()>;
     /// Open a new turn row inside `session` labelled with `user_text`.
@@ -275,6 +275,7 @@ pub struct ResumeCandidate {
 }
 
 /// No-op store: writes are discarded and reads find nothing.
+#[derive(Debug)]
 pub struct NoConversationStore;
 
 #[async_trait]
@@ -360,7 +361,7 @@ impl ConversationStore for NoConversationStore {
 }
 
 /// SQLite-backed [`ConversationStore`].
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SqliteConversationStore {
     handle: Arc<SqliteHandle>,
 }
@@ -403,7 +404,7 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>> {
-        let limit = limit as i64;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {

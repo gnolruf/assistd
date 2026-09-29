@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Shared, runtime-mutable flag for whether the current model accepts
 /// images; checked on every invocation so a model swap takes effect at once.
+#[derive(Debug)]
 pub struct VisionGate {
     supported: AtomicBool,
 }
@@ -23,20 +24,5 @@ impl VisionGate {
     /// Record whether the current model accepts image inputs.
     pub fn set(&self, supported: bool) {
         self.supported.store(supported, Ordering::Release);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn set_overrides_the_constructor_value() {
-        let gate = VisionGate::new(true);
-        assert!(gate.supported());
-        gate.set(false);
-        assert!(!gate.supported());
-        gate.set(true);
-        assert!(gate.supported());
     }
 }

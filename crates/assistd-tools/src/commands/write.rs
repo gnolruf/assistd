@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use assistd_utils::path::tilde_remainder;
 use async_trait::async_trait;
 use rustix::fs::{Mode, OFlags};
 use tokio::io::AsyncWriteExt;
@@ -67,6 +68,7 @@ impl WritePolicyCfg {
 
 /// `write PATH [CONTENT...]`: write the joined args (or else stdin) to an
 /// absolute, allowlisted PATH. Policy refusals exit 126.
+#[derive(Debug)]
 pub struct WriteCommand {
     cfg: Arc<WritePolicyCfg>,
 }
@@ -90,7 +92,7 @@ impl WriteCommand {
 
 #[async_trait]
 impl Command for WriteCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "write"
     }
 
@@ -243,15 +245,11 @@ fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, PathResolveError
 }
 
 fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveError> {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        let home = home.ok_or(PathResolveError::HomeNotSet)?;
-        Ok(PathBuf::from(home).join(rest))
-    } else if raw == "~" {
-        let home = home.ok_or(PathResolveError::HomeNotSet)?;
-        Ok(PathBuf::from(home))
-    } else {
-        Ok(PathBuf::from(raw))
+    if tilde_remainder(raw).is_none() {
+        return Ok(PathBuf::from(raw));
     }
+    let home = home.ok_or(PathResolveError::HomeNotSet)?;
+    Ok(assistd_utils::path::expand_tilde(raw, Path::new(home)))
 }
 
 fn starts_with_hidden_entry(path: &Path) -> bool {

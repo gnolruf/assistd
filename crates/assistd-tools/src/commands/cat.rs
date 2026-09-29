@@ -1,3 +1,4 @@
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
@@ -8,6 +9,7 @@ const SNIFF_LEN: usize = 8192;
 
 /// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if none are
 /// given. Binary files are rejected so their bytes stay out of the context.
+#[derive(Debug)]
 pub struct CatCommand;
 
 #[derive(Default)]
@@ -18,7 +20,7 @@ struct Flags {
 
 #[async_trait]
 impl Command for CatCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "cat"
     }
 
@@ -88,7 +90,7 @@ async fn read_text(path: &str) -> Result<Vec<u8>, CommandOutput> {
     let Some(mime) = sniff_binary(&bytes) else {
         return Ok(bytes);
     };
-    let size = human_size(bytes.len());
+    let size = human_size(bytes.len() as u64);
     let msg = if mime.starts_with("image/") {
         error_line(
             "cat",
@@ -158,32 +160,18 @@ pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
 }
 
 fn describe(head: &[u8], size: u64, path: Option<&str>) -> Vec<u8> {
-    let mime = infer::get(head)
-        .map(|t| t.mime_type().to_string())
-        .unwrap_or_else(|| {
+    let mime = infer::get(head).map_or_else(
+        || {
             if sniff_binary(head).is_some() {
                 "application/octet-stream".into()
             } else {
                 "text/plain".into()
             }
-        });
+        },
+        |t| t.mime_type().to_string(),
+    );
     let prefix = path.map(|p| format!("{p}: ")).unwrap_or_default();
     format!("{prefix}{mime}\n{prefix}{size} bytes\n").into_bytes()
-}
-
-pub(crate) fn human_size(n: usize) -> String {
-    const KB: usize = 1024;
-    const MB: usize = KB * 1024;
-    const GB: usize = MB * 1024;
-    if n >= GB {
-        format!("{:.1}GB", n as f64 / GB as f64)
-    } else if n >= MB {
-        format!("{:.1}MB", n as f64 / MB as f64)
-    } else if n >= KB {
-        format!("{}KB", n / KB)
-    } else {
-        format!("{n}B")
-    }
 }
 
 #[cfg(test)]

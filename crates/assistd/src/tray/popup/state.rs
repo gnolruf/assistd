@@ -12,7 +12,7 @@ const BODY_CHARS: usize = 300;
 
 /// Everything the popup window renders, as one snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct PopupState {
+pub(crate) struct PopupState {
     pub body: String,
     pub footer: Option<ToolCallLine>,
     pub activity: PopupActivity,
@@ -22,7 +22,7 @@ pub struct PopupState {
 /// Coarse activity classification rendered as a one-line status above
 /// the popup body.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum PopupActivity {
+pub(crate) enum PopupActivity {
     #[default]
     Idle,
     Streaming,
@@ -42,7 +42,7 @@ enum TurnActivity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolCallLine {
+pub(crate) struct ToolCallLine {
     pub name: String,
     pub args_summary: String,
 }
@@ -57,7 +57,7 @@ struct TurnState {
 /// Tracks every signal the popup cares about and produces a
 /// [`PopupState`] snapshot on demand.
 #[derive(Debug, Default)]
-pub struct PopupTracker {
+pub(super) struct PopupTracker {
     turns: HashMap<String, TurnState>,
     in_flight: HashSet<String>,
     displayed: Option<String>,
@@ -66,12 +66,10 @@ pub struct PopupTracker {
 }
 
 impl PopupTracker {
-    pub fn snapshot(&self) -> PopupState {
+    pub(super) fn snapshot(&self) -> PopupState {
         let displayed_id = self.displayed.as_deref();
         let displayed = displayed_id.and_then(|id| self.turns.get(id));
-        let displayed_in_flight = displayed_id
-            .map(|id| self.in_flight.contains(id))
-            .unwrap_or(false);
+        let displayed_in_flight = displayed_id.is_some_and(|id| self.in_flight.contains(id));
         PopupState {
             body: displayed
                 .map(|t| truncate_chars_from_end(&t.body, BODY_CHARS))
@@ -82,19 +80,19 @@ impl PopupTracker {
         }
     }
 
-    pub fn is_busy(&self) -> bool {
+    pub(super) fn is_busy(&self) -> bool {
         !self.in_flight.is_empty()
     }
 
-    pub fn is_listening(&self) -> bool {
+    pub(super) fn is_listening(&self) -> bool {
         self.listening
     }
 
-    pub fn is_speaking(&self) -> bool {
+    pub(super) fn is_speaking(&self) -> bool {
         !self.speaking.is_empty()
     }
 
-    pub fn set_disconnected(&mut self) {
+    pub(super) fn set_disconnected(&mut self) {
         self.turns.clear();
         self.in_flight.clear();
         self.displayed = None;
@@ -123,14 +121,14 @@ impl PopupTracker {
 
     /// Apply `ev` and return the new snapshot. The body comes only from
     /// `LastDelta`, which carries the whole reply; `Delta` never appends.
-    pub fn ingest(&mut self, ev: &Event) -> PopupState {
+    pub(super) fn ingest(&mut self, ev: &Event) -> PopupState {
         match ev {
             Event::Delta { id, .. } => {
                 self.activate_turn(id).activity = Some(TurnActivity::Streaming);
             }
             Event::LastDelta { id, text } => {
                 let turn = self.activate_turn(id);
-                turn.body = text.clone();
+                turn.body.clone_from(text);
                 turn.activity = Some(TurnActivity::Streaming);
             }
             Event::ReasoningDelta { id, .. } => {
@@ -188,7 +186,7 @@ impl PopupTracker {
 }
 
 /// Single-line, ≤`max_chars`-codepoint preview of a JSON value.
-pub fn summarize_args(v: &Value, max_chars: usize) -> String {
+pub(super) fn summarize_args(v: &Value, max_chars: usize) -> String {
     let raw = match v {
         Value::Null => String::new(),
         Value::Bool(b) => b.to_string(),

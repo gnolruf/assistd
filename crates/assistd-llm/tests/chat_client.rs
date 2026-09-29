@@ -108,9 +108,8 @@ async fn spawn_fake(script: Script) -> (u16, JoinHandle<()>) {
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         loop {
-            let (sock, _) = match listener.accept().await {
-                Ok(accepted) => accepted,
-                Err(_) => return,
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
             };
             let script = script.clone();
             tokio::spawn(async move {
@@ -127,7 +126,7 @@ async fn serve_connection(mut sock: TcpStream, script: Script) -> io::Result<()>
     };
     let is_stream = body_json
         .get("stream")
-        .and_then(|v| v.as_bool())
+        .and_then(Value::as_bool)
         .unwrap_or(false);
 
     script.captured.lock().await.push(CapturedRequest {
@@ -727,8 +726,7 @@ async fn summarization_triggered_when_over_budget() {
             m["role"] == "system"
                 && m["content"]
                     .as_str()
-                    .map(|s| s.contains("[Conversation summary]"))
-                    .unwrap_or(false)
+                    .is_some_and(|s| s.contains("[Conversation summary]"))
         }),
         "final request should include the synthetic summary message"
     );
@@ -813,8 +811,7 @@ fn tool_call_frames_finishing(
     for chunk in arg_chunks {
         let encoded = serde_json::to_string(chunk).unwrap();
         frames.push(format!(
-            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":{}}}}}]}}}}]}}\n\n",
-            encoded
+            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":{encoded}}}}}]}}}}]}}\n\n"
         ));
     }
     frames.push(format!(
@@ -1091,9 +1088,8 @@ async fn narration_before_a_tool_call_stays_in_history() {
     })];
     let (tx1, mut rx1) = mpsc::channel(32);
     let outcome1 = client.step(tools.clone(), tx1).await.unwrap();
-    let calls = match outcome1 {
-        StepOutcome::ToolCalls(c) => c,
-        _ => panic!("expected ToolCalls"),
+    let StepOutcome::ToolCalls(calls) = outcome1 else {
+        panic!("expected ToolCalls");
     };
     drain(&mut rx1).await;
 

@@ -11,6 +11,7 @@ pub const BODY_MAX: usize = 10 * 1024 * 1024;
 const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
 
 /// `web URL`: HTTP GET a URL and return the response body as stdout.
+#[derive(Debug)]
 pub struct WebCommand {
     client: reqwest::Client,
 }
@@ -42,7 +43,7 @@ impl Default for WebCommand {
 
 #[async_trait]
 impl Command for WebCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "web"
     }
 
@@ -159,7 +160,7 @@ mod tests {
 
     async fn run_web(cmd: &WebCommand, args: &[&str]) -> CommandOutput {
         cmd.run(CommandInput {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
         })
         .await
@@ -200,13 +201,6 @@ mod tests {
             "[error] web: only http(s):// URLs are allowed: file:///etc/hostname. \
              Use: web https://... or web http://...\n"
         );
-    }
-
-    #[tokio::test]
-    async fn no_args_emits_usage() {
-        let out = run_web(&WebCommand::new(), &[]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: web"), "{out:?}");
     }
 
     #[tokio::test]

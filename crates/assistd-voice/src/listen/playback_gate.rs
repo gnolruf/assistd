@@ -9,6 +9,7 @@ pub const PLAYBACK_HANGOVER_FRAMES: u32 = 20;
 /// Decides per 20 ms frame whether the mic is hearing the daemon's own
 /// TTS output. Reads the speaking signal synchronously, so it is safe
 /// on a blocking thread.
+#[derive(Debug)]
 pub struct PlaybackGate {
     speaking: watch::Receiver<bool>,
     hangover_frames: u32,

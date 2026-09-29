@@ -36,6 +36,7 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce 
 /// The conversation lock is held only while state is mutated before and
 /// after a request; the HTTP stream runs without it, so a hung server
 /// never blocks a concurrent `push_user` or `set_transient_context`.
+#[derive(Debug)]
 pub struct LlamaChatClient {
     client: reqwest::Client,
     base_url: String,
@@ -405,7 +406,7 @@ impl LlmBackend for LlamaChatClient {
             } else {
                 conv.push_tool_result_with_attachments(
                     &result.name,
-                    result.content,
+                    &result.content,
                     result.attachments,
                 );
             }
@@ -715,7 +716,7 @@ async fn forward(
     Ok(())
 }
 
-fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<ToolCallRecord>> {
+fn parse_tool_calls(json: Option<&Value>) -> LlmResult<Vec<ToolCallRecord>> {
     let Some(value) = json else {
         return Ok(Vec::new());
     };
@@ -787,7 +788,7 @@ fn history_message(entry: HistoryEntry) -> LlmResult<Message> {
         HistoryRole::System => Message::text(Role::System, entry.content),
         HistoryRole::User => Message::text(Role::User, entry.content),
         HistoryRole::Assistant => Message {
-            tool_calls: parse_tool_calls(&entry.tool_calls_json)?,
+            tool_calls: parse_tool_calls(entry.tool_calls_json.as_ref())?,
             ..Message::text(Role::Assistant, entry.content)
         },
         HistoryRole::Tool => match entry.tool_call_id {

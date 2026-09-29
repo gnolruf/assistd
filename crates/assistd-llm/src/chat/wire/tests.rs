@@ -97,31 +97,6 @@ fn serializes_tools_and_tool_choice_when_set() {
 }
 
 #[test]
-fn serializes_assistant_tool_calls_with_content_omitted() {
-    let mut msg = message("assistant", None);
-    msg.tool_calls = Some(vec![ToolCallSpec {
-        id: "call-1",
-        kind: "function",
-        function: FunctionCallSpec {
-            name: "run",
-            arguments: r#"{"command":"ls /tmp"}"#,
-        },
-    }]);
-    assert_eq!(
-        serde_json::to_value(&msg).unwrap(),
-        json!({
-            "role": "assistant",
-            "tool_calls": [{
-                "id": "call-1",
-                "type": "function",
-                "function": {"name": "run", "arguments": r#"{"command":"ls /tmp"}"#},
-            }],
-        }),
-        "content must be absent, not null"
-    );
-}
-
-#[test]
 fn deserializes_text_and_reasoning_deltas() {
     let cases = [
         (

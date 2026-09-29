@@ -119,6 +119,7 @@ fn parent_dir(path: &str) -> &str {
 }
 
 /// Input to a single chain stage.
+#[derive(Debug)]
 pub struct CommandInput {
     /// Arguments after `argv[0]`.
     pub args: Vec<String>,
@@ -195,7 +196,7 @@ impl CommandOutput {
 /// [`Command::summary`] is listed in the `run` tool description and its
 /// [`Command::help`] is returned for insufficient arguments.
 #[async_trait]
-pub trait Command: Send + Sync + 'static {
+pub trait Command: fmt::Debug + Send + Sync + 'static {
     /// Name the command is dispatched by (e.g. `"cat"`).
     fn name(&self) -> &str;
     /// A terse verb phrase of at most 80 chars with no trailing newline.
@@ -213,7 +214,7 @@ pub trait Command: Send + Sync + 'static {
 }
 
 /// Lookup table of registered commands, keyed by name.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct CommandRegistry {
     commands: BTreeMap<String, Box<dyn Command>>,
 }
@@ -231,7 +232,7 @@ impl CommandRegistry {
 
     /// Look up a registered command by its `name()`.
     pub fn get(&self, name: &str) -> Option<&dyn Command> {
-        self.commands.get(name).map(|c| c.as_ref())
+        self.commands.get(name).map(AsRef::as_ref)
     }
 
     /// Number of registered commands.

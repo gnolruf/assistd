@@ -47,6 +47,7 @@ pub(crate) fn test_patterns(patterns: &[&str]) -> Vec<DestructivePattern> {
 
 /// Confirmation gate that answers every prompt the same way and records
 /// each prompt's `(tool, script, matched_pattern)`.
+#[derive(Debug)]
 pub(crate) struct RecordingGate {
     approve: bool,
     prompts: Mutex<Vec<(String, String, String)>>,

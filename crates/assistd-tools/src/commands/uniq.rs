@@ -5,11 +5,12 @@ use crate::commands::collect_input;
 
 /// `uniq [-c] [FILE]...`: collapse runs of identical adjacent lines from
 /// the named files or stdin; `-c` prefixes each with `<count>\t`.
+#[derive(Debug)]
 pub struct UniqCommand;
 
 #[async_trait]
 impl Command for UniqCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "uniq"
     }
 
@@ -83,7 +84,7 @@ mod tests {
     async fn run_uniq(args: &[&str], stdin: &[u8]) -> CommandOutput {
         UniqCommand
             .run(CommandInput {
-                args: args.iter().map(|s| s.to_string()).collect(),
+                args: args.iter().map(ToString::to_string).collect(),
                 stdin: Some(stdin.to_vec()),
             })
             .await

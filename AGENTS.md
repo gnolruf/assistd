@@ -16,9 +16,9 @@ Guidelines for AI agents (and humans) working in this repository.
 - **No `unsafe`.** The workspace denies `unsafe_code` at the lint
   level. Adding `#[allow(unsafe_code)]` to a module requires an
   extreme, documented justification (FFI with no safe wrapper
-  available, etc.) and should be raised in discussion before being
-  written. There is essentially never a good reason in this
-  codebase; find another way.
+  available, etc.), stated in the attribute's `reason = "..."`, and
+  should be raised in discussion before being written. There is
+  essentially never a good reason in this codebase; find another way.
 - **No other clippy allows.** Do not silence clippy with
   `#[allow(clippy::...)]`, `#![allow(...)]`, or `expect(...)`
   attributes. If clippy fires, fix the code. The only acceptable
@@ -49,8 +49,8 @@ Guidelines for AI agents (and humans) working in this repository.
   `#[cfg(test)] mod tests;`. No `use` between items or inside
   function bodies.
 - **Keep functions short.** Aim for under 60 lines. Past 100, split
-  the function into named steps. Only flat data tables, such as test
-  case lists, may run longer.
+  the function into named steps; clippy enforces the limit, so split
+  long test-case tables by topic too.
 - **Name things for what they are.** A reader should know what a
   function, type, or variable is for from its name alone. No vague
   verbs without an object (`handle`, `process`, `do_work`), no
@@ -82,11 +82,14 @@ update — must pass these in order. Run them from the workspace root.
    -D warnings`. Treat every warning as an error. The workspace
    already warns on `clippy::all` and `rust_2018_idioms` and denies
    `dbg_macro` — leftover `dbg!` will fail the build.
-3. **Targeted tests.** Run the test suite for whichever crate(s)
+3. **Docs and deps.** `RUSTDOCFLAGS="-D warnings" cargo doc
+   --workspace --no-deps`; public docs must not link to private
+   items. If you touched a `Cargo.toml`, also run `cargo machete`.
+4. **Targeted tests.** Run the test suite for whichever crate(s)
    you touched: `cargo test -p assistd-<crate>`. For test fixes
    specifically, also run the originally failing test in isolation
    with `--nocapture` to confirm the fix is real, not flaky timing.
-4. **Full suite.** `cargo test --workspace`. Some crates have
+5. **Full suite.** `cargo test --workspace`. Some crates have
    feature-gated code paths; if your change touches one, also run
    with the relevant features (e.g. `cargo test -p assistd-voice
    --features test-support`).
@@ -97,32 +100,41 @@ wrong, fix the test and explain why in the commit message.
 
 ## Workspace layout
 
-The workspace is split into one binary plus ten library crates.
-`assistd-config` and `assistd-ipc` sit at the bottom (no internal
-deps); `assistd-core` and the `assistd` binary sit at the top. See
+The workspace is split into one binary plus eleven library crates.
+`assistd-utils` sits at the very bottom (no internal deps), with
+`assistd-config` and `assistd-ipc` just above it; `assistd-core` and
+the `assistd` binary sit at the top. See
 [docs/architecture.md](docs/architecture.md) for the full diagram
 and data-flow walkthrough.
 
 | Crate            | Responsibility                                                                                                                  |
 |------------------|---------------------------------------------------------------------------------------------------------------------------------|
 | `assistd`        | Binary (`assistd` on `$PATH`). CLI parsing (`daemon`, `query`, `chat`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. Feature-gated into `daemon` / `client` / `chat` so client-only builds stay small. |
-| `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable; every other crate that needs configuration depends on this one. No internal deps. |
+| `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable; every other crate that needs configuration depends on this one. Depends only on `assistd-utils`. |
 | `assistd-core`   | Daemon glue. Owns `AppState`, the per-turn `Agent` loop, the Unix-socket server, the presence state machine, and the `build_tools()` factory that wires every subsystem together. |
 | `assistd-embed`  | Embedding HTTP client + background job queue. Pulls chunks off an mpsc, batches them to the embedding `llama-server`, writes vectors into `assistd-memory`'s semantic store. |
-| `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`). Intentionally dependency-light so client-only builds don't pull in the daemon graph. |
-| `assistd-llm`    | `LlmBackend` trait, `LlamaChatClient` (HTTP/SSE to `llama-server`), and the child-process supervisor with health probes, restart-on-crash, and vision-capability detection. |
+| `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`). Intentionally dependency-light so client-only builds don't pull in the daemon graph; depends only on `assistd-utils`. |
+| `assistd-llm`    | `LlmBackend` trait, `LlamaChatClient` (HTTP/SSE to `llama-server`), the router-mode launch spec run by the shared child-server supervisor, the HTTP control plane, and vision-capability detection. |
 | `assistd-mcp`    | MCP client (stdio + SSE transports), supervisor with reconnect/backoff, and `McpToolAdapter` which exposes discovered tools through the `Tool` trait under `mcp__<server>__<tool>`. |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore` (K/V facts), `ConversationStore` (transcripts with branching/undo), `SemanticStore` (embedding-indexed chunks). Uses `tokio-rusqlite` + `rusqlite_migration`. |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, the single `RunTool` the model sees, all built-in commands (`bash`, `cat`, `echo`, `grep`, `head`, `ls`, `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`, `write`), and the policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`). |
+| `assistd-utils`  | Helpers every other crate may use: exponential backoff and rolling-window `RestartPolicy`, XDG base-dir lookup, tilde expansion, `human_size`, capped child-output line forwarding, `/proc` listener ownership, and the `ChildServer` supervisor (spawn, `/health` poll, restart, degrade) that both llama-servers run under. Heavy pieces are feature-gated (`process`, `child-server`, `tracing-init`). No internal deps. |
 | `assistd-voice`  | `VoiceInput` (Whisper STT via `whisper-rs`, push-to-talk and VAD continuous modes), `VoiceOutput` (Piper TTS streamed sentence-by-sentence), adaptive `SpeakDecision`. Feature-gated (`whisper`, `mic`, `listen`, `tts`, `cuda`). |
 | `assistd-wm`     | `WindowManager` trait with i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager` fallback, and restricted Wayland sockets (`wp-security-context-v1`) for sandboxed launches. Backs both the system-prompt active-window injection and the `wm` command. Feature-gated per compositor. |
 
 **Dependency direction.** Crates lower in the table do not depend on
 crates higher up. If you find yourself wanting `assistd-memory` to
 call into `assistd-core`, you're holding it wrong — invert the
-dependency or move the type. Keep `assistd-config` and `assistd-ipc`
-free of internal deps; they're the foundation everything else builds
-on (and `assistd-ipc` is shipped to client-only builds).
+dependency or move the type. `assistd-utils` has no internal deps and
+is the only one `assistd-config` and `assistd-ipc` may take; they're
+the foundation everything else builds on (and `assistd-ipc` is
+shipped to client-only builds, so it must use `assistd-utils` with
+default features only).
+
+**Shared logic goes in `assistd-utils`.** When the same function or
+type would otherwise be written in two crates, put it in
+`assistd-utils` instead of copying it. A helper used in one place
+stays where it is used.
 
 ## Working in this codebase
 

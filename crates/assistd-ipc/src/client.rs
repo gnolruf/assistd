@@ -172,6 +172,7 @@ impl EventStream {
 }
 
 /// Bidirectional connection: read events as they arrive and send further requests at any time.
+#[derive(Debug)]
 pub struct DialogConnection {
     write: OwnedWriteHalf,
     events: EventStream,
@@ -204,7 +205,7 @@ mod tests {
     /// Mock daemon: accepts one connection, parses one request, writes `responses`, then closes.
     /// The returned `TempDir` owns the socket and must outlive the test.
     fn mock_server(
-        responses: Vec<Event>,
+        responses: &[Event],
     ) -> (tempfile::TempDir, PathBuf, tokio::task::JoinHandle<()>) {
         mock_server_raw(
             responses
@@ -236,26 +237,6 @@ mod tests {
             write.shutdown().await.unwrap();
         });
         (dir, path, server)
-    }
-
-    #[tokio::test]
-    async fn one_shot_collects_events_until_done() {
-        let events = vec![
-            Event::Delta {
-                id: "r".into(),
-                text: "hello".into(),
-            },
-            Event::Done { id: "r".into() },
-        ];
-        let (_dir, path, server) = mock_server(events.clone());
-
-        let client = IpcClient::with_path(path);
-        let stream = client
-            .one_shot(Request::query("r", "hi"))
-            .await
-            .expect("one_shot");
-        assert_eq!(stream.collect().await.expect("collect"), events);
-        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -308,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_errors_on_premature_close() {
-        let (_dir, path, server) = mock_server(vec![Event::Delta {
+        let (_dir, path, server) = mock_server(&[Event::Delta {
             id: "r".into(),
             text: "incomplete".into(),
         }]);

@@ -1,0 +1,53 @@
+//! One-shot CLI subcommands: each sends one request to the running daemon
+//! and prints the events it streams back.
+
+use std::io::{self, Write};
+
+use anyhow::{Error, Result};
+use assistd_ipc::{Event, IpcClient, IpcClientError, Request};
+
+use terminal_text::escape_controls;
+
+pub(crate) mod listen;
+pub(crate) mod memory;
+pub(crate) mod presence;
+pub(crate) mod ptt;
+pub(crate) mod query;
+mod terminal_text;
+pub(crate) mod voice_ctl;
+
+/// Send `req` and hand every event, terminal ones included, to
+/// `on_event`. Returns after `Done`; on `Error` prints the daemon's
+/// message and exits 1 after `on_event` has seen it. A connection that
+/// closes without a terminal event is an error.
+async fn run_one_shot(req: Request, mut on_event: impl FnMut(&Event) -> Result<()>) -> Result<()> {
+    let mut stream = IpcClient::new()
+        .one_shot(req)
+        .await
+        .map_err(map_not_reachable)?;
+    loop {
+        let Some(event) = stream.next_event().await? else {
+            anyhow::bail!("daemon closed the connection without sending a terminal event");
+        };
+        on_event(&event)?;
+        match event {
+            Event::Done { .. } => return Ok(()),
+            Event::Error { message, .. } => {
+                writeln!(io::stderr(), "daemon error: {}", escape_controls(&message))?;
+                std::process::exit(1);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Phrase `NotReachable` as "daemon is not running" with the socket path.
+fn map_not_reachable(e: IpcClientError) -> Error {
+    match e {
+        IpcClientError::NotReachable { path, source } => Error::msg(format!(
+            "assistd daemon is not running (could not connect to {}): {source}",
+            path.display()
+        )),
+        other => Error::from(other),
+    }
+}

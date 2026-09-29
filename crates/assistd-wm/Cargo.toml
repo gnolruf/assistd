@@ -12,6 +12,7 @@ sway = ["dep:swayipc-async"]
 wayland = ["dep:wayland-client", "dep:wayland-protocols"]
 
 [dependencies]
+assistd-utils = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }

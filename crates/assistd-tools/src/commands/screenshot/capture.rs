@@ -3,6 +3,7 @@
 use std::io;
 use std::time::Duration;
 
+use assistd_utils::text::human_size;
 use serde_json::Value;
 use tokio::process::Command as ProcCommand;
 
@@ -11,7 +12,6 @@ use super::geometry::{find_focused_sway_rect, parse_hyprland_geom, parse_xrandr_
 use super::{Backend, Target};
 use crate::attachment::MAX_IMAGE_BYTES;
 use crate::command::{CommandOutput, Hint, error_line};
-use crate::commands::cat::human_size;
 use crate::exec::{SPAWN_FAILED_EXIT, TIMEOUT_EXIT, WaitOutcome, capture, exit_code};
 
 const STDERR_TAIL_LINES: usize = 20;
@@ -101,8 +101,8 @@ impl CaptureError {
             Self::TooLarge { size } => (
                 format!(
                     "captured PNG too large ({} > {} max)",
-                    human_size(*size),
-                    human_size(MAX_IMAGE_BYTES as usize),
+                    human_size(*size as u64),
+                    human_size(MAX_IMAGE_BYTES),
                 ),
                 Hint::Try,
                 "--focused, or capture a single monitor".into(),
@@ -206,7 +206,7 @@ async fn run_capture(
 ) -> Result<Vec<u8>, CaptureError> {
     let mut cmd = ProcCommand::new(binary);
     cmd.args(args);
-    let max_output = MAX_IMAGE_BYTES as usize;
+    let max_output = usize::try_from(MAX_IMAGE_BYTES).unwrap_or(usize::MAX);
     let captured = capture(cmd, &[], deadline, max_output)
         .await
         .map_err(|e| spawn_error(binary, &e))?;
@@ -215,7 +215,7 @@ async fn run_capture(
         WaitOutcome::Exited(status) => {
             return Err(CaptureError::NonZero {
                 binary: binary.to_string(),
-                status: exit_code(&status),
+                status: exit_code(status),
                 stderr_tail: stderr_tail(&captured.stderr),
             });
         }

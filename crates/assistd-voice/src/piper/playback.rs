@@ -1,5 +1,6 @@
 //! Audio playback via rodio.
 
+use std::fmt;
 use std::num::NonZero;
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -25,6 +26,14 @@ pub struct RodioPlaybackWorker {
     player: Arc<Player>,
     shutdown_tx: Option<mpsc::Sender<()>>,
     device_thread: Option<thread::JoinHandle<()>>,
+}
+
+impl fmt::Debug for RodioPlaybackWorker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RodioPlaybackWorker")
+            .field("device_thread", &self.device_thread)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RodioPlaybackWorker {
@@ -61,7 +70,7 @@ impl RodioPlaybackWorker {
         let samples_f32: Vec<f32> = output
             .samples
             .iter()
-            .map(|&sample| sample as f32 / (i16::MAX as f32))
+            .map(|&sample| f32::from(sample) / f32::from(i16::MAX))
             .collect();
         let buffer = SamplesBuffer::new(channels, sample_rate, samples_f32);
         let player = self.player.clone();
@@ -110,8 +119,7 @@ impl Drop for RodioPlaybackWorker {
 fn describe(device: &cpal::Device) -> String {
     device
         .description()
-        .map(|d| d.to_string())
-        .unwrap_or_else(|_| "<no-description>".into())
+        .map_or_else(|_| "<no-description>".into(), |d| d.to_string())
 }
 
 /// Log the available outputs, then pick the named one or the default.
@@ -192,7 +200,7 @@ fn spawn_device_thread(
 ) -> Result<thread::JoinHandle<()>, PiperError> {
     thread::Builder::new()
         .name("piper-rodio".into())
-        .spawn(move || run_device_thread(device, init_tx, shutdown_rx))
+        .spawn(move || run_device_thread(device, &init_tx, &shutdown_rx))
         .map_err(|err| PiperError::Audio(format!("spawn audio thread: {err}")))
 }
 
@@ -200,12 +208,12 @@ fn spawn_device_thread(
 /// the device sink until `shutdown_rx` fires or hangs up.
 fn run_device_thread(
     device: Option<cpal::Device>,
-    init_tx: mpsc::Sender<Result<Player, String>>,
-    shutdown_rx: mpsc::Receiver<()>,
+    init_tx: &mpsc::Sender<Result<Player, String>>,
+    shutdown_rx: &mpsc::Receiver<()>,
 ) {
     let opened = match device {
         Some(device) => DeviceSinkBuilder::from_device(device)
-            .and_then(|builder| builder.open_stream())
+            .and_then(DeviceSinkBuilder::open_stream)
             .map_err(|err| format!("open configured device: {err}")),
         None => DeviceSinkBuilder::open_default_sink()
             .map_err(|err| format!("open default sink: {err}")),

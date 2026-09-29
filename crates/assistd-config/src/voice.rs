@@ -189,6 +189,6 @@ pub enum CodeBlockMode {
     /// Drop them silently.
     #[default]
     Skip,
-    /// Drop them but say "Code block in <lang>." (or "Code block.") per fence.
+    /// Drop them but say `"Code block in <lang>."` (or `"Code block."`) per fence.
     Summarize,
 }

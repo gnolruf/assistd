@@ -11,7 +11,7 @@ use super::connection::SqliteHandle;
 use super::writer::{WriteOp, dispatch_write};
 
 /// SQLite-backed [`MemoryStore`].
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SqliteMemoryStore {
     handle: Arc<SqliteHandle>,
 }

@@ -1,6 +1,7 @@
 //! MCP (Model Context Protocol) client configuration.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -29,7 +30,8 @@ impl Default for McpConfig {
 
 /// One `[[mcp.servers]]` entry, discriminated by `transport`. A key of the
 /// other transport (`url` on stdio, `env` on SSE) is ignored like any unknown key.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// `Debug` lists env var and header names, never their values.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "transport", rename_all = "lowercase")]
 pub enum McpServerConfig {
     /// Newline-delimited JSON-RPC over a child process's stdin/stdout.
@@ -90,6 +92,39 @@ impl McpServerConfig {
         match self {
             Self::Stdio { .. } => "stdio",
             Self::Sse { .. } => "sse",
+        }
+    }
+}
+
+impl fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stdio {
+                name,
+                command,
+                args,
+                env,
+                request_timeout_secs,
+            } => f
+                .debug_struct("Stdio")
+                .field("name", name)
+                .field("command", command)
+                .field("args", args)
+                .field("env_names", &env.keys().collect::<BTreeSet<_>>())
+                .field("request_timeout_secs", request_timeout_secs)
+                .finish(),
+            Self::Sse {
+                name,
+                url,
+                headers,
+                request_timeout_secs,
+            } => f
+                .debug_struct("Sse")
+                .field("name", name)
+                .field("url", url)
+                .field("header_names", &headers.keys().collect::<BTreeSet<_>>())
+                .field("request_timeout_secs", request_timeout_secs)
+                .finish(),
         }
     }
 }

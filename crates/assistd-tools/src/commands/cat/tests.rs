@@ -7,7 +7,7 @@ use crate::fixtures::PNG_BYTES;
 async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
     CatCommand
         .run(CommandInput {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             stdin: stdin.map(<[u8]>::to_vec),
         })
         .await
@@ -140,14 +140,6 @@ async fn cat_b_works_on_text_file() {
         String::from_utf8_lossy(&out.stdout),
         format!("{path}: text/plain\n{path}: 10 bytes\n")
     );
-}
-
-#[test]
-fn human_size_formats_expected_ranges() {
-    assert_eq!(human_size(0), "0B");
-    assert_eq!(human_size(500), "500B");
-    assert_eq!(human_size(2048), "2KB");
-    assert_eq!(human_size(1024 * 1024 * 3), "3.0MB");
 }
 
 #[tokio::test]

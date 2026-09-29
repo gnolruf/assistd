@@ -119,7 +119,7 @@ async fn store_embedding(
         }
     };
     let model = embedder.model().to_string();
-    let dim = embedder.dim() as i64;
+    let dim = i64::try_from(embedder.dim()).unwrap_or(i64::MAX);
     let vector = vector_to_blob(&embedding);
     let (ack_tx, ack_rx) = oneshot::channel();
     let op = match job {

@@ -5,6 +5,7 @@ use crate::chain::parse_chain;
 use crate::command::{Command, CommandInput, CommandOutput, CommandRegistry};
 
 /// Emits fixed stdout, stderr and exit code, ignoring its input.
+#[derive(Debug)]
 struct Stub {
     name: &'static str,
     stdout: &'static [u8],
@@ -45,10 +46,11 @@ impl Command for Stub {
 }
 
 /// Echoes stdin to stdout.
+#[derive(Debug)]
 struct Echo;
 #[async_trait]
 impl Command for Echo {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "echo_stdin"
     }
     fn summary(&self) -> &'static str {
@@ -63,10 +65,11 @@ impl Command for Echo {
 }
 
 /// Counts newlines in stdin.
+#[derive(Debug)]
 struct LineCount;
 #[async_trait]
 impl Command for LineCount {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "lc"
     }
     fn summary(&self) -> &'static str {
@@ -87,10 +90,11 @@ impl Command for LineCount {
 }
 
 /// Reports whether it was handed a stdin at all.
+#[derive(Debug)]
 struct StdinKind;
 #[async_trait]
 impl Command for StdinKind {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "stdin_kind"
     }
     fn summary(&self) -> &'static str {
@@ -109,11 +113,12 @@ impl Command for StdinKind {
     }
 }
 
-/// Emits bytes of configurable length; exercises PIPE_BUF_MAX.
+/// Emits bytes of configurable length; exercises `PIPE_BUF_MAX`.
+#[derive(Debug)]
 struct Flood(usize);
 #[async_trait]
 impl Command for Flood {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "flood"
     }
     fn summary(&self) -> &'static str {

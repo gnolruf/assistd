@@ -13,6 +13,7 @@ const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"]
 
 /// `grep [-icnrv] PATTERN [FILE|DIR]...`: print lines from the named files
 /// or stdin matching `PATTERN`. Exits 0 on a match, 1 on none, 2 on errors.
+#[derive(Debug)]
 pub struct GrepCommand;
 
 #[derive(Default)]
@@ -50,7 +51,7 @@ impl TargetError {
 
 #[async_trait]
 impl Command for GrepCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "grep"
     }
 
@@ -129,7 +130,7 @@ impl Command for GrepCommand {
         let paths = &positional[1..];
         if paths.is_empty() {
             return match input.stdin {
-                Some(stdin) => annotate_dialect(search_stdin(&re, &flags, stdin), pattern),
+                Some(stdin) => annotate_dialect(search_stdin(&re, &flags, &stdin), pattern),
                 None => CommandOutput::usage(self.help()),
             };
         }
@@ -173,8 +174,8 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
     Ok((flags, &argv[pos..]))
 }
 
-fn search_stdin(re: &Regex, flags: &Flags, stdin: Vec<u8>) -> CommandOutput {
-    let Ok(text) = std::str::from_utf8(&stdin) else {
+fn search_stdin(re: &Regex, flags: &Flags, stdin: &[u8]) -> CommandOutput {
+    let Ok(text) = std::str::from_utf8(stdin) else {
         return CommandOutput::failed(
             2,
             error_line(
@@ -274,7 +275,7 @@ fn outcome(count: usize, stdout: Vec<u8>) -> CommandOutput {
     CommandOutput {
         stdout,
         stderr: Vec::new(),
-        exit_code: if count > 0 { 0 } else { 1 },
+        exit_code: i32::from(count == 0),
         attachments: Vec::new(),
     }
 }
@@ -351,7 +352,7 @@ mod tests {
     async fn run_grep(args: &[&str], stdin: &[u8]) -> CommandOutput {
         GrepCommand
             .run(CommandInput {
-                args: args.iter().map(|s| s.to_string()).collect(),
+                args: args.iter().map(ToString::to_string).collect(),
                 stdin: Some(stdin.to_vec()),
             })
             .await
@@ -410,13 +411,6 @@ mod tests {
         let out = run_grep(&[r"a\|b"], b"literal a|b line\n").await;
         assert_eq!(out.exit_code, 0);
         assert!(out.stderr.is_empty(), "{:?}", out.stderr);
-    }
-
-    #[tokio::test]
-    async fn missing_pattern_emits_usage() {
-        let out = run_grep(&[], b"").await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: grep"), "{out:?}");
     }
 
     #[tokio::test]

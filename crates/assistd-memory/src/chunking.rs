@@ -72,7 +72,7 @@ mod tests {
     }
 
     fn alphabet(len: usize) -> String {
-        (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect()
+        (b'a'..=b'z').cycle().take(len).map(char::from).collect()
     }
 
     fn char_window(s: &str, start: usize, end: usize) -> String {

@@ -26,6 +26,7 @@ use assistd_tools::{
     },
     probe_sandbox,
 };
+use assistd_utils::path::expand_tilde_from_env;
 
 pub mod agent;
 pub mod presence;
@@ -101,6 +102,7 @@ pub enum BuildToolsError {
 }
 
 /// Subsystem handles [`build_tools`] wires into the tool registry.
+#[derive(Debug)]
 pub struct BuildToolsDeps<'a> {
     pub config: &'a Config,
     /// The file `config` was loaded from; its directory holds the
@@ -125,6 +127,7 @@ pub struct BuildToolsDeps<'a> {
 /// The gate is re-probed only after a presence transition or a
 /// llama-server restart, since only those reload weights. A failed probe
 /// leaves the gate unchanged and is retried on the next revalidation.
+#[derive(Debug)]
 pub struct VisionRevalidator {
     gate: Arc<VisionGate>,
     control: LlamaServerControl,
@@ -171,12 +174,13 @@ impl VisionRevalidator {
     pub async fn revalidate_if_stale(&self, presence: &PresenceManager) {
         let mut seen = self.seen.lock().await;
         if seen.take_stale(presence.llama_pid().await) {
-            seen.probed = apply_probe(&self.gate, self.probe().await);
+            seen.probed = apply_probe(&self.gate, &self.probe().await);
         }
     }
 }
 
 /// The load the gate was last probed against.
+#[derive(Debug)]
 struct SeenLoad {
     presence: watch::Receiver<PresenceState>,
     llama_pid: Option<u32>,
@@ -392,7 +396,7 @@ fn resolve_writable_paths(raw_paths: &[String]) -> Vec<PathBuf> {
     raw_paths
         .iter()
         .filter_map(|raw| {
-            let expanded = expand_config_tilde(raw);
+            let expanded = expand_tilde_from_env(raw);
             std::fs::canonicalize(&expanded)
                 .inspect_err(|e| {
                     warn!(
@@ -420,7 +424,7 @@ fn screenshot_policy(backend: ScreenshotBackend) -> ScreenshotPolicyCfg {
 
 /// Set `gate` from a probe that reached the model, returning whether it
 /// did.
-fn apply_probe(gate: &VisionGate, probe: VisionState) -> bool {
+fn apply_probe(gate: &VisionGate, probe: &VisionState) -> bool {
     if probe.model_id.is_none() {
         return false;
     }
@@ -434,22 +438,6 @@ fn apply_probe(gate: &VisionGate, probe: VisionState) -> bool {
     }
     gate.set(probe.vision_supported);
     true
-}
-
-fn expand_config_tilde(raw: &str) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(home).join(rest),
-            Err(_) => PathBuf::from(raw),
-        }
-    } else if raw == "~" {
-        match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(home),
-            Err(_) => PathBuf::from(raw),
-        }
-    } else {
-        PathBuf::from(raw)
-    }
 }
 
 /// This crate's version string.
@@ -489,7 +477,7 @@ mod tests {
         ];
         for (label, gate_initial, probe, expected_gate, expected_reached) in cases {
             let gate = VisionGate::new(gate_initial);
-            assert_eq!(apply_probe(&gate, probe), expected_reached, "{label}");
+            assert_eq!(apply_probe(&gate, &probe), expected_reached, "{label}");
             assert_eq!(gate.supported(), expected_gate, "{label}");
         }
     }

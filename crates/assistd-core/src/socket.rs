@@ -278,7 +278,7 @@ where
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            _ = &mut shutdown => {
+            () = &mut shutdown => {
                 info!("shutting down socket listener");
                 break;
             }
@@ -360,7 +360,7 @@ async fn back_off_from_fd_exhaustion(err: &io::Error, fd_exhausted: &mut bool) {
     if !*fd_exhausted {
         warn!(
             error = %err,
-            backoff_ms = FD_EXHAUSTION_BACKOFF.as_millis() as u64,
+            backoff_ms = u64::try_from(FD_EXHAUSTION_BACKOFF.as_millis()).unwrap_or(u64::MAX),
             "accept failed: file-descriptor limit reached; backing \
              off until in-flight connections release descriptors. \
              Repeat occurrences suppressed until recovery."
@@ -373,7 +373,7 @@ async fn back_off_from_fd_exhaustion(err: &io::Error, fd_exhausted: &mut bool) {
 /// Matches the raw errno because EMFILE maps to the unstable
 /// `io::ErrorKind::Uncategorized`.
 fn is_fd_exhaustion(err: &io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE))
+    matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
 }
 
 async fn handle_connection(
@@ -396,7 +396,10 @@ async fn handle_connection(
     let router_for_dispatch = router.clone();
     let dispatch_fut = async move {
         CONFIRM_ROUTER
-            .scope(router_for_dispatch, dispatch_state.dispatch(req, tx))
+            .scope(
+                router_for_dispatch,
+                Box::pin(dispatch_state.dispatch(req, tx)),
+            )
             .await
     };
     let forward_fut = forward_events(rx, write_half, state, is_subscribe);

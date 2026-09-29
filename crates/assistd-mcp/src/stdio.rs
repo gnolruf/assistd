@@ -1,7 +1,8 @@
 //! Newline-delimited JSON-RPC over a child process's stdin/stdout;
 //! stderr is forwarded to tracing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -16,17 +17,19 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
+use assistd_utils::log_lines::forward_lines;
+
 use crate::error::McpError;
 use crate::jsonrpc::{Correlator, Incoming, notification_line, reply_line};
-use crate::log_lines::forward_lines;
 use crate::{McpClient, ToolResult, ToolSchema, protocol};
 
 /// The reader drops the connection rather than buffer a line past
 /// this, so a misbehaving server cannot exhaust memory.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
-/// Per-server stdio transport configuration.
-#[derive(Debug, Clone)]
+/// Per-server stdio transport configuration. `Debug` lists env var names,
+/// never values.
+#[derive(Clone)]
 pub struct StdioConfig {
     pub command: String,
     pub args: Vec<String>,
@@ -50,7 +53,20 @@ impl StdioConfig {
     }
 }
 
+impl fmt::Debug for StdioConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StdioConfig")
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env_names", &self.env.keys().collect::<BTreeSet<_>>())
+            .field("request_timeout", &self.request_timeout)
+            .field("label", &self.label)
+            .finish()
+    }
+}
+
 /// [`McpClient`] over a child process's pipes.
+#[derive(Debug)]
 pub struct StdioMcpClient {
     label: String,
     correlator: Arc<Correlator>,
@@ -93,7 +109,7 @@ impl StdioMcpClient {
             AbortOnDropHandle::new(tokio::spawn(forward_stderr(stderr, cfg.label.clone())));
 
         let (client, transport_handles) =
-            Self::from_streams(stdout, stdin, cfg.label.clone(), cfg.request_timeout).await?;
+            Self::from_streams(stdout, stdin, cfg.label.clone(), cfg.request_timeout)?;
         let lifeline = ChildLifeline {
             label: cfg.label.clone(),
             child,
@@ -124,7 +140,7 @@ impl StdioMcpClient {
 
     /// Wire the transport over arbitrary streams without running the
     /// initialize handshake.
-    pub async fn from_streams<R, W>(
+    pub fn from_streams<R, W>(
         read: R,
         write: W,
         label: String,
@@ -201,14 +217,15 @@ impl McpClient for StdioMcpClient {
 
     async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult, McpError> {
         let result = self
-            .call("tools/call", protocol::tool_call_params(name, arguments))
+            .call("tools/call", protocol::tool_call_params(name, &arguments))
             .await?;
-        protocol::parse_tool_call(result)
+        protocol::parse_tool_call(&result)
     }
 }
 
 /// The spawned child plus its I/O tasks. Dropping it SIGKILLs the
 /// child's whole process group and aborts the tasks.
+#[derive(Debug)]
 pub struct ChildLifeline {
     label: String,
     child: Child,
@@ -293,11 +310,14 @@ impl ChildLifeline {
 /// The process group a spawned server leads; the id is fixed at spawn
 /// and outlives the child's own exit. Dropping it SIGKILLs every
 /// process still in the group.
+#[derive(Debug)]
 struct ProcessGroup(Pid);
 
 impl ProcessGroup {
     fn led_by(child: &Child) -> Option<Self> {
-        let pid = child.id().and_then(|pid| Pid::from_raw(pid as i32))?;
+        let pid = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok().and_then(Pid::from_raw))?;
         Some(Self(pid))
     }
 
@@ -318,6 +338,7 @@ async fn join_io_tasks(transport: TransportHandles, stderr_task: AbortOnDropHand
 }
 
 /// The read and write tasks of one transport. Dropping it aborts both.
+#[derive(Debug)]
 pub struct TransportHandles {
     read_task: AbortOnDropHandle<()>,
     write_task: AbortOnDropHandle<()>,
@@ -500,7 +521,7 @@ mod tests {
         })
     }
 
-    async fn make_client_with_handler<F, Fut>(
+    fn make_client_with_handler<F, Fut>(
         handler: F,
     ) -> (Arc<StdioMcpClient>, TransportHandles, JoinHandle<()>)
     where
@@ -518,7 +539,6 @@ mod tests {
             "test".into(),
             Duration::from_secs(2),
         )
-        .await
         .unwrap();
         (client, handles, server_task)
     }
@@ -541,7 +561,7 @@ mod tests {
                 }
             })
         };
-        let (client, handles, server) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler);
 
         let tools = client.list_tools().await.unwrap();
         let [tool] = tools.as_slice() else {
@@ -575,7 +595,7 @@ mod tests {
                 }
             })
         };
-        let (client, handles, server) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler);
 
         let result = client.invoke("echo", json!({"x": "hi"})).await.unwrap();
         match result {
@@ -602,7 +622,7 @@ mod tests {
                 }
             })
         };
-        let (client, handles, server) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler);
         let result = client.invoke("snap", json!({})).await.unwrap();
         match result {
             ToolResult::Image { mime, bytes } => {
@@ -624,7 +644,7 @@ mod tests {
                 "error": {"code": -32601, "message": "method not found"}
             })
         };
-        let (client, handles, server) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler);
         let err = client.list_tools().await.unwrap_err();
         assert!(
             matches!(
@@ -648,7 +668,6 @@ mod tests {
             "silent".into(),
             Duration::from_millis(150),
         )
-        .await
         .unwrap();
 
         let err = client.list_tools().await.unwrap_err();
@@ -670,7 +689,6 @@ mod tests {
             "flood".into(),
             Duration::from_secs(5),
         )
-        .await
         .unwrap();
 
         let flood = tokio::spawn(async move {
@@ -697,7 +715,6 @@ mod tests {
             "pinger".into(),
             Duration::from_secs(5),
         )
-        .await
         .unwrap();
 
         let call = tokio::spawn({
@@ -747,7 +764,6 @@ mod tests {
             "drop".into(),
             Duration::from_secs(5),
         )
-        .await
         .unwrap();
 
         let call = tokio::spawn({
@@ -764,5 +780,14 @@ mod tests {
         let err = call.await.unwrap().unwrap_err();
         assert!(matches!(err, McpError::TransportClosed), "{err}");
         handles.shutdown_and_join().await;
+    }
+
+    #[test]
+    fn debug_lists_env_names_but_not_values() {
+        let mut cfg = StdioConfig::new("local", "server");
+        cfg.env.insert("API_TOKEN".into(), "hunter2".into());
+        let rendered = format!("{cfg:?}");
+        assert!(rendered.contains("API_TOKEN"), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
     }
 }

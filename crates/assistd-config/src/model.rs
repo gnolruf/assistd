@@ -19,7 +19,7 @@ impl ModelConfig {
     /// Context length less a 10% margin for the bytes/4 token estimate's
     /// under-counting.
     pub fn context_budget(&self) -> u32 {
-        (u64::from(self.context_length.get()) * 9 / 10) as u32
+        u32::try_from(u64::from(self.context_length.get()) * 9 / 10).unwrap_or(u32::MAX)
     }
 }
 

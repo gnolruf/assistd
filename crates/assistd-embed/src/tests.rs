@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use super::*;
 
 /// Fails any call that includes the text `"bad"`; records the inputs of every call.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct PickyEmbedder {
     calls: Mutex<Vec<Vec<String>>>,
 }
@@ -26,7 +26,7 @@ impl Embedder for PickyEmbedder {
         }
         Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
     }
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "picky"
     }
     fn dim(&self) -> usize {

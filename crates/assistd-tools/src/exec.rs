@@ -33,6 +33,9 @@ pub(crate) const TIMEOUT_EXIT: i32 = 137;
 /// runs so a runaway script cannot balloon daemon memory before the timeout.
 pub(crate) const OUTPUT_BUF_MAX: usize = PIPE_BUF_MAX;
 
+/// Pipe read size; heap-allocated so reader futures stay small.
+const READ_CHUNK_BYTES: usize = 8192;
+
 /// Exit code when a child exceeds [`OUTPUT_BUF_MAX`]; matches the chain
 /// executor's pipe-overflow exit.
 pub(crate) const OUTPUT_OVERFLOW_EXIT: i32 = 141;
@@ -70,7 +73,7 @@ struct Overflow;
 
 /// Owns the output readers of applications watched by [`watch_detached`];
 /// dropping it aborts any reader still running.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct DetachedReaders(Mutex<JoinSet<()>>);
 
 impl DetachedReaders {
@@ -241,7 +244,7 @@ pub(crate) async fn supervise(
     } = capture(cmd, stdin, limit, OUTPUT_BUF_MAX).await?;
 
     Ok(match outcome {
-        WaitOutcome::Exited(status) => exited(stdout, stderr, &status),
+        WaitOutcome::Exited(status) => exited(stdout, stderr, status),
         WaitOutcome::WaitErr(e) => wait_failed(tool, &e),
         WaitOutcome::Timeout => {
             let secs = limit.as_secs();
@@ -301,12 +304,12 @@ pub(crate) async fn watch_detached(
 
     let (stdout, stderr) = output.take_after_exit().await;
     match waited {
-        Ok(status) => exited(stdout, stderr, &status),
+        Ok(status) => exited(stdout, stderr, status),
         Err(e) => wait_failed(tool, &e),
     }
 }
 
-fn exited(stdout: Vec<u8>, stderr: Vec<u8>, status: &ExitStatus) -> CommandOutput {
+fn exited(stdout: Vec<u8>, stderr: Vec<u8>, status: ExitStatus) -> CommandOutput {
     CommandOutput {
         stdout,
         stderr,
@@ -329,7 +332,7 @@ fn wait_failed(tool: &str, e: &io::Error) -> CommandOutput {
 }
 
 async fn drain_into<R: AsyncRead + Unpin>(mut reader: R, limit: usize, sink: Arc<Mutex<Vec<u8>>>) {
-    let mut chunk = [0u8; 8192];
+    let mut chunk = vec![0u8; READ_CHUNK_BYTES];
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
@@ -349,7 +352,7 @@ async fn read_capped<R: AsyncRead + Unpin>(
     limit: usize,
     buf: &mut Vec<u8>,
 ) -> Result<(), Overflow> {
-    let mut chunk = [0u8; 8192];
+    let mut chunk = vec![0u8; READ_CHUNK_BYTES];
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => return Ok(()),
@@ -366,7 +369,11 @@ async fn read_capped<R: AsyncRead + Unpin>(
 
 #[cfg(unix)]
 fn kill_group(pgid: Option<u32>) {
-    if let Some(pgid) = pgid.and_then(|p| rustix::process::Pid::from_raw(p as i32)) {
+    if let Some(pgid) = pgid.and_then(|p| {
+        i32::try_from(p)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+    }) {
         let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
     }
 }
@@ -375,7 +382,7 @@ fn kill_group(pgid: Option<u32>) {
 fn kill_group(_pgid: Option<u32>) {}
 
 /// Shell-style exit code: the status code, or 128 plus the killing signal.
-pub(crate) fn exit_code(status: &ExitStatus) -> i32 {
+pub(crate) fn exit_code(status: ExitStatus) -> i32 {
     status
         .code()
         .or_else(|| signal_exit_code(status))
@@ -383,7 +390,7 @@ pub(crate) fn exit_code(status: &ExitStatus) -> i32 {
 }
 
 #[cfg(unix)]
-fn signal_exit_code(status: &ExitStatus) -> Option<i32> {
+fn signal_exit_code(status: ExitStatus) -> Option<i32> {
     status.signal().map(|s| 128 + s)
 }
 

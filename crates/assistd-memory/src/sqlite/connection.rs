@@ -29,7 +29,7 @@ const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Cheaply cloneable handle shared by every store: reads hit the connection directly,
 /// writes go through the writer task.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SqliteHandle {
     pub(super) conn: Connection,
     pub(super) writer_tx: Arc<mpsc::Sender<WriteOp>>,

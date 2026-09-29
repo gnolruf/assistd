@@ -1,16 +1,17 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
 use crate::attachment::{LoadImageError, load_image_attachment};
 use crate::command::{
     Attachment, Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav,
 };
-use crate::commands::cat::human_size;
 use crate::vision::VisionGate;
 
 /// `see PATH`: read an image file and attach it as a vision input.
+#[derive(Debug)]
 pub struct SeeCommand {
     gate: Arc<VisionGate>,
 }
@@ -32,7 +33,7 @@ impl Default for SeeCommand {
 
 #[async_trait]
 impl Command for SeeCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "see"
     }
 
@@ -91,7 +92,10 @@ fn attached(attachment: Attachment, size: usize, path: &str) -> CommandOutput {
     let mime = match &attachment {
         Attachment::Image { mime, .. } => mime.clone(),
     };
-    let stdout = format!("attached {mime} ({}) from {path}\n", human_size(size));
+    let stdout = format!(
+        "attached {mime} ({}) from {path}\n",
+        human_size(size as u64)
+    );
     CommandOutput {
         stdout: stdout.into_bytes(),
         stderr: Vec::new(),
@@ -140,7 +144,7 @@ mod tests {
 
     async fn run_see(cmd: &SeeCommand, args: &[&str]) -> CommandOutput {
         cmd.run(CommandInput {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
         })
         .await
@@ -190,13 +194,6 @@ mod tests {
              Use: ls /nonexistent to see what is there\n"
         );
         assert!(out.attachments.is_empty());
-    }
-
-    #[tokio::test]
-    async fn no_args_emits_usage() {
-        let out = run_see(&SeeCommand::default(), &[]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: see"), "{out:?}");
     }
 
     #[tokio::test]

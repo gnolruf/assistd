@@ -5,9 +5,9 @@ use tokio::task::JoinHandle;
 use super::*;
 
 struct Harness {
-    input: mpsc::UnboundedSender<DriverInput>,
+    input: UnboundedSender<DriverInput>,
     state: watch::Receiver<PopupState>,
-    place: mpsc::UnboundedReceiver<PlaceRequest>,
+    place: UnboundedReceiver<PlaceRequest>,
     driver: JoinHandle<()>,
 }
 

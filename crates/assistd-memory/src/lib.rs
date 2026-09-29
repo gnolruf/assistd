@@ -1,6 +1,8 @@
 //! Persistent memory: the key/value [`MemoryStore`], the conversation and semantic
 //! stores under [`sqlite`], and no-op fallbacks for when memory is disabled.
 
+use std::fmt;
+
 use async_trait::async_trait;
 
 pub mod chunking;
@@ -27,7 +29,7 @@ pub struct MemoryRecord {
 
 /// Persistent string-keyed, string-valued memory.
 #[async_trait]
-pub trait MemoryStore: Send + Sync + 'static {
+pub trait MemoryStore: fmt::Debug + Send + Sync + 'static {
     /// Persist `value` under `key`, overwriting any existing value; returns the row id.
     /// A subsequent `load(key)` observes the write.
     async fn save(&self, key: &str, value: String) -> Result<i64>;
@@ -49,6 +51,7 @@ pub trait MemoryStore: Send + Sync + 'static {
 }
 
 /// No-op store: writes are discarded and reads find nothing.
+#[derive(Debug)]
 pub struct NoMemoryStore;
 
 #[async_trait]

@@ -25,11 +25,13 @@ use crate::{
 };
 
 /// [`WindowManager`] over a single i3 IPC command socket.
+#[derive(Debug)]
 pub struct I3Backend {
     ipc: Arc<IpcBackend<I3Ipc>>,
 }
 
 /// The backend plus its supervisor task, returned by [`I3Backend::start`].
+#[derive(Debug)]
 pub struct I3Handle {
     pub backend: Arc<I3Backend>,
     supervisor_task: JoinHandle<()>,
@@ -210,12 +212,7 @@ impl IpcProtocol for I3Ipc {
             .await?
             .into_iter()
             .map(|workspace| Workspace {
-                rect: Rect {
-                    x: workspace.rect.x as i32,
-                    y: workspace.rect.y as i32,
-                    width: workspace.rect.width.max(0) as u32,
-                    height: workspace.rect.height.max(0) as u32,
-                },
+                rect: rect_from_i3(&workspace.rect),
                 info: WorkspaceInfo {
                     num: workspace.num,
                     name: workspace.name,
@@ -246,12 +243,7 @@ impl IpcProtocol for I3Ipc {
     }
 
     fn window_rect(node: &reply::Node, criteria: &PlacementCriteria) -> Option<Rect> {
-        (node.window.is_some() && node_matches(node, criteria)).then(|| Rect {
-            x: node.rect.x as i32,
-            y: node.rect.y as i32,
-            width: node.rect.width.max(0) as u32,
-            height: node.rect.height.max(0) as u32,
-        })
+        (node.window.is_some() && node_matches(node, criteria)).then(|| rect_from_i3(&node.rect))
     }
 
     fn collect_windows(tree: &reply::Node) -> Vec<Window> {
@@ -405,7 +397,7 @@ fn parse_geometry_size(token: &str) -> Option<(u32, u32)> {
 /// Winit's X11 RandR DPI formula, quantised to 1/12 steps. `1.0` for
 /// zero-sized inputs or absurd results.
 fn calc_randr_scale(pixels: (u32, u32), mm: (u64, u64)) -> f64 {
-    let (px_w, px_h) = (pixels.0 as f64, pixels.1 as f64);
+    let (px_w, px_h) = (f64::from(pixels.0), f64::from(pixels.1));
     let (mm_w, mm_h) = (mm.0 as f64, mm.1 as f64);
     if mm_w == 0.0 || mm_h == 0.0 {
         return 1.0;
@@ -444,6 +436,20 @@ fn collect_windows(node: &reply::Node, parent_workspace: Option<&str>, out: &mut
     for child in I3Ipc::children(node) {
         collect_windows(child, workspace, out);
     }
+}
+
+/// i3 geometry as a [`Rect`]: negative sizes become zero and coordinates saturate.
+fn rect_from_i3(rect: &reply::Rect) -> Rect {
+    Rect {
+        x: saturating_i32(rect.x),
+        y: saturating_i32(rect.y),
+        width: u32::try_from(rect.width.max(0)).unwrap_or(u32::MAX),
+        height: u32::try_from(rect.height.max(0)).unwrap_or(u32::MAX),
+    }
+}
+
+fn saturating_i32(value: isize) -> i32 {
+    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
 #[cfg(test)]
@@ -524,10 +530,10 @@ DP-0 connected 2560x1440+0+0 (normal left inverted right x axis y axis) 587mm x 
             ((1920, 1080), (0, 0), 1.0),
             ((1920, 1080), (500, 0), 1.0),
         ] {
-            assert_eq!(
-                calc_randr_scale(pixels, mm),
-                expected,
-                "{pixels:?} on {mm:?}mm"
+            let scale = calc_randr_scale(pixels, mm);
+            assert!(
+                (scale - expected).abs() < f64::EPSILON,
+                "{pixels:?} on {mm:?}mm: got {scale}, expected {expected}"
             );
         }
     }

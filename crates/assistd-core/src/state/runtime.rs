@@ -17,6 +17,7 @@ const EVENTS_BUS_CAPACITY: usize = 256;
 
 /// The active session and, once its first message is saved, the branch
 /// it lives on; always read and replaced together.
+#[derive(Debug)]
 pub struct ConversationContext {
     inner: RwLock<ConversationContextInner>,
     /// Lets holders that cannot await the lock read the session
@@ -64,7 +65,7 @@ impl ConversationContext {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct ConversationContextInner {
     session_id: Arc<SessionId>,
     branch_id: Option<BranchId>,
@@ -73,6 +74,7 @@ struct ConversationContextInner {
 /// Per-process request bookkeeping: the active conversation, turn
 /// serialisation and cancellation, persistence ordering, and the events
 /// bus.
+#[derive(Debug)]
 pub struct RuntimeState {
     pub conversation_ctx: Arc<ConversationContext>,
     /// Serialises whole agent turns.
@@ -158,6 +160,7 @@ impl Default for RuntimeState {
 
 /// A receiver on the events bus, from [`RuntimeState::subscribe_events`].
 /// Its filter counts toward [`RuntimeState::bus_wants`] until dropped.
+#[derive(Debug)]
 pub struct BusSubscription {
     rx: broadcast::Receiver<Event>,
     filter: SubscribeFilter,

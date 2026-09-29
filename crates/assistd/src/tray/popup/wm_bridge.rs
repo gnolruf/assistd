@@ -9,7 +9,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::visibility::PlaceRequest;
 
-pub async fn place_worker(
+pub(super) async fn place_worker(
     mut rx: UnboundedReceiver<PlaceRequest>,
     backend: Arc<dyn WindowManager>,
     criteria: PlacementCriteria,
@@ -22,7 +22,7 @@ pub async fn place_worker(
     }
 }
 
-pub fn anchor_from_config(cfg: &TrayPopupConfig) -> PlacementAnchor {
+pub(super) fn anchor_from_config(cfg: &TrayPopupConfig) -> PlacementAnchor {
     PlacementAnchor {
         corner: map_anchor(cfg.anchor),
         offset_x: cfg.offset_x,
@@ -32,11 +32,11 @@ pub fn anchor_from_config(cfg: &TrayPopupConfig) -> PlacementAnchor {
     }
 }
 
-pub fn popup_criteria() -> PlacementCriteria {
+pub(super) fn popup_criteria() -> PlacementCriteria {
     PlacementCriteria::AppId(DEFAULT_TRAY_POPUP_APP_ID.to_string())
 }
 
-pub fn map_anchor(corner: PopupAnchor) -> AnchorCorner {
+pub(super) fn map_anchor(corner: PopupAnchor) -> AnchorCorner {
     match corner {
         PopupAnchor::TopLeft => AnchorCorner::TopLeft,
         PopupAnchor::TopRight => AnchorCorner::TopRight,

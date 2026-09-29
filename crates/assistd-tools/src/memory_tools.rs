@@ -24,6 +24,7 @@ static KEY_RE: LazyLock<Regex> =
 
 /// Saves a `(key, value)` pair and queues its value for embedding so
 /// `recall` can find it by paraphrase.
+#[derive(Debug)]
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
     /// Closed when embedding is disabled; the memory still saves unindexed.
@@ -53,11 +54,11 @@ impl RememberTool {
 
 #[async_trait]
 impl Tool for RememberTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "remember"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Save a fact or preference about the user across conversations. \
          Call this whenever the user states a stable preference, fact about \
          themselves, or anything they say they want remembered. Examples: \
@@ -124,6 +125,7 @@ impl Tool for RememberTool {
 
 /// Returns saved memories ranked by semantic similarity to a query, as
 /// `<key>: <value>` lines.
+#[derive(Debug)]
 pub struct RecallTool {
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
@@ -170,11 +172,11 @@ impl RecallTool {
 
 #[async_trait]
 impl Tool for RecallTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "recall"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Retrieve previously remembered facts and preferences about the user. \
          Call this when prior context might help (e.g. answering \"what editor \
          should I use?\", personalizing a response, or whenever the user \
@@ -222,6 +224,7 @@ impl Tool for RecallTool {
 
 /// Semantic search over past conversations, excluding the session in
 /// progress because its dialogue is already in the model's context.
+#[derive(Debug)]
 pub struct ReminisceTool {
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
@@ -250,11 +253,11 @@ impl ReminisceTool {
 
 #[async_trait]
 impl Tool for ReminisceTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "reminisce"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Search *earlier* conversations — every session except the one \
          in progress, which is already in context — for messages similar \
          in meaning to a query. Complement to `recall`: `recall` looks \
@@ -319,12 +322,7 @@ impl Tool for ReminisceTool {
         let current = self.current_session.borrow().clone();
         let hits = self
             .semantic
-            .nearest_chunks(
-                query_vec,
-                limit as usize,
-                &self.embedding_model,
-                Some(&current),
-            )
+            .nearest_chunks(query_vec, limit, &self.embedding_model, Some(&current))
             .await?;
 
         let output = format_chunks(&hits);
@@ -349,17 +347,15 @@ fn format_memories(hits: &[MemoryHit]) -> String {
         .join("\n")
 }
 
-fn reminisce_limit(args: &Value) -> Result<i64, ToolError> {
+fn reminisce_limit(args: &Value) -> Result<usize, ToolError> {
     let limit = args
         .get("limit")
         .and_then(Value::as_i64)
         .ok_or_else(|| ToolError::InvalidArgs("`limit` (integer) is required".into()))?;
-    if !(1..=20).contains(&limit) {
-        return Err(ToolError::InvalidArgs(format!(
-            "`limit` must be in 1..=20 (got {limit})"
-        )));
-    }
-    Ok(limit)
+    usize::try_from(limit)
+        .ok()
+        .filter(|limit| (1..=20).contains(limit))
+        .ok_or_else(|| ToolError::InvalidArgs(format!("`limit` must be in 1..=20 (got {limit})")))
 }
 
 fn format_chunks(hits: &[EmbeddingHit]) -> String {
@@ -426,6 +422,7 @@ mod tests {
         Arc::new(NoSemanticStore)
     }
 
+    #[derive(Debug)]
     struct FixedEmbedder;
 
     #[async_trait]
@@ -433,7 +430,7 @@ mod tests {
         async fn embed(&self, _text: String) -> Result<Vec<f32>, EmbedError> {
             Ok(vec![1.0])
         }
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "m"
         }
         fn dim(&self) -> usize {
@@ -442,7 +439,7 @@ mod tests {
     }
 
     /// Records the session `reminisce` asked to leave out.
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct ExclusionSpy {
         excluded: parking_lot::Mutex<Option<String>>,
     }
@@ -557,7 +554,7 @@ mod tests {
     fn invalid_args(err: ToolError) -> String {
         match err {
             ToolError::InvalidArgs(msg) => msg,
-            other => panic!("expected InvalidArgs, got {other:?}"),
+            other @ ToolError::Store(_) => panic!("expected InvalidArgs, got {other:?}"),
         }
     }
 

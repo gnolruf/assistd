@@ -4,10 +4,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
 use crate::command::{Attachment, Command, CommandInput, CommandOutput, Hint, error_line};
-use crate::commands::cat::human_size;
 use crate::vision::VisionGate;
 
 use capture::capture_target;
@@ -69,6 +69,7 @@ impl Target {
 
 /// `screenshot [--full|--focused|--monitor=NAME]`: capture the screen as a PNG
 /// and attach it as a vision input for the next LLM turn.
+#[derive(Debug)]
 pub struct ScreenshotCommand {
     cfg: Arc<ScreenshotPolicyCfg>,
     gate: Arc<VisionGate>,
@@ -112,7 +113,7 @@ impl Default for ScreenshotCommand {
 
 #[async_trait]
 impl Command for ScreenshotCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "screenshot"
     }
 
@@ -197,7 +198,7 @@ impl Command for ScreenshotCommand {
 fn attach_png(png: Vec<u8>, target: &Target, backend: Backend) -> CommandOutput {
     let stdout = format!(
         "captured PNG ({}, {}, backend={}); attached to next turn\n",
-        human_size(png.len()),
+        human_size(png.len() as u64),
         target.label(),
         backend.label(),
     );
@@ -247,7 +248,7 @@ mod tests {
     use super::*;
 
     fn args(raw: &[&str]) -> Vec<String> {
-        raw.iter().map(|s| s.to_string()).collect()
+        raw.iter().map(ToString::to_string).collect()
     }
 
     #[test]

@@ -1,8 +1,9 @@
-//! JSON-RPC over the MCP HTTP+SSE binding: requests are POSTed to the
+//! JSON-RPC over the MCP HTTP+SSE binding: requests go by `POST` to the
 //! server's `endpoint` URL and replies arrive on a long-lived `GET`
 //! event stream, with a ping task to detect a silent server.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +29,8 @@ pub const MAX_EVENT_BYTES: usize = 1024 * 1024;
 
 const MAX_REDIRECTS: usize = 10;
 
-/// Per-server SSE configuration.
-#[derive(Debug, Clone)]
+/// Per-server SSE configuration. `Debug` lists header names, never values.
+#[derive(Clone)]
 pub struct SseConfig {
     pub url: String,
     pub headers: HashMap<String, String>,
@@ -54,6 +55,22 @@ impl SseConfig {
     }
 }
 
+impl fmt::Debug for SseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SseConfig")
+            .field("url", &self.url)
+            .field(
+                "header_names",
+                &self.headers.keys().collect::<BTreeSet<_>>(),
+            )
+            .field("request_timeout", &self.request_timeout)
+            .field("read_timeout", &self.read_timeout)
+            .field("ping_interval", &self.ping_interval)
+            .field("label", &self.label)
+            .finish()
+    }
+}
+
 /// [`McpClient`] over HTTP+SSE.
 pub struct SseMcpClient {
     label: String,
@@ -63,6 +80,16 @@ pub struct SseMcpClient {
     post_url: Arc<RwLock<Option<Url>>>,
     headers: HeaderMap,
     request_timeout: Duration,
+}
+
+impl fmt::Debug for SseMcpClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SseMcpClient")
+            .field("label", &self.label)
+            .field("base_url", &self.base_url)
+            .field("request_timeout", &self.request_timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SseMcpClient {
@@ -220,14 +247,15 @@ impl McpClient for SseMcpClient {
 
     async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult, McpError> {
         let result = self
-            .call("tools/call", protocol::tool_call_params(name, arguments))
+            .call("tools/call", protocol::tool_call_params(name, &arguments))
             .await?;
-        protocol::parse_tool_call(result)
+        protocol::parse_tool_call(&result)
     }
 }
 
 /// The reader and ping tasks of one SSE connection. Dropping it
 /// aborts both, closing the event stream.
+#[derive(Debug)]
 pub struct SseLifeline {
     cancel_tx: watch::Sender<bool>,
     stream_task: AbortOnDropHandle<()>,
@@ -431,13 +459,13 @@ enum EndpointError {
 }
 
 /// Incremental SSE parser: feed body chunks, pull complete events.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct EventParser {
     buf: Vec<u8>,
     cur: PartialEvent,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct PartialEvent {
     event_type: Option<String>,
     data: String,
@@ -550,8 +578,8 @@ fn same_origin_redirects() -> redirect::Policy {
     })
 }
 
-/// Wait up to 5s for the `endpoint` event, then fall back to POSTing
-/// to `base_url` if none arrived.
+/// Wait up to 5s for the `endpoint` event, then fall back to sending
+/// `POST`s to `base_url` if none arrived.
 async fn await_endpoint(
     endpoint_ready_rx: oneshot::Receiver<()>,
     post_url: &RwLock<Option<Url>>,
@@ -877,5 +905,15 @@ mod tests {
                 "{data:?} should be rejected",
             );
         }
+    }
+
+    #[test]
+    fn debug_lists_header_names_but_not_values() {
+        let mut cfg = SseConfig::new("remote", "http://127.0.0.1:1/sse");
+        cfg.headers
+            .insert("Authorization".into(), "Bearer hunter2".into());
+        let rendered = format!("{cfg:?}");
+        assert!(rendered.contains("Authorization"), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
     }
 }

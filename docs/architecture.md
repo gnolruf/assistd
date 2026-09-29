@@ -1,6 +1,6 @@
 # Architecture
 
-`assistd` is a Rust workspace split into ten library crates plus a
+`assistd` is a Rust workspace split into eleven library crates plus a
 thin binary. This page maps the crates, the external processes the daemon
 supervises, and the path a user query takes from keypress to spoken
 reply. Read it once before contributing; the rest of `docs/` assumes
@@ -70,19 +70,21 @@ the vocabulary established here.
 | Crate            | Purpose                                                                                              | Depends on                                                                       |
 |------------------|------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | `ipc` always; every other `assistd-*` crate via the `daemon` feature             |
-| `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable.                    | none                                                                             |
-| `assistd-core`   | Daemon glue. `AppState`, agent loop, presence machine, socket server, `build_tools()` factory.       | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `voice`, `wm`                |
-| `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store.                                        | `config`, `memory`                                                               |
-| `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | none (intentionally minimal so client-only builds stay small)                    |
-| `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + child-process supervisor.        | `config`, `ipc`, `tools`                                                         |
-| `assistd-mcp`    | MCP client (stdio + SSE) and adapter that exposes discovered MCP tools through the `Tool` trait.     | `tools`                                                                          |
+| `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable.                    | `utils`                                                                          |
+| `assistd-core`   | Daemon glue. `AppState`, agent loop, presence machine, socket server, `build_tools()` factory.       | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `voice`, `wm`, `utils`       |
+| `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
+| `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | `utils` (default features only, so client-only builds stay small)                |
+| `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
+| `assistd-mcp`    | MCP client (stdio + SSE) and adapter that exposes discovered MCP tools through the `Tool` trait.     | `tools`, `utils`                                                                 |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `ConversationStore`, `SemanticStore`.                | none                                                                             |
-| `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`                                         |
-| `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`                                                                  |
-| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; restricted Wayland sockets. | none                                                                             |
+| `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`, `utils`                                |
+| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, XDG dirs, tilde expansion, `human_size`, child-output line forwarding, `/proc` listener ownership, and the `ChildServer` supervisor. | none                                                                             |
+| `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
+| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; restricted Wayland sockets. | `utils`                                                                          |
 
-`config` and `ipc` sit at the bottom: they have no internal
-dependencies, and most other crates build on them. `core` sits at the top because it's where every subsystem is
+`utils` sits at the bottom with no internal dependencies; `config`
+and `ipc` build only on it, and most other crates build on those
+three. `core` sits at the top because it's where every subsystem is
 wired into a working daemon. The binary itself is intentionally thin:
 parse argv, load config, build `AppState`, hand off.
 
@@ -108,7 +110,8 @@ TUI starts one by re-executing its own binary as `assistd daemon`.
 
 The daemon spawns `llama-server` as a child process at startup, with
 GPU layer count, KV-cache quantization, and other knobs taken from
-`[llama_server]` in the config. `LlamaService` health-probes
+`[llama_server]` in the config. `assistd-utils`'s `ChildServer`
+supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a
 stale server or squatter on the port is never trusted), then `LlamaChatClient`

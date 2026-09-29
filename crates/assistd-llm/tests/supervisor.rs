@@ -6,7 +6,6 @@
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::path::Path;
-use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process};
@@ -16,23 +15,15 @@ use tokio::sync::watch;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{LlamaServerConfig, ModelConfig};
-use assistd_llm::{LlamaServerError, LlamaService, ReadyState};
+use assistd_llm::{LlamaServerSpec, ReadyState};
+use assistd_utils::child_server::{ChildServer, ChildServerError};
 
 use common::FakeLlama;
 
 mod common;
 
 fn init_tracing() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug")),
-            )
-            .with_test_writer()
-            .try_init();
-    });
+    assistd_utils::tracing_init::init_test_tracing("debug");
 }
 
 /// Grab an ephemeral port by binding and dropping it.
@@ -83,11 +74,14 @@ async fn answer_every_request_with_ok(listener: TcpListener) {
     }
 }
 
-async fn start_service(fake: &FakeLlama, port: u16) -> (LlamaService, watch::Sender<bool>) {
+async fn start_service(fake: &FakeLlama, port: u16) -> (ChildServer, watch::Sender<bool>) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let service = LlamaService::start(server_spec(fake, port), model_spec(), shutdown_rx)
-        .await
-        .expect("service should start");
+    let service = ChildServer::start(
+        LlamaServerSpec::new(server_spec(fake, port), model_spec()),
+        shutdown_rx,
+    )
+    .await
+    .expect("service should start");
     (service, shutdown_tx)
 }
 
@@ -112,14 +106,18 @@ async fn restarts_after_external_kill() {
     let (service, shutdown_tx) = start_service(&fake, port).await;
 
     let first_pid = service.pid().expect("first pid");
-    let pid = Pid::from_raw(first_pid as i32).expect("nonzero pid");
+    let pid = i32::try_from(first_pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .expect("valid pid");
     kill_process(pid, Signal::KILL).expect("SIGKILL on test child");
 
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        if Instant::now() >= deadline {
-            panic!("supervisor did not restart llama-server within the deadline");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "supervisor did not restart llama-server within the deadline"
+        );
         if let Some(pid) = service.pid()
             && pid != first_pid
             && service.is_ready()
@@ -141,12 +139,16 @@ async fn enters_degraded_after_five_failures() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let start_at = Instant::now();
-    let result = LlamaService::start(server_spec(&fake, port), model_spec(), shutdown_rx).await;
+    let result = ChildServer::start(
+        LlamaServerSpec::new(server_spec(&fake, port), model_spec()),
+        shutdown_rx,
+    )
+    .await;
     let elapsed = start_at.elapsed();
 
-    let err = result.err().expect("start should fail");
+    let err = result.expect_err("start should fail");
     assert!(
-        matches!(err, LlamaServerError::StartupFailed { attempts: 5 }),
+        matches!(err, ChildServerError::StartupFailed { attempts: 5, .. }),
         "{err:?}"
     );
     assert!(
@@ -173,12 +175,16 @@ async fn respects_shutdown_during_backoff() {
     });
 
     let start_at = Instant::now();
-    let result = LlamaService::start(server_spec(&fake, port), model_spec(), shutdown_rx).await;
+    let result = ChildServer::start(
+        LlamaServerSpec::new(server_spec(&fake, port), model_spec()),
+        shutdown_rx,
+    )
+    .await;
     let elapsed = start_at.elapsed();
 
-    let err = result.err().expect("start should fail once shut down");
+    let err = result.expect_err("start should fail once shut down");
     assert!(
-        matches!(err, LlamaServerError::ShutdownDuringHealth),
+        matches!(err, ChildServerError::ShutdownDuringHealth),
         "{err:?}"
     );
     assert!(
@@ -202,14 +208,16 @@ async fn health_from_a_squatter_on_the_port_is_not_ready() {
         let _ = flip_tx.send(true);
     });
 
-    let result = LlamaService::start(server_spec(&fake, port), model_spec(), shutdown_rx).await;
+    let result = ChildServer::start(
+        LlamaServerSpec::new(server_spec(&fake, port), model_spec()),
+        shutdown_rx,
+    )
+    .await;
     squatter_task.abort();
 
-    let err = result
-        .err()
-        .expect("a 200 from a foreign listener must not count as ready");
+    let err = result.expect_err("a 200 from a foreign listener must not count as ready");
     assert!(
-        matches!(err, LlamaServerError::ShutdownDuringHealth),
+        matches!(err, ChildServerError::ShutdownDuringHealth),
         "{err:?}"
     );
 }

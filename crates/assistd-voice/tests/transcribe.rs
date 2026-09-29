@@ -6,7 +6,6 @@
 #![cfg(feature = "test-support")]
 
 use std::path::{Path, PathBuf};
-use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use assistd_voice::{Transcriber, TranscriptionError, WhisperTranscriber};
@@ -16,18 +15,8 @@ const VAD_MODEL_ID: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
 const SPEECH_URL: &str =
     "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav";
 
-static TRACING_INIT: Once = Once::new();
-
 fn init_tracing() {
-    TRACING_INIT.call_once(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .with_test_writer()
-            .try_init();
-    });
+    assistd_utils::tracing_init::init_test_tracing("info");
 }
 
 async fn fetch_to(path: &Path, url: &str) {
@@ -120,8 +109,7 @@ async fn transcribes_clear_english_speech() {
     );
     assert!(
         elapsed < Duration::from_secs(60),
-        "transcription took {:?}: latency regression",
-        elapsed
+        "transcription took {elapsed:?}: latency regression"
     );
 }
 

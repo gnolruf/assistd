@@ -13,7 +13,7 @@ use assistd_wm::SwayBackend;
 use assistd_wm::{NoWindowManager, WindowManager, WmHandle};
 use tokio::sync::watch;
 
-pub struct WmBackend {
+pub(crate) struct WmBackend {
     pub manager: Arc<dyn WindowManager>,
     pub handle: Option<WmHandle>,
 }
@@ -29,7 +29,10 @@ impl WmBackend {
 
 /// Start the configured (or detected) compositor backend, disconnected
 /// when none is available.
-pub async fn start_backend(config: &Config, shutdown_rx: watch::Receiver<bool>) -> WmBackend {
+pub(crate) async fn start_backend(
+    config: &Config,
+    shutdown_rx: watch::Receiver<bool>,
+) -> WmBackend {
     connect(
         resolve_compositor(config.compositor.compositor_type),
         shutdown_rx,

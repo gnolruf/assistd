@@ -12,11 +12,15 @@ use tokio::sync::{RwLock, watch};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, info, warn};
 
-use crate::backoff::{RESTART_WINDOW, RestartDecision, RestartPolicy, UNHEALTHY_RETRY_INTERVAL};
+use assistd_utils::backoff::{RESTART_WINDOW, RestartDecision, RestartPolicy};
+
 use crate::error::McpError;
 use crate::sse::{SseConfig, SseLifeline, SseMcpClient};
 use crate::stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
 use crate::{McpClient, ToolResult, ToolSchema};
+
+/// Spawn cadence once either restart cap is hit.
+const UNHEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Health published by the supervisor on every state change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,8 +28,7 @@ pub enum HealthState {
     Healthy,
     /// The transport died and a restart is pending.
     Restarting,
-    /// A restart cap was hit; restarts continue at the slow
-    /// [`UNHEALTHY_RETRY_INTERVAL`] cadence.
+    /// A restart cap was hit; restarts continue every five minutes.
     Unhealthy,
 }
 
@@ -39,6 +42,7 @@ pub enum TransportConfig {
 /// Stable handle for a single MCP server; [`Self::client`] survives
 /// transport restarts. Dropping it without [`Self::shutdown`] aborts the
 /// supervisor and kills the live transport.
+#[derive(Debug)]
 pub struct McpServerHandle {
     pub name: String,
     switch: Arc<SwitchingClient>,
@@ -110,6 +114,7 @@ impl McpServerHandle {
 
 /// [`McpClient`] that forwards to whichever transport is live, or
 /// answers [`McpError::ServerDown`] between transports.
+#[derive(Debug)]
 pub struct SwitchingClient {
     inner: RwLock<Option<Arc<dyn McpClient>>>,
 }
@@ -218,7 +223,7 @@ impl Supervisor {
 
             let delay = self.restart_delay();
             tokio::select! {
-                _ = tokio::time::sleep(delay) => {}
+                () = tokio::time::sleep(delay) => {}
                 _ = self.shutdown_requested() => return,
             }
 
@@ -229,7 +234,7 @@ impl Supervisor {
     /// Wait for `lifeline` to end; `Break` means shutdown was requested.
     async fn supervise_session(&mut self, mut lifeline: Lifeline) -> ControlFlow<()> {
         tokio::select! {
-            _ = lifeline.wait() => {
+            () = lifeline.wait() => {
                 let ran_for = self.session_start.elapsed();
                 warn!(
                     target: "assistd::mcp",
@@ -349,6 +354,7 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug)]
     struct FakeClient {
         invocations: Arc<Mutex<u32>>,
     }

@@ -20,13 +20,13 @@ fn id(n: u64) -> WindowId {
 fn ipc_err(msg: &str) -> WmError {
     WmError::Ipc {
         op: "stub",
-        source: std::io::Error::other(msg.to_string()).into(),
+        source: io::Error::other(msg.to_string()).into(),
     }
 }
 
 /// [`WindowManager`] fixture recording every mutating call; `error` makes
 /// every operation fail with that message.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StubWm {
     connected: bool,
     windows: Vec<Window>,
@@ -124,7 +124,7 @@ impl WindowManager for StubWm {
 async fn run_wm(wm: Arc<dyn WindowManager>, args: &[&str]) -> CommandOutput {
     WmCommand::for_test(wm)
         .run(CommandInput {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
         })
         .await
@@ -339,7 +339,7 @@ fn rm_rf_is_destructive(gate: Arc<dyn ConfirmationGate>) -> WmCommand {
 
 async fn run_open(cmd: &WmCommand, args: &[&str]) -> CommandOutput {
     let mut argv = vec!["open".to_string()];
-    argv.extend(args.iter().map(|s| s.to_string()));
+    argv.extend(args.iter().map(ToString::to_string));
     cmd.run(CommandInput {
         args: argv,
         stdin: None,

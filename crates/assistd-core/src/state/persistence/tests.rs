@@ -19,6 +19,7 @@ use crate::state::subsystems::Subsystems;
 /// Records the order writes arrive in, and makes each write finish
 /// faster than the one before it. Unchained, that inverts the order
 /// the daemon queued the messages in.
+#[derive(Debug)]
 struct SlowingStore {
     arrivals: Mutex<Vec<String>>,
     remaining_delay_ms: Mutex<u64>,

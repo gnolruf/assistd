@@ -11,7 +11,7 @@ use ratatui_image::protocol::StatefulProtocol;
 use super::markdown::render_markdown;
 
 /// Rows an inline thumbnail reserves.
-pub const THUMBNAIL_ROWS: u16 = 8;
+pub(super) const THUMBNAIL_ROWS: u16 = 8;
 /// Body-line count above which a new tool block starts collapsed.
 const COLLAPSE_THRESHOLD: usize = 20;
 /// Leading body lines kept visible while collapsed; stderr lines stay
@@ -21,7 +21,7 @@ const COLLAPSED_HEAD_LINES: usize = 10;
 /// One tool invocation: command, output as the daemon delivered it
 /// (already truncated, with its banner and footer), exit status, timing.
 #[derive(Debug, Clone)]
-pub struct ToolBlock {
+pub(super) struct ToolBlock {
     pub command: String,
     pub output: String,
     pub exit_code: i32,
@@ -29,7 +29,7 @@ pub struct ToolBlock {
     pub expanded: bool,
 }
 
-pub struct ThumbnailItem {
+pub(super) struct ThumbnailItem {
     pub name: String,
     pub protocol: StatefulProtocol,
 }
@@ -37,7 +37,7 @@ pub struct ThumbnailItem {
 /// One reasoning phase, shown as an expandable block that auto-collapses
 /// when it finishes.
 #[derive(Debug, Clone)]
-pub struct ThinkingBlock {
+pub(super) struct ThinkingBlock {
     pub text: String,
     pub started_at: Instant,
     /// `None` while still receiving deltas.
@@ -54,7 +54,7 @@ enum OutputItem {
     Thinking(ThinkingBlock),
 }
 
-pub struct OutputPane {
+pub(super) struct OutputPane {
     items: Vec<OutputItem>,
     open_assistant: Option<usize>,
     scroll_offset: usize,
@@ -71,7 +71,7 @@ impl Default for OutputPane {
 }
 
 impl OutputPane {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             items: Vec::new(),
             open_assistant: None,
@@ -81,12 +81,12 @@ impl OutputPane {
         }
     }
 
-    pub fn set_verbose(&mut self, verbose: bool) {
+    pub(super) fn set_verbose(&mut self, verbose: bool) {
         self.verbose = verbose;
     }
 
     /// Append a `> `-prefixed prompt line and a blank separator.
-    pub fn push_user(&mut self, text: &str) {
+    pub(super) fn push_user(&mut self, text: &str) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
             format!("> {text}"),
@@ -96,7 +96,7 @@ impl OutputPane {
     }
 
     /// [`Self::push_user`] with a trailing 📎 tag naming the attachments.
-    pub fn push_user_with_attachments(&mut self, text: &str, names: &[String]) {
+    pub(super) fn push_user_with_attachments(&mut self, text: &str, names: &[String]) {
         self.close_open_assistant();
         let tag = if names.len() == 1 {
             format!("  📎 {}", names[0])
@@ -110,7 +110,7 @@ impl OutputPane {
         self.items.push(OutputItem::Text(Line::from("")));
     }
 
-    pub fn push_info(&mut self, text: &str) {
+    pub(super) fn push_info(&mut self, text: &str) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
             text.to_string(),
@@ -119,7 +119,7 @@ impl OutputPane {
     }
 
     /// Open a streaming assistant block for [`Self::append_assistant`].
-    pub fn begin_assistant(&mut self) {
+    pub(super) fn begin_assistant(&mut self) {
         self.close_open_assistant();
         self.items.push(OutputItem::Assistant(String::new()));
         self.open_assistant = Some(self.items.len() - 1);
@@ -127,7 +127,7 @@ impl OutputPane {
 
     /// Extend the open reply's markdown; the block re-renders on the next
     /// wrap so formatting settles as the closing delimiters arrive.
-    pub fn append_assistant(&mut self, delta: &str) {
+    pub(super) fn append_assistant(&mut self, delta: &str) {
         let idx = match self.open_assistant {
             Some(idx) => idx,
             None => {
@@ -141,7 +141,7 @@ impl OutputPane {
         }
     }
 
-    pub fn finish_assistant(&mut self) {
+    pub(super) fn finish_assistant(&mut self) {
         if self.open_assistant.is_none() {
             return;
         }
@@ -149,7 +149,7 @@ impl OutputPane {
         self.items.push(OutputItem::Text(Line::from("")));
     }
 
-    pub fn push_error(&mut self, msg: &str) {
+    pub(super) fn push_error(&mut self, msg: &str) {
         self.close_open_assistant();
         self.items.push(OutputItem::Text(single_span_line(
             format!("!! {msg}"),
@@ -159,7 +159,7 @@ impl OutputPane {
 
     /// Blocks whose body exceeds [`COLLAPSE_THRESHOLD`] lines start
     /// collapsed.
-    pub fn push_tool_block(
+    pub(super) fn push_tool_block(
         &mut self,
         command: String,
         output: String,
@@ -178,7 +178,7 @@ impl OutputPane {
     }
 
     /// Toggle the most recent tool or thinking block.
-    pub fn toggle_last_expandable(&mut self) -> bool {
+    pub(super) fn toggle_last_expandable(&mut self) -> bool {
         for (idx, item) in self.items.iter_mut().enumerate().rev() {
             let expanded = match item {
                 OutputItem::Tool(b) => &mut b.expanded,
@@ -195,7 +195,7 @@ impl OutputPane {
     }
 
     /// Open a collapsed thinking block.
-    pub fn begin_thinking(&mut self) {
+    pub(super) fn begin_thinking(&mut self) {
         self.close_open_assistant();
         self.items.push(OutputItem::Thinking(ThinkingBlock {
             text: String::new(),
@@ -207,7 +207,7 @@ impl OutputPane {
 
     /// Append to the live thinking block, opening one if the trailing
     /// item is not a live block.
-    pub fn append_thinking(&mut self, delta: &str) {
+    pub(super) fn append_thinking(&mut self, delta: &str) {
         let needs_new = !matches!(
             self.items.last(),
             Some(OutputItem::Thinking(t)) if t.ended_at.is_none()
@@ -223,7 +223,7 @@ impl OutputPane {
 
     /// Stamp and collapse the live thinking block. No-op when none is
     /// live.
-    pub fn finish_thinking(&mut self) {
+    pub(super) fn finish_thinking(&mut self) {
         for (idx, item) in self.items.iter_mut().enumerate().rev() {
             if let OutputItem::Thinking(t) = item {
                 if t.ended_at.is_none() {
@@ -237,14 +237,14 @@ impl OutputPane {
     }
 
     /// Whole seconds the live thinking block has run, if any.
-    pub fn live_thinking_seconds(&self) -> Option<u64> {
+    pub(super) fn live_thinking_seconds(&self) -> Option<u64> {
         self.live_thinking()
             .map(|(_, t)| t.started_at.elapsed().as_secs())
     }
 
     /// Rewrap the live thinking block on the next render so its
     /// elapsed-time header advances. No-op when none is live.
-    pub fn refresh_live_thinking(&mut self) {
+    pub(super) fn refresh_live_thinking(&mut self) {
         if let Some((idx, _)) = self.live_thinking() {
             self.wrap.invalidate(idx);
         }
@@ -261,7 +261,7 @@ impl OutputPane {
             })
     }
 
-    pub fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.items.clear();
         self.wrap.truncate(0);
         self.open_assistant = None;
@@ -270,7 +270,7 @@ impl OutputPane {
 
     /// Drop everything from the most recent user prompt onward. Returns
     /// the number of items removed.
-    pub fn pop_last_user_exchange(&mut self) -> usize {
+    pub(super) fn pop_last_user_exchange(&mut self) -> usize {
         let Some(idx) = self.items.iter().rposition(|item| {
             matches!(
                 item,
@@ -287,37 +287,37 @@ impl OutputPane {
         removed
     }
 
-    pub fn scroll_page_up(&mut self, viewport_height: u16) {
+    pub(super) fn scroll_page_up(&mut self, viewport_height: u16) {
         let step = usize::from((viewport_height / 2).max(1));
         self.scroll_offset = self.scroll_offset.saturating_add(step);
     }
 
-    pub fn scroll_page_down(&mut self, viewport_height: u16) {
+    pub(super) fn scroll_page_down(&mut self, viewport_height: u16) {
         let step = usize::from((viewport_height / 2).max(1));
         self.scroll_offset = self.scroll_offset.saturating_sub(step);
     }
 
-    pub fn scroll_lines_up(&mut self, lines: u16) {
+    pub(super) fn scroll_lines_up(&mut self, lines: u16) {
         self.scroll_offset = self.scroll_offset.saturating_add(usize::from(lines.max(1)));
     }
 
-    pub fn scroll_lines_down(&mut self, lines: u16) {
+    pub(super) fn scroll_lines_down(&mut self, lines: u16) {
         self.scroll_offset = self.scroll_offset.saturating_sub(usize::from(lines.max(1)));
     }
 
-    pub fn reset_scroll(&mut self) {
+    pub(super) fn reset_scroll(&mut self) {
         self.scroll_offset = 0;
     }
 
     /// Offset in wrapped lines; 0 is pinned to the bottom.
-    pub fn scroll_offset(&self) -> usize {
+    pub(super) fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
 
     /// The wrapped lines inside a `height`-row viewport and the index of
     /// the first of them in the whole wrapped transcript. Clamps the
     /// scroll offset to the wrapped total.
-    pub fn render_view(&mut self, width: u16, height: u16) -> (&[Line<'static>], usize) {
+    pub(super) fn render_view(&mut self, width: u16, height: u16) -> (&[Line<'static>], usize) {
         self.sync_wrap(width);
         let lines = &self.wrap.lines;
         let height = usize::from(height);
@@ -348,7 +348,7 @@ impl OutputPane {
     }
 
     /// Reserve [`THUMBNAIL_ROWS`] rows for the renderer to draw over.
-    pub fn push_thumbnail(&mut self, name: String, protocol: StatefulProtocol) {
+    pub(super) fn push_thumbnail(&mut self, name: String, protocol: StatefulProtocol) {
         self.close_open_assistant();
         self.items
             .push(OutputItem::Thumbnail(Box::new(ThumbnailItem {
@@ -359,7 +359,7 @@ impl OutputPane {
 
     /// Where each thumbnail's reserved rows sit in the wrapped output that
     /// [`Self::render_view`] returns for the same `width`.
-    pub fn thumbnail_layout(&mut self, width: u16) -> Vec<ThumbnailSlot> {
+    pub(super) fn thumbnail_layout(&mut self, width: u16) -> Vec<ThumbnailSlot> {
         self.sync_wrap(width);
         self.wrap
             .thumbnails
@@ -376,7 +376,7 @@ impl OutputPane {
     }
 
     /// `None` when the item at `idx` is not a thumbnail.
-    pub fn thumbnail_protocol_mut(&mut self, idx: usize) -> Option<&mut StatefulProtocol> {
+    pub(super) fn thumbnail_protocol_mut(&mut self, idx: usize) -> Option<&mut StatefulProtocol> {
         match self.items.get_mut(idx)? {
             OutputItem::Thumbnail(t) => Some(&mut t.protocol),
             _ => None,
@@ -385,7 +385,7 @@ impl OutputPane {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ThumbnailSlot {
+pub(super) struct ThumbnailSlot {
     pub item_idx: usize,
     /// First row of the reserved area in the wrapped output.
     pub start_row: usize,

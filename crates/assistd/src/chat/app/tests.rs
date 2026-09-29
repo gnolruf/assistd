@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -110,8 +110,8 @@ fn status(event: Event) -> ChatEvent {
 /// Accept one dialog connection, read its request line, then stream
 /// `events` back after a pause in which the query driver sees its writer
 /// channel close with nothing readable.
-async fn mock_daemon(socket: PathBuf, events: Vec<Event>) -> JoinHandle<()> {
-    let listener = UnixListener::bind(&socket).unwrap();
+fn mock_daemon(socket: &Path, events: Vec<Event>) -> JoinHandle<()> {
+    let listener = UnixListener::bind(socket).unwrap();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
@@ -252,7 +252,7 @@ fn a_transcript_is_dropped_when_its_turn_never_runs() {
 async fn query_driver_outlives_its_writer_channel() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("mock.sock");
-    let server = mock_daemon(socket.clone(), vec![delta("hi"), done()]).await;
+    let server = mock_daemon(&socket, vec![delta("hi"), done()]);
 
     let (mut app, mut rx) = test_app_at(socket, true);
     app.spawn_query("hi".into(), Vec::new());
@@ -260,10 +260,12 @@ async fn query_driver_outlives_its_writer_channel() {
 
     let mut terminal = false;
     while !terminal {
-        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
-            Ok(Some(ChatEvent::Wire { event, .. })) => terminal = event.is_terminal(),
-            Ok(other) => panic!("unexpected chat event: {other:?}"),
-            Err(_) => panic!("query driver stalled once the writer channel closed"),
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("query driver stalled once the writer channel closed")
+        {
+            Some(ChatEvent::Wire { event, .. }) => terminal = event.is_terminal(),
+            other => panic!("unexpected chat event: {other:?}"),
         }
     }
     server.await.unwrap();
@@ -324,7 +326,12 @@ fn enter_while_generating_sets_notice() {
 #[test]
 fn on_tick_clears_stale_notice() {
     let (mut app, _rx) = test_app();
-    app.notice = Some(("old".into(), Instant::now() - Duration::from_secs(10)));
+    app.notice = Some((
+        "old".into(),
+        Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("uptime exceeds 10s"),
+    ));
     app.on_tick();
     assert!(app.notice().is_none());
 }
@@ -356,7 +363,9 @@ fn presence_event_updates_state() {
 
 fn arm_modal(app: &mut App) {
     if let Some(modal) = app.modal.as_mut() {
-        modal.opened_at = Instant::now() - CONFIRM_ARM_DELAY;
+        modal.opened_at = Instant::now()
+            .checked_sub(CONFIRM_ARM_DELAY)
+            .expect("uptime exceeds the arm delay");
     }
 }
 

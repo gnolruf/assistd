@@ -16,6 +16,7 @@ const ABBREVIATIONS: &[&str] = &[
 /// Boundaries, highest priority first: `\n\n`; a `\n- `/`\n* ` bullet; `[.!?]`
 /// plus whitespace and an uppercase letter, digit, or newline (abbreviations and
 /// decimals excluded); the `max_len` cap. A terminator at the buffer's end waits for context.
+#[derive(Debug)]
 pub struct SentenceBuffer {
     buf: String,
     in_code_fence: bool,
@@ -238,21 +239,13 @@ fn length_cutoff(buf: &str, max_len: usize) -> Option<usize> {
     if buf.len() < max_len {
         return None;
     }
-    let window = floor_char_boundary(buf, max_len);
+    let window = buf.floor_char_boundary(max_len);
     let cut = buf[..window]
         .char_indices()
         .rev()
         .find(|(_, c)| c.is_whitespace())
         .map_or(window, |(i, c)| i + c.len_utf8());
     Some(cut)
-}
-
-fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
-    idx = idx.min(s.len());
-    while !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
 }
 
 fn find_bullet_marker(buf: &str) -> Option<usize> {
@@ -325,12 +318,11 @@ fn strip_links(s: &str) -> String {
                 if consumed_paren {
                     out.push_str(&text);
                     continue;
-                } else {
-                    out.push('[');
-                    out.push_str(&text);
-                    out.push_str("](");
-                    continue;
                 }
+                out.push('[');
+                out.push_str(&text);
+                out.push_str("](");
+                continue;
             }
             out.push('[');
             out.push_str(&text);

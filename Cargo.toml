@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/assistd",
     "crates/assistd-config",
@@ -11,6 +11,7 @@ members = [
     "crates/assistd-memory",
     "crates/assistd-voice",
     "crates/assistd-tools",
+    "crates/assistd-utils",
     "crates/assistd-wm",
 ]
 default-members = ["crates/assistd"]
@@ -19,7 +20,7 @@ default-members = ["crates/assistd"]
 version = "1.1.0"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.92"
+rust-version = "1.98"
 
 [workspace.dependencies]
 assistd-config = { version = "1.1", path = "crates/assistd-config" }
@@ -31,6 +32,7 @@ assistd-mcp    = { version = "1.1", path = "crates/assistd-mcp" }
 assistd-memory = { version = "1.1", path = "crates/assistd-memory" }
 assistd-voice  = { version = "1.1", path = "crates/assistd-voice" }
 assistd-tools  = { version = "1.1", path = "crates/assistd-tools" }
+assistd-utils  = { version = "1.1", path = "crates/assistd-utils", default-features = false }
 assistd-wm     = { version = "1.1", path = "crates/assistd-wm", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
@@ -55,6 +57,7 @@ tracing-appender = "0.2.5"
 textwrap = "0.16"
 pulldown-cmark = { version = "0.13", default-features = false }
 nvml-wrapper = "0.13"
+num-traits = "0.2.19"
 global-hotkey = "0.8"
 regex = "1"
 glob = "0.3"
@@ -90,10 +93,54 @@ landlock = "0.4.7"
 [workspace.lints.rust]
 unsafe_code = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
+meta_variable_misuse = "warn"
+missing_debug_implementations = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unit_bindings = "warn"
+unreachable_pub = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+allow_attributes_without_reason = "warn"
+assigning_clones = "warn"
+bool_to_int_with_if = "warn"
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
 dbg_macro = "deny"
+doc_markdown = "warn"
+float_cmp = "warn"
+ignored_unit_patterns = "warn"
+large_futures = "warn"
+manual_assert = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+match_wild_err_arm = "warn"
+match_wildcard_for_single_variants = "warn"
+mod_module_files = "warn"
+needless_pass_by_value = "warn"
+needless_raw_string_hashes = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+redundant_closure_for_method_calls = "warn"
+redundant_else = "warn"
+ref_option = "warn"
+semicolon_if_nothing_returned = "warn"
+todo = "warn"
+too_many_lines = "warn"
+trivially_copy_pass_by_ref = "warn"
+unchecked_time_subtraction = "warn"
+undocumented_unsafe_blocks = "warn"
+uninlined_format_args = "warn"
+unnecessary_literal_bound = "warn"
+unnested_or_patterns = "warn"
+unused_async = "warn"
+used_underscore_binding = "warn"
 
 [profile.release]
 lto = "thin"

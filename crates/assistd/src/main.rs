@@ -5,52 +5,23 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+#[cfg(feature = "client")]
+use client::{listen, memory, presence, ptt, query, voice_ctl};
+
 #[cfg(feature = "chat")]
 mod chat;
+#[cfg(feature = "client")]
+mod client;
 #[cfg(feature = "daemon")]
 mod daemon;
-#[cfg(feature = "daemon")]
-mod embed_init;
-#[cfg(feature = "daemon")]
-mod gpu_monitor;
 #[cfg(any(feature = "daemon", feature = "chat"))]
 mod hotkey;
 #[cfg(any(feature = "daemon", feature = "chat"))]
-mod idle_monitor;
-#[cfg(feature = "client")]
-mod ipc_helper;
-#[cfg(any(feature = "daemon", feature = "chat"))]
 mod ipc_voice_proxy;
-#[cfg(feature = "client")]
-mod listen;
-#[cfg(feature = "daemon")]
-mod listen_dispatcher;
-#[cfg(feature = "daemon")]
-mod mcp_init;
-#[cfg(feature = "client")]
-mod memory_cli;
-#[cfg(feature = "daemon")]
-mod memory_init;
-#[cfg(feature = "client")]
-mod presence;
-#[cfg(feature = "client")]
-mod ptt;
-#[cfg(feature = "client")]
-mod query;
-#[cfg(feature = "client")]
-mod terminal_text;
 #[cfg(feature = "tray")]
 mod tray;
-#[cfg(feature = "client")]
-mod voice_ctl;
-#[cfg(feature = "daemon")]
-mod voice_init;
-#[cfg(feature = "daemon")]
-mod voice_probe;
 #[cfg(any(feature = "daemon", feature = "tray-popup"))]
 mod wm_backend;
-#[cfg(feature = "daemon")]
-mod wm_init;
 
 /// How long exit waits on `spawn_blocking` work (e.g. a Whisper model
 /// load abandoned by a shutdown during startup) before leaving it behind.
@@ -151,7 +122,7 @@ enum Commands {
     /// history, save / load / list / forget / delete key-value
     /// memories.
     #[cfg(feature = "client")]
-    Memory(memory_cli::MemoryArgs),
+    Memory(memory::MemoryArgs),
 }
 
 fn main() -> Result<()> {
@@ -201,6 +172,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
         #[cfg(feature = "tray")]
         Commands::Tray(args) => tray::run(args).await,
         #[cfg(feature = "client")]
-        Commands::Memory(args) => memory_cli::run(args).await,
+        Commands::Memory(args) => memory::run(args).await,
     }
 }

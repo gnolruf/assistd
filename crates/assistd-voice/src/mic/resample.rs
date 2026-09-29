@@ -1,6 +1,7 @@
 //! Chunked native-rate to 16 kHz resampling shared by the push-to-talk
 //! and continuous-listen consumers.
 
+use num_traits::ToPrimitive;
 use ringbuf::HeapCons;
 use ringbuf::traits::Consumer;
 use rubato::audioadapter_buffers::direct::SequentialSlice;
@@ -20,7 +21,7 @@ pub(crate) struct ChunkResampler {
 }
 
 impl ChunkResampler {
-    pub fn new(native_rate: u32) -> Result<Self, AudioCaptureError> {
+    pub(crate) fn new(native_rate: u32) -> Result<Self, AudioCaptureError> {
         let resampler = if native_rate == TARGET_SAMPLE_RATE {
             None
         } else {
@@ -49,7 +50,7 @@ impl ChunkResampler {
 
     /// Pull up to one chunk from `consumer` at 16 kHz; `None` when the ring is
     /// empty. A partial chunk is zero-padded so an utterance's tail is kept.
-    pub fn pull(
+    pub(crate) fn pull(
         &mut self,
         consumer: &mut HeapCons<f32>,
     ) -> Result<Option<&[f32]>, AudioCaptureError> {
@@ -76,7 +77,9 @@ impl ChunkResampler {
 
 #[inline]
 pub(crate) fn f32_to_i16(sample: f32) -> i16 {
-    (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
+    (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX))
+        .to_i16()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

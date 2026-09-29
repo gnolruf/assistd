@@ -24,7 +24,7 @@ pub(super) struct Word {
 
 impl Word {
     /// A word whose text is known exactly, as in an argv.
-    pub fn literal(text: &str) -> Self {
+    pub(super) fn literal(text: &str) -> Self {
         Self {
             text: text.to_string(),
             ..Self::default()
@@ -58,7 +58,10 @@ pub(super) struct Script {
 
 impl Script {
     /// The inputs the script feeds `command`'s stdin.
-    pub fn inputs_of<'s>(&'s self, command: &'s SimpleCommand) -> impl Iterator<Item = &'s str> {
+    pub(super) fn inputs_of<'s>(
+        &'s self,
+        command: &'s SimpleCommand,
+    ) -> impl Iterator<Item = &'s str> {
         command.inputs.iter().map(|&i| self.inputs[i].as_str())
     }
 }

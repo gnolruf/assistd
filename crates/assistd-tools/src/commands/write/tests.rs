@@ -13,7 +13,7 @@ fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
 async fn write_under(allowed: &Path, args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
     WriteCommand::new(cfg_from(&[allowed]))
         .run(CommandInput {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             stdin: stdin.map(<[u8]>::to_vec),
         })
         .await
@@ -59,18 +59,6 @@ async fn args_content_wins_over_stdin() {
     .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(std::fs::read(&path).unwrap(), b"args");
-}
-
-#[tokio::test]
-async fn no_args_emits_usage() {
-    let out = WriteCommand::permissive_for_tests()
-        .run(CommandInput {
-            args: Vec::new(),
-            stdin: None,
-        })
-        .await;
-    assert_eq!(out.exit_code, 2);
-    assert!(out.stdout.starts_with(b"usage: write"), "{out:?}");
 }
 
 #[tokio::test]

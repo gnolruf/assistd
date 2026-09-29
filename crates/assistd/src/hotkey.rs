@@ -90,7 +90,7 @@ impl Binding {
 
 /// Validate every configured hotkey string. Empty strings are accepted
 /// and disable that hotkey.
-pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
+pub(crate) fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
     for binding in BINDINGS {
         if let Some(spec) = binding.spec(presence, voice) {
             HotKey::from_str(spec)
@@ -102,7 +102,7 @@ pub fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
 
 /// Targets the hotkey listener routes events to. A `None` handle leaves
 /// its hotkey unregistered.
-pub struct Subsystems {
+pub(crate) struct Subsystems {
     pub presence: Option<Arc<PresenceManager>>,
     pub voice: Arc<dyn VoiceInput>,
     pub listener: Option<Arc<dyn ContinuousListener>>,
@@ -111,7 +111,7 @@ pub struct Subsystems {
 
 /// Spawn the hotkey listener. `None` when no hotkey is configured, the
 /// session is pure Wayland, or registration failed.
-pub fn spawn_listener(
+pub(crate) fn spawn_listener(
     presence_cfg: &PresenceConfig,
     voice_cfg: &VoiceConfig,
     subsystems: Subsystems,
@@ -423,13 +423,13 @@ mod tests {
             ("presence.hotkey", |p, _| p.hotkey = GARBAGE.into()),
             ("voice.hotkey", |_, v| v.hotkey = GARBAGE.into()),
             ("voice.continuous.hotkey", |_, v| {
-                v.continuous.hotkey = GARBAGE.into()
+                v.continuous.hotkey = GARBAGE.into();
             }),
             ("voice.synthesis.toggle_hotkey", |_, v| {
-                v.synthesis.toggle_hotkey = GARBAGE.into()
+                v.synthesis.toggle_hotkey = GARBAGE.into();
             }),
             ("voice.synthesis.skip_hotkey", |_, v| {
-                v.synthesis.skip_hotkey = GARBAGE.into()
+                v.synthesis.skip_hotkey = GARBAGE.into();
             }),
         ];
         for (key, edit) in cases {

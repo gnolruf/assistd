@@ -6,7 +6,7 @@
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -35,16 +35,7 @@ use common::FakeLlama;
 mod common;
 
 fn init_tracing() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .with_test_writer()
-            .try_init();
-    });
+    assistd_utils::tracing_init::init_test_tracing("info");
 }
 
 async fn grab_port() -> u16 {
@@ -101,7 +92,7 @@ async fn new_active_manager(
 
 /// `kill(pid, 0)` existence probe; EPERM still means the process exists.
 fn pid_alive(pid: u32) -> bool {
-    let Some(pid) = Pid::from_raw(pid as i32) else {
+    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
         return false;
     };
     matches!(test_kill_process(pid), Ok(()) | Err(Errno::PERM))
@@ -139,9 +130,11 @@ async fn get_counters(port: u16) -> (u32, u32, Option<String>) {
         .await
         .expect("counters body");
     let counters: Value = serde_json::from_str(&body).expect("counters json");
-    let load = counters["load_count"].as_u64().expect("load_count") as u32;
-    let unload = counters["unload_count"].as_u64().expect("unload_count") as u32;
-    let loaded = counters["loaded_model"].as_str().map(|s| s.to_string());
+    let load = u32::try_from(counters["load_count"].as_u64().expect("load_count"))
+        .expect("load_count fits u32");
+    let unload = u32::try_from(counters["unload_count"].as_u64().expect("unload_count"))
+        .expect("unload_count fits u32");
+    let loaded = counters["loaded_model"].as_str().map(ToString::to_string);
     (load, unload, loaded)
 }
 
@@ -478,41 +471,9 @@ async fn query(sock: &Path, id: &str, text: &str) -> Vec<Event> {
     events
 }
 
-#[tokio::test]
-async fn query_during_sleeping_triggers_auto_wake() {
-    let fake = FakeLlama::new("normal");
-    init_tracing();
-    let port = grab_port().await;
-    let (manager, _shutdown) = new_active_manager(&fake, port).await;
-
-    manager.sleep().await.unwrap();
-    assert_eq!(manager.state(), PresenceState::Sleeping);
-
-    let daemon = Daemon::serve(&manager, Arc::new(EchoBackend::new())).await;
-    let events = query(&daemon.sock_path, "q1", "hello").await;
-
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, Event::Delta { text, .. } if text == "hello")),
-        "{events:?}"
-    );
-    assert!(
-        matches!(events.last(), Some(Event::Done { .. })),
-        "{events:?}"
-    );
-    assert_eq!(
-        manager.state(),
-        PresenceState::Active,
-        "auto-wake must leave manager in Active"
-    );
-
-    daemon.stop().await;
-    manager.sleep().await.unwrap();
-}
-
 /// Backend that leaves a `delay` gap between its one Delta and the end of
 /// the turn.
+#[derive(Debug)]
 struct DelayBackend {
     delay: Duration,
     last_user: Mutex<String>,

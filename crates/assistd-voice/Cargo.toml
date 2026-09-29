@@ -12,6 +12,7 @@ whisper = [
     "dep:reqwest",
     "dep:nvml-wrapper",
     "dep:futures-util",
+    "dep:num-traits",
 ]
 # Requires `whisper` because `MicVoiceInput` wraps `WhisperTranscriber`.
 mic = ["whisper", "dep:cpal", "dep:ringbuf", "dep:rubato"]
@@ -41,11 +42,13 @@ assistd-ipc = { workspace = true, features = ["client"] }
 # Required unconditionally because `sentence` (built in every feature combination)
 # consumes the `CodeBlockMode` enum.
 assistd-config = { workspace = true }
+assistd-utils = { workspace = true }
 parking_lot = { workspace = true }
 
 whisper-rs = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["stream"] }
 nvml-wrapper = { workspace = true, optional = true }
+num-traits = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
 cpal = { workspace = true, optional = true }
@@ -61,6 +64,7 @@ which = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+assistd-utils = { workspace = true, features = ["tracing-init"] }
 assistd-llm = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }

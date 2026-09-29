@@ -1,0 +1,171 @@
+//! Voice subsystem wiring for the daemon.
+
+use std::sync::Arc;
+
+use assistd_core::{
+    Config, ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceManager,
+    VoiceInput, VoiceOutput,
+};
+use assistd_voice::{
+    CpuFallbackFactory, MicContinuousListener, MicVoiceInput, PiperVoiceOutput, QueueConfig,
+    QueuedTranscriber, Transcriber, VoiceOutputController, WhisperTranscriberBuilder,
+    build_cpu_fallback,
+};
+use tokio::sync::watch;
+use tracing::info;
+
+use super::voice_probe::PresenceGpuProbe;
+
+pub(super) struct VoiceSubsystem {
+    pub input: Arc<dyn VoiceInput>,
+    pub listener: Arc<dyn ContinuousListener>,
+    pub output: Arc<VoiceOutputController>,
+}
+
+/// Every handle degrades to a no-op when its feature is disabled or
+/// fails to initialise.
+pub(super) async fn init(config: &Config, presence: &Arc<PresenceManager>) -> VoiceSubsystem {
+    let output_inner = init_output(config).await;
+    let output = VoiceOutputController::new(output_inner, config.voice.synthesis.enabled);
+    let (input, listener) = init_input(config, presence, output.subscribe_speaking()).await;
+    VoiceSubsystem {
+        input,
+        listener,
+        output,
+    }
+}
+
+async fn init_input(
+    config: &Config,
+    presence: &Arc<PresenceManager>,
+    output_speaking: watch::Receiver<bool>,
+) -> (Arc<dyn VoiceInput>, Arc<dyn ContinuousListener>) {
+    if !config.voice.enabled {
+        info!("voice: disabled in config (voice.enabled = false)");
+        return disabled_input();
+    }
+
+    info!(
+        "voice: building mic input ({})",
+        config.voice.transcription.model
+    );
+    let primary = match WhisperTranscriberBuilder::from_config(&config.voice.transcription)
+        .build()
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("voice input failed to initialize: {e:#}; PTT commands will error");
+            return disabled_input();
+        }
+    };
+    let is_gpu = primary.is_gpu();
+    let transcriber = with_cpu_fallback(config, presence, Arc::new(primary), is_gpu);
+
+    let mic = MicVoiceInput::new(
+        transcriber.clone(),
+        config.voice.mic_device.clone(),
+        config.voice.max_recording_secs.get(),
+    );
+    let listener: Arc<dyn ContinuousListener> = if config.voice.continuous.enabled {
+        info!(
+            "voice.continuous: enabled (hotkey={:?}, start_on_launch={})",
+            config.voice.continuous.hotkey, config.voice.continuous.start_on_launch
+        );
+        warn_if_ungated_playback(config);
+        Arc::new(MicContinuousListener::new(
+            transcriber,
+            &config.voice,
+            output_speaking,
+        ))
+    } else {
+        info!("voice.continuous: disabled in config");
+        Arc::new(NoContinuousListener::new())
+    };
+    (Arc::new(mic), listener)
+}
+
+/// With the gate off and no echo cancellation, spoken replies come back
+/// through the mic as new queries.
+fn warn_if_ungated_playback(config: &Config) {
+    if config.voice.continuous.playback_gate || !config.voice.synthesis.enabled {
+        return;
+    }
+    tracing::warn!(
+        "voice.continuous.playback_gate = false with synthesis enabled: \
+         the mic stays open while replies are spoken; without an \
+         echo-cancelled mic source the daemon will answer its own speech \
+         (see docs/voice/echo-cancellation.md)"
+    );
+}
+
+fn disabled_input() -> (Arc<dyn VoiceInput>, Arc<dyn ContinuousListener>) {
+    (
+        Arc::new(NoVoiceInput::new()),
+        Arc::new(NoContinuousListener::new()),
+    )
+}
+
+/// Wrap a GPU transcriber so it falls back to CPU while the GPU is busy;
+/// CPU transcribers are returned unchanged.
+fn with_cpu_fallback(
+    config: &Config,
+    presence: &Arc<PresenceManager>,
+    primary: Arc<dyn Transcriber>,
+    is_gpu: bool,
+) -> Arc<dyn Transcriber> {
+    let queue_cfg = QueueConfig::default();
+    if !is_gpu {
+        info!("voice: CPU transcription active");
+        return primary;
+    }
+    if !queue_cfg.cpu_fallback_enabled {
+        info!("voice: GPU transcription active; CPU fallback disabled by config");
+        return primary;
+    }
+
+    let probe = Arc::new(PresenceGpuProbe::new(
+        presence.clone(),
+        config.sleep.gpu_allowlist.clone(),
+    ));
+    let cpu_cfg = config.voice.transcription.clone();
+    let cpu_factory: CpuFallbackFactory = Arc::new(move || {
+        let cfg = cpu_cfg.clone();
+        Box::pin(async move {
+            let fallback = build_cpu_fallback(&cfg, None).await?;
+            Ok(Arc::new(fallback) as Arc<dyn Transcriber>)
+        })
+    });
+    info!(
+        "voice: GPU transcription active; CPU fallback armed \
+             (gpu_busy_timeout_ms={})",
+        queue_cfg.gpu_busy_timeout_ms
+    );
+    Arc::new(QueuedTranscriber::new(
+        primary,
+        cpu_factory,
+        probe,
+        queue_cfg,
+    ))
+}
+
+async fn init_output(config: &Config) -> Arc<dyn VoiceOutput> {
+    if !config.voice.synthesis.enabled {
+        info!("voice.synthesis: disabled in config (voice.synthesis.enabled = false)");
+        return Arc::new(NoVoiceOutput) as Arc<dyn VoiceOutput>;
+    }
+    info!(
+        "voice.synthesis: starting Piper ({})",
+        config.voice.synthesis.voice
+    );
+    match PiperVoiceOutput::start(config.voice.synthesis.clone()).await {
+        Ok(p) => {
+            info!("voice.synthesis: Piper ready");
+            Arc::new(p) as Arc<dyn VoiceOutput>
+        }
+        Err(e) => {
+            tracing::warn!("voice.synthesis failed to initialize: {e:#}; speech output disabled");
+            Arc::new(NoVoiceOutput) as Arc<dyn VoiceOutput>
+        }
+    }
+}

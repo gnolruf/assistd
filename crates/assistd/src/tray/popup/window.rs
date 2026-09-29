@@ -15,7 +15,7 @@ use super::visibility::DriverInput;
 
 /// Run the popup's eframe loop on the calling thread until the state
 /// sender drops.
-pub fn run_gui_loop(
+pub(super) fn run_gui_loop(
     state_rx: watch::Receiver<PopupState>,
     event_tx: UnboundedSender<DriverInput>,
     app_id: &str,
@@ -47,7 +47,7 @@ pub fn run_gui_loop(
     )
 }
 
-/// The title mirrors `app_id`: egui-winit only sends app_id on Wayland, so
+/// The title mirrors `app_id`: egui-winit only sends `app_id` on Wayland, so
 /// on X11 the i3 backend matches `[title="..."]` instead.
 fn hidden_viewport(
     app_id: &str,

@@ -54,6 +54,7 @@ async fn no_window_manager_reports_disconnected_for_every_operation() {
 
 /// Implements only the required methods, so every default is
 /// observable.
+#[derive(Debug)]
 struct MinimalWm;
 
 #[async_trait]

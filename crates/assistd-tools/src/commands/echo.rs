@@ -4,6 +4,7 @@ use crate::command::{Command, CommandInput, CommandOutput};
 
 /// `echo [-ne] [ARGS...]`: write args joined by spaces, then a newline
 /// unless `-n` is given; `-e` interprets backslash escapes.
+#[derive(Debug)]
 pub struct EchoCommand;
 
 #[derive(Default)]
@@ -14,7 +15,7 @@ struct Flags {
 
 #[async_trait]
 impl Command for EchoCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "echo"
     }
 
@@ -111,7 +112,7 @@ mod tests {
     async fn run_echo(args: &[&str]) -> CommandOutput {
         EchoCommand
             .run(CommandInput {
-                args: args.iter().map(|s| s.to_string()).collect(),
+                args: args.iter().map(ToString::to_string).collect(),
                 stdin: None,
             })
             .await

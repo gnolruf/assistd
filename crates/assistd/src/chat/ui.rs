@@ -25,12 +25,12 @@ const THUMBNAIL_CAPTION_ROWS: u16 = 1;
 const THUMBNAIL_MAX_COLS: u16 = 32;
 const SESSION_TITLE_MAX_CHARS: usize = 32;
 
-pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let frame_area = frame.area();
     let input_height =
         compute_input_height(frame_area.width, frame_area.height, app.input.buffer());
     let suggestions = app.slash_suggestions();
-    let popup_height = (suggestions.len() as u16).min(SLASH_POPUP_MAX_ROWS);
+    let popup_height = saturating_u16(suggestions.len()).min(SLASH_POPUP_MAX_ROWS);
     let [output_area, popup_area, status_area, input_area] = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(popup_height),
@@ -90,7 +90,8 @@ fn render_modal_frame(
 
 fn render_branch_picker_modal(frame: &mut Frame<'_>, area: Rect, picker: &BranchPickerModal) {
     let width = (area.width.saturating_mul(4) / 5).clamp(50, 120);
-    let height = (picker.entries.len() as u16 + 4)
+    let height = saturating_u16(picker.entries.len())
+        .saturating_add(4)
         .min(area.height.saturating_sub(2))
         .max(6);
     let inner = render_modal_frame(
@@ -236,9 +237,9 @@ fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &Confirma
     let line_count = modal.request.script.split('\n').count();
     let width = (area.width.saturating_mul(3) / 5).clamp(40, 100);
     let body_rows = 3 + script.len();
-    let height = (body_rows + 3)
+    let height = saturating_u16(body_rows + 3)
         .max(6)
-        .min(area.height.saturating_sub(2) as usize) as u16;
+        .min(area.height.saturating_sub(2));
     let inner = render_modal_frame(
         frame,
         centered_rect(area, width, height),
@@ -328,7 +329,7 @@ fn render_thumbnails(
         if image_start < viewport_top || image_end > viewport_bottom {
             continue;
         }
-        let local_row = (image_start - viewport_top) as u16;
+        let local_row = saturating_u16(image_start - viewport_top);
         if local_row >= area.height {
             continue;
         }
@@ -549,7 +550,7 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let prompt_w = INPUT_PROMPT.chars().count() as u16;
+    let prompt_w = saturating_u16(INPUT_PROMPT.chars().count());
     let buf_chars: Vec<char> = app.input.buffer().chars().collect();
     let rows = wrap_input(&buf_chars, prompt_w, area.width);
 
@@ -568,11 +569,14 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 
     let (row_idx, col) = locate_cursor(&rows, app.input.cursor_col() as usize);
-    let mut cursor_x = col as u16;
+    let mut cursor_x = saturating_u16(col);
     if row_idx == 0 {
         cursor_x = cursor_x.saturating_add(prompt_w);
     }
-    let cy = (area.y + row_idx as u16).min(area.y + area.height.saturating_sub(1));
+    let cy = area
+        .y
+        .saturating_add(saturating_u16(row_idx))
+        .min(area.y + area.height.saturating_sub(1));
     let cx = (area.x + cursor_x).min(area.x + area.width.saturating_sub(1));
     frame.set_cursor_position(Position::new(cx, cy));
 }
@@ -581,9 +585,9 @@ fn compute_input_height(frame_width: u16, frame_height: u16, buffer: &str) -> u1
     if frame_width == 0 {
         return 1;
     }
-    let prompt_w = INPUT_PROMPT.chars().count() as u16;
+    let prompt_w = saturating_u16(INPUT_PROMPT.chars().count());
     let chars: Vec<char> = buffer.chars().collect();
-    let needed = wrap_input(&chars, prompt_w, frame_width).len() as u16;
+    let needed = saturating_u16(wrap_input(&chars, prompt_w, frame_width).len());
     let cap = frame_height.saturating_sub(4).max(1);
     needed.clamp(1, cap)
 }
@@ -647,6 +651,10 @@ fn locate_cursor(rows: &[(usize, usize)], cursor: usize) -> (usize, usize) {
     let last = rows.len().saturating_sub(1);
     let (s, e) = rows.get(last).copied().unwrap_or((0, 0));
     (last, cursor.saturating_sub(s).min(e - s))
+}
+
+fn saturating_u16(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ use crate::commands::collect_input;
 
 /// `sort [-fnr] [FILE]...`: sort the lines of the named files or stdin
 /// byte-wise (`LC_ALL=C`). Every emitted line is newline-terminated.
+#[derive(Debug)]
 pub struct SortCommand;
 
 #[derive(Default)]
@@ -16,7 +17,7 @@ struct Flags {
 
 #[async_trait]
 impl Command for SortCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "sort"
     }
 
@@ -123,7 +124,7 @@ mod tests {
     async fn run_sort(args: &[&str], stdin: &[u8]) -> CommandOutput {
         SortCommand
             .run(CommandInput {
-                args: args.iter().map(|s| s.to_string()).collect(),
+                args: args.iter().map(ToString::to_string).collect(),
                 stdin: Some(stdin.to_vec()),
             })
             .await

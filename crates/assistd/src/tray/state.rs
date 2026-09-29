@@ -6,7 +6,7 @@ use assistd_ipc::{Event, PresenceState};
 
 /// What the tray icon should currently display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrayState {
+pub(super) enum TrayState {
     /// The tray's own config file failed to load or validate.
     ConfigError,
     /// Daemon socket is unreachable.
@@ -22,7 +22,7 @@ pub enum TrayState {
 }
 
 #[derive(Debug, Clone)]
-pub struct TrayTracker {
+pub(super) struct TrayTracker {
     config_error: Option<String>,
     presence: PresenceState,
     listening: bool,
@@ -39,7 +39,7 @@ impl Default for TrayTracker {
 impl TrayTracker {
     /// A tracker that reports [`TrayState::ConfigError`] for as long as
     /// `config_error` is `Some`, regardless of daemon state.
-    pub fn new(config_error: Option<String>) -> Self {
+    pub(super) fn new(config_error: Option<String>) -> Self {
         Self {
             config_error,
             presence: PresenceState::Active,
@@ -50,7 +50,7 @@ impl TrayTracker {
     }
 
     /// Priority: config error, disconnected, generating, listening, presence.
-    pub fn current(&self) -> TrayState {
+    pub(super) fn current(&self) -> TrayState {
         if self.config_error.is_some() {
             return TrayState::ConfigError;
         }
@@ -69,20 +69,20 @@ impl TrayTracker {
         }
     }
 
-    pub fn presence(&self) -> PresenceState {
+    pub(super) fn presence(&self) -> PresenceState {
         self.presence
     }
 
-    pub fn connected(&self) -> bool {
+    pub(super) fn connected(&self) -> bool {
         self.connected
     }
 
-    pub fn config_error(&self) -> Option<&str> {
+    pub(super) fn config_error(&self) -> Option<&str> {
         self.config_error.as_deref()
     }
 
     /// Returns `true` when the resolved [`TrayState`] changed.
-    pub fn set_connected(&mut self) -> bool {
+    pub(super) fn set_connected(&mut self) -> bool {
         let before = self.current();
         self.connected = true;
         before != self.current()
@@ -90,7 +90,7 @@ impl TrayTracker {
 
     /// Also drops per-turn state. Returns `true` when the resolved
     /// [`TrayState`] changed.
-    pub fn set_disconnected(&mut self) -> bool {
+    pub(super) fn set_disconnected(&mut self) -> bool {
         let before = self.current();
         self.connected = false;
         self.in_flight.clear();
@@ -99,7 +99,7 @@ impl TrayTracker {
     }
 
     /// Returns `true` when the resolved [`TrayState`] changed.
-    pub fn ingest(&mut self, event: &Event) -> bool {
+    pub(super) fn ingest(&mut self, event: &Event) -> bool {
         let before = self.current();
         match event {
             Event::Delta { id, .. } | Event::ToolCall { id, .. } => {
@@ -122,7 +122,7 @@ impl TrayTracker {
 
 /// freedesktop icon-theme names present in every major theme, so no
 /// image assets ship.
-pub fn icon_name_for(state: TrayState) -> &'static str {
+pub(super) fn icon_name_for(state: TrayState) -> &'static str {
     match state {
         TrayState::ConfigError => "dialog-error",
         TrayState::Disconnected => "network-offline",
@@ -133,7 +133,7 @@ pub fn icon_name_for(state: TrayState) -> &'static str {
     }
 }
 
-pub fn tooltip_for(state: TrayState) -> &'static str {
+pub(super) fn tooltip_for(state: TrayState) -> &'static str {
     match state {
         TrayState::ConfigError => "assistd: config error",
         TrayState::Disconnected => "assistd: daemon offline",

@@ -96,7 +96,7 @@ impl App {
         self.spawn_query(text, attachments);
     }
 
-    pub fn spawn_resume_or_new(&mut self, recency_secs: u64) {
+    pub(crate) fn spawn_resume_or_new(&mut self, recency_secs: u64) {
         let req = Request::ResumeOrNew {
             id: Uuid::new_v4().to_string(),
             recency_secs,

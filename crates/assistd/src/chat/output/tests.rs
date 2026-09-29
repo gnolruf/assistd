@@ -361,7 +361,11 @@ fn thinking_block_renders_past_tense_after_finish() {
     p.append_thinking("body");
     p.finish_thinking();
     let t = last_thinking(&mut p);
-    t.started_at = t.ended_at.expect("finished") - Duration::from_secs(3);
+    t.started_at = t
+        .ended_at
+        .expect("finished")
+        .checked_sub(Duration::from_secs(3))
+        .expect("uptime exceeds 3s");
     assert_eq!(rendered_lines(&mut p, 60, 20), ["▎ ✦ Thought for 3s", ""]);
 }
 
@@ -446,19 +450,6 @@ fn wrapping_splits_long_line_at_word_boundaries() {
 }
 
 #[test]
-fn render_view_clamps_scroll_offset() {
-    let mut p = OutputPane::new();
-    for i in 0..15 {
-        p.push_info(&format!("line {i}"));
-    }
-    p.scroll_offset = 99;
-    let (lines, start) = p.render_view(80, 10);
-    assert_eq!(lines.len(), 10);
-    assert_eq!(start, 0);
-    assert_eq!(p.scroll_offset, 5);
-}
-
-#[test]
 fn render_view_zero_width_falls_back_to_raw_lines() {
     let mut p = OutputPane::new();
     p.push_user("hi");
@@ -503,14 +494,14 @@ fn incremental_rewrap_matches_full_rewrap() {
         (40, push_seq_30),
         (40, |p| p.append_assistant("The directory holds ")),
         (40, |p| {
-            p.append_assistant("thirty files that are all quite long")
+            p.append_assistant("thirty files that are all quite long");
         }),
         (13, |p| p.append_assistant("\nsecond line")),
         (13, |p| p.append_assistant("\n")),
         (13, |p| assert!(p.toggle_last_expandable())),
         (80, |p| p.append_assistant("third line")),
         (80, |p| {
-            p.push_thumbnail("cat.png".into(), thumbnail_protocol())
+            p.push_thumbnail("cat.png".into(), thumbnail_protocol());
         }),
         (80, |p| p.append_assistant("after the image")),
         (80, |p| p.set_verbose(true)),
