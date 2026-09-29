@@ -361,7 +361,11 @@ fn thinking_block_renders_past_tense_after_finish() {
     p.append_thinking("body");
     p.finish_thinking();
     let t = last_thinking(&mut p);
-    t.started_at = t.ended_at.expect("finished") - Duration::from_secs(3);
+    t.started_at = t
+        .ended_at
+        .expect("finished")
+        .checked_sub(Duration::from_secs(3))
+        .expect("uptime exceeds 3s");
     assert_eq!(rendered_lines(&mut p, 60, 20), ["▎ ✦ Thought for 3s", ""]);
 }
 

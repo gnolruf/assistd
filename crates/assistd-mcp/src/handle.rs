@@ -28,8 +28,7 @@ pub enum HealthState {
     Healthy,
     /// The transport died and a restart is pending.
     Restarting,
-    /// A restart cap was hit; restarts continue at the slow
-    /// [`UNHEALTHY_RETRY_INTERVAL`] cadence.
+    /// A restart cap was hit; restarts continue every five minutes.
     Unhealthy,
 }
 

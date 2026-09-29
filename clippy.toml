@@ -1,0 +1,2 @@
+# Functions past this many lines should be split into named steps.
+too-many-lines-threshold = 100

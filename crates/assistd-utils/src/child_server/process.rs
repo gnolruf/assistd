@@ -136,7 +136,10 @@ impl ChildProcess {
 /// Have the kernel SIGTERM the child when the daemon dies, even by SIGKILL.
 /// `pre_exec` is the only way to set PDEATHSIG on a spawned child.
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "std exposes no safe way to run code between fork and exec"
+)]
 fn set_parent_death_signal(cmd: &mut Command) {
     // SAFETY: the closure runs in the child between fork() and exec(). It
     // captures nothing and only issues the prctl(PR_SET_PDEATHSIG) syscall,

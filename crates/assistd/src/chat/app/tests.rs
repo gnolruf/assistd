@@ -324,7 +324,12 @@ fn enter_while_generating_sets_notice() {
 #[test]
 fn on_tick_clears_stale_notice() {
     let (mut app, _rx) = test_app();
-    app.notice = Some(("old".into(), Instant::now() - Duration::from_secs(10)));
+    app.notice = Some((
+        "old".into(),
+        Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("uptime exceeds 10s"),
+    ));
     app.on_tick();
     assert!(app.notice().is_none());
 }
@@ -356,7 +361,9 @@ fn presence_event_updates_state() {
 
 fn arm_modal(app: &mut App) {
     if let Some(modal) = app.modal.as_mut() {
-        modal.opened_at = Instant::now() - CONFIRM_ARM_DELAY;
+        modal.opened_at = Instant::now()
+            .checked_sub(CONFIRM_ARM_DELAY)
+            .expect("uptime exceeds the arm delay");
     }
 }
 

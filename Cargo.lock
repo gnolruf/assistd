@@ -222,7 +222,6 @@ dependencies = [
  "global-hotkey",
  "image",
  "ksni",
- "libc",
  "nvml-wrapper",
  "pulldown-cmark",
  "ratatui",
@@ -272,14 +271,12 @@ dependencies = [
  "libc",
  "parking_lot",
  "rustix 1.1.5",
- "serde",
  "serde_json",
  "shlex 2.0.1",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "toml",
  "tracing",
 ]
 

@@ -7,6 +7,15 @@ fn id() -> String {
 
 /// One of every [`Request`] variant with its exact wire form.
 fn request_cases() -> Vec<(Request, &'static str)> {
+    [
+        voice_and_presence_request_cases(),
+        memory_request_cases(),
+        session_request_cases(),
+    ]
+    .concat()
+}
+
+fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
             Request::query("r", "hi"),
@@ -75,6 +84,11 @@ fn request_cases() -> Vec<(Request, &'static str)> {
             Request::GetVoiceState { id: id() },
             r#"{"type":"get_voice_state","id":"r"}"#,
         ),
+    ]
+}
+
+fn memory_request_cases() -> Vec<(Request, &'static str)> {
+    vec![
         (
             Request::MemorySave {
                 id: id(),
@@ -131,6 +145,11 @@ fn request_cases() -> Vec<(Request, &'static str)> {
             Request::MemoryReindex { id: id() },
             r#"{"type":"memory_reindex","id":"r"}"#,
         ),
+    ]
+}
+
+fn session_request_cases() -> Vec<(Request, &'static str)> {
+    vec![
         (
             Request::ConfirmResponse {
                 id: id(),
@@ -261,6 +280,17 @@ fn request_optional_fields_default_when_absent() {
 /// One of every [`Event`] variant with its exact wire form and its
 /// broadcast kind.
 fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+    [
+        turn_event_cases(),
+        voice_and_presence_event_cases(),
+        memory_event_cases(),
+        confirmation_and_status_event_cases(),
+        session_event_cases(),
+    ]
+    .concat()
+}
+
+fn turn_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
     vec![
         (
             Event::Delta {
@@ -296,6 +326,32 @@ fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
             r#"{"type":"tool_result","id":"r","name":"echo","result":"hi"}"#,
             Some(EventKind::ToolResult),
         ),
+        (
+            Event::Error {
+                id: id(),
+                message: "boom".into(),
+            },
+            r#"{"type":"error","id":"r","message":"boom"}"#,
+            Some(EventKind::Error),
+        ),
+        (
+            Event::Done { id: id() },
+            r#"{"type":"done","id":"r"}"#,
+            Some(EventKind::Done),
+        ),
+        (
+            Event::LastDelta {
+                id: id(),
+                text: "Hello world".into(),
+            },
+            r#"{"type":"last_delta","id":"r","text":"Hello world"}"#,
+            Some(EventKind::LastDelta),
+        ),
+    ]
+}
+
+fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+    vec![
         (
             Event::Presence {
                 id: id(),
@@ -352,15 +408,11 @@ fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
             r#"{"type":"speaking_state","id":"r","speaking":true}"#,
             Some(EventKind::SpeakingState),
         ),
-        (
-            Event::SessionTitle {
-                id: id(),
-                session_id: "s".into(),
-                title: "cats".into(),
-            },
-            r#"{"type":"session_title","id":"r","session_id":"s","title":"cats"}"#,
-            Some(EventKind::SessionTitle),
-        ),
+    ]
+}
+
+fn memory_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+    vec![
         (
             Event::SemanticHit {
                 id: id(),
@@ -421,6 +473,11 @@ fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
             r#"{"type":"reindex_progress","id":"r","kind":"chunks","done":3,"total":10}"#,
             None,
         ),
+    ]
+}
+
+fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+    vec![
         (
             Event::ConfirmRequest {
                 id: id(),
@@ -464,6 +521,20 @@ fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
             },
             r#"{"type":"status","id":"r","severity":"warning","component":"idle_monitor","event":"tools_withdrawn","message":"m"}"#,
             None,
+        ),
+    ]
+}
+
+fn session_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+    vec![
+        (
+            Event::SessionTitle {
+                id: id(),
+                session_id: "s".into(),
+                title: "cats".into(),
+            },
+            r#"{"type":"session_title","id":"r","session_id":"s","title":"cats"}"#,
+            Some(EventKind::SessionTitle),
         ),
         (
             Event::BranchInfo {
@@ -516,27 +587,6 @@ fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
             },
             r#"{"type":"undo_applied","id":"r","removed_messages":2,"last_user_text":"hi"}"#,
             None,
-        ),
-        (
-            Event::Error {
-                id: id(),
-                message: "boom".into(),
-            },
-            r#"{"type":"error","id":"r","message":"boom"}"#,
-            Some(EventKind::Error),
-        ),
-        (
-            Event::Done { id: id() },
-            r#"{"type":"done","id":"r"}"#,
-            Some(EventKind::Done),
-        ),
-        (
-            Event::LastDelta {
-                id: id(),
-                text: "Hello world".into(),
-            },
-            r#"{"type":"last_delta","id":"r","text":"Hello world"}"#,
-            Some(EventKind::LastDelta),
         ),
     ]
 }

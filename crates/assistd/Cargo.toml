@@ -46,7 +46,6 @@ chat = [
     "dep:textwrap",
     "dep:pulldown-cmark",
     "dep:async-trait",
-    "dep:libc",
     "dep:rustix",
     "dep:shlex",
     "dep:ratatui-image",
@@ -96,7 +95,6 @@ tracing-appender = { workspace = true, optional = true }
 textwrap         = { workspace = true, optional = true }
 pulldown-cmark   = { workspace = true, optional = true }
 async-trait      = { workspace = true, optional = true }
-libc             = { workspace = true, optional = true }
 rustix           = { workspace = true, optional = true }
 shlex            = { workspace = true, optional = true }
 ratatui-image    = { workspace = true, optional = true }

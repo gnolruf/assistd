@@ -16,9 +16,9 @@ Guidelines for AI agents (and humans) working in this repository.
 - **No `unsafe`.** The workspace denies `unsafe_code` at the lint
   level. Adding `#[allow(unsafe_code)]` to a module requires an
   extreme, documented justification (FFI with no safe wrapper
-  available, etc.) and should be raised in discussion before being
-  written. There is essentially never a good reason in this
-  codebase; find another way.
+  available, etc.), stated in the attribute's `reason = "..."`, and
+  should be raised in discussion before being written. There is
+  essentially never a good reason in this codebase; find another way.
 - **No other clippy allows.** Do not silence clippy with
   `#[allow(clippy::...)]`, `#![allow(...)]`, or `expect(...)`
   attributes. If clippy fires, fix the code. The only acceptable
@@ -49,8 +49,8 @@ Guidelines for AI agents (and humans) working in this repository.
   `#[cfg(test)] mod tests;`. No `use` between items or inside
   function bodies.
 - **Keep functions short.** Aim for under 60 lines. Past 100, split
-  the function into named steps. Only flat data tables, such as test
-  case lists, may run longer.
+  the function into named steps; clippy enforces the limit, so split
+  long test-case tables by topic too.
 - **Name things for what they are.** A reader should know what a
   function, type, or variable is for from its name alone. No vague
   verbs without an object (`handle`, `process`, `do_work`), no
@@ -82,11 +82,14 @@ update — must pass these in order. Run them from the workspace root.
    -D warnings`. Treat every warning as an error. The workspace
    already warns on `clippy::all` and `rust_2018_idioms` and denies
    `dbg_macro` — leftover `dbg!` will fail the build.
-3. **Targeted tests.** Run the test suite for whichever crate(s)
+3. **Docs and deps.** `RUSTDOCFLAGS="-D warnings" cargo doc
+   --workspace --no-deps`; public docs must not link to private
+   items. If you touched a `Cargo.toml`, also run `cargo machete`.
+4. **Targeted tests.** Run the test suite for whichever crate(s)
    you touched: `cargo test -p assistd-<crate>`. For test fixes
    specifically, also run the originally failing test in isolation
    with `--nocapture` to confirm the fix is real, not flaky timing.
-4. **Full suite.** `cargo test --workspace`. Some crates have
+5. **Full suite.** `cargo test --workspace`. Some crates have
    feature-gated code paths; if your change touches one, also run
    with the relevant features (e.g. `cargo test -p assistd-voice
    --features test-support`).
