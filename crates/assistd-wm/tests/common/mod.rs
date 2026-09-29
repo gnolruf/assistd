@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use assistd_wm::WindowManager;
 
-pub async fn assert_focused_window_present(wm: &Arc<dyn WindowManager>) {
+pub(crate) async fn assert_focused_window_present(wm: &Arc<dyn WindowManager>) {
     let focused = wm
         .focused_window()
         .await
@@ -17,7 +17,7 @@ pub async fn assert_focused_window_present(wm: &Arc<dyn WindowManager>) {
 }
 
 /// Asserts that `focused_context().id` matches `focused_window()`.
-pub async fn assert_focused_context_agrees(wm: &Arc<dyn WindowManager>) {
+pub(crate) async fn assert_focused_context_agrees(wm: &Arc<dyn WindowManager>) {
     let focused = wm
         .focused_window()
         .await
@@ -34,7 +34,7 @@ pub async fn assert_focused_context_agrees(wm: &Arc<dyn WindowManager>) {
 }
 
 /// At least one, since multi-monitor setups focus one workspace per output.
-pub async fn assert_at_least_one_workspace_focused(wm: &Arc<dyn WindowManager>) {
+pub(crate) async fn assert_at_least_one_workspace_focused(wm: &Arc<dyn WindowManager>) {
     let workspaces = wm
         .list_workspaces()
         .await
@@ -50,7 +50,7 @@ pub async fn assert_at_least_one_workspace_focused(wm: &Arc<dyn WindowManager>) 
 }
 
 /// Catches drift between the cached focus snapshot and the live tree.
-pub async fn assert_focused_window_in_list_windows(wm: &Arc<dyn WindowManager>) {
+pub(crate) async fn assert_focused_window_in_list_windows(wm: &Arc<dyn WindowManager>) {
     let Some(focused) = wm
         .focused_window()
         .await
@@ -65,7 +65,7 @@ pub async fn assert_focused_window_in_list_windows(wm: &Arc<dyn WindowManager>) 
     );
 }
 
-pub async fn assert_is_connected(wm: &Arc<dyn WindowManager>) {
+pub(crate) async fn assert_is_connected(wm: &Arc<dyn WindowManager>) {
     assert!(
         wm.is_connected(),
         "live backend should report is_connected() == true"

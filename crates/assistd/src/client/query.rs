@@ -15,7 +15,7 @@ use super::terminal_text::{escape_controls, escape_controls_single_line};
 const PREVIEW_MAX_CHARS: usize = 80;
 
 #[derive(Args)]
-pub struct QueryArgs {
+pub(crate) struct QueryArgs {
     /// Text to send to the daemon.
     pub text: String,
     /// Attach one or more images as vision inputs for this turn. Repeat
@@ -25,7 +25,7 @@ pub struct QueryArgs {
     pub images: Vec<PathBuf>,
 }
 
-pub async fn run(args: QueryArgs) -> Result<()> {
+pub(crate) async fn run(args: QueryArgs) -> Result<()> {
     let attachments = load_attachments(&args.images).await?;
     let req = if attachments.is_empty() {
         Request::query(Uuid::new_v4().to_string(), args.text)

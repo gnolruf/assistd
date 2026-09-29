@@ -16,7 +16,7 @@ use tracing::info;
 
 use super::voice_probe::PresenceGpuProbe;
 
-pub struct VoiceSubsystem {
+pub(super) struct VoiceSubsystem {
     pub input: Arc<dyn VoiceInput>,
     pub listener: Arc<dyn ContinuousListener>,
     pub output: Arc<VoiceOutputController>,
@@ -24,7 +24,7 @@ pub struct VoiceSubsystem {
 
 /// Every handle degrades to a no-op when its feature is disabled or
 /// fails to initialise.
-pub async fn init(config: &Config, presence: &Arc<PresenceManager>) -> VoiceSubsystem {
+pub(super) async fn init(config: &Config, presence: &Arc<PresenceManager>) -> VoiceSubsystem {
     let output_inner = init_output(config).await;
     let output = VoiceOutputController::new(output_inner, config.voice.synthesis.enabled);
     let (input, listener) = init_input(config, presence, output.subscribe_speaking()).await;

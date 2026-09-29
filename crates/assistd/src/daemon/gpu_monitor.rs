@@ -41,7 +41,7 @@ pub(crate) struct ProcSample {
 }
 
 /// `None` when disabled in config or when NVML is unavailable.
-pub fn spawn_monitor(
+pub(super) fn spawn_monitor(
     cfg: &SleepConfig,
     presence: Arc<PresenceManager>,
     shutdown: watch::Receiver<bool>,

@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
 
-pub struct MemorySubsystem {
+pub(super) struct MemorySubsystem {
     pub memory_store: Arc<dyn MemoryStore>,
     pub conversation_store: Arc<dyn ConversationStore>,
     pub writer_handle: Option<JoinHandle<()>>,
@@ -42,7 +42,7 @@ impl MemorySubsystem {
 
     /// End the session row, then flip `writer_shutdown` and drain the
     /// writer task. Must run after every other writer client has stopped.
-    pub async fn shutdown(self, writer_shutdown: &watch::Sender<bool>) {
+    pub(super) async fn shutdown(self, writer_shutdown: &watch::Sender<bool>) {
         if let Err(e) = self.conversation_store.end_session(&self.session_id).await {
             tracing::warn!("memory: end_session failed at shutdown: {e:#}");
         }
@@ -55,7 +55,7 @@ impl MemorySubsystem {
 
 /// Degrades to a no-op subsystem when disabled or when the database
 /// cannot be opened.
-pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> MemorySubsystem {
+pub(super) async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> MemorySubsystem {
     if !config.memory.enabled {
         info!("memory: disabled in config (memory.enabled = false)");
         return MemorySubsystem::disabled();

@@ -42,7 +42,7 @@ mod wm_init;
 
 /// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
-pub struct DaemonArgs {
+pub(crate) struct DaemonArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
     #[arg(long, short)]
     pub config: Option<PathBuf>,
@@ -54,7 +54,7 @@ pub struct DaemonArgs {
 }
 
 /// Run the daemon until shutdown.
-pub async fn run(args: DaemonArgs) -> Result<()> {
+pub(crate) async fn run(args: DaemonArgs) -> Result<()> {
     init_tracing();
     assistd_core::install_panic_hook();
 
@@ -229,7 +229,7 @@ async fn start(
 }
 
 /// Write a default config file to the platform config directory.
-pub fn init_config() -> Result<()> {
+pub(crate) fn init_config() -> Result<()> {
     init_tracing();
     let path = Config::default_path()?;
     Config::write_default(&path)?;

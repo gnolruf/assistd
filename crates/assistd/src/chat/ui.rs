@@ -25,7 +25,7 @@ const THUMBNAIL_CAPTION_ROWS: u16 = 1;
 const THUMBNAIL_MAX_COLS: u16 = 32;
 const SESSION_TITLE_MAX_CHARS: usize = 32;
 
-pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let frame_area = frame.area();
     let input_height =
         compute_input_height(frame_area.width, frame_area.height, app.input.buffer());

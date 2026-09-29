@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 
-pub struct EmbeddingSubsystem {
+pub(super) struct EmbeddingSubsystem {
     pub embedder: Arc<dyn Embedder>,
     pub semantic_store: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
@@ -38,7 +38,7 @@ impl EmbeddingSubsystem {
 
     /// Drain queued jobs while the embed server is still up, then stop the
     /// server. The memory writer must still be running.
-    pub async fn shutdown(
+    pub(super) async fn shutdown(
         self,
         worker_shutdown: &watch::Sender<bool>,
         server_shutdown: &watch::Sender<bool>,
@@ -58,7 +58,7 @@ impl EmbeddingSubsystem {
 
 /// Degrades to a no-op subsystem when disabled, when the embed server
 /// fails to start, or when the client probe fails.
-pub async fn init(
+pub(super) async fn init(
     config: &Config,
     sqlite_handle: Option<&Arc<SqliteHandle>>,
     worker_shutdown: &watch::Sender<bool>,

@@ -17,14 +17,14 @@ use crate::ipc_voice_proxy::IpcVoiceProxy;
 const EVENT_BRIDGE_CAPACITY: usize = 12;
 
 /// The hotkey-grab and event-bridge tasks behind chat push-to-talk.
-pub struct VoicePipeline {
+pub(super) struct VoicePipeline {
     hotkey_handle: Option<JoinHandle<()>>,
     bridge_handle: Option<JoinHandle<()>>,
 }
 
 impl VoicePipeline {
     /// Abort both tasks and wait for them to stop.
-    pub async fn shutdown(self) {
+    pub(super) async fn shutdown(self) {
         for handle in [self.hotkey_handle, self.bridge_handle]
             .into_iter()
             .flatten()
@@ -36,7 +36,7 @@ impl VoicePipeline {
 }
 
 /// With voice disabled, returns an empty pipeline and binds no hotkey.
-pub async fn spawn_pipeline(
+pub(super) async fn spawn_pipeline(
     config: &Config,
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,

@@ -50,7 +50,7 @@ const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const TITLE_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Args)]
-pub struct ChatArgs {
+pub(crate) struct ChatArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
     #[arg(long, short)]
     pub config: Option<PathBuf>,
@@ -111,7 +111,7 @@ impl Drop for TerminalGuard {
 }
 
 /// Run the TUI, auto-spawning the daemon when nothing is listening.
-pub async fn run(args: ChatArgs) -> Result<()> {
+pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     let _stderr_redirect = redirect_stderr_to_log()?;
 
     let _log_guard = init_file_tracing()?;

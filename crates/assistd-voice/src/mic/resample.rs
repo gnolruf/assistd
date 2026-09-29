@@ -20,7 +20,7 @@ pub(crate) struct ChunkResampler {
 }
 
 impl ChunkResampler {
-    pub fn new(native_rate: u32) -> Result<Self, AudioCaptureError> {
+    pub(crate) fn new(native_rate: u32) -> Result<Self, AudioCaptureError> {
         let resampler = if native_rate == TARGET_SAMPLE_RATE {
             None
         } else {
@@ -49,7 +49,7 @@ impl ChunkResampler {
 
     /// Pull up to one chunk from `consumer` at 16 kHz; `None` when the ring is
     /// empty. A partial chunk is zero-padded so an utterance's tail is kept.
-    pub fn pull(
+    pub(crate) fn pull(
         &mut self,
         consumer: &mut HeapCons<f32>,
     ) -> Result<Option<&[f32]>, AudioCaptureError> {

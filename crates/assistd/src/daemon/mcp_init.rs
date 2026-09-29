@@ -12,14 +12,14 @@ use assistd_tools::{MCP_TOOL_NAME_PREFIX, Tool};
 use tokio::sync::watch;
 use tracing::info;
 
-pub struct McpSubsystem {
+pub(super) struct McpSubsystem {
     pub handles: Vec<McpServerHandle>,
     pub tools: Vec<Box<dyn Tool>>,
     pub startup_failures: Vec<McpStartupFailure>,
 }
 
 impl McpSubsystem {
-    pub async fn shutdown(self) {
+    pub(super) async fn shutdown(self) {
         for handle in self.handles {
             handle.shutdown().await;
         }
@@ -28,7 +28,7 @@ impl McpSubsystem {
 
 /// Start every configured MCP server. A server that fails to start or to
 /// list its tools is recorded in `startup_failures` and skipped.
-pub async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubsystem {
+pub(super) async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> McpSubsystem {
     let mut subsystem = McpSubsystem {
         handles: Vec::new(),
         tools: Vec::new(),

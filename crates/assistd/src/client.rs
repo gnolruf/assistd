@@ -6,13 +6,13 @@ use assistd_ipc::{Event, IpcClient, IpcClientError, Request};
 
 use terminal_text::escape_controls;
 
-pub mod listen;
-pub mod memory;
-pub mod presence;
-pub mod ptt;
-pub mod query;
+pub(crate) mod listen;
+pub(crate) mod memory;
+pub(crate) mod presence;
+pub(crate) mod ptt;
+pub(crate) mod query;
 mod terminal_text;
-pub mod voice_ctl;
+pub(crate) mod voice_ctl;
 
 /// Send `req` and hand every event, terminal ones included, to
 /// `on_event`. Returns after `Done`; on `Error` prints the daemon's

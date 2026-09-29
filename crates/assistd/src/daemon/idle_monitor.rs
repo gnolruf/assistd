@@ -19,7 +19,7 @@ enum Action {
 }
 
 /// Reject a sleep threshold at or below the drowsy threshold.
-pub fn validate(cfg: &SleepConfig) -> Result<()> {
+pub(super) fn validate(cfg: &SleepConfig) -> Result<()> {
     if cfg.idle_to_drowsy_mins > 0
         && cfg.idle_to_sleep_mins > 0
         && cfg.idle_to_sleep_mins <= cfg.idle_to_drowsy_mins
@@ -33,7 +33,7 @@ pub fn validate(cfg: &SleepConfig) -> Result<()> {
 }
 
 /// Spawn the idle monitor. `None` when both thresholds are 0.
-pub fn spawn_monitor(
+pub(super) fn spawn_monitor(
     cfg: &SleepConfig,
     presence: Arc<PresenceManager>,
     shutdown: watch::Receiver<bool>,

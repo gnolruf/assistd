@@ -13,13 +13,13 @@ use super::run_one_shot;
 use super::terminal_text::{escape_controls, escape_controls_single_line};
 
 #[derive(Args)]
-pub struct MemoryArgs {
+pub(crate) struct MemoryArgs {
     #[command(subcommand)]
     pub action: MemoryAction,
 }
 
 #[derive(Subcommand)]
-pub enum MemoryAction {
+pub(crate) enum MemoryAction {
     /// Semantic search over persisted conversation content. Embeds the
     /// query and ranks past messages by cosine similarity, so
     /// paraphrased phrasings still hit. Requires the embedding
@@ -81,7 +81,7 @@ impl MemoryAction {
     }
 }
 
-pub async fn run(args: MemoryArgs) -> Result<()> {
+pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
     let forget_target = match &args.action {
         MemoryAction::Forget { id } => Some(*id),
         _ => None,

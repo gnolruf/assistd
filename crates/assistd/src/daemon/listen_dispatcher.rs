@@ -16,12 +16,12 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, error, info, warn};
 
-pub struct ListenDispatcherHandles {
+pub(super) struct ListenDispatcherHandles {
     pub forwarder: JoinHandle<()>,
     pub presence_gate: JoinHandle<()>,
 }
 
-pub fn spawn_dispatcher(
+pub(super) fn spawn_dispatcher(
     state: Arc<AppState>,
     listener: Arc<dyn ContinuousListener>,
     presence: Arc<PresenceManager>,

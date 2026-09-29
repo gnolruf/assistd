@@ -12,7 +12,7 @@ use super::{
 };
 
 impl App {
-    pub fn on_chat_event(&mut self, ev: ChatEvent) {
+    pub(crate) fn on_chat_event(&mut self, ev: ChatEvent) {
         match ev {
             ChatEvent::Wire { stream, event } => self.on_wire_event(stream, event),
             ChatEvent::WireError { stream, message } => {

@@ -4,13 +4,13 @@
 use std::borrow::Cow;
 
 /// `text` with every control character except newline and tab escaped.
-pub fn escape_controls(text: &str) -> Cow<'_, str> {
+pub(super) fn escape_controls(text: &str) -> Cow<'_, str> {
     escape_where(text, |c| c.is_control() && c != '\n' && c != '\t')
 }
 
 /// `text` with every control character escaped, newlines and tabs included,
 /// so it always renders as a single line.
-pub fn escape_controls_single_line(text: &str) -> Cow<'_, str> {
+pub(super) fn escape_controls_single_line(text: &str) -> Cow<'_, str> {
     escape_where(text, char::is_control)
 }
 

@@ -10,7 +10,7 @@ use super::run_one_shot;
 use super::terminal_text::{escape_controls, escape_controls_single_line};
 
 #[derive(Debug, Clone, Copy)]
-pub enum PttAction {
+pub(crate) enum PttAction {
     Start,
     Stop,
 }
@@ -24,7 +24,7 @@ impl PttAction {
     }
 }
 
-pub async fn run(action: PttAction) -> Result<()> {
+pub(crate) async fn run(action: PttAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     let mut stdout = std::io::stdout().lock();
     let mut wrote_delta = false;

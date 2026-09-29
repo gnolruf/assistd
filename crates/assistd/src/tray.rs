@@ -16,18 +16,18 @@ use menu::TrayItem;
 
 mod menu;
 #[cfg(feature = "tray-popup")]
-pub mod popup;
+pub(crate) mod popup;
 mod state;
 mod subscribe;
 
 #[derive(Args)]
-pub struct TrayArgs {
+pub(crate) struct TrayArgs {
     /// Path to config file [default: `~/.config/assistd/config.toml`]
     #[arg(long, short)]
     pub config: Option<PathBuf>,
 }
 
-pub async fn run(args: TrayArgs) -> Result<()> {
+pub(crate) async fn run(args: TrayArgs) -> Result<()> {
     init_tracing();
 
     let config_path = match args.config.clone() {

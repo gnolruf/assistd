@@ -4,10 +4,10 @@ use std::collections::VecDeque;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-pub const DEFAULT_HISTORY_CAP: usize = 500;
+pub(super) const DEFAULT_HISTORY_CAP: usize = 500;
 
 #[derive(Debug)]
-pub struct InputLine {
+pub(super) struct InputLine {
     buffer: String,
     cursor: usize,
     history: VecDeque<String>,
@@ -18,7 +18,7 @@ pub struct InputLine {
 
 /// Action returned by [`InputLine::on_key`].
 #[derive(Debug, PartialEq, Eq)]
-pub enum InputAction {
+pub(super) enum InputAction {
     None,
     /// Enter on a non-blank buffer.
     Submit(String),
@@ -33,7 +33,7 @@ impl Default for InputLine {
 }
 
 impl InputLine {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             buffer: String::new(),
             cursor: 0,
@@ -44,22 +44,22 @@ impl InputLine {
         }
     }
 
-    pub fn buffer(&self) -> &str {
+    pub(super) fn buffer(&self) -> &str {
         &self.buffer
     }
 
     /// Replace the buffer and put the cursor at the end.
-    pub fn set_buffer(&mut self, text: String) {
+    pub(super) fn set_buffer(&mut self, text: String) {
         self.cursor = text.len();
         self.buffer = text;
     }
 
     /// Cursor column in characters, not bytes.
-    pub fn cursor_col(&self) -> u16 {
+    pub(super) fn cursor_col(&self) -> u16 {
         self.buffer[..self.cursor].chars().count() as u16
     }
 
-    pub fn on_key(&mut self, ev: KeyEvent) -> InputAction {
+    pub(super) fn on_key(&mut self, ev: KeyEvent) -> InputAction {
         if !matches!(ev.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return InputAction::None;
         }

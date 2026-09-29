@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::run_one_shot;
 
 #[derive(Debug, Clone, Copy)]
-pub enum PresenceAction {
+pub(crate) enum PresenceAction {
     Sleep,
     Drowse,
     Wake,
@@ -34,7 +34,7 @@ impl PresenceAction {
     }
 }
 
-pub async fn run(action: PresenceAction) -> Result<()> {
+pub(crate) async fn run(action: PresenceAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     run_one_shot(req, |event| {
         if let Event::Presence { state, .. } = event {

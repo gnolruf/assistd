@@ -31,7 +31,7 @@ const NOTICE_HOLD: Duration = Duration::from_secs(3);
 const CONFIRM_ARM_DELAY: Duration = Duration::from_millis(750);
 
 /// An image staged by `/attach` for the next submission.
-pub struct PendingAttachment {
+pub(super) struct PendingAttachment {
     /// File basename.
     pub name: String,
     pub mime: String,
@@ -55,7 +55,7 @@ impl PendingAttachment {
 
 /// Boxed inside [`ChatEvent`] so the graphics buffers do not bloat the
 /// other variants.
-pub struct AttachLoadedPayload {
+pub(super) struct AttachLoadedPayload {
     pub name: String,
     pub mime: String,
     pub size: usize,
@@ -66,7 +66,7 @@ pub struct AttachLoadedPayload {
 /// Which concurrent daemon connection an event arrived on, and so which
 /// slice of `App` state its terminal event may retire.
 #[derive(Debug, Clone, Copy)]
-pub enum WireStream {
+pub(super) enum WireStream {
     /// A query dialog or push-to-talk turn; owns the assistant message,
     /// [`App::generating`] and the query writer.
     Reply,
@@ -76,7 +76,7 @@ pub enum WireStream {
     Status,
 }
 
-pub enum ChatEvent {
+pub(super) enum ChatEvent {
     Wire {
         stream: WireStream,
         event: Event,
@@ -124,7 +124,7 @@ impl std::fmt::Debug for ChatEvent {
 
 /// Command-confirmation prompt shown while the daemon's agent loop blocks
 /// on the answer.
-pub struct ConfirmationModal {
+pub(super) struct ConfirmationModal {
     pub request: ConfirmationRequest,
     /// Echoed back in the `Request::ConfirmResponse`.
     confirm_id: String,
@@ -134,12 +134,12 @@ pub struct ConfirmationModal {
 impl ConfirmationModal {
     /// Whether the modal has been visible long enough to accept approval.
     /// Denial is accepted at any time.
-    pub fn armed(&self) -> bool {
+    pub(super) fn armed(&self) -> bool {
         self.opened_at.elapsed() >= CONFIRM_ARM_DELAY
     }
 }
 
-pub struct App {
+pub(super) struct App {
     pub output: OutputPane,
     pub input: InputLine,
     pub throughput: ThroughputMeter,
@@ -218,7 +218,7 @@ enum BranchOp {
 }
 
 #[derive(Debug, Clone)]
-pub struct BranchListEntry {
+pub(super) struct BranchListEntry {
     pub name: String,
     pub parent_branch_name: Option<String>,
     pub fork_point_seq: Option<i64>,
@@ -230,14 +230,14 @@ pub struct BranchListEntry {
 }
 
 /// Branch picker shown by `/resume`.
-pub struct BranchPickerModal {
+pub(super) struct BranchPickerModal {
     pub entries: Vec<BranchListEntry>,
     pub selected: usize,
 }
 
 impl BranchPickerModal {
     /// The selected entry as a session-qualified `/switch` target.
-    pub fn current_target(&self) -> Option<String> {
+    pub(super) fn current_target(&self) -> Option<String> {
         self.entries
             .get(self.selected)
             .map(|e| format!("{}/{}", e.session_short, e.name))
@@ -245,7 +245,7 @@ impl BranchPickerModal {
 }
 
 impl App {
-    pub fn new(
+    pub(super) fn new(
         ipc: Arc<IpcClient>,
         chat_tx: mpsc::Sender<ChatEvent>,
         model_name: String,
@@ -291,29 +291,29 @@ impl App {
         }
     }
 
-    pub fn should_quit(&self) -> bool {
+    pub(super) fn should_quit(&self) -> bool {
         self.quitting
     }
 
-    pub fn spinner_char(&self) -> char {
+    pub(super) fn spinner_char(&self) -> char {
         SPINNER_CHARS[self.spinner % SPINNER_CHARS.len()]
     }
 
-    pub fn notice(&self) -> Option<&str> {
+    pub(super) fn notice(&self) -> Option<&str> {
         self.notice.as_ref().map(|(s, _)| s.as_str())
     }
 
-    pub fn set_output_height(&mut self, h: u16) {
+    pub(super) fn set_output_height(&mut self, h: u16) {
         self.last_output_height = h;
     }
 
-    pub fn on_resources(&mut self, v: ResourceState) {
+    pub(super) fn on_resources(&mut self, v: ResourceState) {
         self.resources = v;
     }
 
     /// Local approximation of the daemon's countdown to its next idle
     /// transition. `None` when no transition is pending.
-    pub fn local_time_until_next_transition(&self) -> Option<Duration> {
+    pub(super) fn local_time_until_next_transition(&self) -> Option<Duration> {
         let state = self.presence_state?;
         let next_threshold_secs = match state {
             PresenceState::Active => self.sleep_cfg.idle_to_drowsy_mins * 60,
@@ -329,7 +329,7 @@ impl App {
         Some(threshold.saturating_sub(self.last_activity_at.elapsed()))
     }
 
-    pub fn on_tick(&mut self) {
+    pub(super) fn on_tick(&mut self) {
         while let Some(res) = self.tasks.try_join_next() {
             if let Err(e) = res {
                 tracing::warn!("chat task failed: {e}");

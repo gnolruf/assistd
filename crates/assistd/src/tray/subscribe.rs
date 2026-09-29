@@ -13,7 +13,7 @@ use super::menu::TrayItem;
 use super::popup::PopupSink;
 
 #[cfg(feature = "tray-popup")]
-pub type OptionalPopup = Option<PopupSink>;
+pub(super) type OptionalPopup = Option<PopupSink>;
 #[cfg(not(feature = "tray-popup"))]
 pub type OptionalPopup = Option<()>;
 
@@ -27,7 +27,7 @@ enum ExitReason {
     DaemonClosed,
 }
 
-pub async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: OptionalPopup) {
+pub(super) async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: OptionalPopup) {
     let mut attempt: u32 = 0;
     loop {
         match try_once(&handle, &ipc, popup.as_ref()).await {

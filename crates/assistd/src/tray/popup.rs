@@ -21,12 +21,12 @@ mod visibility;
 mod window;
 mod wm_bridge;
 
-pub use state::PopupState;
-pub use visibility::DriverInput;
+pub(crate) use state::PopupState;
+pub(crate) use visibility::DriverInput;
 
 /// Cloneable handle that feeds daemon events to the popup driver.
 #[derive(Clone)]
-pub struct PopupSink {
+pub(crate) struct PopupSink {
     driver_tx: UnboundedSender<DriverInput>,
     wake_tool_call: bool,
     wake_delta: bool,
@@ -36,7 +36,7 @@ pub struct PopupSink {
 impl PopupSink {
     /// Forward an event into the driver, plus a `Show` when the event
     /// matches a configured wake rule.
-    pub fn ingest(&self, ev: &Event) {
+    pub(crate) fn ingest(&self, ev: &Event) {
         if self.matches_wake_rule(ev) {
             let _ = self.driver_tx.send(DriverInput::Show);
         }
@@ -45,11 +45,11 @@ impl PopupSink {
             .send(DriverInput::Event(Box::new(ev.clone())));
     }
 
-    pub fn set_disconnected(&self) {
+    pub(crate) fn set_disconnected(&self) {
         let _ = self.driver_tx.send(DriverInput::Disconnected);
     }
 
-    pub fn show_sender(&self) -> UnboundedSender<DriverInput> {
+    pub(crate) fn show_sender(&self) -> UnboundedSender<DriverInput> {
         self.driver_tx.clone()
     }
 
@@ -66,7 +66,7 @@ impl PopupSink {
 }
 
 /// Owns every task and thread the popup spawned.
-pub struct PopupHandle {
+pub(crate) struct PopupHandle {
     pub sink: PopupSink,
     driver_task: JoinHandle<()>,
     place_task: JoinHandle<()>,
@@ -76,7 +76,7 @@ pub struct PopupHandle {
 }
 
 impl PopupHandle {
-    pub async fn shutdown(mut self) {
+    pub(crate) async fn shutdown(mut self) {
         let _ = self.sink.driver_tx.send(DriverInput::Shutdown);
         let _ = self.driver_task.await;
         drop(self.sink);
@@ -101,7 +101,10 @@ impl PopupHandle {
 }
 
 /// Spawn the popup subsystem; `Ok(None)` when disabled by config.
-pub async fn spawn_popup(cfg: &Config, ipc: IpcClient) -> anyhow::Result<Option<PopupHandle>> {
+pub(crate) async fn spawn_popup(
+    cfg: &Config,
+    ipc: IpcClient,
+) -> anyhow::Result<Option<PopupHandle>> {
     if !cfg.tray.popup.enabled {
         tracing::info!(target: "tray", "popup: disabled by config");
         return Ok(None);

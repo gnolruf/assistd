@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::state::{TrayTracker, icon_name_for, tooltip_for};
 
 #[derive(Debug, Clone, Copy)]
-pub enum MenuAction {
+pub(super) enum MenuAction {
     /// Issue `SetPresence(target)` to the daemon.
     SetPresence(PresenceState),
     /// Tear down the tray and exit cleanly.
@@ -21,16 +21,16 @@ pub enum MenuAction {
 }
 
 /// Invoked on left-click.
-pub type ActivateCallback = Box<dyn Fn() + Send + Sync>;
+pub(super) type ActivateCallback = Box<dyn Fn() + Send + Sync>;
 
-pub struct TrayItem {
+pub(super) struct TrayItem {
     tracker: TrayTracker,
     actions: UnboundedSender<MenuAction>,
     on_activate: Option<ActivateCallback>,
 }
 
 impl TrayItem {
-    pub fn new(
+    pub(super) fn new(
         actions: UnboundedSender<MenuAction>,
         on_activate: Option<ActivateCallback>,
         config_error: Option<String>,
@@ -43,17 +43,17 @@ impl TrayItem {
     }
 
     /// Returns `true` when the visible tray state changed.
-    pub fn ingest(&mut self, event: &Event) -> bool {
+    pub(super) fn ingest(&mut self, event: &Event) -> bool {
         self.tracker.ingest(event)
     }
 
     /// Returns `true` when the visible tray state changed.
-    pub fn set_connected(&mut self) -> bool {
+    pub(super) fn set_connected(&mut self) -> bool {
         self.tracker.set_connected()
     }
 
     /// Returns `true` when the visible tray state changed.
-    pub fn set_disconnected(&mut self) -> bool {
+    pub(super) fn set_disconnected(&mut self) -> bool {
         self.tracker.set_disconnected()
     }
 }
@@ -136,7 +136,10 @@ fn toggle_target(presence: PresenceState) -> PresenceState {
 }
 
 /// Drain menu actions until [`MenuAction::Quit`] or the sender drops.
-pub async fn run_actions(mut rx: UnboundedReceiver<MenuAction>, ipc: IpcClient) -> Result<()> {
+pub(super) async fn run_actions(
+    mut rx: UnboundedReceiver<MenuAction>,
+    ipc: IpcClient,
+) -> Result<()> {
     while let Some(action) = rx.recv().await {
         match action {
             MenuAction::SetPresence(target) => {
