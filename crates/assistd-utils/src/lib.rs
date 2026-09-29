@@ -8,6 +8,8 @@ pub mod child_server;
 pub mod log_lines;
 pub mod path;
 #[cfg(feature = "process")]
+pub mod process_group;
+#[cfg(feature = "process")]
 pub mod procfs;
 pub mod text;
 #[cfg(feature = "tracing-init")]

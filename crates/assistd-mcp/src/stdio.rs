@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rustix::process::{Pid, Signal, kill_process_group};
+use rustix::process::Signal;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, Command};
@@ -18,6 +18,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
 use assistd_utils::log_lines::forward_lines;
+use assistd_utils::process_group::ProcessGroup;
 
 use crate::error::McpError;
 use crate::jsonrpc::{Correlator, Incoming, notification_line, reply_line};
@@ -132,7 +133,7 @@ impl StdioMcpClient {
         info!(
             target: "assistd::mcp",
             server = %cfg.label,
-            pid = lifeline.group.0.as_raw_nonzero(),
+            pid = lifeline.group.id().as_raw_nonzero(),
             "MCP stdio server initialized",
         );
         Ok((client, lifeline))
@@ -304,31 +305,6 @@ impl ChildLifeline {
         drop(group);
         let _ = child.wait().await;
         join_io_tasks(transport, stderr_task).await;
-    }
-}
-
-/// The process group a spawned server leads; the id is fixed at spawn
-/// and outlives the child's own exit. Dropping it SIGKILLs every
-/// process still in the group.
-#[derive(Debug)]
-struct ProcessGroup(Pid);
-
-impl ProcessGroup {
-    fn led_by(child: &Child) -> Option<Self> {
-        let pid = child
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok().and_then(Pid::from_raw))?;
-        Some(Self(pid))
-    }
-
-    fn signal(&self, signal: Signal) {
-        let _ = kill_process_group(self.0, signal);
-    }
-}
-
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        self.signal(Signal::KILL);
     }
 }
 

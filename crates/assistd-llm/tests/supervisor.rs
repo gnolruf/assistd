@@ -85,6 +85,36 @@ async fn start_service(fake: &FakeLlama, port: u16) -> (ChildServer, watch::Send
     (service, shutdown_tx)
 }
 
+/// Pid of the grandchild a `with-orphan` fake recorded beside its binary.
+fn orphan_pid(fake: &FakeLlama) -> u32 {
+    std::fs::read_to_string(fake.binary_path().with_file_name("orphan.pid"))
+        .expect("fake wrote its orphan's pid")
+        .trim()
+        .parse()
+        .expect("pid file holds a pid")
+}
+
+/// True once `pid` no longer exists or is a zombie awaiting its reaper.
+fn process_is_gone(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Err(_) => true,
+        Ok(stat) => stat
+            .rsplit(')')
+            .next()
+            .is_none_or(|fields| fields.trim_start().starts_with('Z')),
+    }
+}
+
+async fn wait_until_process_is_gone(pid: u32) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !process_is_gone(pid) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
 #[tokio::test]
 async fn brings_up_fake_server_and_reports_ready() {
     let fake = FakeLlama::new("normal");
@@ -244,4 +274,43 @@ async fn shutdown_kills_running_child() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("fake child {pid} still alive after shutdown");
+}
+
+#[tokio::test]
+async fn crash_kills_the_crashed_servers_process_group() {
+    let fake = FakeLlama::new("with-orphan");
+    let port = grab_port().await;
+    let (service, shutdown_tx) = start_service(&fake, port).await;
+    let orphan = orphan_pid(&fake);
+    fake.set_mode("normal");
+
+    let leader = service
+        .pid()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(Pid::from_raw)
+        .expect("running child");
+    kill_process(leader, Signal::KILL).expect("SIGKILL on test child");
+
+    assert!(
+        wait_until_process_is_gone(orphan).await,
+        "grandchild {orphan} must be killed with the crashed server's process group"
+    );
+    let _ = shutdown_tx.send(true);
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_kills_grandchildren_that_ignore_sigterm() {
+    let fake = FakeLlama::new("with-orphan");
+    let port = grab_port().await;
+    let (service, shutdown_tx) = start_service(&fake, port).await;
+    let orphan = orphan_pid(&fake);
+
+    let _ = shutdown_tx.send(true);
+    service.shutdown().await.unwrap();
+
+    assert!(
+        wait_until_process_is_gone(orphan).await,
+        "grandchild {orphan} must not outlive its server's shutdown"
+    );
 }

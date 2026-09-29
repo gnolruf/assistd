@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use rustix::process::{Pid, Signal, kill_process_group};
+use rustix::process::{Pid, Signal};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -12,17 +12,18 @@ use tracing::{info, warn};
 use super::ChildServerSpec;
 use super::error::ChildServerError;
 use crate::log_lines::forward_lines;
+use crate::process_group::ProcessGroup;
 
 const OUTPUT_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// A running child plus the tasks forwarding its output to tracing. The
-/// child leads its own process group, so `pgid == pid`.
+/// A running child plus the tasks forwarding its output to tracing.
+/// Dropping it SIGKILLs the child's whole process group.
 pub(super) struct ChildProcess {
     server: &'static str,
     child: Child,
-    process_group: Pid,
-    stdout_task: Option<JoinHandle<()>>,
-    stderr_task: Option<JoinHandle<()>>,
+    group: ProcessGroup,
+    stdout_task: JoinHandle<()>,
+    stderr_task: JoinHandle<()>,
 }
 
 impl ChildProcess {
@@ -43,14 +44,11 @@ impl ChildProcess {
             path: path.clone(),
             source,
         })?;
-        let process_group = child
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok().and_then(Pid::from_raw))
-            .ok_or_else(|| ChildServerError::Spawn {
-                server,
-                path,
-                source: io::Error::other("spawned child reported no pid"),
-            })?;
+        let group = ProcessGroup::led_by(&child).ok_or_else(|| ChildServerError::Spawn {
+            server,
+            path,
+            source: io::Error::other("spawned child reported no pid"),
+        })?;
 
         let stdout = child.stdout.take().expect("stdout piped but not captured");
         let stderr = child.stderr.take().expect("stderr piped but not captured");
@@ -68,9 +66,9 @@ impl ChildProcess {
         Ok(Self {
             server,
             child,
-            process_group,
-            stdout_task: Some(stdout_task),
-            stderr_task: Some(stderr_task),
+            group,
+            stdout_task,
+            stderr_task,
         })
     }
 
@@ -81,7 +79,7 @@ impl ChildProcess {
 
     /// Process group the child leads, fixed at spawn.
     pub(super) fn process_group(&self) -> Pid {
-        self.process_group
+        self.group.id()
     }
 
     /// Wait for the child to exit and return its status.
@@ -89,46 +87,41 @@ impl ChildProcess {
         self.child.wait().await
     }
 
-    /// SIGTERM the process group, wait up to `term_timeout`, then SIGKILL
-    /// whatever is left of it. Log forwarders are drained briefly.
-    pub(super) async fn shutdown(mut self, term_timeout: Duration) -> Result<(), ChildServerError> {
-        let pgid = self
-            .child
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok().and_then(Pid::from_raw));
-        if let Some(pgid) = pgid {
-            let _ = kill_process_group(pgid, Signal::TERM);
-        }
+    /// SIGTERM the process group, wait up to `term_timeout` for the child,
+    /// then SIGKILL whatever is left of the group. Log forwarders are
+    /// drained briefly.
+    pub(super) async fn shutdown(self, term_timeout: Duration) -> Result<(), ChildServerError> {
+        let Self {
+            server,
+            mut child,
+            group,
+            stdout_task,
+            stderr_task,
+        } = self;
+        group.signal(Signal::TERM);
 
-        match timeout(term_timeout, self.child.wait()).await {
+        match timeout(term_timeout, child.wait()).await {
             Ok(Ok(status)) => {
                 info!(
                     target: "assistd::child_server",
-                    server = self.server,
-                    "{} exited after SIGTERM: {status}",
-                    self.server,
+                    server,
+                    "{server} exited after SIGTERM: {status}",
                 );
             }
             Ok(Err(e)) => return Err(ChildServerError::Io(e)),
             Err(_) => {
                 warn!(
                     target: "assistd::child_server",
-                    server = self.server,
-                    "{} did not exit within {term_timeout:?}; sending SIGKILL",
-                    self.server,
+                    server,
+                    "{server} did not exit within {term_timeout:?}; sending SIGKILL",
                 );
-                if let Some(pgid) = pgid {
-                    let _ = kill_process_group(pgid, Signal::KILL);
-                }
-                let _ = self.child.start_kill();
-                let _ = self.child.wait().await;
+                group.signal(Signal::KILL);
+                let _ = child.wait().await;
             }
         }
+        drop(group);
 
-        if let Some(task) = self.stdout_task.take() {
-            let _ = timeout(OUTPUT_FLUSH_TIMEOUT, task).await;
-        }
-        if let Some(task) = self.stderr_task.take() {
+        for task in [stdout_task, stderr_task] {
             let _ = timeout(OUTPUT_FLUSH_TIMEOUT, task).await;
         }
 
