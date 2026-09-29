@@ -24,10 +24,10 @@ pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
 pub use memory_tools::{RecallTool, RememberTool, ReminisceTool};
 pub use policy::{
     APPROVALS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist, AllowlistError,
-    Approval, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate,
-    ConfirmationRequest, DestructivePattern, IpcConfirmationGate, NoPendingConfirm, Protected,
-    SandboxError, SandboxInfo, SandboxRequest, SearchPath, ToolSandbox, ToolsDisabled,
-    inherit_confirm_router, probe_sandbox,
+    Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter,
+    ConfirmationGate, ConfirmationRequest, DestructivePattern, IpcConfirmationGate,
+    NoPendingConfirm, Protected, SandboxError, SandboxInfo, SandboxRequest, SearchPath,
+    ToolSandbox, ToolsDisabled, inherit_confirm_router, probe_sandbox,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::{AlwaysAllowGate, DenyAllGate};

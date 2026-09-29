@@ -7,7 +7,7 @@ use crate::commands::{
     BashCommand, CatCommand, GrepCommand, HeadCommand, LsCommand, ScreenshotCommand, SeeCommand,
     SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WmCommand, WriteCommand,
 };
-use crate::policy::{AlwaysAllowGate, Approvals, BashPolicyCfg, SandboxInfo};
+use crate::policy::{AlwaysAllowGate, ApprovalGate, Approvals, BashPolicyCfg, SandboxInfo};
 
 #[derive(Debug)]
 struct Stub(&'static str);
@@ -148,7 +148,10 @@ async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
         (
             "web",
             run_cmd(
-                WebCommand::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
+                WebCommand::new(ApprovalGate::new(
+                    Arc::new(AlwaysAllowGate),
+                    Arc::new(Approvals::unsaved()),
+                )),
                 vec!["file:///etc/passwd".into()],
             )
             .await,

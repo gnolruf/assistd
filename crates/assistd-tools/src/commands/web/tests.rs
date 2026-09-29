@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -6,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use super::*;
 use crate::commands::test_support::RecordingGate;
-use crate::policy::{AlwaysAllowGate, Approval, DenyAllGate};
+use crate::policy::{AlwaysAllowGate, Approval, ApprovalGate, Approvals, DenyAllGate};
 
 /// A server answering one connection per entry of `responses`, in order,
 /// each with that raw HTTP response.
@@ -48,7 +49,10 @@ fn redirect_to(location: &str) -> Vec<u8> {
 }
 
 fn allowing() -> WebCommand {
-    WebCommand::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()))
+    WebCommand::new(ApprovalGate::new(
+        Arc::new(AlwaysAllowGate),
+        Arc::new(Approvals::unsaved()),
+    ))
 }
 
 async fn run_web(cmd: &WebCommand, args: &[&str]) -> CommandOutput {
@@ -103,8 +107,7 @@ async fn rejects_non_http_scheme() {
 #[tokio::test]
 async fn connection_failure_to_reserved_port_exits_1() {
     let cmd = WebCommand::with_timeout(
-        Arc::new(AlwaysAllowGate),
-        Arc::new(Approvals::unsaved()),
+        ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
         Duration::from_millis(200),
     );
     let out = run_web(&cmd, &["http://127.0.0.1:1/"]).await;
@@ -118,7 +121,10 @@ async fn connection_failure_to_reserved_port_exits_1() {
 
 #[tokio::test]
 async fn declined_fetch_exits_126_without_connecting() {
-    let cmd = WebCommand::new(Arc::new(DenyAllGate), Arc::new(Approvals::unsaved()));
+    let cmd = WebCommand::new(ApprovalGate::new(
+        Arc::new(DenyAllGate),
+        Arc::new(Approvals::unsaved()),
+    ));
     let out = run_web(&cmd, &["http://127.0.0.1:1/?secret=x"]).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert_eq!(
@@ -135,7 +141,7 @@ async fn approved_host_is_fetched_without_asking() {
     let (addr, server) = serve(vec![response("HTTP/1.1 200 OK", b"ok")]).await;
     let gate = RecordingGate::answering(Approval::Deny);
     let out = run_web(
-        &WebCommand::new(gate.clone(), hosts),
+        &WebCommand::new(ApprovalGate::new(gate.clone(), hosts)),
         &[&format!("http://{addr}/")],
     )
     .await;
@@ -148,7 +154,7 @@ async fn approved_host_is_fetched_without_asking() {
 async fn always_answer_approves_the_host_for_good() {
     let gate = RecordingGate::answering(Approval::Always);
     let hosts = Arc::new(Approvals::unsaved());
-    let cmd = WebCommand::new(gate.clone(), Arc::clone(&hosts));
+    let cmd = WebCommand::new(ApprovalGate::new(gate.clone(), Arc::clone(&hosts)));
     let (addr, server) = serve(vec![response("HTTP/1.1 200 OK", b"ok")]).await;
     let url = format!("http://{addr}/page");
     let out = run_web(&cmd, &[&url]).await;

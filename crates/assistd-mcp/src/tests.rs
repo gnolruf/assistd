@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use assistd_tools::{AlwaysAllowGate, Approval, DenyAllGate};
+use assistd_tools::{AlwaysAllowGate, Approval, Approvals, ConfirmationGate, DenyAllGate};
 use parking_lot::Mutex;
 
 use super::*;
@@ -12,15 +12,8 @@ async fn adapt_allowing(
     name_prefix: &str,
     output: PresentSpec,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
-    let gate: Arc<dyn ConfirmationGate> = Arc::new(AlwaysAllowGate);
-    adapt_client_as_tools(
-        client,
-        name_prefix,
-        output,
-        &gate,
-        &Arc::new(Approvals::unsaved()),
-    )
-    .await
+    let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
+    adapt_client_as_tools(client, name_prefix, output, &approvals).await
 }
 
 /// Returns a static tool list and echoes arguments back as text.
@@ -268,8 +261,7 @@ async fn gated_tool(
         client.clone(),
         "mcp__files",
         PresentSpec::default(),
-        &gate,
-        &approvals,
+        &ApprovalGate::new(gate, approvals),
     )
     .await
     .unwrap();

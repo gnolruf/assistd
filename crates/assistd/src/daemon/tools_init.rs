@@ -8,7 +8,8 @@ use anyhow::Result;
 use assistd_core::{BuildToolsDeps, Config, ToolRegistry, WindowManager};
 use assistd_memory::SessionId;
 use assistd_tools::{
-    ConfirmationGate, IpcConfirmationGate, MemoryOps, ToolSandbox, ToolsDisabled, VisionGate,
+    ApprovalGate, ConfirmationGate, IpcConfirmationGate, MemoryOps, ToolSandbox, ToolsDisabled,
+    VisionGate,
 };
 use tokio::sync::watch;
 use tracing::info;
@@ -53,8 +54,11 @@ pub(super) async fn init(
         }
     };
     let gate: Arc<dyn ConfirmationGate> = Arc::new(IpcConfirmationGate);
-    let mcp_approvals = Arc::new(assistd_core::mcp_tool_approvals(config_path)?);
-    let mut mcp = mcp_init::init(config, shutdown_tx, &gate, &mcp_approvals).await;
+    let mcp_approvals = ApprovalGate::new(
+        gate.clone(),
+        Arc::new(assistd_core::mcp_tool_approvals(config_path)?),
+    );
+    let mut mcp = mcp_init::init(config, shutdown_tx, &mcp_approvals).await;
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
     let registry = assistd_core::build_tools(BuildToolsDeps {
         config,

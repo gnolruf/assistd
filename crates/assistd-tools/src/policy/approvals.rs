@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -70,31 +71,6 @@ impl Approvals {
         self.approved.read().contains(name)
     }
 
-    /// Whether a use of `name` may go ahead: it was approved for good, or
-    /// `gate` approves the `request` built now. An "always" answer approves
-    /// `name` for good.
-    pub async fn confirm(
-        &self,
-        name: &str,
-        gate: &dyn ConfirmationGate,
-        request: impl FnOnce() -> ConfirmationRequest,
-    ) -> bool {
-        if self.contains(name) {
-            return true;
-        }
-        let approval = gate.confirm(request()).await;
-        if approval == Approval::Always
-            && let Err(e) = self.approve(name).await
-        {
-            warn!(
-                target: "assistd::policy",
-                error = %e,
-                "approval holds until the daemon exits but was not saved"
-            );
-        }
-        approval != Approval::Deny
-    }
-
     /// Approve `name` for good and save.
     ///
     /// # Errors
@@ -118,11 +94,60 @@ impl Approvals {
     }
 }
 
+/// A [`ConfirmationGate`] that is skipped for names in its [`Approvals`].
+#[derive(Debug, Clone)]
+pub struct ApprovalGate {
+    gate: Arc<dyn ConfirmationGate>,
+    approvals: Arc<Approvals>,
+}
+
+impl ApprovalGate {
+    /// Asks `gate` about names missing from `approvals`.
+    pub fn new(gate: Arc<dyn ConfirmationGate>, approvals: Arc<Approvals>) -> Self {
+        Self { gate, approvals }
+    }
+
+    /// Whether `name` was approved for good.
+    pub fn contains(&self, name: &str) -> bool {
+        self.approvals.contains(name)
+    }
+
+    /// Whether a use of `name` may go ahead: it was approved for good, or
+    /// the gate approves the `request` built now. An "always" answer
+    /// approves `name` for good.
+    pub async fn confirm(&self, name: &str, request: impl FnOnce() -> ConfirmationRequest) -> bool {
+        if self.contains(name) {
+            return true;
+        }
+        confirm_remembering(self.gate.as_ref(), request(), self.approvals.approve(name)).await
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stored {
     #[serde(default)]
     approved: BTreeSet<String>,
+}
+
+/// Whether `gate` lets the use in `request` go ahead; an "always" answer
+/// also runs `remember`, whose failure to save is logged.
+pub(super) async fn confirm_remembering(
+    gate: &dyn ConfirmationGate,
+    request: ConfirmationRequest,
+    remember: impl Future<Output = Result<(), AllowlistError>>,
+) -> bool {
+    let approval = gate.confirm(request).await;
+    if approval == Approval::Always
+        && let Err(e) = remember.await
+    {
+        warn!(
+            target: "assistd::policy",
+            error = %e,
+            "approval holds until the daemon exits but was not saved"
+        );
+    }
+    approval != Approval::Deny
 }
 
 /// The text of `store`, or `None` when it does not exist.

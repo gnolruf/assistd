@@ -1,5 +1,4 @@
 use std::fmt::Display;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -8,7 +7,7 @@ use reqwest::{Response, Url};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
-use crate::policy::{Approvals, ConfirmationGate, ConfirmationRequest};
+use crate::policy::{ApprovalGate, ConfirmationRequest};
 
 /// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
@@ -23,25 +22,20 @@ const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
 #[derive(Debug)]
 pub struct WebCommand {
     client: reqwest::Client,
-    gate: Arc<dyn ConfirmationGate>,
-    hosts: Arc<Approvals>,
+    hosts: ApprovalGate,
 }
 
 impl WebCommand {
-    /// A command with a 30-second request timeout that asks `gate` before
-    /// fetching from a host missing from `hosts`.
-    pub fn new(gate: Arc<dyn ConfirmationGate>, hosts: Arc<Approvals>) -> Self {
-        Self::with_timeout(gate, hosts, Duration::from_secs(30))
+    /// A command with a 30-second request timeout that asks before fetching
+    /// from a host `hosts` has not approved.
+    pub fn new(hosts: ApprovalGate) -> Self {
+        Self::with_timeout(hosts, Duration::from_secs(30))
     }
 
     /// [`WebCommand::new`] with requests timing out after `timeout`, and
     /// connecting capped at 10 seconds.
-    pub fn with_timeout(
-        gate: Arc<dyn ConfirmationGate>,
-        hosts: Arc<Approvals>,
-        timeout: Duration,
-    ) -> Self {
-        let redirect_hosts = Arc::clone(&hosts);
+    pub fn with_timeout(hosts: ApprovalGate, timeout: Duration) -> Self {
+        let redirect_hosts = hosts.clone();
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
@@ -51,17 +45,13 @@ impl WebCommand {
             }))
             .build()
             .expect("reqwest client builds with valid config");
-        Self {
-            client,
-            gate,
-            hosts,
-        }
+        Self { client, hosts }
     }
 
     async fn confirmed(&self, url: &Url) -> bool {
         let host = url.host_str().unwrap_or_default();
         self.hosts
-            .confirm(host, self.gate.as_ref(), || ConfirmationRequest {
+            .confirm(host, || ConfirmationRequest {
                 tool: "web".to_string(),
                 script: format!("web {url}"),
                 matched_pattern: format!("fetches from {host}, which is not yet approved"),
@@ -179,7 +169,7 @@ enum BodyError {
 #[error("redirect to unapproved host {0}; fetch it directly to be asked")]
 struct UnapprovedRedirect(String);
 
-fn follow_redirect(attempt: Attempt<'_>, hosts: &Approvals) -> reqwest::redirect::Action {
+fn follow_redirect(attempt: Attempt<'_>, hosts: &ApprovalGate) -> reqwest::redirect::Action {
     if attempt.previous().len() > MAX_REDIRECTS {
         return attempt.error("too many redirects");
     }

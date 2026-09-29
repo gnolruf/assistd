@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use assistd_tools::presentation::{PresentSpec, TextTruncator, TruncatedText};
-use assistd_tools::{Approvals, ConfirmationGate, ConfirmationRequest, Tool, ToolError};
+use assistd_tools::{ApprovalGate, ConfirmationRequest, Tool, ToolError};
 use async_trait::async_trait;
 use base64::Engine;
 use serde_json::{Value, json};
@@ -63,28 +63,25 @@ pub struct McpToolAdapter {
     schema: ToolSchema,
     registry_name: String,
     truncator: Arc<TextTruncator>,
-    gate: Arc<dyn ConfirmationGate>,
-    approvals: Arc<Approvals>,
+    approvals: ApprovalGate,
 }
 
 impl McpToolAdapter {
-    /// Adapter that invokes `schema.name` on `client`, asking `gate` first
-    /// unless `approvals` holds the tool, and cutting text and JSON results
-    /// with `truncator` before they reach the model.
+    /// Adapter that invokes `schema.name` on `client`, asking first unless
+    /// `approvals` holds the tool, and cutting text and JSON results with
+    /// `truncator` before they reach the model.
     pub fn new(
         client: Arc<dyn McpClient>,
         schema: ToolSchema,
         registry_name: String,
         truncator: Arc<TextTruncator>,
-        gate: Arc<dyn ConfirmationGate>,
-        approvals: Arc<Approvals>,
+        approvals: ApprovalGate,
     ) -> Self {
         Self {
             client,
             schema,
             registry_name,
             truncator,
-            gate,
             approvals,
         }
     }
@@ -94,7 +91,7 @@ impl McpToolAdapter {
     async fn confirmed(&self, args: &Value) -> bool {
         let name = self.registry_name.as_str();
         self.approvals
-            .confirm(name, self.gate.as_ref(), || ConfirmationRequest {
+            .confirm(name, || ConfirmationRequest {
                 tool: name.to_string(),
                 script: format!("{args:#}"),
                 matched_pattern: "calls an MCP tool that is not yet approved".to_string(),
@@ -204,14 +201,13 @@ fn text_envelope(kind: &str, cut: TruncatedText, duration_ms: u128) -> Value {
 /// [`Tool`] entries for every tool the server exposes, named
 /// `<name_prefix>__<tool>` and gated on the supervisor's health. Results
 /// past `output`'s caps are cut, with the overflow spilled as
-/// `mcp-<server>-<n>.txt`. Each call asks `gate` first unless `approvals`
-/// holds the tool.
+/// `mcp-<server>-<n>.txt`. Each call asks first unless `approvals` holds
+/// the tool.
 pub async fn adapt_handle_as_tools(
     handle: &McpServerHandle,
     name_prefix: &str,
     output: PresentSpec,
-    gate: &Arc<dyn ConfirmationGate>,
-    approvals: &Arc<Approvals>,
+    approvals: &ApprovalGate,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let client = handle.client();
     let schemas = client.list_tools().await?;
@@ -227,8 +223,7 @@ pub async fn adapt_handle_as_tools(
             schema,
             registry_name,
             truncator.clone(),
-            Arc::clone(gate),
-            Arc::clone(approvals),
+            approvals.clone(),
         );
         let routed = HealthRoutedTool::new(adapter, server_name.clone(), health_rx.clone());
         tools.push(Box::new(routed));
@@ -241,8 +236,7 @@ async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
     name_prefix: &str,
     output: PresentSpec,
-    gate: &Arc<dyn ConfirmationGate>,
-    approvals: &Arc<Approvals>,
+    approvals: &ApprovalGate,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let schemas = client.list_tools().await?;
     let truncator = Arc::new(TextTruncator::new(output, "mcp-test"));
@@ -255,8 +249,7 @@ async fn adapt_client_as_tools(
                 schema,
                 name,
                 truncator.clone(),
-                Arc::clone(gate),
-                Arc::clone(approvals),
+                approvals.clone(),
             );
             Box::new(adapter) as Box<dyn Tool>
         })

@@ -112,12 +112,16 @@ impl Allowlist {
     }
 
     /// Approve `names` for good, pinning each to the file it resolves to
-    /// now, and save. Names that resolve to nothing are skipped.
+    /// now, and save. Names that resolve to nothing are skipped, and no
+    /// names saves nothing.
     ///
     /// # Errors
     /// [`AllowlistError::Write`] when saving fails; the approvals still hold
     /// until the daemon exits.
     pub async fn approve(&self, names: &[String]) -> Result<(), AllowlistError> {
+        if names.is_empty() {
+            return Ok(());
+        }
         let _saving = self.saving.lock().await;
         let approved = {
             let mut approved = self.approved.write();

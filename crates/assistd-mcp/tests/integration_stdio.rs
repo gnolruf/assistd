@@ -10,7 +10,7 @@ use assistd_mcp::{
     mcp_error_line,
 };
 use assistd_tools::presentation::PresentSpec;
-use assistd_tools::{AlwaysAllowGate, Approvals, ConfirmationGate, Tool};
+use assistd_tools::{AlwaysAllowGate, ApprovalGate, Approvals, Tool};
 use serde_json::json;
 use tokio::sync::watch;
 
@@ -26,15 +26,8 @@ fn make_stdio_config(label: &str) -> TransportConfig {
 
 /// [`adapt_handle_as_tools`] with every call allowed.
 async fn adapt_allowing(handle: &McpServerHandle) -> Result<Vec<Box<dyn Tool>>, McpError> {
-    let gate: Arc<dyn ConfirmationGate> = Arc::new(AlwaysAllowGate);
-    adapt_handle_as_tools(
-        handle,
-        "mcp__fake",
-        PresentSpec::default(),
-        &gate,
-        &Arc::new(Approvals::unsaved()),
-    )
-    .await
+    let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
+    adapt_handle_as_tools(handle, "mcp__fake", PresentSpec::default(), &approvals).await
 }
 
 /// Resolves once the supervisor exits and drops its health sender.

@@ -1,7 +1,6 @@
 //! MCP subsystem wiring for the daemon.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_core::{Config, McpServerConfig, McpStartupFailure};
@@ -9,7 +8,7 @@ use assistd_mcp::{
     McpServerHandle, SseConfig, StdioConfig, TransportConfig, adapt_handle_as_tools,
 };
 use assistd_tools::presentation::PresentSpec;
-use assistd_tools::{Approvals, ConfirmationGate, MCP_TOOL_NAME_PREFIX, Tool};
+use assistd_tools::{ApprovalGate, MCP_TOOL_NAME_PREFIX, Tool};
 use tokio::sync::watch;
 use tracing::info;
 
@@ -28,14 +27,13 @@ impl McpSubsystem {
     }
 }
 
-/// Start every configured MCP server, whose tools ask `gate` before each
-/// call unless `approvals` holds them. A server that fails to start or to
+/// Start every configured MCP server, whose tools ask before each call
+/// unless `approvals` holds them. A server that fails to start or to
 /// list its tools is recorded in `startup_failures` and skipped.
 pub(super) async fn init(
     config: &Config,
     shutdown_tx: &watch::Sender<bool>,
-    gate: &Arc<dyn ConfirmationGate>,
-    approvals: &Arc<Approvals>,
+    approvals: &ApprovalGate,
 ) -> McpSubsystem {
     let mut subsystem = McpSubsystem::default();
     if !config.mcp.enabled {
@@ -46,14 +44,8 @@ pub(super) async fn init(
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
     let output = PresentSpec::from_config(&config.tools.output, overflow_dir);
     for server in &config.mcp.servers {
-        let started = start_server(
-            server,
-            output.clone(),
-            shutdown_tx.subscribe(),
-            gate,
-            approvals,
-        )
-        .await;
+        let started =
+            start_server(server, output.clone(), shutdown_tx.subscribe(), approvals).await;
         match started {
             Ok((handle, tools)) => {
                 subsystem.tools.extend(tools);
@@ -71,8 +63,7 @@ async fn start_server(
     server: &McpServerConfig,
     output: PresentSpec,
     shutdown: watch::Receiver<bool>,
-    gate: &Arc<dyn ConfirmationGate>,
-    approvals: &Arc<Approvals>,
+    approvals: &ApprovalGate,
 ) -> Result<(McpServerHandle, Vec<Box<dyn Tool>>), McpStartupFailure> {
     let transport = build_transport_config(server);
     let label = server.name().to_string();
@@ -89,7 +80,7 @@ async fn start_server(
     };
 
     let prefix = format!("{MCP_TOOL_NAME_PREFIX}{}", handle.name);
-    match adapt_handle_as_tools(&handle, &prefix, output, gate, approvals).await {
+    match adapt_handle_as_tools(&handle, &prefix, output, approvals).await {
         Ok(tools) => {
             info!(
                 "mcp: {} ready ({} tools, transport={})",

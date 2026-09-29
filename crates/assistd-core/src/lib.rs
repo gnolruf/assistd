@@ -17,9 +17,9 @@ use assistd_llm::{LlamaServerControl, VisionState, probe_capabilities_routed};
 use assistd_memory::{SemanticStore, SessionId};
 use assistd_tools::{
     APPROVALS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist, AllowlistError,
-    Approvals, ConfirmationGate, DestructivePattern, MemoryOps, Protected, RecallTool,
-    RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo, SandboxRequest, Tool,
-    ToolSandbox, VisionGate,
+    ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps, Protected,
+    RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo, SandboxRequest,
+    Tool, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
@@ -345,7 +345,10 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     commands.register(WriteCommand::new(write_cfg, confirmation_gate.clone()));
     commands.register(SeeCommand::new(vision_gate.clone()));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
-    commands.register(WebCommand::new(confirmation_gate.clone(), approved_hosts));
+    commands.register(WebCommand::new(ApprovalGate::new(
+        confirmation_gate.clone(),
+        approved_hosts,
+    )));
     commands.register(BashCommand::new(
         bash_cfg.clone(),
         sandbox.clone(),

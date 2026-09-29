@@ -13,7 +13,8 @@ use super::{
 };
 use crate::command::CommandRegistry;
 use crate::policy::{
-    AlwaysAllowGate, Approval, Approvals, ConfirmationGate, ConfirmationRequest, DestructivePattern,
+    AlwaysAllowGate, Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest,
+    DestructivePattern,
 };
 
 pub(crate) fn test_registry() -> CommandRegistry {
@@ -30,10 +31,10 @@ pub(crate) fn test_registry() -> CommandRegistry {
     registry.register(WriteCommand::permissive_for_tests());
     registry.register(SeeCommand::default());
     registry.register(ScreenshotCommand::default());
-    registry.register(WebCommand::new(
+    registry.register(WebCommand::new(ApprovalGate::new(
         Arc::new(AlwaysAllowGate),
         Arc::new(Approvals::unsaved()),
-    ));
+    )));
     registry.register(BashCommand::default());
     registry.register(WmCommand::for_test(Arc::new(NoWindowManager)));
     registry
