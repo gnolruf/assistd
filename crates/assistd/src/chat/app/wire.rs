@@ -116,7 +116,11 @@ impl App {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let exit_code = result.get("exit_code").and_then(Value::as_i64).unwrap_or(0) as i32;
+        let exit_code = result
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok())
+            .unwrap_or(0);
         let duration_ms = result
             .get("duration_ms")
             .and_then(Value::as_u64)

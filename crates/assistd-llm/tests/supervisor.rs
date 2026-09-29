@@ -106,7 +106,10 @@ async fn restarts_after_external_kill() {
     let (service, shutdown_tx) = start_service(&fake, port).await;
 
     let first_pid = service.pid().expect("first pid");
-    let pid = Pid::from_raw(first_pid as i32).expect("nonzero pid");
+    let pid = i32::try_from(first_pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .expect("valid pid");
     kill_process(pid, Signal::KILL).expect("SIGKILL on test child");
 
     let deadline = Instant::now() + Duration::from_secs(8);

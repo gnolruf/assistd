@@ -131,7 +131,7 @@ async fn resume_or_start_unsaved_session(
 }
 
 fn pid_is_alive(pid: u32) -> bool {
-    let Some(pid) = Pid::from_raw(pid as i32) else {
+    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
         return false;
     };
     match rustix::process::test_kill_process(pid) {

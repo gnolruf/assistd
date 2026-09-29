@@ -206,7 +206,7 @@ async fn run_capture(
 ) -> Result<Vec<u8>, CaptureError> {
     let mut cmd = ProcCommand::new(binary);
     cmd.args(args);
-    let max_output = MAX_IMAGE_BYTES as usize;
+    let max_output = usize::try_from(MAX_IMAGE_BYTES).unwrap_or(usize::MAX);
     let captured = capture(cmd, &[], deadline, max_output)
         .await
         .map_err(|e| spawn_error(binary, &e))?;

@@ -56,7 +56,7 @@ impl InputLine {
 
     /// Cursor column in characters, not bytes.
     pub(super) fn cursor_col(&self) -> u16 {
-        self.buffer[..self.cursor].chars().count() as u16
+        u16::try_from(self.buffer[..self.cursor].chars().count()).unwrap_or(u16::MAX)
     }
 
     pub(super) fn on_key(&mut self, ev: KeyEvent) -> InputAction {

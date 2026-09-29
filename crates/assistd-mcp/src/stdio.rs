@@ -301,7 +301,9 @@ struct ProcessGroup(Pid);
 
 impl ProcessGroup {
     fn led_by(child: &Child) -> Option<Self> {
-        let pid = child.id().and_then(|pid| Pid::from_raw(pid as i32))?;
+        let pid = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok().and_then(Pid::from_raw))?;
         Some(Self(pid))
     }
 

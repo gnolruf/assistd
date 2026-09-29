@@ -360,7 +360,7 @@ async fn back_off_from_fd_exhaustion(err: &io::Error, fd_exhausted: &mut bool) {
     if !*fd_exhausted {
         warn!(
             error = %err,
-            backoff_ms = FD_EXHAUSTION_BACKOFF.as_millis() as u64,
+            backoff_ms = u64::try_from(FD_EXHAUSTION_BACKOFF.as_millis()).unwrap_or(u64::MAX),
             "accept failed: file-descriptor limit reached; backing \
              off until in-flight connections release descriptors. \
              Repeat occurrences suppressed until recovery."

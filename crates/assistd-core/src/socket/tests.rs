@@ -232,7 +232,7 @@ async fn oversize_request_is_rejected_without_oom() {
         let (read, mut write) = stream.into_split();
 
         let chunk = vec![b'a'; 1024 * 1024];
-        let mut remaining = MAX_REQUEST_BYTES as usize + 1;
+        let mut remaining = usize::try_from(MAX_REQUEST_BYTES).expect("request cap fits usize") + 1;
         while remaining > 0 {
             let n = remaining.min(chunk.len());
             if write.write_all(&chunk[..n]).await.is_err() {

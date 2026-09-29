@@ -404,7 +404,7 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>> {
-        let limit = limit as i64;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {

@@ -232,7 +232,7 @@ impl AppState {
             .await;
             return Ok(());
         }
-        let dim = self.memory.embedder.dim() as i64;
+        let dim = i64::try_from(self.memory.embedder.dim()).unwrap_or(i64::MAX);
 
         let chunks = match self.memory.semantic.chunks_missing_embedding(&model).await {
             Ok(chunks) => chunks,
@@ -253,8 +253,8 @@ impl AppState {
                 return Err(e.into());
             }
         };
-        let chunks_total = chunks.len() as u32;
-        let memories_total = memories.len() as u32;
+        let chunks_total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
+        let memories_total = u32::try_from(memories.len()).unwrap_or(u32::MAX);
 
         let _ = tx
             .send(Event::ReindexProgress {
@@ -302,7 +302,7 @@ impl AppState {
         F: Fn(i64, Vec<u8>) -> Fut,
         Fut: Future<Output = Result<(), MemoryError>>,
     {
-        let total = items.len() as u32;
+        let total = u32::try_from(items.len()).unwrap_or(u32::MAX);
         let mut done = 0u32;
         for batch in items.chunks(BATCH_SIZE) {
             let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();

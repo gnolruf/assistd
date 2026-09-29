@@ -126,9 +126,9 @@ impl WindowManager for SwayBackend {
                 primary: output.primary,
                 current_mode: output.current_mode.map(|mode| {
                     (
-                        mode.width.max(0) as u32,
-                        mode.height.max(0) as u32,
-                        mode.refresh.max(0) as u32,
+                        u32::try_from(mode.width).unwrap_or(0),
+                        u32::try_from(mode.height).unwrap_or(0),
+                        u32::try_from(mode.refresh).unwrap_or(0),
                     )
                 }),
                 scale: output.scale,
@@ -211,8 +211,8 @@ impl IpcProtocol for SwayIpc {
                 rect: Rect {
                     x: workspace.rect.x,
                     y: workspace.rect.y,
-                    width: workspace.rect.width.max(0) as u32,
-                    height: workspace.rect.height.max(0) as u32,
+                    width: u32::try_from(workspace.rect.width).unwrap_or(0),
+                    height: u32::try_from(workspace.rect.height).unwrap_or(0),
                 },
                 info: WorkspaceInfo {
                     num: workspace.num,
@@ -253,8 +253,8 @@ impl IpcProtocol for SwayIpc {
         .then(|| Rect {
             x: node.rect.x,
             y: node.rect.y,
-            width: node.rect.width.max(0) as u32,
-            height: node.rect.height.max(0) as u32,
+            width: u32::try_from(node.rect.width).unwrap_or(0),
+            height: u32::try_from(node.rect.height).unwrap_or(0),
         })
     }
 
@@ -365,10 +365,7 @@ fn collect_windows(node: &Node, parent_workspace: Option<&str>, out: &mut Vec<Wi
 }
 
 fn sway_id(raw: i64) -> Option<WindowId> {
-    if raw <= 0 {
-        return None;
-    }
-    WindowId::new(raw as u64)
+    u64::try_from(raw).ok().and_then(WindowId::new)
 }
 
 #[cfg(test)]

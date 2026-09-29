@@ -619,7 +619,7 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
         delete_turn_if_unreferenced(&tx, turn_id)?;
         tx.commit()?;
         Ok(UndoOutcome {
-            removed_messages: removed as u32,
+            removed_messages: u32::try_from(removed).unwrap_or(u32::MAX),
             last_user_text,
             removed_turn_id: Some(turn_id),
         })

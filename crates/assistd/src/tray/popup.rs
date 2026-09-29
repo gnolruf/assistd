@@ -7,6 +7,7 @@ use assistd_config::defaults::DEFAULT_TRAY_POPUP_APP_ID;
 use assistd_ipc::{Event, IpcClient};
 use assistd_wm::criteria::compute_target_position;
 use assistd_wm::{PlacementAnchor, WindowManager, WmHandle};
+use num_traits::ToPrimitive;
 use tokio::runtime::Handle as RuntimeHandle;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::watch;
@@ -163,7 +164,7 @@ async fn initial_window_position(
     let scale = match manager.focused_output_scale().await {
         Ok(s) => {
             tracing::info!(target: "tray", "popup: focused-output scale = {s:.4}");
-            s as f32
+            s.to_f32().unwrap_or(1.0)
         }
         Err(e) => {
             tracing::warn!(
@@ -225,8 +226,14 @@ fn spawn_gui_thread(
 
 fn scale_anchor_size(anchor: PlacementAnchor, scale: f32) -> PlacementAnchor {
     PlacementAnchor {
-        width: (anchor.width as f32 * scale).round() as u32,
-        height: (anchor.height as f32 * scale).round() as u32,
+        width: (anchor.width as f32 * scale)
+            .round()
+            .to_u32()
+            .unwrap_or(anchor.width),
+        height: (anchor.height as f32 * scale)
+            .round()
+            .to_u32()
+            .unwrap_or(anchor.height),
         ..anchor
     }
 }

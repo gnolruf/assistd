@@ -45,7 +45,7 @@ impl ChildProcess {
         })?;
         let process_group = child
             .id()
-            .and_then(|pid| Pid::from_raw(pid as i32))
+            .and_then(|pid| i32::try_from(pid).ok().and_then(Pid::from_raw))
             .ok_or_else(|| ChildServerError::Spawn {
                 server,
                 path,
@@ -92,7 +92,10 @@ impl ChildProcess {
     /// SIGTERM the process group, wait up to `term_timeout`, then SIGKILL
     /// whatever is left of it. Log forwarders are drained briefly.
     pub(super) async fn shutdown(mut self, term_timeout: Duration) -> Result<(), ChildServerError> {
-        let pgid = self.child.id().and_then(|pid| Pid::from_raw(pid as i32));
+        let pgid = self
+            .child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok().and_then(Pid::from_raw));
         if let Some(pgid) = pgid {
             let _ = kill_process_group(pgid, Signal::TERM);
         }

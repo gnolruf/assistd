@@ -12,6 +12,7 @@ whisper = [
     "dep:reqwest",
     "dep:nvml-wrapper",
     "dep:futures-util",
+    "dep:num-traits",
 ]
 # Requires `whisper` because `MicVoiceInput` wraps `WhisperTranscriber`.
 mic = ["whisper", "dep:cpal", "dep:ringbuf", "dep:rubato"]
@@ -47,6 +48,7 @@ parking_lot = { workspace = true }
 whisper-rs = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["stream"] }
 nvml-wrapper = { workspace = true, optional = true }
+num-traits = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
 cpal = { workspace = true, optional = true }

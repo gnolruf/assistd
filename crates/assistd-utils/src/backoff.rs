@@ -185,9 +185,10 @@ mod tests {
         let mut policy = RestartPolicy::default();
         let healthy = Duration::from_secs(MIN_HEALTHY_SECONDS + 5);
 
-        for i in 0..MAX_RESTARTS_PER_WINDOW - 1 {
+        let window = u32::try_from(MAX_RESTARTS_PER_WINDOW).expect("restart cap fits u32");
+        for i in 1..window {
             policy.record_session_end(healthy);
-            let at = t0 + healthy * (i as u32 + 1);
+            let at = t0 + healthy * i;
             assert!(matches!(
                 policy.next_restart(at),
                 RestartDecision::Backoff { .. }
@@ -195,7 +196,7 @@ mod tests {
         }
 
         policy.record_session_end(healthy);
-        let at = t0 + healthy * MAX_RESTARTS_PER_WINDOW as u32;
+        let at = t0 + healthy * window;
         assert_eq!(
             policy.next_restart(at),
             RestartDecision::WindowCapReached {
@@ -210,9 +211,10 @@ mod tests {
         let mut policy = RestartPolicy::default();
         let healthy = Duration::from_secs(MIN_HEALTHY_SECONDS + 5);
 
-        for i in 0..MAX_RESTARTS_PER_WINDOW - 1 {
+        let window = u32::try_from(MAX_RESTARTS_PER_WINDOW).expect("restart cap fits u32");
+        for i in 1..window {
             policy.record_session_end(healthy);
-            policy.next_restart(t0 + healthy * (i as u32 + 1));
+            policy.next_restart(t0 + healthy * i);
         }
 
         policy.record_session_end(healthy);

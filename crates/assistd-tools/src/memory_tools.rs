@@ -322,12 +322,7 @@ impl Tool for ReminisceTool {
         let current = self.current_session.borrow().clone();
         let hits = self
             .semantic
-            .nearest_chunks(
-                query_vec,
-                limit as usize,
-                &self.embedding_model,
-                Some(&current),
-            )
+            .nearest_chunks(query_vec, limit, &self.embedding_model, Some(&current))
             .await?;
 
         let output = format_chunks(&hits);
@@ -352,17 +347,15 @@ fn format_memories(hits: &[MemoryHit]) -> String {
         .join("\n")
 }
 
-fn reminisce_limit(args: &Value) -> Result<i64, ToolError> {
+fn reminisce_limit(args: &Value) -> Result<usize, ToolError> {
     let limit = args
         .get("limit")
         .and_then(Value::as_i64)
         .ok_or_else(|| ToolError::InvalidArgs("`limit` (integer) is required".into()))?;
-    if !(1..=20).contains(&limit) {
-        return Err(ToolError::InvalidArgs(format!(
-            "`limit` must be in 1..=20 (got {limit})"
-        )));
-    }
-    Ok(limit)
+    usize::try_from(limit)
+        .ok()
+        .filter(|limit| (1..=20).contains(limit))
+        .ok_or_else(|| ToolError::InvalidArgs(format!("`limit` must be in 1..=20 (got {limit})")))
 }
 
 fn format_chunks(hits: &[EmbeddingHit]) -> String {

@@ -63,6 +63,7 @@ tray-popup = [
     "tray",
     "dep:assistd-wm",
     "dep:eframe",
+    "dep:num-traits",
     "dep:winit",
 ]
 
@@ -101,6 +102,7 @@ ratatui-image    = { workspace = true, optional = true }
 image            = { workspace = true, optional = true }
 ksni             = { workspace = true, optional = true }
 eframe           = { workspace = true, optional = true }
+num-traits       = { workspace = true, optional = true }
 winit            = { workspace = true, optional = true }
 assistd-config   = { workspace = true, optional = true }
 

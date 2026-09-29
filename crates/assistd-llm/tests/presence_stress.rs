@@ -95,11 +95,16 @@ async fn get_counters(port: u16) -> (u32, u32, u32, Option<String>) {
         .await
         .expect("counters body");
     let counters: Value = serde_json::from_str(&body).expect("counters json");
-    let load = counters["load_count"].as_u64().expect("load_count") as u32;
-    let unload = counters["unload_count"].as_u64().expect("unload_count") as u32;
-    let chat = counters["chat_completions_count"]
-        .as_u64()
-        .expect("chat_completions_count") as u32;
+    let load = u32::try_from(counters["load_count"].as_u64().expect("load_count"))
+        .expect("load_count fits u32");
+    let unload = u32::try_from(counters["unload_count"].as_u64().expect("unload_count"))
+        .expect("unload_count fits u32");
+    let chat = u32::try_from(
+        counters["chat_completions_count"]
+            .as_u64()
+            .expect("chat_completions_count"),
+    )
+    .expect("chat_completions_count fits u32");
     let pid = counters["pid"].as_u64().map(|n| n.to_string());
     (load, unload, chat, pid)
 }

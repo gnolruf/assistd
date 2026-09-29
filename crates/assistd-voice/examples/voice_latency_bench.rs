@@ -18,6 +18,7 @@ use assistd_voice::{
     NoVoiceOutput, PiperVoiceOutput, SentenceBuffer, Transcriber, VoiceOutput, WhisperTranscriber,
 };
 use clap::Parser;
+use num_traits::ToPrimitive;
 use parking_lot::Mutex;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -259,9 +260,9 @@ impl RunMetrics {
     fn from_stages(turn_start: Instant, stages: &StageLog) -> Self {
         let mut per_stage = HashMap::new();
         for (name, when) in stages {
-            per_stage
-                .entry(name.clone())
-                .or_insert_with(|| when.duration_since(turn_start).as_millis() as u64);
+            per_stage.entry(name.clone()).or_insert_with(|| {
+                u64::try_from(when.duration_since(turn_start).as_millis()).unwrap_or(u64::MAX)
+            });
         }
         let end_to_end_ms = per_stage.get("playback_enqueued").copied();
         Self {
@@ -651,7 +652,10 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
     }
-    let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
+    let idx = ((sorted.len() - 1) as f64 * p)
+        .round()
+        .to_usize()
+        .unwrap_or(0);
     sorted[idx.min(sorted.len() - 1)]
 }
 

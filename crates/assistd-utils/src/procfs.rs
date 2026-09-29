@@ -179,7 +179,10 @@ mod tests {
             .process_group(0)
             .spawn()
             .expect("spawn sleep");
-        let other_group = Pid::from_raw(other.id() as i32).expect("nonzero pid");
+        let other_group = i32::try_from(other.id())
+            .ok()
+            .and_then(Pid::from_raw)
+            .expect("valid pid");
         let owned = is_listening_in_group(addr, other_group);
         let _ = other.kill();
         let _ = other.wait();

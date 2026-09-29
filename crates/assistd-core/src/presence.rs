@@ -360,7 +360,7 @@ impl PresenceManager {
             target: "assistd::presence",
             prior = ?prior,
             new = ?PresenceState::Sleeping,
-            duration_ms = started.elapsed().as_millis() as u64,
+            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "transitioned {prior:?} → Sleeping"
         );
         outcome
@@ -421,7 +421,7 @@ impl PresenceManager {
             target: "assistd::presence",
             prior = ?prior,
             new = ?PresenceState::Drowsy,
-            duration_ms = started.elapsed().as_millis() as u64,
+            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "transitioned Active → Drowsy"
         );
         Ok(())
@@ -469,7 +469,7 @@ impl PresenceManager {
             target: "assistd::presence",
             prior = ?prior,
             new = ?PresenceState::Active,
-            duration_ms = started.elapsed().as_millis() as u64,
+            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "transitioned {prior:?} → Active"
         );
         Ok(())

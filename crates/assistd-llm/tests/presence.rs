@@ -92,7 +92,7 @@ async fn new_active_manager(
 
 /// `kill(pid, 0)` existence probe; EPERM still means the process exists.
 fn pid_alive(pid: u32) -> bool {
-    let Some(pid) = Pid::from_raw(pid as i32) else {
+    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
         return false;
     };
     matches!(test_kill_process(pid), Ok(()) | Err(Errno::PERM))
@@ -130,8 +130,10 @@ async fn get_counters(port: u16) -> (u32, u32, Option<String>) {
         .await
         .expect("counters body");
     let counters: Value = serde_json::from_str(&body).expect("counters json");
-    let load = counters["load_count"].as_u64().expect("load_count") as u32;
-    let unload = counters["unload_count"].as_u64().expect("unload_count") as u32;
+    let load = u32::try_from(counters["load_count"].as_u64().expect("load_count"))
+        .expect("load_count fits u32");
+    let unload = u32::try_from(counters["unload_count"].as_u64().expect("unload_count"))
+        .expect("unload_count fits u32");
     let loaded = counters["loaded_model"].as_str().map(ToString::to_string);
     (load, unload, loaded)
 }

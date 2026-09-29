@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use assistd_config::TranscriptionConfig;
 use async_trait::async_trait;
+use num_traits::ToPrimitive;
 use parking_lot::Mutex;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
@@ -332,7 +333,7 @@ fn run_inference(
     params.set_no_context(true);
     params.set_suppress_blank(true);
     if let Some(threads) = inference.threads {
-        params.set_n_threads(threads as i32);
+        params.set_n_threads(i32::try_from(threads).unwrap_or(i32::MAX));
     }
 
     state
@@ -357,7 +358,7 @@ fn sampling_strategy(beams: u32) -> SamplingStrategy {
         SamplingStrategy::Greedy { best_of: 1 }
     } else {
         SamplingStrategy::BeamSearch {
-            beam_size: beams as i32,
+            beam_size: i32::try_from(beams).unwrap_or(i32::MAX),
             patience: -1.0,
         }
     }
@@ -365,7 +366,11 @@ fn sampling_strategy(beams: u32) -> SamplingStrategy {
 
 fn silero_vad_params(silence_secs: f32) -> WhisperVadParams {
     let mut vad_params = WhisperVadParams::default();
-    let silence_ms = (silence_secs * 1000.0).round().clamp(0.0, i32::MAX as f32) as i32;
+    let silence_ms = (silence_secs * 1000.0)
+        .round()
+        .max(0.0)
+        .to_i32()
+        .unwrap_or(i32::MAX);
     vad_params.set_min_silence_duration(silence_ms);
     vad_params
 }
@@ -394,11 +399,19 @@ fn stitch_speech_segments(audio: &[f32], segments: &[WhisperVadSegment]) -> Vec<
 }
 
 fn centiseconds_to_samples(centiseconds: f32) -> usize {
-    (centiseconds * SAMPLES_PER_CENTISECOND).round().max(0.0) as usize
+    (centiseconds * SAMPLES_PER_CENTISECOND)
+        .round()
+        .max(0.0)
+        .to_usize()
+        .unwrap_or(usize::MAX)
 }
 
 fn secs_to_samples(secs: f32) -> usize {
-    (secs * SAMPLE_RATE_HZ as f32).round().max(0.0) as usize
+    (secs * SAMPLE_RATE_HZ as f32)
+        .round()
+        .max(0.0)
+        .to_usize()
+        .unwrap_or(usize::MAX)
 }
 
 async fn fetch_vad(

@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::{EmbedError, Embedder};
@@ -169,7 +170,7 @@ fn l2_normalize(mut vector: Vec<f32>) -> Vec<f32> {
     if !norm.is_finite() || norm == 0.0 {
         return vector;
     }
-    let inverse_norm = (1.0 / norm) as f32;
+    let inverse_norm = (1.0 / norm).to_f32().unwrap_or(f32::MAX);
     for value in &mut vector {
         *value *= inverse_norm;
     }

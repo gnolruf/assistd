@@ -369,7 +369,11 @@ async fn read_capped<R: AsyncRead + Unpin>(
 
 #[cfg(unix)]
 fn kill_group(pgid: Option<u32>) {
-    if let Some(pgid) = pgid.and_then(|p| rustix::process::Pid::from_raw(p as i32)) {
+    if let Some(pgid) = pgid.and_then(|p| {
+        i32::try_from(p)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+    }) {
         let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
     }
 }

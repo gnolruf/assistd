@@ -499,11 +499,13 @@ impl Conversation {
 }
 
 fn approx_tokens(text: &str) -> u32 {
-    (text.len() as u32).div_ceil(4)
+    u32::try_from(text.len()).unwrap_or(u32::MAX).div_ceil(4)
 }
 
 fn approx_message_tokens(m: &Message) -> u32 {
-    let image_cost = (m.attachments.len() as u32).saturating_mul(TOKENS_PER_IMAGE);
+    let image_cost = u32::try_from(m.attachments.len())
+        .unwrap_or(u32::MAX)
+        .saturating_mul(TOKENS_PER_IMAGE);
     let tool_call_bytes: usize = m
         .tool_calls
         .iter()
@@ -522,7 +524,7 @@ fn approx_message_tokens(m: &Message) -> u32 {
 }
 
 fn approx_tokens_bytes(n: usize) -> u32 {
-    ((n as u32).saturating_add(3)) / 4
+    u32::try_from(n).unwrap_or(u32::MAX).saturating_add(3) / 4
 }
 
 fn wire_message(message: &Message) -> wire::ChatMessage<'_> {
