@@ -68,6 +68,25 @@ async fn glob_matches_reach_bash_as_file_names_not_code() {
 }
 
 #[tokio::test]
+async fn leading_dash_c_is_accepted_as_bash_would() {
+    let mut registry = CommandRegistry::new();
+    registry.register(BashCommand::default());
+    let line = "bash -c 'n=$((1+4)); echo RESULT_$n | tr A-Z a-z'";
+
+    let out = execute(&parse_chain(line).expect("parses"), &registry, None).await;
+
+    assert_eq!(out.exit_code, 0, "{out:?}");
+    assert_eq!(out.stdout, b"result_5\n");
+}
+
+#[tokio::test]
+async fn bare_dash_c_prints_usage() {
+    let out = run(&BashCommand::default(), "-c", None).await;
+    assert_eq!(out.exit_code, 2);
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("usage: bash"));
+}
+
+#[tokio::test]
 async fn bash_propagates_nonzero_exit() {
     let out = run(&BashCommand::default(), "exit 3", None).await;
     assert_eq!(out.exit_code, 3);
