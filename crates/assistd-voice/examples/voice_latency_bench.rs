@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::io::{self, Write};
 use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::path::{Path, PathBuf};
@@ -315,10 +316,12 @@ async fn main() -> Result<()> {
     let pcm = load_pcm(&args).await?;
     let whisper = build_whisper(&args).await?;
 
-    eprintln!(
+    writeln!(
+        io::stderr(),
         "building LLM client → http://{}:{}",
-        args.llama_host, args.llama_port
-    );
+        args.llama_host,
+        args.llama_port
+    )?;
     let llm_settings = LlmSettings::from_args(&args);
     let piper = start_piper(&args).await;
 
@@ -329,9 +332,9 @@ async fn main() -> Result<()> {
 
     let summary = summarize(args.iterations, &runs);
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&summary)?);
+        writeln!(io::stdout(), "{}", serde_json::to_string_pretty(&summary)?)?;
     } else {
-        print_human(&summary);
+        print_human(&summary)?;
     }
     Ok(())
 }
@@ -350,22 +353,24 @@ async fn load_pcm(args: &Args) -> Result<Vec<i16>> {
         Some(path) => path,
         None => ensure_wav_cached(&args.wav_url).await?,
     };
-    eprintln!("loading WAV: {}", wav_path.display());
+    writeln!(io::stderr(), "loading WAV: {}", wav_path.display())?;
     let pcm = load_wav_16k_mono(&wav_path).context("loading WAV")?;
-    eprintln!(
+    writeln!(
+        io::stderr(),
         "loaded {} samples ({:.2}s @ 16 kHz mono i16)",
         pcm.len(),
         pcm.len() as f32 / 16_000.0
-    );
+    )?;
     Ok(pcm)
 }
 
 async fn build_whisper(args: &Args) -> Result<Arc<dyn Transcriber>> {
-    eprintln!(
+    writeln!(
+        io::stderr(),
         "building Whisper ({}{})",
         args.whisper_model,
         if args.whisper_cpu_only { ", CPU" } else { "" }
-    );
+    )?;
     let whisper = WhisperTranscriber::builder()
         .model(args.whisper_model.clone())
         .prefer_gpu(!args.whisper_cpu_only)
@@ -381,12 +386,17 @@ async fn build_whisper(args: &Args) -> Result<Arc<dyn Transcriber>> {
 /// timings stay comparable.
 async fn start_piper(args: &Args) -> Arc<dyn VoiceOutput> {
     if args.no_piper {
-        eprintln!("Piper disabled (--no-piper); end-to-end timing will be omitted");
+        let _ = writeln!(
+            io::stderr(),
+            "Piper disabled (--no-piper); end-to-end timing will be omitted"
+        );
         return Arc::new(NoVoiceOutput);
     }
-    eprintln!(
+    let _ = writeln!(
+        io::stderr(),
         "building Piper TTS (binary='{}', cuda={})...",
-        args.piper_binary, args.piper_cuda
+        args.piper_binary,
+        args.piper_cuda
     );
     let synthesis = SynthesisConfig {
         binary_path: args.piper_binary.clone().into(),
@@ -396,7 +406,8 @@ async fn start_piper(args: &Args) -> Arc<dyn VoiceOutput> {
     match PiperVoiceOutput::start(synthesis).await {
         Ok(piper) => Arc::new(piper),
         Err(err) => {
-            eprintln!(
+            let _ = writeln!(
+                io::stderr(),
                 "Piper unavailable ({err:#}); falling back to NoVoiceOutput. \
                  End-to-end timing will be omitted. Install piper or pass \
                  --no-piper to silence this warning."
@@ -429,17 +440,22 @@ async fn run_iterations(
             Ok(()) => {
                 let metrics = RunMetrics::from_stages(turn_start, stages);
                 if let Some(end_to_end) = metrics.end_to_end_ms {
-                    eprintln!("iter {iteration}: {} ms end-to-end", end_to_end);
+                    writeln!(
+                        io::stderr(),
+                        "iter {iteration}: {} ms end-to-end",
+                        end_to_end
+                    )?;
                 } else {
-                    eprintln!(
+                    writeln!(
+                        io::stderr(),
                         "iter {iteration}: completed but no playback_enqueued event captured ({} stage events)",
                         metrics.per_stage.len()
-                    );
+                    )?;
                 }
                 runs.push(metrics);
             }
             Err(err) => {
-                eprintln!("iter {iteration} failed: {err:#}");
+                writeln!(io::stderr(), "iter {iteration} failed: {err:#}")?;
             }
         }
     }
@@ -617,7 +633,7 @@ async fn ensure_wav_cached(url: &str) -> Result<PathBuf> {
     if path.exists() {
         return Ok(path);
     }
-    eprintln!("downloading {url} → {}", path.display());
+    writeln!(io::stderr(), "downloading {url} → {}", path.display())?;
     let bytes = reqwest::get(url)
         .await
         .with_context(|| format!("GET {url}"))?
@@ -693,44 +709,70 @@ fn ordered_stage_stats(mut by_stage: HashMap<String, Vec<u64>>) -> Vec<(String, 
     stages
 }
 
-fn print_human(summary: &Summary) {
-    println!(
+fn print_human(summary: &Summary) -> io::Result<()> {
+    writeln!(
+        io::stdout(),
         "\nVoice latency benchmark: {} of {} iterations completed\n",
-        summary.successful_iterations, summary.requested_iterations,
-    );
-    println!(
+        summary.successful_iterations,
+        summary.requested_iterations,
+    )?;
+    writeln!(
+        io::stdout(),
         "{:>26}  {:>9}  {:>9}  {:>9}  {:>9}  {:>5}",
-        "stage", "min", "median", "p95", "max", "n"
-    );
-    println!(
+        "stage",
+        "min",
+        "median",
+        "p95",
+        "max",
+        "n"
+    )?;
+    writeln!(
+        io::stdout(),
         "{:>26}  {:>9}  {:>9}  {:>9}  {:>9}  {:>5}",
-        "----", "---", "------", "---", "---", "-"
-    );
+        "----",
+        "---",
+        "------",
+        "---",
+        "---",
+        "-"
+    )?;
     for (name, stats) in &summary.stages {
-        println!(
+        writeln!(
+            io::stdout(),
             "{:>26}  {:>6} ms  {:>6} ms  {:>6} ms  {:>6} ms  {:>5}",
-            name, stats.min_ms, stats.median_ms, stats.p95_ms, stats.max_ms, stats.count
-        );
+            name,
+            stats.min_ms,
+            stats.median_ms,
+            stats.p95_ms,
+            stats.max_ms,
+            stats.count
+        )?;
     }
-    println!();
+    writeln!(io::stdout())?;
     match &summary.end_to_end {
         Some(end_to_end) => {
-            println!(
+            writeln!(
+                io::stdout(),
                 "end-to-end (T0 → playback_enqueued): min {} ms, median {} ms, p95 {} ms, max {} ms (n={})",
                 end_to_end.min_ms,
                 end_to_end.median_ms,
                 end_to_end.p95_ms,
                 end_to_end.max_ms,
                 end_to_end.count
-            );
+            )?;
             let pass = end_to_end.median_ms <= 500;
-            println!(
+            writeln!(
+                io::stdout(),
                 "acceptance gate (median ≤ 500 ms): {}",
                 if pass { "PASS" } else { "FAIL" }
-            );
+            )?;
         }
-        None => println!("no playback_enqueued events captured; pipeline did not reach Piper"),
+        None => writeln!(
+            io::stdout(),
+            "no playback_enqueued events captured; pipeline did not reach Piper"
+        )?,
     }
+    Ok(())
 }
 
 fn stage_json(stats: &StageStats) -> serde_json::Value {

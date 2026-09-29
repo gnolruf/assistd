@@ -1,6 +1,6 @@
 //! `query` subcommand.
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -33,7 +33,7 @@ pub(crate) async fn run(args: QueryArgs) -> Result<()> {
         Request::query_with_attachments(Uuid::new_v4().to_string(), args.text, attachments)
     };
 
-    let mut stdout = std::io::stdout().lock();
+    let mut stdout = io::stdout().lock();
     let mut wrote_anything = false;
     run_one_shot(req, |event| {
         print_event(&mut stdout, event, &mut wrote_anything)
@@ -123,16 +123,18 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
             message,
             ..
         } => {
-            eprintln!(
+            writeln!(
+                io::stderr(),
                 "[{severity} {component}: {}]",
                 escape_controls_single_line(message)
-            );
+            )?;
         }
         Event::ConfirmRequest { .. } => {
-            eprintln!(
+            writeln!(
+                io::stderr(),
                 "[daemon asked for destructive-command confirmation; denying \
                  (non-interactive query)]"
-            );
+            )?;
         }
         Event::Done { .. } | Event::Error { .. } if *wrote_anything => {
             writeln!(out)?;

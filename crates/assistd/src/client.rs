@@ -1,6 +1,8 @@
 //! One-shot CLI subcommands: each sends one request to the running daemon
 //! and prints the events it streams back.
 
+use std::io::{self, Write};
+
 use anyhow::{Error, Result};
 use assistd_ipc::{Event, IpcClient, IpcClientError, Request};
 
@@ -31,7 +33,7 @@ async fn run_one_shot(req: Request, mut on_event: impl FnMut(&Event) -> Result<(
         match event {
             Event::Done { .. } => return Ok(()),
             Event::Error { message, .. } => {
-                eprintln!("daemon error: {}", escape_controls(&message));
+                writeln!(io::stderr(), "daemon error: {}", escape_controls(&message))?;
                 std::process::exit(1);
             }
             _ => {}

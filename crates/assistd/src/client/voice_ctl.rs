@@ -1,5 +1,7 @@
 //! `voice-*` subcommands.
 
+use std::io::{self, Write};
+
 use anyhow::Result;
 use assistd_ipc::{Event, Request};
 use uuid::Uuid;
@@ -27,7 +29,11 @@ pub(crate) async fn run(action: VoiceCtlAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     run_one_shot(req, |event| {
         if let Event::VoiceOutputState { enabled, .. } = event {
-            println!("voice-output: {}", if *enabled { "on" } else { "off" });
+            writeln!(
+                io::stdout(),
+                "voice-output: {}",
+                if *enabled { "on" } else { "off" }
+            )?;
         }
         Ok(())
     })

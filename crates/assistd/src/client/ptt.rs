@@ -1,6 +1,6 @@
 //! `ptt-start` and `ptt-stop` subcommands.
 
-use std::io::Write;
+use std::io::{self, Write};
 
 use anyhow::Result;
 use assistd_ipc::{Event, Request, VoiceCaptureState};
@@ -26,18 +26,22 @@ impl PttAction {
 
 pub(crate) async fn run(action: PttAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
-    let mut stdout = std::io::stdout().lock();
+    let mut stdout = io::stdout().lock();
     let mut wrote_delta = false;
     run_one_shot(req, |event| {
         match event {
             Event::VoiceState { state, .. } => {
-                eprintln!("[voice: {}]", voice_state_label(*state));
+                writeln!(io::stderr(), "[voice: {}]", voice_state_label(*state))?;
             }
             Event::Transcription { text, .. } => {
                 if text.trim().is_empty() {
-                    eprintln!("[transcription: (no speech detected)]");
+                    writeln!(io::stderr(), "[transcription: (no speech detected)]")?;
                 } else {
-                    eprintln!("[transcription: {}]", escape_controls_single_line(text));
+                    writeln!(
+                        io::stderr(),
+                        "[transcription: {}]",
+                        escape_controls_single_line(text)
+                    )?;
                 }
             }
             Event::Delta { text, .. } => {
@@ -51,9 +55,9 @@ pub(crate) async fn run(action: PttAction) -> Result<()> {
                     args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
                 );
                 if preview.is_empty() {
-                    eprintln!("\n[tool call: {name}]");
+                    writeln!(io::stderr(), "\n[tool call: {name}]")?;
                 } else {
-                    eprintln!("\n[tool call: {name} {preview}]");
+                    writeln!(io::stderr(), "\n[tool call: {name} {preview}]")?;
                 }
             }
             Event::ToolResult { name, result, .. } => {
@@ -62,7 +66,7 @@ pub(crate) async fn run(action: PttAction) -> Result<()> {
                     .get("exit_code")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
-                eprintln!("[tool result: {name} exit:{exit}]");
+                writeln!(io::stderr(), "[tool result: {name} exit:{exit}]")?;
             }
             Event::Status {
                 severity,
@@ -70,16 +74,18 @@ pub(crate) async fn run(action: PttAction) -> Result<()> {
                 message,
                 ..
             } => {
-                eprintln!(
+                writeln!(
+                    io::stderr(),
                     "[{severity} {component}: {}]",
                     escape_controls_single_line(message)
-                );
+                )?;
             }
             Event::ConfirmRequest { .. } => {
-                eprintln!(
+                writeln!(
+                    io::stderr(),
                     "[daemon asked for destructive-command confirmation; denying \
                      (non-interactive ptt)]"
-                );
+                )?;
             }
             Event::Done { .. } | Event::Error { .. } if wrote_delta => {
                 writeln!(stdout)?;

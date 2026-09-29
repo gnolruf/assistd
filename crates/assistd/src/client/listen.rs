@@ -1,5 +1,7 @@
 //! `listen-*` subcommands.
 
+use std::io::{self, Write};
+
 use anyhow::Result;
 use assistd_ipc::{Event, Request};
 use uuid::Uuid;
@@ -29,7 +31,11 @@ pub(crate) async fn run(action: ListenAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     run_one_shot(req, |event| {
         if let Event::ListenState { active, .. } = event {
-            println!("listen: {}", if *active { "on" } else { "off" });
+            writeln!(
+                io::stdout(),
+                "listen: {}",
+                if *active { "on" } else { "off" }
+            )?;
         }
         Ok(())
     })

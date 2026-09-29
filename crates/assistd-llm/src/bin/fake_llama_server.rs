@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::env;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -122,20 +122,23 @@ async fn main() -> ExitCode {
     let args = parse_args();
 
     if matches!(args.mode, Mode::BindFail) {
-        eprintln!("fake_llama_server: bind-fail mode; exiting");
+        let _ = writeln!(io::stderr(), "fake_llama_server: bind-fail mode; exiting");
         return ExitCode::from(1);
     }
 
     let listener = match TcpListener::bind((args.host.as_str(), args.port)).await {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("fake_llama_server: bind failed: {e}");
+            let _ = writeln!(io::stderr(), "fake_llama_server: bind failed: {e}");
             return ExitCode::from(2);
         }
     };
-    eprintln!(
+    let _ = writeln!(
+        io::stderr(),
         "fake_llama_server: listening on {}:{} mode={:?}",
-        args.host, args.port, args.mode
+        args.host,
+        args.port,
+        args.mode
     );
 
     let state = Arc::new(Mutex::new(ServerState::default()));
@@ -146,7 +149,10 @@ async fn main() -> ExitCode {
             serve_loop(listener, Mode::Normal, state).await;
         });
         tokio::time::sleep(Duration::from_secs(secs)).await;
-        eprintln!("fake_llama_server: crash-after elapsed; exiting 0");
+        let _ = writeln!(
+            io::stderr(),
+            "fake_llama_server: crash-after elapsed; exiting 0"
+        );
         return ExitCode::SUCCESS;
     }
 
@@ -157,7 +163,10 @@ async fn main() -> ExitCode {
             serve_loop(listener, Mode::Normal, state).await;
         });
         term.recv().await;
-        eprintln!("fake_llama_server: SIGTERM received; exiting in {secs}s");
+        let _ = writeln!(
+            io::stderr(),
+            "fake_llama_server: SIGTERM received; exiting in {secs}s"
+        );
         tokio::time::sleep(Duration::from_secs(secs)).await;
         return ExitCode::SUCCESS;
     }
@@ -171,7 +180,7 @@ async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerSt
         let (sock, _) = match listener.accept().await {
             Ok(accepted) => accepted,
             Err(e) => {
-                eprintln!("fake_llama_server: accept error: {e}");
+                let _ = writeln!(io::stderr(), "fake_llama_server: accept error: {e}");
                 continue;
             }
         };

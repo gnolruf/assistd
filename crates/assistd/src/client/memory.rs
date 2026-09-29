@@ -2,7 +2,7 @@
 //! never opens the SQLite file itself, because the daemon owns the
 //! writer.
 
-use std::io::Write;
+use std::io::{self, Write};
 
 use anyhow::Result;
 use assistd_ipc::{Event, ReindexKind, Request};
@@ -104,24 +104,26 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                 let session_short = session_id.chars().take(8).collect::<String>();
                 let flattened = content.replace('\n', " ");
                 let single_line = escape_controls_single_line(&flattened);
-                println!(
+                writeln!(
+                    io::stdout(),
                     "{timestamp}  {role:9}  conv={conversation_id:<6}  sess={session_short}  sim={similarity:.2}  {single_line}"
-                );
+                )?;
             }
             Event::MemoryValue { key, value, .. } => match value {
-                Some(v) => println!(
+                Some(v) => writeln!(
+                    io::stdout(),
                     "{}\t{}",
                     escape_controls_single_line(key),
                     escape_controls(v)
-                ),
+                )?,
                 None => {
-                    eprintln!("(no value for key {key:?})");
+                    writeln!(io::stderr(), "(no value for key {key:?})")?;
                     std::process::exit(2);
                 }
             },
             Event::MemoryKeys { keys, .. } => {
                 for k in keys {
-                    println!("{}", escape_controls_single_line(k));
+                    writeln!(io::stdout(), "{}", escape_controls_single_line(k))?;
                 }
             }
             Event::MemoryRow {
@@ -133,18 +135,22 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                 let key = escape_controls_single_line(key);
                 let flattened = value.replace('\n', " ");
                 let single_line = escape_controls_single_line(&flattened);
-                println!("{memory_id}\t{key}\t{single_line}");
+                writeln!(io::stdout(), "{memory_id}\t{key}\t{single_line}")?;
             }
             Event::MemoryForgetResult { deleted: true, key, .. } => {
                 let id = forget_target.unwrap_or(0);
                 match key {
-                    Some(k) => println!("forgot id={id} key={}", escape_controls_single_line(k)),
-                    None => println!("forgot id={id}"),
+                    Some(k) => writeln!(
+                        io::stdout(),
+                        "forgot id={id} key={}",
+                        escape_controls_single_line(k)
+                    )?,
+                    None => writeln!(io::stdout(), "forgot id={id}")?,
                 }
             }
             Event::MemoryForgetResult { deleted: false, .. } => {
                 let id = forget_target.unwrap_or(0);
-                eprintln!("no memory with id={id}");
+                writeln!(io::stderr(), "no memory with id={id}")?;
                 std::process::exit(2);
             }
             Event::ReindexProgress {
@@ -153,7 +159,7 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                 print_reindex_progress(*kind, *done, *total, &mut last_reindex_kind);
             }
             Event::Done { .. } if last_reindex_kind.is_some() && !reindex_quiet => {
-                eprintln!();
+                writeln!(io::stderr())?;
             }
             _ => {}
         }
@@ -170,7 +176,7 @@ fn print_reindex_progress(
     total: u32,
     last_kind: &mut Option<ReindexKind>,
 ) {
-    let mut err = std::io::stderr();
+    let mut err = io::stderr();
     if last_kind.is_some_and(|last| last != kind) {
         let _ = writeln!(err);
     }

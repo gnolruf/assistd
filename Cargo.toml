@@ -107,6 +107,8 @@ all = { level = "warn", priority = -1 }
 dbg_macro = "deny"
 allow_attributes_without_reason = "warn"
 mod_module_files = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
 todo = "warn"
 too_many_lines = "warn"
 unchecked_time_subtraction = "warn"

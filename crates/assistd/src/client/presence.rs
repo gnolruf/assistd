@@ -1,5 +1,7 @@
 //! `sleep`, `wake`, `drowse`, and `cycle` subcommands.
 
+use std::io::{self, Write};
+
 use anyhow::Result;
 use assistd_ipc::{Event, PresenceState, Request};
 use uuid::Uuid;
@@ -38,7 +40,7 @@ pub(crate) async fn run(action: PresenceAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     run_one_shot(req, |event| {
         if let Event::Presence { state, .. } = event {
-            println!("presence: {}", presence_label(*state));
+            writeln!(io::stdout(), "presence: {}", presence_label(*state))?;
         }
         Ok(())
     })

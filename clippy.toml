@@ -1,2 +1,4 @@
 # Functions past this many lines should be split into named steps.
 too-many-lines-threshold = 100
+# The test harness captures print output, so tests may print.
+allow-print-in-tests = true
