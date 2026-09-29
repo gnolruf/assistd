@@ -396,7 +396,10 @@ async fn handle_connection(
     let router_for_dispatch = router.clone();
     let dispatch_fut = async move {
         CONFIRM_ROUTER
-            .scope(router_for_dispatch, dispatch_state.dispatch(req, tx))
+            .scope(
+                router_for_dispatch,
+                Box::pin(dispatch_state.dispatch(req, tx)),
+            )
             .await
     };
     let forward_fut = forward_events(rx, write_half, state, is_subscribe);

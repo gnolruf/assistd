@@ -33,6 +33,9 @@ pub(crate) const TIMEOUT_EXIT: i32 = 137;
 /// runs so a runaway script cannot balloon daemon memory before the timeout.
 pub(crate) const OUTPUT_BUF_MAX: usize = PIPE_BUF_MAX;
 
+/// Pipe read size; heap-allocated so reader futures stay small.
+const READ_CHUNK_BYTES: usize = 8192;
+
 /// Exit code when a child exceeds [`OUTPUT_BUF_MAX`]; matches the chain
 /// executor's pipe-overflow exit.
 pub(crate) const OUTPUT_OVERFLOW_EXIT: i32 = 141;
@@ -329,7 +332,7 @@ fn wait_failed(tool: &str, e: &io::Error) -> CommandOutput {
 }
 
 async fn drain_into<R: AsyncRead + Unpin>(mut reader: R, limit: usize, sink: Arc<Mutex<Vec<u8>>>) {
-    let mut chunk = [0u8; 8192];
+    let mut chunk = vec![0u8; READ_CHUNK_BYTES];
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
@@ -349,7 +352,7 @@ async fn read_capped<R: AsyncRead + Unpin>(
     limit: usize,
     buf: &mut Vec<u8>,
 ) -> Result<(), Overflow> {
-    let mut chunk = [0u8; 8192];
+    let mut chunk = vec![0u8; READ_CHUNK_BYTES];
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => return Ok(()),
