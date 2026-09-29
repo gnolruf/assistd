@@ -98,6 +98,7 @@ trivial_numeric_casts = "warn"
 unit_bindings = "warn"
 unused_import_braces = "warn"
 unused_lifetimes = "warn"
+unused_qualifications = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

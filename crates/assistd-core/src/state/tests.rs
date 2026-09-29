@@ -49,8 +49,8 @@ struct StateParts {
     backend: Arc<dyn LlmBackend>,
     presence: PresenceState,
     tools: Arc<ToolRegistry>,
-    voice: Arc<dyn assistd_voice::VoiceInput>,
-    listener: Arc<dyn assistd_voice::ContinuousListener>,
+    voice: Arc<dyn VoiceInput>,
+    listener: Arc<dyn ContinuousListener>,
     speech: Arc<dyn assistd_voice::VoiceOutput>,
 }
 
@@ -453,7 +453,7 @@ impl MockVoice {
 }
 
 #[async_trait::async_trait]
-impl assistd_voice::VoiceInput for MockVoice {
+impl VoiceInput for MockVoice {
     async fn start_recording(&self) -> Result<(), VoiceInputError> {
         self.start_result.lock().take().unwrap_or(Ok(()))
     }
@@ -594,7 +594,7 @@ impl MockListener {
 }
 
 #[async_trait::async_trait]
-impl assistd_voice::ContinuousListener for MockListener {
+impl ContinuousListener for MockListener {
     async fn start(&self) -> Result<(), ListenError> {
         if self.start_fails {
             return Err(ListenError::Disabled);
@@ -1378,7 +1378,7 @@ async fn append_turn(
     conv.end_turn(turn).await.unwrap();
 }
 
-fn history(events: &[Event]) -> Vec<(assistd_ipc::Role, &str)> {
+fn history(events: &[Event]) -> Vec<(Role, &str)> {
     events
         .iter()
         .filter_map(|e| match e {
@@ -1483,10 +1483,7 @@ async fn switch_replays_history_into_event_stream() {
     );
     assert_eq!(
         history(&events),
-        [
-            (assistd_ipc::Role::User, "hello"),
-            (assistd_ipc::Role::Assistant, "world")
-        ]
+        [(Role::User, "hello"), (Role::Assistant, "world")]
     );
     assert_eq!(events.last(), Some(&done("rq")));
 }
@@ -1525,10 +1522,7 @@ async fn resume_or_new_with_huge_window_resumes_instead_of_panicking() {
     res.unwrap();
     assert_eq!(
         history(&events),
-        [
-            (assistd_ipc::Role::User, "hello"),
-            (assistd_ipc::Role::Assistant, "world")
-        ],
+        [(Role::User, "hello"), (Role::Assistant, "world")],
         "an unbounded window must keep the branch"
     );
     assert_eq!(events.last(), Some(&done("rq")));

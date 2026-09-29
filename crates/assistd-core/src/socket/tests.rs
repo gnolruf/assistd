@@ -105,7 +105,7 @@ impl TestServer {
 async fn with_server<F, Fut, R>(state: Arc<AppState>, body: F) -> R
 where
     F: FnOnce(PathBuf) -> Fut,
-    Fut: std::future::Future<Output = R>,
+    Fut: Future<Output = R>,
 {
     let server = TestServer::start(state).await;
     let out = body(server.path.clone()).await;
@@ -417,7 +417,7 @@ async fn refuses_socket_dir_that_is_a_symlink() {
 /// Done.
 struct SlowBackend {
     deltas: usize,
-    pause: std::time::Duration,
+    pause: Duration,
 }
 
 #[async_trait::async_trait]
@@ -425,7 +425,7 @@ impl assistd_llm::LlmBackend for SlowBackend {
     async fn generate(
         &self,
         _prompt: String,
-        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<()> {
         for i in 0..self.deltas {
             let _ = tx
@@ -457,7 +457,7 @@ impl assistd_llm::LlmBackend for SlowBackend {
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
-        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
         for i in 0..self.deltas {
             let _ = tx
@@ -480,7 +480,7 @@ impl assistd_llm::LlmBackend for StuckBackend {
     async fn generate(
         &self,
         _prompt: String,
-        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<()> {
         let _ = tx
             .send(assistd_llm::LlmEvent::Delta {
@@ -509,7 +509,7 @@ impl assistd_llm::LlmBackend for StuckBackend {
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
-        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
         let _ = tx
             .send(assistd_llm::LlmEvent::Delta {
@@ -772,7 +772,7 @@ async fn shutdown_closes_idle_subscriber_without_waiting_out_grace() {
 /// Backend whose first step asks for the `gated` tool and whose second
 /// step ends the turn.
 struct GatedToolBackend {
-    stepped: std::sync::atomic::AtomicBool,
+    stepped: AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -780,7 +780,7 @@ impl assistd_llm::LlmBackend for GatedToolBackend {
     async fn generate(
         &self,
         _prompt: String,
-        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<()> {
         let _ = tx.send(assistd_llm::LlmEvent::Done).await;
         Ok(())
@@ -804,9 +804,9 @@ impl assistd_llm::LlmBackend for GatedToolBackend {
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
-        _tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        _tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
-        if self.stepped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if self.stepped.swap(true, Ordering::SeqCst) {
             return Ok(assistd_llm::StepOutcome::Final);
         }
         Ok(assistd_llm::StepOutcome::ToolCalls(vec![
@@ -850,7 +850,7 @@ impl assistd_tools::Tool for GatedTool {
             },
         )
         .await;
-        let approved = approved != assistd_tools::Approval::Deny;
+        let approved = approved != Approval::Deny;
         Ok(serde_json::json!({
             "output": if approved { "approved" } else { "denied" },
             "exit_code": 0,
@@ -864,7 +864,7 @@ fn gated_tool_state() -> Arc<AppState> {
     Arc::new(AppState::new(
         Config::default(),
         Arc::new(GatedToolBackend {
-            stepped: std::sync::atomic::AtomicBool::new(false),
+            stepped: AtomicBool::new(false),
         }),
         PresenceManager::stub(PresenceState::Active),
         Arc::new(tools),
@@ -932,7 +932,7 @@ async fn one_shot_client_eof_denies_prompt_without_waiting() {
 struct FloodBackend;
 
 impl FloodBackend {
-    async fn flood(tx: &tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>) {
+    async fn flood(tx: &mpsc::Sender<assistd_llm::LlmEvent>) {
         let text = "x".repeat(1024);
         while tx
             .send(assistd_llm::LlmEvent::Delta { text: text.clone() })
@@ -947,7 +947,7 @@ impl assistd_llm::LlmBackend for FloodBackend {
     async fn generate(
         &self,
         _prompt: String,
-        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<()> {
         Self::flood(&tx).await;
         Ok(())
@@ -971,7 +971,7 @@ impl assistd_llm::LlmBackend for FloodBackend {
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
-        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
         Self::flood(&tx).await;
         Ok(assistd_llm::StepOutcome::Final)
@@ -1063,7 +1063,7 @@ impl assistd_llm::LlmBackend for HangingCallBackend {
     async fn generate(
         &self,
         _prompt: String,
-        _tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        _tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<()> {
         unimplemented!("uses step path")
     }
@@ -1086,7 +1086,7 @@ impl assistd_llm::LlmBackend for HangingCallBackend {
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
-        tx: tokio::sync::mpsc::Sender<assistd_llm::LlmEvent>,
+        tx: mpsc::Sender<assistd_llm::LlmEvent>,
     ) -> assistd_llm::LlmResult<assistd_llm::StepOutcome> {
         if !self.called.swap(true, Ordering::SeqCst) {
             return Ok(assistd_llm::StepOutcome::ToolCalls(vec![

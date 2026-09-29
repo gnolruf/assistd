@@ -82,7 +82,7 @@ async fn wake_from_active_does_not_reset_activity_timer() {
 #[tokio::test]
 async fn acquire_request_guard_fast_path_when_active() {
     let m = PresenceManager::stub(PresenceState::Active);
-    tokio::time::timeout(
+    timeout(
         Duration::from_millis(100),
         m.acquire_request_guard_inner(None),
     )
@@ -107,7 +107,7 @@ async fn sleep_defers_for_inflight_request() {
     );
 
     drop(guard);
-    tokio::time::timeout(Duration::from_secs(2), sleep_task)
+    timeout(Duration::from_secs(2), sleep_task)
         .await
         .expect("sleep did not complete after guard dropped")
         .expect("sleep task panicked")
@@ -130,7 +130,7 @@ async fn drowse_defers_for_inflight_request() {
     );
 
     drop(guard);
-    tokio::time::timeout(Duration::from_secs(2), drowse_task)
+    timeout(Duration::from_secs(2), drowse_task)
         .await
         .expect("drowse did not unblock after guard dropped")
         .expect("drowse task panicked")
@@ -156,7 +156,7 @@ async fn stream_guard_increments_and_decrements_count() {
 #[tokio::test(start_paused = true)]
 async fn wait_until_llm_idle_returns_true_immediately_when_zero() {
     let m = PresenceManager::stub(PresenceState::Active);
-    let idle = tokio::time::timeout(
+    let idle = timeout(
         Duration::from_millis(20),
         m.wait_until_llm_idle(Duration::from_secs(5)),
     )
@@ -189,7 +189,7 @@ async fn stream_guard_does_not_block_sleep() {
     let _stream = m.acquire_stream_guard();
     let m2 = Arc::clone(&m);
     let sleep_task = tokio::spawn(async move { m2.sleep().await });
-    tokio::time::timeout(Duration::from_secs(1), sleep_task)
+    timeout(Duration::from_secs(1), sleep_task)
         .await
         .expect("sleep was blocked by an LLM stream guard")
         .expect("sleep task panicked")
@@ -238,7 +238,7 @@ async fn rapid_sleep_and_guard_churn_does_not_deadlock() {
         }
     });
 
-    tokio::time::timeout(Duration::from_secs(30), async move {
+    timeout(Duration::from_secs(30), async move {
         writer.await.expect("writer panicked");
         for r in readers {
             r.await.expect("reader panicked");

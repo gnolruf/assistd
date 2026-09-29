@@ -75,7 +75,7 @@ pub enum LlmError {
     ServerRestarting(String),
 }
 
-pub type LlmResult<T> = std::result::Result<T, LlmError>;
+pub type LlmResult<T> = Result<T, LlmError>;
 
 /// Whether a request lets a reasoning model produce its `<think>` block;
 /// [`Thinking::Disabled`] asks the chat template to skip it.

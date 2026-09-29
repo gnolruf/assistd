@@ -20,7 +20,7 @@ fn id(n: u64) -> WindowId {
 fn ipc_err(msg: &str) -> WmError {
     WmError::Ipc {
         op: "stub",
-        source: std::io::Error::other(msg.to_string()).into(),
+        source: io::Error::other(msg.to_string()).into(),
     }
 }
 
