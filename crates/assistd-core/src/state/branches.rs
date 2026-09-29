@@ -138,7 +138,7 @@ impl AppState {
         self: Arc<Self>,
         id: String,
         session: Arc<SessionId>,
-        user_text: String,
+        user_text: &str,
     ) {
         let trimmed: String = user_text.chars().take(MAX_TITLE_PROMPT_CHARS).collect();
         self.runtime.persistence_tracker.clone().spawn(async move {

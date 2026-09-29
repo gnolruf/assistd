@@ -38,9 +38,9 @@ pub fn start(
     let handle = tokio::task::spawn_blocking(move || {
         capture_continuous(
             device_hint_owned.as_deref(),
-            worker_stop,
-            worker_overrun,
-            frame_tx,
+            &worker_stop,
+            &worker_overrun,
+            &frame_tx,
         )
     });
 
@@ -53,16 +53,16 @@ pub fn start(
 
 fn capture_continuous(
     device_hint: Option<&str>,
-    stop_flag: Arc<AtomicBool>,
-    overrun: Arc<AtomicU64>,
-    frame_tx: mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
+    stop_flag: &AtomicBool,
+    overrun: &Arc<AtomicU64>,
+    frame_tx: &mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
 ) -> Result<(), AudioCaptureError> {
     let ring_capacity = LISTEN_RING_SECONDS.saturating_mul(LISTEN_RING_NATIVE_RATE_ASSUMED);
     let ProducerStream {
         consumer,
         native_rate,
         stream,
-    } = open_producer_stream(device_hint, ring_capacity, overrun.clone())?;
+    } = open_producer_stream(device_hint, ring_capacity, Arc::clone(overrun))?;
 
     debug!(
         target: "assistd::voice::listen",

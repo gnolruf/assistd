@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -110,8 +110,8 @@ fn status(event: Event) -> ChatEvent {
 /// Accept one dialog connection, read its request line, then stream
 /// `events` back after a pause in which the query driver sees its writer
 /// channel close with nothing readable.
-fn mock_daemon(socket: PathBuf, events: Vec<Event>) -> JoinHandle<()> {
-    let listener = UnixListener::bind(&socket).unwrap();
+fn mock_daemon(socket: &Path, events: Vec<Event>) -> JoinHandle<()> {
+    let listener = UnixListener::bind(socket).unwrap();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
@@ -252,7 +252,7 @@ fn a_transcript_is_dropped_when_its_turn_never_runs() {
 async fn query_driver_outlives_its_writer_channel() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("mock.sock");
-    let server = mock_daemon(socket.clone(), vec![delta("hi"), done()]);
+    let server = mock_daemon(&socket, vec![delta("hi"), done()]);
 
     let (mut app, mut rx) = test_app_at(socket, true);
     app.spawn_query("hi".into(), Vec::new());

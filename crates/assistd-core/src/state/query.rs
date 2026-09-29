@@ -258,7 +258,7 @@ impl AppState {
             self.clone().spawn_session_title_generation(
                 id.clone(),
                 current_session,
-                title_user_text,
+                &title_user_text,
             );
         }
 

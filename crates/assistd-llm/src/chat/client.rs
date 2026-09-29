@@ -406,7 +406,7 @@ impl LlmBackend for LlamaChatClient {
             } else {
                 conv.push_tool_result_with_attachments(
                     &result.name,
-                    result.content,
+                    &result.content,
                     result.attachments,
                 );
             }

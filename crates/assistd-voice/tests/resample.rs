@@ -4,7 +4,6 @@
 #![cfg(feature = "mic")]
 
 use std::f32::consts::PI;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use assistd_voice::mic::consumer::drain_to_pcm;
@@ -23,8 +22,8 @@ fn drain_one_second(rate_hz: u32) -> Vec<i16> {
             .expect("ring sized for the whole clip");
     }
     drop(producer);
-    let stop = Arc::new(AtomicBool::new(true));
-    drain_to_pcm(consumer, rate_hz, 16_000 * 4, stop).expect("drain_to_pcm error")
+    let stop = AtomicBool::new(true);
+    drain_to_pcm(consumer, rate_hz, 16_000 * 4, &stop).expect("drain_to_pcm error")
 }
 
 fn assert_mostly_nonzero(pcm: &[i16], label: &str) {

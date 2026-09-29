@@ -205,7 +205,7 @@ mod tests {
     /// Mock daemon: accepts one connection, parses one request, writes `responses`, then closes.
     /// The returned `TempDir` owns the socket and must outlive the test.
     fn mock_server(
-        responses: Vec<Event>,
+        responses: &[Event],
     ) -> (tempfile::TempDir, PathBuf, tokio::task::JoinHandle<()>) {
         mock_server_raw(
             responses
@@ -289,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_errors_on_premature_close() {
-        let (_dir, path, server) = mock_server(vec![Event::Delta {
+        let (_dir, path, server) = mock_server(&[Event::Delta {
             id: "r".into(),
             text: "incomplete".into(),
         }]);

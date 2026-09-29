@@ -1,7 +1,6 @@
 //! Continuous-listen ring consumer: emits 20 ms 16 kHz i16 frames over
 //! a channel.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -21,8 +20,8 @@ const IDLE_PARK: Duration = Duration::from_millis(10);
 pub fn drain_to_frames(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
-    stop_flag: Arc<AtomicBool>,
-    frame_tx: mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
+    stop_flag: &AtomicBool,
+    frame_tx: &mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
 ) -> Result<(), AudioCaptureError> {
     let mut resampler = ChunkResampler::new(native_rate)?;
     let mut pending: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 2);
@@ -33,7 +32,7 @@ pub fn drain_to_frames(
             if let Some(samples) = resampler.pull(&mut consumer)? {
                 pending.extend(samples.iter().map(|&sample| f32_to_i16(sample)));
             }
-            if !send_full_frames(&mut pending, &frame_tx, &mut frames_emitted) {
+            if !send_full_frames(&mut pending, frame_tx, &mut frames_emitted) {
                 return Ok(());
             }
             continue;

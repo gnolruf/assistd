@@ -189,7 +189,7 @@ pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSessi
         capture_ptt(
             device_hint_owned.as_deref(),
             max_recording_secs,
-            worker_stop,
+            &worker_stop,
             worker_overrun,
         )
     });
@@ -204,7 +204,7 @@ pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSessi
 fn capture_ptt(
     device_hint: Option<&str>,
     max_recording_secs: u32,
-    stop_flag: Arc<AtomicBool>,
+    stop_flag: &AtomicBool,
     overrun: Arc<AtomicU64>,
 ) -> Result<Vec<i16>, AudioCaptureError> {
     let ring_capacity = ASSUMED_NATIVE_RATE

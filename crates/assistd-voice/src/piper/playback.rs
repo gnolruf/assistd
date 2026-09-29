@@ -200,7 +200,7 @@ fn spawn_device_thread(
 ) -> Result<thread::JoinHandle<()>, PiperError> {
     thread::Builder::new()
         .name("piper-rodio".into())
-        .spawn(move || run_device_thread(device, init_tx, shutdown_rx))
+        .spawn(move || run_device_thread(device, &init_tx, &shutdown_rx))
         .map_err(|err| PiperError::Audio(format!("spawn audio thread: {err}")))
 }
 
@@ -208,8 +208,8 @@ fn spawn_device_thread(
 /// the device sink until `shutdown_rx` fires or hangs up.
 fn run_device_thread(
     device: Option<cpal::Device>,
-    init_tx: mpsc::Sender<Result<Player, String>>,
-    shutdown_rx: mpsc::Receiver<()>,
+    init_tx: &mpsc::Sender<Result<Player, String>>,
+    shutdown_rx: &mpsc::Receiver<()>,
 ) {
     let opened = match device {
         Some(device) => DeviceSinkBuilder::from_device(device)

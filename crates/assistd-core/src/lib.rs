@@ -174,7 +174,7 @@ impl VisionRevalidator {
     pub async fn revalidate_if_stale(&self, presence: &PresenceManager) {
         let mut seen = self.seen.lock().await;
         if seen.take_stale(presence.llama_pid().await) {
-            seen.probed = apply_probe(&self.gate, self.probe().await);
+            seen.probed = apply_probe(&self.gate, &self.probe().await);
         }
     }
 }
@@ -424,7 +424,7 @@ fn screenshot_policy(backend: ScreenshotBackend) -> ScreenshotPolicyCfg {
 
 /// Set `gate` from a probe that reached the model, returning whether it
 /// did.
-fn apply_probe(gate: &VisionGate, probe: VisionState) -> bool {
+fn apply_probe(gate: &VisionGate, probe: &VisionState) -> bool {
     if probe.model_id.is_none() {
         return false;
     }
@@ -477,7 +477,7 @@ mod tests {
         ];
         for (label, gate_initial, probe, expected_gate, expected_reached) in cases {
             let gate = VisionGate::new(gate_initial);
-            assert_eq!(apply_probe(&gate, probe), expected_reached, "{label}");
+            assert_eq!(apply_probe(&gate, &probe), expected_reached, "{label}");
             assert_eq!(gate.supported(), expected_gate, "{label}");
         }
     }

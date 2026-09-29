@@ -256,9 +256,9 @@ struct RunMetrics {
 
 impl RunMetrics {
     /// Milliseconds from `turn_start` to each stage; a repeated stage keeps its first timestamp.
-    fn from_stages(turn_start: Instant, stages: StageLog) -> Self {
+    fn from_stages(turn_start: Instant, stages: &StageLog) -> Self {
         let mut per_stage = HashMap::new();
-        for (name, when) in &stages {
+        for (name, when) in stages {
             per_stage
                 .entry(name.clone())
                 .or_insert_with(|| when.duration_since(turn_start).as_millis() as u64);
@@ -438,7 +438,7 @@ async fn run_iterations(
         let stages = collector.take(&correlation_id);
         match outcome {
             Ok(()) => {
-                let metrics = RunMetrics::from_stages(turn_start, stages);
+                let metrics = RunMetrics::from_stages(turn_start, &stages);
                 if let Some(end_to_end) = metrics.end_to_end_ms {
                     writeln!(io::stderr(), "iter {iteration}: {end_to_end} ms end-to-end")?;
                 } else {

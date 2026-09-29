@@ -43,7 +43,7 @@ fn main() {
         let Some(id) = req.get("id").cloned() else {
             continue;
         };
-        let Some(response) = respond(&req, id, &mut out) else {
+        let Some(response) = respond(&req, &id, &mut out) else {
             continue;
         };
         if write_line(&mut out, &response).is_err() {
@@ -54,7 +54,7 @@ fn main() {
 
 /// The reply to request `req`, or `None` when the tool answers by
 /// writing to `out` directly.
-fn respond(req: &Value, id: Value, out: &mut impl Write) -> Option<Value> {
+fn respond(req: &Value, id: &Value, out: &mut impl Write) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let response = match method {
         "initialize" => initialize(id),
@@ -77,7 +77,7 @@ fn respond(req: &Value, id: Value, out: &mut impl Write) -> Option<Value> {
     Some(response)
 }
 
-fn initialize(id: Value) -> Value {
+fn initialize(id: &Value) -> Value {
     if let Some(pid_file) = std::env::var_os(FAIL_INIT_WITH_ORPHAN_ENV) {
         let orphan = spawn_orphan();
         std::fs::write(pid_file, orphan.to_string()).expect("write orphan pid file");
@@ -110,7 +110,7 @@ fn spawn_orphan() -> u32 {
         .id()
 }
 
-fn tools_list(id: Value) -> Value {
+fn tools_list(id: &Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -146,7 +146,7 @@ fn tools_list(id: Value) -> Value {
     })
 }
 
-fn call_tool(req: &Value, id: Value, out: &mut impl Write) -> Option<Value> {
+fn call_tool(req: &Value, id: &Value, out: &mut impl Write) -> Option<Value> {
     let params = req.get("params");
     let name = params
         .and_then(|params| params.get("name"))

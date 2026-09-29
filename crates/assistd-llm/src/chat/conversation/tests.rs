@@ -235,7 +235,7 @@ fn image_tool_results_do_not_close_the_turn() {
     c.push_assistant_with_tool_calls(None, "thinking".into(), vec![mk_call("c-1", "{}")]);
     c.push_tool_result_with_attachments(
         "see",
-        "a picture".into(),
+        "a picture",
         vec![Attachment::Image {
             mime: "image/png".into(),
             bytes: vec![0xAB],
@@ -378,7 +378,7 @@ fn truncate_to_last_real_user_skips_both_tool_result_shapes() {
         c.push_user("real q".into());
         c.push_assistant_with_tool_calls(None, String::new(), vec![mk_call("c-1", "{}")]);
         if image_result {
-            c.push_tool_result_with_attachments("run", "output".into(), Vec::new());
+            c.push_tool_result_with_attachments("run", "output", Vec::new());
         } else {
             c.push_tool_result("c-1".into(), "output".into());
         }
@@ -768,7 +768,7 @@ fn truncate_drops_image_tool_result_with_its_call() {
         String::new(),
         vec![mk_call("c-1", r#"{"command":"ls"}"#)],
     );
-    c.push_tool_result_with_attachments("run", "some output\n".into(), Vec::new());
+    c.push_tool_result_with_attachments("run", "some output\n", Vec::new());
     c.push_assistant("old reply".into());
     c.push_user("latest".into());
 
@@ -795,7 +795,7 @@ async fn summarize_preserves_tool_call_pair_boundary() {
         String::new(),
         vec![mk_call("c-99", r#"{"command":"ls"}"#)],
     );
-    c.push_tool_result_with_attachments("run", "foo\nbar\n".into(), Vec::new());
+    c.push_tool_result_with_attachments("run", "foo\nbar\n", Vec::new());
     c.push_user("latest".into());
 
     let fake = FakeSummarizer::new("summary");

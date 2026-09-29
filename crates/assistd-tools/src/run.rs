@@ -135,7 +135,7 @@ impl Tool for RunTool {
             Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
         let presented = present(out, &self.spec, &self.overflow_counter, start.elapsed());
-        Ok(build_result(presented))
+        Ok(build_result(&presented))
     }
 }
 
@@ -166,7 +166,7 @@ fn parse_error_line(e: &ParseError) -> String {
     error_line("parse", e, hint, recovery)
 }
 
-fn build_result(presented: PresentResult) -> Value {
+fn build_result(presented: &PresentResult) -> Value {
     let mut result = json!({
         "output":      presented.output,
         "stdout":      presented.stdout_raw,

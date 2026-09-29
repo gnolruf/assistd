@@ -130,7 +130,7 @@ impl Command for GrepCommand {
         let paths = &positional[1..];
         if paths.is_empty() {
             return match input.stdin {
-                Some(stdin) => annotate_dialect(search_stdin(&re, &flags, stdin), pattern),
+                Some(stdin) => annotate_dialect(search_stdin(&re, &flags, &stdin), pattern),
                 None => CommandOutput::usage(self.help()),
             };
         }
@@ -174,8 +174,8 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
     Ok((flags, &argv[pos..]))
 }
 
-fn search_stdin(re: &Regex, flags: &Flags, stdin: Vec<u8>) -> CommandOutput {
-    let Ok(text) = std::str::from_utf8(&stdin) else {
+fn search_stdin(re: &Regex, flags: &Flags, stdin: &[u8]) -> CommandOutput {
+    let Ok(text) = std::str::from_utf8(stdin) else {
         return CommandOutput::failed(
             2,
             error_line(

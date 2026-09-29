@@ -128,7 +128,7 @@ impl ContinuousListener for MicContinuousListener {
             .clone()
             .map(|speaking| PlaybackGate::new(speaking, PLAYBACK_HANGOVER_FRAMES));
         let vad_handle =
-            tokio::task::spawn_blocking(move || vad_loop(tuning, playback_gate, frame_rx, pcm_tx));
+            tokio::task::spawn_blocking(move || vad_loop(tuning, playback_gate, frame_rx, &pcm_tx));
 
         listen_state.session = Some(ListenSession {
             capture_stop,
@@ -182,7 +182,7 @@ fn vad_loop(
     tuning: VadTuning,
     mut playback_gate: Option<PlaybackGate>,
     mut frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
-    pcm_tx: mpsc::Sender<Vec<i16>>,
+    pcm_tx: &mpsc::Sender<Vec<i16>>,
 ) {
     let mut vad = UtteranceVad::new(tuning);
     while let Some(frame) = frame_rx.blocking_recv() {

@@ -194,7 +194,12 @@ impl App {
                 fork_point_seq,
                 session_title,
                 ..
-            } => self.on_branch_switched(name, parent_branch_name, fork_point_seq, session_title),
+            } => self.on_branch_switched(
+                &name,
+                parent_branch_name.as_deref(),
+                fork_point_seq,
+                session_title.as_deref(),
+            ),
             Event::SessionTitle { title, .. } => self.session_title = Some(title),
             Event::HistoryEntry {
                 role,
@@ -206,7 +211,7 @@ impl App {
                 removed_messages,
                 last_user_text,
                 ..
-            } => self.on_undo_applied(removed_messages, last_user_text),
+            } => self.on_undo_applied(removed_messages, last_user_text.as_deref()),
             _ => {}
         }
     }
@@ -215,15 +220,12 @@ impl App {
     /// a missing one clears it.
     fn on_branch_switched(
         &mut self,
-        name: String,
-        parent_branch_name: Option<String>,
+        name: &str,
+        parent_branch_name: Option<&str>,
         fork_point_seq: Option<i64>,
-        session_title: Option<String>,
+        session_title: Option<&str>,
     ) {
-        let title = session_title
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty());
+        let title = session_title.map(str::trim).filter(|t| !t.is_empty());
         self.session_title = title.map(str::to_string);
         match self.in_flight_branch_op {
             Some(BranchOp::Switch) => {
@@ -238,7 +240,7 @@ impl App {
                 self.output.clear();
             }
             _ => {
-                let detail = match (parent_branch_name.as_deref(), fork_point_seq) {
+                let detail = match (parent_branch_name, fork_point_seq) {
                     (Some(p), Some(seq)) => {
                         format!("[forked from '{p}'@seq{seq} into '{name}']")
                     }
@@ -267,14 +269,13 @@ impl App {
         }
     }
 
-    fn on_undo_applied(&mut self, removed_messages: u32, last_user_text: Option<String>) {
+    fn on_undo_applied(&mut self, removed_messages: u32, last_user_text: Option<&str>) {
         if removed_messages == 0 {
             self.set_notice("nothing to undo");
             return;
         }
         self.output.pop_last_user_exchange();
         let preview = last_user_text
-            .as_deref()
             .map(|t| t.chars().take(48).collect::<String>())
             .unwrap_or_default();
         if preview.is_empty() {

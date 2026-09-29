@@ -520,14 +520,14 @@ async fn send_tool_result(turn: &Turn, payload: &ToolResultPayload, raw_result: 
 fn cancelled_tool_result(call: &ToolCall, reason: &str) -> (ToolResultPayload, Value) {
     error_tool_result(
         call,
-        format!("[error] {}: agent turn {reason}.", call.name),
+        &format!("[error] {}: agent turn {reason}.", call.name),
         0,
     )
 }
 
 fn error_tool_result(
     call: &ToolCall,
-    message: String,
+    message: &str,
     duration_ms: u128,
 ) -> (ToolResultPayload, Value) {
     let content = format!("{message}\n[exit:-1 | {duration_ms}ms]");
@@ -572,7 +572,7 @@ async fn dispatch_tool_call(
         );
         return error_tool_result(
             call,
-            format!(
+            &format!(
                 "[error] {}: no result after {}s; call abandoned. Try: a faster or narrower command.",
                 call.name,
                 deadline.as_secs()
@@ -595,7 +595,7 @@ async fn dispatch_tool_call(
             );
             error_tool_result(
                 call,
-                format!(
+                &format!(
                     "[error] {}: tool invocation failed. Check: {e}. Try: a different command.",
                     call.name
                 ),
@@ -621,7 +621,7 @@ fn unknown_tool_result(
     let available = tools.names().collect::<Vec<_>>().join(", ");
     error_tool_result(
         call,
-        format!(
+        &format!(
             "[error] agent: unknown tool '{}'. Available: {available}.",
             call.name
         ),

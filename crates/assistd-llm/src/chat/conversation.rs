@@ -197,7 +197,7 @@ impl Conversation {
     pub fn push_tool_result_with_attachments(
         &mut self,
         name: &str,
-        content: String,
+        content: &str,
         attachments: Vec<Attachment>,
     ) {
         self.messages.push(Message {

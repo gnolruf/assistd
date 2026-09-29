@@ -231,9 +231,9 @@ impl McpClient for SseMcpClient {
 
     async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult, McpError> {
         let result = self
-            .call("tools/call", protocol::tool_call_params(name, arguments))
+            .call("tools/call", protocol::tool_call_params(name, &arguments))
             .await?;
-        protocol::parse_tool_call(result)
+        protocol::parse_tool_call(&result)
     }
 }
 

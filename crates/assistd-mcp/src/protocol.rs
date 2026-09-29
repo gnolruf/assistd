@@ -53,7 +53,7 @@ pub(crate) fn answer_server_request(method: &str) -> Reply {
     }
 }
 
-pub(crate) fn tool_call_params(name: &str, arguments: Value) -> Value {
+pub(crate) fn tool_call_params(name: &str, arguments: &Value) -> Value {
     json!({ "name": name, "arguments": arguments })
 }
 
@@ -90,7 +90,7 @@ pub(crate) fn parse_tools_list(result: &Value) -> Result<Vec<ToolSchema>, McpErr
 
 /// The first content entry of a `tools/call` result, with an
 /// `isError` text result prefixed so the model can tell it apart.
-pub(crate) fn parse_tool_call(result: Value) -> Result<ToolResult, McpError> {
+pub(crate) fn parse_tool_call(result: &Value) -> Result<ToolResult, McpError> {
     let is_error = result
         .get("isError")
         .and_then(Value::as_bool)

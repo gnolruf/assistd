@@ -10,6 +10,7 @@ pub(super) enum WaylandCompositor {
 }
 
 /// The environment variables a display server advertises itself with.
+#[derive(Clone, Copy)]
 struct DisplayEnv<'a> {
     session_type: Option<&'a str>,
     wayland_display: bool,
@@ -17,6 +18,7 @@ struct DisplayEnv<'a> {
 }
 
 /// The environment variables a Wayland compositor advertises itself with.
+#[derive(Clone, Copy)]
 struct WaylandEnv<'a> {
     swaysock: bool,
     hyprland_signature: bool,

@@ -1,6 +1,5 @@
 //! Push-to-talk ring consumer: accumulates 16 kHz i16 PCM until stopped.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -19,7 +18,7 @@ pub fn drain_to_pcm(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
     max_pcm_samples: usize,
-    stop_flag: Arc<AtomicBool>,
+    stop_flag: &AtomicBool,
 ) -> Result<Vec<i16>, AudioCaptureError> {
     let mut resampler = ChunkResampler::new(native_rate)?;
     let mut pcm: Vec<i16> = Vec::with_capacity(max_pcm_samples.min(16_000 * 10));
