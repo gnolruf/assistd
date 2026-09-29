@@ -241,7 +241,7 @@ pub(crate) async fn supervise(
     } = capture(cmd, stdin, limit, OUTPUT_BUF_MAX).await?;
 
     Ok(match outcome {
-        WaitOutcome::Exited(status) => exited(stdout, stderr, &status),
+        WaitOutcome::Exited(status) => exited(stdout, stderr, status),
         WaitOutcome::WaitErr(e) => wait_failed(tool, &e),
         WaitOutcome::Timeout => {
             let secs = limit.as_secs();
@@ -301,12 +301,12 @@ pub(crate) async fn watch_detached(
 
     let (stdout, stderr) = output.take_after_exit().await;
     match waited {
-        Ok(status) => exited(stdout, stderr, &status),
+        Ok(status) => exited(stdout, stderr, status),
         Err(e) => wait_failed(tool, &e),
     }
 }
 
-fn exited(stdout: Vec<u8>, stderr: Vec<u8>, status: &ExitStatus) -> CommandOutput {
+fn exited(stdout: Vec<u8>, stderr: Vec<u8>, status: ExitStatus) -> CommandOutput {
     CommandOutput {
         stdout,
         stderr,
@@ -375,7 +375,7 @@ fn kill_group(pgid: Option<u32>) {
 fn kill_group(_pgid: Option<u32>) {}
 
 /// Shell-style exit code: the status code, or 128 plus the killing signal.
-pub(crate) fn exit_code(status: &ExitStatus) -> i32 {
+pub(crate) fn exit_code(status: ExitStatus) -> i32 {
     status
         .code()
         .or_else(|| signal_exit_code(status))
@@ -383,7 +383,7 @@ pub(crate) fn exit_code(status: &ExitStatus) -> i32 {
 }
 
 #[cfg(unix)]
-fn signal_exit_code(status: &ExitStatus) -> Option<i32> {
+fn signal_exit_code(status: ExitStatus) -> Option<i32> {
     status.signal().map(|s| 128 + s)
 }
 

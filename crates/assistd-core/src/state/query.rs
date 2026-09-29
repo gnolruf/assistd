@@ -223,7 +223,7 @@ impl AppState {
             .prepare_attachments(&id, &wire_attachments, &tx)
             .await?;
         let _session_guards = self.acquire_query_guards(&id, &tx).await?;
-        let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        let agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         if let Some(revalidator) = &self.subsystems.vision_revalidator {
             revalidator
                 .revalidate_if_stale(&self.subsystems.presence)
@@ -252,7 +252,7 @@ impl AppState {
 
         let agent_result = agent_task.await;
         *self.runtime.current_cancel.lock().await = None;
-        drop(_agent_guard);
+        drop(agent_guard);
 
         if done_emitted && matches!(&agent_result, Ok(Ok(()))) {
             self.clone().spawn_session_title_generation(

@@ -716,7 +716,7 @@ async fn forward(
     Ok(())
 }
 
-fn parse_tool_calls(json: &Option<Value>) -> LlmResult<Vec<ToolCallRecord>> {
+fn parse_tool_calls(json: Option<&Value>) -> LlmResult<Vec<ToolCallRecord>> {
     let Some(value) = json else {
         return Ok(Vec::new());
     };
@@ -788,7 +788,7 @@ fn history_message(entry: HistoryEntry) -> LlmResult<Message> {
         HistoryRole::System => Message::text(Role::System, entry.content),
         HistoryRole::User => Message::text(Role::User, entry.content),
         HistoryRole::Assistant => Message {
-            tool_calls: parse_tool_calls(&entry.tool_calls_json)?,
+            tool_calls: parse_tool_calls(entry.tool_calls_json.as_ref())?,
             ..Message::text(Role::Assistant, entry.content)
         },
         HistoryRole::Tool => match entry.tool_call_id {

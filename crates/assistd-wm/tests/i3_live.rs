@@ -23,7 +23,7 @@ async fn connects_and_passes_shared_assertions() {
 
     let wm: Arc<dyn WindowManager> = handle.backend.clone();
 
-    common::assert_is_connected(&wm).await;
+    common::assert_is_connected(&wm);
     common::assert_focused_window_present(&wm).await;
     common::assert_focused_context_agrees(&wm).await;
     common::assert_at_least_one_workspace_focused(&wm).await;

@@ -143,8 +143,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         ipc.clone(),
         chat_tx.clone(),
         shutdown_tx.subscribe(),
-    )
-    .await;
+    );
 
     let _polling_handle = AbortOnDropHandle::new(spawn_status_polling(
         ipc.clone(),

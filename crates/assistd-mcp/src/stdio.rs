@@ -95,7 +95,7 @@ impl StdioMcpClient {
             AbortOnDropHandle::new(tokio::spawn(forward_stderr(stderr, cfg.label.clone())));
 
         let (client, transport_handles) =
-            Self::from_streams(stdout, stdin, cfg.label.clone(), cfg.request_timeout).await?;
+            Self::from_streams(stdout, stdin, cfg.label.clone(), cfg.request_timeout)?;
         let lifeline = ChildLifeline {
             label: cfg.label.clone(),
             child,
@@ -126,7 +126,7 @@ impl StdioMcpClient {
 
     /// Wire the transport over arbitrary streams without running the
     /// initialize handshake.
-    pub async fn from_streams<R, W>(
+    pub fn from_streams<R, W>(
         read: R,
         write: W,
         label: String,
@@ -505,7 +505,7 @@ mod tests {
         })
     }
 
-    async fn make_client_with_handler<F, Fut>(
+    fn make_client_with_handler<F, Fut>(
         handler: F,
     ) -> (Arc<StdioMcpClient>, TransportHandles, JoinHandle<()>)
     where
@@ -523,7 +523,6 @@ mod tests {
             "test".into(),
             Duration::from_secs(2),
         )
-        .await
         .unwrap();
         (client, handles, server_task)
     }
@@ -546,7 +545,7 @@ mod tests {
                 }
             })
         };
-        let (client, handles, server) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler);
 
         let tools = client.list_tools().await.unwrap();
         let [tool] = tools.as_slice() else {
@@ -580,7 +579,7 @@ mod tests {
                 }
             })
         };
-        let (client, handles, server) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler);
 
         let result = client.invoke("echo", json!({"x": "hi"})).await.unwrap();
         match result {
@@ -607,7 +606,7 @@ mod tests {
                 }
             })
         };
-        let (client, handles, server) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler);
         let result = client.invoke("snap", json!({})).await.unwrap();
         match result {
             ToolResult::Image { mime, bytes } => {
@@ -629,7 +628,7 @@ mod tests {
                 "error": {"code": -32601, "message": "method not found"}
             })
         };
-        let (client, handles, server) = make_client_with_handler(handler).await;
+        let (client, handles, server) = make_client_with_handler(handler);
         let err = client.list_tools().await.unwrap_err();
         assert!(
             matches!(
@@ -653,7 +652,6 @@ mod tests {
             "silent".into(),
             Duration::from_millis(150),
         )
-        .await
         .unwrap();
 
         let err = client.list_tools().await.unwrap_err();
@@ -675,7 +673,6 @@ mod tests {
             "flood".into(),
             Duration::from_secs(5),
         )
-        .await
         .unwrap();
 
         let flood = tokio::spawn(async move {
@@ -702,7 +699,6 @@ mod tests {
             "pinger".into(),
             Duration::from_secs(5),
         )
-        .await
         .unwrap();
 
         let call = tokio::spawn({
@@ -752,7 +748,6 @@ mod tests {
             "drop".into(),
             Duration::from_secs(5),
         )
-        .await
         .unwrap();
 
         let call = tokio::spawn({

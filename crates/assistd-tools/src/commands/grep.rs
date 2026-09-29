@@ -275,7 +275,7 @@ fn outcome(count: usize, stdout: Vec<u8>) -> CommandOutput {
     CommandOutput {
         stdout,
         stderr: Vec::new(),
-        exit_code: if count > 0 { 0 } else { 1 },
+        exit_code: i32::from(count == 0),
         attachments: Vec::new(),
     }
 }

@@ -215,7 +215,7 @@ async fn run_capture(
         WaitOutcome::Exited(status) => {
             return Err(CaptureError::NonZero {
                 binary: binary.to_string(),
-                status: exit_code(&status),
+                status: exit_code(status),
                 stderr_tail: stderr_tail(&captured.stderr),
             });
         }

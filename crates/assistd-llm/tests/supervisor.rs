@@ -111,9 +111,10 @@ async fn restarts_after_external_kill() {
 
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        if Instant::now() >= deadline {
-            panic!("supervisor did not restart llama-server within the deadline");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "supervisor did not restart llama-server within the deadline"
+        );
         if let Some(pid) = service.pid()
             && pid != first_pid
             && service.is_ready()

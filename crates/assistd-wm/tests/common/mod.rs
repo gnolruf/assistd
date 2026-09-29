@@ -65,7 +65,7 @@ pub(crate) async fn assert_focused_window_in_list_windows(wm: &Arc<dyn WindowMan
     );
 }
 
-pub(crate) async fn assert_is_connected(wm: &Arc<dyn WindowManager>) {
+pub(crate) fn assert_is_connected(wm: &Arc<dyn WindowManager>) {
     assert!(
         wm.is_connected(),
         "live backend should report is_connected() == true"

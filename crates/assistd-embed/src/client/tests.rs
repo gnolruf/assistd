@@ -200,7 +200,7 @@ fn l2_normalize_scales_to_unit_length_and_passes_degenerate_input_through() {
         assert_eq!(got.len(), expected.len(), "{label}");
         for (g, e) in got.iter().zip(&expected) {
             assert!(
-                g == e || (g - e).abs() < 1e-6,
+                g.to_bits() == e.to_bits() || (g - e).abs() < 1e-6,
                 "{label}: got {got:?}, expected {expected:?}"
             );
         }

@@ -318,12 +318,11 @@ fn strip_links(s: &str) -> String {
                 if consumed_paren {
                     out.push_str(&text);
                     continue;
-                } else {
-                    out.push('[');
-                    out.push_str(&text);
-                    out.push_str("](");
-                    continue;
                 }
+                out.push('[');
+                out.push_str(&text);
+                out.push_str("](");
+                continue;
             }
             out.push('[');
             out.push_str(&text);

@@ -64,7 +64,7 @@ pub(crate) async fn run(args: TrayArgs) -> Result<()> {
     let popup_sink: Option<()> = None;
 
     let (actions_tx, actions_rx) = mpsc::unbounded_channel();
-    let activate_cb = build_activate_callback(&popup_sink);
+    let activate_cb = build_activate_callback(popup_sink.as_ref());
     let item = TrayItem::new(actions_tx, activate_cb, config_error);
 
     let handle = item
@@ -102,8 +102,8 @@ fn load_config(path: &Path) -> Result<Config, ConfigError> {
 }
 
 #[cfg(feature = "tray-popup")]
-fn build_activate_callback(sink: &Option<popup::PopupSink>) -> Option<menu::ActivateCallback> {
-    let sink = sink.as_ref()?.clone();
+fn build_activate_callback(sink: Option<&popup::PopupSink>) -> Option<menu::ActivateCallback> {
+    let sink = sink?.clone();
     Some(Box::new(move || {
         let tx = sink.show_sender();
         let _ = tx.send(popup::DriverInput::Show);

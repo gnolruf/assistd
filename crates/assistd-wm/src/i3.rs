@@ -526,10 +526,10 @@ DP-0 connected 2560x1440+0+0 (normal left inverted right x axis y axis) 587mm x 
             ((1920, 1080), (0, 0), 1.0),
             ((1920, 1080), (500, 0), 1.0),
         ] {
-            assert_eq!(
-                calc_randr_scale(pixels, mm),
-                expected,
-                "{pixels:?} on {mm:?}mm"
+            let scale = calc_randr_scale(pixels, mm);
+            assert!(
+                (scale - expected).abs() < f64::EPSILON,
+                "{pixels:?} on {mm:?}mm: got {scale}, expected {expected}"
             );
         }
     }

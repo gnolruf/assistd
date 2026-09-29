@@ -444,15 +444,11 @@ impl Conversation {
     }
 
     fn summary_insertion_index(&self) -> usize {
-        if self
-            .messages
-            .first()
-            .is_some_and(|m| m.role == Role::System && m.content.starts_with(SUMMARY_PREFIX))
-        {
-            1
-        } else {
-            0
-        }
+        usize::from(
+            self.messages
+                .first()
+                .is_some_and(|m| m.role == Role::System && m.content.starts_with(SUMMARY_PREFIX)),
+        )
     }
 
     /// Start of the newest `preserve_pairs` user/assistant pairs, widened so

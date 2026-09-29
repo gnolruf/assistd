@@ -36,7 +36,7 @@ impl VoicePipeline {
 }
 
 /// With voice disabled, returns an empty pipeline and binds no hotkey.
-pub(super) async fn spawn_pipeline(
+pub(super) fn spawn_pipeline(
     config: &Config,
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,
