@@ -109,3 +109,28 @@ fn unknown_keys(toml_src: &str) -> Vec<String> {
     let raw: toml::Table = toml::from_str(toml_src).expect("config must be valid TOML");
     cfg.unknown_keys(&raw).expect("config must serialize")
 }
+
+#[test]
+fn debug_lists_secret_names_but_not_values() {
+    let toml = r#"
+        [[servers]]
+        name = "local"
+        transport = "stdio"
+        command = "server"
+        env = { API_TOKEN = "stdio-secret" }
+
+        [[servers]]
+        name = "remote"
+        transport = "sse"
+        url = "http://127.0.0.1:1/sse"
+        headers = { Authorization = "sse-secret" }
+    "#;
+    let cfg: McpConfig = toml::from_str(toml).unwrap();
+    let rendered = format!("{cfg:?}");
+    for name in ["API_TOKEN", "Authorization"] {
+        assert!(rendered.contains(name), "{rendered}");
+    }
+    for secret in ["stdio-secret", "sse-secret"] {
+        assert!(!rendered.contains(secret), "{rendered}");
+    }
+}

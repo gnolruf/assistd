@@ -1,7 +1,8 @@
 //! Newline-delimited JSON-RPC over a child process's stdin/stdout;
 //! stderr is forwarded to tracing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -26,8 +27,9 @@ use crate::{McpClient, ToolResult, ToolSchema, protocol};
 /// this, so a misbehaving server cannot exhaust memory.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
-/// Per-server stdio transport configuration.
-#[derive(Debug, Clone)]
+/// Per-server stdio transport configuration. `Debug` lists env var names,
+/// never values.
+#[derive(Clone)]
 pub struct StdioConfig {
     pub command: String,
     pub args: Vec<String>,
@@ -48,6 +50,18 @@ impl StdioConfig {
             request_timeout: Duration::from_secs(30),
             label: label.into(),
         }
+    }
+}
+
+impl fmt::Debug for StdioConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StdioConfig")
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env_names", &self.env.keys().collect::<BTreeSet<_>>())
+            .field("request_timeout", &self.request_timeout)
+            .field("label", &self.label)
+            .finish()
     }
 }
 
@@ -766,5 +780,14 @@ mod tests {
         let err = call.await.unwrap().unwrap_err();
         assert!(matches!(err, McpError::TransportClosed), "{err}");
         handles.shutdown_and_join().await;
+    }
+
+    #[test]
+    fn debug_lists_env_names_but_not_values() {
+        let mut cfg = StdioConfig::new("local", "server");
+        cfg.env.insert("API_TOKEN".into(), "hunter2".into());
+        let rendered = format!("{cfg:?}");
+        assert!(rendered.contains("API_TOKEN"), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
     }
 }

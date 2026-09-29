@@ -2,7 +2,7 @@
 //! server's `endpoint` URL and replies arrive on a long-lived `GET`
 //! event stream, with a ping task to detect a silent server.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::mem;
 use std::sync::Arc;
@@ -29,8 +29,8 @@ pub const MAX_EVENT_BYTES: usize = 1024 * 1024;
 
 const MAX_REDIRECTS: usize = 10;
 
-/// Per-server SSE configuration.
-#[derive(Debug, Clone)]
+/// Per-server SSE configuration. `Debug` lists header names, never values.
+#[derive(Clone)]
 pub struct SseConfig {
     pub url: String,
     pub headers: HashMap<String, String>,
@@ -52,6 +52,22 @@ impl SseConfig {
             ping_interval: Duration::from_secs(15),
             label: label.into(),
         }
+    }
+}
+
+impl fmt::Debug for SseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SseConfig")
+            .field("url", &self.url)
+            .field(
+                "header_names",
+                &self.headers.keys().collect::<BTreeSet<_>>(),
+            )
+            .field("request_timeout", &self.request_timeout)
+            .field("read_timeout", &self.read_timeout)
+            .field("ping_interval", &self.ping_interval)
+            .field("label", &self.label)
+            .finish()
     }
 }
 
@@ -889,5 +905,15 @@ mod tests {
                 "{data:?} should be rejected",
             );
         }
+    }
+
+    #[test]
+    fn debug_lists_header_names_but_not_values() {
+        let mut cfg = SseConfig::new("remote", "http://127.0.0.1:1/sse");
+        cfg.headers
+            .insert("Authorization".into(), "Bearer hunter2".into());
+        let rendered = format!("{cfg:?}");
+        assert!(rendered.contains("Authorization"), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
     }
 }
