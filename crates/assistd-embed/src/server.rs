@@ -1,6 +1,7 @@
 //! How the embedding llama-server is launched.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use assistd_config::EmbeddingConfig;
@@ -12,12 +13,17 @@ use tokio::process::Command;
 #[derive(Debug)]
 pub struct EmbedServerSpec {
     cfg: EmbeddingConfig,
+    binary_path: PathBuf,
     ready_timeout: Duration,
 }
 
 impl EmbedServerSpec {
-    pub fn new(cfg: EmbeddingConfig, ready_timeout: Duration) -> Self {
-        Self { cfg, ready_timeout }
+    pub fn new(cfg: EmbeddingConfig, binary_path: PathBuf, ready_timeout: Duration) -> Self {
+        Self {
+            cfg,
+            binary_path,
+            ready_timeout,
+        }
     }
 }
 
@@ -27,7 +33,7 @@ impl ChildServerSpec for EmbedServerSpec {
     }
 
     fn command(&self) -> Command {
-        let mut cmd = Command::new("llama-server");
+        let mut cmd = Command::new(&self.binary_path);
         cmd.arg("--embedding")
             .arg("--pooling")
             .arg("mean")

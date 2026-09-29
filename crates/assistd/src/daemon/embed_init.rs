@@ -72,6 +72,7 @@ pub(super) async fn init(
     let service = match ChildServer::start(
         EmbedServerSpec::new(
             config.embedding.clone(),
+            config.llama_server.binary_path.clone(),
             Duration::from_secs(config.llama_server.ready_timeout_secs.get()),
         ),
         server_shutdown.subscribe(),

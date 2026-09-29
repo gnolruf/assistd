@@ -13,7 +13,8 @@ use crate::defaults::{
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct LlamaServerConfig {
-    /// Binary path, or a name on `$PATH`. Must not be empty.
+    /// Binary path, or a name on `$PATH`, for the chat and embedding servers.
+    /// Must not be empty.
     pub binary_path: PathBuf,
     /// Bind host. Must be loopback: the server has no authentication.
     pub host: IpAddr,
