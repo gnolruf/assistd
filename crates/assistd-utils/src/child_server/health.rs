@@ -100,7 +100,7 @@ impl HealthChecker {
                 _ = shutdown_rx.changed() => {
                     return Err(ChildServerError::ShutdownDuringHealth);
                 }
-                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = tokio::time::sleep(POLL_INTERVAL) => {}
             }
         }
     }

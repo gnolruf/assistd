@@ -31,7 +31,7 @@ impl Embedder for MockEmbedder {
         }
         Ok(vec![self.embedding.clone(); texts.len()])
     }
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "mock"
     }
     fn dim(&self) -> usize {

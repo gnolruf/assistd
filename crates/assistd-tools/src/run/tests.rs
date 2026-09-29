@@ -16,7 +16,7 @@ use crate::fixtures::PNG_BYTES;
 struct Lines(usize);
 #[async_trait]
 impl Command for Lines {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "lines"
     }
     fn summary(&self) -> &'static str {
@@ -39,7 +39,7 @@ impl Command for Lines {
 struct ByteCount;
 #[async_trait]
 impl Command for ByteCount {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "bytecount"
     }
     fn summary(&self) -> &'static str {

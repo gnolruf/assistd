@@ -109,8 +109,7 @@ impl App {
     fn on_cycle_key(&mut self) {
         let target = self
             .presence_state
-            .map(|s| s.next())
-            .unwrap_or(PresenceState::Active);
+            .map_or(PresenceState::Active, PresenceState::next);
         self.set_notice(&format!("cycling → {}", presence_label(target)));
         let req = Request::Cycle {
             id: Uuid::new_v4().to_string(),

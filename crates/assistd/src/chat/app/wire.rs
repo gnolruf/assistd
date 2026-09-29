@@ -125,8 +125,7 @@ impl App {
             .pending_tool_call
             .take()
             .filter(|(call_id, _)| call_id == id)
-            .map(|(_, command)| command)
-            .unwrap_or_else(|| "<?>".to_string());
+            .map_or_else(|| "<?>".to_string(), |(_, command)| command);
         self.output
             .push_tool_block(command, output, exit_code, duration_ms);
     }
@@ -235,7 +234,7 @@ impl App {
                 };
                 self.output.push_info(&msg);
             }
-            Some(BranchOp::Resume) | Some(BranchOp::New) => {
+            Some(BranchOp::Resume | BranchOp::New) => {
                 self.output.clear();
             }
             _ => {

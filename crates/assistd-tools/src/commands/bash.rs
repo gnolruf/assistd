@@ -45,7 +45,7 @@ impl Default for BashCommand {
 
 #[async_trait]
 impl Command for BashCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "bash"
     }
 

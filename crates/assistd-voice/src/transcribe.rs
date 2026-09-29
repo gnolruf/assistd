@@ -187,7 +187,7 @@ impl QueuedTranscriber {
             }
             return !idle_now;
         }
-        let timeout = Duration::from_millis(self.config.gpu_busy_timeout_ms as u64);
+        let timeout = Duration::from_millis(u64::from(self.config.gpu_busy_timeout_ms));
         let idle = self.busy.wait_until_llm_idle(timeout).await;
         if !idle {
             tracing::info!(

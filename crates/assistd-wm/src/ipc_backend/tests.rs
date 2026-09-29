@@ -35,38 +35,38 @@ impl IpcProtocol for FakeProtocol {
         events.recv().await.map(Ok)
     }
 
-    async fn run_command(_: &mut (), payload: &str) -> Result<Result<(), String>, TransportError> {
+    async fn run_command((): &mut (), payload: &str) -> Result<Result<(), String>, TransportError> {
         match payload {
             "break" => Err(std::io::Error::other("socket closed").into()),
             _ => Ok(Ok(())),
         }
     }
 
-    async fn get_tree(_: &mut ()) -> Result<(), TransportError> {
+    async fn get_tree((): &mut ()) -> Result<(), TransportError> {
         Ok(())
     }
 
-    async fn get_workspaces(_: &mut ()) -> Result<Vec<Workspace>, TransportError> {
+    async fn get_workspaces((): &mut ()) -> Result<Vec<Workspace>, TransportError> {
         Ok(Vec::new())
     }
 
-    fn children(_: &()) -> impl Iterator<Item = &()> {
+    fn children((): &()) -> impl Iterator<Item = &()> {
         std::iter::empty()
     }
 
-    fn is_focused(_: &()) -> bool {
+    fn is_focused((): &()) -> bool {
         false
     }
 
-    fn identity(_: &()) -> NodeIdentity {
+    fn identity((): &()) -> NodeIdentity {
         NodeIdentity::default()
     }
 
-    fn window_rect(_: &(), _: &PlacementCriteria) -> Option<Rect> {
+    fn window_rect((): &(), _: &PlacementCriteria) -> Option<Rect> {
         None
     }
 
-    fn collect_windows(_: &()) -> Vec<Window> {
+    fn collect_windows((): &()) -> Vec<Window> {
         Vec::new()
     }
 }

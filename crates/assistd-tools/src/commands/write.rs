@@ -92,7 +92,7 @@ impl WriteCommand {
 
 #[async_trait]
 impl Command for WriteCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "write"
     }
 

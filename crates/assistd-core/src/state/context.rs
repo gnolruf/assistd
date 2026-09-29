@@ -81,11 +81,11 @@ pub(super) fn format_window_context_block(focused: &FocusedWindowContext) -> Opt
     let mut block = String::from("Current desktop context:\n");
     match (class.as_deref(), title.as_deref()) {
         (Some(class), Some(title)) => {
-            block.push_str(&format!("- Focused window: {class} - \"{title}\"\n"))
+            block.push_str(&format!("- Focused window: {class} - \"{title}\"\n"));
         }
         (Some(class), None) => block.push_str(&format!("- Focused window: {class}\n")),
         (None, Some(title)) => {
-            block.push_str(&format!("- Focused window: (unknown) - \"{title}\"\n"))
+            block.push_str(&format!("- Focused window: (unknown) - \"{title}\"\n"));
         }
         (None, None) => {}
     }
@@ -95,10 +95,7 @@ pub(super) fn format_window_context_block(focused: &FocusedWindowContext) -> Opt
     if let Some(workspace) = workspace.as_deref() {
         block.push_str(&format!("- Workspace: {workspace}\n"));
     }
-    let is_terminal = class
-        .as_deref()
-        .map(assistd_wm::is_terminal_class)
-        .unwrap_or(false);
+    let is_terminal = class.as_deref().is_some_and(assistd_wm::is_terminal_class);
     let kind = if is_terminal {
         "terminal"
     } else {
@@ -152,8 +149,7 @@ fn truncate_for_context(text: &str, max_chars: usize) -> String {
     let cutoff = text
         .char_indices()
         .nth(max_chars)
-        .map(|(byte_idx, _)| byte_idx)
-        .unwrap_or(text.len());
+        .map_or(text.len(), |(byte_idx, _)| byte_idx);
     let mut head = text[..cutoff].replace('\n', " ");
     head.push('…');
     head

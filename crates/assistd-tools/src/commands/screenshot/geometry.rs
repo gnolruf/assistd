@@ -44,7 +44,7 @@ fn strip_xrandr_geom_token(token: &str) -> Option<String> {
 /// The focused node's rect in a `swaymsg -t get_tree` tree, as grim's
 /// `X,Y WxH`.
 pub(super) fn find_focused_sway_rect(node: &Value) -> Option<String> {
-    if node.get("focused").and_then(|f| f.as_bool()) == Some(true) {
+    if node.get("focused").and_then(Value::as_bool) == Some(true) {
         let rect = node.get("rect")?;
         let x = rect.get("x")?.as_i64()?;
         let y = rect.get("y")?.as_i64()?;

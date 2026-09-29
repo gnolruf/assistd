@@ -43,7 +43,7 @@ impl Default for WebCommand {
 
 #[async_trait]
 impl Command for WebCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "web"
     }
 
@@ -160,7 +160,7 @@ mod tests {
 
     async fn run_web(cmd: &WebCommand, args: &[&str]) -> CommandOutput {
         cmd.run(CommandInput {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
         })
         .await

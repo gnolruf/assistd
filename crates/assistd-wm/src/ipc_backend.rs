@@ -326,7 +326,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { return false; }
                 }
-                _ = self.reconnect.notified() => {
+                () = self.reconnect.notified() => {
                     return true;
                 }
                 next = P::next_event(&mut events) => {
@@ -388,7 +388,7 @@ async fn supervise<P: IpcProtocol>(
                     return;
                 }
             }
-            _ = tokio::time::sleep(delay) => {}
+            () = tokio::time::sleep(delay) => {}
         }
 
         match backend.protocol.connect().await {

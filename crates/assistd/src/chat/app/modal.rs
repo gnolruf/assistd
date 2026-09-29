@@ -66,13 +66,13 @@ impl App {
             .as_ref()
             .is_some_and(|m| !m.request.always_allow.is_empty());
         match ev.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') if armed => {
+            KeyCode::Char('y' | 'Y') if armed => {
                 self.resolve_modal(Approval::Once);
             }
-            KeyCode::Char('a') | KeyCode::Char('A') if armed && offers_always => {
+            KeyCode::Char('a' | 'A') if armed && offers_always => {
                 self.resolve_modal(Approval::Always);
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 self.resolve_modal(Approval::Deny);
             }
             _ => {}

@@ -73,7 +73,7 @@ fn registry_resolves_by_name_and_lists_alphabetically() {
     reg.register(Stub("grep"));
     reg.register(Stub("cat"));
     reg.register(Stub("ls"));
-    assert_eq!(reg.get("grep").map(|c| c.name()), Some("grep"));
+    assert_eq!(reg.get("grep").map(Command::name), Some("grep"));
     assert!(reg.get("nope").is_none());
     assert_eq!(reg.sorted_names(), ["cat", "grep", "ls"]);
     let summary = "stub command for tests";

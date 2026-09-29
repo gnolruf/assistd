@@ -29,8 +29,7 @@ async fn read_request_body(stream: &mut TcpStream) -> Value {
     let len: usize = headers
         .lines()
         .find_map(|l| l.strip_prefix("content-length:"))
-        .map(|v| v.trim().parse().unwrap())
-        .unwrap_or(0);
+        .map_or(0, |v| v.trim().parse().unwrap());
     while buf.len() < header_end + len {
         let n = stream.read(&mut chunk).await.unwrap();
         assert!(n > 0, "client closed mid-body");

@@ -50,7 +50,7 @@ impl Command for Stub {
 struct Echo;
 #[async_trait]
 impl Command for Echo {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "echo_stdin"
     }
     fn summary(&self) -> &'static str {
@@ -69,7 +69,7 @@ impl Command for Echo {
 struct LineCount;
 #[async_trait]
 impl Command for LineCount {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "lc"
     }
     fn summary(&self) -> &'static str {
@@ -94,7 +94,7 @@ impl Command for LineCount {
 struct StdinKind;
 #[async_trait]
 impl Command for StdinKind {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "stdin_kind"
     }
     fn summary(&self) -> &'static str {
@@ -118,7 +118,7 @@ impl Command for StdinKind {
 struct Flood(usize);
 #[async_trait]
 impl Command for Flood {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "flood"
     }
     fn summary(&self) -> &'static str {

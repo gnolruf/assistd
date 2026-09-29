@@ -272,8 +272,7 @@ fn read_parent_pid(pid: u32) -> Option<u32> {
 
 fn read_comm(pid: u32) -> String {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| format!("<pid {pid}>"))
+        .map_or_else(|_| format!("<pid {pid}>"), |s| s.trim().to_string())
 }
 
 #[cfg(test)]

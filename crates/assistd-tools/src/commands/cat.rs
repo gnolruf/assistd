@@ -20,7 +20,7 @@ struct Flags {
 
 #[async_trait]
 impl Command for CatCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "cat"
     }
 
@@ -160,15 +160,16 @@ pub(crate) fn sniff_binary(bytes: &[u8]) -> Option<String> {
 }
 
 fn describe(head: &[u8], size: u64, path: Option<&str>) -> Vec<u8> {
-    let mime = infer::get(head)
-        .map(|t| t.mime_type().to_string())
-        .unwrap_or_else(|| {
+    let mime = infer::get(head).map_or_else(
+        || {
             if sniff_binary(head).is_some() {
                 "application/octet-stream".into()
             } else {
                 "text/plain".into()
             }
-        });
+        },
+        |t| t.mime_type().to_string(),
+    );
     let prefix = path.map(|p| format!("{p}: ")).unwrap_or_default();
     format!("{prefix}{mime}\n{prefix}{size} bytes\n").into_bytes()
 }

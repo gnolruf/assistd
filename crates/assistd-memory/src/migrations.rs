@@ -5,7 +5,7 @@ use rusqlite_migration::{M, Migrations};
 
 /// V1 schema. Applied versions live in `PRAGMA user_version`, not `schema_migrations`;
 /// forked branches share `conversations` rows through `branch_messages`.
-const V1_SQL: &str = r#"
+const V1_SQL: &str = r"
 CREATE TABLE schema_migrations (
     version    INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
@@ -119,7 +119,7 @@ CREATE TABLE embeddings (
     created_at            TEXT NOT NULL
 );
 CREATE INDEX idx_embeddings_model ON embeddings(model);
-"#;
+";
 
 /// The full migration set.
 pub fn migrations() -> Migrations<'static> {

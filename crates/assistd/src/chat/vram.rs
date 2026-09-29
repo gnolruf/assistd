@@ -90,7 +90,7 @@ pub(super) fn spawn_probe(
             let _ = tx.send(ResourceState { vram, ram });
 
             tokio::select! {
-                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = tokio::time::sleep(POLL_INTERVAL) => {}
                 _ = shutdown.changed() => return,
             }
             if *shutdown.borrow() {

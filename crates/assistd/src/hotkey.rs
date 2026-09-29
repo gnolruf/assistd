@@ -423,13 +423,13 @@ mod tests {
             ("presence.hotkey", |p, _| p.hotkey = GARBAGE.into()),
             ("voice.hotkey", |_, v| v.hotkey = GARBAGE.into()),
             ("voice.continuous.hotkey", |_, v| {
-                v.continuous.hotkey = GARBAGE.into()
+                v.continuous.hotkey = GARBAGE.into();
             }),
             ("voice.synthesis.toggle_hotkey", |_, v| {
-                v.synthesis.toggle_hotkey = GARBAGE.into()
+                v.synthesis.toggle_hotkey = GARBAGE.into();
             }),
             ("voice.synthesis.skip_hotkey", |_, v| {
-                v.synthesis.skip_hotkey = GARBAGE.into()
+                v.synthesis.skip_hotkey = GARBAGE.into();
             }),
         ];
         for (key, edit) in cases {

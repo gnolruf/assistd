@@ -40,10 +40,7 @@ pub(super) async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: Optiona
                 tracing::warn!(target: "tray", "subscribe attempt failed: {e}");
             }
         }
-        if push(&handle, |item| item.set_disconnected())
-            .await
-            .is_none()
-        {
+        if push(&handle, TrayItem::set_disconnected).await.is_none() {
             return;
         }
         disconnect_popup(popup.as_ref());
@@ -63,7 +60,7 @@ async fn try_once(
     };
     let stream = ipc.one_shot(req).await?;
 
-    if push(handle, |item| item.set_connected()).await.is_none() {
+    if push(handle, TrayItem::set_connected).await.is_none() {
         return Ok(ExitReason::ServiceShutdown);
     }
 

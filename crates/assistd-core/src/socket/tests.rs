@@ -828,11 +828,11 @@ struct GatedTool;
 
 #[async_trait::async_trait]
 impl assistd_tools::Tool for GatedTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "gated"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "asks for confirmation"
     }
 
@@ -1128,10 +1128,10 @@ impl Drop for DropFlag {
 
 #[async_trait::async_trait]
 impl assistd_tools::Tool for SilentHangingTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "hang"
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "never returns"
     }
     fn parameters_schema(&self) -> serde_json::Value {

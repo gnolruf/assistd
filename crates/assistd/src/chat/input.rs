@@ -180,8 +180,7 @@ impl InputLine {
         let prev = self.buffer[..self.cursor]
             .char_indices()
             .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+            .map_or(0, |(i, _)| i);
         self.buffer.drain(prev..self.cursor);
         self.cursor = prev;
     }
@@ -203,8 +202,7 @@ impl InputLine {
         self.cursor = self.buffer[..self.cursor]
             .char_indices()
             .next_back()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+            .map_or(0, |(i, _)| i);
     }
 
     fn move_right(&mut self) {

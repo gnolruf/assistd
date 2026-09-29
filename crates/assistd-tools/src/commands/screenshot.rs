@@ -113,7 +113,7 @@ impl Default for ScreenshotCommand {
 
 #[async_trait]
 impl Command for ScreenshotCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "screenshot"
     }
 
@@ -248,7 +248,7 @@ mod tests {
     use super::*;
 
     fn args(raw: &[&str]) -> Vec<String> {
-        raw.iter().map(|s| s.to_string()).collect()
+        raw.iter().map(ToString::to_string).collect()
     }
 
     #[test]

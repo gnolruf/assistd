@@ -108,11 +108,14 @@ pub(super) async fn init(
         Some(h) => Arc::new(SqliteSemanticStore::new(h.clone())),
         None => Arc::new(NoSemanticStore),
     };
-    let writer_tx = sqlite_handle.map(|h| h.writer_tx()).unwrap_or_else(|| {
-        let (tx, rx) = mpsc::channel(1);
-        drop(rx);
-        Arc::new(tx)
-    });
+    let writer_tx = sqlite_handle.map_or_else(
+        || {
+            let (tx, rx) = mpsc::channel(1);
+            drop(rx);
+            Arc::new(tx)
+        },
+        |h| h.writer_tx(),
+    );
     let (embed_tx, embed_rx) = mpsc::channel(256);
     let task = spawn_embedder_task(
         embedder.clone(),

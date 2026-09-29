@@ -98,7 +98,7 @@ fn parse_args() -> Args {
     while i < argv.len() {
         match argv[i].as_str() {
             "--host" => {
-                host = argv[i + 1].clone();
+                host.clone_from(&argv[i + 1]);
                 i += 2;
             }
             "--port" => {
@@ -214,7 +214,7 @@ async fn serve_connection(
             serve_chat_completion(&mut sock, &state, &body).await?;
             return Ok(());
         }
-        ("POST", "/test/script") | ("POST", "/test/reset") => {
+        ("POST", "/test/script" | "/test/reset") => {
             let resp = if has_test_control_header(&head) {
                 if path == "/test/script" {
                     queue_script_response(&state, &body).await
@@ -464,13 +464,13 @@ async fn queue_script_response(
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter_map(|v| v.as_str().map(ToString::to_string))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     let delay_ms_between = parsed
         .get("delay_ms_between")
-        .and_then(|v| v.as_u64())
+        .and_then(Value::as_u64)
         .unwrap_or(0);
     let mut server = state.lock().await;
     server.chat_scripts.push_back(ChatScript {
@@ -506,7 +506,7 @@ async fn serve_chat_completion(
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let stream = parsed
         .get("stream")
-        .and_then(|v| v.as_bool())
+        .and_then(Value::as_bool)
         .unwrap_or(false);
     let last_user = parsed
         .get("messages")
@@ -516,7 +516,7 @@ async fn serve_chat_completion(
                 if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
                     msg.get("content")
                         .and_then(|c| c.as_str())
-                        .map(|s| s.to_string())
+                        .map(ToString::to_string)
                 } else {
                     None
                 }

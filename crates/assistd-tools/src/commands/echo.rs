@@ -15,7 +15,7 @@ struct Flags {
 
 #[async_trait]
 impl Command for EchoCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "echo"
     }
 
@@ -112,7 +112,7 @@ mod tests {
     async fn run_echo(args: &[&str]) -> CommandOutput {
         EchoCommand
             .run(CommandInput {
-                args: args.iter().map(|s| s.to_string()).collect(),
+                args: args.iter().map(ToString::to_string).collect(),
                 stdin: None,
             })
             .await

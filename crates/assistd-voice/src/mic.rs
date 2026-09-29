@@ -211,7 +211,7 @@ fn log_captured_levels(pcm: &[i16]) {
     let peak_dbfs = if peak == 0 {
         f32::NEG_INFINITY
     } else {
-        20.0 * (peak as f32 / i16::MAX as f32).log10()
+        20.0 * (f32::from(peak) / f32::from(i16::MAX)).log10()
     };
     info!(
         target: "assistd::voice::mic",

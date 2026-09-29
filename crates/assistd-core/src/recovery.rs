@@ -84,10 +84,10 @@ where
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let location = info
-            .location()
-            .map(|loc| format!("{}:{}", loc.file(), loc.line()))
-            .unwrap_or_else(|| "<unknown>".to_string());
+        let location = info.location().map_or_else(
+            || "<unknown>".to_string(),
+            |loc| format!("{}:{}", loc.file(), loc.line()),
+        );
         let payload_msg = panic_message(info.payload());
 
         recovery_event!(

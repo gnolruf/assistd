@@ -109,8 +109,8 @@ fn build_transport_config(server: &McpServerConfig) -> TransportConfig {
             ..
         } => {
             let mut stdio = StdioConfig::new(name.clone(), command.to_string_lossy().into_owned());
-            stdio.args = args.clone();
-            stdio.env = env.clone();
+            stdio.args.clone_from(args);
+            stdio.env.clone_from(env);
             stdio.request_timeout = request_timeout;
             TransportConfig::Stdio(stdio)
         }
@@ -118,7 +118,7 @@ fn build_transport_config(server: &McpServerConfig) -> TransportConfig {
             name, url, headers, ..
         } => {
             let mut sse = SseConfig::new(name.clone(), url.to_string());
-            sse.headers = headers.clone();
+            sse.headers.clone_from(headers);
             sse.request_timeout = request_timeout;
             TransportConfig::Sse(sse)
         }

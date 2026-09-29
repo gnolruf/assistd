@@ -223,7 +223,7 @@ impl Supervisor {
 
             let delay = self.restart_delay();
             tokio::select! {
-                _ = tokio::time::sleep(delay) => {}
+                () = tokio::time::sleep(delay) => {}
                 _ = self.shutdown_requested() => return,
             }
 
@@ -234,7 +234,7 @@ impl Supervisor {
     /// Wait for `lifeline` to end; `Break` means shutdown was requested.
     async fn supervise_session(&mut self, mut lifeline: Lifeline) -> ControlFlow<()> {
         tokio::select! {
-            _ = lifeline.wait() => {
+            () = lifeline.wait() => {
                 let ran_for = self.session_start.elapsed();
                 warn!(
                     target: "assistd::mcp",

@@ -92,7 +92,7 @@ impl ToolRegistry {
         self.tools
             .iter()
             .find(|t| t.name() == name)
-            .map(|t| t.as_ref())
+            .map(AsRef::as_ref)
     }
 
     /// Number of registered tools.
@@ -157,10 +157,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for Noop {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "noop"
         }
-        fn description(&self) -> &str {
+        fn description(&self) -> &'static str {
             "does nothing"
         }
         fn parameters_schema(&self) -> Value {
@@ -175,7 +175,7 @@ mod tests {
     fn registry_finds_tools_by_name() {
         let mut reg = ToolRegistry::new();
         reg.register(Noop);
-        assert_eq!(reg.get("noop").map(|t| t.name()), Some("noop"));
+        assert_eq!(reg.get("noop").map(Tool::name), Some("noop"));
         assert!(reg.get("missing").is_none());
     }
 

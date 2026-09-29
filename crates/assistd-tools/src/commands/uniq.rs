@@ -10,7 +10,7 @@ pub struct UniqCommand;
 
 #[async_trait]
 impl Command for UniqCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "uniq"
     }
 
@@ -84,7 +84,7 @@ mod tests {
     async fn run_uniq(args: &[&str], stdin: &[u8]) -> CommandOutput {
         UniqCommand
             .run(CommandInput {
-                args: args.iter().map(|s| s.to_string()).collect(),
+                args: args.iter().map(ToString::to_string).collect(),
                 stdin: Some(stdin.to_vec()),
             })
             .await

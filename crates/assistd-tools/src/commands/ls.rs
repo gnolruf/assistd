@@ -13,7 +13,7 @@ pub struct LsCommand;
 
 #[async_trait]
 impl Command for LsCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "ls"
     }
 
@@ -132,7 +132,7 @@ mod tests {
     async fn run_ls(args: &[&str]) -> CommandOutput {
         LsCommand
             .run(CommandInput {
-                args: args.iter().map(|s| s.to_string()).collect(),
+                args: args.iter().map(ToString::to_string).collect(),
                 stdin: None,
             })
             .await

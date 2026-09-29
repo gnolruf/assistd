@@ -98,10 +98,10 @@ struct HangingTool {
 
 #[async_trait]
 impl Tool for HangingTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "run"
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "never returns"
     }
     fn parameters_schema(&self) -> Value {
@@ -358,10 +358,10 @@ async fn tool_invoke_err_becomes_synthetic_error_result() {
     struct ErrTool;
     #[async_trait]
     impl Tool for ErrTool {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "run"
         }
-        fn description(&self) -> &str {
+        fn description(&self) -> &'static str {
             "errors on invoke"
         }
         fn parameters_schema(&self) -> Value {
@@ -433,7 +433,7 @@ impl Tool for FakeMcpTool {
     fn name(&self) -> &str {
         &self.name
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "fake mcp tool"
     }
     fn parameters_schema(&self) -> Value {

@@ -132,7 +132,7 @@ async fn get_counters(port: u16) -> (u32, u32, Option<String>) {
     let counters: Value = serde_json::from_str(&body).expect("counters json");
     let load = counters["load_count"].as_u64().expect("load_count") as u32;
     let unload = counters["unload_count"].as_u64().expect("unload_count") as u32;
-    let loaded = counters["loaded_model"].as_str().map(|s| s.to_string());
+    let loaded = counters["loaded_model"].as_str().map(ToString::to_string);
     (load, unload, loaded)
 }
 

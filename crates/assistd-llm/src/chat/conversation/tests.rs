@@ -94,7 +94,9 @@ fn user_text(message: &wire::ChatMessage<'_>) -> String {
         Some(wire::ContentBody::Text(t)) => t.to_string(),
         Some(wire::ContentBody::Parts(parts)) => match &parts[0] {
             wire::ContentPart::Text { text } => text.to_string(),
-            other => panic!("first part must be text, got {other:?}"),
+            other @ wire::ContentPart::ImageUrl { .. } => {
+                panic!("first part must be text, got {other:?}")
+            }
         },
         None => panic!("user message without content"),
     }
@@ -250,7 +252,9 @@ fn image_tool_results_do_not_close_the_turn() {
     match &result.content {
         Some(wire::ContentBody::Parts(parts)) => match &parts[0] {
             wire::ContentPart::Text { text } => assert_eq!(*text, "[tool:see]\na picture"),
-            other => panic!("first part must be text, got {other:?}"),
+            other @ wire::ContentPart::ImageUrl { .. } => {
+                panic!("first part must be text, got {other:?}")
+            }
         },
         other => panic!("expected multimodal body, got {other:?}"),
     }

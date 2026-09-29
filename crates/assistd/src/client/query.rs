@@ -88,7 +88,7 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
             let name = escape_controls_single_line(name);
             let exit = result
                 .get("exit_code")
-                .and_then(|v| v.as_i64())
+                .and_then(serde_json::Value::as_i64)
                 .unwrap_or(0);
             writeln!(out, "[tool result: {name} exit:{exit}]")?;
         }

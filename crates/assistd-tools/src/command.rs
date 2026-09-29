@@ -232,7 +232,7 @@ impl CommandRegistry {
 
     /// Look up a registered command by its `name()`.
     pub fn get(&self, name: &str) -> Option<&dyn Command> {
-        self.commands.get(name).map(|c| c.as_ref())
+        self.commands.get(name).map(AsRef::as_ref)
     }
 
     /// Number of registered commands.

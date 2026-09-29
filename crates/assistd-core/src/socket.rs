@@ -278,7 +278,7 @@ where
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            _ = &mut shutdown => {
+            () = &mut shutdown => {
                 info!("shutting down socket listener");
                 break;
             }
@@ -373,7 +373,7 @@ async fn back_off_from_fd_exhaustion(err: &io::Error, fd_exhausted: &mut bool) {
 /// Matches the raw errno because EMFILE maps to the unstable
 /// `io::ErrorKind::Uncategorized`.
 fn is_fd_exhaustion(err: &io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE))
+    matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
 }
 
 async fn handle_connection(

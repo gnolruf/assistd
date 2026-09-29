@@ -210,8 +210,7 @@ async fn resolve_capabilities(ipc: &IpcClient, config: &Config, daemon_up: bool)
             .model
             .name
             .rsplit_once('/')
-            .map(|(_, rest)| rest.to_string())
-            .unwrap_or_else(|| config.model.name.clone())
+            .map_or_else(|| config.model.name.clone(), |(_, rest)| rest.to_string())
     } else {
         daemon_model_name
     };
@@ -264,7 +263,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
             _ = tick.tick() => {
                 app.on_tick();
             }
-            Ok(_) = resource_rx.changed() => {
+            Ok(()) = resource_rx.changed() => {
                 let v = resource_rx.borrow_and_update().clone();
                 app.on_resources(v);
             }
@@ -477,7 +476,7 @@ fn spawn_title_subscription(
                 () = pump_titles(&ipc, &chat_tx) => {
                     tokio::select! {
                         _ = shutdown.changed() => break,
-                        _ = tokio::time::sleep(TITLE_RECONNECT_DELAY) => {}
+                        () = tokio::time::sleep(TITLE_RECONNECT_DELAY) => {}
                     }
                 }
             }
@@ -532,8 +531,7 @@ fn install_signal_handler(shutdown_tx: watch::Sender<bool>) -> JoinHandle<()> {
 
 fn log_dir() -> Result<PathBuf> {
     let dir = assistd_utils::xdg::state_home()
-        .map(|state| state.join("assistd"))
-        .unwrap_or_else(std::env::temp_dir);
+        .map_or_else(std::env::temp_dir, |state| state.join("assistd"));
     std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
     Ok(dir)
 }

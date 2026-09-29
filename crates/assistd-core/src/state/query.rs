@@ -374,7 +374,7 @@ impl AppState {
             synthesis.code_block_mode,
         );
         let partial_flush = (synthesis.partial_flush_ms > 0)
-            .then(|| Duration::from_millis(synthesis.partial_flush_ms as u64));
+            .then(|| Duration::from_millis(u64::from(synthesis.partial_flush_ms)));
         let (tx, rx) = mpsc::channel::<String>(32);
         (
             SpeechPipeline {
@@ -627,8 +627,7 @@ fn tool_result_body(result: &Value) -> String {
     result
         .get("output")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| result.to_string())
+        .map_or_else(|| result.to_string(), ToString::to_string)
 }
 
 /// `LastDelta` carries the whole reply so far, so building one costs a

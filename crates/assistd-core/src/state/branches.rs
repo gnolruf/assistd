@@ -453,14 +453,13 @@ impl AppState {
         branches
             .into_iter()
             .find(|info| info.branch_id == branch)
-            .map(|info| {
+            .map_or((None, None, None), |info| {
                 (
                     Some(info.name),
                     info.parent_branch_name,
                     info.fork_point_seq,
                 )
             })
-            .unwrap_or((None, None, None))
     }
 }
 
@@ -526,10 +525,9 @@ fn is_within_recency(latest: Option<&str>, recency_secs: u64) -> bool {
         None => true,
         Some(timestamp) => DateTime::parse_from_rfc3339(timestamp)
             .ok()
-            .map(|at| {
+            .is_some_and(|at| {
                 let age = Utc::now().signed_duration_since(at.with_timezone(&Utc));
                 age >= TimeDelta::zero() && age <= window
-            })
-            .unwrap_or(false),
+            }),
     }
 }

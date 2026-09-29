@@ -78,7 +78,7 @@ impl Embedder for NoEmbedder {
     async fn embed(&self, _text: String) -> Result<Vec<f32>, EmbedError> {
         Err(EmbedError::Disabled)
     }
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         ""
     }
     fn dim(&self) -> usize {

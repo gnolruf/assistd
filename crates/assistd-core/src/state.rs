@@ -205,7 +205,7 @@ impl AppState {
             Request::Switch { id, target } => self.handle_switch(id, target, tx).await,
             Request::Undo { id } => self.handle_undo(id, tx).await,
             Request::ResumeOrNew { id, recency_secs } => {
-                self.handle_resume_or_new(id, recency_secs, tx).await
+                self.handle_resume_or_new(id, recency_secs, tx).await;
             }
             Request::NewSession { id } => self.handle_new_session(id, tx).await,
             Request::Subscribe { id, filter } => self.handle_subscribe(id, filter, tx).await,

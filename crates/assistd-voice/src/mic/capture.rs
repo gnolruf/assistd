@@ -283,8 +283,7 @@ fn device_name(device: &Device) -> Result<String, CpalError> {
     device.description().map(|description| {
         description
             .driver()
-            .map(str::to_string)
-            .unwrap_or_else(|| description.name().to_string())
+            .map_or_else(|| description.name().to_string(), str::to_string)
     })
 }
 

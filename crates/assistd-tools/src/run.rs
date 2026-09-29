@@ -97,7 +97,7 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
 
 #[async_trait]
 impl Tool for RunTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "run"
     }
 

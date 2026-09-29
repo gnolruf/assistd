@@ -405,7 +405,7 @@ fn format_mode(width: u32, height: u32, millihertz: u32) -> String {
     if hz_frac == 0 {
         format!("{width}x{height}@{hz_int}Hz")
     } else {
-        format!("{width}x{height}@{hz_int}.{:03}Hz", hz_frac)
+        format!("{width}x{height}@{hz_int}.{hz_frac:03}Hz")
     }
 }
 

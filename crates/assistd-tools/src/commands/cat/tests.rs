@@ -7,7 +7,7 @@ use crate::fixtures::PNG_BYTES;
 async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
     CatCommand
         .run(CommandInput {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             stdin: stdin.map(<[u8]>::to_vec),
         })
         .await

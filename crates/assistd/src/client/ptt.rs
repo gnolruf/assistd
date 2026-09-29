@@ -64,7 +64,7 @@ pub(crate) async fn run(action: PttAction) -> Result<()> {
                 let name = escape_controls_single_line(name);
                 let exit = result
                     .get("exit_code")
-                    .and_then(|v| v.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .unwrap_or(0);
                 writeln!(io::stderr(), "[tool result: {name} exit:{exit}]")?;
             }

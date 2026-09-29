@@ -104,15 +104,27 @@ unused_qualifications = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-dbg_macro = "deny"
 allow_attributes_without_reason = "warn"
+assigning_clones = "warn"
+cast_lossless = "warn"
+dbg_macro = "deny"
+ignored_unit_patterns = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+match_wildcard_for_single_variants = "warn"
 mod_module_files = "warn"
+needless_raw_string_hashes = "warn"
 print_stderr = "warn"
 print_stdout = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
 todo = "warn"
 too_many_lines = "warn"
 unchecked_time_subtraction = "warn"
 undocumented_unsafe_blocks = "warn"
+uninlined_format_args = "warn"
+unnecessary_literal_bound = "warn"
+unnested_or_patterns = "warn"
 
 [profile.release]
 lto = "thin"

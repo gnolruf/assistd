@@ -440,11 +440,7 @@ async fn run_iterations(
             Ok(()) => {
                 let metrics = RunMetrics::from_stages(turn_start, stages);
                 if let Some(end_to_end) = metrics.end_to_end_ms {
-                    writeln!(
-                        io::stderr(),
-                        "iter {iteration}: {} ms end-to-end",
-                        end_to_end
-                    )?;
+                    writeln!(io::stderr(), "iter {iteration}: {end_to_end} ms end-to-end")?;
                 } else {
                     writeln!(
                         io::stderr(),

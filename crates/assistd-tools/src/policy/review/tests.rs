@@ -368,7 +368,7 @@ fn argv_is_matched_without_reparsing_it() {
         allowlist: &allowlist,
         protected: &[],
     };
-    let argv = |args: &[&str]| -> Vec<String> { args.iter().map(|a| a.to_string()).collect() };
+    let argv = |args: &[&str]| -> Vec<String> { args.iter().map(ToString::to_string).collect() };
     let check_argv = |args: &[&str]| check_argv(&argv(args), &rules).map(|found| found.to_string());
     assert_eq!(
         check_argv(&["rm", "-rf", "/tmp/x"]).as_deref(),
@@ -404,7 +404,7 @@ impl Programs {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
         let allowlist = Allowlist::unsaved(
-            allowed.iter().map(|s| s.to_string()),
+            allowed.iter().map(ToString::to_string),
             SearchPath {
                 dirs: vec![dir.path().to_path_buf()],
                 read_only: true,
@@ -432,7 +432,7 @@ impl Programs {
 
 fn unlisted(programs: &[&str], approvable: bool) -> Option<Confirmation> {
     Some(Confirmation::Unlisted {
-        programs: programs.iter().map(|p| p.to_string()).collect(),
+        programs: programs.iter().map(ToString::to_string).collect(),
         approvable,
     })
 }

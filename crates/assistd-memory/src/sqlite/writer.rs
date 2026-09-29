@@ -241,7 +241,7 @@ async fn execute(conn: &Connection, op: WriteOp) {
             ack,
         } => reply(ack, fork_branch(conn, src_branch_id, new_name).await),
         WriteOp::UndoLastTurn { branch_id, ack } => {
-            reply(ack, undo_last_turn(conn, branch_id).await)
+            reply(ack, undo_last_turn(conn, branch_id).await);
         }
         WriteOp::SetSessionTitle {
             session_id,

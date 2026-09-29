@@ -164,7 +164,7 @@ impl<S: ChildServerSpec> Supervisor<S> {
         let _ = self.ready_tx.send(ReadyState::BackingOff { attempt });
 
         tokio::select! {
-            _ = tokio::time::sleep(delay) => ControlFlow::Continue(()),
+            () = tokio::time::sleep(delay) => ControlFlow::Continue(()),
             _ = self.shutdown_rx.changed() => {
                 info!(
                     target: "assistd::child_server",

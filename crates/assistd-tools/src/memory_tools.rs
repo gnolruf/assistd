@@ -54,11 +54,11 @@ impl RememberTool {
 
 #[async_trait]
 impl Tool for RememberTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "remember"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Save a fact or preference about the user across conversations. \
          Call this whenever the user states a stable preference, fact about \
          themselves, or anything they say they want remembered. Examples: \
@@ -172,11 +172,11 @@ impl RecallTool {
 
 #[async_trait]
 impl Tool for RecallTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "recall"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Retrieve previously remembered facts and preferences about the user. \
          Call this when prior context might help (e.g. answering \"what editor \
          should I use?\", personalizing a response, or whenever the user \
@@ -253,11 +253,11 @@ impl ReminisceTool {
 
 #[async_trait]
 impl Tool for ReminisceTool {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "reminisce"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Search *earlier* conversations — every session except the one \
          in progress, which is already in context — for messages similar \
          in meaning to a query. Complement to `recall`: `recall` looks \
@@ -437,7 +437,7 @@ mod tests {
         async fn embed(&self, _text: String) -> Result<Vec<f32>, EmbedError> {
             Ok(vec![1.0])
         }
-        fn model(&self) -> &str {
+        fn model(&self) -> &'static str {
             "m"
         }
         fn dim(&self) -> usize {
@@ -561,7 +561,7 @@ mod tests {
     fn invalid_args(err: ToolError) -> String {
         match err {
             ToolError::InvalidArgs(msg) => msg,
-            other => panic!("expected InvalidArgs, got {other:?}"),
+            other @ ToolError::Store(_) => panic!("expected InvalidArgs, got {other:?}"),
         }
     }
 

@@ -35,8 +35,7 @@ impl App {
         };
         let name = Path::new(&path)
             .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
+            .map_or_else(|| path.clone(), |f| f.to_string_lossy().into_owned());
         self.set_notice(&format!("📎 reading {name}…"));
         let chat_tx = self.chat_tx.clone();
         let picker = self.picker.clone();
@@ -143,7 +142,7 @@ fn matching_entries(dir: &Path, prefix: &str) -> Vec<(String, bool)> {
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
             name.starts_with(prefix).then(|| {
-                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
                 (name, is_dir)
             })
         })

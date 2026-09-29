@@ -70,7 +70,7 @@ impl RodioPlaybackWorker {
         let samples_f32: Vec<f32> = output
             .samples
             .iter()
-            .map(|&sample| sample as f32 / (i16::MAX as f32))
+            .map(|&sample| f32::from(sample) / f32::from(i16::MAX))
             .collect();
         let buffer = SamplesBuffer::new(channels, sample_rate, samples_f32);
         let player = self.player.clone();
@@ -119,8 +119,7 @@ impl Drop for RodioPlaybackWorker {
 fn describe(device: &cpal::Device) -> String {
     device
         .description()
-        .map(|d| d.to_string())
-        .unwrap_or_else(|_| "<no-description>".into())
+        .map_or_else(|_| "<no-description>".into(), |d| d.to_string())
 }
 
 /// Log the available outputs, then pick the named one or the default.
@@ -214,7 +213,7 @@ fn run_device_thread(
 ) {
     let opened = match device {
         Some(device) => DeviceSinkBuilder::from_device(device)
-            .and_then(|builder| builder.open_stream())
+            .and_then(DeviceSinkBuilder::open_stream)
             .map_err(|err| format!("open configured device: {err}")),
         None => DeviceSinkBuilder::open_default_sink()
             .map_err(|err| format!("open default sink: {err}")),

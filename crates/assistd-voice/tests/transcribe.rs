@@ -109,8 +109,7 @@ async fn transcribes_clear_english_speech() {
     );
     assert!(
         elapsed < Duration::from_secs(60),
-        "transcription took {:?}: latency regression",
-        elapsed
+        "transcription took {elapsed:?}: latency regression"
     );
 }
 

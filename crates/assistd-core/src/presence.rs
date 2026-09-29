@@ -187,7 +187,7 @@ impl PresenceManager {
     /// PID of the managed llama-server child, or `None` if `Sleeping` or
     /// not yet spawned.
     pub async fn llama_pid(&self) -> Option<u32> {
-        self.llama.lock().await.as_ref().and_then(|s| s.pid())
+        self.llama.lock().await.as_ref().and_then(ChildServer::pid)
     }
 
     /// Non-blocking [`Self::llama_pid`]. Also `None` while a transition
@@ -196,7 +196,7 @@ impl PresenceManager {
         self.llama
             .try_lock()
             .ok()
-            .and_then(|svc| svc.as_ref().and_then(|s| s.pid()))
+            .and_then(|svc| svc.as_ref().and_then(ChildServer::pid))
     }
 
     /// Non-blocking snapshot of the supervisor's [`ReadyState`]. `None`
@@ -205,7 +205,7 @@ impl PresenceManager {
         self.llama
             .try_lock()
             .ok()
-            .and_then(|svc| svc.as_ref().map(|s| s.state()))
+            .and_then(|svc| svc.as_ref().map(ChildServer::state))
     }
 
     /// Wait until llama-server reports `ReadyState::Ready` or `budget`

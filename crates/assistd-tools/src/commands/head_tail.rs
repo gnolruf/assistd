@@ -15,7 +15,7 @@ pub struct HeadCommand;
 
 #[async_trait]
 impl Command for HeadCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "head"
     }
 
@@ -58,7 +58,7 @@ pub struct TailCommand;
 
 #[async_trait]
 impl Command for TailCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "tail"
     }
 
@@ -161,7 +161,7 @@ mod tests {
 
     async fn run(cmd: &dyn Command, args: &[&str], stdin: &[u8]) -> CommandOutput {
         cmd.run(CommandInput {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             stdin: Some(stdin.to_vec()),
         })
         .await

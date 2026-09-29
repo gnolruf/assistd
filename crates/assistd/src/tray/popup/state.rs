@@ -69,9 +69,7 @@ impl PopupTracker {
     pub(super) fn snapshot(&self) -> PopupState {
         let displayed_id = self.displayed.as_deref();
         let displayed = displayed_id.and_then(|id| self.turns.get(id));
-        let displayed_in_flight = displayed_id
-            .map(|id| self.in_flight.contains(id))
-            .unwrap_or(false);
+        let displayed_in_flight = displayed_id.is_some_and(|id| self.in_flight.contains(id));
         PopupState {
             body: displayed
                 .map(|t| truncate_chars_from_end(&t.body, BODY_CHARS))
@@ -130,7 +128,7 @@ impl PopupTracker {
             }
             Event::LastDelta { id, text } => {
                 let turn = self.activate_turn(id);
-                turn.body = text.clone();
+                turn.body.clone_from(text);
                 turn.activity = Some(TurnActivity::Streaming);
             }
             Event::ReasoningDelta { id, .. } => {

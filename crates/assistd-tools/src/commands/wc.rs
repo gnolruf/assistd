@@ -24,7 +24,7 @@ impl Selected {
 
 #[async_trait]
 impl Command for WcCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "wc"
     }
 
@@ -116,7 +116,7 @@ mod tests {
     async fn run_wc(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
         WcCommand
             .run(CommandInput {
-                args: args.iter().map(|s| s.to_string()).collect(),
+                args: args.iter().map(ToString::to_string).collect(),
                 stdin: stdin.map(<[u8]>::to_vec),
             })
             .await

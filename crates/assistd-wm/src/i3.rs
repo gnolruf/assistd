@@ -407,7 +407,7 @@ fn parse_geometry_size(token: &str) -> Option<(u32, u32)> {
 /// Winit's X11 RandR DPI formula, quantised to 1/12 steps. `1.0` for
 /// zero-sized inputs or absurd results.
 fn calc_randr_scale(pixels: (u32, u32), mm: (u64, u64)) -> f64 {
-    let (px_w, px_h) = (pixels.0 as f64, pixels.1 as f64);
+    let (px_w, px_h) = (f64::from(pixels.0), f64::from(pixels.1));
     let (mm_w, mm_h) = (mm.0 as f64, mm.1 as f64);
     if mm_w == 0.0 || mm_h == 0.0 {
         return 1.0;

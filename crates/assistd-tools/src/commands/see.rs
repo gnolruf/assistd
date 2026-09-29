@@ -33,7 +33,7 @@ impl Default for SeeCommand {
 
 #[async_trait]
 impl Command for SeeCommand {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "see"
     }
 
@@ -144,7 +144,7 @@ mod tests {
 
     async fn run_see(cmd: &SeeCommand, args: &[&str]) -> CommandOutput {
         cmd.run(CommandInput {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
         })
         .await

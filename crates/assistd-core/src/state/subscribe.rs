@@ -26,7 +26,7 @@ impl AppState {
         let mut rx = self.runtime.subscribe_events(filter);
         loop {
             tokio::select! {
-                _ = tx.closed() => {
+                () = tx.closed() => {
                     debug!(
                         target: "assistd::subscribe",
                         id = %id,

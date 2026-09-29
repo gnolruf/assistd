@@ -640,7 +640,7 @@ fn completed_tool_result(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let exit_code = raw.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+    let exit_code = raw.get("exit_code").and_then(Value::as_i64).unwrap_or(0);
     let command = call
         .arguments
         .get("command")

@@ -26,7 +26,7 @@ impl Embedder for PickyEmbedder {
         }
         Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
     }
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "picky"
     }
     fn dim(&self) -> usize {

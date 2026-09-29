@@ -26,7 +26,7 @@ fn bash_with(
 ) -> BashCommand {
     let cfg = BashPolicyCfg {
         timeout: Duration::from_secs(10),
-        denylist: denylist.into_iter().map(|s| s.to_string()).collect(),
+        denylist: denylist.into_iter().map(ToString::to_string).collect(),
         destructive_patterns: destructive
             .into_iter()
             .map(|pattern| DestructivePattern::new(pattern).expect("valid pattern"))
@@ -40,7 +40,7 @@ fn bash_with(
 /// approvals kept in `store`.
 fn bash_allowing(allowed: &[&str], store: &Path, gate: Arc<dyn ConfirmationGate>) -> BashCommand {
     let allowlist = Allowlist::load(
-        allowed.iter().map(|s| s.to_string()),
+        allowed.iter().map(ToString::to_string),
         SearchPath {
             dirs: ["/usr/local/bin", "/usr/bin", "/bin"]
                 .map(Into::into)

@@ -433,13 +433,7 @@ impl Conversation {
             Some(m) if m.role == Role::Assistant && !m.tool_calls.is_empty()
         );
         self.messages.remove(idx);
-        while drop_trailing_result
-            && self
-                .messages
-                .get(idx)
-                .map(Self::is_tool_result)
-                .unwrap_or(false)
-        {
+        while drop_trailing_result && self.messages.get(idx).is_some_and(Self::is_tool_result) {
             self.messages.remove(idx);
         }
     }
@@ -453,8 +447,7 @@ impl Conversation {
         if self
             .messages
             .first()
-            .map(|m| m.role == Role::System && m.content.starts_with(SUMMARY_PREFIX))
-            .unwrap_or(false)
+            .is_some_and(|m| m.role == Role::System && m.content.starts_with(SUMMARY_PREFIX))
         {
             1
         } else {
@@ -485,13 +478,7 @@ impl Conversation {
                 }
             }
         }
-        while idx > start
-            && self
-                .messages
-                .get(idx)
-                .map(Self::is_tool_result)
-                .unwrap_or(false)
-        {
+        while idx > start && self.messages.get(idx).is_some_and(Self::is_tool_result) {
             idx -= 1;
         }
         idx.max(start)
@@ -527,11 +514,9 @@ fn approx_message_tokens(m: &Message) -> u32 {
         .map(|c| c.id.len() + c.name.len() + c.arguments.len() + 32)
         .sum();
     let tool_call_cost = approx_tokens_bytes(tool_call_bytes);
-    let context_cost = m
-        .context
-        .as_deref()
-        .map(|ctx| approx_tokens_bytes(CONTEXT_OPEN.len() + ctx.len() + CONTEXT_CLOSE.len()))
-        .unwrap_or(0);
+    let context_cost = m.context.as_deref().map_or(0, |ctx| {
+        approx_tokens_bytes(CONTEXT_OPEN.len() + ctx.len() + CONTEXT_CLOSE.len())
+    });
     TOKENS_PER_MESSAGE_OVERHEAD
         .saturating_add(approx_tokens(&m.content))
         .saturating_add(approx_tokens(&m.reasoning))
