@@ -7,6 +7,7 @@ use super::*;
 
 /// Returns `embedding` for every input, but fails any call that includes `"bad"`.
 /// Records the inputs of every call.
+#[derive(Debug)]
 struct MockEmbedder {
     calls: Mutex<Vec<Vec<String>>>,
     embedding: Vec<f32>,

@@ -15,6 +15,7 @@ use crate::{MemoryError, Result};
 const DRAIN_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Mutations the writer task executes, each with a `oneshot` ack.
+#[derive(Debug)]
 pub enum WriteOp {
     EndSession {
         session_id: String,

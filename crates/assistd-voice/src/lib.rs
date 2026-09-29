@@ -2,6 +2,8 @@
 //! [`VoiceOutput`] (text-to-speech) traits, with Whisper, cpal, and
 //! Piper implementations behind cargo features.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use tokio::sync::watch;
 
@@ -55,7 +57,7 @@ pub use whisper::{WhisperTranscriber, WhisperTranscriberBuilder, build_cpu_fallb
 /// [`stop_and_transcribe`](VoiceInput::stop_and_transcribe), then
 /// transcribe it.
 #[async_trait]
-pub trait VoiceInput: Send + Sync + 'static {
+pub trait VoiceInput: fmt::Debug + Send + Sync + 'static {
     /// Open the capture device and begin buffering. Recording runs
     /// until [`stop_and_transcribe`](Self::stop_and_transcribe) or the
     /// configured cap.
@@ -76,7 +78,7 @@ pub trait VoiceInput: Send + Sync + 'static {
 /// Text-to-speech with a FIFO playback queue, so sequential `speak`
 /// calls produce back-to-back audio.
 #[async_trait]
-pub trait VoiceOutput: Send + Sync + 'static {
+pub trait VoiceOutput: fmt::Debug + Send + Sync + 'static {
     /// Synthesize `text` and enqueue the audio. Returns once enqueued,
     /// not once played; use [`wait_idle`](Self::wait_idle) for that.
     async fn speak(&self, text: String) -> Result<(), VoiceOutputError>;
@@ -91,6 +93,7 @@ pub trait VoiceOutput: Send + Sync + 'static {
 }
 
 /// Placeholder [`VoiceInput`] that refuses capture and reports `Idle`.
+#[derive(Debug)]
 pub struct NoVoiceInput {
     state_tx: watch::Sender<VoiceCaptureState>,
 }
@@ -129,6 +132,7 @@ impl VoiceInput for NoVoiceInput {
 }
 
 /// Placeholder [`VoiceOutput`] that drops every request silently.
+#[derive(Debug)]
 pub struct NoVoiceOutput;
 
 #[async_trait]

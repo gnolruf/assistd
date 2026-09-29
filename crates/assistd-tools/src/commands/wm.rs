@@ -58,6 +58,7 @@ const LAYOUT_HELP: &str = "usage: wm layout <default|tabbed|stacking|splith|spli
     container's previous layout.\n";
 
 /// `wm <subcommand> [args]`: drive the active window manager from the LLM's `run` tool.
+#[derive(Debug)]
 pub struct WmCommand {
     wm: Arc<dyn WindowManager>,
     policy: SubprocessPolicy,

@@ -16,6 +16,7 @@ const ABBREVIATIONS: &[&str] = &[
 /// Boundaries, highest priority first: `\n\n`; a `\n- `/`\n* ` bullet; `[.!?]`
 /// plus whitespace and an uppercase letter, digit, or newline (abbreviations and
 /// decimals excluded); the `max_len` cap. A terminator at the buffer's end waits for context.
+#[derive(Debug)]
 pub struct SentenceBuffer {
     buf: String,
     in_code_fence: bool,

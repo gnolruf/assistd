@@ -68,6 +68,7 @@ impl WritePolicyCfg {
 
 /// `write PATH [CONTENT...]`: write the joined args (or else stdin) to an
 /// absolute, allowlisted PATH. Policy refusals exit 126.
+#[derive(Debug)]
 pub struct WriteCommand {
     cfg: Arc<WritePolicyCfg>,
 }

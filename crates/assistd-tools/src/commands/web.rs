@@ -11,6 +11,7 @@ pub const BODY_MAX: usize = 10 * 1024 * 1024;
 const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
 
 /// `web URL`: HTTP GET a URL and return the response body as stdout.
+#[derive(Debug)]
 pub struct WebCommand {
     client: reqwest::Client,
 }

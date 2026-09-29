@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 /// Push-to-talk over the daemon socket. `event_sink`, when `Some`,
 /// receives every event the daemon emits on the PTT connection.
+#[derive(Debug)]
 pub(crate) struct IpcVoiceProxy {
     ipc: Arc<IpcClient>,
     event_sink: Option<mpsc::Sender<Event>>,

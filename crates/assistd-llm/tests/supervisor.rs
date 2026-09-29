@@ -142,7 +142,7 @@ async fn enters_degraded_after_five_failures() {
     .await;
     let elapsed = start_at.elapsed();
 
-    let err = result.err().expect("start should fail");
+    let err = result.expect_err("start should fail");
     assert!(
         matches!(err, ChildServerError::StartupFailed { attempts: 5, .. }),
         "{err:?}"
@@ -178,7 +178,7 @@ async fn respects_shutdown_during_backoff() {
     .await;
     let elapsed = start_at.elapsed();
 
-    let err = result.err().expect("start should fail once shut down");
+    let err = result.expect_err("start should fail once shut down");
     assert!(
         matches!(err, ChildServerError::ShutdownDuringHealth),
         "{err:?}"
@@ -211,9 +211,7 @@ async fn health_from_a_squatter_on_the_port_is_not_ready() {
     .await;
     squatter_task.abort();
 
-    let err = result
-        .err()
-        .expect("a 200 from a foreign listener must not count as ready");
+    let err = result.expect_err("a 200 from a foreign listener must not count as ready");
     assert!(
         matches!(err, ChildServerError::ShutdownDuringHealth),
         "{err:?}"

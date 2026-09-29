@@ -36,6 +36,7 @@ const MAX_TOOL_STEPS: u32 = 200;
 /// With a `health` probe the loop replays a step once after a
 /// llama-server crash; without one, a crash ends the turn. A tool still
 /// running after `tool_deadline` is reported to the model as failed.
+#[derive(Debug)]
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,

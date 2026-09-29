@@ -25,6 +25,7 @@ pub enum ReadyState {
 
 /// Handle to a supervised child server, constructed via [`ChildServer::start`].
 /// Dropping it aborts the supervisor task; [`ChildServer::shutdown`] joins it.
+#[derive(Debug)]
 pub struct ChildServer {
     server: &'static str,
     task: Option<JoinHandle<()>>,

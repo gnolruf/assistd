@@ -1,5 +1,6 @@
 //! The [`Transcriber`] trait and the GPU-or-CPU [`QueuedTranscriber`].
 
+use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
@@ -13,7 +14,7 @@ use crate::VoiceCaptureState;
 
 /// Transcribe 16 kHz mono PCM audio into text.
 #[async_trait]
-pub trait Transcriber: Send + Sync + 'static {
+pub trait Transcriber: fmt::Debug + Send + Sync + 'static {
     /// Transcribe signed 16-bit mono samples at 16 kHz. Returns trimmed
     /// text; an empty string means the input was silence, not an error.
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError>;
@@ -55,7 +56,7 @@ pub enum TranscriptionError {
 
 /// Answers "is the GPU available for Whisper right now?".
 #[async_trait]
-pub trait BusyProbe: Send + Sync + 'static {
+pub trait BusyProbe: fmt::Debug + Send + Sync + 'static {
     /// Wait up to `timeout` for in-flight LLM streams to drain. `true`
     /// when the GPU became free in time.
     async fn wait_until_llm_idle(&self, timeout: Duration) -> bool;
@@ -70,6 +71,7 @@ pub trait BusyProbe: Send + Sync + 'static {
 }
 
 /// Probe that always reports the GPU free.
+#[derive(Debug)]
 pub struct NullBusyProbe;
 
 #[async_trait]
@@ -124,6 +126,16 @@ pub struct QueuedTranscriber {
     busy: Arc<dyn BusyProbe>,
     state_tx: watch::Sender<VoiceCaptureState>,
     config: QueueConfig,
+}
+
+impl fmt::Debug for QueuedTranscriber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueuedTranscriber")
+            .field("primary", &self.primary)
+            .field("busy", &self.busy)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl QueuedTranscriber {
@@ -231,6 +243,7 @@ impl Transcriber for QueuedTranscriber {
 
 /// Test transcriber returning a fixed string and counting calls.
 #[cfg(any(test, feature = "test-support"))]
+#[derive(Debug)]
 pub struct StubTranscriber {
     text: String,
     gpu: bool,
@@ -284,6 +297,7 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug)]
     struct ScriptedProbe {
         idle: AtomicBool,
         foreign: AtomicBool,
@@ -426,6 +440,7 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
     struct GatedTranscriber {
         label: &'static str,
         started: Arc<Notify>,

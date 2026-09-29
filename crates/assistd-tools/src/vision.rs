@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Shared, runtime-mutable flag for whether the current model accepts
 /// images; checked on every invocation so a model swap takes effect at once.
+#[derive(Debug)]
 pub struct VisionGate {
     supported: AtomicBool,
 }

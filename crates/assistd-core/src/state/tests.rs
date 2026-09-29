@@ -355,6 +355,7 @@ async fn dispatch_query_forwards_tool_call_and_result_events() {
 
 /// Answers the title-generation one-shot with a fixed string and records
 /// the [`assistd_llm::Thinking`] mode it was asked for.
+#[derive(Debug)]
 struct TitlingBackend {
     thinking: StdMutex<Option<assistd_llm::Thinking>>,
 }
@@ -435,6 +436,7 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
 }
 
 /// `VoiceInput` returning canned start/stop outcomes.
+#[derive(Debug)]
 struct MockVoice {
     start_result: StdMutex<Option<Result<(), VoiceInputError>>>,
     stop_result: StdMutex<Option<Result<String, VoiceInputError>>>,
@@ -573,6 +575,7 @@ async fn dispatch_ptt_stop_error_emits_error_event() {
 }
 
 /// `ContinuousListener` whose start either succeeds or fails on demand.
+#[derive(Debug)]
 struct MockListener {
     active: AtomicBool,
     start_fails: bool,
@@ -701,6 +704,7 @@ async fn dispatch_listen_start_error_propagates() {
 
 /// Records every `speak()` in arrival order, counts `wait_idle()`, and
 /// counts sentences spoken while the controller's speaking signal was low.
+#[derive(Debug)]
 struct MockSpeechRecorder {
     calls: StdMutex<Vec<String>>,
     wait_idle_calls: AtomicUsize,
@@ -779,10 +783,12 @@ async fn dispatch_query_speaks_sentences_in_order_and_drains() {
 
 /// On its first `step`, emits a scripted sequence of deltas with optional
 /// pauses between them; always answers `Final`.
+#[derive(Debug)]
 struct StreamingDeltaBackend {
     script: StdMutex<Option<Vec<DeltaScript>>>,
 }
 
+#[derive(Debug)]
 enum DeltaScript {
     Text(&'static str),
     Sleep(Duration),
@@ -869,6 +875,7 @@ async fn partial_flush_speaks_a_stalled_fragment_only_when_enabled() {
 
 /// Scripted backend: a step that returns tool calls first emits
 /// `pre_delta`; a `Final` step emits `post_delta`.
+#[derive(Debug)]
 struct ToolCallBackend {
     pre_delta: &'static str,
     post_delta: &'static str,
@@ -930,6 +937,7 @@ impl LlmBackend for ToolCallBackend {
 }
 
 /// Sleeps before returning, spanning the partial-flush window.
+#[derive(Debug)]
 struct SleepTool {
     ms: u64,
 }
@@ -992,6 +1000,7 @@ async fn dispatch_query_tool_call_inhibits_idle_flush() {
 
 /// Never returns. `dropped` flips when the invocation future is torn
 /// down, proving the agent task stopped rather than being detached.
+#[derive(Debug)]
 struct HangingTool {
     entered: Arc<Notify>,
     dropped: Arc<AtomicBool>,

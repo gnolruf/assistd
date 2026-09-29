@@ -72,6 +72,7 @@ pub enum DispatchError {
 }
 
 /// Shared, long-lived daemon state handed to every request handler.
+#[derive(Debug)]
 pub struct AppState {
     pub config: Config,
     pub subsystems: Subsystems,

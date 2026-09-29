@@ -9,6 +9,7 @@ use tokio::process::Command;
 
 /// Launch parameters for the supervised embedding llama-server. With
 /// `gpu_layers == 0` the child sees no CUDA devices.
+#[derive(Debug)]
 pub struct EmbedServerSpec {
     cfg: EmbeddingConfig,
     ready_timeout: Duration,

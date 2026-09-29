@@ -18,6 +18,7 @@ pub struct McpStartupFailure {
 }
 
 /// Handles to the long-lived daemon subsystems.
+#[derive(Debug)]
 pub struct Subsystems {
     pub llm: Arc<dyn LlmBackend>,
     pub presence: Arc<PresenceManager>,

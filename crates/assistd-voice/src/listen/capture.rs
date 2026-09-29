@@ -16,6 +16,7 @@ const LISTEN_RING_SECONDS: usize = 5;
 const LISTEN_RING_NATIVE_RATE_ASSUMED: usize = 48_000;
 
 /// Handles to a running continuous capture.
+#[derive(Debug)]
 pub struct ListenCaptureSession {
     pub stop_flag: Arc<AtomicBool>,
     pub overrun: Arc<AtomicU64>,

@@ -5,6 +5,7 @@ use crate::commands::collect_input;
 
 /// `uniq [-c] [FILE]...`: collapse runs of identical adjacent lines from
 /// the named files or stdin; `-c` prefixes each with `<count>\t`.
+#[derive(Debug)]
 pub struct UniqCommand;
 
 #[async_trait]

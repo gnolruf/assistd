@@ -1,6 +1,7 @@
 //! Embedding subsystem: the [`Embedder`] trait, an HTTP client and launch spec for a
 //! dedicated embedding llama-server, and the background task that embeds queued rows.
 
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -23,7 +24,7 @@ pub const BATCH_SIZE: usize = 32;
 
 /// Generates embedding vectors for text.
 #[async_trait]
-pub trait Embedder: Send + Sync + 'static {
+pub trait Embedder: fmt::Debug + Send + Sync + 'static {
     /// An L2-normalised embedding of `text`, so cosine similarity is a plain dot product.
     async fn embed(&self, text: String) -> Result<Vec<f32>, EmbedError>;
 
@@ -69,6 +70,7 @@ pub async fn embed_each(
 }
 
 /// Fallback when embedding is disabled: `embed` errors, `model` is empty, `dim` is zero.
+#[derive(Debug)]
 pub struct NoEmbedder;
 
 #[async_trait]

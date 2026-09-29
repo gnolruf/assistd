@@ -1,5 +1,6 @@
 //! Audio playback via rodio.
 
+use std::fmt;
 use std::num::NonZero;
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -25,6 +26,14 @@ pub struct RodioPlaybackWorker {
     player: Arc<Player>,
     shutdown_tx: Option<mpsc::Sender<()>>,
     device_thread: Option<thread::JoinHandle<()>>,
+}
+
+impl fmt::Debug for RodioPlaybackWorker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RodioPlaybackWorker")
+            .field("device_thread", &self.device_thread)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RodioPlaybackWorker {

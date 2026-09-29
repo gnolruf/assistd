@@ -24,6 +24,7 @@ static KEY_RE: LazyLock<Regex> =
 
 /// Saves a `(key, value)` pair and queues its value for embedding so
 /// `recall` can find it by paraphrase.
+#[derive(Debug)]
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
     /// Closed when embedding is disabled; the memory still saves unindexed.
@@ -124,6 +125,7 @@ impl Tool for RememberTool {
 
 /// Returns saved memories ranked by semantic similarity to a query, as
 /// `<key>: <value>` lines.
+#[derive(Debug)]
 pub struct RecallTool {
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
@@ -222,6 +224,7 @@ impl Tool for RecallTool {
 
 /// Semantic search over past conversations, excluding the session in
 /// progress because its dialogue is already in the model's context.
+#[derive(Debug)]
 pub struct ReminisceTool {
     embedder: Arc<dyn Embedder>,
     semantic: Arc<dyn SemanticStore>,
@@ -426,6 +429,7 @@ mod tests {
         Arc::new(NoSemanticStore)
     }
 
+    #[derive(Debug)]
     struct FixedEmbedder;
 
     #[async_trait]
@@ -442,7 +446,7 @@ mod tests {
     }
 
     /// Records the session `reminisce` asked to leave out.
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct ExclusionSpy {
         excluded: parking_lot::Mutex<Option<String>>,
     }

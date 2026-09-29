@@ -13,6 +13,7 @@ use crate::policy::{
 
 /// `bash SCRIPT`: run a policy-gated `bash -c <script>` subprocess. Policy
 /// refusals exit 126; a timeout kills the process group and exits 137.
+#[derive(Debug)]
 pub struct BashCommand {
     policy: SubprocessPolicy,
 }

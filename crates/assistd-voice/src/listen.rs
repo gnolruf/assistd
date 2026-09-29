@@ -1,6 +1,8 @@
 //! Hands-free continuous listening: VAD-gated segmentation that emits completed
 //! transcripts as a long-running stream, unlike one-shot [`crate::VoiceInput`] presses.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::{broadcast, watch};
@@ -24,7 +26,7 @@ pub enum ListenError {
 /// A long-running, VAD-gated listener emitting completed utterance
 /// transcripts.
 #[async_trait]
-pub trait ContinuousListener: Send + Sync + 'static {
+pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     /// Open the mic and start segmenting. A no-op when already active.
     async fn start(&self) -> Result<(), ListenError>;
 
@@ -43,6 +45,7 @@ pub trait ContinuousListener: Send + Sync + 'static {
 }
 
 /// Placeholder [`ContinuousListener`] that never delivers transcripts.
+#[derive(Debug)]
 pub struct NoContinuousListener {
     state_tx: watch::Sender<bool>,
     utterances: broadcast::Sender<String>,

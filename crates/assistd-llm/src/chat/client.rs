@@ -36,6 +36,7 @@ const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce 
 /// The conversation lock is held only while state is mutated before and
 /// after a request; the HTTP stream runs without it, so a hung server
 /// never blocks a concurrent `push_user` or `set_transient_context`.
+#[derive(Debug)]
 pub struct LlamaChatClient {
     client: reqwest::Client,
     base_url: String,

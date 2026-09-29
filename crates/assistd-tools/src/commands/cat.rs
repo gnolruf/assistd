@@ -9,6 +9,7 @@ const SNIFF_LEN: usize = 8192;
 
 /// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if none are
 /// given. Binary files are rejected so their bytes stay out of the context.
+#[derive(Debug)]
 pub struct CatCommand;
 
 #[derive(Default)]

@@ -1,6 +1,7 @@
 //! VAD-driven utterance segmentation over 20 ms frames.
 
 use std::collections::VecDeque;
+use std::fmt;
 
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
@@ -80,6 +81,16 @@ pub struct UtteranceVad {
     preroll: VecDeque<[i16; FRAME_SAMPLES]>,
     utterance: Vec<i16>,
     utterance_frames: u32,
+}
+
+impl fmt::Debug for UtteranceVad {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UtteranceVad")
+            .field("tuning", &self.tuning)
+            .field("phase", &self.phase)
+            .field("utterance_frames", &self.utterance_frames)
+            .finish_non_exhaustive()
+    }
 }
 
 impl UtteranceVad {

@@ -30,6 +30,7 @@ const PENDING_UTTERANCE_DEPTH: usize = 4;
 type CaptureJoin = JoinHandle<Result<(), AudioCaptureError>>;
 
 /// cpal + webrtc-vad implementation of [`ContinuousListener`].
+#[derive(Debug)]
 pub struct MicContinuousListener {
     transcriber: Arc<dyn Transcriber>,
     mic_device: Option<String>,
@@ -41,10 +42,12 @@ pub struct MicContinuousListener {
     listen_state: Arc<Mutex<ListenState>>,
 }
 
+#[derive(Debug)]
 struct ListenState {
     session: Option<ListenSession>,
 }
 
+#[derive(Debug)]
 struct ListenSession {
     capture_stop: Arc<AtomicBool>,
     capture_handle: CaptureJoin,

@@ -27,6 +27,7 @@ enum ReadyState {
     Degraded { reason: String },
 }
 
+#[derive(Debug)]
 struct CircuitState {
     ready: ReadyState,
     recent_failures: VecDeque<Instant>,
@@ -105,6 +106,7 @@ impl CircuitState {
 /// degraded and `speak` drops utterances without error; once a minute
 /// has passed since the last failure, one utterance is let through and
 /// either re-arms the service or re-opens the breaker.
+#[derive(Debug)]
 pub struct PiperVoiceOutput {
     synth: Arc<OneShotSynth>,
     playback: Arc<RodioPlaybackWorker>,

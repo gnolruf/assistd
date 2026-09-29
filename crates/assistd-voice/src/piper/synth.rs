@@ -25,6 +25,7 @@ pub struct SynthOutput {
 
 /// Stateless synthesizer: one piper subprocess per call, because piper's raw
 /// output has no frame delimiter and stdout EOF is the only reliable end marker.
+#[derive(Debug)]
 pub struct OneShotSynth {
     config: Arc<PiperRuntimeConfig>,
 }

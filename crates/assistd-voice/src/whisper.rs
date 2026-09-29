@@ -1,5 +1,6 @@
 //! Whisper-rs-backed [`Transcriber`].
 
+use std::fmt;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -85,6 +86,12 @@ struct StatePool<S> {
     idle: Mutex<Vec<S>>,
 }
 
+impl<S> fmt::Debug for StatePool<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StatePool").finish_non_exhaustive()
+    }
+}
+
 impl<S> Default for StatePool<S> {
     fn default() -> Self {
         Self {
@@ -111,6 +118,7 @@ impl<S> StatePool<S> {
 }
 
 /// Concrete [`Transcriber`] backed by whisper.cpp via whisper-rs.
+#[derive(Debug)]
 pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
     states: Arc<StatePool<WhisperState>>,

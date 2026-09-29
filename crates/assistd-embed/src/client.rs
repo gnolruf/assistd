@@ -27,6 +27,7 @@ struct EmbedDatum {
 }
 
 /// [`Embedder`] backed by a llama-server running with `--embedding`.
+#[derive(Debug)]
 pub struct LlamaEmbedder {
     client: reqwest::Client,
     base_url: String,

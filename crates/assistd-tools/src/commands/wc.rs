@@ -5,6 +5,7 @@ use crate::commands::collect_input;
 
 /// `wc [-lwc] [FILE]...`: print `<lines> <words> <bytes>` of the named
 /// files or stdin; flags narrow it, always in that order.
+#[derive(Debug)]
 pub struct WcCommand;
 
 /// Which counts to print; nothing selected means all three.

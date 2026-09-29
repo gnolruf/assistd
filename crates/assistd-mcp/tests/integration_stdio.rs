@@ -282,8 +282,7 @@ async fn failed_initialize_kills_the_process_group() {
 
     let err = McpServerHandle::start("fake".into(), TransportConfig::Stdio(cfg), shutdown_rx)
         .await
-        .err()
-        .expect("fixture refuses initialize");
+        .expect_err("fixture refuses initialize");
     assert!(
         matches!(err, McpError::RpcError { code: -32000, .. }),
         "{err}"

@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use super::*;
 
 /// Fails any call that includes the text `"bad"`; records the inputs of every call.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct PickyEmbedder {
     calls: Mutex<Vec<Vec<String>>>,
 }

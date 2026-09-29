@@ -471,6 +471,7 @@ async fn query(sock: &Path, id: &str, text: &str) -> Vec<Event> {
 
 /// Backend that leaves a `delay` gap between its one Delta and the end of
 /// the turn.
+#[derive(Debug)]
 struct DelayBackend {
     delay: Duration,
     last_user: Mutex<String>,

@@ -74,6 +74,7 @@ fn bwrap_or_none() -> Option<Arc<SandboxInfo>> {
 }
 
 /// Fails the test if the policy ever consults it.
+#[derive(Debug)]
 struct PanicGate;
 
 #[async_trait]
@@ -84,6 +85,7 @@ impl ConfirmationGate for PanicGate {
 }
 
 /// Gives every request the same answer and records what it was asked.
+#[derive(Debug)]
 struct RecordingGate {
     answer: Approval,
     asked: Mutex<Vec<ConfirmationRequest>>,

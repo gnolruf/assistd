@@ -52,6 +52,7 @@ impl StdioConfig {
 }
 
 /// [`McpClient`] over a child process's pipes.
+#[derive(Debug)]
 pub struct StdioMcpClient {
     label: String,
     correlator: Arc<Correlator>,
@@ -210,6 +211,7 @@ impl McpClient for StdioMcpClient {
 
 /// The spawned child plus its I/O tasks. Dropping it SIGKILLs the
 /// child's whole process group and aborts the tasks.
+#[derive(Debug)]
 pub struct ChildLifeline {
     label: String,
     child: Child,
@@ -294,6 +296,7 @@ impl ChildLifeline {
 /// The process group a spawned server leads; the id is fixed at spawn
 /// and outlives the child's own exit. Dropping it SIGKILLs every
 /// process still in the group.
+#[derive(Debug)]
 struct ProcessGroup(Pid);
 
 impl ProcessGroup {
@@ -319,6 +322,7 @@ async fn join_io_tasks(transport: TransportHandles, stderr_task: AbortOnDropHand
 }
 
 /// The read and write tasks of one transport. Dropping it aborts both.
+#[derive(Debug)]
 pub struct TransportHandles {
     read_task: AbortOnDropHandle<()>,
     write_task: AbortOnDropHandle<()>,

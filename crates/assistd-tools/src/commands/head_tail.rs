@@ -10,6 +10,7 @@ const DEFAULT_LINES: usize = 10;
 
 /// `head [-n N] [FILE]...`: emit the first `N` lines of the named
 /// files, or of stdin when none are given.
+#[derive(Debug)]
 pub struct HeadCommand;
 
 #[async_trait]
@@ -52,6 +53,7 @@ impl Command for HeadCommand {
 
 /// `tail [-n N] [FILE]...`: emit the last `N` lines of the named
 /// files, or of stdin when none are given.
+#[derive(Debug)]
 pub struct TailCommand;
 
 #[async_trait]

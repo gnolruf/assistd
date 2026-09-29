@@ -22,11 +22,13 @@ use crate::{
 };
 
 /// [`WindowManager`] over a single Sway IPC command socket.
+#[derive(Debug)]
 pub struct SwayBackend {
     ipc: Arc<IpcBackend<SwayIpc>>,
 }
 
 /// The backend plus its supervisor task, returned by [`SwayBackend::start`].
+#[derive(Debug)]
 pub struct SwayHandle {
     pub backend: Arc<SwayBackend>,
     supervisor_task: JoinHandle<()>,

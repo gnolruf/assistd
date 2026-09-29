@@ -92,6 +92,7 @@ pub enum PresenceError {
 /// Owner of the llama-server handle and the daemon-wide presence state.
 /// Transitions are serialised, so an auto-wake cannot race an explicit
 /// `sleep`.
+#[derive(Debug)]
 pub struct PresenceManager {
     state: StdMutex<PresenceState>,
     transition: AsyncMutex<()>,
@@ -620,12 +621,14 @@ impl PresenceManager {
 
 /// Holds the daemon `Active` for a query: [`PresenceManager::sleep`] and
 /// [`PresenceManager::drowse`] wait until every guard drops.
+#[derive(Debug)]
 pub struct RequestGuard {
     _guard: OwnedRwLockReadGuard<()>,
 }
 
 /// Counts one in-flight LLM stream for as long as it is held. Unlike
 /// [`RequestGuard`], does not block sleep/drowse.
+#[derive(Debug)]
 pub struct LlmStreamGuard {
     tx: watch::Sender<usize>,
 }
@@ -637,6 +640,7 @@ impl Drop for LlmStreamGuard {
 }
 
 /// Exposes a [`PresenceManager`] through the [`LlmHealthProbe`] trait.
+#[derive(Debug)]
 pub struct PresenceLlmHealthProbe {
     presence: Arc<PresenceManager>,
 }

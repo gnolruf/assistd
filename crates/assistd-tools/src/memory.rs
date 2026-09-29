@@ -14,7 +14,7 @@ pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 
 /// Combined handle over the key/value store and conversation history.
 /// Cheap to clone.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct MemoryOps {
     pub store: Arc<dyn MemoryStore>,
     pub conversations: Arc<dyn ConversationStore>,

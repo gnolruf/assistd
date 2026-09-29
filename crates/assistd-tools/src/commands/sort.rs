@@ -5,6 +5,7 @@ use crate::commands::collect_input;
 
 /// `sort [-fnr] [FILE]...`: sort the lines of the named files or stdin
 /// byte-wise (`LC_ALL=C`). Every emitted line is newline-terminated.
+#[derive(Debug)]
 pub struct SortCommand;
 
 #[derive(Default)]

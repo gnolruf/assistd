@@ -1,6 +1,8 @@
 //! Tool-use subsystem: [`Tool`]s the model calls with JSON, chiefly
 //! [`RunTool`], which runs shell-style chains of byte-oriented [`Command`]s.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -49,7 +51,7 @@ pub enum ToolError {
 
 /// A single tool the LLM can invoke.
 #[async_trait]
-pub trait Tool: Send + Sync + 'static {
+pub trait Tool: fmt::Debug + Send + Sync + 'static {
     /// Identifier the model calls this tool by.
     fn name(&self) -> &str;
 
@@ -64,7 +66,7 @@ pub trait Tool: Send + Sync + 'static {
 }
 
 /// Lookup table of registered tools.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
@@ -150,6 +152,7 @@ pub(crate) mod fixtures {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
     struct Noop;
 
     #[async_trait]

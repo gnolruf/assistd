@@ -10,6 +10,7 @@ use crate::handle::HealthState;
 use crate::{McpToolAdapter, Tool, ToolError};
 
 /// Wraps an [`McpToolAdapter`] with a per-server health gate.
+#[derive(Debug)]
 pub struct HealthRoutedTool {
     inner: McpToolAdapter,
     server_name: String,
@@ -71,6 +72,7 @@ mod tests {
 
     use crate::{McpClient, ToolResult, ToolSchema};
 
+    #[derive(Debug)]
     struct FakeClient;
 
     #[async_trait]

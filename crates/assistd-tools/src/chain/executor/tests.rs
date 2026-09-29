@@ -5,6 +5,7 @@ use crate::chain::parse_chain;
 use crate::command::{Command, CommandInput, CommandOutput, CommandRegistry};
 
 /// Emits fixed stdout, stderr and exit code, ignoring its input.
+#[derive(Debug)]
 struct Stub {
     name: &'static str,
     stdout: &'static [u8],
@@ -45,6 +46,7 @@ impl Command for Stub {
 }
 
 /// Echoes stdin to stdout.
+#[derive(Debug)]
 struct Echo;
 #[async_trait]
 impl Command for Echo {
@@ -63,6 +65,7 @@ impl Command for Echo {
 }
 
 /// Counts newlines in stdin.
+#[derive(Debug)]
 struct LineCount;
 #[async_trait]
 impl Command for LineCount {
@@ -87,6 +90,7 @@ impl Command for LineCount {
 }
 
 /// Reports whether it was handed a stdin at all.
+#[derive(Debug)]
 struct StdinKind;
 #[async_trait]
 impl Command for StdinKind {
@@ -110,6 +114,7 @@ impl Command for StdinKind {
 }
 
 /// Emits bytes of configurable length; exercises PIPE_BUF_MAX.
+#[derive(Debug)]
 struct Flood(usize);
 #[async_trait]
 impl Command for Flood {

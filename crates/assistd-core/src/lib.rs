@@ -102,6 +102,7 @@ pub enum BuildToolsError {
 }
 
 /// Subsystem handles [`build_tools`] wires into the tool registry.
+#[derive(Debug)]
 pub struct BuildToolsDeps<'a> {
     pub config: &'a Config,
     /// The file `config` was loaded from; its directory holds the
@@ -126,6 +127,7 @@ pub struct BuildToolsDeps<'a> {
 /// The gate is re-probed only after a presence transition or a
 /// llama-server restart, since only those reload weights. A failed probe
 /// leaves the gate unchanged and is retried on the next revalidation.
+#[derive(Debug)]
 pub struct VisionRevalidator {
     gate: Arc<VisionGate>,
     control: LlamaServerControl,
@@ -178,6 +180,7 @@ impl VisionRevalidator {
 }
 
 /// The load the gate was last probed against.
+#[derive(Debug)]
 struct SeenLoad {
     presence: watch::Receiver<PresenceState>,
     llama_pid: Option<u32>,

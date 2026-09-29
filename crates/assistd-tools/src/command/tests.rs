@@ -9,6 +9,7 @@ use crate::commands::{
 };
 use crate::policy::{AlwaysAllowGate, BashPolicyCfg, SandboxInfo};
 
+#[derive(Debug)]
 struct Stub(&'static str);
 
 #[async_trait]

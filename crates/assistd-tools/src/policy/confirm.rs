@@ -2,6 +2,7 @@
 //! prompts to an IPC client.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +55,7 @@ impl Approval {
 
 /// Decides whether a command that needs confirmation may run.
 #[async_trait]
-pub trait ConfirmationGate: Send + Sync + 'static {
+pub trait ConfirmationGate: fmt::Debug + Send + Sync + 'static {
     /// Ask for confirmation. Every failure mode (channel drop, shutdown,
     /// timeout) must become [`Approval::Deny`] so a turn never hangs.
     async fn confirm(&self, req: ConfirmationRequest) -> Approval;
@@ -92,7 +93,7 @@ impl ConfirmationGate for AlwaysAllowGate {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct PendingPrompts {
     /// The client can no longer answer; every later ask is denied.
     closed: bool,
@@ -107,6 +108,7 @@ pub struct NoPendingConfirm;
 /// Per-connection routing table for in-flight confirmation prompts,
 /// reached through the [`CONFIRM_ROUTER`] task-local. Asks beyond
 /// [`MAX_PENDING_CONFIRMS`] in flight are denied rather than queued.
+#[derive(Debug)]
 pub struct ConfirmRouter {
     /// Id of the connection's originating request.
     request_id: String,

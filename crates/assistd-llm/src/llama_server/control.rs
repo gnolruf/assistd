@@ -14,6 +14,7 @@ const PROPS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// HTTP client for the model-management endpoints on llama-server.
 /// Stateless apart from the connection pool, so it survives server restarts.
+#[derive(Debug)]
 pub struct LlamaServerControl {
     client: reqwest::Client,
     host: String,

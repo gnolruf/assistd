@@ -415,6 +415,7 @@ async fn refuses_socket_dir_that_is_a_symlink() {
 
 /// Backend that emits N deltas with a fixed pause between each, then
 /// Done.
+#[derive(Debug)]
 struct SlowBackend {
     deltas: usize,
     pause: Duration,
@@ -473,6 +474,7 @@ impl assistd_llm::LlmBackend for SlowBackend {
 
 /// Backend that emits a single delta then blocks indefinitely on an
 /// un-awoken channel.
+#[derive(Debug)]
 struct StuckBackend;
 
 #[async_trait::async_trait]
@@ -771,6 +773,7 @@ async fn shutdown_closes_idle_subscriber_without_waiting_out_grace() {
 
 /// Backend whose first step asks for the `gated` tool and whose second
 /// step ends the turn.
+#[derive(Debug)]
 struct GatedToolBackend {
     stepped: AtomicBool,
 }
@@ -820,6 +823,7 @@ impl assistd_llm::LlmBackend for GatedToolBackend {
 }
 
 /// Tool that runs the production IPC gate and reports its verdict.
+#[derive(Debug)]
 struct GatedTool;
 
 #[async_trait::async_trait]
@@ -929,6 +933,7 @@ async fn one_shot_client_eof_denies_prompt_without_waiting() {
 }
 
 /// Backend that streams 1 KiB deltas until its channel closes.
+#[derive(Debug)]
 struct FloodBackend;
 
 impl FloodBackend {
@@ -1053,7 +1058,7 @@ async fn peer_hung_up_distinguishes_a_half_close_from_a_full_close() {
 }
 
 /// Calls `hang` on its first step and answers on the next.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct HangingCallBackend {
     called: AtomicBool,
 }
@@ -1108,6 +1113,7 @@ impl assistd_llm::LlmBackend for HangingCallBackend {
 
 /// Never returns and emits nothing; `dropped` flips when the invocation
 /// future is torn down.
+#[derive(Debug)]
 struct SilentHangingTool {
     dropped: Arc<AtomicBool>,
 }

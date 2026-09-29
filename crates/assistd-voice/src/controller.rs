@@ -21,6 +21,7 @@ pub enum SpeakDecision {
 }
 
 /// Mute switch, skip epoch, and speaking signal over an `Arc<dyn VoiceOutput>`.
+#[derive(Debug)]
 pub struct VoiceOutputController {
     inner: Arc<dyn VoiceOutput>,
     enabled: AtomicBool,
@@ -122,6 +123,7 @@ impl VoiceOutputController {
 /// Keeps the controller's speaking signal raised; dropping the last
 /// live guard lowers it.
 #[must_use = "speaking ends as soon as the guard is dropped"]
+#[derive(Debug)]
 pub struct SpeakingGuard {
     controller: Arc<VoiceOutputController>,
 }

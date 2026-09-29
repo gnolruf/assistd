@@ -20,6 +20,7 @@ use crate::{Tool, ToolError};
 
 /// The LLM-facing `run` tool, dispatching a command line through the chain
 /// parser and executor.
+#[derive(Debug)]
 pub struct RunTool {
     registry: Arc<CommandRegistry>,
     spec: PresentSpec,

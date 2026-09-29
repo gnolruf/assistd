@@ -6,7 +6,7 @@ use crate::transcribe::TranscriptionError;
 
 /// Echoes the first sample as text after sleeping for that many ms,
 /// recording the peak number of concurrent calls.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct SlowEcho {
     in_flight: AtomicUsize,
     peak: AtomicUsize,

@@ -9,6 +9,7 @@ use assistd_utils::child_server::ChildServerSpec;
 use tokio::process::Command;
 
 /// Launch parameters for the supervised router-mode llama-server.
+#[derive(Debug)]
 pub struct LlamaServerSpec {
     cfg: LlamaServerConfig,
     model: ModelConfig,

@@ -11,6 +11,7 @@ use crate::command::{
 use crate::vision::VisionGate;
 
 /// `see PATH`: read an image file and attach it as a vision input.
+#[derive(Debug)]
 pub struct SeeCommand {
     gate: Arc<VisionGate>,
 }

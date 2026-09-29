@@ -58,6 +58,7 @@ const TERMINAL_CLASSES: &[&str] = &[
 
 /// Shutdown handle for whichever backend was started. Each variant
 /// wraps that backend's supervisor task.
+#[derive(Debug)]
 pub enum WmHandle {
     #[cfg(feature = "i3")]
     I3(I3Handle),
@@ -427,7 +428,7 @@ pub struct PlacementAnchor {
 /// Async interface to a window manager. Each method is one IPC call; one
 /// that times out returns [`WmError::Timeout`] and triggers reconnection.
 #[async_trait]
-pub trait WindowManager: Send + Sync + 'static {
+pub trait WindowManager: fmt::Debug + Send + Sync + 'static {
     /// Focus the window with the given id.
     async fn focus(&self, window: &WindowId) -> WmResult<()>;
 
@@ -494,6 +495,7 @@ pub trait WindowManager: Send + Sync + 'static {
 }
 
 /// Placeholder [`WindowManager`] that refuses every operation.
+#[derive(Debug)]
 pub struct NoWindowManager;
 
 #[async_trait]

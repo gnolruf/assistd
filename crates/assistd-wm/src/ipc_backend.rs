@@ -2,6 +2,7 @@
 //! command socket, an event socket feeding the focus snapshot, and a
 //! reconnecting supervisor. [`IpcProtocol`] abstracts the client crates.
 
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -118,6 +119,14 @@ pub(crate) struct IpcBackend<P: IpcProtocol> {
     snapshot: RwLock<Snapshot>,
     reconnect: Notify,
     window_events: broadcast::Sender<WindowEvent>,
+}
+
+impl<P: IpcProtocol> fmt::Debug for IpcBackend<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IpcBackend")
+            .field("connected", &self.connected)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<P: IpcProtocol> IpcBackend<P> {

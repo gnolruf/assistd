@@ -26,7 +26,7 @@ fn ipc_err(msg: &str) -> WmError {
 
 /// [`WindowManager`] fixture recording every mutating call; `error` makes
 /// every operation fail with that message.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StubWm {
     connected: bool,
     windows: Vec<Window>,

@@ -69,6 +69,7 @@ impl Target {
 
 /// `screenshot [--full|--focused|--monitor=NAME]`: capture the screen as a PNG
 /// and attach it as a vision input for the next LLM turn.
+#[derive(Debug)]
 pub struct ScreenshotCommand {
     cfg: Arc<ScreenshotPolicyCfg>,
     gate: Arc<VisionGate>,

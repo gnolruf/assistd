@@ -12,6 +12,7 @@ use crate::commands::{
 use crate::fixtures::PNG_BYTES;
 
 /// Fake command: emits a configurable number of lines.
+#[derive(Debug)]
 struct Lines(usize);
 #[async_trait]
 impl Command for Lines {
@@ -34,6 +35,7 @@ impl Command for Lines {
 }
 
 /// Fake command: counts how many bytes flow in on stdin.
+#[derive(Debug)]
 struct ByteCount;
 #[async_trait]
 impl Command for ByteCount {

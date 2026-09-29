@@ -13,6 +13,7 @@ const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"]
 
 /// `grep [-icnrv] PATTERN [FILE|DIR]...`: print lines from the named files
 /// or stdin matching `PATTERN`. Exits 0 on a match, 1 on none, 2 on errors.
+#[derive(Debug)]
 pub struct GrepCommand;
 
 #[derive(Default)]

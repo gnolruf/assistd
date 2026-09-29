@@ -70,7 +70,7 @@ struct Overflow;
 
 /// Owns the output readers of applications watched by [`watch_detached`];
 /// dropping it aborts any reader still running.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct DetachedReaders(Mutex<JoinSet<()>>);
 
 impl DetachedReaders {

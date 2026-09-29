@@ -25,11 +25,13 @@ use crate::{
 };
 
 /// [`WindowManager`] over a single i3 IPC command socket.
+#[derive(Debug)]
 pub struct I3Backend {
     ipc: Arc<IpcBackend<I3Ipc>>,
 }
 
 /// The backend plus its supervisor task, returned by [`I3Backend::start`].
+#[derive(Debug)]
 pub struct I3Handle {
     pub backend: Arc<I3Backend>,
     supervisor_task: JoinHandle<()>,

@@ -4,6 +4,7 @@ use crate::command::{Command, CommandInput, CommandOutput};
 
 /// `echo [-ne] [ARGS...]`: write args joined by spaces, then a newline
 /// unless `-n` is given; `-e` interprets backslash escapes.
+#[derive(Debug)]
 pub struct EchoCommand;
 
 #[derive(Default)]

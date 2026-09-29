@@ -42,6 +42,7 @@ pub enum TransportConfig {
 /// Stable handle for a single MCP server; [`Self::client`] survives
 /// transport restarts. Dropping it without [`Self::shutdown`] aborts the
 /// supervisor and kills the live transport.
+#[derive(Debug)]
 pub struct McpServerHandle {
     pub name: String,
     switch: Arc<SwitchingClient>,
@@ -113,6 +114,7 @@ impl McpServerHandle {
 
 /// [`McpClient`] that forwards to whichever transport is live, or
 /// answers [`McpError::ServerDown`] between transports.
+#[derive(Debug)]
 pub struct SwitchingClient {
     inner: RwLock<Option<Arc<dyn McpClient>>>,
 }
@@ -352,6 +354,7 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug)]
     struct FakeClient {
         invocations: Arc<Mutex<u32>>,
     }

@@ -1,5 +1,6 @@
 //! cpal stream construction and the audio-thread callback.
 
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -61,6 +62,7 @@ pub enum DeviceValidationError {
 }
 
 /// Handles to a running push-to-talk capture.
+#[derive(Debug)]
 pub struct CaptureSession {
     pub stop_flag: Arc<AtomicBool>,
     pub overrun: Arc<AtomicU64>,
@@ -73,6 +75,14 @@ pub struct ProducerStream {
     pub consumer: HeapCons<f32>,
     pub native_rate: u32,
     pub stream: Stream,
+}
+
+impl fmt::Debug for ProducerStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProducerStream")
+            .field("native_rate", &self.native_rate)
+            .finish_non_exhaustive()
+    }
 }
 
 type RingProducer = HeapProd<f32>;

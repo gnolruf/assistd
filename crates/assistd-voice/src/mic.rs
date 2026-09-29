@@ -23,6 +23,7 @@ pub use capture::{AudioCaptureError, DeviceValidationError};
 /// Push-to-talk voice input backed by cpal and a [`Transcriber`]. The
 /// audio device is opened on [`start_recording`](VoiceInput::start_recording),
 /// not at construction.
+#[derive(Debug)]
 pub struct MicVoiceInput {
     transcriber: Arc<dyn Transcriber>,
     mic_device: Option<String>,
@@ -34,6 +35,7 @@ pub struct MicVoiceInput {
     ptt: Arc<Mutex<PttState>>,
 }
 
+#[derive(Debug)]
 struct PttState {
     session: Option<capture::CaptureSession>,
     forwarder: Option<JoinHandle<()>>,

@@ -72,6 +72,7 @@ impl BashPolicyCfg {
 }
 
 /// The policy, sandbox and gate a command runs model-chosen argv under.
+#[derive(Debug)]
 pub(crate) struct SubprocessPolicy {
     pub(crate) cfg: Arc<BashPolicyCfg>,
     pub(crate) sandbox: Arc<SandboxInfo>,

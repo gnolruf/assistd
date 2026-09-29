@@ -172,6 +172,7 @@ impl EventStream {
 }
 
 /// Bidirectional connection: read events as they arrive and send further requests at any time.
+#[derive(Debug)]
 pub struct DialogConnection {
     write: OwnedWriteHalf,
     events: EventStream,

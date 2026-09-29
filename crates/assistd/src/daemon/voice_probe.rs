@@ -18,6 +18,7 @@ const FOREIGN_VRAM_THRESHOLD_MB: u64 = 100;
 /// Reports the GPU busy while an LLM stream is in flight or a foreign
 /// process holds VRAM. Without NVML, foreign contention is never
 /// reported.
+#[derive(Debug)]
 pub(super) struct PresenceGpuProbe {
     presence: Arc<PresenceManager>,
     nvml: Option<Arc<Nvml>>,

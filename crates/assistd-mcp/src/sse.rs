@@ -3,6 +3,7 @@
 //! event stream, with a ping task to detect a silent server.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,6 +64,16 @@ pub struct SseMcpClient {
     post_url: Arc<RwLock<Option<Url>>>,
     headers: HeaderMap,
     request_timeout: Duration,
+}
+
+impl fmt::Debug for SseMcpClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SseMcpClient")
+            .field("label", &self.label)
+            .field("base_url", &self.base_url)
+            .field("request_timeout", &self.request_timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SseMcpClient {
@@ -228,6 +239,7 @@ impl McpClient for SseMcpClient {
 
 /// The reader and ping tasks of one SSE connection. Dropping it
 /// aborts both, closing the event stream.
+#[derive(Debug)]
 pub struct SseLifeline {
     cancel_tx: watch::Sender<bool>,
     stream_task: AbortOnDropHandle<()>,
@@ -431,13 +443,13 @@ enum EndpointError {
 }
 
 /// Incremental SSE parser: feed body chunks, pull complete events.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct EventParser {
     buf: Vec<u8>,
     cur: PartialEvent,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct PartialEvent {
     event_type: Option<String>,
     data: String,

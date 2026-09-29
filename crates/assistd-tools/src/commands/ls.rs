@@ -8,6 +8,7 @@ use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
 
 /// `ls [-al] [PATH]`: list PATH (default CWD) as sorted
 /// `<type>\t<size>\t<name>` rows, without following symlinks.
+#[derive(Debug)]
 pub struct LsCommand;
 
 #[async_trait]
