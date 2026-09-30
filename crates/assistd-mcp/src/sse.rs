@@ -186,7 +186,6 @@ impl SseMcpClient {
         protocol::await_reply(&mut pending.rx, self.request_timeout).await
     }
 
-    /// Answer a request the server sent on the event stream.
     async fn answer_server_request(&self, id: Value, method: &str) {
         debug!(target: "assistd::mcp", server = %self.label, method, "answering server request");
         let line = match reply_line(&id, &protocol::answer_server_request(method)) {
@@ -548,14 +547,12 @@ fn build_headers(raw: &HashMap<String, String>) -> Result<HeaderMap, McpError> {
         let name = HeaderName::from_bytes(key.as_bytes())
             .map_err(|e| McpError::config(format!("invalid header name `{key}`"), e))?;
         let value = HeaderValue::from_str(value)
-            .map_err(|e| McpError::config(format!("invalid header value `{value}`"), e))?;
+            .map_err(|e| McpError::config(format!("invalid value for header `{key}`"), e))?;
         headers.insert(name, value);
     }
     Ok(headers)
 }
 
-/// A client builder that follows at most [`MAX_REDIRECTS`] redirects and
-/// never one onto another origin, so configured headers stay with the server.
 fn http_client_builder(read_timeout: Duration) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .read_timeout(read_timeout)
@@ -578,8 +575,6 @@ fn same_origin_redirects() -> redirect::Policy {
     })
 }
 
-/// Wait up to 5s for the `endpoint` event, then fall back to sending
-/// `POST`s to `base_url` if none arrived.
 async fn await_endpoint(
     endpoint_ready_rx: oneshot::Receiver<()>,
     post_url: &RwLock<Option<Url>>,
@@ -913,6 +908,14 @@ mod tests {
         cfg.headers
             .insert("Authorization".into(), "Bearer hunter2".into());
         let rendered = format!("{cfg:?}");
+        assert!(rendered.contains("Authorization"), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+    }
+
+    #[test]
+    fn invalid_header_value_error_names_header_but_not_value() {
+        let raw = HashMap::from([("Authorization".to_owned(), "Bearer hunter2\n".to_owned())]);
+        let rendered = build_headers(&raw).unwrap_err().to_string();
         assert!(rendered.contains("Authorization"), "{rendered}");
         assert!(!rendered.contains("hunter2"), "{rendered}");
     }
