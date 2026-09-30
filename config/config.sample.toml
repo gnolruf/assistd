@@ -5,25 +5,13 @@
 [model]
 name = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"  # owner/repo:quant
 context_length = 8192
-
-[llama_server]
-binary_path = "llama-server"
+server_binary = "llama-server"
 host = "127.0.0.1"
 port = 8385
-# gpu_layers = 9999  # -ngl; 9999 offloads every layer
+# gpu_layers = 9999  # 9999 offloads every layer
 # ready_timeout_secs = 300  # raise for slow first-time downloads
-# alias = "qwen3.6-35b-a3b"
-# override_tensor = "\\.ffn_(up|down|gate)_exps\\.=CPU"
-# flash_attn = true
-# cache_type_k = "q8_0"
-# cache_type_v = "q8_0"
-# threads = 8
-# batch_size = 2048
-# ubatch_size = 2048
-# n_cpu_moe = 30  # MoE expert layers kept on CPU
-# cache_ram_mib = 32768
-# mlock = true  # needs a large enough RLIMIT_MEMLOCK
-# mmproj_offload = false  # keep the vision encoder on CPU
+# Extra server flags, shell-quoted; no shell runs. Flags assistd manages or that expose the server are refused.
+# custom_args = "--flash-attn on --cache-type-k q8_0 --n-cpu-moe 30 -ot '\\.ffn_(up|down|gate)_exps\\.=CPU'"
 
 [chat]
 # Empty disables the system prompt; don't list tools, requests already carry them.
@@ -166,7 +154,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # enabled = true
 # model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"  # suffix is a quant tag, not a filename
 # host = "127.0.0.1"
-# port = 8386  # must differ from llama_server.port
+# port = 8386  # must differ from model.port
 # gpu_layers = 0
 # top_k = 5
 # auto_inject = true

@@ -16,7 +16,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
 use assistd_config::defaults::{nz32, nz64};
-use assistd_config::{ChatConfig, Config, LlamaServerConfig, ModelConfig, TimeoutsConfig};
+use assistd_config::{ChatConfig, Config, ModelConfig, TimeoutsConfig};
 use assistd_core::{
     AppState, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceManager, PresenceState,
     ToolRegistry, VoiceOutputController,
@@ -39,32 +39,16 @@ async fn grab_port() -> u16 {
     port
 }
 
-fn server_spec(fake: &FakeLlama, port: u16) -> LlamaServerConfig {
-    LlamaServerConfig {
-        binary_path: fake.binary_path(),
+fn model_spec(fake: &FakeLlama, port: u16) -> ModelConfig {
+    ModelConfig {
+        name: "test/fake-model-GGUF:Q4_K_M".to_string(),
+        context_length: nz32(2048),
+        server_binary: fake.binary_path(),
         host: Ipv4Addr::LOCALHOST.into(),
         port: NonZeroU16::new(port).expect("bound port is never 0"),
         gpu_layers: 0,
         ready_timeout_secs: nz64(60),
-        alias: None,
-        override_tensor: None,
-        flash_attn: None,
-        cache_type_k: None,
-        cache_type_v: None,
-        threads: None,
-        batch_size: None,
-        ubatch_size: None,
-        n_cpu_moe: None,
-        cache_ram_mib: None,
-        mlock: None,
-        mmproj_offload: None,
-    }
-}
-
-fn model_spec() -> ModelConfig {
-    ModelConfig {
-        name: "test/fake-model-GGUF:Q4_K_M".to_string(),
-        context_length: nz32(2048),
+        ..ModelConfig::default()
     }
 }
 
@@ -73,14 +57,10 @@ async fn new_active_manager(
     port: u16,
 ) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     let (tx, rx) = watch::channel(false);
-    let manager = PresenceManager::new_active(
-        server_spec(fake, port),
-        model_spec(),
-        TimeoutsConfig::default(),
-        rx,
-    )
-    .await
-    .expect("cold-start wake failed");
+    let manager =
+        PresenceManager::new_active(model_spec(fake, port), TimeoutsConfig::default(), rx)
+            .await
+            .expect("cold-start wake failed");
     (manager, tx)
 }
 
@@ -101,12 +81,9 @@ async fn build_running_daemon(
         request_timeout_secs: nz64(10),
         ..ChatConfig::default()
     };
-    let server_cfg = server_spec(fake, port);
-
     let client = LlamaChatClient::new(
         &chat_cfg,
-        &server_cfg,
-        &model_spec(),
+        &model_spec(fake, port),
         &TimeoutsConfig::default(),
         None,
     )

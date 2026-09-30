@@ -232,7 +232,6 @@ async fn start_presence(
     llm_shutdown: &watch::Sender<bool>,
 ) -> Result<Arc<PresenceManager>> {
     let presence = PresenceManager::new_active(
-        config.llama_server.clone(),
         config.model.clone(),
         config.timeouts.clone(),
         llm_shutdown.subscribe(),
@@ -240,7 +239,7 @@ async fn start_presence(
     .await?;
     info!(
         "presence: Active (llama-server ready on {}:{})",
-        config.llama_server.host, config.llama_server.port
+        config.model.host, config.model.port
     );
     Ok(presence)
 }
@@ -251,11 +250,8 @@ async fn probe_vision(
     config: &Config,
     presence: &PresenceManager,
 ) -> Result<Arc<VisionRevalidator>> {
-    let control = LlamaServerControl::new(
-        &config.llama_server.host.to_string(),
-        config.llama_server.port.get(),
-    )
-    .context("failed to construct llama-server control client for vision probe")?;
+    let control = LlamaServerControl::new(&config.model.host.to_string(), config.model.port.get())
+        .context("failed to construct llama-server control client for vision probe")?;
     let revalidator = VisionRevalidator::new(control, config.model.name.clone(), presence).await;
     if revalidator.gate().supported() {
         info!("vision: enabled (model has mmproj)");
@@ -294,7 +290,6 @@ fn build_chat_backend(
 ) -> Result<Arc<dyn LlmBackend>> {
     let chat = LlamaChatClient::new(
         &config.chat,
-        &config.llama_server,
         &config.model,
         &config.timeouts,
         Some(health_probe),

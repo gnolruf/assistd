@@ -13,8 +13,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
+use assistd_config::ModelConfig;
 use assistd_config::defaults::{nz32, nz64};
-use assistd_config::{LlamaServerConfig, ModelConfig};
 use assistd_llm::{LlamaServerSpec, ReadyState};
 use assistd_utils::child_server::{ChildServer, ChildServerError};
 
@@ -34,32 +34,16 @@ async fn grab_port() -> u16 {
     port
 }
 
-fn server_spec(fake: &FakeLlama, port: u16) -> LlamaServerConfig {
-    LlamaServerConfig {
-        binary_path: fake.binary_path(),
+fn model_spec(fake: &FakeLlama, port: u16) -> ModelConfig {
+    ModelConfig {
+        name: "test/fake-model-GGUF:Q4_K_M".to_string(),
+        context_length: nz32(2048),
+        server_binary: fake.binary_path(),
         host: Ipv4Addr::LOCALHOST.into(),
         port: NonZeroU16::new(port).expect("bound port is never 0"),
         gpu_layers: 0,
         ready_timeout_secs: nz64(60),
-        alias: None,
-        override_tensor: None,
-        flash_attn: None,
-        cache_type_k: None,
-        cache_type_v: None,
-        threads: None,
-        batch_size: None,
-        ubatch_size: None,
-        n_cpu_moe: None,
-        cache_ram_mib: None,
-        mlock: None,
-        mmproj_offload: None,
-    }
-}
-
-fn model_spec() -> ModelConfig {
-    ModelConfig {
-        name: "test/fake-model-GGUF:Q4_K_M".to_string(),
-        context_length: nz32(2048),
+        ..ModelConfig::default()
     }
 }
 
@@ -76,12 +60,9 @@ async fn answer_every_request_with_ok(listener: TcpListener) {
 
 async fn start_service(fake: &FakeLlama, port: u16) -> (ChildServer, watch::Sender<bool>) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let service = ChildServer::start(
-        LlamaServerSpec::new(server_spec(fake, port), model_spec()),
-        shutdown_rx,
-    )
-    .await
-    .expect("service should start");
+    let service = ChildServer::start(LlamaServerSpec::new(model_spec(fake, port)), shutdown_rx)
+        .await
+        .expect("service should start");
     (service, shutdown_tx)
 }
 
@@ -169,11 +150,8 @@ async fn enters_degraded_after_five_failures() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let start_at = Instant::now();
-    let result = ChildServer::start(
-        LlamaServerSpec::new(server_spec(&fake, port), model_spec()),
-        shutdown_rx,
-    )
-    .await;
+    let result =
+        ChildServer::start(LlamaServerSpec::new(model_spec(&fake, port)), shutdown_rx).await;
     let elapsed = start_at.elapsed();
 
     let err = result.expect_err("start should fail");
@@ -205,11 +183,8 @@ async fn respects_shutdown_during_backoff() {
     });
 
     let start_at = Instant::now();
-    let result = ChildServer::start(
-        LlamaServerSpec::new(server_spec(&fake, port), model_spec()),
-        shutdown_rx,
-    )
-    .await;
+    let result =
+        ChildServer::start(LlamaServerSpec::new(model_spec(&fake, port)), shutdown_rx).await;
     let elapsed = start_at.elapsed();
 
     let err = result.expect_err("start should fail once shut down");
@@ -238,11 +213,8 @@ async fn health_from_a_squatter_on_the_port_is_not_ready() {
         let _ = flip_tx.send(true);
     });
 
-    let result = ChildServer::start(
-        LlamaServerSpec::new(server_spec(&fake, port), model_spec()),
-        shutdown_rx,
-    )
-    .await;
+    let result =
+        ChildServer::start(LlamaServerSpec::new(model_spec(&fake, port)), shutdown_rx).await;
     squatter_task.abort();
 
     let err = result.expect_err("a 200 from a foreign listener must not count as ready");

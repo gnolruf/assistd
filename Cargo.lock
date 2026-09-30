@@ -247,6 +247,7 @@ version = "1.1.0"
 dependencies = [
  "assistd-utils",
  "serde",
+ "shlex 2.0.1",
  "thiserror 2.0.20",
  "toml",
  "tracing",

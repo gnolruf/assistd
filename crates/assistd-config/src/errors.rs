@@ -46,6 +46,22 @@ pub enum ConfigError {
     Validation(Vec<String>),
 }
 
+/// Why a `model.custom_args` string was refused.
+#[derive(Debug, Error)]
+pub enum CustomArgsError {
+    #[error("unterminated quote or trailing backslash")]
+    Unparseable,
+
+    #[error("argument {0:?} contains a control character")]
+    ControlCharacter(String),
+
+    #[error("`{0}` is set by assistd or relied on by its client; configure [model] instead")]
+    Managed(String),
+
+    #[error("`{0}` exposes files, tools or state through the unauthenticated server")]
+    Exposing(String),
+}
+
 fn format_validation_errors(errors: &[String]) -> String {
     let mut report = format!("configuration has {} error(s):", errors.len());
     for (i, error) in errors.iter().enumerate() {

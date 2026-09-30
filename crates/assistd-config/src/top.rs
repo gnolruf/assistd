@@ -11,7 +11,6 @@ use crate::compositor::CompositorConfig;
 use crate::daemon::DaemonConfig;
 use crate::embedding::EmbeddingConfig;
 use crate::errors::ConfigError;
-use crate::llama::LlamaServerConfig;
 use crate::mcp::McpConfig;
 use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
@@ -27,7 +26,6 @@ use crate::voice::{SynthesisConfig, VoiceConfig};
 #[serde(default)]
 pub struct Config {
     pub model: ModelConfig,
-    pub llama_server: LlamaServerConfig,
     pub chat: ChatConfig,
     pub voice: VoiceConfig,
     pub compositor: CompositorConfig,
@@ -48,13 +46,13 @@ impl Config {
     /// types can't express. Returns every problem found, not just the first.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
-        validate_model_server(&mut errors, &self.model, &self.llama_server);
+        validate_model(&mut errors, &self.model);
         validate_chat(&mut errors, &self.chat, &self.model);
         validate_voice(&mut errors, &self.voice);
         validate_sleep(&mut errors, &self.sleep);
         validate_tools(&mut errors, &self.tools);
         validate_memory(&mut errors, &self.memory);
-        validate_embedding(&mut errors, &self.embedding, &self.llama_server);
+        validate_embedding(&mut errors, &self.embedding, &self.model);
         validate_mcp(&mut errors, &self.mcp);
         validate_tray_popup(&mut errors, &self.tray.popup);
         if errors.is_empty() {
@@ -171,18 +169,14 @@ fn collect_unknown_array_keys(
     }
 }
 
-fn validate_model_server(
-    errors: &mut Vec<String>,
-    model: &ModelConfig,
-    llama_server: &LlamaServerConfig,
-) {
+fn validate_model(errors: &mut Vec<String>, model: &ModelConfig) {
     if model.name.is_empty() {
         errors.push("model.name must not be empty".into());
     }
-    if llama_server.binary_path.as_os_str().is_empty() {
-        errors.push("llama_server.binary_path must not be empty".into());
+    if model.server_binary.as_os_str().is_empty() {
+        errors.push("model.server_binary must not be empty".into());
     }
-    require_loopback(errors, "llama_server.host", llama_server.host);
+    require_loopback(errors, "model.host", model.host);
 }
 
 fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfig) {
@@ -303,18 +297,14 @@ fn validate_memory(errors: &mut Vec<String>, memory: &MemoryConfig) {
     }
 }
 
-fn validate_embedding(
-    errors: &mut Vec<String>,
-    embedding: &EmbeddingConfig,
-    llama_server: &LlamaServerConfig,
-) {
+fn validate_embedding(errors: &mut Vec<String>, embedding: &EmbeddingConfig, model: &ModelConfig) {
     if !embedding.enabled {
         return;
     }
     require_hf_id(errors, "embedding.model", &embedding.model);
     require_loopback(errors, "embedding.host", embedding.host);
-    if embedding.port == llama_server.port {
-        errors.push("embedding.port must differ from llama_server.port (the chat server)".into());
+    if embedding.port == model.port {
+        errors.push("embedding.port must differ from model.port (the chat server)".into());
     }
 }
 

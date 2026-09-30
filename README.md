@@ -75,7 +75,8 @@ defaults are runnable as-is. Open the file if you want to:
 
 - swap `[model] name` for a different HuggingFace GGUF id (the
   string is passed to llama-server's `--hf` flag),
-- change `[llama_server] gpu_layers` if VRAM is tight,
+- change `[model] gpu_layers` if VRAM is tight, or pass extra server
+  flags through `[model] custom_args`,
 - enable voice (`[voice] enabled = true`) or TTS
   (`[voice.synthesis] enabled = true`).
 
@@ -133,7 +134,7 @@ front-loads the cold-start cost.
 
 That's it. If something hangs, run `assistd daemon` directly so its
 tracing output is visible; if the model never finishes downloading,
-check that `[llama_server] ready_timeout_secs` is high enough for
+check that `[model] ready_timeout_secs` is high enough for
 your connection.
 
 ## Window-manager integration

@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
+use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_tools::Attachment;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -50,11 +50,10 @@ pub struct LlamaChatClient {
 }
 
 impl LlamaChatClient {
-    /// Build a client for the server at `server.host:server.port`. Pass
+    /// Build a client for the server at `model.host:model.port`. Pass
     /// `health: None` when no supervisor is attached.
     pub fn new(
         chat: &ChatConfig,
-        server: &LlamaServerConfig,
         model: &ModelConfig,
         timeouts: &TimeoutsConfig,
         health: Option<Arc<dyn LlmHealthProbe>>,
@@ -63,7 +62,7 @@ impl LlamaChatClient {
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        let base_url = format!("http://{}:{}", server.host, server.port);
+        let base_url = format!("http://{}:{}", model.host, model.port);
         let conv = Conversation::new(chat.system_prompt.clone());
         Ok(Self {
             client,

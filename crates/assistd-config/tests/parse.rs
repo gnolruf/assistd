@@ -13,7 +13,6 @@ fn empty_toml_yields_the_code_defaults() {
 fn every_section_may_be_declared_empty() {
     let toml_src = "\
 [model]
-[llama_server]
 [chat]
 [voice]
 [voice.transcription]
@@ -101,6 +100,16 @@ fn a_wrong_type_is_still_a_parse_error() {
 }
 
 #[test]
+fn custom_args_with_a_refused_flag_is_a_parse_error() {
+    let err =
+        toml::from_str::<Config>("[model]\ncustom_args = \"--flash-attn on --host 0.0.0.0\"\n")
+            .expect_err("custom_args must not override the bind host");
+    let message = err.to_string();
+    assert!(message.contains("custom_args"), "{message}");
+    assert!(message.contains("--host"), "{message}");
+}
+
+#[test]
 fn written_default_round_trips_with_no_unknown_keys() {
     let serialized = toml::to_string_pretty(&Config::default()).expect("serialize default");
     let (back, unknown) = parse_reporting_unknown_keys(&serialized);
@@ -124,15 +133,14 @@ fn minimal_fixture_parses_and_validates() {
 
 #[test]
 fn non_loopback_server_hosts_are_rejected() {
-    let cfg: Config = toml::from_str(
-        "[llama_server]\nhost = \"0.0.0.0\"\n[embedding]\nenabled = true\nhost = \"::\"\n",
-    )
-    .expect("config must parse");
+    let cfg: Config =
+        toml::from_str("[model]\nhost = \"0.0.0.0\"\n[embedding]\nenabled = true\nhost = \"::\"\n")
+            .expect("config must parse");
     let err = cfg
         .validate()
         .expect_err("wildcard hosts must not validate");
     let message = err.to_string();
-    assert!(message.contains("llama_server.host"), "{message}");
+    assert!(message.contains("model.host"), "{message}");
     assert!(message.contains("embedding.host"), "{message}");
 }
 
@@ -171,9 +179,8 @@ fn history_and_response_must_fit_the_context_together() {
 
 #[test]
 fn ipv6_loopback_server_hosts_validate() {
-    let cfg: Config =
-        toml::from_str("[llama_server]\nhost = \"::1\"\n[embedding]\nhost = \"::1\"\n")
-            .expect("config must parse");
+    let cfg: Config = toml::from_str("[model]\nhost = \"::1\"\n[embedding]\nhost = \"::1\"\n")
+        .expect("config must parse");
     cfg.validate().expect("::1 is loopback");
 }
 

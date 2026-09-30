@@ -11,7 +11,7 @@ use crate::defaults::{
     DEFAULT_EMBEDDING_TOP_K,
 };
 
-/// Dedicated embedding llama-server and semantic-recall settings.
+/// Dedicated embedding server and semantic-recall settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct EmbeddingConfig {
@@ -22,7 +22,7 @@ pub struct EmbeddingConfig {
     pub model: String,
     /// Bind host. Must be loopback: the server has no authentication.
     pub host: IpAddr,
-    /// Bind port. Must differ from `llama_server.port`.
+    /// Bind port. Must differ from `model.port`.
     pub port: NonZeroU16,
     /// `-ngl` count. `0` keeps it on CPU.
     pub gpu_layers: u32,

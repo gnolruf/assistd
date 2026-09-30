@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use assistd_config::defaults::{nz32, nz64};
-use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
+use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_llm::{
     ChatClientError, LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome, Thinking,
     ToolCall, ToolResultPayload,
@@ -319,7 +319,6 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
 
 struct ClientCfg {
     chat: ChatConfig,
-    server: LlamaServerConfig,
     model: ModelConfig,
     timeouts: TimeoutsConfig,
 }
@@ -341,28 +340,12 @@ fn chat_spec(port: u16) -> ClientCfg {
             presence_penalty: None,
             reasoning_effort: None,
         },
-        server: LlamaServerConfig {
-            binary_path: "llama-server".into(),
-            host: Ipv4Addr::LOCALHOST.into(),
-            port: NonZeroU16::new(port).expect("bound port is never 0"),
-            gpu_layers: 9999,
-            ready_timeout_secs: nz64(60),
-            alias: None,
-            override_tensor: None,
-            flash_attn: None,
-            cache_type_k: None,
-            cache_type_v: None,
-            threads: None,
-            batch_size: None,
-            ubatch_size: None,
-            n_cpu_moe: None,
-            cache_ram_mib: None,
-            mlock: None,
-            mmproj_offload: None,
-        },
         model: ModelConfig {
             name: "test-model".into(),
             context_length: nz32(12_000),
+            host: Ipv4Addr::LOCALHOST.into(),
+            port: NonZeroU16::new(port).expect("bound port is never 0"),
+            ..ModelConfig::default()
         },
         timeouts: TimeoutsConfig::default(),
     }
@@ -373,7 +356,7 @@ fn delta(text: &str) -> LlmEvent {
 }
 
 fn build_client(cfg: &ClientCfg) -> LlamaChatClient {
-    LlamaChatClient::new(&cfg.chat, &cfg.server, &cfg.model, &cfg.timeouts, None).unwrap()
+    LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None).unwrap()
 }
 
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {

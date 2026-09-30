@@ -109,8 +109,9 @@ TUI starts one by re-executing its own binary as `assistd daemon`.
 ### LLM lifecycle (`assistd-llm` ↔ llama-server)
 
 The daemon spawns `llama-server` as a child process at startup, with
-GPU layer count, KV-cache quantization, and other knobs taken from
-`[llama_server]` in the config. `assistd-utils`'s `ChildServer`
+the bind address, context length and GPU layer count taken from
+`[model]` in the config, plus any `custom_args` (parsed and checked at
+config load, never run through a shell). `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a
