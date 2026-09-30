@@ -37,7 +37,8 @@ pub enum McpServerConfig {
     /// Newline-delimited JSON-RPC over a child process's stdin/stdout.
     Stdio {
         /// Label in tool names (`mcp__<name>__<tool>`) and logs. Must be
-        /// unique and use only ASCII letters, digits, `_` or `-`.
+        /// unique, use only ASCII letters, digits, `_` or `-`, and contain
+        /// no `__` and no trailing `_`, so no two servers' tools share a name.
         name: String,
         /// Command to spawn; a bare name is resolved via `$PATH`.
         command: PathBuf,
