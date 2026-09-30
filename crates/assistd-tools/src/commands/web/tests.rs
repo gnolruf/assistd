@@ -48,11 +48,17 @@ fn redirect_to(location: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// A command that may reach loopback test servers, and no other address.
+fn loopback_only(hosts: ApprovalGate) -> WebCommand {
+    WebCommand::connecting_to(|ip| ip.is_loopback(), hosts, Duration::from_secs(30))
+}
+
+fn allowing_gate() -> ApprovalGate {
+    ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()))
+}
+
 fn allowing() -> WebCommand {
-    WebCommand::new(ApprovalGate::new(
-        Arc::new(AlwaysAllowGate),
-        Arc::new(Approvals::unsaved()),
-    ))
+    loopback_only(allowing_gate())
 }
 
 async fn run_web(cmd: &WebCommand, args: &[&str]) -> CommandOutput {
@@ -106,8 +112,9 @@ async fn rejects_non_http_scheme() {
 
 #[tokio::test]
 async fn connection_failure_to_reserved_port_exits_1() {
-    let cmd = WebCommand::with_timeout(
-        ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
+    let cmd = WebCommand::connecting_to(
+        |ip| ip.is_loopback(),
+        allowing_gate(),
         Duration::from_millis(200),
     );
     let out = run_web(&cmd, &["http://127.0.0.1:1/"]).await;
@@ -125,11 +132,11 @@ async fn declined_fetch_exits_126_without_connecting() {
         Arc::new(DenyAllGate),
         Arc::new(Approvals::unsaved()),
     ));
-    let out = run_web(&cmd, &["http://127.0.0.1:1/?secret=x"]).await;
+    let out = run_web(&cmd, &["http://example.com/?secret=x"]).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert_eq!(
         stderr(&out),
-        "[error] web: fetch cancelled by user: http://127.0.0.1:1/?secret=x. \
+        "[error] web: fetch cancelled by user: http://example.com/?secret=x. \
          Try: answering without this page\n"
     );
 }
@@ -141,7 +148,7 @@ async fn approved_host_is_fetched_without_asking() {
     let (addr, server) = serve(vec![response("HTTP/1.1 200 OK", b"ok")]).await;
     let gate = RecordingGate::answering(Approval::Deny);
     let out = run_web(
-        &WebCommand::new(ApprovalGate::new(gate.clone(), hosts)),
+        &loopback_only(ApprovalGate::new(gate.clone(), hosts)),
         &[&format!("http://{addr}/")],
     )
     .await;
@@ -154,7 +161,7 @@ async fn approved_host_is_fetched_without_asking() {
 async fn always_answer_approves_the_host_for_good() {
     let gate = RecordingGate::answering(Approval::Always);
     let hosts = Arc::new(Approvals::unsaved());
-    let cmd = WebCommand::new(ApprovalGate::new(gate.clone(), Arc::clone(&hosts)));
+    let cmd = loopback_only(ApprovalGate::new(gate.clone(), Arc::clone(&hosts)));
     let (addr, server) = serve(vec![response("HTTP/1.1 200 OK", b"ok")]).await;
     let url = format!("http://{addr}/page");
     let out = run_web(&cmd, &[&url]).await;
@@ -198,6 +205,79 @@ async fn redirect_to_an_unapproved_host_is_refused() {
         "{}",
         stderr(&out)
     );
+}
+
+#[tokio::test]
+async fn redirect_to_a_non_public_address_is_refused() {
+    let (addr, server) = serve(vec![redirect_to("http://10.0.0.1/")]).await;
+    let out = run_web(&allowing(), &[&format!("http://{addr}/")]).await;
+    server.await.unwrap();
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        stderr(&out).contains("10.0.0.1 is not a public address"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[tokio::test]
+async fn non_public_literal_is_denied_without_asking() {
+    let gate = RecordingGate::answering(Approval::Always);
+    let cmd = WebCommand::new(ApprovalGate::new(
+        gate.clone(),
+        Arc::new(Approvals::unsaved()),
+    ));
+    let out = run_web(&cmd, &["http://[::ffff:169.254.169.254]/latest/"]).await;
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    assert_eq!(
+        stderr(&out),
+        "[error] web: fetch denied by policy: ::ffff:169.254.169.254 is not a \
+         public address. Try: a URL on the public internet\n"
+    );
+    assert!(gate.requests().is_empty());
+}
+
+#[tokio::test]
+async fn name_resolving_only_to_loopback_is_refused() {
+    let cmd = WebCommand::new(allowing_gate());
+    let out = run_web(&cmd, &["http://localhost:1/"]).await;
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        stderr(&out).contains("localhost resolves only to non-public addresses"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn public_addresses_are_told_from_non_public_ones() {
+    let cases: [(&str, bool); 22] = [
+        ("1.1.1.1", true),
+        ("8.8.8.8", true),
+        ("100.63.255.255", true),
+        ("172.32.0.1", true),
+        ("0.0.0.0", false),
+        ("127.0.0.1", false),
+        ("10.1.2.3", false),
+        ("100.64.0.1", false),
+        ("169.254.169.254", false),
+        ("172.31.255.255", false),
+        ("192.168.1.1", false),
+        ("198.18.0.1", false),
+        ("224.0.0.1", false),
+        ("255.255.255.255", false),
+        ("2606:4700:4700::1111", true),
+        ("::ffff:8.8.8.8", true),
+        ("::1", false),
+        ("::", false),
+        ("::ffff:127.0.0.1", false),
+        ("fd00::1", false),
+        ("fe80::1", false),
+        ("2001:db8::1", false),
+    ];
+    for (addr, public) in cases {
+        assert_eq!(is_public(addr.parse().unwrap()), public, "{addr}");
+    }
 }
 
 #[tokio::test]
