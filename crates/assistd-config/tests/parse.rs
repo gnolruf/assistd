@@ -160,6 +160,33 @@ fn ipv6_loopback_server_hosts_validate() {
     cfg.validate().expect("::1 is loopback");
 }
 
+#[test]
+fn mcp_server_names_that_could_share_a_tool_name_are_rejected() {
+    for name in ["a__b", "a_", "a___b"] {
+        let cfg: Config = toml::from_str(&format!(
+            "[mcp]\nenabled = true\n[[mcp.servers]]\nname = \"{name}\"\n\
+             transport = \"stdio\"\ncommand = \"npx\"\n"
+        ))
+        .expect("config must parse");
+        let err = cfg
+            .validate()
+            .expect_err("a name that can end early in `mcp__<name>__<tool>` must not validate");
+        let message = err.to_string();
+        assert!(message.contains("mcp.servers[0].name"), "{name}: {message}");
+    }
+}
+
+#[test]
+fn mcp_server_names_with_single_underscores_validate() {
+    let cfg: Config = toml::from_str(
+        "[mcp]\nenabled = true\n[[mcp.servers]]\nname = \"google_calendar-v2\"\n\
+         transport = \"stdio\"\ncommand = \"npx\"\n",
+    )
+    .expect("config must parse");
+    cfg.validate()
+        .expect("single inner underscores are unambiguous");
+}
+
 fn parse_reporting_unknown_keys(toml_src: &str) -> (Config, Vec<String>) {
     let cfg: Config = toml::from_str(toml_src).expect("config must parse");
     let raw: toml::Table = toml::from_str(toml_src).expect("config must be valid TOML");
