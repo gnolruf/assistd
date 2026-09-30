@@ -340,10 +340,11 @@ fn validate_mcp(errors: &mut Vec<String>, mcp: &McpConfig) {
                 "mcp.servers[{i}].name '{name}' is duplicated; names must be unique"
             ));
         }
-        if !name.chars().all(is_tool_name_char) {
+        if !is_mcp_server_name(name) {
             errors.push(format!(
-                "mcp.servers[{i}].name must use only ASCII letters, digits, '_' or '-' \
-                 (becomes part of the LLM-visible tool name `mcp__<name>__<tool>`)"
+                "mcp.servers[{i}].name must use only ASCII letters, digits, '_' or '-', \
+                 with no '__' and no trailing '_' (becomes the `<name>` in the \
+                 LLM-visible tool name `mcp__<name>__<tool>`)"
             ));
         }
     }
@@ -395,6 +396,10 @@ fn is_valid_hf_id(id: &str) -> bool {
         return false;
     };
     !owner.is_empty() && !name.is_empty()
+}
+
+fn is_mcp_server_name(name: &str) -> bool {
+    name.chars().all(is_tool_name_char) && !name.contains("__") && !name.ends_with('_')
 }
 
 fn is_tool_name_char(c: char) -> bool {
