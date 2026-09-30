@@ -111,7 +111,9 @@ TUI starts one by re-executing its own binary as `assistd daemon`.
 The daemon spawns `llama-server` as a child process at startup, with
 the bind address, context length and GPU layer count taken from
 `[model]` in the config, plus any `custom_args` (parsed and checked at
-config load, never run through a shell). `assistd-utils`'s `ChildServer`
+config load, never run through a shell). Inherited `LLAMA_ARG_*` and
+`LLAMA_API_KEY` variables are stripped, so the checked command line is
+the server's only source of options. `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a

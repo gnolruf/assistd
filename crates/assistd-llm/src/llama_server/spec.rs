@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use assistd_config::ModelConfig;
-use assistd_utils::child_server::ChildServerSpec;
+use assistd_utils::child_server::{ChildServerSpec, remove_llama_env};
 use tokio::process::Command;
 
 /// Launch parameters for the supervised router-mode llama-server.
@@ -29,6 +29,7 @@ impl ChildServerSpec for LlamaServerSpec {
         let mut cmd = Command::new(&self.model.server_binary);
         cmd.args(self.model.custom_args.as_slice());
         push_managed_args(&mut cmd, &self.model);
+        remove_llama_env(&mut cmd);
         cmd
     }
 

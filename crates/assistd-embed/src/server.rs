@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use assistd_config::EmbeddingConfig;
-use assistd_utils::child_server::ChildServerSpec;
+use assistd_utils::child_server::{ChildServerSpec, remove_llama_env};
 use tokio::process::Command;
 
 /// Launch parameters for the supervised embedding llama-server. With
@@ -29,6 +29,7 @@ impl ChildServerSpec for EmbedServerSpec {
         let mut cmd = Command::new(&self.cfg.server_binary);
         cmd.args(self.cfg.custom_args.as_slice());
         push_managed_args(&mut cmd, &self.cfg);
+        remove_llama_env(&mut cmd);
         if self.cfg.gpu_layers == 0 {
             cmd.env("CUDA_VISIBLE_DEVICES", "");
         }

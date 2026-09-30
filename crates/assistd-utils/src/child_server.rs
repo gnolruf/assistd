@@ -8,11 +8,13 @@ use tokio::process::Command;
 
 mod error;
 mod health;
+mod llama_env;
 mod process;
 mod service;
 mod supervisor;
 
 pub use error::ChildServerError;
+pub use llama_env::remove_llama_env;
 pub use service::{ChildServer, ReadyState};
 
 /// Describes one supervised server: how to spawn it and where it listens.
