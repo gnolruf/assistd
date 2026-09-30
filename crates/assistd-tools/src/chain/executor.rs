@@ -4,7 +4,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use super::expand::expand_args;
+use super::expand::{ExpandError, expand_args};
 use super::{Chain, Word};
 use crate::command::{CommandInput, CommandOutput, CommandRegistry, Hint, error_line};
 
@@ -91,7 +91,10 @@ async fn run_command(
     };
 
     let args = if cmd.expands_args() {
-        expand_args(&words[1..])
+        match expand_args(&words[1..]).await {
+            Ok(args) => args,
+            Err(err) => return glob_failure(name, &err),
+        }
     } else {
         words[1..].iter().map(|word| word.text.clone()).collect()
     };
@@ -112,6 +115,19 @@ async fn run_command(
         exit_code: out.exit_code,
         attachments: out.attachments,
     }
+}
+
+fn glob_failure(name: &str, err: &ExpandError) -> CommandOutput {
+    CommandOutput::failed(
+        1,
+        error_line(
+            name,
+            err,
+            Hint::Try,
+            "narrow the pattern, or ls the directory first",
+        )
+        .into_bytes(),
+    )
 }
 
 fn prefix_stderr(name: &str, raw: &[u8]) -> Vec<u8> {
