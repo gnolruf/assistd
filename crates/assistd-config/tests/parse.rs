@@ -110,6 +110,15 @@ fn custom_args_with_a_refused_flag_is_a_parse_error() {
 }
 
 #[test]
+fn embedding_custom_args_refuse_their_own_managed_flags() {
+    let err = toml::from_str::<Config>("[embedding]\ncustom_args = \"--pooling cls\"\n")
+        .expect_err("custom_args must not change the pooling assistd relies on");
+    assert!(err.to_string().contains("--pooling"), "{err}");
+    toml::from_str::<Config>("[embedding]\ncustom_args = \"-c 8192 --threads 4\"\n")
+        .expect("embedding tuning flags parse");
+}
+
+#[test]
 fn written_default_round_trips_with_no_unknown_keys() {
     let serialized = toml::to_string_pretty(&Config::default()).expect("serialize default");
     let (back, unknown) = parse_reporting_unknown_keys(&serialized);

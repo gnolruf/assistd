@@ -46,7 +46,7 @@ pub enum ConfigError {
     Validation(Vec<String>),
 }
 
-/// Why a `model.custom_args` string was refused.
+/// Why a `custom_args` string was refused.
 #[derive(Debug, Error)]
 pub enum CustomArgsError {
     #[error("unterminated quote or trailing backslash")]
@@ -55,7 +55,7 @@ pub enum CustomArgsError {
     #[error("argument {0:?} contains a control character")]
     ControlCharacter(String),
 
-    #[error("`{0}` is set by assistd or relied on by its client; configure [model] instead")]
+    #[error("`{0}` is set by assistd or relied on by its client")]
     Managed(String),
 
     #[error("`{0}` exposes files, tools or state through the unauthenticated server")]

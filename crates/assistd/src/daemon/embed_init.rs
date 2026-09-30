@@ -1,7 +1,6 @@
 //! Embedding subsystem wiring for the daemon.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use assistd_core::Config;
 use assistd_embed::{
@@ -70,11 +69,7 @@ pub(super) async fn init(
     }
 
     let service = match ChildServer::start(
-        EmbedServerSpec::new(
-            config.embedding.clone(),
-            config.model.server_binary.clone(),
-            Duration::from_secs(config.model.ready_timeout_secs.get()),
-        ),
+        EmbedServerSpec::new(config.embedding.clone()),
         server_shutdown.subscribe(),
     )
     .await

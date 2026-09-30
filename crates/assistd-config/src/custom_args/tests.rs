@@ -1,9 +1,13 @@
 use super::*;
 
-fn parse(source: &str) -> Result<Vec<String>, CustomArgsError> {
+fn parse_for<S: ServerKind>(source: &str) -> Result<Vec<String>, CustomArgsError> {
     source
-        .parse::<CustomArgs>()
+        .parse::<CustomArgs<S>>()
         .map(|custom_args| custom_args.as_slice().to_vec())
+}
+
+fn parse(source: &str) -> Result<Vec<String>, CustomArgsError> {
+    parse_for::<ChatServer>(source)
 }
 
 #[test]
@@ -72,6 +76,27 @@ fn managed_flags_are_rejected_in_both_spellings() {
 }
 
 #[test]
+fn shared_and_exposing_flags_are_rejected_on_the_embedding_server_too() {
+    for source in ["--host 0.0.0.0", "--hf-repo a/b:Q4", "--tools all"] {
+        assert!(parse_for::<EmbeddingServer>(source).is_err(), "{source:?}");
+    }
+}
+
+#[test]
+fn server_specific_flags_are_managed_only_on_their_server() {
+    assert!(matches!(
+        parse("--embedding"),
+        Err(CustomArgsError::Managed(_))
+    ));
+    assert!(matches!(
+        parse_for::<EmbeddingServer>("--pooling cls"),
+        Err(CustomArgsError::Managed(_))
+    ));
+    parse_for::<EmbeddingServer>("-c 8192 --ubatch-size 2048").expect("tuning is allowed");
+    parse("--pooling cls").expect("pooling is not the chat server's concern");
+}
+
+#[test]
 fn exposing_flags_are_rejected_in_both_spellings() {
     for source in [
         "--tools all",
@@ -97,6 +122,6 @@ fn a_rejected_flag_hidden_after_valid_args_is_still_found() {
 #[test]
 fn serializing_returns_the_source_string() {
     let source = "--flash-attn on  -ot 'exps=CPU'";
-    let custom_args: CustomArgs = source.parse().expect("parses");
+    let custom_args: CustomArgs<ChatServer> = source.parse().expect("parses");
     assert_eq!(String::from(custom_args), source);
 }

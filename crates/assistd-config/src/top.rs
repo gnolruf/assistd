@@ -302,6 +302,9 @@ fn validate_embedding(errors: &mut Vec<String>, embedding: &EmbeddingConfig, mod
         return;
     }
     require_hf_id(errors, "embedding.model", &embedding.model);
+    if embedding.server_binary.as_os_str().is_empty() {
+        errors.push("embedding.server_binary must not be empty when embedding is enabled".into());
+    }
     require_loopback(errors, "embedding.host", embedding.host);
     if embedding.port == model.port {
         errors.push("embedding.port must differ from model.port (the chat server)".into());

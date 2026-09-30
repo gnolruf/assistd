@@ -150,12 +150,15 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # db_path = "/home/you/.local/share/assistd/memory.db"
 
 [embedding]
-# A second llama-server for semantic recall.
+# A second model server for semantic recall.
 # enabled = true
 # model = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"  # suffix is a quant tag, not a filename
+# server_binary = "llama-server"
 # host = "127.0.0.1"
 # port = 8386  # must differ from model.port
 # gpu_layers = 0
+# ready_timeout_secs = 300
+# custom_args = "--threads 4 --ubatch-size 2048"  # same rules as model.custom_args
 # top_k = 5
 # auto_inject = true
 

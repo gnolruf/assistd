@@ -23,7 +23,7 @@ pub mod voice;
 
 pub use chat::ChatConfig;
 pub use compositor::{CompositorConfig, CompositorType};
-pub use custom_args::CustomArgs;
+pub use custom_args::{ChatServer, CustomArgs, EmbeddingServer, ServerKind};
 pub use daemon::DaemonConfig;
 pub use embedding::EmbeddingConfig;
 pub use errors::{ConfigError, CustomArgsError};

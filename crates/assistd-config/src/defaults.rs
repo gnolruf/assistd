@@ -101,6 +101,8 @@ pub const DEFAULT_MEMORY_ENABLED: bool = true;
 
 pub const DEFAULT_EMBEDDING_ENABLED: bool = true;
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M";
+pub const DEFAULT_EMBEDDING_SERVER_BINARY: &str = "llama-server";
+pub const DEFAULT_EMBEDDING_READY_TIMEOUT_SECS: NonZeroU64 = nz64(300);
 pub const DEFAULT_EMBEDDING_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_EMBEDDING_PORT: NonZeroU16 = nz16(8386);
 /// CPU-only so the embedder never contends with the chat model for VRAM.

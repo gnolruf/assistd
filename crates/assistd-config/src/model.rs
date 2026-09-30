@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::custom_args::CustomArgs;
+use crate::custom_args::{ChatServer, CustomArgs};
 use crate::defaults::{
     DEFAULT_MODEL_CONTEXT_LENGTH, DEFAULT_MODEL_GPU_LAYERS, DEFAULT_MODEL_HOST, DEFAULT_MODEL_NAME,
     DEFAULT_MODEL_PORT, DEFAULT_MODEL_READY_TIMEOUT_SECS, DEFAULT_MODEL_SERVER_BINARY,
@@ -19,8 +19,7 @@ pub struct ModelConfig {
     pub name: String,
     /// Context window length in tokens.
     pub context_length: NonZeroU32,
-    /// Server binary path, or a name on `$PATH`, for the chat and embedding
-    /// servers. Must not be empty.
+    /// Server binary path, or a name on `$PATH`. Must not be empty.
     pub server_binary: PathBuf,
     /// Bind host. Must be loopback: the server has no authentication.
     pub host: IpAddr,
@@ -29,12 +28,12 @@ pub struct ModelConfig {
     /// Layers offloaded to the GPU; values above the model's layer count
     /// offload every layer.
     pub gpu_layers: u32,
-    /// Last-ditch cap, in seconds, on becoming healthy and loading the model
-    /// (chat and embedding servers); neither wait trips while progressing.
+    /// Last-ditch cap, in seconds, on becoming healthy and loading the model;
+    /// neither wait trips while progressing.
     pub ready_timeout_secs: NonZeroU64,
     /// Extra server arguments. Flags assistd sets itself, or that expose
     /// files, tools or state through the server, fail to parse.
-    pub custom_args: CustomArgs,
+    pub custom_args: CustomArgs<ChatServer>,
 }
 
 impl ModelConfig {
