@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 #[cfg(test)]
 use assistd_config::defaults::{nz16, nz32, nz64};
-use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
+use assistd_config::{ModelConfig, TimeoutsConfig};
 use assistd_ipc::{Component, Event, PresenceState, StatusKind, StatusSeverity};
 use assistd_llm::{
     HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec, LlmHealthProbe,
@@ -96,7 +96,6 @@ pub enum PresenceError {
 pub struct PresenceManager {
     state: StdMutex<PresenceState>,
     transition: AsyncMutex<()>,
-    llama_server: LlamaServerConfig,
     model: ModelConfig,
     timeouts: TimeoutsConfig,
     control: LlamaServerControl,
@@ -122,14 +121,12 @@ impl PresenceManager {
     /// Create a manager and cold-start it to `Active`. Flipping
     /// `daemon_shutdown` cancels an in-flight wake.
     pub async fn new_active(
-        llama_server: LlamaServerConfig,
         model: ModelConfig,
         timeouts: TimeoutsConfig,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
-        let control =
-            LlamaServerControl::new(&llama_server.host.to_string(), llama_server.port.get())
-                .map_err(PresenceError::Control)?;
+        let control = LlamaServerControl::new(&model.host.to_string(), model.port.get())
+            .map_err(PresenceError::Control)?;
 
         let current_inner_shutdown: InnerShutdownSlot = Arc::new(StdMutex::new(None));
         spawn_shutdown_forwarder(daemon_shutdown.clone(), Arc::clone(&current_inner_shutdown));
@@ -139,7 +136,6 @@ impl PresenceManager {
         let manager = Arc::new(Self {
             state: StdMutex::new(PresenceState::Sleeping),
             transition: AsyncMutex::new(()),
-            llama_server,
             model,
             timeouts,
             control,
@@ -491,19 +487,15 @@ impl PresenceManager {
         let (inner_tx, inner_rx) = watch::channel(false);
         *self.current_inner_shutdown.lock() = Some(inner_tx);
 
-        let service = match ChildServer::start(
-            LlamaServerSpec::new(self.llama_server.clone(), self.model.clone()),
-            inner_rx,
-        )
-        .await
-        {
-            Ok(service) => service,
-            Err(e) => {
-                *self.current_inner_shutdown.lock() = None;
-                warn!(target: "assistd::presence", "wake cold-start failed: {e}");
-                return Err(PresenceError::ColdStart(e));
-            }
-        };
+        let service =
+            match ChildServer::start(LlamaServerSpec::new(self.model.clone()), inner_rx).await {
+                Ok(service) => service,
+                Err(e) => {
+                    *self.current_inner_shutdown.lock() = None;
+                    warn!(target: "assistd::presence", "wake cold-start failed: {e}");
+                    return Err(PresenceError::ColdStart(e));
+                }
+            };
 
         match self.load_model_and_wait(service.subscribe_ready()).await {
             Ok(()) => {
@@ -543,7 +535,7 @@ impl PresenceManager {
         &self,
         mut ready_rx: watch::Receiver<ReadyState>,
     ) -> Result<(), PresenceError> {
-        let secs = self.llama_server.ready_timeout_secs.get();
+        let secs = self.model.ready_timeout_secs.get();
         let backstop = Duration::from_secs(secs);
         tokio::select! {
             res = self
@@ -570,36 +562,21 @@ impl PresenceManager {
     pub(crate) fn stub(state: PresenceState) -> Arc<Self> {
         let (_tx, rx) = watch::channel(false);
         let (state_tx, _) = watch::channel(state);
-        let llama_server = LlamaServerConfig {
-            binary_path: "/does/not/exist".into(),
+        let model = ModelConfig {
+            name: "stub/model".into(),
+            context_length: nz32(1024),
+            server_binary: "/does/not/exist".into(),
             host: std::net::Ipv4Addr::LOCALHOST.into(),
             port: nz16(1),
             gpu_layers: 1,
             ready_timeout_secs: nz64(1),
-            alias: None,
-            override_tensor: None,
-            flash_attn: None,
-            cache_type_k: None,
-            cache_type_v: None,
-            threads: None,
-            batch_size: None,
-            ubatch_size: None,
-            n_cpu_moe: None,
-            cache_ram_mib: None,
-            mlock: None,
-            mmproj_offload: None,
+            ..ModelConfig::default()
         };
-        let model = ModelConfig {
-            name: "stub/model".into(),
-            context_length: nz32(1024),
-        };
-        let control =
-            LlamaServerControl::new(&llama_server.host.to_string(), 1).expect("dummy control");
+        let control = LlamaServerControl::new(&model.host.to_string(), 1).expect("dummy control");
         let (stream_count_tx, _) = watch::channel(0usize);
         Arc::new(Self {
             state: StdMutex::new(state),
             transition: AsyncMutex::new(()),
-            llama_server,
             model,
             timeouts: TimeoutsConfig::default(),
             control,

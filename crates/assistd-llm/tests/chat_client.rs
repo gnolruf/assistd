@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use assistd_config::defaults::{nz32, nz64};
-use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
+use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_llm::{
     ChatClientError, LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome, Thinking,
     ToolCall, ToolResultPayload,
@@ -319,7 +319,6 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
 
 struct ClientCfg {
     chat: ChatConfig,
-    server: LlamaServerConfig,
     model: ModelConfig,
     timeouts: TimeoutsConfig,
 }
@@ -339,29 +338,14 @@ fn chat_spec(port: u16) -> ClientCfg {
             top_k: None,
             min_p: None,
             presence_penalty: None,
-        },
-        server: LlamaServerConfig {
-            binary_path: "llama-server".into(),
-            host: Ipv4Addr::LOCALHOST.into(),
-            port: NonZeroU16::new(port).expect("bound port is never 0"),
-            gpu_layers: 9999,
-            ready_timeout_secs: nz64(60),
-            alias: None,
-            override_tensor: None,
-            flash_attn: None,
-            cache_type_k: None,
-            cache_type_v: None,
-            threads: None,
-            batch_size: None,
-            ubatch_size: None,
-            n_cpu_moe: None,
-            cache_ram_mib: None,
-            mlock: None,
-            mmproj_offload: None,
+            reasoning_effort: None,
         },
         model: ModelConfig {
             name: "test-model".into(),
             context_length: nz32(12_000),
+            host: Ipv4Addr::LOCALHOST.into(),
+            port: NonZeroU16::new(port).expect("bound port is never 0"),
+            ..ModelConfig::default()
         },
         timeouts: TimeoutsConfig::default(),
     }
@@ -372,7 +356,7 @@ fn delta(text: &str) -> LlmEvent {
 }
 
 fn build_client(cfg: &ClientCfg) -> LlamaChatClient {
-    LlamaChatClient::new(&cfg.chat, &cfg.server, &cfg.model, &cfg.timeouts, None).unwrap()
+    LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None).unwrap()
 }
 
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
@@ -879,7 +863,7 @@ async fn step_runs_tool_calls_reported_with_stop_finish_reason() {
 }
 
 #[tokio::test]
-async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
+async fn step_cut_off_at_the_token_limit_is_truncated_and_left_out_of_history() {
     let script = Script::new();
     script
         .push_stream(StreamResponse::RawFrames(tool_call_frames_finishing(
@@ -889,6 +873,9 @@ async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
             "length",
         )))
         .await;
+    script
+        .push_stream(StreamResponse::Deltas(vec!["fine".into()]))
+        .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let client = build_client(&chat_spec(port));
@@ -897,13 +884,20 @@ async fn step_truncated_tool_call_arguments_error_rather_than_vanish() {
         .await
         .unwrap();
     let (tx, _rx) = mpsc::channel(32);
-    let err = client
-        .step(Vec::new(), tx)
-        .await
-        .expect_err("truncated arguments must not be swallowed");
+    let outcome = client.step(Vec::new(), tx.clone()).await.unwrap();
+    assert!(matches!(outcome, StepOutcome::Truncated), "{outcome:?}");
+
+    client.step(Vec::new(), tx).await.unwrap();
+    let captured = script.captured().await;
+    let roles: Vec<&str> = captured[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
     assert!(
-        matches!(err, LlmError::ToolCallParse(_)),
-        "expected a tool-call parse error, got {err:?}"
+        !roles.contains(&"assistant"),
+        "truncated step leaked into history: {roles:?}"
     );
 }
 
@@ -1206,6 +1200,38 @@ async fn complete_oneshot_sends_a_lone_prompt_on_the_summary_budget() {
     assert!(
         captured[1].body.get("chat_template_kwargs").is_none(),
         "Thinking::Enabled must leave the request untouched"
+    );
+}
+
+#[tokio::test]
+async fn configured_reasoning_effort_rides_every_request() {
+    let script = Script::new();
+    for reply in ["answer", "title"] {
+        script
+            .push_stream(StreamResponse::Deltas(vec![reply.into()]))
+            .await;
+    }
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let mut cfg = chat_spec(port);
+    cfg.chat.reasoning_effort = Some("low".into());
+    let client = build_client(&cfg);
+    client.push_user("hi".into(), Vec::new()).await.unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    client.step(Vec::new(), tx).await.unwrap();
+    client
+        .complete_oneshot("title?".into(), Thinking::Disabled)
+        .await
+        .unwrap();
+
+    let captured = script.captured().await;
+    assert_eq!(
+        captured[0].body["chat_template_kwargs"],
+        json!({"reasoning_effort": "low"})
+    );
+    assert_eq!(
+        captured[1].body["chat_template_kwargs"],
+        json!({"enable_thinking": false, "reasoning_effort": "low"})
     );
 }
 

@@ -325,6 +325,87 @@ async fn tool_request_after_withdrawal_ends_turn_with_synthetic_results() {
 }
 
 #[tokio::test]
+async fn truncated_step_is_retried_with_a_note() {
+    let backend = MockBackend::with(vec![StepOutcome::Truncated, StepOutcome::Final]);
+    let (res, events) = run_turn(
+        Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE),
+        "go",
+    )
+    .await;
+    res.unwrap();
+
+    assert_eq!(status_kinds(&events), [StatusKind::OutputTruncated]);
+    assert!(events.ends_with(&ok_then_done()), "{events:?}");
+    assert_eq!(*backend.transient_notes.lock(), [TRUNCATION_NOTE]);
+    assert!(backend.pushed_results.lock().is_empty());
+}
+
+#[tokio::test]
+async fn truncations_past_the_retry_limit_fail_the_turn() {
+    let outcomes = (0..=TRUNCATION_RETRY_LIMIT)
+        .map(|_| StepOutcome::Truncated)
+        .collect();
+    let backend = MockBackend::with(outcomes);
+    let (res, events) = run_turn(
+        Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE),
+        "go",
+    )
+    .await;
+
+    assert!(
+        matches!(res, Err(LlmError::OutputLimit(n)) if n == TRUNCATION_RETRY_LIMIT + 1),
+        "{res:?}"
+    );
+    assert_eq!(
+        status_kinds(&events),
+        [StatusKind::OutputTruncated; TRUNCATION_RETRY_LIMIT as usize]
+    );
+    assert_eq!(events.last(), Some(&LlmEvent::Done));
+}
+
+#[tokio::test]
+async fn a_completed_step_resets_the_truncation_retries() {
+    let mut outcomes: Vec<StepOutcome> = (0..TRUNCATION_RETRY_LIMIT)
+        .map(|_| StepOutcome::Truncated)
+        .collect();
+    outcomes.push(StepOutcome::ToolCalls(vec![call("c-1", "echo a")]));
+    outcomes.extend((0..TRUNCATION_RETRY_LIMIT).map(|_| StepOutcome::Truncated));
+    let backend = MockBackend::with(outcomes);
+    let (res, events) = run_turn(
+        Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE),
+        "go",
+    )
+    .await;
+
+    res.unwrap();
+    assert_eq!(events.last(), Some(&LlmEvent::Done));
+}
+
+#[tokio::test]
+async fn truncation_after_withdrawal_restates_the_withdrawal() {
+    let mut outcomes: Vec<StepOutcome> = (0..DUPLICATE_CALL_LIMIT)
+        .map(|i| StepOutcome::ToolCalls(vec![call(&format!("c-{i}"), "echo same")]))
+        .collect();
+    outcomes.push(StepOutcome::Truncated);
+    let backend = MockBackend::with(outcomes);
+    let (res, _events) = run_turn(
+        Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE),
+        "loop it",
+    )
+    .await;
+    res.unwrap();
+
+    let withdrawal = ToolBudgetExhausted::Repeating.model_note();
+    assert_eq!(
+        *backend.transient_notes.lock(),
+        [
+            withdrawal.clone(),
+            format!("{TRUNCATION_NOTE} {withdrawal}")
+        ]
+    );
+}
+
+#[tokio::test]
 async fn unknown_tool_passes_error_to_next_step() {
     let backend = MockBackend::with(vec![
         StepOutcome::ToolCalls(vec![ToolCall {

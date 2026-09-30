@@ -66,10 +66,12 @@ fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) 
         top_k: None,
         min_p: None,
         presence_penalty: None,
+        reasoning_effort: None,
     };
     let model = ModelConfig {
         name: "test-model".into(),
         context_length: nz32(ctx),
+        ..ModelConfig::default()
     };
     (chat, model)
 }

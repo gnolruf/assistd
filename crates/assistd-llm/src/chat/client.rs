@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, TimeoutsConfig};
+use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_tools::Attachment;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -50,11 +50,10 @@ pub struct LlamaChatClient {
 }
 
 impl LlamaChatClient {
-    /// Build a client for the server at `server.host:server.port`. Pass
+    /// Build a client for the server at `model.host:model.port`. Pass
     /// `health: None` when no supervisor is attached.
     pub fn new(
         chat: &ChatConfig,
-        server: &LlamaServerConfig,
         model: &ModelConfig,
         timeouts: &TimeoutsConfig,
         health: Option<Arc<dyn LlmHealthProbe>>,
@@ -63,7 +62,7 @@ impl LlamaChatClient {
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        let base_url = format!("http://{}:{}", server.host, server.port);
+        let base_url = format!("http://{}:{}", model.host, model.port);
         let conv = Conversation::new(chat.system_prompt.clone());
         Ok(Self {
             client,
@@ -89,8 +88,21 @@ impl LlamaChatClient {
             presence_penalty: self.chat.presence_penalty,
             tools: None,
             tool_choice: None,
-            chat_template_kwargs: None,
+            chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
         }
+    }
+
+    /// The configured chat-template variables, or `None` when the template
+    /// defaults apply to all of them.
+    fn template_kwargs(&self, thinking: Thinking) -> Option<wire::ChatTemplateKwargs<'_>> {
+        let enable_thinking = (thinking == Thinking::Disabled).then_some(false);
+        let reasoning_effort = self.chat.reasoning_effort.as_deref();
+        (enable_thinking.is_some() || reasoning_effort.is_some()).then_some(
+            wire::ChatTemplateKwargs {
+                enable_thinking,
+                reasoning_effort,
+            },
+        )
     }
 
     /// Classify a failed request: a restart-coincident failure becomes
@@ -487,12 +499,7 @@ impl LlmBackend for LlamaChatClient {
                 wire::ContentBody::Text(prompt.as_str().into()),
             )]);
             payload.max_tokens = self.chat.max_summary_tokens();
-            payload.chat_template_kwargs = match thinking {
-                Thinking::Enabled => None,
-                Thinking::Disabled => Some(wire::ChatTemplateKwargs {
-                    enable_thinking: false,
-                }),
-            };
+            payload.chat_template_kwargs = self.template_kwargs(thinking);
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
 
@@ -543,7 +550,7 @@ impl Summarizer for LlamaChatClient {
             presence_penalty: None,
             tools: None,
             tool_choice: None,
-            chat_template_kwargs: None,
+            chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
         };
 
         let mut response = self
@@ -750,8 +757,19 @@ fn parse_tool_calls(json: Option<&Value>) -> LlmResult<Vec<ToolCallRecord>> {
 }
 
 /// Record the step in `conv`. Tool calls from a stream that ended before
-/// the model's finish chunk are discarded rather than run half-built.
+/// the model's finish chunk are discarded rather than run half-built, and a
+/// response cut off at the token limit is not recorded at all.
 fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<StepOutcome> {
+    if accum.finish_reason.as_deref() == Some("length") {
+        warn!(
+            target: "assistd::chat",
+            text_bytes = accum.text.len(),
+            reasoning_bytes = accum.reasoning.len(),
+            tool_calls = accum.tool_calls.len(),
+            "response hit max_tokens; discarding it"
+        );
+        return Ok(StepOutcome::Truncated);
+    }
     if accum.tool_calls.is_empty() {
         conv.push_assistant(accum.text);
         return Ok(StepOutcome::Final);

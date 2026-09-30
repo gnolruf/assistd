@@ -24,7 +24,7 @@ impl FakeLlama {
         fake
     }
 
-    /// Path to use as `LlamaServerConfig::binary_path`.
+    /// Path to use as `ModelConfig::server_binary`.
     pub(crate) fn binary_path(&self) -> PathBuf {
         self.dir.path().join("llama-server")
     }

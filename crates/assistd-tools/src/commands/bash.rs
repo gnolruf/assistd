@@ -56,9 +56,10 @@ impl Command for BashCommand {
     fn help(&self) -> String {
         let timeout_secs = self.policy.cfg.timeout.as_secs();
         format!(
-            "usage: bash \"<script>\"\n\
+            "usage: bash [-c] \"<script>\"\n\
              \n\
-             Spawn a real `bash -c <script>` subprocess. The escape hatch for \
+             Spawn a real `bash -c <script>` subprocess; a leading `-c` is \
+             accepted and ignored. The escape hatch for \
              anything the in-process commands can't express: redirections, env \
              expansion, backgrounding, pipes the chain parser doesn't support.\n\
              \n\
@@ -76,10 +77,11 @@ impl Command for BashCommand {
     }
 
     async fn run(&self, input: CommandInput) -> CommandOutput {
-        if input.args.is_empty() {
+        let script_words = strip_dash_c(&input.args);
+        if script_words.is_empty() {
             return CommandOutput::usage(self.help());
         }
-        let script = input.args.join(" ");
+        let script = script_words.join(" ");
         let confirmation = check_script(&script, &self.policy.cfg.rules());
         if let Err(denied) = self
             .policy
@@ -112,6 +114,15 @@ impl Command for BashCommand {
                 .into_bytes(),
             )
         })
+    }
+}
+
+/// The script words without a leading `-c`, which the model writes out of
+/// habit although this command already runs `bash -c`.
+fn strip_dash_c(args: &[String]) -> &[String] {
+    match args.split_first() {
+        Some((flag, rest)) if flag == "-c" => rest,
+        _ => args,
     }
 }
 

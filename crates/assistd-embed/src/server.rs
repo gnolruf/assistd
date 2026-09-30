@@ -1,11 +1,10 @@
 //! How the embedding llama-server is launched.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use assistd_config::EmbeddingConfig;
-use assistd_utils::child_server::ChildServerSpec;
+use assistd_utils::child_server::{ChildServerSpec, remove_llama_env};
 use tokio::process::Command;
 
 /// Launch parameters for the supervised embedding llama-server. With
@@ -13,17 +12,11 @@ use tokio::process::Command;
 #[derive(Debug)]
 pub struct EmbedServerSpec {
     cfg: EmbeddingConfig,
-    binary_path: PathBuf,
-    ready_timeout: Duration,
 }
 
 impl EmbedServerSpec {
-    pub fn new(cfg: EmbeddingConfig, binary_path: PathBuf, ready_timeout: Duration) -> Self {
-        Self {
-            cfg,
-            binary_path,
-            ready_timeout,
-        }
+    pub fn new(cfg: EmbeddingConfig) -> Self {
+        Self { cfg }
     }
 }
 
@@ -33,18 +26,10 @@ impl ChildServerSpec for EmbedServerSpec {
     }
 
     fn command(&self) -> Command {
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.arg("--embedding")
-            .arg("--pooling")
-            .arg("mean")
-            .arg("--hf-repo")
-            .arg(&self.cfg.model)
-            .arg("-ngl")
-            .arg(self.cfg.gpu_layers.to_string())
-            .arg("--host")
-            .arg(self.cfg.host.to_string())
-            .arg("--port")
-            .arg(self.cfg.port.to_string());
+        let mut cmd = Command::new(&self.cfg.server_binary);
+        cmd.args(self.cfg.custom_args.as_slice());
+        push_managed_args(&mut cmd, &self.cfg);
+        remove_llama_env(&mut cmd);
         if self.cfg.gpu_layers == 0 {
             cmd.env("CUDA_VISIBLE_DEVICES", "");
         }
@@ -56,6 +41,20 @@ impl ChildServerSpec for EmbedServerSpec {
     }
 
     fn ready_timeout(&self) -> Duration {
-        self.ready_timeout
+        Duration::from_secs(self.cfg.ready_timeout_secs.get())
     }
+}
+
+fn push_managed_args(cmd: &mut Command, cfg: &EmbeddingConfig) {
+    cmd.arg("--embedding")
+        .arg("--pooling")
+        .arg("mean")
+        .arg("--hf-repo")
+        .arg(&cfg.model)
+        .arg("-ngl")
+        .arg(cfg.gpu_layers.to_string())
+        .arg("--host")
+        .arg(cfg.host.to_string())
+        .arg("--port")
+        .arg(cfg.port.to_string());
 }

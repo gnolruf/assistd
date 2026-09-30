@@ -18,7 +18,8 @@ pub struct ChatConfig {
     /// tools: requests carry their schemas.
     pub system_prompt: String,
     /// Approximate token budget for system prompt plus history; older
-    /// messages are summarized past it. Must be below `model.context_length`.
+    /// messages are summarized past it. Together with `max_response_tokens`,
+    /// must fit in 90% of `model.context_length`.
     pub max_history_tokens: NonZeroU32,
     /// Target summary length in tokens. Must be below `max_history_tokens`.
     pub summary_target_tokens: NonZeroU32,
@@ -26,7 +27,9 @@ pub struct ChatConfig {
     pub preserve_recent_turns: NonZeroU32,
     /// Sampling temperature, `0.0..=2.0`.
     pub temperature: f32,
-    /// Max tokens per response. Must be below `model.context_length`.
+    /// Max tokens per model response, reasoning included; a response that
+    /// hits it is discarded and retried. See `max_history_tokens` for the
+    /// bound.
     pub max_response_tokens: NonZeroU32,
     /// Seconds to the first streamed byte (prompt prefill); generation
     /// itself is unbounded. Also caps the whole summarization call.
@@ -40,6 +43,10 @@ pub struct ChatConfig {
     pub min_p: Option<f32>,
     /// `-2.0..=2.0`.
     pub presence_penalty: Option<f32>,
+    /// `reasoning_effort` chat-template variable sent with every request, e.g.
+    /// `low`. Valid values depend on the model's template; `None` keeps the
+    /// template's default. Must not be empty.
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for ChatConfig {
@@ -57,6 +64,7 @@ impl Default for ChatConfig {
             top_k: None,
             min_p: None,
             presence_penalty: None,
+            reasoning_effort: None,
         }
     }
 }

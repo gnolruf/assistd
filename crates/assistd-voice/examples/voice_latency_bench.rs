@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use assistd_config::{ChatConfig, LlamaServerConfig, ModelConfig, SynthesisConfig, TimeoutsConfig};
+use assistd_config::{ChatConfig, ModelConfig, SynthesisConfig, TimeoutsConfig};
 use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent};
 use assistd_voice::{
     NoVoiceOutput, PiperVoiceOutput, SentenceBuffer, Transcriber, VoiceOutput, WhisperTranscriber,
@@ -115,7 +115,6 @@ struct Args {
 /// history never skews later runs.
 struct LlmSettings {
     chat: ChatConfig,
-    server: LlamaServerConfig,
     model: ModelConfig,
     timeouts: TimeoutsConfig,
 }
@@ -127,13 +126,10 @@ impl LlmSettings {
                 max_response_tokens: args.max_response_tokens,
                 ..ChatConfig::default()
             },
-            server: LlamaServerConfig {
-                host: args.llama_host,
-                port: args.llama_port,
-                ..LlamaServerConfig::default()
-            },
             model: ModelConfig {
                 name: args.model.clone(),
+                host: args.llama_host,
+                port: args.llama_port,
                 ..ModelConfig::default()
             },
             timeouts: TimeoutsConfig::default(),
@@ -141,9 +137,8 @@ impl LlmSettings {
     }
 
     fn client(&self) -> Result<Arc<dyn LlmBackend>> {
-        let client =
-            LlamaChatClient::new(&self.chat, &self.server, &self.model, &self.timeouts, None)
-                .context("building LLM client")?;
+        let client = LlamaChatClient::new(&self.chat, &self.model, &self.timeouts, None)
+            .context("building LLM client")?;
         Ok(Arc::new(client))
     }
 }

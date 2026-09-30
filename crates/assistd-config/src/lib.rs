@@ -4,12 +4,12 @@
 
 pub mod chat;
 pub mod compositor;
+pub mod custom_args;
 pub mod daemon;
 pub mod defaults;
 pub mod embedding;
 pub mod errors;
 pub mod fixtures;
-pub mod llama;
 pub mod mcp;
 pub mod memory;
 pub mod model;
@@ -23,10 +23,10 @@ pub mod voice;
 
 pub use chat::ChatConfig;
 pub use compositor::{CompositorConfig, CompositorType};
+pub use custom_args::{ChatServer, CustomArgs, EmbeddingServer, ServerKind};
 pub use daemon::DaemonConfig;
 pub use embedding::EmbeddingConfig;
-pub use errors::ConfigError;
-pub use llama::LlamaServerConfig;
+pub use errors::{ConfigError, CustomArgsError};
 pub use mcp::{McpConfig, McpServerConfig};
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;

@@ -32,15 +32,18 @@ pub struct ChatRequest<'a> {
     pub tool_choice: Option<&'a str>,
     /// Extra variables handed to llama.cpp's Jinja chat template.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub chat_template_kwargs: Option<ChatTemplateKwargs>,
+    pub chat_template_kwargs: Option<ChatTemplateKwargs<'a>>,
 }
 
-/// Chat-template variables. `enable_thinking: false` is the convention
-/// reasoning models (Qwen3, DeepSeek-R1) use to skip the `<think>`
-/// block; templates without the variable ignore it.
+/// Chat-template variables; templates ignore the ones they don't use.
+/// `enable_thinking: false` is the convention reasoning models (Qwen3,
+/// DeepSeek-R1) use to skip the `<think>` block.
 #[derive(Debug, Clone, Serialize)]
-pub struct ChatTemplateKwargs {
-    pub enable_thinking: bool,
+pub struct ChatTemplateKwargs<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'a str>,
 }
 
 /// One message in the outgoing `messages` array.

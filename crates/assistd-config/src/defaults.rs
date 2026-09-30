@@ -30,14 +30,13 @@ pub const fn nz64(v: u64) -> NonZeroU64 {
     }
 }
 
-pub const DEFAULT_LLAMA_BINARY: &str = "llama-server";
-pub const DEFAULT_LLAMA_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-pub const DEFAULT_LLAMA_PORT: NonZeroU16 = nz16(8385);
-pub const DEFAULT_GPU_LAYERS: u32 = 9999;
-pub const DEFAULT_READY_TIMEOUT_SECS: NonZeroU64 = nz64(300);
-
 pub const DEFAULT_MODEL_NAME: &str = "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M";
 pub const DEFAULT_MODEL_CONTEXT_LENGTH: NonZeroU32 = nz32(8192);
+pub const DEFAULT_MODEL_SERVER_BINARY: &str = "llama-server";
+pub const DEFAULT_MODEL_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+pub const DEFAULT_MODEL_PORT: NonZeroU16 = nz16(8385);
+pub const DEFAULT_MODEL_GPU_LAYERS: u32 = 9999;
+pub const DEFAULT_MODEL_READY_TIMEOUT_SECS: NonZeroU64 = nz64(300);
 
 pub const DEFAULT_CHAT_MAX_HISTORY_TOKENS: NonZeroU32 = nz32(6000);
 pub const DEFAULT_CHAT_SUMMARY_TARGET_TOKENS: NonZeroU32 = nz32(1000);
@@ -102,6 +101,8 @@ pub const DEFAULT_MEMORY_ENABLED: bool = true;
 
 pub const DEFAULT_EMBEDDING_ENABLED: bool = true;
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M";
+pub const DEFAULT_EMBEDDING_SERVER_BINARY: &str = "llama-server";
+pub const DEFAULT_EMBEDDING_READY_TIMEOUT_SECS: NonZeroU64 = nz64(300);
 pub const DEFAULT_EMBEDDING_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_EMBEDDING_PORT: NonZeroU16 = nz16(8386);
 /// CPU-only so the embedder never contends with the chat model for VRAM.

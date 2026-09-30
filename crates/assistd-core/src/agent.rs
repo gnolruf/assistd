@@ -31,6 +31,15 @@ const DUPLICATE_CALL_LIMIT: usize = 3;
 /// Ceiling on tool-calling steps per turn that keep making different calls.
 const MAX_TOOL_STEPS: u32 = 200;
 
+/// Consecutive retries of a step cut off at the output-token limit before
+/// the turn fails.
+const TRUNCATION_RETRY_LIMIT: u32 = 2;
+
+/// Tells the model why its last response vanished and how to avoid a repeat.
+const TRUNCATION_NOTE: &str = "Your previous response reached the output-token limit before \
+     it finished, so it was discarded and none of its tool calls ran. Keep your reasoning \
+     brief and your tool calls small: split a long script into several shorter calls.";
+
 /// Long-lived agent dependencies, reused across turns.
 ///
 /// With a `health` probe the loop replays a step once after a
@@ -80,9 +89,10 @@ impl Agent {
             tx,
             cancel,
             schemas: self.tools.openai_schemas(),
-            tools_withdrawn: false,
+            tools_withdrawn: None,
             streak: CallStreak::default(),
             iteration: 0,
+            truncated_steps: 0,
         };
 
         loop {
@@ -105,10 +115,12 @@ impl Agent {
                     let _ = turn.tx.send(LlmEvent::Done).await;
                     return Ok(());
                 }
-                StepOutcome::ToolCalls(calls) if turn.tools_withdrawn => {
+                StepOutcome::Truncated => self.retry_truncated_step(&mut turn).await?,
+                StepOutcome::ToolCalls(calls) if turn.tools_withdrawn.is_some() => {
                     return self.refuse_withdrawn_calls(&turn, &calls).await;
                 }
                 StepOutcome::ToolCalls(calls) => {
+                    turn.truncated_steps = 0;
                     let (results, stuck) = self.dispatch_tool_calls(&mut turn, calls).await;
                     self.backend.push_tool_results(results).await?;
                     turn.iteration += 1;
@@ -136,6 +148,50 @@ impl Agent {
             .collect();
         self.backend.push_tool_results(results).await?;
         let _ = turn.tx.send(LlmEvent::Done).await;
+        Ok(())
+    }
+
+    /// Tell the client and the model that the last response was cut off so
+    /// the next step retries it; errors once [`TRUNCATION_RETRY_LIMIT`]
+    /// consecutive retries are spent.
+    async fn retry_truncated_step(&self, turn: &mut Turn) -> Result<(), LlmError> {
+        turn.truncated_steps += 1;
+        if turn.truncated_steps > TRUNCATION_RETRY_LIMIT {
+            let error = LlmError::OutputLimit(turn.truncated_steps);
+            fail_turn(&turn.tx, &format!("{}: {error}", llm_error_label(&error))).await;
+            return Err(error);
+        }
+        recovery_event!(
+            StatusSeverity::Warning,
+            Component::Llm,
+            "output_truncated",
+            iteration = turn.iteration,
+            retry = turn.truncated_steps,
+            "response hit the output-token limit; retrying the step"
+        );
+        let _ = turn
+            .tx
+            .send(status_event(
+                StatusSeverity::Warning,
+                Component::Llm,
+                StatusKind::OutputTruncated,
+                format!(
+                    "LLM response hit the output-token limit; retrying ({}/{TRUNCATION_RETRY_LIMIT})",
+                    turn.truncated_steps
+                ),
+            ))
+            .await;
+        if let Err(e) = self
+            .backend
+            .set_transient_note(turn.truncation_note())
+            .await
+        {
+            warn!(
+                target: "assistd::agent",
+                error = %e,
+                "set_transient_note failed; retrying without the note"
+            );
+        }
         Ok(())
     }
 
@@ -282,7 +338,7 @@ impl Agent {
                 "set_transient_note failed; answering without the note"
             );
         }
-        turn.tools_withdrawn = true;
+        turn.tools_withdrawn = Some(why);
     }
 }
 
@@ -290,14 +346,23 @@ struct Turn {
     tx: mpsc::Sender<LlmEvent>,
     cancel: CancellationToken,
     schemas: Vec<Value>,
-    tools_withdrawn: bool,
+    tools_withdrawn: Option<ToolBudgetExhausted>,
     streak: CallStreak,
     iteration: u32,
+    truncated_steps: u32,
 }
 
 impl Turn {
     fn stop_requested(&self) -> bool {
         self.tx.is_closed() || self.cancel.is_cancelled()
+    }
+
+    /// [`TRUNCATION_NOTE`], restating the withdrawal the retry would otherwise lose.
+    fn truncation_note(&self) -> String {
+        match self.tools_withdrawn {
+            Some(why) => format!("{TRUNCATION_NOTE} {}", why.model_note()),
+            None => TRUNCATION_NOTE.to_string(),
+        }
     }
 }
 
@@ -378,6 +443,7 @@ fn llm_error_label(error: &LlmError) -> &'static str {
         LlmError::ToolCallParse(_) => "tool-call parse",
         LlmError::Unavailable(_) => "backend unavailable",
         LlmError::ServerRestarting(_) => "llm restarting",
+        LlmError::OutputLimit(_) => "output limit",
     }
 }
 

@@ -21,7 +21,7 @@ use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use assistd_config::defaults::{nz32, nz64};
-use assistd_config::{LlamaServerConfig, ModelConfig, TimeoutsConfig};
+use assistd_config::{ModelConfig, TimeoutsConfig};
 use assistd_core::{
     AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceError,
     PresenceManager, PresenceState, ToolRegistry, VoiceOutputController,
@@ -45,32 +45,16 @@ async fn grab_port() -> u16 {
     port
 }
 
-fn server_spec(fake: &FakeLlama, port: u16) -> LlamaServerConfig {
-    LlamaServerConfig {
-        binary_path: fake.binary_path(),
+fn model_spec(fake: &FakeLlama, port: u16) -> ModelConfig {
+    ModelConfig {
+        name: "test/fake-model-GGUF:Q4_K_M".to_string(),
+        context_length: nz32(2048),
+        server_binary: fake.binary_path(),
         host: Ipv4Addr::LOCALHOST.into(),
         port: NonZeroU16::new(port).expect("bound port is never 0"),
         gpu_layers: 0,
         ready_timeout_secs: nz64(60),
-        alias: None,
-        override_tensor: None,
-        flash_attn: None,
-        cache_type_k: None,
-        cache_type_v: None,
-        threads: None,
-        batch_size: None,
-        ubatch_size: None,
-        n_cpu_moe: None,
-        cache_ram_mib: None,
-        mlock: None,
-        mmproj_offload: None,
-    }
-}
-
-fn model_spec() -> ModelConfig {
-    ModelConfig {
-        name: "test/fake-model-GGUF:Q4_K_M".to_string(),
-        context_length: nz32(2048),
+        ..ModelConfig::default()
     }
 }
 
@@ -79,14 +63,10 @@ async fn new_active_manager(
     port: u16,
 ) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     let (tx, rx) = watch::channel(false);
-    let manager = PresenceManager::new_active(
-        server_spec(fake, port),
-        model_spec(),
-        TimeoutsConfig::default(),
-        rx,
-    )
-    .await
-    .expect("cold-start wake failed");
+    let manager =
+        PresenceManager::new_active(model_spec(fake, port), TimeoutsConfig::default(), rx)
+            .await
+            .expect("cold-start wake failed");
     (manager, tx)
 }
 
@@ -152,7 +132,10 @@ async fn cold_start_puts_manager_in_active_and_loads_model() {
     let (load_count, unload_count, loaded) = get_counters(port).await;
     assert_eq!(load_count, 1, "cold start should call /models/load once");
     assert_eq!(unload_count, 0);
-    assert_eq!(loaded.as_deref(), Some(model_spec().name.as_str()));
+    assert_eq!(
+        loaded.as_deref(),
+        Some(model_spec(&fake, port).name.as_str())
+    );
 
     manager.sleep().await.unwrap();
 }
@@ -231,7 +214,10 @@ async fn wake_from_drowsy_reuses_process_and_only_loads_model() {
 
     let (load_after, _, loaded) = get_counters(port).await;
     assert_eq!(load_after, load_initial + 1);
-    assert_eq!(loaded.as_deref(), Some(model_spec().name.as_str()));
+    assert_eq!(
+        loaded.as_deref(),
+        Some(model_spec(&fake, port).name.as_str())
+    );
 
     manager.sleep().await.unwrap();
 }
@@ -309,14 +295,9 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
         presence_sleep_secs: 1,
         ..TimeoutsConfig::default()
     };
-    let manager = PresenceManager::new_active(
-        server_spec(&fake, port),
-        model_spec(),
-        timeouts,
-        shutdown_rx,
-    )
-    .await
-    .expect("cold-start wake failed");
+    let manager = PresenceManager::new_active(model_spec(&fake, port), timeouts, shutdown_rx)
+        .await
+        .expect("cold-start wake failed");
     let pid = manager.llama_pid().await.expect("child running");
 
     let err = manager
