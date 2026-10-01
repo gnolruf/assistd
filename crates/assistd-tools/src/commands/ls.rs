@@ -6,7 +6,7 @@ use tokio::fs::ReadDir;
 
 use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
 
-/// `ls [-al] [PATH]`: list PATH (default CWD) as sorted
+/// `ls [-al] [PATH]...`: list each PATH (default CWD) as sorted
 /// `<type>\t<size>\t<name>` rows, without following symlinks.
 #[derive(Debug)]
 pub struct LsCommand;
@@ -18,16 +18,18 @@ impl Command for LsCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "list a directory, or one file (type, size, name); -a for dot-entries"
+        "list directories or files (type, size, name); -a for dot-entries"
     }
 
     fn help(&self) -> String {
-        "usage: ls [-al] [PATH]\n\
+        "usage: ls [-al] [PATH]...\n\
          \n\
          List directory entries alphabetically, one per line, formatted as \
          `<type>\\t<size>\\t<name>`. `<type>` is `dir`, `file`, or `symlink`; \
          `<size>` is bytes from the entry's (symlink-preserving) metadata. \
          A PATH that is not a directory prints one row for that path. \
+         With several PATHs, non-directory rows come first, then each \
+         directory under a `PATH:` header, each group sorted by path. \
          Defaults to the daemon's CWD if PATH is omitted.\n\
          \n\
          Flags:\n  \
@@ -37,38 +39,33 @@ impl Command for LsCommand {
     }
 
     async fn run(&self, input: CommandInput) -> CommandOutput {
-        let (show_hidden, path) = match parse_flags(&input.args) {
+        let (show_hidden, paths) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => return CommandOutput::usage_error("ls", msg, "ls -al PATH"),
         };
-        let reader = match tokio::fs::read_dir(path).await {
-            Ok(r) => r,
-            Err(e) if e.kind() == ErrorKind::NotADirectory => return list_file(path).await,
-            Err(e) => {
-                return CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes());
-            }
+        let [path] = paths.as_slice() else {
+            return list_many(&paths, show_hidden).await;
         };
-        let mut rows = match read_rows(reader, show_hidden).await {
-            Ok(rows) => rows,
-            Err(e) => {
-                return CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes());
+        match list_path(path, show_hidden).await {
+            Ok(Listing::Directory(rows) | Listing::Single(rows)) => {
+                CommandOutput::ok(rows.into_bytes())
             }
-        };
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut out = Vec::new();
-        for (name, kind, size) in rows {
-            out.extend_from_slice(format!("{kind}\t{size}\t{name}\n").as_bytes());
+            Err(msg) => CommandOutput::failed(1, msg),
         }
-        CommandOutput::ok(out)
     }
 }
 
-fn parse_flags(argv: &[String]) -> Result<(bool, &str), String> {
+enum Listing {
+    Directory(String),
+    Single(String),
+}
+
+fn parse_flags(argv: &[String]) -> Result<(bool, Vec<&str>), String> {
     let mut show_hidden = false;
-    let mut path = None;
+    let mut paths = Vec::new();
     for arg in argv {
         match arg.strip_prefix('-') {
-            Some(flags) if !flags.is_empty() && path.is_none() => {
+            Some(flags) if !flags.is_empty() && paths.is_empty() => {
                 for ch in flags.chars() {
                     match ch {
                         'a' => show_hidden = true,
@@ -77,10 +74,13 @@ fn parse_flags(argv: &[String]) -> Result<(bool, &str), String> {
                     }
                 }
             }
-            _ => path = Some(arg.as_str()),
+            _ => paths.push(arg.as_str()),
         }
     }
-    Ok((show_hidden, path.unwrap_or(".")))
+    if paths.is_empty() {
+        paths.push(".");
+    }
+    Ok((show_hidden, paths))
 }
 
 fn kind_and_size(md: &Metadata) -> (&'static str, u64) {
@@ -95,14 +95,62 @@ fn kind_and_size(md: &Metadata) -> (&'static str, u64) {
     (kind, md.len())
 }
 
-async fn list_file(path: &str) -> CommandOutput {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(md) => {
-            let (kind, size) = kind_and_size(&md);
-            CommandOutput::ok(format!("{kind}\t{size}\t{path}\n").into_bytes())
+async fn list_many(paths: &[&str], show_hidden: bool) -> CommandOutput {
+    let mut out = CommandOutput::ok(Vec::new());
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    for &path in paths {
+        match list_path(path, show_hidden).await {
+            Ok(Listing::Single(row)) => files.push((path, row)),
+            Ok(Listing::Directory(rows)) => directories.push((path, rows)),
+            Err(msg) => {
+                out.stderr.extend_from_slice(msg.as_bytes());
+                out.exit_code = 1;
+            }
         }
-        Err(e) => CommandOutput::failed(1, io_error_nav("ls", path, &e).into_bytes()),
     }
+    files.sort_by(|a, b| a.0.cmp(b.0));
+    directories.sort_by(|a, b| a.0.cmp(b.0));
+    for (_, row) in files {
+        out.stdout.extend_from_slice(row.as_bytes());
+    }
+    for (path, rows) in directories {
+        if !out.stdout.is_empty() {
+            out.stdout.push(b'\n');
+        }
+        out.stdout
+            .extend_from_slice(format!("{path}:\n{rows}").as_bytes());
+    }
+    out
+}
+
+async fn list_path(path: &str, show_hidden: bool) -> Result<Listing, String> {
+    let describe_error = |e: io::Error| io_error_nav("ls", path, &e);
+    let reader = match tokio::fs::read_dir(path).await {
+        Ok(reader) => reader,
+        Err(e) if e.kind() == ErrorKind::NotADirectory => {
+            return file_row(path)
+                .await
+                .map(Listing::Single)
+                .map_err(describe_error);
+        }
+        Err(e) => return Err(describe_error(e)),
+    };
+    let mut rows = read_rows(reader, show_hidden)
+        .await
+        .map_err(describe_error)?;
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(Listing::Directory(
+        rows.into_iter()
+            .map(|(name, kind, size)| format!("{kind}\t{size}\t{name}\n"))
+            .collect(),
+    ))
+}
+
+async fn file_row(path: &str) -> io::Result<String> {
+    let md = tokio::fs::symlink_metadata(path).await?;
+    let (kind, size) = kind_and_size(&md);
+    Ok(format!("{kind}\t{size}\t{path}\n"))
 }
 
 async fn read_rows(
@@ -124,158 +172,4 @@ async fn read_rows(
 }
 
 #[cfg(test)]
-mod tests {
-    use tempfile::tempdir;
-
-    use super::*;
-
-    async fn run_ls(args: &[&str]) -> CommandOutput {
-        LsCommand
-            .run(CommandInput {
-                args: args.iter().map(ToString::to_string).collect(),
-                stdin: None,
-            })
-            .await
-    }
-
-    #[tokio::test]
-    async fn ls_emits_type_size_name_rows() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("alpha"), b"hi").unwrap();
-        std::fs::write(dir.path().join("zebra"), b"longer content here").unwrap();
-        std::fs::create_dir(dir.path().join("nested")).unwrap();
-        let out = run_ls(&[&dir.path().to_string_lossy()]).await;
-        assert_eq!(out.exit_code, 0);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let lines: Vec<&str> = stdout.lines().collect();
-        let &[alpha, nested, zebra] = lines.as_slice() else {
-            panic!("expected three rows: {stdout}");
-        };
-        assert_eq!(alpha, "file\t2\talpha");
-        assert!(
-            nested.starts_with("dir\t") && nested.ends_with("\tnested"),
-            "{nested}"
-        );
-        assert_eq!(zebra, "file\t19\tzebra");
-    }
-
-    #[tokio::test]
-    async fn ls_hides_dot_entries_until_dash_a() {
-        let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("visible"), b"x").unwrap();
-        std::fs::write(dir.path().join(".hidden"), b"x").unwrap();
-        let path = dir.path().to_string_lossy().into_owned();
-
-        let plain = run_ls(&[&path]).await;
-        assert_eq!(plain.stdout, b"file\t1\tvisible\n");
-
-        for flags in ["-a", "-la"] {
-            let all = run_ls(&[flags, &path]).await;
-            assert_eq!(all.exit_code, 0, "{flags}");
-            assert_eq!(
-                String::from_utf8_lossy(&all.stdout),
-                "file\t1\t.hidden\nfile\t1\tvisible\n",
-                "{flags}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn ls_unknown_flag_errors() {
-        let out = run_ls(&["-Z", "/tmp"]).await;
-        assert_eq!(out.exit_code, 2);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] ls: unknown flag '-Z'. Use: ls -al PATH\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn ls_treats_dash_prefixed_path_after_path_as_path() {
-        let out = run_ls(&["/tmp", "-weird"]).await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] ls: file not found: -weird. Use: ls . to see what is there\n"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn ls_reports_symlink_without_following() {
-        let dir = tempdir().unwrap();
-        let target = dir.path().join("target.txt");
-        std::fs::write(&target, b"hello").unwrap();
-        std::os::unix::fs::symlink(&target, dir.path().join("link")).unwrap();
-        let out = run_ls(&[&dir.path().to_string_lossy()]).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            format!(
-                "symlink\t{}\tlink\nfile\t5\ttarget.txt\n",
-                target.as_os_str().len()
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn ls_missing_dir_exits_1() {
-        let out = run_ls(&["/definitely/not/here"]).await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] ls: file not found: /definitely/not/here. \
-             Use: ls /definitely/not to see what is there\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn ls_file_emits_a_single_row_named_by_the_given_path() {
-        let dir = tempdir().unwrap();
-        let file = dir.path().join(".notes.txt");
-        std::fs::write(&file, b"hello").unwrap();
-        let path = file.to_string_lossy().into_owned();
-
-        let out = run_ls(&[&path]).await;
-        assert_eq!(out.exit_code, 0, "{out:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            format!("file\t5\t{path}\n")
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn ls_symlink_to_file_reports_the_link_itself() {
-        let dir = tempdir().unwrap();
-        let target = dir.path().join("target.txt");
-        std::fs::write(&target, b"hello").unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let path = link.to_string_lossy().into_owned();
-
-        let out = run_ls(&[&path]).await;
-        assert_eq!(out.exit_code, 0, "{out:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            format!("symlink\t{}\t{path}\n", target.as_os_str().len())
-        );
-    }
-
-    #[tokio::test]
-    async fn ls_path_through_a_file_names_the_offending_parent() {
-        let dir = tempdir().unwrap();
-        let file = dir.path().join("notes.txt");
-        std::fs::write(&file, b"hello").unwrap();
-        let file = file.to_string_lossy().into_owned();
-
-        let out = run_ls(&[&format!("{file}/sub")]).await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            format!(
-                "[error] ls: {file}/sub: a parent component is not a directory. Check: ls {file}\n"
-            )
-        );
-    }
-}
+mod tests;
