@@ -559,6 +559,26 @@ async fn dispatch_ptt_stop_with_text_runs_query() {
 }
 
 #[tokio::test]
+async fn interrupt_between_ptt_press_and_release_drops_the_prompt() {
+    let state = state_with_voice(MockVoice::new(Ok(()), Ok("hello world".into())));
+    let (res, _) = dispatch(&state, Request::PttStart { id: "p".into() }).await;
+    res.unwrap();
+    let (res, _) = dispatch(&state, Request::InterruptTurn { id: "int".into() }).await;
+    res.unwrap();
+
+    let (res, events) = dispatch(&state, Request::PttStop { id: "p".into() }).await;
+    res.unwrap();
+    assert_eq!(
+        events,
+        [
+            voice_state("p", VoiceCaptureState::Transcribing),
+            voice_state("p", VoiceCaptureState::Idle),
+            done("p"),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn dispatch_ptt_stop_empty_transcription_skips_query() {
     let state = state_with_voice(MockVoice::new(Ok(()), Ok(String::new())));
     let (res, events) = dispatch(&state, Request::PttStop { id: "p4".into() }).await;

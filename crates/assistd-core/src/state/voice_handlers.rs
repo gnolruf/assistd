@@ -4,10 +4,14 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, warn};
 
 use assistd_ipc::{Event, VoiceCaptureState};
+use assistd_voice::VoiceInputError;
 
+use super::query::finish_interrupted_before_start;
+use super::runtime::PttCapture;
 use super::{AppState, DispatchError, send_error};
 use crate::recovery::{Component, spawn_supervised};
 
@@ -29,8 +33,11 @@ impl AppState {
         }
         match self.subsystems.voice.start_recording().await {
             Ok(()) => {
-                let warmup = self.spawn_presence_warmup();
-                *self.runtime.warmup_handle.lock().await = Some(warmup);
+                let capture = PttCapture {
+                    warmup: self.spawn_presence_warmup(),
+                    cancel: self.runtime.turn_cancellation(),
+                };
+                *self.runtime.ptt_capture.lock().await = Some(capture);
                 let _ = tx
                     .send(Event::VoiceState {
                         id: id.clone(),
@@ -65,13 +72,11 @@ impl AppState {
             })
             .await;
 
-        let warmup = self.runtime.warmup_handle.lock().await.take();
-        let (transcription, ()) =
-            tokio::join!(self.subsystems.voice.stop_and_transcribe(), async {
-                if let Some(warmup) = warmup {
-                    let _ = warmup.await;
-                }
-            });
+        let (warmup, cancel) = match self.runtime.ptt_capture.lock().await.take() {
+            Some(PttCapture { warmup, cancel }) => (Some(warmup), cancel),
+            None => (None, self.runtime.turn_cancellation()),
+        };
+        let transcription = self.transcribe_while_warming(warmup, &cancel).await;
         debug!(
             target: "assistd::voice::latency",
             stage = "ensure_active_done",
@@ -97,6 +102,9 @@ impl AppState {
                 state: VoiceCaptureState::Idle,
             })
             .await;
+        if cancel.is_cancelled() {
+            return finish_interrupted_before_start(&tx, id).await;
+        }
         let _ = tx
             .send(Event::Transcription {
                 id: id.clone(),
@@ -109,7 +117,28 @@ impl AppState {
             return Ok(());
         }
 
-        self.handle_query(id, text, Vec::new(), tx).await
+        self.run_query(id, text, Vec::new(), tx, cancel).await
+    }
+
+    async fn transcribe_while_warming(
+        &self,
+        warmup: Option<JoinHandle<()>>,
+        cancel: &CancellationToken,
+    ) -> Result<String, VoiceInputError> {
+        let warmed_or_cancelled = async {
+            if let Some(warmup) = warmup {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {}
+                    _ = warmup => {}
+                }
+            }
+        };
+        let (transcription, ()) = tokio::join!(
+            self.subsystems.voice.stop_and_transcribe(),
+            warmed_or_cancelled
+        );
+        transcription
     }
 
     fn spawn_presence_warmup(&self) -> JoinHandle<()> {

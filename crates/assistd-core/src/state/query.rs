@@ -220,6 +220,19 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let cancel = self.runtime.turn_cancellation();
+        self.run_query(id, text, wire_attachments, tx, cancel).await
+    }
+
+    /// [`Self::handle_query`] for a turn whose cancellation token was
+    /// taken earlier; the prompt is dropped if `cancel` has already fired.
+    pub(super) async fn run_query(
+        self: Arc<Self>,
+        id: String,
+        text: String,
+        wire_attachments: Vec<ImageAttachment>,
+        tx: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    ) -> Result<(), DispatchError> {
         let _cancel_on_return = cancel.clone().drop_guard();
         let attachments = self
             .prepare_attachments(&id, &wire_attachments, &tx)
@@ -548,7 +561,7 @@ impl AppState {
     }
 }
 
-async fn finish_interrupted_before_start(
+pub(super) async fn finish_interrupted_before_start(
     tx: &mpsc::Sender<Event>,
     id: String,
 ) -> Result<(), DispatchError> {
