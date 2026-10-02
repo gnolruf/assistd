@@ -1,6 +1,7 @@
 //! HTTP control plane for llama.cpp's router-mode server: load and unload
 //! model weights without restarting the process, and query what is loaded.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -17,21 +18,21 @@ const PROPS_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 pub struct LlamaServerControl {
     client: reqwest::Client,
-    host: String,
+    addr: SocketAddr,
     base_url: String,
 }
 
 impl LlamaServerControl {
-    /// Build a control client for `http://{host}:{port}`.
-    pub fn new(host: &str, port: u16) -> Result<Self, LlamaServerError> {
+    /// Build a control client for `http://{addr}`.
+    pub fn new(addr: SocketAddr) -> Result<Self, LlamaServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(DEFAULT_TIMEOUT)
             .build()?;
         Ok(Self {
             client,
-            host: host.to_string(),
-            base_url: format!("http://{host}:{port}"),
+            addr,
+            base_url: format!("http://{addr}"),
         })
     }
 
@@ -43,8 +44,8 @@ impl LlamaServerControl {
     /// `GET /props` on the router child listening on `port` of the same
     /// host, under the same timeout as [`Self::props`].
     pub async fn child_props(&self, port: u16) -> Result<Value, LlamaServerError> {
-        self.fetch_props(&format!("http://{}:{port}", self.host))
-            .await
+        let child_addr = SocketAddr::new(self.addr.ip(), port);
+        self.fetch_props(&format!("http://{child_addr}")).await
     }
 
     /// Ask the server to load `model`. Returns once the request is
@@ -221,6 +222,8 @@ fn control_http_error(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv6Addr;
+
     use super::*;
 
     fn parse(body: &str) -> ModelsResponse {
@@ -279,5 +282,12 @@ mod tests {
             let parsed = parse(&format!(r#"{{"data":[{entry}]}}"#));
             assert_eq!(parsed.find_loaded_child_port(model), expected, "{label}");
         }
+    }
+
+    #[test]
+    fn new_brackets_ipv6_hosts_in_base_url() {
+        let control =
+            LlamaServerControl::new(SocketAddr::from((Ipv6Addr::LOCALHOST, 8385))).unwrap();
+        assert_eq!(control.base_url, "http://[::1]:8385");
     }
 }

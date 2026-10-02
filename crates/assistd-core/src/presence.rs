@@ -1,6 +1,7 @@
 //! Daemon presence state machine (`Active`, `Drowsy`, `Sleeping`), which
 //! frees GPU resources on demand and auto-wakes when a query arrives.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -125,7 +126,7 @@ impl PresenceManager {
         timeouts: TimeoutsConfig,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
-        let control = LlamaServerControl::new(&model.host.to_string(), model.port.get())
+        let control = LlamaServerControl::new(SocketAddr::new(model.host, model.port.get()))
             .map_err(PresenceError::Control)?;
 
         let current_inner_shutdown: InnerShutdownSlot = Arc::new(StdMutex::new(None));
@@ -572,7 +573,8 @@ impl PresenceManager {
             ready_timeout_secs: nz64(1),
             ..ModelConfig::default()
         };
-        let control = LlamaServerControl::new(&model.host.to_string(), 1).expect("dummy control");
+        let control =
+            LlamaServerControl::new(SocketAddr::new(model.host, 1)).expect("dummy control");
         let (stream_count_tx, _) = watch::channel(0usize);
         Arc::new(Self {
             state: StdMutex::new(state),

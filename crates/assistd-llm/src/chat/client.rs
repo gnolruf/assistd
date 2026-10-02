@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::mem::take;
+use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,7 +64,7 @@ impl LlamaChatClient {
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        let base_url = format!("http://{}:{}", model.host, model.port);
+        let base_url = format!("http://{}", SocketAddr::new(model.host, model.port.get()));
         let conv = Conversation::new(chat.system_prompt.clone());
         Ok(Self {
             client,

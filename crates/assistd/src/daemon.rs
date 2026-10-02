@@ -1,6 +1,7 @@
 //! Daemon entrypoint: bring up every subsystem, serve the IPC socket,
 //! tear down in order.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -238,8 +239,8 @@ async fn start_presence(
     )
     .await?;
     info!(
-        "presence: Active (llama-server ready on {}:{})",
-        config.model.host, config.model.port
+        "presence: Active (llama-server ready on {})",
+        SocketAddr::new(config.model.host, config.model.port.get())
     );
     Ok(presence)
 }
@@ -250,8 +251,9 @@ async fn probe_vision(
     config: &Config,
     presence: &PresenceManager,
 ) -> Result<Arc<VisionRevalidator>> {
-    let control = LlamaServerControl::new(&config.model.host.to_string(), config.model.port.get())
-        .context("failed to construct llama-server control client for vision probe")?;
+    let control =
+        LlamaServerControl::new(SocketAddr::new(config.model.host, config.model.port.get()))
+            .context("failed to construct llama-server control client for vision probe")?;
     let revalidator = VisionRevalidator::new(control, config.model.name.clone(), presence).await;
     if revalidator.gate().supported() {
         info!("vision: enabled (model has mmproj)");

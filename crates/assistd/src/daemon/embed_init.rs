@@ -1,5 +1,6 @@
 //! Embedding subsystem wiring for the daemon.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use assistd_core::Config;
@@ -82,8 +83,7 @@ pub(super) async fn init(
     };
 
     let client = match LlamaEmbedder::new(
-        &config.embedding.host.to_string(),
-        config.embedding.port.get(),
+        SocketAddr::new(config.embedding.host, config.embedding.port.get()),
         config.embedding.model.clone(),
         assistd_embed::REQUEST_TIMEOUT,
     )
